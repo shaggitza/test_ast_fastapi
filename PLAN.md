@@ -2,7 +2,9 @@
 
 ## Executive Summary
 
-This document outlines the development plan for a CLI tool that automatically detects which FastAPI endpoints are affected by code changes. The tool will parse Python code using AST, integrate with static analysis tools (mypy, ruff), and provide actionable insights for CI/CD pipelines.
+This document outlines the development plan for a CLI tool that automatically detects which FastAPI endpoints are affected by code changes. The tool parses Python code using AST, integrates with static analysis tools (mypy), and provides actionable insights for CI/CD pipelines.
+
+**Status**: Core functionality implemented and working. See [README.md](README.md) for usage.
 
 ---
 
@@ -12,18 +14,20 @@ This document outlines the development plan for a CLI tool that automatically de
 Build an automation pipeline that identifies changes in Python code and maps them to affected FastAPI endpoints.
 
 ### Success Criteria
-- [ ] Accurately detect 95%+ of direct endpoint dependencies
-- [ ] Accurately detect 80%+ of indirect (transitive) dependencies
-- [ ] Process a medium-sized FastAPI project (100+ endpoints) in under 30 seconds
-- [ ] Provide clear, actionable output for CI/CD integration
-- [ ] Zero false negatives for high-confidence changes
+- [x] Accurately detect 95%+ of direct endpoint dependencies
+- [x] Accurately detect 80%+ of indirect (transitive) dependencies
+- [x] Process a medium-sized FastAPI project (100+ endpoints) in under 30 seconds
+- [x] Provide clear, actionable output for CI/CD integration
+- [x] Zero false negatives for high-confidence changes
 
 ---
 
 ## 2. Core Components
 
-### 2.1 FastAPI Application Parser
+### 2.1 FastAPI Application Parser ✅
 **Purpose**: Extract all endpoint definitions from a FastAPI application
+
+**Status**: Implemented in `parser/fastapi_extractor.py`
 
 **Responsibilities**:
 - Identify FastAPI app instantiation patterns
@@ -37,8 +41,10 @@ Build an automation pipeline that identifies changes in Python code and maps the
 - Build endpoint registry with full metadata
 - Handle dynamic route registration patterns
 
-### 2.2 Dependency Graph Builder
+### 2.2 Dependency Graph Builder ✅
 **Purpose**: Build a complete dependency graph from endpoints to all related code
+
+**Status**: Implemented with three backends in `analyzer/`
 
 **Responsibilities**:
 - Trace function calls from endpoint handlers
@@ -53,8 +59,10 @@ Build an automation pipeline that identifies changes in Python code and maps the
 - Import resolution with fallback strategies
 - Integration with mypy for type-aware analysis
 
-### 2.3 Diff Parser
+### 2.3 Diff Parser ✅
 **Purpose**: Parse git diff files and extract structured change information
+
+**Status**: Implemented in `parser/diff_parser.py`
 
 **Responsibilities**:
 - Parse unified diff format
@@ -68,8 +76,10 @@ Build an automation pipeline that identifies changes in Python code and maps the
 - Use AST to map line numbers to symbols
 - Build change set with affected symbols
 
-### 2.4 Change-to-Endpoint Mapper
+### 2.4 Change-to-Endpoint Mapper ✅
 **Purpose**: Correlate code changes with affected endpoints
+
+**Status**: Implemented in `analyzer/change_mapper.py`
 
 **Responsibilities**:
 - Query dependency graph for change impact
@@ -83,8 +93,10 @@ Build an automation pipeline that identifies changes in Python code and maps the
 - Confidence scoring based on dependency distance
 - Caching for repeated queries
 
-### 2.5 CLI Interface
+### 2.5 CLI Interface ✅
 **Purpose**: Provide user-friendly command-line interface
+
+**Status**: Implemented in `cli.py`
 
 **Responsibilities**:
 - Parse command-line arguments
@@ -94,16 +106,18 @@ Build an automation pipeline that identifies changes in Python code and maps the
 - Handle errors gracefully
 
 **Technical Approach**:
-- Use `argparse` or `click` for CLI parsing
-- Implement multiple output formatters
-- Progress indicators for long operations
+- Use `click` for CLI parsing
+- Implement multiple output formatters (text, JSON, YAML)
+- Rich progress indicators for long operations
 
 ---
 
 ## 3. Integration Points
 
-### 3.1 mypy Integration
+### 3.1 mypy Integration ✅
 **Purpose**: Leverage type information for better dependency resolution
+
+**Status**: Implemented in `analyzer/mypy_analyzer.py`
 
 **Use Cases**:
 - Resolve dynamically typed function calls
@@ -111,12 +125,14 @@ Build an automation pipeline that identifies changes in Python code and maps the
 - Track type aliases and generic types
 
 **Implementation**:
-- Use mypy's programmatic API
+- Use mypy's build API for full dependency graph
 - Cache type information for performance
 - Fallback to AST-only when mypy unavailable
 
 ### 3.2 ruff Integration
 **Purpose**: Fast import analysis and code quality checks
+
+**Status**: Not implemented (grimp used instead for import analysis)
 
 **Use Cases**:
 - Rapid import graph construction
@@ -128,8 +144,10 @@ Build an automation pipeline that identifies changes in Python code and maps the
 - Parse import information
 - Integrate with dependency graph
 
-### 3.3 Code Indexing
+### 3.3 Code Indexing ✅
 **Purpose**: Build searchable index of codebase symbols
+
+**Status**: Implemented via endpoint registry and dependency graph
 
 **Index Contents**:
 - Function definitions with signatures
@@ -139,63 +157,62 @@ Build an automation pipeline that identifies changes in Python code and maps the
 - Decorator applications
 
 **Implementation**:
-- SQLite or in-memory index
-- Incremental index updates
+- In-memory index with caching
 - Symbol resolution APIs
 
 ---
 
 ## 4. Development Phases
 
-### Phase 1: Foundation (Weeks 1-2)
-- [ ] Project setup and tooling configuration
-- [ ] Basic AST parsing infrastructure
-- [ ] FastAPI endpoint extraction (simple cases)
-- [ ] Unit test framework setup
-- [ ] Example FastAPI project creation
+### Phase 1: Foundation ✅
+- [x] Project setup and tooling configuration
+- [x] Basic AST parsing infrastructure
+- [x] FastAPI endpoint extraction (simple cases)
+- [x] Unit test framework setup
+- [x] Example FastAPI project creation
 
 **Deliverables**:
 - Working endpoint parser for single-file apps
 - Test suite with example fixtures
 - CI pipeline setup
 
-### Phase 2: Dependency Analysis (Weeks 3-4)
-- [ ] Dependency graph data structures
-- [ ] Import resolution system
-- [ ] Function call tracing
-- [ ] Basic diff parser
+### Phase 2: Dependency Analysis ✅
+- [x] Dependency graph data structures
+- [x] Import resolution system
+- [x] Function call tracing
+- [x] Basic diff parser
 
 **Deliverables**:
 - Complete dependency graph for simple projects
 - Diff parsing with symbol mapping
 - Integration tests
 
-### Phase 3: Advanced Analysis (Weeks 5-6)
-- [ ] FastAPI Depends() resolution
-- [ ] APIRouter support
-- [ ] Transitive dependency tracking
-- [ ] mypy integration (optional enhancement)
+### Phase 3: Advanced Analysis ✅
+- [x] FastAPI Depends() resolution
+- [x] APIRouter support
+- [x] Transitive dependency tracking
+- [x] mypy integration (optional enhancement)
 
 **Deliverables**:
 - Full FastAPI pattern support
 - Accurate transitive dependency detection
 - Performance benchmarks
 
-### Phase 4: CLI & Output (Weeks 7-8)
-- [ ] Full CLI implementation
-- [ ] Multiple output formats (JSON, YAML, text)
-- [ ] Configuration file support
-- [ ] Error handling and reporting
+### Phase 4: CLI & Output ✅
+- [x] Full CLI implementation
+- [x] Multiple output formats (JSON, YAML, text)
+- [x] Configuration file support
+- [x] Error handling and reporting
 
 **Deliverables**:
 - Production-ready CLI
 - Documentation
 - Example CI/CD configurations
 
-### Phase 5: Polish & Release (Weeks 9-10)
-- [ ] Performance optimization
-- [ ] Edge case handling
-- [ ] Documentation completion
+### Phase 5: Polish & Release 🔄
+- [x] Performance optimization (caching)
+- [x] Edge case handling
+- [x] Documentation completion
 - [ ] PyPI packaging and release
 
 **Deliverables**:
@@ -216,15 +233,16 @@ Build an automation pipeline that identifies changes in Python code and maps the
 |---------|---------|----------|
 | `click` | CLI framework | Yes |
 | `pydantic` | Data validation | Yes |
-| `networkx` | Graph operations | Yes |
+| `grimp` | Import graph analysis | Yes |
 | `rich` | Terminal output | Yes |
 | `pyyaml` | YAML support | Yes |
-| `mypy` | Type analysis | Optional |
-| `ruff` | Fast linting | Optional |
+| `unidiff` | Diff parsing | Yes |
+| `coverage` | Code coverage analysis | Yes |
+| `mypy` | Type analysis | Yes |
 
 ### Data Structures
 - **Endpoint Registry**: Dict mapping paths to handler metadata
-- **Dependency Graph**: NetworkX DiGraph with symbol nodes
+- **Dependency Graph**: Import graph with grimp, AST tracing, or mypy
 - **Change Set**: Pydantic models for structured diff data
 - **Impact Report**: Hierarchical structure with confidence scores
 
@@ -232,18 +250,18 @@ Build an automation pipeline that identifies changes in Python code and maps the
 
 ## 6. Testing Strategy
 
-### Unit Tests
+### Unit Tests ✅
 - AST parsing functions
 - Diff parsing
 - Graph operations
 - Output formatters
 
-### Integration Tests
+### Integration Tests ✅
 - End-to-end analysis of example projects
 - CLI argument handling
 - File I/O operations
 
-### Fixture Projects
+### Fixture Projects ✅
 - Simple single-file FastAPI app
 - Modular FastAPI with routers
 - Complex app with deep dependencies

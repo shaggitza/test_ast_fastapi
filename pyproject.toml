@@ -44,6 +44,7 @@ dependencies = [
     "grimp>=3.0",
     "unidiff>=0.7.0",
     "coverage>=7.0.0",
+    "mypy>=1.19.1",
 ]
 
 [project.optional-dependencies]

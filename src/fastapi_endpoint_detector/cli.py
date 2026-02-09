@@ -168,8 +168,12 @@ def analyze(
                 progress.update(task, line_info=current_line_info["text"])
             
             # Set line progress callback on mypy analyzer if using that backend
+            # Note: This just initializes the analyzer without running analysis
             if backend == "mypy":
                 mapper.mypy_analyzer.set_line_progress_callback(line_progress)
+            elif backend == "coverage":
+                # Coverage analyzer doesn't have line-level progress, but we init it
+                _ = mapper.coverage_analyzer
             
             report = mapper.analyze_diff(diff, progress_callback=update_progress)
         

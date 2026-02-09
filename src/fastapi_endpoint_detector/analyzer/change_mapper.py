@@ -124,7 +124,7 @@ class ChangeMapper:
     
     @property
     def coverage_analyzer(self) -> "CoverageAnalyzer":
-        """Get the coverage analyzer, initializing if needed."""
+        """Get the coverage analyzer, initializing if needed (does NOT pre-analyze)."""
         if self._coverage_analyzer is None:
             from fastapi_endpoint_detector.analyzer.coverage_analyzer import (
                 CoverageAnalyzer,
@@ -136,13 +136,13 @@ class ChangeMapper:
                 package_path = self.app_path
             
             self._coverage_analyzer = CoverageAnalyzer(package_path)
-            # Pre-analyze all endpoints
-            self._coverage_analyzer.analyze_endpoints(self.registry.get_all(), use_cache=self.use_cache)
+            # NOTE: We don't pre-analyze here - that's done in _preanalyze_coverage
+            # with progress reporting
         return self._coverage_analyzer
     
     @property
     def mypy_analyzer(self) -> "MypyAnalyzer":
-        """Get the mypy analyzer, initializing if needed."""
+        """Get the mypy analyzer, initializing if needed (does NOT pre-analyze)."""
         if self._mypy_analyzer is None:
             from fastapi_endpoint_detector.analyzer.mypy_analyzer import (
                 MypyAnalyzer,
@@ -154,8 +154,8 @@ class ChangeMapper:
                 package_path = self.app_path
             
             self._mypy_analyzer = MypyAnalyzer(package_path)
-            # Pre-analyze all endpoints
-            self._mypy_analyzer.analyze_endpoints(self.registry.get_all(), use_cache=self.use_cache)
+            # NOTE: We don't pre-analyze here - that's done in _preanalyze_mypy
+            # with progress reporting
         return self._mypy_analyzer
     
     def _check_direct_handler_change(
@@ -600,6 +600,25 @@ class ChangeMapper:
         endpoints = self.registry.get_all()
         total = len(endpoints)
         
+        # Try to load from cache first
+        if self.use_cache and self.coverage_analyzer.coverage_cache_path.exists():
+            if progress_callback:
+                progress_callback(10, 100, "Loading cached analysis...")
+            try:
+                self.coverage_analyzer._load_cache()
+                # Check if all endpoints are cached
+                all_cached = all(
+                    ep.identifier in self.coverage_analyzer._endpoint_coverage
+                    for ep in endpoints
+                )
+                if all_cached:
+                    if progress_callback:
+                        progress_callback(65, 100, f"Loaded {total} endpoints from cache")
+                    return
+            except Exception:
+                pass
+        
+        # Analyze uncached endpoints
         for i, endpoint in enumerate(endpoints):
             if progress_callback:
                 progress_callback(
@@ -609,6 +628,10 @@ class ChangeMapper:
                 )
             if endpoint.identifier not in self.coverage_analyzer._endpoint_coverage:
                 self.coverage_analyzer.trace_endpoint_handler(endpoint)
+        
+        # Save cache after analysis
+        if self.use_cache:
+            self.coverage_analyzer._save_cache()
     
     def _preanalyze_mypy(
         self,
@@ -618,6 +641,25 @@ class ChangeMapper:
         endpoints = self.registry.get_all()
         total = len(endpoints)
         
+        # Try to load from cache first
+        if self.use_cache and self.mypy_analyzer.cache_path.exists():
+            if progress_callback:
+                progress_callback(10, 100, "Loading cached analysis...")
+            try:
+                self.mypy_analyzer._load_cache()
+                # Check if all endpoints are cached
+                all_cached = all(
+                    ep.identifier in self.mypy_analyzer._endpoint_deps
+                    for ep in endpoints
+                )
+                if all_cached:
+                    if progress_callback:
+                        progress_callback(65, 100, f"Loaded {total} endpoints from cache")
+                    return
+            except Exception:
+                pass
+        
+        # Analyze uncached endpoints
         for i, endpoint in enumerate(endpoints):
             if progress_callback:
                 progress_callback(
@@ -627,6 +669,10 @@ class ChangeMapper:
                 )
             if endpoint.identifier not in self.mypy_analyzer._endpoint_deps:
                 self.mypy_analyzer.analyze_endpoint(endpoint)
+        
+        # Save cache after analysis
+        if self.use_cache:
+            self.mypy_analyzer._save_cache()
     
     def get_endpoints(self) -> list[Endpoint]:
         """Get all endpoints in the application."""

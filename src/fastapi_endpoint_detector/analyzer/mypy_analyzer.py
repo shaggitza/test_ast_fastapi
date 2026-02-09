@@ -131,6 +131,7 @@ class MypyAnalyzer:
         """Check if mypy is available."""
         try:
             from mypy import api
+            from mypy.build import build
             return True
         except ImportError:
             return False
@@ -140,6 +141,73 @@ class MypyAnalyzer:
         if self.app_path.is_file():
             return self.app_path.parent
         return self.app_path
+    
+    def _get_module_dependencies_via_mypy(self, file_path: Path) -> set[str]:
+        """
+        Use mypy's build API to get all module dependencies for a file.
+        
+        Returns a set of module names that the file depends on (directly or transitively).
+        """
+        if not self._mypy_available:
+            return set()
+        
+        try:
+            from mypy.build import build
+            from mypy.options import Options
+            from mypy.fscache import FileSystemCache
+            from mypy.modulefinder import BuildSource
+            
+            source_root = self._get_source_root()
+            
+            # Convert file path to module name
+            try:
+                rel_path = file_path.relative_to(source_root.parent)
+                module_name = str(rel_path.with_suffix('')).replace('/', '.').replace('\\', '.')
+            except ValueError:
+                module_name = None
+            
+            options = Options()
+            options.ignore_missing_imports = True
+            options.follow_imports = 'normal'
+            options.mypy_path = [str(source_root.parent)]
+            
+            sources = [BuildSource(path=str(file_path), module=module_name)]
+            fscache = FileSystemCache()
+            
+            result = build(sources=sources, options=options, fscache=fscache)
+            
+            # Collect all dependencies that are within our source tree
+            all_deps: set[str] = set()
+            
+            # Get the main module's dependencies
+            main_module = module_name or '_main_'
+            if main_module in result.graph:
+                state = result.graph[main_module]
+                for dep in state.dependencies:
+                    if source_root.name in dep:  # Only include project modules
+                        all_deps.add(dep)
+            
+            return all_deps
+            
+        except Exception:
+            return set()
+    
+    def _module_to_file_path(self, module_name: str) -> Optional[Path]:
+        """Convert a module name to its file path."""
+        source_root = self._get_source_root()
+        parts = module_name.split('.')
+        
+        # Try as package (with _init_.py)
+        package_path = source_root.parent / Path(*parts) / '_init_.py'
+        if package_path.exists():
+            return package_path
+        
+        # Try as module (.py file)
+        module_path = source_root.parent / Path(*parts).with_suffix('.py')
+        if module_path.exists():
+            return module_path
+        
+        return None
     
     def analyze_with_mypy(self) -> dict[str, dict]:
         """
@@ -216,10 +284,10 @@ class MypyAnalyzer:
         deps: EndpointDependencies,
     ) -> None:
         """
-        Analyze handler using AST with mypy-style type tracking.
+        Analyze handler using mypy's type analysis + AST tracing.
         
-        This traces through the handler's code and follows type annotations
-        to determine which files contain the actual implementations used.
+        This first uses mypy's build API to get the complete dependency graph
+        for the handler's module, then traces through the handler's code.
         """
         
         handler = endpoint.handler
@@ -235,7 +303,31 @@ class MypyAnalyzer:
         except Exception:
             return
         
-        # Collect imports and their resolved paths
+        # Use mypy to get full dependency graph for this file
+        mypy_deps = self._get_module_dependencies_via_mypy(file_path)
+        
+        # Add all mypy-discovered dependencies to referenced_files
+        for module_name in mypy_deps:
+            module_path = self._module_to_file_path(module_name)
+            if module_path and module_path.exists():
+                path_str = str(module_path)
+                if path_str not in deps.referenced_files:
+                    # Add all lines from the dependency
+                    try:
+                        dep_source = module_path.read_text(encoding='utf-8')
+                        dep_tree = ast.parse(dep_source)
+                        lines = set()
+                        for node in ast.walk(dep_tree):
+                            if hasattr(node, 'lineno'):
+                                lines.add(node.lineno)
+                                if hasattr(node, 'end_lineno') and node.end_lineno:
+                                    lines.update(range(node.lineno, node.end_lineno + 1))
+                        deps.referenced_files[path_str] = lines
+                        deps.referenced_symbols.append(module_name)
+                    except Exception:
+                        deps.referenced_files[path_str] = set()
+        
+        # Collect imports and their resolved paths (for AST-based tracing too)
         imports = self._collect_imports_with_resolution(tree, file_path)
         
         # Find the handler function
@@ -583,7 +675,11 @@ class MypyAnalyzer:
         target_symbol: str = "",
         visited: Optional[set] = None,
     ) -> None:
-        """Add a file to the dependencies with call stack."""
+        """Add a file to the dependencies with call stack.
+        
+        Note: Transitive dependencies are handled by mypy's dependency graph,
+        so this method only adds direct references.
+        """
         
         path_str = str(file_path)
         
@@ -620,6 +716,7 @@ class MypyAnalyzer:
                         lines.update(range(node.lineno, node.end_lineno + 1))
             
             deps.referenced_files[path_str] = lines
+                        
         except Exception:
             deps.referenced_files[path_str] = set()
     
