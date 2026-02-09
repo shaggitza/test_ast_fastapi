@@ -291,21 +291,67 @@ class MypyAnalyzer:
         return imports
     
     def _resolve_import(self, module_name: str, base_dir: Path) -> Optional[Path]:
-        """Resolve a module name to its file path."""
-        parts = module_name.split('.')
+        """Resolve a module name to its file path.
         
-        # Try relative to base_dir
-        for search_path in [base_dir, self._get_source_root()]:
+        Handles both proper Python packages and non-module projects by:
+        1. Trying the module path relative to base_dir
+        2. Trying relative to source root
+        3. Walking up directories to find matching module structure
+        4. Searching subdirectories for matching files
+        """
+        parts = module_name.split('.')
+        source_root = self._get_source_root()
+        
+        # Build list of search paths
+        search_paths = [base_dir, source_root]
+        
+        # Also add parent directories up to source root
+        current = base_dir
+        while current != source_root and current.parent != current:
+            current = current.parent
+            search_paths.append(current)
+        
+        # Try each search path
+        for search_path in search_paths:
             relative = search_path / Path(*parts)
             
-            # Check package
+            # Check package (with __init__.py)
             if (relative / '__init__.py').exists():
                 return relative / '__init__.py'
             
-            # Check module
+            # Check module (bare .py file)
             module_file = relative.with_suffix('.py')
             if module_file.exists():
                 return module_file
+            
+            # For non-module projects: check if path exists as directory
+            # without __init__.py (treat as namespace package)
+            if relative.is_dir() and parts:
+                # Look for the final part as a .py file
+                final_file = relative.with_suffix('.py')
+                if final_file.exists():
+                    return final_file
+        
+        # Fallback: search for the file recursively in source root
+        # This handles projects without proper package structure
+        if parts:
+            target_file = parts[-1] + '.py'
+            target_subpath = Path(*parts).with_suffix('.py')
+            
+            for py_file in source_root.rglob('*.py'):
+                # Check if filename matches
+                if py_file.name == target_file:
+                    # Verify the relative path matches module structure
+                    try:
+                        rel_path = py_file.relative_to(source_root)
+                        # Check if it ends with expected subpath
+                        if str(rel_path) == str(target_subpath):
+                            return py_file
+                        # Or just return if only looking for a single file
+                        if len(parts) == 1:
+                            return py_file
+                    except ValueError:
+                        continue
         
         return None
     

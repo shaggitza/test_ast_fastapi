@@ -448,16 +448,31 @@ class ChangeMapper:
                     seen_endpoints.add(endpoint.identifier)
         else:
             # Import-based: use grimp dependency graph (default)
-            changed_module = self.dep_graph.file_path_to_module(diff_file.path)
-            
-            if changed_module:
-                # Check all endpoints for module dependencies
+            # Falls back to coverage-based if dependency graph fails
+            try:
+                changed_module = self.dep_graph.file_path_to_module(diff_file.path)
+                
+                if changed_module:
+                    # Check all endpoints for module dependencies
+                    for endpoint in self.registry:
+                        if endpoint.identifier in seen_endpoints:
+                            continue
+                        
+                        result = self._check_module_dependency(
+                            endpoint, changed_module, diff_file
+                        )
+                        if result:
+                            affected.append(result)
+                            seen_endpoints.add(endpoint.identifier)
+            except Exception:
+                # Fallback to coverage-based analysis if grimp fails
+                # (e.g., for non-module projects)
                 for endpoint in self.registry:
                     if endpoint.identifier in seen_endpoints:
                         continue
                     
-                    result = self._check_module_dependency(
-                        endpoint, changed_module, diff_file
+                    result = self._check_coverage_dependency(
+                        endpoint, diff_file, added_lines, removed_lines
                     )
                     if result:
                         affected.append(result)

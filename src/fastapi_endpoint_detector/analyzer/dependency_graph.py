@@ -59,22 +59,59 @@ class DependencyGraph:
         """
         Find all Python packages in the project directory.
         
+        For non-module projects without __init__.py files, this will
+        create temporary __init__.py files to enable package discovery.
+        
         Returns:
             List of package names.
         """
         packages = []
+        self._temp_init_files: list[Path] = []  # Track created init files
         
         # Check for a main package (directory with __init__.py)
         if (self.package_path / "__init__.py").exists():
             packages.append(self.package_path.name)
             return packages
         
-        # Otherwise, find all subdirectories that are packages
+        # For non-module projects: create temporary __init__.py
+        # to enable grimp to analyze the structure
+        main_init = self.package_path / "__init__.py"
+        if not main_init.exists():
+            try:
+                main_init.write_text("# Temporary init for analysis\n")
+                self._temp_init_files.append(main_init)
+                packages.append(self.package_path.name)
+            except Exception:
+                pass
+        
+        # Also check subdirectories
         for item in self.package_path.iterdir():
-            if item.is_dir() and (item / "__init__.py").exists():
-                packages.append(item.name)
+            if item.is_dir() and not item.name.startswith(('.', '_')):
+                init_file = item / "__init__.py"
+                if init_file.exists():
+                    packages.append(item.name)
+                elif any(item.glob("*.py")):
+                    # Has Python files but no __init__.py - create one
+                    try:
+                        init_file.write_text("# Temporary init for analysis\n")
+                        self._temp_init_files.append(init_file)
+                        packages.append(item.name)
+                    except Exception:
+                        pass
         
         return packages
+    
+    def _cleanup_temp_init_files(self) -> None:
+        """Remove any temporary __init__.py files created during analysis."""
+        for init_file in getattr(self, '_temp_init_files', []):
+            try:
+                if init_file.exists():
+                    content = init_file.read_text()
+                    if content.strip() == "# Temporary init for analysis":
+                        init_file.unlink()
+            except Exception:
+                pass
+        self._temp_init_files = []
     
     def build(self) -> "DependencyGraph":
         """
@@ -130,6 +167,7 @@ class DependencyGraph:
             ) from e
         finally:
             self._restore_import_path()
+            self._cleanup_temp_init_files()
     
     def _ensure_built(self) -> None:
         """Ensure the graph has been built."""

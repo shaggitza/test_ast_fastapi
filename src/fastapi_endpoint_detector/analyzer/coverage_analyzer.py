@@ -396,29 +396,66 @@ class CoverageAnalyzer:
     ) -> Optional[Path]:
         """
         Resolve a module name to its file path.
+        
+        Handles both proper Python packages and non-module projects by:
+        1. Trying the module path relative to base_dir
+        2. Trying relative to app_path
+        3. Walking up directories to find matching module structure
+        4. Searching subdirectories for matching files
         """
         # Convert module.name to module/name.py
         parts = module_name.split(".")
         
-        # Try relative to base_dir
-        relative_path = base_dir / Path(*parts)
+        # Build list of search paths
+        search_paths = [base_dir, self.app_path]
         
-        # Check for package or module
-        if (relative_path / "__init__.py").exists():
-            return relative_path / "__init__.py"
+        # Also add parent directories up to app_path
+        current = base_dir
+        while current != self.app_path and current.parent != current:
+            current = current.parent
+            if current not in search_paths:
+                search_paths.append(current)
         
-        module_file = relative_path.with_suffix(".py")
-        if module_file.exists():
-            return module_file
+        # Try each search path
+        for search_path in search_paths:
+            relative_path = search_path / Path(*parts)
+            
+            # Check for package (with __init__.py)
+            if (relative_path / "__init__.py").exists():
+                return relative_path / "__init__.py"
+            
+            # Check for module (bare .py file)
+            module_file = relative_path.with_suffix(".py")
+            if module_file.exists():
+                return module_file
+            
+            # For non-module projects: check if path exists as directory
+            # without __init__.py (treat as namespace package)
+            if relative_path.is_dir() and parts:
+                final_file = relative_path.with_suffix(".py")
+                if final_file.exists():
+                    return final_file
         
-        # Try relative to app_path
-        app_relative = self.app_path / Path(*parts)
-        if (app_relative / "__init__.py").exists():
-            return app_relative / "__init__.py"
-        
-        app_file = app_relative.with_suffix(".py")
-        if app_file.exists():
-            return app_file
+        # Fallback: search for the file recursively in app_path
+        # This handles projects without proper package structure
+        if parts:
+            target_file = parts[-1] + ".py"
+            target_subpath = Path(*parts).with_suffix(".py")
+            
+            for py_file in self.app_path.rglob("*.py"):
+                # Check if filename matches
+                if py_file.name == target_file:
+                    # Verify the relative path matches module structure
+                    try:
+                        rel_path = py_file.relative_to(self.app_path)
+                        # Check if it ends with expected subpath
+                        if str(rel_path) == str(target_subpath):
+                            return py_file
+                        # Or just return if only looking for a single file
+                        if len(parts) == 1:
+                            return py_file
+                    except ValueError:
+                        continue
         
         return None
     

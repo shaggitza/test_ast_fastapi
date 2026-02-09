@@ -152,8 +152,14 @@ class FastAPIExtractor:
         # Get the module name
         module_name = getattr(original, "__module__", "<unknown>")
         
+        # Get the function name, handling callable classes
+        func_name = getattr(original, "__name__", None)
+        if func_name is None:
+            # Might be a callable class instance
+            func_name = type(original).__name__
+        
         return HandlerInfo(
-            name=original.__name__,
+            name=func_name,
             module=module_name,
             file_path=file_path,
             line_number=start_line,
@@ -178,7 +184,8 @@ class FastAPIExtractor:
                 if hasattr(dep, "dependency"):
                     dep_func = dep.dependency
                     if callable(dep_func):
-                        dependencies.append(dep_func.__name__)
+                        dep_name = getattr(dep_func, "__name__", None) or type(dep_func).__name__
+                        dependencies.append(dep_name)
         
         # Check endpoint signature for Depends parameters
         if hasattr(route, "endpoint") and callable(route.endpoint):
@@ -190,7 +197,9 @@ class FastAPIExtractor:
                         # Check if it's a Depends instance
                         if type(default).__name__ == "Depends":
                             if hasattr(default, "dependency") and default.dependency:
-                                dependencies.append(default.dependency.__name__)
+                                dep = default.dependency
+                                dep_name = getattr(dep, "__name__", None) or type(dep).__name__
+                                dependencies.append(dep_name)
             except (ValueError, TypeError):
                 pass
         
