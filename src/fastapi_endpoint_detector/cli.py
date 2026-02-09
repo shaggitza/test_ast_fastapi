@@ -5,11 +5,13 @@ This module provides the CLI using Click framework for argument parsing
 and orchestrates the analysis pipeline.
 """
 
+import sys
 from pathlib import Path
 from typing import Optional
 
 import click
 from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn, TimeRemainingColumn
 
 from fastapi_endpoint_detector import __version__
 from fastapi_endpoint_detector.config import Config, load_config
@@ -111,7 +113,24 @@ def analyze(
             app_variable=app_var,
             backend=backend,  # type: ignore[arg-type]
         )
-        report = mapper.analyze_diff(diff)
+        
+        # Create progress bar
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TimeElapsedColumn(),
+            TimeRemainingColumn(),
+            console=console,
+            transient=True,  # Remove progress bar when done
+        ) as progress:
+            task = progress.add_task("Initializing...", total=100)
+            
+            def update_progress(current: int, total: int, description: str) -> None:
+                progress.update(task, completed=current, description=description)
+            
+            report = mapper.analyze_diff(diff, progress_callback=update_progress)
         
         # Format and output results
         formatter = get_formatter(output_format)
@@ -122,7 +141,6 @@ def analyze(
             console.print(f"[green]Results written to:[/green] {output}")
         else:
             # Print directly to stdout to preserve ANSI codes from formatter
-            import sys
             sys.stdout.write(formatted_output)
             sys.stdout.flush()
             

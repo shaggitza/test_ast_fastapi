@@ -13,7 +13,7 @@ Supports three backends for dependency analysis:
 import time
 from enum import Enum
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Callable, Literal, Optional
 
 from fastapi_endpoint_detector.config import Config
 from fastapi_endpoint_detector.models.diff import DiffFile, ChangeType
@@ -30,9 +30,11 @@ from fastapi_endpoint_detector.analyzer.dependency_graph import DependencyGraph
 from fastapi_endpoint_detector.analyzer.endpoint_registry import EndpointRegistry
 
 
-
 # Type alias for backend selection
 DependencyBackend = Literal["import", "coverage", "mypy"]
+
+# Progress callback type: (current, total, description) -> None
+ProgressCallback = Callable[[int, int, str], None]
 
 
 class ChangeMapperError(Exception):
@@ -480,12 +482,18 @@ class ChangeMapper:
         
         return affected
     
-    def analyze_diff(self, diff_source: Path | str) -> AnalysisReport:
+    def analyze_diff(
+        self,
+        diff_source: Path | str,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> AnalysisReport:
         """
         Analyze a diff and generate a report of affected endpoints.
         
         Args:
             diff_source: Path to diff file or diff content string.
+            progress_callback: Optional callback for progress updates.
+                              Called with (current, total, description).
             
         Returns:
             AnalysisReport with all affected endpoints.
@@ -494,7 +502,12 @@ class ChangeMapper:
         errors: list[str] = []
         warnings: list[str] = []
         
+        def report_progress(current: int, total: int, desc: str) -> None:
+            if progress_callback:
+                progress_callback(current, total, desc)
+        
         # Parse the diff
+        report_progress(0, 100, "Parsing diff...")
         try:
             if isinstance(diff_source, Path):
                 diff_files = DiffParser.parse_file(diff_source)
@@ -510,12 +523,34 @@ class ChangeMapper:
         # Filter to Python files
         python_files = DiffParser.get_python_files(diff_files)
         
+        # Initialize endpoints (this triggers backend analysis)
+        report_progress(5, 100, "Extracting endpoints...")
+        total_endpoints = len(self.registry)
+        
+        # Pre-analyze endpoints with the selected backend
+        if self.backend == "coverage":
+            report_progress(10, 100, f"Analyzing {total_endpoints} endpoints (coverage)...")
+            self._preanalyze_coverage(progress_callback)
+        elif self.backend == "mypy":
+            report_progress(10, 100, f"Analyzing {total_endpoints} endpoints (mypy)...")
+            self._preanalyze_mypy(progress_callback)
+        else:
+            report_progress(10, 100, "Building dependency graph...")
+            # Import backend builds graph lazily
+            _ = self.dep_graph
+        
         # Analyze each Python file
+        report_progress(70, 100, f"Checking {len(python_files)} changed files...")
         all_affected: list[AffectedEndpoint] = []
         seen_endpoints: set[str] = set()
         
-        for diff_file in python_files:
+        for i, diff_file in enumerate(python_files):
             try:
+                report_progress(
+                    70 + int(20 * (i + 1) / max(len(python_files), 1)),
+                    100,
+                    f"Analyzing {diff_file.path.name}..."
+                )
                 file_affected = self._analyze_diff_file(diff_file)
                 for ae in file_affected:
                     if ae.endpoint.identifier not in seen_endpoints:
@@ -525,6 +560,7 @@ class ChangeMapper:
                 warnings.append(f"Error analyzing {diff_file.path}: {e}")
         
         # Filter by confidence threshold
+        report_progress(95, 100, "Filtering results...")
         threshold = self.config.analysis.confidence_threshold
         confidence_order = {
             ConfidenceLevel.HIGH: 1.0,
@@ -539,6 +575,7 @@ class ChangeMapper:
         
         # Calculate duration
         duration_ms = (time.time() - start_time) * 1000
+        report_progress(100, 100, "Complete!")
         
         return AnalysisReport(
             app_path=str(self.app_path),
@@ -551,6 +588,42 @@ class ChangeMapper:
             errors=errors,
             warnings=warnings,
         )
+    
+    def _preanalyze_coverage(
+        self,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> None:
+        """Pre-analyze all endpoints with coverage backend."""
+        endpoints = self.registry.get_all()
+        total = len(endpoints)
+        
+        for i, endpoint in enumerate(endpoints):
+            if progress_callback:
+                progress_callback(
+                    10 + int(55 * (i + 1) / max(total, 1)),
+                    100,
+                    f"Analyzing endpoint {i + 1}/{total}: {endpoint.path}"
+                )
+            if endpoint.identifier not in self.coverage_analyzer._endpoint_coverage:
+                self.coverage_analyzer.trace_endpoint_handler(endpoint)
+    
+    def _preanalyze_mypy(
+        self,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> None:
+        """Pre-analyze all endpoints with mypy backend."""
+        endpoints = self.registry.get_all()
+        total = len(endpoints)
+        
+        for i, endpoint in enumerate(endpoints):
+            if progress_callback:
+                progress_callback(
+                    10 + int(55 * (i + 1) / max(total, 1)),
+                    100,
+                    f"Analyzing endpoint {i + 1}/{total}: {endpoint.path}"
+                )
+            if endpoint.identifier not in self.mypy_analyzer._endpoint_deps:
+                self.mypy_analyzer.analyze_endpoint(endpoint)
     
     def get_endpoints(self) -> list[Endpoint]:
         """Get all endpoints in the application."""
