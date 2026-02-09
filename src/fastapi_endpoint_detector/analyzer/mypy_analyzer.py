@@ -7,6 +7,7 @@ tracking than import-based analysis.
 """
 
 import ast
+import json
 import os
 import sys
 import tempfile
@@ -105,6 +106,18 @@ class MypyAnalyzer:
         self.app_path = app_path.resolve()
         self._endpoint_deps: dict[str, EndpointDependencies] = {}
         self._mypy_available = self._check_mypy_available()
+        self._cache_file: Optional[Path] = None
+    
+    @property
+    def cache_path(self) -> Path:
+        """Path to the mypy analysis cache file."""
+        if self._cache_file:
+            return self._cache_file
+        return self.app_path.parent / ".endpoint_mypy_cache.json"
+    
+    def set_cache_path(self, path: Path) -> None:
+        """Set a custom cache file path."""
+        self._cache_file = path
     
     def _check_mypy_available(self) -> bool:
         """Check if mypy is available."""
@@ -565,21 +578,113 @@ class MypyAnalyzer:
     def analyze_endpoints(
         self,
         endpoints: list[Endpoint],
+        use_cache: bool = True,
     ) -> dict[str, EndpointDependencies]:
         """
         Analyze multiple endpoints.
         
         Args:
             endpoints: List of endpoints to analyze.
+            use_cache: Whether to use cached analysis data.
             
         Returns:
             Dict mapping endpoint IDs to their dependencies.
         """
+        # Try to load from cache
+        if use_cache and self.cache_path.exists():
+            try:
+                self._load_cache()
+                # Check if all endpoints are in cache
+                all_cached = all(
+                    ep.identifier in self._endpoint_deps
+                    for ep in endpoints
+                )
+                if all_cached:
+                    return self._endpoint_deps
+            except Exception:
+                pass
+        
+        # Analyze uncached endpoints
         for endpoint in endpoints:
             if endpoint.identifier not in self._endpoint_deps:
                 self.analyze_endpoint(endpoint)
         
+        # Save cache
+        if use_cache:
+            self._save_cache()
+        
         return self._endpoint_deps
+    
+    def _save_cache(self) -> None:
+        """Save mypy analysis data to cache file."""
+        cache_data = {}
+        for endpoint_id, deps in self._endpoint_deps.items():
+            cache_data[endpoint_id] = {
+                "methods": deps.methods,
+                "path": deps.path,
+                "referenced_files": {
+                    f: list(lines) for f, lines in deps.referenced_files.items()
+                },
+                "referenced_symbols": deps.referenced_symbols,
+                "call_stacks": {
+                    f: [
+                        {
+                            "file_path": frame.file_path,
+                            "line_number": frame.line_number,
+                            "function_name": frame.function_name,
+                            "code_context": frame.code_context,
+                        }
+                        for frame in frames
+                    ]
+                    for f, frames in deps.call_stacks.items()
+                },
+            }
+        
+        try:
+            self.cache_path.write_text(
+                json.dumps(cache_data, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+    
+    def _load_cache(self) -> None:
+        """Load mypy analysis data from cache file."""
+        try:
+            data = json.loads(self.cache_path.read_text(encoding="utf-8"))
+            
+            for endpoint_id, deps_data in data.items():
+                call_stacks = {}
+                for f, frames_data in deps_data.get("call_stacks", {}).items():
+                    call_stacks[f] = [
+                        CallFrame(
+                            file_path=frame["file_path"],
+                            line_number=frame["line_number"],
+                            function_name=frame["function_name"],
+                            code_context=frame.get("code_context", ""),
+                        )
+                        for frame in frames_data
+                    ]
+                
+                self._endpoint_deps[endpoint_id] = EndpointDependencies(
+                    endpoint_id=endpoint_id,
+                    methods=deps_data["methods"],
+                    path=deps_data["path"],
+                    referenced_files={
+                        f: set(lines)
+                        for f, lines in deps_data["referenced_files"].items()
+                    },
+                    referenced_symbols=deps_data.get("referenced_symbols", []),
+                    call_stacks=call_stacks,
+                )
+        except Exception:
+            pass
+    
+    def clear_cache(self) -> None:
+        """Clear the mypy analysis cache."""
+        if self.cache_path.exists():
+            self.cache_path.unlink()
+        self._endpoint_deps.clear()
     
     def get_endpoint_dependencies(
         self,

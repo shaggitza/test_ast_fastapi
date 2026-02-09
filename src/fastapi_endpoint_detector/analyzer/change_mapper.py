@@ -64,6 +64,7 @@ class ChangeMapper:
         config: Optional[Config] = None,
         app_variable: str = "app",
         backend: DependencyBackend = "import",
+        use_cache: bool = True,
     ) -> None:
         """
         Initialize the change mapper.
@@ -73,11 +74,13 @@ class ChangeMapper:
             config: Optional configuration object.
             app_variable: Name of the FastAPI app variable.
             backend: Dependency analysis backend ("import", "coverage", or "mypy").
+            use_cache: Whether to use cached analysis results (default True).
         """
         self.app_path = app_path.resolve()
         self.config = config or Config()
         self.app_variable = app_variable
         self.backend = backend
+        self.use_cache = use_cache
         
         # These are lazily initialized
         self._extractor: Optional[FastAPIExtractor] = None
@@ -134,7 +137,7 @@ class ChangeMapper:
             
             self._coverage_analyzer = CoverageAnalyzer(package_path)
             # Pre-analyze all endpoints
-            self._coverage_analyzer.analyze_endpoints(self.registry.get_all())
+            self._coverage_analyzer.analyze_endpoints(self.registry.get_all(), use_cache=self.use_cache)
         return self._coverage_analyzer
     
     @property
@@ -152,7 +155,7 @@ class ChangeMapper:
             
             self._mypy_analyzer = MypyAnalyzer(package_path)
             # Pre-analyze all endpoints
-            self._mypy_analyzer.analyze_endpoints(self.registry.get_all())
+            self._mypy_analyzer.analyze_endpoints(self.registry.get_all(), use_cache=self.use_cache)
         return self._mypy_analyzer
     
     def _check_direct_handler_change(
@@ -628,3 +631,34 @@ class ChangeMapper:
     def get_endpoints(self) -> list[Endpoint]:
         """Get all endpoints in the application."""
         return self.registry.get_all()
+    
+    def clear_cache(self) -> None:
+        """Clear cached analysis results for the selected backend."""
+        if self.backend == "coverage":
+            if self._coverage_analyzer is not None:
+                self._coverage_analyzer.clear_cache()
+            else:
+                # Initialize and clear the cache file even if analyzer not loaded
+                from fastapi_endpoint_detector.analyzer.coverage_analyzer import (
+                    CoverageAnalyzer,
+                )
+                if self.app_path.is_file():
+                    package_path = self.app_path.parent
+                else:
+                    package_path = self.app_path
+                temp_analyzer = CoverageAnalyzer(package_path)
+                temp_analyzer.clear_cache()
+        elif self.backend == "mypy":
+            if self._mypy_analyzer is not None:
+                self._mypy_analyzer.clear_cache()
+            else:
+                # Initialize and clear the cache file even if analyzer not loaded
+                from fastapi_endpoint_detector.analyzer.mypy_analyzer import (
+                    MypyAnalyzer,
+                )
+                if self.app_path.is_file():
+                    package_path = self.app_path.parent
+                else:
+                    package_path = self.app_path
+                temp_analyzer = MypyAnalyzer(package_path)
+                temp_analyzer.clear_cache()

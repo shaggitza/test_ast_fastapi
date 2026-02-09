@@ -82,6 +82,16 @@ def cli(ctx: click.Context, config: Optional[Path]) -> None:
     default="import",
     help="Dependency analysis backend: 'import' (grimp-based, fast), 'coverage' (AST tracing), or 'mypy' (type-based, precise). Default: import.",
 )
+@click.option(
+    "--no-cache",
+    is_flag=True,
+    help="Disable caching of analysis results (coverage/mypy backends).",
+)
+@click.option(
+    "--clear-cache",
+    is_flag=True,
+    help="Clear cached analysis data before running (coverage/mypy backends).",
+)
 @click.pass_context
 def analyze(
     ctx: click.Context,
@@ -92,6 +102,8 @@ def analyze(
     app_var: str,
     verbose: bool,
     backend: str,
+    no_cache: bool,
+    clear_cache: bool,
 ) -> None:
     """Analyze code changes and identify affected FastAPI endpoints."""
     from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
@@ -104,6 +116,10 @@ def analyze(
         console.print(f"[blue]Using diff file:[/blue] {diff}")
         console.print(f"[blue]App variable:[/blue] {app_var}")
         console.print(f"[blue]Dependency backend:[/blue] {backend}")
+        if no_cache:
+            console.print("[blue]Caching:[/blue] disabled")
+        if clear_cache:
+            console.print("[blue]Clearing cache before analysis[/blue]")
     
     try:
         # Run the analysis with selected backend
@@ -112,7 +128,12 @@ def analyze(
             config=config,
             app_variable=app_var,
             backend=backend,  # type: ignore[arg-type]
+            use_cache=not no_cache,
         )
+        
+        # Clear cache if requested
+        if clear_cache:
+            mapper.clear_cache()
         
         # Create progress bar
         with Progress(
