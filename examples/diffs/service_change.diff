@@ -1,0 +1,14 @@
+diff --git a/examples/sample_fastapi_project/services/user_service.py b/examples/sample_fastapi_project/services/user_service.py
+index 8082958..cf6f632 100644
+--- a/examples/sample_fastapi_project/services/user_service.py
++++ b/examples/sample_fastapi_project/services/user_service.py
+@@ -15,7 +15,8 @@ class UserService:
+     def list_users(self) -> list[User]:
+         """Get all users from the database."""
+         # Simulated database query
+-        return list(self._users_cache.values())
++        active_users = [u for u in self._users_cache.values() if u.is_active]
++        return active_users
+ 
+     def get_user_by_id(self, user_id: int) -> User | None:
+         """Get a user by their ID."""
