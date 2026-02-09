@@ -1,0 +1,30 @@
+diff --git a/examples/sample_fastapi_project/models/user.py b/examples/sample_fastapi_project/models/user.py
+index 1234567..abcdefg 100644
+--- a/examples/sample_fastapi_project/models/user.py
++++ b/examples/sample_fastapi_project/models/user.py
+@@ -1,6 +1,7 @@
+ """User Data Models."""
+ 
+-from pydantic import BaseModel, EmailStr
++from datetime import datetime
++from pydantic import BaseModel, EmailStr, Field
+ 
+ 
+ class UserBase(BaseModel):
+@@ -8,6 +9,7 @@ class UserBase(BaseModel):
+ 
+     name: str
+     email: str
++    role: str = "user"
+ 
+ 
+ class UserCreate(UserBase):
+@@ -28,6 +30,8 @@ class User(UserBase):
+ 
+     id: int
+     is_active: bool = True
++    created_at: datetime = Field(default_factory=datetime.utcnow)
++    updated_at: datetime | None = None
+ 
+     class Config:
+         """Pydantic configuration."""

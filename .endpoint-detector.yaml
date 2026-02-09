@@ -1,0 +1,123 @@
+# FastAPI Endpoint Change Detector Configuration
+# This is an example configuration file. Copy to your project root and customize.
+
+# =============================================================================
+# Application Detection
+# =============================================================================
+app_detection:
+  # Patterns to identify FastAPI application instantiation
+  app_patterns:
+    - "app = FastAPI"
+    - "application = FastAPI"
+    - "api = FastAPI"
+
+  # Patterns to identify APIRouter instantiation
+  router_patterns:
+    - "router = APIRouter"
+    - "*_router = APIRouter"
+
+# =============================================================================
+# Analysis Settings
+# =============================================================================
+analysis:
+  # Maximum depth for transitive dependency analysis
+  # Higher values catch more indirect dependencies but take longer
+  max_dependency_depth: 10
+
+  # Whether to include type-only dependencies (from TYPE_CHECKING blocks)
+  include_type_dependencies: false
+
+  # Whether to analyze FastAPI Depends() chains
+  analyze_depends: true
+
+  # Whether to analyze Pydantic model inheritance
+  analyze_pydantic_models: true
+
+# =============================================================================
+# Path Configuration
+# =============================================================================
+paths:
+  # Directories to ignore during analysis
+  ignore_dirs:
+    - ".git"
+    - ".venv"
+    - "venv"
+    - "__pycache__"
+    - "node_modules"
+    - ".mypy_cache"
+    - ".ruff_cache"
+    - ".pytest_cache"
+
+  # File patterns to ignore
+  ignore_files:
+    - "*.pyc"
+    - "*.pyo"
+    - "*.pyd"
+    - "*_test.py"
+    - "test_*.py"
+    - "conftest.py"
+
+  # Directories to include (if empty, all non-ignored dirs are included)
+  include_dirs: []
+
+# =============================================================================
+# Confidence Scoring
+# =============================================================================
+confidence:
+  # Minimum confidence level to report
+  # Options: low, medium, high
+  threshold: low
+
+  # Weights for confidence calculation
+  weights:
+    direct_dependency: 1.0
+    one_hop_dependency: 0.7
+    two_hop_dependency: 0.4
+    transitive_dependency: 0.2
+
+# =============================================================================
+# Output Settings
+# =============================================================================
+output:
+  # Default output format: text, json, yaml
+  format: text
+
+  # Whether to include unaffected endpoints in the report
+  include_unaffected: false
+
+  # Whether to show the full dependency tree
+  show_dependency_tree: false
+
+  # Whether to use colors in terminal output
+  colorize: true
+
+  # Verbosity level: 0 (quiet), 1 (normal), 2 (verbose)
+  verbosity: 1
+
+# =============================================================================
+# Integration Settings
+# =============================================================================
+integrations:
+  # mypy integration for type-aware analysis
+  mypy:
+    enabled: false
+    config_file: null  # Use pyproject.toml by default
+
+  # ruff integration for fast import analysis
+  ruff:
+    enabled: false
+    config_file: null  # Use pyproject.toml by default
+
+# =============================================================================
+# CI/CD Integration
+# =============================================================================
+ci:
+  # Exit code when affected endpoints are found
+  # Set to 0 to always succeed (just report)
+  exit_code_on_changes: 0
+
+  # Generate machine-readable output for CI systems
+  machine_output: false
+
+  # Output file for CI systems (null for stdout)
+  output_file: null
