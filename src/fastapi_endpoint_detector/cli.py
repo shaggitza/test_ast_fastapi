@@ -135,6 +135,9 @@ def analyze(
         if clear_cache:
             mapper.clear_cache()
         
+        # Track current line being analyzed
+        current_line_info = {"text": ""}
+        
         # Create progress bar
         with Progress(
             SpinnerColumn(),
@@ -143,13 +146,30 @@ def analyze(
             TaskProgressColumn(),
             TimeElapsedColumn(),
             TimeRemainingColumn(),
+            TextColumn("{task.fields[line_info]}", style="dim"),
             console=console,
             transient=True,  # Remove progress bar when done
         ) as progress:
-            task = progress.add_task("Initializing...", total=100)
+            task = progress.add_task("Initializing...", total=100, line_info="")
             
             def update_progress(current: int, total: int, description: str) -> None:
-                progress.update(task, completed=current, description=description)
+                progress.update(
+                    task, 
+                    completed=current, 
+                    description=description,
+                    line_info=current_line_info["text"],
+                )
+            
+            def line_progress(file_path: str, line_num: int, symbol: str) -> None:
+                """Update the current line being analyzed."""
+                from pathlib import Path
+                filename = Path(file_path).name
+                current_line_info["text"] = f"→ {filename}:{line_num} ({symbol})"
+                progress.update(task, line_info=current_line_info["text"])
+            
+            # Set line progress callback on mypy analyzer if using that backend
+            if backend == "mypy":
+                mapper.mypy_analyzer.set_line_progress_callback(line_progress)
             
             report = mapper.analyze_diff(diff, progress_callback=update_progress)
         

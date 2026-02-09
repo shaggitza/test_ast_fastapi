@@ -13,9 +13,12 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from fastapi_endpoint_detector.models.endpoint import Endpoint
+
+# Type alias for line-level progress callback (file_path, line_number, symbol_name)
+LineProgressCallback = Callable[[str, int, str], None]
 
 
 class MypyAnalyzerError(Exception):
@@ -107,6 +110,7 @@ class MypyAnalyzer:
         self._endpoint_deps: dict[str, EndpointDependencies] = {}
         self._mypy_available = self._check_mypy_available()
         self._cache_file: Optional[Path] = None
+        self._line_progress_callback: Optional[LineProgressCallback] = None
     
     @property
     def cache_path(self) -> Path:
@@ -119,6 +123,10 @@ class MypyAnalyzer:
         """Set a custom cache file path."""
         self._cache_file = path
     
+    def set_line_progress_callback(self, callback: Optional[LineProgressCallback]) -> None:
+        """Set a callback for line-level progress reporting."""
+        self._line_progress_callback = callback
+
     def _check_mypy_available(self) -> bool:
         """Check if mypy is available."""
         try:
@@ -258,10 +266,13 @@ class MypyAnalyzer:
             code_context=handler_code,
         )
         
+        # Initialize visited set to prevent loops
+        visited: set = set()
+        
         # Trace all references in the handler body with call stack tracking
         self._trace_references(
             handler_node, deps, imports, type_context, 
-            file_path, source_lines, handler.name, [root_frame]
+            file_path, source_lines, handler.name, [root_frame], visited
         )
     
     def _collect_imports_with_resolution(
@@ -418,31 +429,63 @@ class MypyAnalyzer:
         source_lines: list[str],
         current_func: str,
         call_stack: list[CallFrame],
+        visited: Optional[set] = None,
     ) -> None:
         """
         Trace all references in a function body and add to deps.
+        
+        Args:
+            visited: Set of visited node keys to prevent loops.
         """
+        # Initialize visited set on first call
+        if visited is None:
+            visited = set()
         
         for node in ast.walk(func_node):
+            line_num = getattr(node, 'lineno', 0)
+            col_offset = getattr(node, 'col_offset', 0)
+            node_type = type(node).__name__
+            # Use a more specific key: (file, line, col, node_type) to allow different nodes on same line
+            visit_key = (str(source_file), line_num, col_offset, node_type)
+            
+            # Skip if already visited this exact node location
+            if visit_key in visited:
+                continue
+            visited.add(visit_key)
+            
+            # Report progress if callback is set
+            if self._line_progress_callback and line_num > 0:
+                symbol_name = ""
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                    symbol_name = node.func.attr
+                elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                    symbol_name = node.func.id
+                elif isinstance(node, ast.Attribute):
+                    symbol_name = node.attr
+                elif isinstance(node, ast.Name):
+                    symbol_name = node.id
+                
+                if symbol_name:
+                    self._line_progress_callback(str(source_file), line_num, symbol_name)
+            
             # Direct function calls: func()
             if isinstance(node, ast.Call):
                 self._handle_call(
                     node, deps, imports, type_context,
-                    source_file, source_lines, current_func, call_stack
+                    source_file, source_lines, current_func, call_stack, visited
                 )
             
             # Attribute access: obj.attr
             elif isinstance(node, ast.Attribute):
                 self._handle_attribute(
                     node, deps, imports, type_context,
-                    source_file, source_lines, current_func, call_stack
+                    source_file, source_lines, current_func, call_stack, visited
                 )
             
             # Direct name references
             elif isinstance(node, ast.Name):
                 if node.id in imports:
                     file_path, _ = imports[node.id]
-                    line_num = getattr(node, 'lineno', 0)
                     code_ctx = source_lines[line_num - 1] if 0 < line_num <= len(source_lines) else ""
                     
                     call_frame = CallFrame(
@@ -451,7 +494,7 @@ class MypyAnalyzer:
                         function_name=current_func,
                         code_context=code_ctx,
                     )
-                    self._add_file_reference(deps, file_path, call_stack + [call_frame])
+                    self._add_file_reference(deps, file_path, call_stack + [call_frame], visited=visited)
     
     def _handle_call(
         self,
@@ -463,6 +506,7 @@ class MypyAnalyzer:
         source_lines: list[str],
         current_func: str,
         call_stack: list[CallFrame],
+        visited: Optional[set] = None,
     ) -> None:
         """Handle a function call node."""
         
@@ -472,7 +516,7 @@ class MypyAnalyzer:
         if isinstance(node.func, ast.Attribute):
             self._handle_attribute(
                 node.func, deps, imports, type_context,
-                source_file, source_lines, current_func, call_stack
+                source_file, source_lines, current_func, call_stack, visited
             )
         elif isinstance(node.func, ast.Name):
             if node.func.id in imports:
@@ -483,7 +527,7 @@ class MypyAnalyzer:
                     function_name=current_func,
                     code_context=code_ctx,
                 )
-                self._add_file_reference(deps, file_path, call_stack + [call_frame])
+                self._add_file_reference(deps, file_path, call_stack + [call_frame], visited=visited)
     
     def _handle_attribute(
         self,
@@ -495,6 +539,7 @@ class MypyAnalyzer:
         source_lines: list[str],
         current_func: str,
         call_stack: list[CallFrame],
+        visited: Optional[set] = None,
     ) -> None:
         """Handle an attribute access node."""
         
@@ -516,7 +561,8 @@ class MypyAnalyzer:
                 self._add_file_reference(
                     deps, type_context[base_name], 
                     call_stack + [call_frame],
-                    target_symbol=f"{base_name}.{attr_name}"
+                    target_symbol=f"{base_name}.{attr_name}",
+                    visited=visited,
                 )
             
             # Check imports
@@ -525,7 +571,8 @@ class MypyAnalyzer:
                 self._add_file_reference(
                     deps, file_path, 
                     call_stack + [call_frame],
-                    target_symbol=f"{base_name}.{attr_name}"
+                    target_symbol=f"{base_name}.{attr_name}",
+                    visited=visited,
                 )
     
     def _add_file_reference(
@@ -534,6 +581,7 @@ class MypyAnalyzer:
         file_path: Path,
         call_stack: list[CallFrame],
         target_symbol: str = "",
+        visited: Optional[set] = None,
     ) -> None:
         """Add a file to the dependencies with call stack."""
         
