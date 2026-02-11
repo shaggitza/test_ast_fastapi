@@ -76,21 +76,14 @@ def cli(ctx: click.Context, config: Optional[Path]) -> None:
     help="Enable verbose output.",
 )
 @click.option(
-    "--backend",
-    "-b",
-    type=click.Choice(["import", "coverage", "mypy"]),
-    default="import",
-    help="Dependency analysis backend: 'import' (grimp-based, fast), 'coverage' (AST tracing), or 'mypy' (type-based, precise). Default: import.",
-)
-@click.option(
     "--no-cache",
     is_flag=True,
-    help="Disable caching of analysis results (coverage/mypy backends).",
+    help="Disable caching of analysis results.",
 )
 @click.option(
     "--clear-cache",
     is_flag=True,
-    help="Clear cached analysis data before running (coverage/mypy backends).",
+    help="Clear cached analysis data before running.",
 )
 @click.pass_context
 def analyze(
@@ -101,7 +94,6 @@ def analyze(
     output: Optional[Path],
     app_var: str,
     verbose: bool,
-    backend: str,
     no_cache: bool,
     clear_cache: bool,
 ) -> None:
@@ -115,19 +107,18 @@ def analyze(
         console.print(f"[blue]Analyzing FastAPI application at:[/blue] {app}")
         console.print(f"[blue]Using diff file:[/blue] {diff}")
         console.print(f"[blue]App variable:[/blue] {app_var}")
-        console.print(f"[blue]Dependency backend:[/blue] {backend}")
+        console.print("[blue]Using mypy for dependency analysis[/blue]")
         if no_cache:
             console.print("[blue]Caching:[/blue] disabled")
         if clear_cache:
             console.print("[blue]Clearing cache before analysis[/blue]")
     
     try:
-        # Run the analysis with selected backend
+        # Run the analysis with mypy
         mapper = ChangeMapper(
             app_path=app,
             config=config,
             app_variable=app_var,
-            backend=backend,  # type: ignore[arg-type]
             use_cache=not no_cache,
         )
         
@@ -167,13 +158,9 @@ def analyze(
                 current_line_info["text"] = f"→ {filename}:{line_num} ({symbol})"
                 progress.update(task, line_info=current_line_info["text"])
             
-            # Set line progress callback on mypy analyzer if using that backend
+            # Set line progress callback on mypy analyzer
             # Note: This just initializes the analyzer without running analysis
-            if backend == "mypy":
-                mapper.mypy_analyzer.set_line_progress_callback(line_progress)
-            elif backend == "coverage":
-                # Coverage analyzer doesn't have line-level progress, but we init it
-                _ = mapper.coverage_analyzer
+            mapper.mypy_analyzer.set_line_progress_callback(line_progress)
             
             report = mapper.analyze_diff(diff, progress_callback=update_progress)
         

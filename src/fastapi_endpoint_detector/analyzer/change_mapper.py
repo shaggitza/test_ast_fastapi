@@ -1,19 +1,15 @@
 """
 Change mapper - maps code changes to affected endpoints.
 
-This module combines diff parsing, endpoint registry, and dependency
-graph to determine which endpoints are affected by code changes.
+This module combines diff parsing, endpoint registry, and mypy-based
+dependency analysis to determine which endpoints are affected by code changes.
 
-Supports three backends for dependency analysis:
-- import: Uses grimp to analyze Python imports (default, faster)
-- coverage: Uses coverage.py + AST to trace code execution paths
-- mypy: Uses mypy-style type analysis for precise dependency tracking
+Uses mypy for type-aware, precise dependency tracking.
 """
 
 import time
-from enum import Enum
 from pathlib import Path
-from typing import Callable, Literal, Optional
+from typing import Callable, Optional
 
 from fastapi_endpoint_detector.config import Config
 from fastapi_endpoint_detector.models.diff import DiffFile, ChangeType
@@ -26,12 +22,8 @@ from fastapi_endpoint_detector.models.report import (
 )
 from fastapi_endpoint_detector.parser.diff_parser import DiffParser
 from fastapi_endpoint_detector.parser.fastapi_extractor import FastAPIExtractor
-from fastapi_endpoint_detector.analyzer.dependency_graph import DependencyGraph
 from fastapi_endpoint_detector.analyzer.endpoint_registry import EndpointRegistry
 
-
-# Type alias for backend selection
-DependencyBackend = Literal["import", "coverage", "mypy"]
 
 # Progress callback type: (current, total, description) -> None
 ProgressCallback = Callable[[int, int, str], None]
@@ -48,14 +40,11 @@ class ChangeMapper:
     
     This is the main orchestration class that:
     1. Extracts endpoints from a FastAPI app
-    2. Builds the dependency graph (using chosen backend)
+    2. Analyzes dependencies using mypy
     3. Parses diff files
     4. Determines which endpoints are affected
     
-    Supports three dependency analysis backends:
-    - "import": Uses grimp for import-based dependency analysis (default, fast)
-    - "coverage": Uses coverage.py + AST to trace code execution paths
-    - "mypy": Uses mypy-style type analysis for precise dependency tracking
+    Uses mypy for type-aware, precise dependency tracking.
     """
     
     def __init__(
@@ -63,7 +52,6 @@ class ChangeMapper:
         app_path: Path,
         config: Optional[Config] = None,
         app_variable: str = "app",
-        backend: DependencyBackend = "import",
         use_cache: bool = True,
     ) -> None:
         """
@@ -73,20 +61,16 @@ class ChangeMapper:
             app_path: Path to the FastAPI application.
             config: Optional configuration object.
             app_variable: Name of the FastAPI app variable.
-            backend: Dependency analysis backend ("import", "coverage", or "mypy").
             use_cache: Whether to use cached analysis results (default True).
         """
         self.app_path = app_path.resolve()
         self.config = config or Config()
         self.app_variable = app_variable
-        self.backend = backend
         self.use_cache = use_cache
         
         # These are lazily initialized
         self._extractor: Optional[FastAPIExtractor] = None
         self._registry: Optional[EndpointRegistry] = None
-        self._dep_graph: Optional[DependencyGraph] = None
-        self._coverage_analyzer: Optional["CoverageAnalyzer"] = None
         self._mypy_analyzer: Optional["MypyAnalyzer"] = None
     
     @property
@@ -107,38 +91,6 @@ class ChangeMapper:
             endpoints = self.extractor.extract_endpoints()
             self._registry.register_many(endpoints)
         return self._registry
-    
-    @property
-    def dep_graph(self) -> DependencyGraph:
-        """Get the dependency graph, building if needed."""
-        if self._dep_graph is None:
-            # Determine package path
-            if self.app_path.is_file():
-                package_path = self.app_path.parent
-            else:
-                package_path = self.app_path
-            
-            self._dep_graph = DependencyGraph(package_path)
-            self._dep_graph.build()
-        return self._dep_graph
-    
-    @property
-    def coverage_analyzer(self) -> "CoverageAnalyzer":
-        """Get the coverage analyzer, initializing if needed (does NOT pre-analyze)."""
-        if self._coverage_analyzer is None:
-            from fastapi_endpoint_detector.analyzer.coverage_analyzer import (
-                CoverageAnalyzer,
-            )
-            
-            if self.app_path.is_file():
-                package_path = self.app_path.parent
-            else:
-                package_path = self.app_path
-            
-            self._coverage_analyzer = CoverageAnalyzer(package_path)
-            # NOTE: We don't pre-analyze here - that's done in _preanalyze_coverage
-            # with progress reporting
-        return self._coverage_analyzer
     
     @property
     def mypy_analyzer(self) -> "MypyAnalyzer":
@@ -191,133 +143,6 @@ class ChangeMapper:
                 reason=f"Handler function directly modified in {diff_file.path}",
                 dependency_chain=[str(diff_file.path)],
                 changed_files=[str(diff_file.path)],
-            )
-        
-        return None
-    
-    def _check_module_dependency(
-        self,
-        endpoint: Endpoint,
-        changed_module: str,
-        diff_file: DiffFile,
-    ) -> Optional[AffectedEndpoint]:
-        """
-        Check if an endpoint depends on a changed module.
-        
-        Args:
-            endpoint: The endpoint to check.
-            changed_module: The module that changed.
-            diff_file: The diff file.
-            
-        Returns:
-            AffectedEndpoint if affected via dependency, None otherwise.
-        """
-        handler_module = endpoint.handler.module
-        
-        if not handler_module or handler_module == changed_module:
-            return None
-        
-        # Build list of modules to check (the changed module and its parent packages)
-        # e.g., "services.user_service" -> ["services.user_service", "services"]
-        modules_to_check = [changed_module]
-        parts = changed_module.split(".")
-        for i in range(len(parts) - 1, 0, -1):
-            modules_to_check.append(".".join(parts[:i]))
-        
-        try:
-            # Check direct imports
-            direct_imports = self.dep_graph.get_modules_imported_by(handler_module)
-            
-            for mod in modules_to_check:
-                if mod in direct_imports:
-                    return AffectedEndpoint(
-                        endpoint=endpoint,
-                        confidence=ConfidenceLevel.MEDIUM,
-                        reason=f"Handler imports {mod} (changed: {changed_module})",
-                        dependency_chain=[handler_module, mod],
-                        changed_files=[str(diff_file.path)],
-                    )
-            
-            # Check transitive dependencies if enabled
-            if self.config.analysis.track_transitive:
-                upstream = self.dep_graph.get_upstream_modules(handler_module)
-                
-                for mod in modules_to_check:
-                    if mod in upstream:
-                        # Find the path
-                        chain = self.dep_graph.get_shortest_path(
-                            from_module=handler_module,
-                            to_module=mod,
-                        )
-                        chain_list = list(chain) if chain else [handler_module, mod]
-                        
-                        return AffectedEndpoint(
-                            endpoint=endpoint,
-                            confidence=ConfidenceLevel.LOW,
-                            reason=f"Handler transitively depends on {mod} (changed: {changed_module})",
-                            dependency_chain=chain_list,
-                            changed_files=[str(diff_file.path)],
-                        )
-        except Exception:
-            # Dependency graph might not cover all modules
-            pass
-        
-        return None
-    
-    def _check_coverage_dependency(
-        self,
-        endpoint: Endpoint,
-        diff_file: DiffFile,
-        added_lines: list[int],
-        removed_lines: list[int],
-    ) -> Optional[AffectedEndpoint]:
-        """
-        Check if an endpoint's coverage intersects with changed lines.
-        
-        Uses the coverage-based backend to determine if the endpoint
-        actually executes code in the changed lines.
-        
-        Args:
-            endpoint: The endpoint to check.
-            diff_file: The diff file.
-            added_lines: Lines added in the diff.
-            removed_lines: Lines removed in the diff.
-            
-        Returns:
-            AffectedEndpoint if coverage intersects, None otherwise.
-        """
-        cov_data = self.coverage_analyzer.get_endpoint_coverage(endpoint.identifier)
-        
-        if not cov_data:
-            return None
-        
-        file_path = str(diff_file.path)
-        
-        # Check if the file is covered at all
-        if not cov_data.covers_file(file_path):
-            return None
-        
-        # Check if the endpoint's coverage intersects with changed lines
-        changed_lines = set(added_lines) | set(removed_lines)
-        
-        # Also check context lines (for added lines that don't exist yet)
-        context_lines = set()
-        for line in changed_lines:
-            context_lines.update(range(max(1, line - 3), line + 4))
-        
-        covered_lines = cov_data.get_covered_lines(file_path)
-        overlap = covered_lines & (changed_lines | context_lines)
-        
-        if overlap:
-            direct_overlap = covered_lines & changed_lines
-            display_lines = direct_overlap if direct_overlap else overlap
-            
-            return AffectedEndpoint(
-                endpoint=endpoint,
-                confidence=ConfidenceLevel.MEDIUM,
-                reason=f"Coverage intersects with {diff_file.path} (lines {sorted(display_lines)[:5]}{'...' if len(display_lines) > 5 else ''})",
-                dependency_chain=[endpoint.handler.module or "unknown", file_path],
-                changed_files=[file_path],
             )
         
         return None
@@ -399,7 +224,7 @@ class ChangeMapper:
         """
         Analyze a single diff file and find affected endpoints.
         
-        Uses the selected backend (import, coverage, or mypy) for dependency analysis.
+        Uses mypy for type-aware dependency analysis.
         
         Args:
             diff_file: The parsed diff file.
@@ -416,7 +241,7 @@ class ChangeMapper:
         # Find endpoints in the changed file
         file_endpoints = self.registry.get_by_file(diff_file.path)
         
-        # Check for direct handler changes (applies to all backends)
+        # Check for direct handler changes
         for endpoint in file_endpoints:
             result = self._check_direct_handler_change(
                 endpoint, diff_file, added_lines, removed_lines
@@ -425,63 +250,17 @@ class ChangeMapper:
                 affected.append(result)
                 seen_endpoints.add(endpoint.identifier)
         
-        # Use the appropriate backend for dependency analysis
-        if self.backend == "coverage":
-            # Coverage-based: check all endpoints against changed lines
-            for endpoint in self.registry:
-                if endpoint.identifier in seen_endpoints:
-                    continue
-                
-                result = self._check_coverage_dependency(
-                    endpoint, diff_file, added_lines, removed_lines
-                )
-                if result:
-                    affected.append(result)
-                    seen_endpoints.add(endpoint.identifier)
-                    
-        elif self.backend == "mypy":
-            # Mypy-based: use type analysis for precise dependency tracking
-            for endpoint in self.registry:
-                if endpoint.identifier in seen_endpoints:
-                    continue
-                
-                result = self._check_mypy_dependency(
-                    endpoint, diff_file, added_lines, removed_lines
-                )
-                if result:
-                    affected.append(result)
-                    seen_endpoints.add(endpoint.identifier)
-        else:
-            # Import-based: use grimp dependency graph (default)
-            # Falls back to coverage-based if dependency graph fails
-            try:
-                changed_module = self.dep_graph.file_path_to_module(diff_file.path)
-                
-                if changed_module:
-                    # Check all endpoints for module dependencies
-                    for endpoint in self.registry:
-                        if endpoint.identifier in seen_endpoints:
-                            continue
-                        
-                        result = self._check_module_dependency(
-                            endpoint, changed_module, diff_file
-                        )
-                        if result:
-                            affected.append(result)
-                            seen_endpoints.add(endpoint.identifier)
-            except Exception:
-                # Fallback to coverage-based analysis if grimp fails
-                # (e.g., for non-module projects)
-                for endpoint in self.registry:
-                    if endpoint.identifier in seen_endpoints:
-                        continue
-                    
-                    result = self._check_coverage_dependency(
-                        endpoint, diff_file, added_lines, removed_lines
-                    )
-                    if result:
-                        affected.append(result)
-                        seen_endpoints.add(endpoint.identifier)
+        # Use mypy for type-aware dependency analysis
+        for endpoint in self.registry:
+            if endpoint.identifier in seen_endpoints:
+                continue
+            
+            result = self._check_mypy_dependency(
+                endpoint, diff_file, added_lines, removed_lines
+            )
+            if result:
+                affected.append(result)
+                seen_endpoints.add(endpoint.identifier)
         
         return affected
     
@@ -526,21 +305,13 @@ class ChangeMapper:
         # Filter to Python files
         python_files = DiffParser.get_python_files(diff_files)
         
-        # Initialize endpoints (this triggers backend analysis)
+        # Initialize endpoints
         report_progress(5, 100, "Extracting endpoints...")
         total_endpoints = len(self.registry)
         
-        # Pre-analyze endpoints with the selected backend
-        if self.backend == "coverage":
-            report_progress(10, 100, f"Analyzing {total_endpoints} endpoints (coverage)...")
-            self._preanalyze_coverage(progress_callback)
-        elif self.backend == "mypy":
-            report_progress(10, 100, f"Analyzing {total_endpoints} endpoints (mypy)...")
-            self._preanalyze_mypy(progress_callback)
-        else:
-            report_progress(10, 100, "Building dependency graph...")
-            # Import backend builds graph lazily
-            _ = self.dep_graph
+        # Pre-analyze endpoints with mypy
+        report_progress(10, 100, f"Analyzing {total_endpoints} endpoints (mypy)...")
+        self._preanalyze_mypy(progress_callback)
         
         # Analyze each Python file
         report_progress(70, 100, f"Checking {len(python_files)} changed files...")
@@ -592,52 +363,11 @@ class ChangeMapper:
             warnings=warnings,
         )
     
-    def _preanalyze_coverage(
-        self,
-        progress_callback: Optional[ProgressCallback] = None,
-    ) -> None:
-        """Pre-analyze all endpoints with coverage backend."""
-        endpoints = self.registry.get_all()
-        total = len(endpoints)
-        
-        # Try to load from cache first
-        if self.use_cache and self.coverage_analyzer.coverage_cache_path.exists():
-            if progress_callback:
-                progress_callback(10, 100, "Loading cached analysis...")
-            try:
-                self.coverage_analyzer._load_cache()
-                # Check if all endpoints are cached
-                all_cached = all(
-                    ep.identifier in self.coverage_analyzer._endpoint_coverage
-                    for ep in endpoints
-                )
-                if all_cached:
-                    if progress_callback:
-                        progress_callback(65, 100, f"Loaded {total} endpoints from cache")
-                    return
-            except Exception:
-                pass
-        
-        # Analyze uncached endpoints
-        for i, endpoint in enumerate(endpoints):
-            if progress_callback:
-                progress_callback(
-                    10 + int(55 * (i + 1) / max(total, 1)),
-                    100,
-                    f"Analyzing endpoint {i + 1}/{total}: {endpoint.path}"
-                )
-            if endpoint.identifier not in self.coverage_analyzer._endpoint_coverage:
-                self.coverage_analyzer.trace_endpoint_handler(endpoint)
-        
-        # Save cache after analysis
-        if self.use_cache:
-            self.coverage_analyzer._save_cache()
-    
     def _preanalyze_mypy(
         self,
         progress_callback: Optional[ProgressCallback] = None,
     ) -> None:
-        """Pre-analyze all endpoints with mypy backend."""
+        """Pre-analyze all endpoints with mypy."""
         endpoints = self.registry.get_all()
         total = len(endpoints)
         
@@ -679,32 +409,17 @@ class ChangeMapper:
         return self.registry.get_all()
     
     def clear_cache(self) -> None:
-        """Clear cached analysis results for the selected backend."""
-        if self.backend == "coverage":
-            if self._coverage_analyzer is not None:
-                self._coverage_analyzer.clear_cache()
+        """Clear cached analysis results for mypy."""
+        if self._mypy_analyzer is not None:
+            self._mypy_analyzer.clear_cache()
+        else:
+            # Initialize and clear the cache file even if analyzer not loaded
+            from fastapi_endpoint_detector.analyzer.mypy_analyzer import (
+                MypyAnalyzer,
+            )
+            if self.app_path.is_file():
+                package_path = self.app_path.parent
             else:
-                # Initialize and clear the cache file even if analyzer not loaded
-                from fastapi_endpoint_detector.analyzer.coverage_analyzer import (
-                    CoverageAnalyzer,
-                )
-                if self.app_path.is_file():
-                    package_path = self.app_path.parent
-                else:
-                    package_path = self.app_path
-                temp_analyzer = CoverageAnalyzer(package_path)
-                temp_analyzer.clear_cache()
-        elif self.backend == "mypy":
-            if self._mypy_analyzer is not None:
-                self._mypy_analyzer.clear_cache()
-            else:
-                # Initialize and clear the cache file even if analyzer not loaded
-                from fastapi_endpoint_detector.analyzer.mypy_analyzer import (
-                    MypyAnalyzer,
-                )
-                if self.app_path.is_file():
-                    package_path = self.app_path.parent
-                else:
-                    package_path = self.app_path
-                temp_analyzer = MypyAnalyzer(package_path)
-                temp_analyzer.clear_cache()
+                package_path = self.app_path
+            temp_analyzer = MypyAnalyzer(package_path)
+            temp_analyzer.clear_cache()
