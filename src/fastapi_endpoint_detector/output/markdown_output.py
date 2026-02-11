@@ -13,10 +13,6 @@ class MarkdownFormatter(BaseFormatter):
     Format output as Markdown.
     """
 
-    def __init__(self) -> None:
-        """Initialize the markdown formatter."""
-        pass
-
     def _confidence_emoji(self, confidence: ConfidenceLevel) -> str:
         """Get an emoji for a confidence level."""
         emojis = {
