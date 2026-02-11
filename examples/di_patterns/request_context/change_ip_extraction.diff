@@ -2,10 +2,14 @@ diff --git a/examples/di_patterns/request_context/main.py b/examples/di_patterns
 index 1234567..abcdefg 100644
 --- a/examples/di_patterns/request_context/main.py
 +++ b/examples/di_patterns/request_context/main.py
-@@ -29,9 +29,14 @@ def get_user_agent(user_agent: str | None = Header(None)) -> str:
+@@ -29,10 +29,14 @@ def get_user_agent(user_agent: str | None = Header(None)) -> str:
  
  def get_client_ip(request: Request) -> str:
      """Extract client IP address from request."""
+-    # Check X-Forwarded-For header first (for proxied requests)
+-    forwarded_for = request.headers.get("X-Forwarded-For")
+-    if forwarded_for:
+-        return forwarded_for.split(",")[0].strip()
 +    # Support for various proxy headers
 +    proxy_headers = ["X-Forwarded-For", "X-Real-IP", "CF-Connecting-IP"]
 +    
@@ -14,10 +18,7 @@ index 1234567..abcdefg 100644
 +        if forwarded:
 +            return forwarded.split(",")[0].strip()
 +    
--    # Check X-Forwarded-For header first (for proxied requests)
--    forwarded_for = request.headers.get("X-Forwarded-For")
--    if forwarded_for:
--        return forwarded_for.split(",")[0].strip()
--
+ 
      # Fall back to direct client
      if request.client:
+         return request.client.host

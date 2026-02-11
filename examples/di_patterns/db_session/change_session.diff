@@ -2,7 +2,7 @@ diff --git a/examples/di_patterns/db_session/main.py b/examples/di_patterns/db_s
 index 1234567..abcdefg 100644
 --- a/examples/di_patterns/db_session/main.py
 +++ b/examples/di_patterns/db_session/main.py
-@@ -45,9 +45,14 @@ class Session:
+@@ -42,9 +42,14 @@ class Session:
      def __init__(self, db: Database):
          self.db = db
          self.in_transaction = False
@@ -18,7 +18,7 @@ index 1234567..abcdefg 100644
  
      def commit(self) -> None:
          """Commit the current transaction."""
-@@ -59,6 +64,8 @@ class Session:
+@@ -56,6 +61,8 @@ class Session:
          if self.in_transaction:
              self.in_transaction = False
  
@@ -27,3 +27,5 @@ index 1234567..abcdefg 100644
 +        self.query_count += 1
 +        print(f"Query #{self.query_count}: SELECT * FROM {model}")
          return self.db.execute(f"SELECT * FROM {model}")
+ 
+ 

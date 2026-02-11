@@ -2,7 +2,7 @@ diff --git a/examples/di_patterns/security_deps/main.py b/examples/di_patterns/s
 index 1234567..abcdefg 100644
 --- a/examples/di_patterns/security_deps/main.py
 +++ b/examples/di_patterns/security_deps/main.py
-@@ -21,11 +21,18 @@ bearer_scheme = HTTPBearer()
+@@ -22,11 +22,18 @@ bearer_scheme = HTTPBearer()
  
  def decode_token(token: str) -> dict:
      """Decode and validate JWT token."""
@@ -24,3 +24,4 @@ index 1234567..abcdefg 100644
 +            "token_hash": token_hash,
          }
      raise HTTPException(
+         status_code=status.HTTP_401_UNAUTHORIZED,

@@ -2,8 +2,7 @@ diff --git a/examples/di_patterns/function_based/main.py b/examples/di_patterns/
 index 1234567..abcdefg 100644
 --- a/examples/di_patterns/function_based/main.py
 +++ b/examples/di_patterns/function_based/main.py
-@@ -14,9 +14,12 @@ app = FastAPI(title="Function-Based DI Example")
- 
+@@ -15,6 +15,9 @@ app = FastAPI(title="Function-Based DI Example")
  def get_current_user(authorization: str | None = Header(None)) -> dict:
      """Extract and validate current user from authorization header."""
      if not authorization:

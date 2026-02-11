@@ -1,0 +1,580 @@
+{
+  "GET /items": {
+    "methods": [
+      "GET"
+    ],
+    "path": "/items",
+    "referenced_files": {
+      "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/class_based/main.py": [
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        22,
+        23,
+        24
+      ]
+    },
+    "referenced_symbols": [
+      {
+        "file_path": "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/class_based/main.py",
+        "symbol_name": "list_items",
+        "start_line": 32,
+        "end_line": 39
+      },
+      {
+        "file_path": "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/class_based/main.py",
+        "symbol_name": "class_based.main.DatabaseService.connect",
+        "start_line": 22,
+        "end_line": 24
+      }
+    ],
+    "call_stacks": {
+      "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/class_based/main.py": [
+        {
+          "file_path": "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/class_based/main.py",
+          "line_number": 32,
+          "function_name": "list_items",
+          "code_context": ""
+        }
+      ]
+    }
+  },
+  "GET /items/{item_id}": {
+    "methods": [
+      "GET"
+    ],
+    "path": "/items/{item_id}",
+    "referenced_files": {
+      "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/class_based/main.py": [
+        22,
+        23,
+        24,
+        26,
+        27,
+        28,
+        29,
+        30
+      ],
+      "/home/runner/.local/lib/python3.12/site-packages/mypy/typeshed/stdlib/builtins.pyi": [
+        509,
+        494
+      ]
+    },
+    "referenced_symbols": [
+      {
+        "file_path": "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/class_based/main.py",
+        "symbol_name": "get_item",
+        "start_line": 26,
+        "end_line": 30
+      },
+      {
+        "file_path": "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/class_based/main.py",
+        "symbol_name": "class_based.main.DatabaseService.connect",
+        "start_line": 22,
+        "end_line": 24
+      },
+      {
+        "file_path": "/home/runner/.local/lib/python3.12/site-packages/mypy/typeshed/stdlib/builtins.pyi",
+        "symbol_name": "builtins.str.join",
+        "start_line": 509,
+        "end_line": 509
+      },
+      {
+        "file_path": "/home/runner/.local/lib/python3.12/site-packages/mypy/typeshed/stdlib/builtins.pyi",
+        "symbol_name": "builtins.str.format",
+        "start_line": 494,
+        "end_line": 494
+      }
+    ],
+    "call_stacks": {
+      "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/class_based/main.py": [
+        {
+          "file_path": "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/class_based/main.py",
+          "line_number": 26,
+          "function_name": "get_item",
+          "code_context": ""
+        }
+      ],
+      "/home/runner/.local/lib/python3.12/site-packages/mypy/typeshed/stdlib/builtins.pyi": [
+        {
+          "file_path": "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/class_based/main.py",
+          "line_number": 26,
+          "function_name": "get_item",
+          "code_context": ""
+        }
+      ]
+    }
+  },
+  "POST /items/{item_id}/invalidate": {
+    "methods": [
+      "POST"
+    ],
+    "path": "/items/{item_id}/invalidate",
+    "referenced_files": {
+      "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/class_based/main.py": [
+        96,
+        97,
+        98,
+        99,
+        52,
+        53,
+        54,
+        95
+      ],
+      "/home/runner/.local/lib/python3.12/site-packages/mypy/typeshed/stdlib/builtins.pyi": [
+        509,
+        494
+      ]
+    },
+    "referenced_symbols": [
+      {
+        "file_path": "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/class_based/main.py",
+        "symbol_name": "invalidate_cache",
+        "start_line": 95,
+        "end_line": 99
+      },
+      {
+        "file_path": "/home/runner/.local/lib/python3.12/site-packages/mypy/typeshed/stdlib/builtins.pyi",
+        "symbol_name": "builtins.str.join",
+        "start_line": 509,
+        "end_line": 509
+      },
+      {
+        "file_path": "/home/runner/.local/lib/python3.12/site-packages/mypy/typeshed/stdlib/builtins.pyi",
+        "symbol_name": "builtins.str.format",
+        "start_line": 494,
+        "end_line": 494
+      },
+      {
+        "file_path": "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/class_based/main.py",
+        "symbol_name": "class_based.main.CacheService.set",
+        "start_line": 52,
+        "end_line": 54
+      }
+    ],
+    "call_stacks": {
+      "/home/runner/.local/lib/python3.12/site-packages/mypy/typeshed/stdlib/builtins.pyi": [
+        {
+          "file_path": "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/class_based/main.py",
+          "line_number": 95,
+          "function_name": "invalidate_cache",
+          "code_context": ""
+        }
+      ],
+      "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/class_based/main.py": [
+        {
+          "file_path": "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/class_based/main.py",
+          "line_number": 95,
+          "function_name": "invalidate_cache",
+          "code_context": ""
+        }
+      ]
+    }
+  },
+  "GET /users/me": {
+    "methods": [
+      "GET"
+    ],
+    "path": "/users/me",
+    "referenced_files": {
+      "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/function_based/main.py": [
+        57,
+        58,
+        59
+      ]
+    },
+    "referenced_symbols": [
+      {
+        "file_path": "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/function_based/main.py",
+        "symbol_name": "get_user_profile",
+        "start_line": 57,
+        "end_line": 59
+      }
+    ],
+    "call_stacks": {}
+  },
+  "GET /users": {
+    "methods": [
+      "GET"
+    ],
+    "path": "/users",
+    "referenced_files": {
+      "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/function_based/main.py": [
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        71,
+        72,
+        73,
+        74,
+        63
+      ]
+    },
+    "referenced_symbols": [
+      {
+        "file_path": "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/function_based/main.py",
+        "symbol_name": "list_users",
+        "start_line": 63,
+        "end_line": 74
+      }
+    ],
+    "call_stacks": {}
+  },
+  "POST /users/me/settings": {
+    "methods": [
+      "POST"
+    ],
+    "path": "/users/me/settings",
+    "referenced_files": {
+      "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/function_based/main.py": [
+        78,
+        79,
+        80,
+        81,
+        82,
+        83,
+        84
+      ]
+    },
+    "referenced_symbols": [
+      {
+        "file_path": "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/function_based/main.py",
+        "symbol_name": "update_settings",
+        "start_line": 78,
+        "end_line": 84
+      }
+    ],
+    "call_stacks": {}
+  },
+  "GET /users/{user_id}": {
+    "methods": [
+      "GET"
+    ],
+    "path": "/users/{user_id}",
+    "referenced_files": {
+      "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/nested_deps/main.py": [
+        108,
+        109,
+        110,
+        111,
+        112,
+        113,
+        114
+      ],
+      "/home/runner/.local/lib/python3.12/site-packages/mypy/typeshed/stdlib/builtins.pyi": [
+        509,
+        494
+      ]
+    },
+    "referenced_symbols": [
+      {
+        "file_path": "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/nested_deps/main.py",
+        "symbol_name": "get_user",
+        "start_line": 108,
+        "end_line": 114
+      },
+      {
+        "file_path": "/home/runner/.local/lib/python3.12/site-packages/mypy/typeshed/stdlib/builtins.pyi",
+        "symbol_name": "builtins.str.join",
+        "start_line": 509,
+        "end_line": 509
+      },
+      {
+        "file_path": "/home/runner/.local/lib/python3.12/site-packages/mypy/typeshed/stdlib/builtins.pyi",
+        "symbol_name": "builtins.str.format",
+        "start_line": 494,
+        "end_line": 494
+      }
+    ],
+    "call_stacks": {
+      "/home/runner/.local/lib/python3.12/site-packages/mypy/typeshed/stdlib/builtins.pyi": [
+        {
+          "file_path": "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/nested_deps/main.py",
+          "line_number": 108,
+          "function_name": "get_user",
+          "code_context": ""
+        }
+      ]
+    }
+  },
+  "POST /users": {
+    "methods": [
+      "POST"
+    ],
+    "path": "/users",
+    "referenced_files": {
+      "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/nested_deps/main.py": [
+        118,
+        119,
+        120,
+        121,
+        122,
+        123,
+        124
+      ]
+    },
+    "referenced_symbols": [
+      {
+        "file_path": "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/nested_deps/main.py",
+        "symbol_name": "create_user",
+        "start_line": 118,
+        "end_line": 124
+      }
+    ],
+    "call_stacks": {}
+  },
+  "GET /users/me/items": {
+    "methods": [
+      "GET"
+    ],
+    "path": "/users/me/items",
+    "referenced_files": {
+      "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/security_deps/main.py": [
+        98,
+        99,
+        100,
+        101,
+        102,
+        103,
+        104,
+        105,
+        106
+      ]
+    },
+    "referenced_symbols": [
+      {
+        "file_path": "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/security_deps/main.py",
+        "symbol_name": "read_user_items",
+        "start_line": 98,
+        "end_line": 106
+      }
+    ],
+    "call_stacks": {}
+  },
+  "POST /items": {
+    "methods": [
+      "POST"
+    ],
+    "path": "/items",
+    "referenced_files": {
+      "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/security_deps/main.py": [
+        110,
+        111,
+        112,
+        113,
+        114,
+        115,
+        116,
+        117,
+        118,
+        119
+      ]
+    },
+    "referenced_symbols": [
+      {
+        "file_path": "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/security_deps/main.py",
+        "symbol_name": "create_item",
+        "start_line": 110,
+        "end_line": 119
+      }
+    ],
+    "call_stacks": {}
+  },
+  "DELETE /users/{user_id}": {
+    "methods": [
+      "DELETE"
+    ],
+    "path": "/users/{user_id}",
+    "referenced_files": {
+      "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/security_deps/main.py": [
+        128,
+        129,
+        123,
+        124,
+        125,
+        126,
+        127
+      ]
+    },
+    "referenced_symbols": [
+      {
+        "file_path": "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/security_deps/main.py",
+        "symbol_name": "delete_user",
+        "start_line": 123,
+        "end_line": 129
+      }
+    ],
+    "call_stacks": {}
+  },
+  "GET /protected": {
+    "methods": [
+      "GET"
+    ],
+    "path": "/protected",
+    "referenced_files": {
+      "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/security_deps/main.py": [
+        133,
+        134,
+        135,
+        136,
+        137,
+        138,
+        139,
+        140
+      ]
+    },
+    "referenced_symbols": [
+      {
+        "file_path": "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/security_deps/main.py",
+        "symbol_name": "protected_endpoint",
+        "start_line": 133,
+        "end_line": 140
+      }
+    ],
+    "call_stacks": {}
+  },
+  "PUT /users/{user_id}": {
+    "methods": [
+      "PUT"
+    ],
+    "path": "/users/{user_id}",
+    "referenced_files": {
+      "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/db_session/main.py": [
+        141,
+        142,
+        143,
+        144,
+        145,
+        146,
+        147
+      ]
+    },
+    "referenced_symbols": [
+      {
+        "file_path": "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/db_session/main.py",
+        "symbol_name": "update_user",
+        "start_line": 141,
+        "end_line": 147
+      }
+    ],
+    "call_stacks": {}
+  },
+  "GET /info": {
+    "methods": [
+      "GET"
+    ],
+    "path": "/info",
+    "referenced_files": {
+      "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/request_context/main.py": [
+        103,
+        104,
+        105,
+        106,
+        107,
+        108
+      ]
+    },
+    "referenced_symbols": [
+      {
+        "file_path": "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/request_context/main.py",
+        "symbol_name": "request_info",
+        "start_line": 103,
+        "end_line": 108
+      }
+    ],
+    "call_stacks": {}
+  },
+  "GET /tracked": {
+    "methods": [
+      "GET"
+    ],
+    "path": "/tracked",
+    "referenced_files": {
+      "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/request_context/main.py": [
+        112,
+        113,
+        114,
+        115,
+        116,
+        117
+      ]
+    },
+    "referenced_symbols": [
+      {
+        "file_path": "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/request_context/main.py",
+        "symbol_name": "tracked_endpoint",
+        "start_line": 112,
+        "end_line": 117
+      }
+    ],
+    "call_stacks": {}
+  },
+  "GET /profile": {
+    "methods": [
+      "GET"
+    ],
+    "path": "/profile",
+    "referenced_files": {
+      "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/request_context/main.py": [
+        128,
+        129,
+        121,
+        122,
+        123,
+        124,
+        125,
+        126,
+        127
+      ]
+    },
+    "referenced_symbols": [
+      {
+        "file_path": "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/request_context/main.py",
+        "symbol_name": "get_profile",
+        "start_line": 121,
+        "end_line": 129
+      }
+    ],
+    "call_stacks": {}
+  },
+  "POST /action": {
+    "methods": [
+      "POST"
+    ],
+    "path": "/action",
+    "referenced_files": {
+      "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/request_context/main.py": [
+        133,
+        134,
+        135,
+        136,
+        137,
+        138,
+        139,
+        140,
+        141,
+        142,
+        143,
+        144
+      ]
+    },
+    "referenced_symbols": [
+      {
+        "file_path": "/home/runner/work/test_ast_fastapi/test_ast_fastapi/examples/di_patterns/request_context/main.py",
+        "symbol_name": "perform_action",
+        "start_line": 133,
+        "end_line": 144
+      }
+    ],
+    "call_stacks": {}
+  }
+}
