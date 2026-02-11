@@ -179,3 +179,9 @@ Thumbs.db
 *.analysis.json
 examples/.endpoint_coverage_cache.json
 examples/.endpoint_mypy_cache.json
+# Cache files
+*.endpoint_mypy_cache.json
+.endpoint_mypy_cache.json
+
+# Backup files
+*.orig

@@ -1,0 +1,13 @@
+diff --git a/examples/di_patterns/request_context/main.py b/examples/di_patterns/request_context/main.py
+index 1234567..abcdefg 100644
+--- a/examples/di_patterns/request_context/main.py
++++ b/examples/di_patterns/request_context/main.py
+@@ -31,7 +31,7 @@ def get_client_ip(request: Request) -> str:
+     # Check X-Forwarded-For header first (for proxied requests)
+     forwarded_for = request.headers.get("X-Forwarded-For")
+     if forwarded_for:
+-        return forwarded_for.split(",")[0].strip()
++        return forwarded_for.split(",")[0].strip().lower()
+ 
+     # Fall back to direct client
+     if request.client:

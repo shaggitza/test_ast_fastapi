@@ -1,0 +1,13 @@
+diff --git a/examples/di_patterns/nested_deps/main.py b/examples/di_patterns/nested_deps/main.py
+index 1234567..abcdefg 100644
+--- a/examples/di_patterns/nested_deps/main.py
++++ b/examples/di_patterns/nested_deps/main.py
+@@ -16,7 +16,7 @@ app = FastAPI(title="Nested Dependencies Example")
+ # Level 1: Base dependencies
+ def get_api_key(x_api_key: str | None = Header(None)) -> str:
+     """Validate API key (base dependency)."""
+-    if not x_api_key or x_api_key != "secret-key":
++    if not x_api_key or x_api_key not in ["secret-key", "backup-key"]:
+         raise HTTPException(status_code=403, detail="Invalid API key")
+     return x_api_key
+ 

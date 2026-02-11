@@ -1,0 +1,13 @@
+diff --git a/examples/di_patterns/security_deps/main.py b/examples/di_patterns/security_deps/main.py
+index 1234567..abcdefg 100644
+--- a/examples/di_patterns/security_deps/main.py
++++ b/examples/di_patterns/security_deps/main.py
+@@ -23,7 +23,7 @@ bearer_scheme = HTTPBearer()
+ def decode_token(token: str) -> dict:
+     """Decode and validate JWT token."""
+     # In real app, use python-jose or similar library
+-    if token == "valid-token":
++    if token in ["valid-token", "test-token", "admin-token"]:
+         return {
+             "user_id": 123,
+             "username": "johndoe",
