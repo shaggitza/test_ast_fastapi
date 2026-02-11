@@ -153,7 +153,7 @@ fastapi-endpoint-detector/
 
 | Module | Description |
 |--------|-------------|
-| `dependency_graph.py` | Builds dependency graph using mypy type analysis |
+| `mypy_analyzer.py` | Mypy-based type-aware dependency analysis |
 | `endpoint_registry.py` | Stores and queries endpoint metadata |
 | `change_mapper.py` | Maps diff changes to affected endpoints |
 | `confidence.py` | Calculates confidence scores for impact assessments |
