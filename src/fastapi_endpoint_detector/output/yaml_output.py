@@ -16,7 +16,7 @@ class YamlFormatter(BaseFormatter):
     """
     Format output as YAML.
     """
-    
+
     def _endpoint_to_dict(self, endpoint: Endpoint) -> dict[str, Any]:
         """Convert an endpoint to a dictionary."""
         return {
@@ -33,7 +33,7 @@ class YamlFormatter(BaseFormatter):
             "tags": endpoint.tags,
             "dependencies": endpoint.dependencies,
         }
-    
+
     def format(self, report: AnalysisReport) -> str:
         """Format an analysis report as YAML."""
         data = {
@@ -61,14 +61,14 @@ class YamlFormatter(BaseFormatter):
             "errors": report.errors,
             "warnings": report.warnings,
         }
-        
+
         return yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)
-    
+
     def format_endpoints(self, endpoints: list[Endpoint]) -> str:
         """Format a list of endpoints as YAML."""
         data = {
             "total": len(endpoints),
             "endpoints": [self._endpoint_to_dict(ep) for ep in endpoints],
         }
-        
+
         return yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)

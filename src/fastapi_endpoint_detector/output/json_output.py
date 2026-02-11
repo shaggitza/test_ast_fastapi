@@ -15,16 +15,16 @@ class JsonFormatter(BaseFormatter):
     """
     Format output as JSON.
     """
-    
+
     def __init__(self, indent: int = 2) -> None:
         """
         Initialize the JSON formatter.
-        
+
         Args:
             indent: JSON indentation level.
         """
         self.indent = indent
-    
+
     def _endpoint_to_dict(self, endpoint: Endpoint) -> dict[str, Any]:
         """Convert an endpoint to a dictionary."""
         return {
@@ -41,7 +41,7 @@ class JsonFormatter(BaseFormatter):
             "tags": endpoint.tags,
             "dependencies": endpoint.dependencies,
         }
-    
+
     def format(self, report: AnalysisReport) -> str:
         """Format an analysis report as JSON."""
         data = {
@@ -69,14 +69,14 @@ class JsonFormatter(BaseFormatter):
             "errors": report.errors,
             "warnings": report.warnings,
         }
-        
+
         return json.dumps(data, indent=self.indent, default=str)
-    
+
     def format_endpoints(self, endpoints: list[Endpoint]) -> str:
         """Format a list of endpoints as JSON."""
         data = {
             "total": len(endpoints),
             "endpoints": [self._endpoint_to_dict(ep) for ep in endpoints],
         }
-        
+
         return json.dumps(data, indent=self.indent, default=str)

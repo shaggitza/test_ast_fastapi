@@ -37,7 +37,7 @@ class HtmlFormatter(BaseFormatter):
                     self._file_cache[file_path] = path.read_text(encoding="utf-8").splitlines()
                 else:
                     self._file_cache[file_path] = []
-            except Exception:
+            except (OSError, UnicodeDecodeError):
                 self._file_cache[file_path] = []
         return self._file_cache[file_path]
 
@@ -51,7 +51,7 @@ class HtmlFormatter(BaseFormatter):
             context: Number of lines before and after to include.
 
         Returns:
-            HTML string with syntax-highlighted code context.
+            HTML string with escaped code context and basic line highlighting.
         """
         lines = self._get_file_lines(file_path)
         if not lines:
@@ -97,7 +97,7 @@ class HtmlFormatter(BaseFormatter):
         return emojis.get(confidence, "⚪")
 
     def _get_html_template(self) -> str:
-        """Get the HTML template with CSS and JavaScript."""
+        """Get the HTML template with inline CSS."""
         return """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -423,14 +423,16 @@ class HtmlFormatter(BaseFormatter):
         content_lines.append("<h2>Summary</h2>")
         content_lines.append('<div class="summary">')
         content_lines.append(
-            f'<div class="summary-item">'
-            f'<span class="summary-label">App Path:</span> <code>{html.escape(report.app_path)}</code>'
-            f"</div>"
+            '<div class="summary-item">'
+            '<span class="summary-label">App Path:</span> '
+            f"<code>{html.escape(report.app_path)}</code>"
+            "</div>"
         )
         content_lines.append(
-            f'<div class="summary-item">'
-            f'<span class="summary-label">Diff Source:</span> <code>{html.escape(report.diff_source)}</code>'
-            f"</div>"
+            '<div class="summary-item">'
+            '<span class="summary-label">Diff Source:</span> '
+            f"<code>{html.escape(report.diff_source)}</code>"
+            "</div>"
         )
         content_lines.append(
             f'<div class="summary-item">'
@@ -489,10 +491,14 @@ class HtmlFormatter(BaseFormatter):
                     content_lines.append("</div>")
 
                     # Handler info with hover
+                    handler_label = (
+                        f"{ep.handler.name} "
+                        f"({Path(ep.handler.file_path).name}:{ep.handler.line_number})"
+                    )
                     handler_ref = self._format_code_ref(
                         str(ep.handler.file_path),
                         ep.handler.line_number,
-                        f"{ep.handler.name} ({Path(ep.handler.file_path).name}:{ep.handler.line_number})",
+                        handler_label,
                     )
                     content_lines.append(
                         f'<div class="info-item">'
@@ -523,10 +529,14 @@ class HtmlFormatter(BaseFormatter):
                         content_lines.append('<div class="call-stack">')
                         content_lines.append("<strong>Call Stack:</strong><br>")
                         for frame in ae.call_stack:
+                            frame_label = (
+                                f'File "{Path(frame.file_path).name}", '
+                                f"line {frame.line_number}, in {frame.function_name}"
+                            )
                             frame_ref = self._format_code_ref(
                                 frame.file_path,
                                 frame.line_number,
-                                f'File "{Path(frame.file_path).name}", line {frame.line_number}, in {frame.function_name}',
+                                frame_label,
                             )
                             content_lines.append(f"{frame_ref}<br>")
                         content_lines.append("</div>")
