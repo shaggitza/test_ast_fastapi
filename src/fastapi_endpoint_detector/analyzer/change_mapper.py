@@ -206,36 +206,43 @@ class ChangeMapper:
                         code_context=frame.code_context,
                     ))
                 
-                # Add a final frame showing the actual changed lines
-                # Use the first changed line as the representative line
+                # Add frames showing the actual changed lines
+                # If there are multiple changed lines, add a frame for each
                 if display_lines:
-                    changed_line = sorted(display_lines)[0]
-                    # Try to get the function name from symbol references
-                    function_name = "module"
-                    for sym_ref in deps.referenced_symbols:
-                        if (sym_ref.file_path == file_path and 
-                            sym_ref.contains_line(changed_line)):
-                            function_name = sym_ref.symbol_name
-                            break
+                    # Sort the changed lines
+                    sorted_lines = sorted(display_lines)
                     
-                    # Try to get code context from the file
-                    code_context = ""
+                    # Read the file once for all lines
+                    lines_list = []
                     try:
                         file_path_obj = Path(file_path)
                         if file_path_obj.exists():
                             with open(file_path_obj, encoding="utf-8") as f:
                                 lines_list = f.readlines()
-                                if 0 < changed_line <= len(lines_list):
-                                    code_context = lines_list[changed_line - 1].rstrip()
                     except (OSError, UnicodeDecodeError):
                         pass
                     
-                    call_stack.append(CallStackFrame(
-                        file_path=file_path,
-                        line_number=changed_line,
-                        function_name=function_name,
-                        code_context=code_context,
-                    ))
+                    # Add a frame for each changed line
+                    for changed_line in sorted_lines:
+                        # Try to get the function name from symbol references
+                        function_name = "module"
+                        for sym_ref in deps.referenced_symbols:
+                            if (sym_ref.file_path == file_path and 
+                                sym_ref.contains_line(changed_line)):
+                                function_name = sym_ref.symbol_name
+                                break
+                        
+                        # Try to get code context from the file
+                        code_context = ""
+                        if lines_list and 0 < changed_line <= len(lines_list):
+                            code_context = lines_list[changed_line - 1].rstrip()
+                        
+                        call_stack.append(CallStackFrame(
+                            file_path=file_path,
+                            line_number=changed_line,
+                            function_name=function_name,
+                            code_context=code_context,
+                        ))
             
             return AffectedEndpoint(
                 endpoint=endpoint,
