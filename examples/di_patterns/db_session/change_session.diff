@@ -2,30 +2,12 @@ diff --git a/examples/di_patterns/db_session/main.py b/examples/di_patterns/db_s
 index 1234567..abcdefg 100644
 --- a/examples/di_patterns/db_session/main.py
 +++ b/examples/di_patterns/db_session/main.py
-@@ -42,9 +42,14 @@ class Session:
-     def __init__(self, db: Database):
-         self.db = db
-         self.in_transaction = False
-+        self.query_count = 0
- 
-     def begin(self) -> None:
-         """Start a transaction."""
-+        if self.in_transaction:
-+            raise RuntimeError("Transaction already in progress")
-         self.in_transaction = True
-+        # Reset query counter for new transaction
-+        self.query_count = 0
- 
-     def commit(self) -> None:
-         """Commit the current transaction."""
-@@ -56,6 +61,8 @@ class Session:
-         if self.in_transaction:
-             self.in_transaction = False
+@@ -59,7 +59,7 @@ class Session:
  
      def query(self, model: str) -> list:
          """Execute a query on the given model."""
-+        self.query_count += 1
-+        print(f"Query #{self.query_count}: SELECT * FROM {model}")
-         return self.db.execute(f"SELECT * FROM {model}")
+-        return self.db.execute(f"SELECT * FROM {model}")
++        return self.db.execute(f"SELECT * FROM {model} ORDER BY id")
  
  
+ # Global database instance (in real app, configure properly)
