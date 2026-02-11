@@ -78,6 +78,13 @@ def get_formatter(name: str) -> BaseFormatter:
         ValueError: If the formatter name is not recognized.
     """
     # Import formatters to ensure they're registered
+    from fastapi_endpoint_detector.output import (  # noqa: F401
+        html_output,
+        json_output,
+        markdown_output,
+        text_output,
+        yaml_output,
+    )
 
     if name not in _FORMATTERS:
         available = ", ".join(_FORMATTERS.keys())
