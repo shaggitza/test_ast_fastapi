@@ -205,6 +205,25 @@ class ChangeMapper:
                         function_name=frame.function_name,
                         code_context=frame.code_context,
                     ))
+                
+                # Add a final frame showing the actual changed lines
+                # Use the first changed line as the representative line
+                if display_lines:
+                    changed_line = sorted(display_lines)[0]
+                    # Try to get the function name from symbol references
+                    function_name = "module"
+                    for sym_ref in deps.referenced_symbols:
+                        if (sym_ref.file_path == file_path and 
+                            sym_ref.contains_line(changed_line)):
+                            function_name = sym_ref.symbol_name
+                            break
+                    
+                    call_stack.append(CallStackFrame(
+                        file_path=file_path,
+                        line_number=changed_line,
+                        function_name=function_name,
+                        code_context="",
+                    ))
             
             return AffectedEndpoint(
                 endpoint=endpoint,
