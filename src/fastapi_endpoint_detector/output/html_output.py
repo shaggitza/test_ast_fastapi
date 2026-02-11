@@ -3,6 +3,7 @@ HTML output formatter with interactive features.
 """
 
 import html
+import re
 from pathlib import Path
 
 from fastapi_endpoint_detector.models.endpoint import Endpoint
@@ -53,21 +54,46 @@ class HtmlFormatter(BaseFormatter):
         Returns:
             HTML string with escaped code context and basic line highlighting.
         """
+        return self._get_code_context_range(file_path, line_number, line_number, context)
+    
+    def _get_code_context_range(
+        self, 
+        file_path: str, 
+        start_line: int, 
+        end_line: int, 
+        context: int = 3
+    ) -> str:
+        """
+        Get code context around a line range, highlighting all lines in the range.
+
+        Args:
+            file_path: Path to the file.
+            start_line: Starting line number (1-indexed).
+            end_line: Ending line number (1-indexed).
+            context: Number of lines before and after to include.
+
+        Returns:
+            HTML string with escaped code context and basic line highlighting.
+        """
         lines = self._get_file_lines(file_path)
         if not lines:
             return "<pre>File not found or could not be read</pre>"
 
         # Convert to 0-indexed
-        idx = line_number - 1
-        start = max(0, idx - context)
-        end = min(len(lines), idx + context + 1)
+        start_idx = start_line - 1
+        end_idx = end_line - 1
+        
+        # Calculate display range with context
+        display_start = max(0, start_idx - context)
+        display_end = min(len(lines), end_idx + context + 1)
 
         html_lines = []
         html_lines.append('<pre class="code-context">')
-        for i in range(start, end):
+        for i in range(display_start, display_end):
             line_num = i + 1
             line_content = html.escape(lines[i])
-            if i == idx:
+            # Highlight all lines in the range
+            if start_idx <= i <= end_idx:
                 html_lines.append(
                     f'<span class="highlight-line">'
                     f'<span class="line-num">{line_num:4d}</span> {line_content}'
@@ -388,22 +414,29 @@ class HtmlFormatter(BaseFormatter):
         file_path: str,
         line_number: int,
         label: str | None = None,
+        end_line_number: int | None = None,
     ) -> str:
         """
         Format a code reference with hover tooltip.
 
         Args:
             file_path: Path to the file.
-            line_number: Line number.
+            line_number: Starting line number.
             label: Optional label to display (defaults to file:line).
+            end_line_number: Optional ending line number for ranges.
 
         Returns:
             HTML string with hover tooltip.
         """
         if label is None:
-            label = f"{Path(file_path).name}:{line_number}"
+            if end_line_number and end_line_number > line_number:
+                label = f"{Path(file_path).name}:{line_number}-{end_line_number}"
+            else:
+                label = f"{Path(file_path).name}:{line_number}"
 
-        context = self._get_code_context(file_path, line_number)
+        context = self._get_code_context_range(
+            file_path, line_number, end_line_number or line_number
+        )
         return (
             f'<span class="code-ref">'
             f"{html.escape(label)}"
@@ -529,14 +562,35 @@ class HtmlFormatter(BaseFormatter):
                         content_lines.append('<div class="call-stack">')
                         content_lines.append("<strong>Call Stack:</strong><br>")
                         for frame in ae.call_stack:
-                            frame_label = (
-                                f'File "{Path(frame.file_path).name}", '
-                                f"line {frame.line_number}, in {frame.function_name}"
-                            )
+                            # Extract line range from code_context if present
+                            end_line = frame.line_number
+                            if frame.code_context and frame.code_context.startswith("[lines "):
+                                # Parse "[lines X-Y]" format
+                                match = re.match(r'\[lines (\d+)-(\d+)\]', frame.code_context)
+                                if match:
+                                    start_line = int(match.group(1))
+                                    end_line = int(match.group(2))
+                                    # Update frame label to show range
+                                    frame_label = (
+                                        f'File "{Path(frame.file_path).name}", '
+                                        f"lines {start_line}-{end_line}, in {frame.function_name}"
+                                    )
+                                else:
+                                    frame_label = (
+                                        f'File "{Path(frame.file_path).name}", '
+                                        f"line {frame.line_number}, in {frame.function_name}"
+                                    )
+                            else:
+                                frame_label = (
+                                    f'File "{Path(frame.file_path).name}", '
+                                    f"line {frame.line_number}, in {frame.function_name}"
+                                )
+                            
                             frame_ref = self._format_code_ref(
                                 frame.file_path,
                                 frame.line_number,
                                 frame_label,
+                                end_line,
                             )
                             content_lines.append(f"{frame_ref}<br>")
                         content_lines.append("</div>")
