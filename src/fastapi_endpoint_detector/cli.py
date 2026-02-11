@@ -53,7 +53,7 @@ def cli(ctx: click.Context, config: Optional[Path]) -> None:
     "--format",
     "-f",
     "output_format",
-    type=click.Choice(["text", "json", "yaml"]),
+    type=click.Choice(["text", "json", "yaml", "markdown", "html"]),
     default="text",
     help="Output format (default: text).",
 )
@@ -196,7 +196,7 @@ def analyze(
     "--format",
     "-f",
     "output_format",
-    type=click.Choice(["text", "json", "yaml"]),
+    type=click.Choice(["text", "json", "yaml", "markdown", "html"]),
     default="text",
     help="Output format (default: text).",
 )
