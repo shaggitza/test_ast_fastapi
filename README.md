@@ -7,7 +7,7 @@
 
 ## Overview
 
-FastAPI Endpoint Change Detector is a CLI tool that analyzes code changes in FastAPI projects and determines which API endpoints are affected. It uses multiple analysis backends including AST parsing, import graph analysis, coverage tracing, and mypy type analysis to accurately trace dependencies from endpoints to all related code.
+FastAPI Endpoint Change Detector is a CLI tool that analyzes code changes in FastAPI projects and determines which API endpoints are affected. It uses mypy for type-aware, precise dependency tracking from endpoints to all related code.
 
 This tool is designed for CI/CD pipelines to enable:
 - **Targeted Testing**: Run only the tests related to changed endpoints
@@ -17,10 +17,7 @@ This tool is designed for CI/CD pipelines to enable:
 
 ## Features
 
-- 🔍 **Multiple Analysis Backends**:
-  - `import` - Fast grimp-based import graph analysis
-  - `coverage` - AST tracing with code path analysis
-  - `mypy` - Type-aware analysis using mypy's build API for precise dependency tracking
+- 🔍 **Type-Aware Analysis**: Uses mypy for precise dependency tracking
 - 🔗 **Dependency Graph**: Build a complete dependency graph from endpoints to all related code
 - 📊 **Diff Analysis**: Parse git diff files to identify changed code sections
 - 🎯 **Endpoint Mapping**: Map changes back to specific FastAPI route handlers
@@ -56,9 +53,6 @@ pip install -e ".[dev]"
 # Basic usage - analyze a diff file against your FastAPI app
 fastapi-endpoint-detector analyze --app path/to/main.py --diff changes.diff
 
-# Use the mypy backend for more precise type-aware analysis
-fastapi-endpoint-detector analyze --app path/to/main.py --diff changes.diff --backend mypy
-
 # Output as JSON
 fastapi-endpoint-detector analyze --app path/to/main.py --diff changes.diff --format json
 
@@ -74,16 +68,6 @@ fastapi-endpoint-detector list --app path/to/main.py
 
 # Output as JSON
 fastapi-endpoint-detector list --app path/to/main.py --format json
-```
-
-### View Dependencies
-
-```bash
-# Show overall dependency statistics
-fastapi-endpoint-detector deps --app path/to/main.py
-
-# Show dependencies for a specific module
-fastapi-endpoint-detector deps --app path/to/main.py --module myapp.services.user_service
 ```
 
 ## Commands
@@ -102,7 +86,6 @@ fastapi-endpoint-detector analyze [OPTIONS]
 | `--diff` | `-d` | Yes | Path to the diff file containing code changes |
 | `--format` | `-f` | No | Output format: `text`, `json`, `yaml` (default: `text`) |
 | `--output` | `-o` | No | Output file path (default: stdout) |
-| `--backend` | `-b` | No | Analysis backend: `import`, `coverage`, `mypy` (default: `import`) |
 | `--app-var` | | No | Name of the FastAPI app variable (default: `app`) |
 | `--verbose` | `-v` | No | Enable verbose output |
 | `--no-cache` | | No | Disable caching of analysis results |
@@ -124,57 +107,11 @@ fastapi-endpoint-detector list [OPTIONS]
 | `--output` | `-o` | No | Output file path (default: stdout) |
 | `--app-var` | | No | Name of the FastAPI app variable (default: `app`) |
 
-### `deps` - Show Dependencies
-
-Display dependency information for the FastAPI application.
-
-```bash
-fastapi-endpoint-detector deps [OPTIONS]
-```
-
-| Option | Short | Required | Description |
-|--------|-------|----------|-------------|
-| `--app` | `-a` | Yes | Path to the FastAPI application entry file or directory |
-| `--module` | `-m` | No | Show dependencies for a specific module |
-
-## Analysis Backends
-
-The tool supports three different analysis backends, each with different trade-offs:
-
-### `import` (Default)
-
-Uses grimp for fast import graph analysis. Best for quick checks and large codebases.
-
-- ✅ Fast execution
-- ✅ Low memory usage
-- ❌ May miss runtime dependencies
-
-### `coverage`
-
-Uses AST tracing to analyze code paths. Provides more detailed analysis than import-based.
-
-- ✅ Traces actual code paths
-- ✅ Good accuracy
-- ❌ Slower than import backend
-
-### `mypy`
-
-Uses mypy's build API for type-aware dependency analysis. Most precise but requires type hints.
-
-- ✅ Most accurate with typed code
-- ✅ Understands type relationships
-- ✅ Follows transitive dependencies via type system
-- ❌ Requires mypy to be installed
-- ❌ Slower than other backends
-
 ## How It Works
 
 1. **Parse FastAPI App**: Scans the application to identify all route decorators (`@app.get`, `@app.post`, `@router.get`, etc.) and their handler functions
 
-2. **Build Dependency Graph**: Uses the selected backend to trace all function calls, imports, and dependencies from each endpoint:
-   - `import`: Analyzes import statements using grimp
-   - `coverage`: Traces through AST to follow function calls
-   - `mypy`: Uses mypy's type analysis for precise dependency resolution
+2. **Build Dependency Graph**: Uses mypy's type analysis to trace all function calls, imports, and dependencies from each endpoint with precise type-aware dependency resolution
 
 3. **Parse Diff File**: Analyzes the git diff to identify which files and line ranges have changed
 
@@ -254,7 +191,7 @@ output:
 This project is under active development. Current status:
 
 - ✅ FastAPI endpoint extraction (app and router patterns)
-- ✅ Multiple analysis backends (import, coverage, mypy)
+- ✅ Mypy-based type-aware dependency analysis
 - ✅ Diff parsing and change detection
 - ✅ Change-to-endpoint mapping
 - ✅ Multiple output formats (text, JSON, YAML)
@@ -276,5 +213,4 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 
 - [FastAPI](https://fastapi.tiangolo.com/) - The modern Python web framework
 - [mypy](https://mypy.readthedocs.io/) - Static type checker for Python
-- [grimp](https://github.com/seddonym/grimp) - Python import graph library
 - [Rich](https://github.com/Textualize/rich) - Beautiful terminal formatting

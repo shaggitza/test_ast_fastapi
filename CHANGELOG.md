@@ -7,20 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Simplified to mypy-only analysis**: Removed `import` (grimp-based) and `coverage` analysis backends
+  - Removed `dependency_graph.py` module and grimp dependency
+  - Removed `coverage_analyzer.py` module and coverage.py dependency
+  - Removed `--backend` CLI option - mypy is now the only analysis method
+  - Updated `ChangeMapper` to use mypy exclusively
+  - Removed `use_ruff` configuration option
+  - Updated all documentation to reflect mypy-only analysis
+
+### Removed
+- Import-based backend using grimp
+- Coverage-based backend using AST tracing
+- `--backend` CLI option
+- `deps` CLI command (depended on import graph)
+- grimp dependency
+- coverage.py dependency
+
 ### Added
 - **Mypy integration**: Added mypy's build API for type-aware dependency analysis
   - New `_get_module_dependencies_via_mypy()` method for full dependency graph extraction
   - New `_module_to_file_path()` helper for module resolution
   - Enhanced `_analyze_handler_with_types()` to leverage mypy's type system
-- **Cache improvements**: Added cache loading/saving with progress reporting in `_preanalyze_coverage` and `_preanalyze_mypy`
-- **Coverage backend initialization**: Coverage analyzer now properly initializes with progress feedback
+- **Cache improvements**: Added cache loading/saving with progress reporting in `_preanalyze_mypy`
 - Test script `test_mypy_api.py` demonstrating mypy's build API usage
-
-### Changed
-- `coverage_analyzer` and `mypy_analyzer` properties no longer pre-analyze endpoints on initialization
-- Pre-analysis moved to dedicated `_preanalyze_coverage` and `_preanalyze_mypy` methods with progress callbacks
-- Updated documentation to reflect current project status and features
-- Mypy is now a required dependency (>= 1.19.1)
 
 ---
 
@@ -31,10 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `analyze`: Analyze code changes and identify affected endpoints
   - `list`: List all FastAPI endpoints in the application
   - `deps`: Show dependency information for modules
-- Three analysis backends:
-  - `import`: Fast grimp-based import graph analysis (default)
-  - `coverage`: AST tracing with code path analysis
-  - `mypy`: Type-aware analysis using mypy's build API
+- Mypy-based type-aware dependency analysis
 - FastAPI endpoint parser supporting:
   - Direct `@app` decorators (`@app.get`, `@app.post`, etc.)
   - `@router` decorators with `APIRouter`
