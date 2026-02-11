@@ -55,12 +55,12 @@ class HtmlFormatter(BaseFormatter):
             HTML string with escaped code context and basic line highlighting.
         """
         return self._get_code_context_range(file_path, line_number, line_number, context)
-    
+
     def _get_code_context_range(
-        self, 
-        file_path: str, 
-        start_line: int, 
-        end_line: int, 
+        self,
+        file_path: str,
+        start_line: int,
+        end_line: int,
         context: int = 3
     ) -> str:
         """
@@ -82,7 +82,7 @@ class HtmlFormatter(BaseFormatter):
         # Convert to 0-indexed
         start_idx = start_line - 1
         end_idx = end_line - 1
-        
+
         # Calculate display range with context
         display_start = max(0, start_idx - context)
         display_end = min(len(lines), end_idx + context + 1)
@@ -119,17 +119,17 @@ class HtmlFormatter(BaseFormatter):
         """
         if not code_context or not code_context.startswith("[lines "):
             return None
-            
+
         match = re.match(r'\[lines (\d+)-(\d+)\]', code_context)
         if match:
             return (int(match.group(1)), int(match.group(2)))
         return None
-    
+
     def _format_frame_label(
-        self, 
-        file_path: str, 
-        start_line: int, 
-        end_line: int | None, 
+        self,
+        file_path: str,
+        start_line: int,
+        end_line: int | None,
         function_name: str
     ) -> str:
         """
@@ -149,7 +149,7 @@ class HtmlFormatter(BaseFormatter):
             return f'File "{file_name}", lines {start_line}-{end_line}, in {function_name}'
         else:
             return f'File "{file_name}", line {start_line}, in {function_name}'
-    
+
     def _confidence_color(self, confidence: ConfidenceLevel) -> str:
         """Get CSS color class for a confidence level."""
         colors = {
@@ -611,20 +611,20 @@ class HtmlFormatter(BaseFormatter):
                             # Extract line range from code_context if present
                             # Code context uses '[lines X-Y]' notation for grouped consecutive lines
                             line_range = self._parse_line_range(frame.code_context)
-                            
+
                             if line_range:
                                 start_line, end_line = line_range
                             else:
                                 start_line = frame.line_number
                                 end_line = frame.line_number
-                            
+
                             frame_label = self._format_frame_label(
                                 frame.file_path,
                                 start_line,
                                 end_line if end_line > start_line else None,
                                 frame.function_name
                             )
-                            
+
                             frame_ref = self._format_code_ref(
                                 frame.file_path,
                                 start_line,
