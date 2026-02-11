@@ -643,10 +643,8 @@ class MypyAnalyzer:
                         actual_fullname = import_map[n.name]
 
                     deps.add_reference(current_file, n.line, actual_fullname)
-
-                    # For decorator references, also trace into the function
-                    # This allows us to find dependencies in decorator implementations
-                    resolve_and_trace(actual_fullname, n.line)
+                    # Note: We don't trace into every NameExpr to avoid over-tracing
+                    # Decorators are handled specially by walking them explicitly
 
             elif isinstance(n, FuncDef):
                 # Walk function arguments for default values and annotations
@@ -812,7 +810,18 @@ class MypyAnalyzer:
         # Walk decorators first
         if hasattr(node, 'decorators') and node.decorators:
             for decorator in node.decorators:
-                walk_node(decorator)
+                # Special handling for decorators - trace into them
+                if isinstance(decorator, NameExpr) and decorator.fullname:
+                    # Resolve using import map
+                    actual_fullname = decorator.fullname
+                    if decorator.name in import_map:
+                        actual_fullname = import_map[decorator.name]
+                    deps.add_reference(current_file, decorator.line, actual_fullname)
+                    # Trace into the decorator function to find its dependencies
+                    resolve_and_trace(actual_fullname, decorator.line)
+                else:
+                    # For CallExpr decorators, walk normally
+                    walk_node(decorator)
         # Then walk the body
         if hasattr(node, 'body') and node.body:
             walk_node(node.body)
