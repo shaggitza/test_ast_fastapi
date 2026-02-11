@@ -4,6 +4,7 @@ Report data models.
 Models representing analysis reports and results.
 """
 
+import re
 from datetime import datetime
 from enum import Enum
 from typing import Optional
@@ -37,9 +38,28 @@ class CallStackFrame(BaseModel):
     
     def format_traceback(self) -> str:
         """Format this frame like a Python traceback."""
-        result = f'  File "{self.file_path}", line {self.line_number}, in {self.function_name}'
+        # Check if code_context contains line range notation
+        line_display = f"line {self.line_number}"
+        if self.code_context and self.code_context.startswith("[lines "):
+            # Parse "[lines X-Y]" format
+            match = re.match(r'\[lines (\d+)-(\d+)\]', self.code_context)
+            if match:
+                start_line = match.group(1)
+                end_line = match.group(2)
+                line_display = f"lines {start_line}-{end_line}"
+        
+        result = f'  File "{self.file_path}", {line_display}, in {self.function_name}'
         if self.code_context:
-            result += f"\n    {self.code_context.strip()}"
+            # Handle multi-line code context (when showing multiple lines in a range)
+            context_str = self.code_context.strip()
+            if '\n' in context_str:
+                # Multi-line context - indent each line
+                lines = context_str.split('\n')
+                for line in lines:
+                    result += f"\n    {line}"
+            else:
+                # Single line context
+                result += f"\n    {context_str}"
         return result
 
 

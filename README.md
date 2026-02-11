@@ -22,8 +22,9 @@ This tool is designed for CI/CD pipelines to enable:
 - 📊 **Diff Analysis**: Parse git diff files to identify changed code sections
 - 🎯 **Endpoint Mapping**: Map changes back to specific FastAPI route handlers
 - 💾 **Caching**: Cache analysis results for faster subsequent runs
-- 📋 **Multiple Output Formats**: JSON, YAML, or human-readable text reports
+- 📋 **Multiple Output Formats**: JSON, YAML, Markdown, HTML, or human-readable text reports
 - 🎨 **Rich Progress Display**: Visual progress bars with real-time analysis feedback
+- 🔎 **Interactive HTML Reports**: Hover over code references to see surrounding lines
 
 ## Installation
 
@@ -56,6 +57,12 @@ fastapi-endpoint-detector analyze --app path/to/main.py --diff changes.diff
 # Output as JSON
 fastapi-endpoint-detector analyze --app path/to/main.py --diff changes.diff --format json
 
+# Output as Markdown
+fastapi-endpoint-detector analyze --app path/to/main.py --diff changes.diff --format markdown
+
+# Output as interactive HTML with hover tooltips
+fastapi-endpoint-detector analyze --app path/to/main.py --diff changes.diff --format html -o report.html
+
 # Save to file
 fastapi-endpoint-detector analyze --app path/to/main.py --diff changes.diff -o report.txt
 ```
@@ -68,6 +75,12 @@ fastapi-endpoint-detector list --app path/to/main.py
 
 # Output as JSON
 fastapi-endpoint-detector list --app path/to/main.py --format json
+
+# Output as Markdown table
+fastapi-endpoint-detector list --app path/to/main.py --format markdown
+
+# Output as interactive HTML table
+fastapi-endpoint-detector list --app path/to/main.py --format html -o endpoints.html
 ```
 
 ## Commands
@@ -84,7 +97,7 @@ fastapi-endpoint-detector analyze [OPTIONS]
 |--------|-------|----------|-------------|
 | `--app` | `-a` | Yes | Path to the FastAPI application entry file or directory |
 | `--diff` | `-d` | Yes | Path to the diff file containing code changes |
-| `--format` | `-f` | No | Output format: `text`, `json`, `yaml` (default: `text`) |
+| `--format` | `-f` | No | Output format: `text`, `json`, `yaml`, `markdown`, `html` (default: `text`) |
 | `--output` | `-o` | No | Output file path (default: stdout) |
 | `--app-var` | | No | Name of the FastAPI app variable (default: `app`) |
 | `--verbose` | `-v` | No | Enable verbose output |
@@ -103,7 +116,7 @@ fastapi-endpoint-detector list [OPTIONS]
 | Option | Short | Required | Description |
 |--------|-------|----------|-------------|
 | `--app` | `-a` | Yes | Path to the FastAPI application entry file or directory |
-| `--format` | `-f` | No | Output format: `text`, `json`, `yaml` (default: `text`) |
+| `--format` | `-f` | No | Output format: `text`, `json`, `yaml`, `markdown`, `html` (default: `text`) |
 | `--output` | `-o` | No | Output file path (default: stdout) |
 | `--app-var` | | No | Name of the FastAPI app variable (default: `app`) |
 
