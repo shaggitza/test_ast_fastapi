@@ -28,15 +28,11 @@ This tool is designed for CI/CD pipelines to enable:
 
 ## Installation
 
-```bash
-pip install fastapi-endpoint-detector
-```
-
-Or install from source:
+Install from source:
 
 ```bash
-git clone https://github.com/your-org/fastapi-endpoint-detector.git
-cd fastapi-endpoint-detector
+git clone https://github.com/shaggitza/test_ast_fastapi.git
+cd test_ast_fastapi
 pip install -e .
 ```
 
