@@ -104,6 +104,52 @@ class HtmlFormatter(BaseFormatter):
         html_lines.append("</pre>")
         return "\n".join(html_lines)
 
+    def _parse_line_range(self, code_context: str | None) -> tuple[int, int] | None:
+        """
+        Parse line range from code_context field.
+        
+        The code_context field may contain a '[lines X-Y]' prefix when
+        consecutive lines are grouped together in call stack frames.
+        
+        Args:
+            code_context: The code context string that may contain range notation.
+            
+        Returns:
+            Tuple of (start_line, end_line) if range found, None otherwise.
+        """
+        if not code_context or not code_context.startswith("[lines "):
+            return None
+            
+        match = re.match(r'\[lines (\d+)-(\d+)\]', code_context)
+        if match:
+            return (int(match.group(1)), int(match.group(2)))
+        return None
+    
+    def _format_frame_label(
+        self, 
+        file_path: str, 
+        start_line: int, 
+        end_line: int | None, 
+        function_name: str
+    ) -> str:
+        """
+        Format a call stack frame label.
+        
+        Args:
+            file_path: Path to the file.
+            start_line: Starting line number.
+            end_line: Optional ending line number for ranges.
+            function_name: Name of the function.
+            
+        Returns:
+            Formatted frame label string.
+        """
+        file_name = Path(file_path).name
+        if end_line and end_line > start_line:
+            return f'File "{file_name}", lines {start_line}-{end_line}, in {function_name}'
+        else:
+            return f'File "{file_name}", line {start_line}, in {function_name}'
+    
     def _confidence_color(self, confidence: ConfidenceLevel) -> str:
         """Get CSS color class for a confidence level."""
         colors = {
@@ -563,32 +609,25 @@ class HtmlFormatter(BaseFormatter):
                         content_lines.append("<strong>Call Stack:</strong><br>")
                         for frame in ae.call_stack:
                             # Extract line range from code_context if present
-                            end_line = frame.line_number
-                            if frame.code_context and frame.code_context.startswith("[lines "):
-                                # Parse "[lines X-Y]" format
-                                match = re.match(r'\[lines (\d+)-(\d+)\]', frame.code_context)
-                                if match:
-                                    start_line = int(match.group(1))
-                                    end_line = int(match.group(2))
-                                    # Update frame label to show range
-                                    frame_label = (
-                                        f'File "{Path(frame.file_path).name}", '
-                                        f"lines {start_line}-{end_line}, in {frame.function_name}"
-                                    )
-                                else:
-                                    frame_label = (
-                                        f'File "{Path(frame.file_path).name}", '
-                                        f"line {frame.line_number}, in {frame.function_name}"
-                                    )
+                            # Code context uses '[lines X-Y]' notation for grouped consecutive lines
+                            line_range = self._parse_line_range(frame.code_context)
+                            
+                            if line_range:
+                                start_line, end_line = line_range
                             else:
-                                frame_label = (
-                                    f'File "{Path(frame.file_path).name}", '
-                                    f"line {frame.line_number}, in {frame.function_name}"
-                                )
+                                start_line = frame.line_number
+                                end_line = frame.line_number
+                            
+                            frame_label = self._format_frame_label(
+                                frame.file_path,
+                                start_line,
+                                end_line if end_line > start_line else None,
+                                frame.function_name
+                            )
                             
                             frame_ref = self._format_code_ref(
                                 frame.file_path,
-                                frame.line_number,
+                                start_line,
                                 frame_label,
                                 end_line,
                             )
