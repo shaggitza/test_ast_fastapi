@@ -23,10 +23,9 @@ fastapi-endpoint-detector/
 │       │
 │       ├── 📁 analyzer/                   # Analysis engine modules
 │       │   ├── 📄 __init__.py
-│       │   ├── 📄 dependency_graph.py     # Dependency graph construction
+│       │   ├── 📄 mypy_analyzer.py        # Mypy-based type-aware dependency analysis
 │       │   ├── 📄 endpoint_registry.py    # Endpoint storage and querying
-│       │   ├── 📄 change_mapper.py        # Map changes to endpoints
-│       │   └── 📄 confidence.py           # Confidence scoring logic
+│       │   └── 📄 change_mapper.py        # Map changes to endpoints
 │       │
 │       ├── 📁 output/                     # Output formatting modules
 │       │   ├── 📄 __init__.py
@@ -156,7 +155,6 @@ fastapi-endpoint-detector/
 | `mypy_analyzer.py` | Mypy-based type-aware dependency analysis |
 | `endpoint_registry.py` | Stores and queries endpoint metadata |
 | `change_mapper.py` | Maps diff changes to affected endpoints |
-| `confidence.py` | Calculates confidence scores for impact assessments |
 
 ### Output Package (`output/`)
 
