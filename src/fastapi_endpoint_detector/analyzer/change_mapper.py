@@ -253,13 +253,19 @@ class ChangeMapper:
                                     break
                             
                             # Try to get code context from the file
-                            # For ranges, show the first line's context with range notation
+                            # For ranges, show all lines in the group
                             code_context = ""
                             if lines_list and 0 < first_line <= len(lines_list):
-                                code_context = lines_list[first_line - 1].rstrip()
-                                # If it's a range, indicate that in the context
                                 if len(group) > 1:
-                                    code_context = f"[lines {first_line}-{last_line}] {code_context}"
+                                    # Multiple lines - show all of them
+                                    context_lines = []
+                                    for line_num in group:
+                                        if 0 < line_num <= len(lines_list):
+                                            context_lines.append(lines_list[line_num - 1].rstrip())
+                                    code_context = f"[lines {first_line}-{last_line}]\n" + "\n".join(context_lines)
+                                else:
+                                    # Single line
+                                    code_context = lines_list[first_line - 1].rstrip()
                             
                             call_stack.append(CallStackFrame(
                                 file_path=file_path,

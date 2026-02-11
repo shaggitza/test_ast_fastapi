@@ -50,7 +50,16 @@ class CallStackFrame(BaseModel):
         
         result = f'  File "{self.file_path}", {line_display}, in {self.function_name}'
         if self.code_context:
-            result += f"\n    {self.code_context.strip()}"
+            # Handle multi-line code context (when showing multiple lines in a range)
+            context_str = self.code_context.strip()
+            if '\n' in context_str:
+                # Multi-line context - indent each line
+                lines = context_str.split('\n')
+                for line in lines:
+                    result += f"\n    {line}"
+            else:
+                # Single line context
+                result += f"\n    {context_str}"
         return result
 
 
