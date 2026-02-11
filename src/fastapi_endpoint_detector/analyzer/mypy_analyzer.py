@@ -323,6 +323,22 @@ class MypyAnalyzer:
                 if state and state.path:
                     return state.path, candidate
         
+        # If not found by module path, search for the function/class by fullname match
+        # This handles imported functions where fullname might not map directly to module structure
+        for mod_name, tree in self._trees.items():
+            if hasattr(tree, 'defs'):
+                for defn in tree.defs:
+                    # Check if this definition's fullname matches what we're looking for
+                    if hasattr(defn, 'fullname'):
+                        # Look for exact fullname match or name-based match
+                        if defn.fullname == fullname:
+                            # Exact match - this is the definition
+                            if mod_name in self._module_to_path:
+                                return self._module_to_path[mod_name], mod_name
+                            state = self._build_result.graph.get(mod_name)
+                            if state and state.path:
+                                return state.path, mod_name
+        
         return None
     
     def _get_type_from_node(self, node: Any) -> Any:
@@ -381,11 +397,46 @@ class MypyAnalyzer:
         start, end = self._get_func_lines(func_node)
         deps.add_symbol_reference(handler_path, handler.name, start, end)
         
+        # Build import map for this module to resolve imported names
+        import_map: dict[str, str] = {}  # local_name -> actual_fullname
+        if hasattr(tree, 'defs'):
+            from mypy.nodes import ImportFrom, Import
+            for defn in tree.defs:
+                if isinstance(defn, ImportFrom):
+                    # from module import name
+                    if hasattr(defn, 'id') and hasattr(defn, 'names'):
+                        module_name = defn.id
+                        # Resolve relative module name to full module name
+                        if not module_name.startswith('.'):
+                            # Absolute import - prefix with current package if needed
+                            # Check if this is a sibling module
+                            sibling_module = f"{handler_module.rsplit('.', 1)[0]}.{module_name}" if '.' in handler_module else module_name
+                            if sibling_module in self._module_to_path:
+                                full_module_name = sibling_module
+                            else:
+                                full_module_name = module_name
+                        else:
+                            # Relative import
+                            full_module_name = module_name  # TODO: Handle relative imports properly
+                        
+                        for name_info in defn.names:
+                            local_name = name_info[0]  # The name as imported
+                            original_name = name_info[1] if name_info[1] else local_name  # Alias or same
+                            # Map local name to actual fullname
+                            import_map[local_name] = f"{full_module_name}.{original_name}"
+                elif isinstance(defn, Import):
+                    # import module or import module as alias
+                    if hasattr(defn, 'ids'):
+                        for module_info in defn.ids:
+                            module_name = module_info[0]
+                            alias = module_info[1] if module_info[1] else module_name
+                            import_map[alias] = module_name
+        
         # Trace all references in the function body
         visited: set[str] = set()
         call_stack = [CallFrame(handler_path, start, handler.name)]
         
-        self._trace_references(func_node, deps, handler_path, handler_module, call_stack, visited)
+        self._trace_references(func_node, deps, handler_path, handler_module, call_stack, visited, import_map)
         
         self._endpoint_deps[endpoint.identifier] = deps
         return deps
@@ -398,12 +449,19 @@ class MypyAnalyzer:
         current_module: str,
         call_stack: list[CallFrame],
         visited: set[str],
+        import_map: dict[str, str] | None = None,
     ) -> None:
         """
         Trace all references in a mypy AST node.
         
         Uses mypy's types map to resolve method calls when type info is available.
+        
+        Args:
+            import_map: Maps local names to their actual fullnames from imports
         """
+        if import_map is None:
+            import_map = {}
+        
         from mypy.nodes import (
             CallExpr, MemberExpr, NameExpr, RefExpr, FuncDef,
             Block, ExpressionStmt, AssignmentStmt,
@@ -413,6 +471,7 @@ class MypyAnalyzer:
             ConditionalExpr, ListExpr, TupleExpr, DictExpr, SetExpr,
             GeneratorExpr, ListComprehension, SetComprehension,
             DictionaryComprehension, LambdaExpr, YieldExpr, YieldFromExpr,
+            Decorator, ImportFrom, Import,
         )
         from mypy.types import Instance, CallableType
         
@@ -468,7 +527,7 @@ class MypyAnalyzer:
                 
                 self._trace_references(
                     target_func, deps, target_path, target_module, 
-                    new_stack, visited
+                    new_stack, visited, import_map
                 )
             else:
                 # Couldn't find specific function, add module reference
@@ -483,15 +542,36 @@ class MypyAnalyzer:
             if isinstance(callee, NameExpr):
                 # Direct function call: func()
                 if callee.fullname:
-                    deps.add_reference(current_file, call.line, callee.fullname)
-                    resolve_and_trace(callee.fullname, call.line)
+                    actual_fullname = callee.fullname
+                    
+                    # Try to resolve using import map first
+                    if callee.name in import_map:
+                        actual_fullname = import_map[callee.name]
+                    else:
+                        # Try to get the actual definition location from the node
+                        if hasattr(callee, 'node') and callee.node:
+                            node = callee.node
+                            # Check if the node has a fullname (it's the actual definition)
+                            if hasattr(node, 'fullname') and node.fullname:
+                                actual_fullname = node.fullname
+                    
+                    deps.add_reference(current_file, call.line, actual_fullname)
+                    resolve_and_trace(actual_fullname, call.line)
             
             elif isinstance(callee, MemberExpr):
                 # Method call: obj.method()
                 if callee.fullname:
                     # Mypy resolved the method name
                     deps.add_reference(current_file, call.line, callee.fullname)
-                    resolve_and_trace(callee.fullname, call.line)
+                    
+                    # Try to get actual definition location
+                    actual_fullname = callee.fullname
+                    if hasattr(callee, 'node') and callee.node:
+                        node = callee.node
+                        if hasattr(node, 'fullname') and node.fullname:
+                            actual_fullname = node.fullname
+                    
+                    resolve_and_trace(actual_fullname, call.line)
                 else:
                     # Try to resolve via type information
                     receiver_type = self._get_type_from_node(callee.expr)
@@ -531,6 +611,24 @@ class MypyAnalyzer:
                 if n.fullname:
                     deps.add_reference(current_file, n.line, n.fullname)
             
+            elif isinstance(n, FuncDef):
+                # Walk function arguments for default values and annotations
+                if hasattr(n, 'arguments'):
+                    for arg in n.arguments:
+                        # Walk default argument values
+                        if hasattr(arg, 'initializer') and arg.initializer:
+                            walk_node(arg.initializer)
+                        # Walk type annotations
+                        if hasattr(arg, 'type_annotation') and arg.type_annotation:
+                            walk_node(arg.type_annotation)
+                # Walk decorators
+                if hasattr(n, 'decorators'):
+                    for decorator in n.decorators:
+                        walk_node(decorator)
+                # Walk function body
+                if hasattr(n, 'body'):
+                    walk_node(n.body)
+            
             elif isinstance(n, Block):
                 for stmt in n.body:
                     walk_node(stmt)
@@ -569,8 +667,14 @@ class MypyAnalyzer:
             
             elif isinstance(n, TryStmt):
                 walk_node(n.body)
+                # Walk exception handlers
                 for handler in n.handlers:
                     walk_node(handler)
+                # Walk exception types
+                if hasattr(n, 'types') and n.types:
+                    for exc_type in n.types:
+                        if exc_type:
+                            walk_node(exc_type)
                 if n.else_body:
                     walk_node(n.else_body)
                 if n.finally_body:
@@ -622,22 +726,60 @@ class MypyAnalyzer:
                     walk_node(key)
                     walk_node(value)
             
-            elif isinstance(n, (GeneratorExpr, ListComprehension, SetComprehension, DictionaryComprehension)):
+            elif isinstance(n, ListComprehension):
+                # ListComprehension has a generator attribute
+                if hasattr(n, 'generator'):
+                    walk_node(n.generator)
+            
+            elif isinstance(n, (SetComprehension, DictionaryComprehension)):
+                # These might also have generator attribute
+                if hasattr(n, 'generator'):
+                    walk_node(n.generator)
+            
+            elif isinstance(n, GeneratorExpr):
+                # Walk the generator/element expression
                 if hasattr(n, 'left_expr'):
                     walk_node(n.left_expr)
+                # Walk generator clauses (for x in sequence if condition)
+                if hasattr(n, 'sequences'):
+                    for seq in n.sequences:
+                        walk_node(seq)
                 if hasattr(n, 'condlists'):
                     for conds in n.condlists:
                         for cond in conds:
                             walk_node(cond)
-                if hasattr(n, 'sequences'):
-                    for seq in n.sequences:
-                        walk_node(seq)
+                # For dict comprehensions, also walk key and value
+                if hasattr(n, 'key'):
+                    walk_node(n.key)
+                if hasattr(n, 'value'):
+                    walk_node(n.value)
             
             elif isinstance(n, LambdaExpr):
+                # Walk lambda arguments (for default values)
+                if hasattr(n, 'arguments'):
+                    for arg in n.arguments:
+                        if hasattr(arg, 'initializer') and arg.initializer:
+                            walk_node(arg.initializer)
+                # Walk lambda body
                 walk_node(n.body)
             
             elif isinstance(n, (YieldExpr, YieldFromExpr)):
                 walk_node(n.expr)
+            
+            elif isinstance(n, (ImportFrom, Import)):
+                # Handle imports inside function bodies
+                # The imported names are already resolved by mypy
+                # We just need to ensure they're processed
+                pass
+            
+            elif isinstance(n, Decorator):
+                # Walk decorator arguments
+                if hasattr(n, 'decorators'):
+                    for decorator in n.decorators:
+                        walk_node(decorator)
+                # Walk the decorated function
+                if hasattr(n, 'func'):
+                    walk_node(n.func)
         
         # Start walking from the function body
         if hasattr(node, 'body') and node.body:
