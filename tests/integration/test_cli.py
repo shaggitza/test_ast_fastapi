@@ -43,9 +43,3 @@ class TestCLI:
         result = runner.invoke(cli, ["list", "--help"])
         assert result.exit_code == 0
         assert "--app" in result.output
-    
-    def test_deps_help(self, runner: CliRunner) -> None:
-        """Test the deps command help."""
-        result = runner.invoke(cli, ["deps", "--help"])
-        assert result.exit_code == 0
-        assert "--app" in result.output

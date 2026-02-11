@@ -99,14 +99,8 @@ output:
 # =============================================================================
 integrations:
   # mypy integration for type-aware analysis
-  mypy:
-    enabled: false
-    config_file: null  # Use pyproject.toml by default
-
-  # ruff integration for fast import analysis
-  ruff:
-    enabled: false
-    config_file: null  # Use pyproject.toml by default
+  use_mypy: true
+  mypy_config: null  # Use pyproject.toml by default
 
 # =============================================================================
 # CI/CD Integration

@@ -76,21 +76,14 @@ def cli(ctx: click.Context, config: Optional[Path]) -> None:
     help="Enable verbose output.",
 )
 @click.option(
-    "--backend",
-    "-b",
-    type=click.Choice(["import", "coverage", "mypy"]),
-    default="import",
-    help="Dependency analysis backend: 'import' (grimp-based, fast), 'coverage' (AST tracing), or 'mypy' (type-based, precise). Default: import.",
-)
-@click.option(
     "--no-cache",
     is_flag=True,
-    help="Disable caching of analysis results (coverage/mypy backends).",
+    help="Disable caching of analysis results.",
 )
 @click.option(
     "--clear-cache",
     is_flag=True,
-    help="Clear cached analysis data before running (coverage/mypy backends).",
+    help="Clear cached analysis data before running.",
 )
 @click.pass_context
 def analyze(
@@ -101,7 +94,6 @@ def analyze(
     output: Optional[Path],
     app_var: str,
     verbose: bool,
-    backend: str,
     no_cache: bool,
     clear_cache: bool,
 ) -> None:
@@ -115,19 +107,18 @@ def analyze(
         console.print(f"[blue]Analyzing FastAPI application at:[/blue] {app}")
         console.print(f"[blue]Using diff file:[/blue] {diff}")
         console.print(f"[blue]App variable:[/blue] {app_var}")
-        console.print(f"[blue]Dependency backend:[/blue] {backend}")
+        console.print("[blue]Using mypy for dependency analysis[/blue]")
         if no_cache:
             console.print("[blue]Caching:[/blue] disabled")
         if clear_cache:
             console.print("[blue]Clearing cache before analysis[/blue]")
     
     try:
-        # Run the analysis with selected backend
+        # Run the analysis with mypy
         mapper = ChangeMapper(
             app_path=app,
             config=config,
             app_variable=app_var,
-            backend=backend,  # type: ignore[arg-type]
             use_cache=not no_cache,
         )
         
@@ -167,13 +158,9 @@ def analyze(
                 current_line_info["text"] = f"→ {filename}:{line_num} ({symbol})"
                 progress.update(task, line_info=current_line_info["text"])
             
-            # Set line progress callback on mypy analyzer if using that backend
+            # Set line progress callback on mypy analyzer
             # Note: This just initializes the analyzer without running analysis
-            if backend == "mypy":
-                mapper.mypy_analyzer.set_line_progress_callback(line_progress)
-            elif backend == "coverage":
-                # Coverage analyzer doesn't have line-level progress, but we init it
-                _ = mapper.coverage_analyzer
+            mapper.mypy_analyzer.set_line_progress_callback(line_progress)
             
             report = mapper.analyze_diff(diff, progress_callback=update_progress)
         
@@ -252,69 +239,6 @@ def list_endpoints(
             import sys
             sys.stdout.write(formatted_output)
             sys.stdout.flush()
-            
-    except Exception as e:
-        console.print(f"[red]Error:[/red] {e}")
-        raise click.Abort()
-
-
-@cli.command()
-@click.option(
-    "--app",
-    "-a",
-    type=click.Path(exists=True, path_type=Path),
-    required=True,
-    help="Path to FastAPI application directory or entry point file.",
-)
-@click.option(
-    "--module",
-    "-m",
-    type=str,
-    help="Show dependencies for a specific module.",
-)
-@click.pass_context
-def deps(
-    ctx: click.Context,
-    app: Path,
-    module: Optional[str],
-) -> None:
-    """Show dependency information for the FastAPI application."""
-    from fastapi_endpoint_detector.analyzer.dependency_graph import DependencyGraph
-    
-    try:
-        # Determine package path
-        if app.is_file():
-            package_path = app.parent
-        else:
-            package_path = app
-        
-        dep_graph = DependencyGraph(package_path)
-        dep_graph.build()
-        
-        if module:
-            # Show info for specific module
-            console.print(f"[bold]Module:[/bold] {module}")
-            console.print()
-            
-            imports = dep_graph.get_modules_imported_by(module)
-            console.print(f"[bold]Imports ({len(imports)}):[/bold]")
-            for imp in sorted(imports):
-                console.print(f"  • {imp}")
-            console.print()
-            
-            imported_by = dep_graph.get_modules_that_import(module)
-            console.print(f"[bold]Imported by ({len(imported_by)}):[/bold]")
-            for imp in sorted(imported_by):
-                console.print(f"  • {imp}")
-        else:
-            # Show overall stats
-            all_modules = dep_graph.get_all_modules()
-            console.print(f"[bold]Package:[/bold] {package_path.name}")
-            console.print(f"[bold]Total modules:[/bold] {len(all_modules)}")
-            console.print()
-            console.print("[bold]Modules:[/bold]")
-            for mod in sorted(all_modules):
-                console.print(f"  • {mod}")
             
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")

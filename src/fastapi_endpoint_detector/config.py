@@ -77,12 +77,8 @@ class IntegrationConfig(BaseModel):
     """Configuration for external tool integrations."""
     
     use_mypy: bool = Field(
-        default=False,
-        description="Use mypy for enhanced type analysis.",
-    )
-    use_ruff: bool = Field(
-        default=False,
-        description="Use ruff for fast import analysis.",
+        default=True,
+        description="Use mypy for type-aware analysis.",
     )
     mypy_config: Optional[Path] = Field(
         default=None,
