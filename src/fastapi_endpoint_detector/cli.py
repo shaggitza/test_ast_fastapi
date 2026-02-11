@@ -245,69 +245,6 @@ def list_endpoints(
         raise click.Abort()
 
 
-@cli.command()
-@click.option(
-    "--app",
-    "-a",
-    type=click.Path(exists=True, path_type=Path),
-    required=True,
-    help="Path to FastAPI application directory or entry point file.",
-)
-@click.option(
-    "--module",
-    "-m",
-    type=str,
-    help="Show dependencies for a specific module.",
-)
-@click.pass_context
-def deps(
-    ctx: click.Context,
-    app: Path,
-    module: Optional[str],
-) -> None:
-    """Show dependency information for the FastAPI application."""
-    from fastapi_endpoint_detector.analyzer.dependency_graph import DependencyGraph
-    
-    try:
-        # Determine package path
-        if app.is_file():
-            package_path = app.parent
-        else:
-            package_path = app
-        
-        dep_graph = DependencyGraph(package_path)
-        dep_graph.build()
-        
-        if module:
-            # Show info for specific module
-            console.print(f"[bold]Module:[/bold] {module}")
-            console.print()
-            
-            imports = dep_graph.get_modules_imported_by(module)
-            console.print(f"[bold]Imports ({len(imports)}):[/bold]")
-            for imp in sorted(imports):
-                console.print(f"  • {imp}")
-            console.print()
-            
-            imported_by = dep_graph.get_modules_that_import(module)
-            console.print(f"[bold]Imported by ({len(imported_by)}):[/bold]")
-            for imp in sorted(imported_by):
-                console.print(f"  • {imp}")
-        else:
-            # Show overall stats
-            all_modules = dep_graph.get_all_modules()
-            console.print(f"[bold]Package:[/bold] {package_path.name}")
-            console.print(f"[bold]Total modules:[/bold] {len(all_modules)}")
-            console.print()
-            console.print("[bold]Modules:[/bold]")
-            for mod in sorted(all_modules):
-                console.print(f"  • {mod}")
-            
-    except Exception as e:
-        console.print(f"[red]Error:[/red] {e}")
-        raise click.Abort()
-
-
 def main() -> None:
     """Main entry point for the CLI."""
     cli(obj={})
