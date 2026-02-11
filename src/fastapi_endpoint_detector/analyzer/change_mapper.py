@@ -207,7 +207,7 @@ class ChangeMapper:
                     ))
                 
                 # Add frames showing the actual changed lines
-                # If there are multiple changed lines, add a frame for each
+                # Group consecutive lines together for cleaner display
                 if display_lines:
                     # Sort the changed lines
                     sorted_lines = sorted(display_lines)
@@ -222,24 +222,47 @@ class ChangeMapper:
                     except (OSError, UnicodeDecodeError):
                         pass
                     
-                    # Add a frame for each changed line
-                    for changed_line in sorted_lines:
+                    # Group consecutive lines together
+                    line_groups = []
+                    current_group = [sorted_lines[0]]
+                    
+                    for i in range(1, len(sorted_lines)):
+                        if sorted_lines[i] == sorted_lines[i-1] + 1:
+                            # Consecutive line, add to current group
+                            current_group.append(sorted_lines[i])
+                        else:
+                            # Non-consecutive, start a new group
+                            line_groups.append(current_group)
+                            current_group = [sorted_lines[i]]
+                    
+                    # Don't forget the last group
+                    line_groups.append(current_group)
+                    
+                    # Add a frame for each group of lines
+                    for group in line_groups:
+                        first_line = group[0]
+                        last_line = group[-1]
+                        
                         # Try to get the function name from symbol references
                         function_name = "module"
                         for sym_ref in deps.referenced_symbols:
                             if (sym_ref.file_path == file_path and 
-                                sym_ref.contains_line(changed_line)):
+                                sym_ref.contains_line(first_line)):
                                 function_name = sym_ref.symbol_name
                                 break
                         
                         # Try to get code context from the file
+                        # For ranges, show the first line's context
                         code_context = ""
-                        if lines_list and 0 < changed_line <= len(lines_list):
-                            code_context = lines_list[changed_line - 1].rstrip()
+                        if lines_list and 0 < first_line <= len(lines_list):
+                            code_context = lines_list[first_line - 1].rstrip()
+                            # If it's a range, indicate that in the context
+                            if len(group) > 1:
+                                code_context = f"[lines {first_line}-{last_line}] {code_context}"
                         
                         call_stack.append(CallStackFrame(
                             file_path=file_path,
-                            line_number=changed_line,
+                            line_number=first_line,
                             function_name=function_name,
                             code_context=code_context,
                         ))
