@@ -218,11 +218,23 @@ class ChangeMapper:
                             function_name = sym_ref.symbol_name
                             break
                     
+                    # Try to get code context from the file
+                    code_context = ""
+                    try:
+                        file_path_obj = Path(file_path)
+                        if file_path_obj.exists():
+                            with open(file_path_obj, encoding="utf-8") as f:
+                                lines_list = f.readlines()
+                                if 0 < changed_line <= len(lines_list):
+                                    code_context = lines_list[changed_line - 1].rstrip()
+                    except (OSError, UnicodeDecodeError):
+                        pass
+                    
                     call_stack.append(CallStackFrame(
                         file_path=file_path,
                         line_number=changed_line,
                         function_name=function_name,
-                        code_context="",
+                        code_context=code_context,
                     ))
             
             return AffectedEndpoint(
