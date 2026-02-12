@@ -276,7 +276,8 @@ class RestrictedPythonValidator:
     """Validate code only uses safe Python features."""
     
     FORBIDDEN_NODES = {
-        ast.Exec,      # exec() statement (Python 2)
+        # Note: ast.Exec only exists in Python 2 AST, included for completeness
+        # if analyzing legacy codebases
         ast.Import,    # Restrict imports to allowlist
         ast.ImportFrom,
     }
@@ -371,12 +372,13 @@ class SeccompSandbox:
             resource.setrlimit(resource.RLIMIT_NPROC, (1, 1))
         
         # Run in subprocess with limits
+        # Note: Network isolation requires OS-level configuration via
+        # network namespaces or firewall rules, not subprocess.run() parameters
         result = subprocess.run(
             [sys.executable, sandbox_script],
             preexec_fn=set_limits,
             timeout=60,
             capture_output=True,
-            network=False,  # Requires OS-level config
         )
         
         return self._parse_result(result)
