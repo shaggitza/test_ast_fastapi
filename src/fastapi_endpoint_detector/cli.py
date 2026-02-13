@@ -5,6 +5,7 @@ This module provides the CLI using Click framework for argument parsing
 and orchestrates the analysis pipeline.
 """
 
+import json
 import sys
 from pathlib import Path
 from typing import Optional
@@ -177,10 +178,9 @@ def analyze(
         # Handle secure AST mode
         if secure_ast:
             console.print("[yellow]Secure AST mode: Using pure static analysis without imports[/yellow]")
-            # Note: This mode would need integration with the change mapper
-            # For now, we'll create a simplified path
-            console.print("[yellow]Note: Secure AST mode for analyze command requires change mapper integration[/yellow]")
+            console.print("[red]Error: Secure AST mode for analyze command is not yet implemented[/red]")
             console.print("[yellow]Use 'list --secure-ast' to list endpoints in secure mode[/yellow]")
+            raise click.Abort()
         
         # Run the analysis with mypy (default mode)
         mapper = ChangeMapper(
@@ -331,7 +331,6 @@ def list_endpoints(
             
             # Output results
             if output_format == "json":
-                import json
                 formatted_output = json.dumps(result, indent=2)
             else:
                 formatted_output = result

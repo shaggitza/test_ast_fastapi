@@ -224,5 +224,5 @@ def test_handler():
         
         # May fail due to missing dependencies, but shouldn't show VM or secure-AST messages
         if result.exit_code != 0:
-            assert "vm" not in result.output.lower() or "docker" not in result.output.lower()
+            assert "vm" not in result.output.lower() and "docker" not in result.output.lower()
 

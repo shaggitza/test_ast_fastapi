@@ -98,8 +98,12 @@ class SecureASTExtractor:
         # Find route decorators
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef):
-                endpoints = self._extract_endpoints_from_function(node, file_path)
-                self._endpoints.extend(endpoints)
+                try:
+                    endpoints = self._extract_endpoints_from_function(node, file_path)
+                    self._endpoints.extend(endpoints)
+                except Exception:
+                    # Continue analyzing other functions even if one fails
+                    pass
     
     def _extract_endpoints_from_function(
         self, 
