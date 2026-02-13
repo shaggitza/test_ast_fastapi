@@ -16,10 +16,10 @@ from fastapi_endpoint_detector.models.report import (
     AnalysisReport,
     ConfidenceLevel,
 )
-from fastapi_endpoint_detector.output.markdown_output import MarkdownFormatter
+from fastapi_endpoint_detector.output.formatters import get_formatter
 from fastapi_endpoint_detector.output.html_output import HtmlFormatter
 from fastapi_endpoint_detector.output.json_output import JsonFormatter
-from fastapi_endpoint_detector.output.formatters import get_formatter
+from fastapi_endpoint_detector.output.markdown_output import MarkdownFormatter
 
 
 class TestMarkdownFormatter:

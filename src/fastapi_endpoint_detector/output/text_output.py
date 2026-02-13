@@ -102,7 +102,7 @@ class TextFormatter(BaseFormatter):
                         console.print(f"      Chain: {chain}")
 
                     # Show traceback-style call stack if available
-                    if ae.call_stack:
+                    if ae.call_stacks:
                         console.print()
                         console.print("      [bold cyan]Call Stack (traceback style):[/bold cyan]")
                         traceback_lines = ae.format_traceback().strip().split('\n')
