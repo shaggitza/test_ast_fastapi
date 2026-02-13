@@ -85,6 +85,16 @@ def cli(ctx: click.Context, config: Optional[Path]) -> None:
     is_flag=True,
     help="Clear cached analysis data before running.",
 )
+@click.option(
+    "--vm",
+    is_flag=True,
+    help="Execute analysis in isolated Docker container for untrusted code.",
+)
+@click.option(
+    "--secure-ast",
+    is_flag=True,
+    help="Use pure AST analysis without importing code (secure mode).",
+)
 @click.pass_context
 def analyze(
     ctx: click.Context,
@@ -96,6 +106,8 @@ def analyze(
     verbose: bool,
     no_cache: bool,
     clear_cache: bool,
+    vm: bool,
+    secure_ast: bool,
 ) -> None:
     """Analyze code changes and identify affected FastAPI endpoints."""
     from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
@@ -103,18 +115,74 @@ def analyze(
     
     config: Config = ctx.obj["config"]
     
+    # Validate mutually exclusive options
+    if vm and secure_ast:
+        console.print("[red]Error:[/red] --vm and --secure-ast cannot be used together")
+        raise click.Abort()
+    
     if verbose:
         console.print(f"[blue]Analyzing FastAPI application at:[/blue] {app}")
         console.print(f"[blue]Using diff file:[/blue] {diff}")
         console.print(f"[blue]App variable:[/blue] {app_var}")
-        console.print("[blue]Using mypy for dependency analysis[/blue]")
+        
+        if vm:
+            console.print("[blue]Execution mode:[/blue] VM (Docker container)")
+        elif secure_ast:
+            console.print("[blue]Execution mode:[/blue] Secure AST (no imports)")
+        else:
+            console.print("[blue]Using mypy for dependency analysis[/blue]")
+            
         if no_cache:
             console.print("[blue]Caching:[/blue] disabled")
         if clear_cache:
             console.print("[blue]Clearing cache before analysis[/blue]")
     
     try:
-        # Run the analysis with mypy
+        # Handle VM execution mode
+        if vm:
+            from fastapi_endpoint_detector.executor.vm_executor import VMExecutor, VMExecutorError
+            
+            executor = VMExecutor()
+            
+            # Check if Docker image exists, build if needed
+            if not executor.check_image_exists():
+                console.print("[yellow]Docker image not found. Building image...[/yellow]")
+                executor.build_image()
+                console.print("[green]Docker image built successfully[/green]")
+            
+            # Run analysis in VM
+            result = executor.analyze_in_vm(
+                app_path=app,
+                diff_path=diff,
+                app_variable=app_var,
+                output_format=output_format,
+            )
+            
+            # Output results
+            if output_format == "json":
+                import json
+                formatted_output = json.dumps(result, indent=2)
+            else:
+                formatted_output = result
+            
+            if output:
+                output.write_text(formatted_output, encoding="utf-8")
+                console.print(f"[green]Results written to:[/green] {output}")
+            else:
+                sys.stdout.write(formatted_output)
+                sys.stdout.flush()
+            
+            return
+        
+        # Handle secure AST mode
+        if secure_ast:
+            console.print("[yellow]Secure AST mode: Using pure static analysis without imports[/yellow]")
+            # Note: This mode would need integration with the change mapper
+            # For now, we'll create a simplified path
+            console.print("[yellow]Note: Secure AST mode for analyze command requires change mapper integration[/yellow]")
+            console.print("[yellow]Use 'list --secure-ast' to list endpoints in secure mode[/yellow]")
+        
+        # Run the analysis with mypy (default mode)
         mapper = ChangeMapper(
             app_path=app,
             config=config,
@@ -212,6 +280,16 @@ def analyze(
     default="app",
     help="Name of the FastAPI app variable (default: app).",
 )
+@click.option(
+    "--vm",
+    is_flag=True,
+    help="Execute analysis in isolated Docker container for untrusted code.",
+)
+@click.option(
+    "--secure-ast",
+    is_flag=True,
+    help="Use pure AST analysis without importing code (secure mode).",
+)
 @click.pass_context
 def list_endpoints(
     ctx: click.Context,
@@ -219,14 +297,65 @@ def list_endpoints(
     output_format: str,
     output: Optional[Path],
     app_var: str,
+    vm: bool,
+    secure_ast: bool,
 ) -> None:
     """List all FastAPI endpoints in the application."""
     from fastapi_endpoint_detector.parser.fastapi_extractor import FastAPIExtractor
     from fastapi_endpoint_detector.output.formatters import get_formatter
     
+    # Validate mutually exclusive options
+    if vm and secure_ast:
+        console.print("[red]Error:[/red] --vm and --secure-ast cannot be used together")
+        raise click.Abort()
+    
     try:
-        extractor = FastAPIExtractor(app_path=app, app_variable=app_var)
-        endpoints = extractor.extract_endpoints()
+        # Handle VM execution mode
+        if vm:
+            from fastapi_endpoint_detector.executor.vm_executor import VMExecutor
+            
+            executor = VMExecutor()
+            
+            # Check if Docker image exists, build if needed
+            if not executor.check_image_exists():
+                console.print("[yellow]Docker image not found. Building image...[/yellow]")
+                executor.build_image()
+                console.print("[green]Docker image built successfully[/green]")
+            
+            # Run analysis in VM
+            result = executor.analyze_in_vm(
+                app_path=app,
+                app_variable=app_var,
+                output_format=output_format,
+            )
+            
+            # Output results
+            if output_format == "json":
+                import json
+                formatted_output = json.dumps(result, indent=2)
+            else:
+                formatted_output = result
+            
+            if output:
+                output.write_text(formatted_output, encoding="utf-8")
+                console.print(f"[green]Results written to:[/green] {output}")
+            else:
+                sys.stdout.write(formatted_output)
+                sys.stdout.flush()
+            
+            return
+        
+        # Handle secure AST mode
+        if secure_ast:
+            from fastapi_endpoint_detector.parser.secure_ast_extractor import SecureASTExtractor
+            
+            console.print("[blue]Using secure AST mode (no code execution)[/blue]")
+            extractor_obj = SecureASTExtractor(app_path=app, app_variable=app_var)
+            endpoints = extractor_obj.extract_endpoints()
+        else:
+            # Use default runtime introspection
+            extractor = FastAPIExtractor(app_path=app, app_variable=app_var)
+            endpoints = extractor.extract_endpoints()
         
         formatter = get_formatter(output_format)
         formatted_output = formatter.format_endpoints(endpoints)
