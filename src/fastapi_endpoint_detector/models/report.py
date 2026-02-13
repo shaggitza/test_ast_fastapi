@@ -76,22 +76,40 @@ class AffectedEndpoint(BaseModel):
         default_factory=list,
         description="Files that changed affecting this endpoint",
     )
-    call_stack: list[CallStackFrame] = Field(
+    call_stacks: list[list[CallStackFrame]] = Field(
         default_factory=list,
-        description="Traceback-style call stack showing the dependency path",
+        description="All traceback-style call stacks showing different dependency paths. Each inner list represents one path from the endpoint handler to the changed file.",
     )
 
     class Config:
         frozen = True
 
     def format_traceback(self) -> str:
-        """Format the call stack like a Python traceback."""
-        if not self.call_stack:
+        """Format all call stacks like Python tracebacks.
+        
+        If there are multiple call stacks (multiple paths to reach the same dependency),
+        each one is shown separately with a header indicating which path it is.
+        """
+        if not self.call_stacks:
             return ""
-        lines = ["Traceback (dependency chain):"]
-        for frame in self.call_stack:
-            lines.append(frame.format_traceback())
-        return "\n".join(lines)
+        
+        results = []
+        for i, call_stack in enumerate(self.call_stacks, 1):
+            if len(self.call_stacks) > 1:
+                # Multiple paths - label each one
+                results.append(f"Traceback (dependency chain, path {i} of {len(self.call_stacks)}):")
+            else:
+                # Single path
+                results.append("Traceback (dependency chain):")
+            
+            for frame in call_stack:
+                results.append(frame.format_traceback())
+            
+            # Add spacing between multiple tracebacks
+            if i < len(self.call_stacks):
+                results.append("")
+        
+        return "\n".join(results)
 
 
 class AnalysisReport(BaseModel):

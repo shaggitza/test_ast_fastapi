@@ -62,8 +62,8 @@ class EndpointDependencies:
     """Mapping of file path -> set of referenced line numbers."""
     referenced_symbols: list[SymbolReference] = field(default_factory=list)
     """List of symbol references with their file paths and line ranges."""
-    call_stacks: dict[str, list[CallFrame]] = field(default_factory=dict)
-    """Mapping of file path -> call stack showing how handler reaches that file."""
+    call_stacks: dict[str, list[list[CallFrame]]] = field(default_factory=dict)
+    """Mapping of file path -> list of call stacks showing all paths from handler to that file."""
 
     def add_reference(self, file_path: str, line: int, symbol_name: str = "") -> None:
         """Add a line reference to dependencies."""
@@ -128,19 +128,23 @@ class EndpointDependencies:
 
         return set()
 
-    def get_call_stack(self, file_path: str) -> list[CallFrame]:
-        """Get the call stack for how the handler reaches a specific file."""
+    def get_call_stack(self, file_path: str) -> list[list[CallFrame]]:
+        """Get all call stacks showing how the handler reaches a specific file.
+        
+        Returns a list of call stacks (each call stack is a list of CallFrame).
+        Multiple call stacks indicate different paths to reach the same file.
+        """
         file_path_resolved = str(Path(file_path).resolve())
         file_name = Path(file_path).name
 
-        for ref_path, stack in self.call_stacks.items():
+        for ref_path, stacks in self.call_stacks.items():
             ref_resolved = str(Path(ref_path).resolve())
             ref_name = Path(ref_path).name
             if (ref_resolved == file_path_resolved or
                 ref_path.endswith(str(file_path)) or
                 file_path.endswith(ref_path) or
                 ref_name == file_name):
-                return stack
+                return stacks
 
         return []
 
@@ -547,9 +551,13 @@ class MypyAnalyzer:
                 start, end = self._get_func_lines(target_func)
                 deps.add_symbol_reference(target_path, fullname, start, end)
 
-                # Record call stack
+                # Record call stack - store all unique paths
                 if target_path not in deps.call_stacks:
-                    deps.call_stacks[target_path] = list(call_stack)
+                    deps.call_stacks[target_path] = []
+                # Add this call stack if it's unique (not already recorded)
+                current_stack = list(call_stack)
+                if current_stack not in deps.call_stacks[target_path]:
+                    deps.call_stacks[target_path].append(current_stack)
 
                 # Recursively trace into the target function
                 new_frame = CallFrame(target_path, start, fullname)
@@ -563,7 +571,10 @@ class MypyAnalyzer:
                 # Couldn't find specific function, add module reference
                 deps.add_symbol_reference(target_path, fullname, 1, 20)
                 if target_path not in deps.call_stacks:
-                    deps.call_stacks[target_path] = list(call_stack)
+                    deps.call_stacks[target_path] = []
+                current_stack = list(call_stack)
+                if current_stack not in deps.call_stacks[target_path]:
+                    deps.call_stacks[target_path].append(current_stack)
 
         def handle_call_expr(call: CallExpr) -> None:
             """Handle a function/method call expression."""
@@ -883,15 +894,18 @@ class MypyAnalyzer:
                 ],
                 "call_stacks": {
                     f: [
-                        {
-                            "file_path": frame.file_path,
-                            "line_number": frame.line_number,
-                            "function_name": frame.function_name,
-                            "code_context": frame.code_context,
-                        }
-                        for frame in frames
+                        [
+                            {
+                                "file_path": frame.file_path,
+                                "line_number": frame.line_number,
+                                "function_name": frame.function_name,
+                                "code_context": frame.code_context,
+                            }
+                            for frame in stack
+                        ]
+                        for stack in stacks
                     ]
-                    for f, frames in deps.call_stacks.items()
+                    for f, stacks in deps.call_stacks.items()
                 },
             }
 
@@ -909,16 +923,19 @@ class MypyAnalyzer:
             data = json.loads(self.cache_path.read_text(encoding="utf-8"))
 
             for endpoint_id, deps_data in data.items():
-                call_stacks: dict[str, list[CallFrame]] = {}
-                for f, frames_data in deps_data.get("call_stacks", {}).items():
+                call_stacks: dict[str, list[list[CallFrame]]] = {}
+                for f, stacks_data in deps_data.get("call_stacks", {}).items():
                     call_stacks[f] = [
-                        CallFrame(
-                            file_path=frame["file_path"],
-                            line_number=frame["line_number"],
-                            function_name=frame["function_name"],
-                            code_context=frame.get("code_context", ""),
-                        )
-                        for frame in frames_data
+                        [
+                            CallFrame(
+                                file_path=frame["file_path"],
+                                line_number=frame["line_number"],
+                                function_name=frame["function_name"],
+                                code_context=frame.get("code_context", ""),
+                            )
+                            for frame in stack_data
+                        ]
+                        for stack_data in stacks_data
                     ]
 
                 symbol_refs: list[SymbolReference] = []

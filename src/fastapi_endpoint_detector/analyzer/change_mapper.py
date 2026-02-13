@@ -193,10 +193,22 @@ class ChangeMapper:
             direct_overlap = deps.references_lines(file_path, changed_lines)
             display_lines = direct_overlap if direct_overlap else overlap
 
-            # Get call stack for traceback-style output
-            call_stack: list[CallStackFrame] = []
-            raw_stack = deps.get_call_stack(file_path)
-            if raw_stack:
+            # Get call stacks for traceback-style output - all paths
+            all_call_stacks: list[list[CallStackFrame]] = []
+            raw_stacks = deps.get_call_stack(file_path)
+            
+            for raw_stack in raw_stacks:
+                call_stack: list[CallStackFrame] = []
+                
+                # Add a marker frame at the beginning to show where this trace originates from
+                call_stack.append(CallStackFrame(
+                    file_path=endpoint.handler.file_path or "",
+                    line_number=endpoint.handler.line_number,
+                    function_name=f"[ENDPOINT] {endpoint.identifier}",
+                    code_context=f"Handler: {endpoint.handler.name}",
+                ))
+                
+                # Add the actual call stack frames
                 for frame in raw_stack:
                     call_stack.append(CallStackFrame(
                         file_path=frame.file_path,
@@ -272,6 +284,9 @@ class ChangeMapper:
                                 function_name=function_name,
                                 code_context=code_context,
                             ))
+                
+                # Add this completed call stack to the list
+                all_call_stacks.append(call_stack)
 
             return AffectedEndpoint(
                 endpoint=endpoint,
@@ -279,7 +294,7 @@ class ChangeMapper:
                 reason=f"Type analysis shows dependency on {diff_file.path} (lines {sorted(display_lines)[:5]}{'...' if len(display_lines) > 5 else ''})",
                 dependency_chain=[endpoint.handler.module or "unknown", file_path],
                 changed_files=[file_path],
-                call_stack=call_stack,
+                call_stacks=all_call_stacks,
             )
 
         return None

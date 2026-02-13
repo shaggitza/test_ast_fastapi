@@ -604,34 +604,45 @@ class HtmlFormatter(BaseFormatter):
                         )
 
                     # Call stack with hover on each frame
-                    if ae.call_stack:
+                    if ae.call_stacks:
                         content_lines.append('<div class="call-stack">')
                         content_lines.append("<strong>Call Stack:</strong><br>")
-                        for frame in ae.call_stack:
-                            # Extract line range from code_context if present
-                            # Code context uses '[lines X-Y]' notation for grouped consecutive lines
-                            line_range = self._parse_line_range(frame.code_context)
+                        
+                        for stack_idx, call_stack in enumerate(ae.call_stacks, 1):
+                            # Header for multiple paths
+                            if len(ae.call_stacks) > 1:
+                                content_lines.append(f"<div class='stack-path'><em>Path {stack_idx} of {len(ae.call_stacks)}:</em></div>")
+                            
+                            for frame in call_stack:
+                                # Extract line range from code_context if present
+                                # Code context uses '[lines X-Y]' notation for grouped consecutive lines
+                                line_range = self._parse_line_range(frame.code_context)
 
-                            if line_range:
-                                start_line, end_line = line_range
-                            else:
-                                start_line = frame.line_number
-                                end_line = frame.line_number
+                                if line_range:
+                                    start_line, end_line = line_range
+                                else:
+                                    start_line = frame.line_number
+                                    end_line = frame.line_number
 
-                            frame_label = self._format_frame_label(
-                                frame.file_path,
-                                start_line,
-                                end_line if end_line > start_line else None,
-                                frame.function_name
-                            )
+                                frame_label = self._format_frame_label(
+                                    frame.file_path,
+                                    start_line,
+                                    end_line if end_line > start_line else None,
+                                    frame.function_name
+                                )
 
-                            frame_ref = self._format_code_ref(
-                                frame.file_path,
-                                start_line,
-                                frame_label,
-                                end_line,
-                            )
-                            content_lines.append(f"{frame_ref}<br>")
+                                frame_ref = self._format_code_ref(
+                                    frame.file_path,
+                                    start_line,
+                                    frame_label,
+                                    end_line,
+                                )
+                                content_lines.append(f"{frame_ref}<br>")
+                            
+                            # Add spacing between paths
+                            if stack_idx < len(ae.call_stacks):
+                                content_lines.append("<br>")
+                        
                         content_lines.append("</div>")
 
                     content_lines.append("</div>")  # end endpoint-card
