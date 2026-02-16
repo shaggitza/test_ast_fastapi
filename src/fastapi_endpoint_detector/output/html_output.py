@@ -529,6 +529,12 @@ class HtmlFormatter(BaseFormatter):
             f'<span class="summary-label">Affected Endpoints:</span> {report.affected_count}'
             f"</div>"
         )
+        content_lines.append(
+            f'<div class="summary-item">'
+            f'<span class="summary-label">Orphan Changes:</span> '
+            f'{report.total_orphan_lines} lines in {report.orphan_count} files'
+            f"</div>"
+        )
         if report.analysis_duration_ms:
             content_lines.append(
                 f'<div class="summary-item">'
@@ -638,6 +644,35 @@ class HtmlFormatter(BaseFormatter):
         else:
             content_lines.append('<div class="no-endpoints">')
             content_lines.append("✅ No endpoints were affected by the changes.")
+            content_lines.append("</div>")
+
+        # Orphan changes
+        if report.orphan_changes:
+            content_lines.append('<div class="warning-box">')
+            content_lines.append("<h3>⚠️ Orphan Code Changes</h3>")
+            content_lines.append(
+                f'<p><em>Changes not related to any endpoint '
+                f'({report.total_orphan_lines} lines in {report.orphan_count} files)</em></p>'
+            )
+            
+            for oc in report.orphan_changes:
+                file_name = Path(oc.file_path).name
+                content_lines.append('<div style="margin: 15px 0; padding: 10px; background: #fff; border-radius: 5px;">')
+                content_lines.append(f'<div style="font-weight: bold; margin-bottom: 5px;">📄 {html.escape(file_name)}</div>')
+                content_lines.append(f'<div style="font-size: 0.9em; color: #666;"><code>{html.escape(oc.file_path)}</code></div>')
+                content_lines.append(f'<div style="margin-top: 8px; font-family: monospace; font-size: 0.9em;">{html.escape(oc.format_lines())}</div>')
+                content_lines.append(f'<div style="margin-top: 5px; font-size: 0.85em; color: #777; font-style: italic;">{html.escape(oc.reason)}</div>')
+                content_lines.append('</div>')
+            
+            content_lines.append('<div style="margin-top: 15px; padding: 10px; background: #f0f0f0; border-radius: 5px; font-size: 0.9em;">')
+            content_lines.append('<strong>💡 Tip:</strong> Orphan changes may indicate:')
+            content_lines.append('<ul style="margin: 5px 0 0 20px;">')
+            content_lines.append('<li>Unused or dead code</li>')
+            content_lines.append('<li>Code with incorrect types preventing dependency analysis</li>')
+            content_lines.append('<li>Utility code not called by any endpoint</li>')
+            content_lines.append('<li>Code outside the analyzed application scope</li>')
+            content_lines.append('</ul>')
+            content_lines.append('</div>')
             content_lines.append("</div>")
 
         # Errors

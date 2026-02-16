@@ -3,6 +3,7 @@ Human-readable text output formatter.
 """
 
 from io import StringIO
+from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
@@ -111,6 +112,26 @@ class TextFormatter(BaseFormatter):
                     console.print()
         else:
             console.print("[green]No endpoints affected by the changes.[/green]")
+            console.print()
+
+        # Orphan changes
+        if report.orphan_changes:
+            console.print("[bold yellow]⚠️  Orphan Code Changes[/bold yellow]")
+            console.print(f"[dim]Changes not related to any endpoint ({report.total_orphan_lines} lines in {report.orphan_count} files)[/dim]")
+            console.print()
+            
+            for oc in report.orphan_changes:
+                file_name = Path(oc.file_path).name
+                console.print(f"  📄 [cyan]{file_name}[/cyan] ({oc.file_path})")
+                console.print(f"     {oc.format_lines()}")
+                console.print(f"     [dim]Reason: {oc.reason}[/dim]")
+                console.print()
+            
+            console.print("[dim]💡 Tip: Orphan changes may indicate:[/dim]")
+            console.print("[dim]   • Unused or dead code[/dim]")
+            console.print("[dim]   • Code with incorrect types preventing dependency analysis[/dim]")
+            console.print("[dim]   • Utility code not called by any endpoint[/dim]")
+            console.print("[dim]   • Code outside the analyzed application scope[/dim]")
             console.print()
 
         # Errors and warnings

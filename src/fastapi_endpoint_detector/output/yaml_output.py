@@ -44,6 +44,8 @@ class YamlFormatter(BaseFormatter):
                 "total_endpoints": report.total_endpoints,
                 "affected_endpoints": report.affected_count,
                 "high_confidence": report.high_confidence_count,
+                "orphan_files": report.orphan_count,
+                "orphan_lines": report.total_orphan_lines,
                 "files_changed": report.total_files_changed,
                 "python_files_changed": report.python_files_changed,
                 "analysis_duration_ms": report.analysis_duration_ms,
@@ -57,6 +59,16 @@ class YamlFormatter(BaseFormatter):
                     "changed_files": ae.changed_files,
                 }
                 for ae in report.affected_endpoints
+            ],
+            "orphan_changes": [
+                {
+                    "file_path": oc.file_path,
+                    "added_lines": oc.added_lines,
+                    "removed_lines": oc.removed_lines,
+                    "total_lines": oc.total_lines,
+                    "reason": oc.reason,
+                }
+                for oc in report.orphan_changes
             ],
             "errors": report.errors,
             "warnings": report.warnings,

@@ -7,6 +7,7 @@ Models representing analysis reports and results.
 import re
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -95,6 +96,47 @@ class AffectedEndpoint(BaseModel):
         return "\n".join(lines)
 
 
+class OrphanChange(BaseModel):
+    """Represents code changes that are not related to any endpoint."""
+    
+    file_path: str = Field(description="Path to the file with orphan changes")
+    added_lines: list[int] = Field(
+        default_factory=list,
+        description="Line numbers of added lines that are orphan",
+    )
+    removed_lines: list[int] = Field(
+        default_factory=list,
+        description="Line numbers of removed lines that are orphan",
+    )
+    reason: str = Field(
+        default="Code changes not related to any endpoint",
+        description="Why these changes are considered orphan",
+    )
+    
+    class Config:
+        frozen = True
+    
+    @property
+    def total_lines(self) -> int:
+        """Total number of orphan lines."""
+        return len(self.added_lines) + len(self.removed_lines)
+    
+    def format_lines(self) -> str:
+        """Format the orphan lines for display."""
+        parts = []
+        if self.added_lines:
+            lines_str = ", ".join(str(ln) for ln in sorted(self.added_lines)[:10])
+            if len(self.added_lines) > 10:
+                lines_str += f", ... ({len(self.added_lines)} total)"
+            parts.append(f"Added: lines {lines_str}")
+        if self.removed_lines:
+            lines_str = ", ".join(str(ln) for ln in sorted(self.removed_lines)[:10])
+            if len(self.removed_lines) > 10:
+                lines_str += f", ... ({len(self.removed_lines)} total)"
+            parts.append(f"Removed: lines {lines_str}")
+        return "; ".join(parts) if parts else "No lines"
+
+
 class AnalysisReport(BaseModel):
     """Complete analysis report."""
     
@@ -108,6 +150,10 @@ class AnalysisReport(BaseModel):
     affected_endpoints: list[AffectedEndpoint] = Field(
         default_factory=list,
         description="Endpoints affected by changes",
+    )
+    orphan_changes: list[OrphanChange] = Field(
+        default_factory=list,
+        description="Code changes not related to any endpoint",
     )
     total_files_changed: int = Field(
         default=0,
@@ -142,6 +188,16 @@ class AnalysisReport(BaseModel):
             1 for ae in self.affected_endpoints 
             if ae.confidence == ConfidenceLevel.HIGH
         )
+    
+    @property
+    def orphan_count(self) -> int:
+        """Number of files with orphan changes."""
+        return len(self.orphan_changes)
+    
+    @property
+    def total_orphan_lines(self) -> int:
+        """Total number of orphan lines across all files."""
+        return sum(oc.total_lines for oc in self.orphan_changes)
     
     @property
     def has_errors(self) -> bool:
