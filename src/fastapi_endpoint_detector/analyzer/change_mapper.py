@@ -288,7 +288,7 @@ class ChangeMapper:
     def _analyze_diff_file(
         self,
         diff_file: DiffFile,
-    ) -> list[AffectedEndpoint]:
+    ) -> tuple[list[AffectedEndpoint], set[int], set[int]]:
         """
         Analyze a single diff file and find affected endpoints.
         
@@ -298,10 +298,13 @@ class ChangeMapper:
             diff_file: The parsed diff file.
             
         Returns:
-            List of affected endpoints from this file.
+            Tuple of (affected endpoints, processed added lines, processed removed lines).
+            Processed lines are those that were matched to any endpoint.
         """
         affected: list[AffectedEndpoint] = []
         seen_endpoints: set[str] = set()
+        processed_added_lines: set[int] = set()
+        processed_removed_lines: set[int] = set()
         
         # Get changed lines
         added_lines, removed_lines = DiffParser.get_changed_line_numbers(diff_file)
@@ -317,6 +320,12 @@ class ChangeMapper:
             if result:
                 affected.append(result)
                 seen_endpoints.add(endpoint.identifier)
+                # Mark lines as processed
+                handler = endpoint.handler
+                handler_end = handler.end_line_number or handler.line_number + 50
+                handler_lines = set(range(handler.line_number, handler_end + 1))
+                processed_added_lines.update(ln for ln in added_lines if ln in handler_lines)
+                processed_removed_lines.update(ln for ln in removed_lines if ln in handler_lines)
         
         # Use mypy for type-aware dependency analysis
         for endpoint in self.registry:
@@ -329,8 +338,21 @@ class ChangeMapper:
             if result:
                 affected.append(result)
                 seen_endpoints.add(endpoint.identifier)
+                # Mark lines as processed - get the actual lines that were referenced
+                deps = self.mypy_analyzer.get_endpoint_dependencies(endpoint.identifier)
+                if deps:
+                    file_path = str(diff_file.path)
+                    changed_lines = set(added_lines) | set(removed_lines)
+                    context_lines = set()
+                    for line in changed_lines:
+                        context_lines.update(range(max(1, line - 3), line + 4))
+                    referenced = deps.references_lines(file_path, changed_lines | context_lines)
+                    if referenced:
+                        # Only mark the directly changed lines as processed
+                        processed_added_lines.update(ln for ln in added_lines if ln in referenced)
+                        processed_removed_lines.update(ln for ln in removed_lines if ln in referenced)
         
-        return affected
+        return affected, processed_added_lines, processed_removed_lines
     
     def analyze_diff(
         self,
@@ -385,6 +407,7 @@ class ChangeMapper:
         report_progress(70, 100, f"Checking {len(python_files)} changed files...")
         all_affected: list[AffectedEndpoint] = []
         seen_endpoints: set[str] = set()
+        orphan_changes: list["OrphanChange"] = []
         
         for i, diff_file in enumerate(python_files):
             try:
@@ -393,11 +416,25 @@ class ChangeMapper:
                     100,
                     f"Analyzing {diff_file.path.name}..."
                 )
-                file_affected = self._analyze_diff_file(diff_file)
+                file_affected, processed_added, processed_removed = self._analyze_diff_file(diff_file)
                 for ae in file_affected:
                     if ae.endpoint.identifier not in seen_endpoints:
                         all_affected.append(ae)
                         seen_endpoints.add(ae.endpoint.identifier)
+                
+                # Collect orphan lines (lines not processed by any endpoint)
+                added_lines, removed_lines = DiffParser.get_changed_line_numbers(diff_file)
+                orphan_added = [ln for ln in added_lines if ln not in processed_added]
+                orphan_removed = [ln for ln in removed_lines if ln not in processed_removed]
+                
+                if orphan_added or orphan_removed:
+                    from fastapi_endpoint_detector.models.report import OrphanChange
+                    orphan_changes.append(OrphanChange(
+                        file_path=str(diff_file.path),
+                        added_lines=orphan_added,
+                        removed_lines=orphan_removed,
+                        reason="Code changes not related to any endpoint (possibly unused, unrelated, or has type issues)",
+                    ))
             except Exception as e:
                 warnings.append(f"Error analyzing {diff_file.path}: {e}")
         
@@ -424,6 +461,7 @@ class ChangeMapper:
             diff_source=diff_source_str,
             total_endpoints=len(self.registry),
             affected_endpoints=filtered_affected,
+            orphan_changes=orphan_changes,
             total_files_changed=len(diff_files),
             python_files_changed=len(python_files),
             analysis_duration_ms=duration_ms,
