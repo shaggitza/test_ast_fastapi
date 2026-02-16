@@ -3,6 +3,7 @@ Human-readable text output formatter.
 """
 
 from io import StringIO
+from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
@@ -120,7 +121,6 @@ class TextFormatter(BaseFormatter):
             console.print()
             
             for oc in report.orphan_changes:
-                from pathlib import Path
                 file_name = Path(oc.file_path).name
                 console.print(f"  📄 [cyan]{file_name}[/cyan] ({oc.file_path})")
                 console.print(f"     {oc.format_lines()}")

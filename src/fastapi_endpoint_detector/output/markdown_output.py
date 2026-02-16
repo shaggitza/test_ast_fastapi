@@ -2,6 +2,8 @@
 Markdown output formatter.
 """
 
+from pathlib import Path
+
 from fastapi_endpoint_detector.models.endpoint import Endpoint
 from fastapi_endpoint_detector.models.report import AnalysisReport, ConfidenceLevel
 from fastapi_endpoint_detector.output.formatters import BaseFormatter, register_formatter
@@ -108,7 +110,6 @@ class MarkdownFormatter(BaseFormatter):
             lines.append("")
             
             for oc in report.orphan_changes:
-                from pathlib import Path
                 file_name = Path(oc.file_path).name
                 lines.append(f"### 📄 `{file_name}`")
                 lines.append("")
