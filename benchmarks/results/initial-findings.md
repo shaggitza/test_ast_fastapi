@@ -226,6 +226,46 @@ consumer/provider interactions stored in a Pact Broker. A meaningful POC
 requires a broker and version/environment matrix; a local schema fixture would
 not test its actual value.
 
+## SCIP TypeScript blast-radius POC
+
+Executed `@sourcegraph/scip-typescript` 0.4.0, the SCIP CLI 0.9.0, and
+`scip-query` 0.16.0 against the NestJS provider fixture. The fair tuned run
+used multiline TypeScript, a `tsconfig.json`, decorator declarations, a
+baseline Git commit, and a working-tree service change.
+
+For `PricingService.total`, the index contained exact references at the two
+controller call sites. `diff-impact` reported:
+
+- changed file `pricing.service.ts`;
+- changed class and exact `PricingService.total()` method symbols;
+- fan-in of one consumer file;
+- affected consumer `pricing.controller.ts`;
+- no impact on `health.controller.ts`.
+
+`refs` returned the exact lines inside `quote()` and `order()`. SCIP itself did
+not classify their `@Post` decorators or concatenate the controller prefix, and
+`scip-query call-graph` did not emit caller methods for these references.
+
+Scoring depends on product boundary:
+
+- raw SCIP/scip-query endpoint output: **TP=0, FN=2**, because it stops at
+  symbols/files rather than HTTP identities;
+- SCIP evidence plus a small NestJS adapter mapping reference lines to enclosing
+  methods/decorators: **TP=2, FP=0, FN=0**.
+
+This is actual blast-radius evidence, not interface compatibility. It validates
+the proposed HYBRID architecture: compiler-backed, language-agnostic
+references underneath; framework-specific entrypoint classification above.
+It also shows why SCIP alone is not a finished PR impact product.
+
+## Role of contract analyzers
+
+The oasdiff, GraphQL Inspector and Buf results above are **not blast-radius
+scores** and must never be presented as alternatives to the symbol/reference
+engine. They answer a separate question—whether an externally visible contract
+changed—and contribute supplemental evidence only after affected entrypoints
+have been found through code impact analysis.
+
 ## Consequence for the decision
 
 No tested OSS candidate currently justifies dropping this repository. The
