@@ -67,14 +67,31 @@ Findings:
 - therefore it also produced **TP=0, FN=2** on the FastAPI positive case in the
   tested out-of-box workflow.
 
+A fair tuning pass then followed the documented model:
+
+1. extract with `--source-dirs .`;
+2. promote extracted documents under the configured CoDD directory;
+3. change `scan.source_dirs` from the default `src/` to `.` for this flat fixture;
+4. point `scan.doc_dirs` at the promoted design documents;
+5. scan again before applying the change.
+
+After tuning, CoDD produced 7 nodes and 7 edges. The changed `services.py` file
+resolved to `file:services.py`, propagated at depth 1 to the services design,
+and at depth 2 to the main design with confidence 0.90. It therefore correctly
+detected module-level transitive impact after onboarding.
+
+It still did not emit the normalized `POST /quotes` and `POST /orders`
+entrypoint identities, so its endpoint-level benchmark result remains
+**TP=0, FN=2** under our output contract. This is a product-scope mismatch, not
+a claim that its graph is incorrect.
+
 Interpretation:
 
-CoDD's impact graph appears to depend on promoted artifacts/frontmatter and a
-CoDD-managed coherence map. It is not an immediate replacement for semantic
-`diff → runtime entrypoint` analysis on an arbitrary existing repository. It
-may remain useful for requirements/design/test traceability after onboarding,
-but its README claims must not be translated into endpoint-impact claims
-without benchmark evidence.
+CoDD is a credible coherence/design impact layer after extraction, document
+promotion, and scan configuration. It is not an immediate replacement for
+semantic `diff → runtime entrypoint` analysis on an arbitrary repository. It
+may be useful for requirements/design/test traceability, but requires a
+framework-entrypoint adapter before it can satisfy our PR report.
 
 ## Sourcegraph Precise Impact Analysis
 
