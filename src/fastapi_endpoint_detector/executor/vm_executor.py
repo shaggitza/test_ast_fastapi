@@ -140,20 +140,12 @@ class VMExecutor:
         # Prepare volume mounts
         app_abs_path = app_path.resolve()
 
-        volumes = {
-            str(app_abs_path.parent): {
-                'bind': '/code',
-                'mode': 'ro'  # Read-only
-            }
-        }
+        volumes = [(app_abs_path.parent, "/code")]
 
         # Prepare command
         if diff_path:
             diff_abs_path = diff_path.resolve()
-            volumes[str(diff_abs_path.parent)] = {
-                'bind': '/diff',
-                'mode': 'ro'
-            }
+            volumes.append((diff_abs_path.parent, "/diff"))
             cmd = [
                 "analyze",
                 "--app", f"/code/{app_abs_path.name}",
@@ -191,10 +183,8 @@ class VMExecutor:
         docker_cmd.extend(["--security-opt", "no-new-privileges"])
 
         # Add volume mounts
-        for host_path, mount_info in volumes.items():
-            docker_cmd.extend([
-                "-v", f"{host_path}:{mount_info['bind']}:{mount_info['mode']}"
-            ])
+        for host_path, container_path in volumes:
+            docker_cmd.extend(["-v", f"{host_path}:{container_path}:ro"])
 
         # Add image and command
         docker_cmd.append(self.DOCKER_IMAGE)

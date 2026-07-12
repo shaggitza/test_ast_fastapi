@@ -215,8 +215,11 @@ class TestVMExecutor:
         # Check that docker run was called with volume mounts
         docker_run_call = next(call for call in mock_run.call_args_list if "run" in str(call))
         call_args = docker_run_call[0][0]
-        # When both files are in the same directory, only one volume mount is needed
-        assert "-v" in call_args
+        # The app and diff need distinct container mount points even when they
+        # are located in the same host directory.
+        mounts = [call_args[index + 1] for index, arg in enumerate(call_args) if arg == "-v"]
+        assert f"{tmp_path}:/code:ro" in mounts
+        assert f"{tmp_path}:/diff:ro" in mounts
 
     @patch('subprocess.run')
     def test_analyze_in_vm_security_options(self, mock_run: Mock, tmp_path: Path) -> None:
