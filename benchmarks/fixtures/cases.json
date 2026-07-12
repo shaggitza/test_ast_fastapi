@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "fastapi-transitive-service",
+      "language": "python",
+      "framework": "fastapi",
+      "description": "A changed service function affects two HTTP handlers through direct and dependency-injected paths.",
+      "changed_symbols": ["services.calculate_total"],
+      "before": {
+        "services.py": "def calculate_total(price: float, quantity: int) -> float:\n    return price * quantity\n",
+        "main.py": "from fastapi import Depends, FastAPI\nfrom services import calculate_total\napp = FastAPI()\n\ndef quote_service() -> float:\n    return calculate_total(10, 2)\n\n@app.post('/quotes')\ndef quote(total: float = Depends(quote_service)) -> dict:\n    return {'total': total}\n\n@app.post('/orders')\ndef order() -> dict:\n    return {'total': calculate_total(10, 1)}\n\n@app.get('/health')\ndef health() -> dict:\n    return {'ok': True}\n"
+      },
+      "after": {
+        "services.py": "def calculate_total(price: float, quantity: int) -> float:\n    return round(price * quantity, 2)\n",
+        "main.py": "from fastapi import Depends, FastAPI\nfrom services import calculate_total\napp = FastAPI()\n\ndef quote_service() -> float:\n    return calculate_total(10, 2)\n\n@app.post('/quotes')\ndef quote(total: float = Depends(quote_service)) -> dict:\n    return {'total': total}\n\n@app.post('/orders')\ndef order() -> dict:\n    return {'total': calculate_total(10, 1)}\n\n@app.get('/health')\ndef health() -> dict:\n    return {'ok': True}\n"
+      },
+      "expected": {
+        "affected_entrypoints": ["HTTP POST /quotes", "HTTP POST /orders"],
+        "unaffected_entrypoints": ["HTTP GET /health"],
+        "orphans": []
+      }
+    },
+    {
+      "id": "spring-overloaded-service",
+      "language": "java",
+      "framework": "spring",
+      "description": "A changed overloaded service method affects only the controller calling that signature.",
+      "changed_symbols": ["PricingService.calculate(String,int)"],
+      "before": {
+        "PricingService.java": "class PricingService { double calculate(String sku, int qty) { return qty * 10.0; } double calculate(String sku) { return 10.0; } }",
+        "PricingController.java": "@RestController class PricingController { PricingService service; @PostMapping(\"/quotes\") double quote(String sku, int qty) { return service.calculate(sku, qty); } @GetMapping(\"/prices/{sku}\") double price(String sku) { return service.calculate(sku); } }"
+      },
+      "after": {
+        "PricingService.java": "class PricingService { double calculate(String sku, int qty) { return Math.round(qty * 10.0); } double calculate(String sku) { return 10.0; } }",
+        "PricingController.java": "@RestController class PricingController { PricingService service; @PostMapping(\"/quotes\") double quote(String sku, int qty) { return service.calculate(sku, qty); } @GetMapping(\"/prices/{sku}\") double price(String sku) { return service.calculate(sku); } }"
+      },
+      "expected": {
+        "affected_entrypoints": ["HTTP POST /quotes"],
+        "unaffected_entrypoints": ["HTTP GET /prices/{sku}"],
+        "orphans": []
+      }
+    },
+    {
+      "id": "nestjs-provider",
+      "language": "typescript",
+      "framework": "nestjs",
+      "description": "A provider change propagates to two controller methods but not a separate health controller.",
+      "changed_symbols": ["PricingService.total"],
+      "before": {
+        "pricing.service.ts": "@Injectable() export class PricingService { total(qty: number): number { return qty * 10; } }",
+        "pricing.controller.ts": "@Controller('pricing') export class PricingController { constructor(private service: PricingService) {} @Post('quote') quote() { return this.service.total(2); } @Post('order') order() { return this.service.total(1); } }",
+        "health.controller.ts": "@Controller('health') export class HealthController { @Get() health() { return {ok: true}; } }"
+      },
+      "after": {
+        "pricing.service.ts": "@Injectable() export class PricingService { total(qty: number): number { return Math.round(qty * 10); } }",
+        "pricing.controller.ts": "@Controller('pricing') export class PricingController { constructor(private service: PricingService) {} @Post('quote') quote() { return this.service.total(2); } @Post('order') order() { return this.service.total(1); } }",
+        "health.controller.ts": "@Controller('health') export class HealthController { @Get() health() { return {ok: true}; } }"
+      },
+      "expected": {
+        "affected_entrypoints": ["HTTP POST /pricing/quote", "HTTP POST /pricing/order"],
+        "unaffected_entrypoints": ["HTTP GET /health"],
+        "orphans": []
+      }
+    },
+    {
+      "id": "cross-repository-python-sdk",
+      "language": "python",
+      "framework": "fastapi",
+      "description": "A producer SDK signature change affects an HTTP entrypoint in another repository.",
+      "changed_symbols": ["pricing_sdk.Client.quote"],
+      "before": {
+        "producer/pricing_sdk.py": "class Client:\n    def quote(self, sku: str) -> float:\n        return 10.0\n",
+        "consumer/main.py": "from fastapi import FastAPI\nfrom pricing_sdk import Client\napp = FastAPI()\n@app.post('/invoices')\ndef invoice(sku: str) -> dict:\n    return {'price': Client().quote(sku)}\n"
+      },
+      "after": {
+        "producer/pricing_sdk.py": "class Client:\n    def quote(self, sku: str, currency: str) -> float:\n        return 10.0\n",
+        "consumer/main.py": "from fastapi import FastAPI\nfrom pricing_sdk import Client\napp = FastAPI()\n@app.post('/invoices')\ndef invoice(sku: str) -> dict:\n    return {'price': Client().quote(sku)}\n"
+      },
+      "expected": {
+        "affected_entrypoints": ["HTTP POST /invoices"],
+        "cross_repository_consumers": ["consumer:main.invoice"],
+        "orphans": []
+      }
+    },
+    {
+      "id": "orphan-negative-control",
+      "language": "python",
+      "framework": "fastapi",
+      "description": "An unused helper change must not affect the endpoint.",
+      "changed_symbols": ["helpers.unused"],
+      "before": {
+        "helpers.py": "def unused() -> int:\n    return 1\n",
+        "main.py": "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/health')\ndef health() -> dict:\n    return {'ok': True}\n"
+      },
+      "after": {
+        "helpers.py": "def unused() -> int:\n    return 2\n",
+        "main.py": "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/health')\ndef health() -> dict:\n    return {'ok': True}\n"
+      },
+      "expected": {
+        "affected_entrypoints": [],
+        "unaffected_entrypoints": ["HTTP GET /health"],
+        "orphans": ["helpers.unused"]
+      }
+    },
+    {
+      "id": "openapi-breaking-contract",
+      "language": "openapi",
+      "framework": "openapi",
+      "description": "A required response property is removed and must be classified as a contract change.",
+      "changed_symbols": ["GET /users/{id} response User.email"],
+      "before": {
+        "openapi.yaml": "openapi: 3.0.0\npaths:\n  /users/{id}:\n    get:\n      responses:\n        '200':\n          content:\n            application/json:\n              schema:\n                type: object\n                required: [id, email]\n                properties:\n                  id: {type: integer}\n                  email: {type: string}\n"
+      },
+      "after": {
+        "openapi.yaml": "openapi: 3.0.0\npaths:\n  /users/{id}:\n    get:\n      responses:\n        '200':\n          content:\n            application/json:\n              schema:\n                type: object\n                required: [id]\n                properties:\n                  id: {type: integer}\n"
+      },
+      "expected": {
+        "affected_entrypoints": ["HTTP GET /users/{id}"],
+        "contract_changes": ["Removed required response property User.email"],
+        "orphans": []
+      }
+    }
+  ]
+}
