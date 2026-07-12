@@ -1,0 +1,792 @@
+{
+  "schema_version": 1,
+  "warning": "Priority is not impact ground truth; every PR requires review.",
+  "counts": {
+    "high": 26,
+    "low": 19,
+    "medium": 12,
+    "manual_special_handling": 3
+  },
+  "entries": [
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1349,
+      "title": "Upgrade Tests to use pinned Ubuntu, Postgres in CI and work with Pytest 9",
+      "url": "https://github.com/khoj-ai/khoj/pull/1349",
+      "priority": "high",
+      "reasons": [
+        "python_source_changed"
+      ],
+      "changed_files": 4,
+      "changed_lines": 55,
+      "review_status": "pending"
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1348,
+      "title": "Support MiniMax M3 chat model",
+      "url": "https://github.com/khoj-ai/khoj/pull/1348",
+      "priority": "high",
+      "reasons": [
+        "python_source_changed"
+      ],
+      "changed_files": 2,
+      "changed_lines": 4,
+      "review_status": "pending"
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1312,
+      "title": "Update Exa integration with tracking header and current API params",
+      "url": "https://github.com/khoj-ai/khoj/pull/1312",
+      "priority": "high",
+      "reasons": [
+        "python_source_changed"
+      ],
+      "changed_files": 1,
+      "changed_lines": 8,
+      "review_status": "pending"
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1296,
+      "title": "Fix AttributeError when memories disabled and setting is None",
+      "url": "https://github.com/khoj-ai/khoj/pull/1296",
+      "priority": "high",
+      "reasons": [
+        "python_source_changed"
+      ],
+      "changed_files": 1,
+      "changed_lines": 8,
+      "review_status": "pending"
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1292,
+      "title": "Fix UnboundLocalError in PdfToEntries.extract_text when PDF processing fails",
+      "url": "https://github.com/khoj-ai/khoj/pull/1292",
+      "priority": "high",
+      "reasons": [
+        "python_source_changed"
+      ],
+      "changed_files": 1,
+      "changed_lines": 1,
+      "review_status": "pending"
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1284,
+      "title": "Close leaked file handle in orgnode parser",
+      "url": "https://github.com/khoj-ai/khoj/pull/1284",
+      "priority": "high",
+      "reasons": [
+        "python_source_changed"
+      ],
+      "changed_files": 1,
+      "changed_lines": 4,
+      "review_status": "pending"
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1277,
+      "title": "fix: ChatModel.__str__ returns None when friendly_name is null",
+      "url": "https://github.com/khoj-ai/khoj/pull/1277",
+      "priority": "high",
+      "reasons": [
+        "python_source_changed"
+      ],
+      "changed_files": 1,
+      "changed_lines": 2,
+      "review_status": "pending"
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1271,
+      "title": "Fix operator precedence in research iteration counter",
+      "url": "https://github.com/khoj-ai/khoj/pull/1271",
+      "priority": "high",
+      "reasons": [
+        "python_source_changed"
+      ],
+      "changed_files": 1,
+      "changed_lines": 2,
+      "review_status": "pending"
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1269,
+      "title": "Fix extract_from_webpage discarding pre-fetched content",
+      "url": "https://github.com/khoj-ai/khoj/pull/1269",
+      "priority": "high",
+      "reasons": [
+        "python_source_changed"
+      ],
+      "changed_files": 1,
+      "changed_lines": 1,
+      "review_status": "pending"
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1265,
+      "title": "Fix typos: recieved to received, equest to request",
+      "url": "https://github.com/khoj-ai/khoj/pull/1265",
+      "priority": "high",
+      "reasons": [
+        "python_source_changed"
+      ],
+      "changed_files": 1,
+      "changed_lines": 4,
+      "review_status": "pending"
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1238,
+      "title": "Fix AttributeError when Eleven Labs API key is not set",
+      "url": "https://github.com/khoj-ai/khoj/pull/1238",
+      "priority": "high",
+      "reasons": [
+        "python_source_changed"
+      ],
+      "changed_files": 2,
+      "changed_lines": 15,
+      "review_status": "pending"
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1229,
+      "title": "Support using MCP tools in research mode",
+      "url": "https://github.com/khoj-ai/khoj/pull/1229",
+      "priority": "high",
+      "reasons": [
+        "python_source_changed"
+      ],
+      "changed_files": 8,
+      "changed_lines": 404,
+      "review_status": "pending"
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1212,
+      "title": "Drop Server Side Indexer, Native Offline Chat, Old Migration Scripts",
+      "url": "https://github.com/khoj-ai/khoj/pull/1212",
+      "priority": "high",
+      "reasons": [
+        "python_source_changed"
+      ],
+      "changed_files": 55,
+      "changed_lines": 4169,
+      "review_status": "pending"
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1211,
+      "title": "Resolve Pydantic deprecation warnings",
+      "url": "https://github.com/khoj-ai/khoj/pull/1211",
+      "priority": "high",
+      "reasons": [
+        "python_source_changed"
+      ],
+      "changed_files": 1,
+      "changed_lines": 8,
+      "review_status": "pending"
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1207,
+      "title": "Add websocket chat api to ease bi-directional communication",
+      "url": "https://github.com/khoj-ai/khoj/pull/1207",
+      "priority": "high",
+      "reasons": [
+        "python_source_changed"
+      ],
+      "changed_files": 13,
+      "changed_lines": 2009,
+      "review_status": "pending"
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13976,
+      "title": "feat(mcp): persist MCP servers in a database table",
+      "url": "https://github.com/langflow-ai/langflow/pull/13976",
+      "priority": "high",
+      "reasons": [
+        "python_source_changed"
+      ],
+      "changed_files": 11,
+      "changed_lines": 876,
+      "review_status": "pending"
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13968,
+      "title": "feat(exa): update Exa Search to the exa-py SDK and graduate it to the standalone lfx-exa bundle",
+      "url": "https://github.com/langflow-ai/langflow/pull/13968",
+      "priority": "high",
+      "reasons": [
+        "python_source_changed"
+      ],
+      "changed_files": 18,
+      "changed_lines": 946,
+      "review_status": "pending"
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13966,
+      "title": "fix: prevent LangfuseResourceManager deepcopy failure in Agent/Tool Calling Agent",
+      "url": "https://github.com/langflow-ai/langflow/pull/13966",
+      "priority": "high",
+      "reasons": [
+        "python_source_changed"
+      ],
+      "changed_files": 2,
+      "changed_lines": 49,
+      "review_status": "pending"
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13960,
+      "title": "fix: cascade span deletes when clearing traces for a flow",
+      "url": "https://github.com/langflow-ai/langflow/pull/13960",
+      "priority": "high",
+      "reasons": [
+        "python_source_changed"
+      ],
+      "changed_files": 41,
+      "changed_lines": 16280,
+      "review_status": "pending"
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13954,
+      "title": "fix: arxiv timeout in research translation loop",
+      "url": "https://github.com/langflow-ai/langflow/pull/13954",
+      "priority": "high",
+      "reasons": [
+        "python_source_changed"
+      ],
+      "changed_files": 4,
+      "changed_lines": 85,
+      "review_status": "pending"
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13952,
+      "title": "feat(a2a): implement tasks/cancel with a durable terminal state",
+      "url": "https://github.com/langflow-ai/langflow/pull/13952",
+      "priority": "high",
+      "reasons": [
+        "python_source_changed"
+      ],
+      "changed_files": 3,
+      "changed_lines": 294,
+      "review_status": "pending"
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13950,
+      "title": "feat(a2a): add an owner-scoped agent registry endpoint",
+      "url": "https://github.com/langflow-ai/langflow/pull/13950",
+      "priority": "high",
+      "reasons": [
+        "python_source_changed"
+      ],
+      "changed_files": 2,
+      "changed_lines": 59,
+      "review_status": "pending"
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13949,
+      "title": "feat(a2a): set the card protocolVersion explicitly instead of the sdk default",
+      "url": "https://github.com/langflow-ai/langflow/pull/13949",
+      "priority": "high",
+      "reasons": [
+        "python_source_changed"
+      ],
+      "changed_files": 2,
+      "changed_lines": 13,
+      "review_status": "pending"
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26924,
+      "title": "fix: convert SecurityHeadersMiddleware to pure ASGI",
+      "url": "https://github.com/open-webui/open-webui/pull/26924",
+      "priority": "high",
+      "reasons": [
+        "python_source_changed"
+      ],
+      "changed_files": 1,
+      "changed_lines": 32,
+      "review_status": "pending"
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26911,
+      "title": "fix: Milvus multitenancy scalar index creation on Milvus Lite",
+      "url": "https://github.com/open-webui/open-webui/pull/26911",
+      "priority": "high",
+      "reasons": [
+        "python_source_changed"
+      ],
+      "changed_files": 1,
+      "changed_lines": 14,
+      "review_status": "pending"
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26906,
+      "title": "fix: don't mutate caller's payload when resolving a pipe base model",
+      "url": "https://github.com/open-webui/open-webui/pull/26906",
+      "priority": "high",
+      "reasons": [
+        "python_source_changed"
+      ],
+      "changed_files": 1,
+      "changed_lines": 4,
+      "review_status": "pending"
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13996,
+      "title": "ci: add non-blocking flaky test report job with 30-day retention",
+      "url": "https://github.com/langflow-ai/langflow/pull/13996",
+      "priority": "medium",
+      "reasons": [
+        "runtime_or_build_configuration_possible"
+      ],
+      "changed_files": 1,
+      "changed_lines": 45,
+      "review_status": "pending"
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13987,
+      "title": "fix(a11y): make /assets/files accessible",
+      "url": "https://github.com/langflow-ai/langflow/pull/13987",
+      "priority": "medium",
+      "reasons": [
+        "runtime_or_build_configuration_possible"
+      ],
+      "changed_files": 15,
+      "changed_lines": 1249,
+      "review_status": "pending"
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13982,
+      "title": "fix(ci): publish bundle deps before nightly main",
+      "url": "https://github.com/langflow-ai/langflow/pull/13982",
+      "priority": "medium",
+      "reasons": [
+        "runtime_or_build_configuration_possible"
+      ],
+      "changed_files": 1,
+      "changed_lines": 153,
+      "review_status": "pending"
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13971,
+      "title": "chore: upgrade lock files",
+      "url": "https://github.com/langflow-ai/langflow/pull/13971",
+      "priority": "medium",
+      "reasons": [
+        "runtime_or_build_configuration_possible"
+      ],
+      "changed_files": 8,
+      "changed_lines": 8714,
+      "review_status": "pending"
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13953,
+      "title": "fix(a11y): improve API keys tab order",
+      "url": "https://github.com/langflow-ai/langflow/pull/13953",
+      "priority": "medium",
+      "reasons": [
+        "runtime_or_build_configuration_possible"
+      ],
+      "changed_files": 24,
+      "changed_lines": 1438,
+      "review_status": "pending"
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26881,
+      "title": "i18n: Update Japanese language translations",
+      "url": "https://github.com/open-webui/open-webui/pull/26881",
+      "priority": "medium",
+      "reasons": [
+        "runtime_or_build_configuration_possible"
+      ],
+      "changed_files": 1,
+      "changed_lines": 306,
+      "review_status": "pending"
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26463,
+      "title": "i18n: fix Spanish relative time labels",
+      "url": "https://github.com/open-webui/open-webui/pull/26463",
+      "priority": "medium",
+      "reasons": [
+        "runtime_or_build_configuration_possible"
+      ],
+      "changed_files": 1,
+      "changed_lines": 12,
+      "review_status": "pending"
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26409,
+      "title": "i18n: Update and fix Catalan translation.json",
+      "url": "https://github.com/open-webui/open-webui/pull/26409",
+      "priority": "medium",
+      "reasons": [
+        "runtime_or_build_configuration_possible"
+      ],
+      "changed_files": 1,
+      "changed_lines": 478,
+      "review_status": "pending"
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26406,
+      "title": "i18n: translate missing Thai keys",
+      "url": "https://github.com/open-webui/open-webui/pull/26406",
+      "priority": "medium",
+      "reasons": [
+        "runtime_or_build_configuration_possible"
+      ],
+      "changed_files": 1,
+      "changed_lines": 282,
+      "review_status": "pending"
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26391,
+      "title": "i18n: add pt-BR translations for newly added UI items and consistency pass",
+      "url": "https://github.com/open-webui/open-webui/pull/26391",
+      "priority": "medium",
+      "reasons": [
+        "runtime_or_build_configuration_possible"
+      ],
+      "changed_files": 1,
+      "changed_lines": 396,
+      "review_status": "pending"
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26388,
+      "title": "0.10.1",
+      "url": "https://github.com/open-webui/open-webui/pull/26388",
+      "priority": "medium",
+      "reasons": [
+        "runtime_or_build_configuration_possible"
+      ],
+      "changed_files": 4,
+      "changed_lines": 29,
+      "review_status": "pending"
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26386,
+      "title": "Update translation.json",
+      "url": "https://github.com/open-webui/open-webui/pull/26386",
+      "priority": "medium",
+      "reasons": [
+        "runtime_or_build_configuration_possible"
+      ],
+      "changed_files": 1,
+      "changed_lines": 16,
+      "review_status": "pending"
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1319,
+      "title": "Fix contributor guide typos",
+      "url": "https://github.com/khoj-ai/khoj/pull/1319",
+      "priority": "low",
+      "reasons": [
+        "no_python_or_known_contract_file"
+      ],
+      "changed_files": 1,
+      "changed_lines": 6,
+      "review_status": "pending"
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1263,
+      "title": "Remove redundant SDK version check in LauncherActivity of Android app",
+      "url": "https://github.com/khoj-ai/khoj/pull/1263",
+      "priority": "low",
+      "reasons": [
+        "no_python_or_known_contract_file"
+      ],
+      "changed_files": 1,
+      "changed_lines": 7,
+      "review_status": "pending"
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1235,
+      "title": "Enable excluding folders to sync from obsidian plugin settings",
+      "url": "https://github.com/khoj-ai/khoj/pull/1235",
+      "priority": "low",
+      "reasons": [
+        "no_python_or_known_contract_file"
+      ],
+      "changed_files": 2,
+      "changed_lines": 126,
+      "review_status": "pending"
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1221,
+      "title": "Improve Obsidian Batch Sync. Show Progress, Storage Used on Settings Page",
+      "url": "https://github.com/khoj-ai/khoj/pull/1221",
+      "priority": "low",
+      "reasons": [
+        "no_python_or_known_contract_file"
+      ],
+      "changed_files": 3,
+      "changed_lines": 329,
+      "review_status": "pending"
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1216,
+      "title": "Fix to create chat with custom agents from obsidian",
+      "url": "https://github.com/khoj-ai/khoj/pull/1216",
+      "priority": "low",
+      "reasons": [
+        "no_python_or_known_contract_file"
+      ],
+      "changed_files": 1,
+      "changed_lines": 13,
+      "review_status": "pending"
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 14009,
+      "title": "feat(frontend): render the flow share seam in the editor Share dropdown",
+      "url": "https://github.com/langflow-ai/langflow/pull/14009",
+      "priority": "low",
+      "reasons": [
+        "no_python_or_known_contract_file"
+      ],
+      "changed_files": 2,
+      "changed_lines": 12,
+      "review_status": "pending"
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 14004,
+      "title": "fix(frontend): center update toast buttons vertically",
+      "url": "https://github.com/langflow-ai/langflow/pull/14004",
+      "priority": "low",
+      "reasons": [
+        "no_python_or_known_contract_file"
+      ],
+      "changed_files": 1,
+      "changed_lines": 16,
+      "review_status": "pending"
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13995,
+      "title": "fix: thin single focus border on global-variable input",
+      "url": "https://github.com/langflow-ai/langflow/pull/13995",
+      "priority": "low",
+      "reasons": [
+        "no_python_or_known_contract_file"
+      ],
+      "changed_files": 2,
+      "changed_lines": 5,
+      "review_status": "pending"
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13992,
+      "title": "fix(docker): give runtime user a writable npm cache so stdio MCP servers start",
+      "url": "https://github.com/langflow-ai/langflow/pull/13992",
+      "priority": "low",
+      "reasons": [
+        "no_python_or_known_contract_file"
+      ],
+      "changed_files": 3,
+      "changed_lines": 41,
+      "review_status": "pending"
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13975,
+      "title": "fix(frontend): stop flow deletes from clobbering newly created flows",
+      "url": "https://github.com/langflow-ai/langflow/pull/13975",
+      "priority": "low",
+      "reasons": [
+        "no_python_or_known_contract_file"
+      ],
+      "changed_files": 4,
+      "changed_lines": 107,
+      "review_status": "pending"
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13959,
+      "title": "docs: add frontend-i18n agent skill and wire it into frontend-code-review",
+      "url": "https://github.com/langflow-ai/langflow/pull/13959",
+      "priority": "low",
+      "reasons": [
+        "no_python_or_known_contract_file"
+      ],
+      "changed_files": 2,
+      "changed_lines": 63,
+      "review_status": "pending"
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26914,
+      "title": "fix: restore prompt confirmation for sandboxed tool result embeds",
+      "url": "https://github.com/open-webui/open-webui/pull/26914",
+      "priority": "low",
+      "reasons": [
+        "no_python_or_known_contract_file"
+      ],
+      "changed_files": 2,
+      "changed_lines": 32,
+      "review_status": "pending"
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26913,
+      "title": "fix: socket reconnect recovery never runs for chats started from the home page",
+      "url": "https://github.com/open-webui/open-webui/pull/26913",
+      "priority": "low",
+      "reasons": [
+        "no_python_or_known_contract_file"
+      ],
+      "changed_files": 1,
+      "changed_lines": 8,
+      "review_status": "pending"
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26907,
+      "title": "fix: gate allow-same-origin on the terminal file-preview iframe to prevent same-origin XSS",
+      "url": "https://github.com/open-webui/open-webui/pull/26907",
+      "priority": "low",
+      "reasons": [
+        "no_python_or_known_contract_file"
+      ],
+      "changed_files": 1,
+      "changed_lines": 5,
+      "review_status": "pending"
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26641,
+      "title": "Update CHANGELOG.md",
+      "url": "https://github.com/open-webui/open-webui/pull/26641",
+      "priority": "low",
+      "reasons": [
+        "no_python_or_known_contract_file"
+      ],
+      "changed_files": 1,
+      "changed_lines": 41,
+      "review_status": "pending"
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26625,
+      "title": "fix: use absolute indexURL for pyodide sandbox",
+      "url": "https://github.com/open-webui/open-webui/pull/26625",
+      "priority": "low",
+      "reasons": [
+        "no_python_or_known_contract_file"
+      ],
+      "changed_files": 1,
+      "changed_lines": 77,
+      "review_status": "pending"
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26454,
+      "title": "fix: use updated_at for sidebar chat timestamp",
+      "url": "https://github.com/open-webui/open-webui/pull/26454",
+      "priority": "low",
+      "reasons": [
+        "no_python_or_known_contract_file"
+      ],
+      "changed_files": 1,
+      "changed_lines": 4,
+      "review_status": "pending"
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26405,
+      "title": "fix: derive content from output for search",
+      "url": "https://github.com/open-webui/open-webui/pull/26405",
+      "priority": "low",
+      "reasons": [
+        "no_python_or_known_contract_file"
+      ],
+      "changed_files": 1,
+      "changed_lines": 1,
+      "review_status": "pending"
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26384,
+      "title": "fix: pinned note sidebar drag-and-drop into chat context",
+      "url": "https://github.com/open-webui/open-webui/pull/26384",
+      "priority": "low",
+      "reasons": [
+        "no_python_or_known_contract_file"
+      ],
+      "changed_files": 1,
+      "changed_lines": 20,
+      "review_status": "pending"
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13985,
+      "title": "merge: sync release-1.11.0 into cz/hitl-v2",
+      "url": "https://github.com/langflow-ai/langflow/pull/13985",
+      "priority": "manual_special_handling",
+      "reasons": [
+        "aggregate_or_oversized_change"
+      ],
+      "changed_files": 1514,
+      "changed_lines": 323933,
+      "review_status": "pending"
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26642,
+      "title": "0.10.2",
+      "url": "https://github.com/open-webui/open-webui/pull/26642",
+      "priority": "manual_special_handling",
+      "reasons": [
+        "aggregate_or_oversized_change"
+      ],
+      "changed_files": 107,
+      "changed_lines": 2723,
+      "review_status": "pending"
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26385,
+      "title": "0.10.0",
+      "url": "https://github.com/open-webui/open-webui/pull/26385",
+      "priority": "manual_special_handling",
+      "reasons": [
+        "aggregate_or_oversized_change"
+      ],
+      "changed_files": 352,
+      "changed_lines": 56940,
+      "review_status": "pending"
+    }
+  ]
+}

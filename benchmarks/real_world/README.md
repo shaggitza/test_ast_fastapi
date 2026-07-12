@@ -24,6 +24,8 @@ frozen benchmark used in a published comparison.
 
 ## Ground-truth protocol
 
+Reviews may be committed incrementally. A review file is incomplete until it has one validated record for every corpus PR; partial files must never be passed off as a benchmark score.
+
 An LLM opinion is not ground truth by itself. Each PR is reviewed independently
 by two agents and adjudicated by a human or a third agent with access to both
 reviews.
