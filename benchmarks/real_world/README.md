@@ -1,0 +1,119 @@
+# Real-world FastAPI PR benchmark
+
+This benchmark tests whether an impact analyzer works on changes made by real
+projects, rather than only on fixtures designed for the analyzer.
+
+## Corpus
+
+`repos.json` selects three popular but architecturally different FastAPI
+applications. `collect_prs.py` records the latest 20 merged PRs from each
+repository without filtering by size, author, or perceived relevance. This
+produces 60 PRs and avoids cherry-picking easy examples.
+
+The committed `corpus.json` freezes:
+
+- repository and PR identity;
+- base/head/merge commit identity;
+- changed files and line counts;
+- PR description and diff URL;
+- ground-truth review state.
+
+Third-party source and patches are fetched on demand and are not vendored.
+Re-running the collector creates a new corpus; it must not silently replace the
+frozen benchmark used in a published comparison.
+
+## Ground-truth protocol
+
+An LLM opinion is not ground truth by itself. Each PR is reviewed independently
+by two agents and adjudicated by a human or a third agent with access to both
+reviews.
+
+Reviewers must inspect the diff **and the base revision**, tracing changed
+symbols in both directions. They must not see analyzer predictions.
+
+Each review records:
+
+```json
+{
+  "repository": "owner/repo",
+  "pr": 123,
+  "reviewer": {"kind": "agent|human", "name": "...", "version": "..."},
+  "changed_symbols": ["module.symbol"],
+  "affected_entrypoints": [
+    {
+      "id": "HTTP POST /api/items",
+      "kind": "http|graphql|task|event|cli|cron|sdk|other",
+      "confidence": "confirmed|probable|possible",
+      "evidence": ["file.py:10 symbol_a -> file.py:30 handler"]
+    }
+  ],
+  "affected_tests": ["tests/test_items.py::test_create"],
+  "contract_changes": [],
+  "cross_repository_consumers": [],
+  "orphans": ["file.py:50-53"],
+  "unknowns": ["dynamic registration cannot be resolved statically"],
+  "notes": "..."
+}
+```
+
+Rules:
+
+1. `confirmed` requires a source-level path or direct entrypoint modification.
+2. `probable` requires a dependency relation with unresolved dynamic behavior.
+3. `possible` is reported separately and is not counted as positive ground
+   truth until adjudication.
+4. Missing evidence must be an `unknown`, never silently interpreted as no
+   impact.
+5. Docs-only and CI-only PRs remain in the corpus as negative controls.
+6. Large or generated PRs may be marked `not_evaluable`, with a reason; they
+   remain visible in coverage reporting.
+7. Agent model, version, prompt hash, date, and token/tool constraints are
+   recorded to make agent-assisted labeling auditable.
+
+### Independence and leakage controls
+
+- Review A and Review B run in separate contexts.
+- Neither reviewer receives predictions from this project or a vendor.
+- Repository popularity, PR title, and description may be used, but comments
+  posted after merge are excluded from evidence.
+- Adjudication sees both reviews and resolves disagreements entrypoint by
+  entrypoint.
+- Inter-reviewer agreement is reported before adjudication (exact-set Jaccard
+  and per-entrypoint agreement).
+
+## Running an analyzer
+
+Every candidate emits the same prediction schema as the adjudicated labels,
+plus runtime metadata:
+
+```json
+{
+  "repository": "owner/repo",
+  "pr": 123,
+  "candidate": "name/version/config-hash",
+  "affected_entrypoints": [{"id": "HTTP POST /api/items", "evidence": []}],
+  "unresolved": [],
+  "index_seconds": 0.0,
+  "incremental_seconds": 0.0
+}
+```
+
+Use `evaluate.py` to compare predictions. Primary metrics are micro/macro recall,
+precision, F1, unresolved rate, evaluable coverage, and latency. A candidate
+cannot improve its score by omitting hard PRs.
+
+## Reproduction
+
+```bash
+python benchmarks/real_world/collect_prs.py
+python benchmarks/real_world/evaluate.py \
+  --ground-truth benchmarks/real_world/adjudicated.jsonl \
+  --predictions path/to/predictions.jsonl
+```
+
+## Important limitation
+
+The corpus metadata is ready, but labels are intentionally not fabricated.
+Calling agent-generated labels “manual ground truth” without independent review
+and adjudication would bias the comparison. Label completion is tracked as part
+of the benchmark milestone.

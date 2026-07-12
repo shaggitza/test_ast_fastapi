@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "prs_per_repository": 20,
+  "repositories": [
+    {
+      "name": "open-webui/open-webui",
+      "reason": "Large production FastAPI application with routers, services, background work, and a substantial contributor base."
+    },
+    {
+      "name": "langflow-ai/langflow",
+      "reason": "Large Python/FastAPI application with complex service and component boundaries."
+    },
+    {
+      "name": "khoj-ai/khoj",
+      "reason": "Production AI application exposing FastAPI APIs and integrations with a different architecture and scale."
+    }
+  ]
+}
