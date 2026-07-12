@@ -6,14 +6,13 @@ Models representing parsed diff files and changes.
 
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
 from pydantic import BaseModel, Field
 
 
 class ChangeType(str, Enum):
     """Type of file change in a diff."""
-    
+
     ADDED = "added"
     MODIFIED = "modified"
     DELETED = "deleted"
@@ -22,7 +21,7 @@ class ChangeType(str, Enum):
 
 class DiffHunk(BaseModel):
     """Represents a hunk (section of changes) in a diff."""
-    
+
     source_start: int = Field(description="Starting line in source file")
     source_length: int = Field(description="Number of lines in source")
     target_start: int = Field(description="Starting line in target file")
@@ -35,17 +34,17 @@ class DiffHunk(BaseModel):
         default_factory=list,
         description="Line numbers of removed lines (in source)",
     )
-    
+
     class Config:
         frozen = True
 
 
 class DiffFile(BaseModel):
     """Represents a single file in a diff."""
-    
+
     path: Path = Field(description="Path to the file")
     change_type: ChangeType = Field(description="Type of change")
-    source_path: Optional[Path] = Field(
+    source_path: Path | None = Field(
         default=None,
         description="Original path (for renames)",
     )
@@ -55,15 +54,15 @@ class DiffFile(BaseModel):
     )
     added_lines: int = Field(default=0, description="Total lines added")
     removed_lines: int = Field(default=0, description="Total lines removed")
-    
+
     class Config:
         frozen = True
-    
+
     @property
     def is_python_file(self) -> bool:
         """Check if this is a Python file."""
         return self.path.suffix == ".py"
-    
+
     def get_affected_line_ranges(self) -> list[tuple[int, int]]:
         """Get list of (start, end) line ranges affected by changes."""
         ranges: list[tuple[int, int]] = []
@@ -79,12 +78,12 @@ class DiffFile(BaseModel):
 
 class FileChange(BaseModel):
     """Aggregated information about changes in a file."""
-    
+
     file: DiffFile = Field(description="The diff file information")
     affected_modules: list[str] = Field(
         default_factory=list,
         description="Module names affected by this change",
     )
-    
+
     class Config:
         frozen = True

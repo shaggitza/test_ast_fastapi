@@ -3,7 +3,6 @@ Pytest configuration and shared fixtures.
 """
 
 from pathlib import Path
-from typing import Generator
 
 import pytest
 
@@ -48,7 +47,7 @@ index 1234567..abcdefg 100644
 @@ -10,6 +10,10 @@ def get_user(user_id: int) -> User:
      user = db.query(User).filter(User.id == user_id).first()
      return user
- 
+
 +def get_user_by_email(email: str) -> User:
 +    user = db.query(User).filter(User.email == email).first()
 +    return user
