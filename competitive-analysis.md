@@ -71,7 +71,9 @@ Aceste produse răspund în primul rând la „ce construim/testăm?”, nu la �
 | Call-graph test selection | Harness Test Intelligence | Candidat comercial relevant deoarece justifică selecția testelor prin dependențe |
 | Predictive selection | Develocity, CloudBees/Launchable | Optimizează timpul de CI, dar nu oferă evidence graph determinist complet |
 
-### 3.3 Contract impact
+### 3.3 Contract impact (semnal suplimentar, nu blast radius)
+
+Aceste instrumente nu calculează propagarea schimbărilor prin cod și nu sunt competitori pentru motorul de impact. Ele răspund doar dacă s-a schimbat contractul public al unui entrypoint deja identificat. Nu trebuie să le acordăm TP/FP/FN în scorecard-ul de blast radius; rezultatele lor se măsoară într-un scorecard separat de contract compatibility.
 
 Nu trebuie să reimplementăm analizatoare mature de contracte:
 

@@ -48,14 +48,14 @@
       "description": "A provider change propagates to two controller methods but not a separate health controller.",
       "changed_symbols": ["PricingService.total"],
       "before": {
-        "pricing.service.ts": "@Injectable() export class PricingService { total(qty: number): number { return qty * 10; } }",
-        "pricing.controller.ts": "@Controller('pricing') export class PricingController { constructor(private service: PricingService) {} @Post('quote') quote() { return this.service.total(2); } @Post('order') order() { return this.service.total(1); } }",
-        "health.controller.ts": "@Controller('health') export class HealthController { @Get() health() { return {ok: true}; } }"
+        "pricing.service.ts": "@Injectable()\nexport class PricingService {\n  total(qty: number): number {\n    return qty * 10;\n  }\n}\n",
+        "pricing.controller.ts": "@Controller('pricing')\nexport class PricingController {\n  constructor(private service: PricingService) {}\n\n  @Post('quote')\n  quote() {\n    return this.service.total(2);\n  }\n\n  @Post('order')\n  order() {\n    return this.service.total(1);\n  }\n}\n",
+        "health.controller.ts": "@Controller('health')\nexport class HealthController {\n  @Get()\n  health() {\n    return {ok: true};\n  }\n}\n"
       },
       "after": {
-        "pricing.service.ts": "@Injectable() export class PricingService { total(qty: number): number { return Math.round(qty * 10); } }",
-        "pricing.controller.ts": "@Controller('pricing') export class PricingController { constructor(private service: PricingService) {} @Post('quote') quote() { return this.service.total(2); } @Post('order') order() { return this.service.total(1); } }",
-        "health.controller.ts": "@Controller('health') export class HealthController { @Get() health() { return {ok: true}; } }"
+        "pricing.service.ts": "@Injectable()\nexport class PricingService {\n  total(qty: number): number {\n    return Math.round(qty * 10);\n  }\n}\n",
+        "pricing.controller.ts": "@Controller('pricing')\nexport class PricingController {\n  constructor(private service: PricingService) {}\n\n  @Post('quote')\n  quote() {\n    return this.service.total(2);\n  }\n\n  @Post('order')\n  order() {\n    return this.service.total(1);\n  }\n}\n",
+        "health.controller.ts": "@Controller('health')\nexport class HealthController {\n  @Get()\n  health() {\n    return {ok: true};\n  }\n}\n"
       },
       "expected": {
         "affected_entrypoints": ["HTTP POST /pricing/quote", "HTTP POST /pricing/order"],
