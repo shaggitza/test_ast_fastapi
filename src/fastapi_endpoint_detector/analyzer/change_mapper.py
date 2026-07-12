@@ -36,13 +36,13 @@ class ChangeMapperError(Exception):
 class ChangeMapper:
     """
     Map code changes to affected FastAPI endpoints.
-    
+
     This is the main orchestration class that:
     1. Extracts endpoints from a FastAPI app
     2. Analyzes dependencies using mypy
     3. Parses diff files
     4. Determines which endpoints are affected
-    
+
     Uses mypy for type-aware, precise dependency tracking.
     """
 
@@ -55,7 +55,7 @@ class ChangeMapper:
     ) -> None:
         """
         Initialize the change mapper.
-        
+
         Args:
             app_path: Path to the FastAPI application.
             config: Optional configuration object.
@@ -118,13 +118,13 @@ class ChangeMapper:
     ) -> AffectedEndpoint | None:
         """
         Check if a diff directly modifies an endpoint's handler.
-        
+
         Args:
             endpoint: The endpoint to check.
             diff_file: The diff file.
             added_lines: Lines added in the diff.
             removed_lines: Lines removed in the diff.
-            
+
         Returns:
             AffectedEndpoint if directly affected, None otherwise.
         """
@@ -155,15 +155,15 @@ class ChangeMapper:
     ) -> AffectedEndpoint | None:
         """
         Check if an endpoint's dependencies (via mypy analysis) intersect with changes.
-        
+
         Uses mypy-style type analysis to determine actual code dependencies.
-        
+
         Args:
             endpoint: The endpoint to check.
             diff_file: The diff file.
             added_lines: Lines added in the diff.
             removed_lines: Lines removed in the diff.
-            
+
         Returns:
             AffectedEndpoint if dependencies intersect, None otherwise.
         """
@@ -196,10 +196,10 @@ class ChangeMapper:
             # Get call stacks for traceback-style output - all paths
             all_call_stacks: list[list[CallStackFrame]] = []
             raw_stacks = deps.get_call_stack(file_path)
-            
+
             for raw_stack in raw_stacks:
                 call_stack: list[CallStackFrame] = []
-                
+
                 # Add a marker frame at the beginning to show where this trace originates from
                 call_stack.append(CallStackFrame(
                     file_path=endpoint.handler.file_path or "",
@@ -207,7 +207,7 @@ class ChangeMapper:
                     function_name=f"[ENDPOINT] {endpoint.identifier}",
                     code_context=f"Handler: {endpoint.handler.name}",
                 ))
-                
+
                 # Add the actual call stack frames
                 for frame in raw_stack:
                     call_stack.append(CallStackFrame(
@@ -284,7 +284,7 @@ class ChangeMapper:
                                 function_name=function_name,
                                 code_context=code_context,
                             ))
-                
+
                 # Add this completed call stack to the list
                 all_call_stacks.append(call_stack)
 
@@ -305,12 +305,12 @@ class ChangeMapper:
     ) -> list[AffectedEndpoint]:
         """
         Analyze a single diff file and find affected endpoints.
-        
+
         Uses mypy for type-aware dependency analysis.
-        
+
         Args:
             diff_file: The parsed diff file.
-            
+
         Returns:
             List of affected endpoints from this file.
         """
@@ -353,12 +353,12 @@ class ChangeMapper:
     ) -> AnalysisReport:
         """
         Analyze a diff and generate a report of affected endpoints.
-        
+
         Args:
             diff_source: Path to diff file or diff content string.
             progress_callback: Optional callback for progress updates.
                               Called with (current, total, description).
-            
+
         Returns:
             AnalysisReport with all affected endpoints.
         """

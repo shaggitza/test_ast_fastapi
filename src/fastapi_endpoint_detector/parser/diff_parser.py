@@ -24,7 +24,7 @@ class DiffParserError(Exception):
 class DiffParser:
     """
     Parse unified diff files using the unidiff library.
-    
+
     Supports parsing from files, strings, or stdin.
     """
 
@@ -32,10 +32,10 @@ class DiffParser:
     def _determine_change_type(patched_file: PatchedFile) -> ChangeType:
         """
         Determine the type of change for a patched file.
-        
+
         Args:
             patched_file: A PatchedFile from unidiff.
-            
+
         Returns:
             The ChangeType for this file.
         """
@@ -52,10 +52,10 @@ class DiffParser:
     def _parse_hunk(hunk: "unidiff.Hunk") -> DiffHunk:  # type: ignore[name-defined]
         """
         Parse a unidiff Hunk into our DiffHunk model.
-        
+
         Args:
             hunk: A Hunk from unidiff.
-            
+
         Returns:
             DiffHunk with line information.
         """
@@ -91,10 +91,10 @@ class DiffParser:
     def _parse_patched_file(patched_file: PatchedFile) -> DiffFile:
         """
         Parse a PatchedFile into our DiffFile model.
-        
+
         Args:
             patched_file: A PatchedFile from unidiff.
-            
+
         Returns:
             DiffFile with all hunk information.
         """
@@ -127,14 +127,14 @@ class DiffParser:
     def parse_file(cls, diff_path: Path, encoding: str = "utf-8") -> list[DiffFile]:
         """
         Parse a diff file.
-        
+
         Args:
             diff_path: Path to the diff file.
             encoding: File encoding (default: utf-8).
-            
+
         Returns:
             List of DiffFile objects.
-            
+
         Raises:
             DiffParserError: If parsing fails.
         """
@@ -148,13 +148,13 @@ class DiffParser:
     def parse_string(cls, diff_content: str) -> list[DiffFile]:
         """
         Parse diff content from a string.
-        
+
         Args:
             diff_content: The diff content as a string.
-            
+
         Returns:
             List of DiffFile objects.
-            
+
         Raises:
             DiffParserError: If parsing fails.
         """
@@ -168,10 +168,10 @@ class DiffParser:
     def parse(cls, source: Path | str) -> list[DiffFile]:
         """
         Parse diff from a file path or string.
-        
+
         Args:
             source: Either a Path to a diff file or diff content as string.
-            
+
         Returns:
             List of DiffFile objects.
         """
@@ -191,10 +191,10 @@ class DiffParser:
     def get_python_files(cls, diff_files: list[DiffFile]) -> list[DiffFile]:
         """
         Filter diff files to only Python files.
-        
+
         Args:
             diff_files: List of DiffFile objects.
-            
+
         Returns:
             List of DiffFile objects that are Python files.
         """
@@ -207,10 +207,10 @@ class DiffParser:
     ) -> tuple[list[int], list[int]]:
         """
         Get all changed line numbers from a diff file.
-        
+
         Args:
             diff_file: A DiffFile object.
-            
+
         Returns:
             Tuple of (added_lines, removed_lines).
         """

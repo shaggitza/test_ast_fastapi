@@ -130,7 +130,7 @@ class EndpointDependencies:
 
     def get_call_stack(self, file_path: str) -> list[list[CallFrame]]:
         """Get all call stacks showing how the handler reaches a specific file.
-        
+
         Returns a list of call stacks (each call stack is a list of CallFrame).
         Multiple call stacks indicate different paths to reach the same file.
         """
@@ -152,7 +152,7 @@ class EndpointDependencies:
 class MypyAnalyzer:
     """
     Analyze endpoint dependencies using mypy's type system.
-    
+
     Uses mypy's build API with proper configuration to get typed ASTs
     and extract precise file/line information for all references.
     """
@@ -271,7 +271,7 @@ class MypyAnalyzer:
     def _find_func_in_tree(self, tree: Any, func_name: str) -> tuple[Any, str] | None:
         """
         Find a function/method definition in a mypy AST.
-        
+
         Returns (func_node, qualified_name) or None.
         Note: Returns the Decorator node if the function is decorated, otherwise FuncDef.
         """
@@ -311,7 +311,7 @@ class MypyAnalyzer:
     def _resolve_fullname_to_file(self, fullname: str) -> tuple[str, str] | None:
         """
         Try to resolve a fullname to (file_path, module_name).
-        
+
         Returns None if not found in our project.
         """
         parts = fullname.split('.')
@@ -461,9 +461,9 @@ class MypyAnalyzer:
     ) -> None:
         """
         Trace all references in a mypy AST node.
-        
+
         Uses mypy's types map to resolve method calls when type info is available.
-        
+
         Args:
             import_map: Maps local names to their actual fullnames from imports
         """

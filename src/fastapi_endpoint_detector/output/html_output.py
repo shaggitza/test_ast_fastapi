@@ -107,13 +107,13 @@ class HtmlFormatter(BaseFormatter):
     def _parse_line_range(self, code_context: str | None) -> tuple[int, int] | None:
         """
         Parse line range from code_context field.
-        
+
         The code_context field may contain a '[lines X-Y]' prefix when
         consecutive lines are grouped together in call stack frames.
-        
+
         Args:
             code_context: The code context string that may contain range notation.
-            
+
         Returns:
             Tuple of (start_line, end_line) if range found, None otherwise.
         """
@@ -134,13 +134,13 @@ class HtmlFormatter(BaseFormatter):
     ) -> str:
         """
         Format a call stack frame label.
-        
+
         Args:
             file_path: Path to the file.
             start_line: Starting line number.
             end_line: Optional ending line number for ranges.
             function_name: Name of the function.
-            
+
         Returns:
             Formatted frame label string.
         """
@@ -607,12 +607,12 @@ class HtmlFormatter(BaseFormatter):
                     if ae.call_stacks:
                         content_lines.append('<div class="call-stack">')
                         content_lines.append("<strong>Call Stack:</strong><br>")
-                        
+
                         for stack_idx, call_stack in enumerate(ae.call_stacks, 1):
                             # Header for multiple paths
                             if len(ae.call_stacks) > 1:
                                 content_lines.append(f"<div class='stack-path'><em>Path {stack_idx} of {len(ae.call_stacks)}:</em></div>")
-                            
+
                             for frame in call_stack:
                                 # Extract line range from code_context if present
                                 # Code context uses '[lines X-Y]' notation for grouped consecutive lines
@@ -638,11 +638,11 @@ class HtmlFormatter(BaseFormatter):
                                     end_line,
                                 )
                                 content_lines.append(f"{frame_ref}<br>")
-                            
+
                             # Add spacing between paths
                             if stack_idx < len(ae.call_stacks):
                                 content_lines.append("<br>")
-                        
+
                         content_lines.append("</div>")
 
                     content_lines.append("</div>")  # end endpoint-card

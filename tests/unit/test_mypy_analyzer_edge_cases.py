@@ -412,7 +412,7 @@ def handler():
     # Import inside function body
     from utils import helper
     from late_import import late_function
-    
+
     result = helper()
     result2 = late_function()
     return result + result2
@@ -422,7 +422,7 @@ def handler():
 
     def test_imports_in_function_body_traced(self, dynamic_import_project: Path) -> None:
         """Test that imports inside function bodies are handled.
-        
+
         Note: This is a known limitation - mypy doesn't fully resolve imports
         inside function bodies because they're not at module scope. The type
         information for such imports is often 'Any', which limits our ability

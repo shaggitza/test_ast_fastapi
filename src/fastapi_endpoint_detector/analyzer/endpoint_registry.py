@@ -11,7 +11,7 @@ from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod
 class EndpointRegistry:
     """
     Registry for storing and querying FastAPI endpoints.
-    
+
     Provides efficient lookups by path, file, method, etc.
     """
 
@@ -25,7 +25,7 @@ class EndpointRegistry:
     def register(self, endpoint: Endpoint) -> None:
         """
         Register an endpoint in the registry.
-        
+
         Args:
             endpoint: The endpoint to register.
         """
@@ -51,7 +51,7 @@ class EndpointRegistry:
     def register_many(self, endpoints: list[Endpoint]) -> None:
         """
         Register multiple endpoints.
-        
+
         Args:
             endpoints: List of endpoints to register.
         """
@@ -65,10 +65,10 @@ class EndpointRegistry:
     def get_by_path(self, path: str) -> list[Endpoint]:
         """
         Get endpoints by URL path.
-        
+
         Args:
             path: The URL path to search for.
-            
+
         Returns:
             List of endpoints with the given path.
         """
@@ -77,10 +77,10 @@ class EndpointRegistry:
     def get_by_file(self, file_path: Path | str) -> list[Endpoint]:
         """
         Get endpoints defined in a specific file.
-        
+
         Args:
             file_path: Path to the file (can be relative or absolute).
-            
+
         Returns:
             List of endpoints defined in that file.
         """
@@ -115,10 +115,10 @@ class EndpointRegistry:
     def get_by_module(self, module: str) -> list[Endpoint]:
         """
         Get endpoints defined in a specific module.
-        
+
         Args:
             module: The module name.
-            
+
         Returns:
             List of endpoints defined in that module.
         """
@@ -127,10 +127,10 @@ class EndpointRegistry:
     def get_by_method(self, method: EndpointMethod) -> list[Endpoint]:
         """
         Get endpoints by HTTP method.
-        
+
         Args:
             method: The HTTP method.
-            
+
         Returns:
             List of endpoints supporting that method.
         """
@@ -139,10 +139,10 @@ class EndpointRegistry:
     def get_by_tag(self, tag: str) -> list[Endpoint]:
         """
         Get endpoints by OpenAPI tag.
-        
+
         Args:
             tag: The tag to search for.
-            
+
         Returns:
             List of endpoints with that tag.
         """
@@ -156,12 +156,12 @@ class EndpointRegistry:
     ) -> list[Endpoint]:
         """
         Get endpoints whose handlers overlap with a line range.
-        
+
         Args:
             file_path: Path to the file.
             start_line: Start of the line range.
             end_line: End of the line range.
-            
+
         Returns:
             List of endpoints whose handlers are in the line range.
         """
@@ -181,10 +181,10 @@ class EndpointRegistry:
     def find_endpoints_using_dependency(self, dependency_name: str) -> list[Endpoint]:
         """
         Find endpoints that use a specific Depends() dependency.
-        
+
         Args:
             dependency_name: Name of the dependency function.
-            
+
         Returns:
             List of endpoints using that dependency.
         """

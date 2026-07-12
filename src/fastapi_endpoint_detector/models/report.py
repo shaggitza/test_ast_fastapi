@@ -86,13 +86,13 @@ class AffectedEndpoint(BaseModel):
 
     def format_traceback(self) -> str:
         """Format all call stacks like Python tracebacks.
-        
+
         If there are multiple call stacks (multiple paths to reach the same dependency),
         each one is shown separately with a header indicating which path it is.
         """
         if not self.call_stacks:
             return ""
-        
+
         results = []
         for i, call_stack in enumerate(self.call_stacks, 1):
             if len(self.call_stacks) > 1:
@@ -101,14 +101,14 @@ class AffectedEndpoint(BaseModel):
             else:
                 # Single path
                 results.append("Traceback (dependency chain):")
-            
+
             for frame in call_stack:
                 results.append(frame.format_traceback())
-            
+
             # Add spacing between multiple tracebacks
             if i < len(self.call_stacks):
                 results.append("")
-        
+
         return "\n".join(results)
 
 

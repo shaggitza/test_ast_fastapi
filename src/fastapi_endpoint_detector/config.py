@@ -102,13 +102,13 @@ class Config(BaseModel):
 def load_config(config_path: Path | None = None) -> Config:
     """
     Load configuration from a YAML file.
-    
+
     Args:
         config_path: Path to the configuration file. If None, returns defaults.
-        
+
     Returns:
         Config object with loaded or default values.
-        
+
     Raises:
         FileNotFoundError: If the specified config file doesn't exist.
         ValueError: If the config file is invalid.
@@ -132,13 +132,13 @@ def load_config(config_path: Path | None = None) -> Config:
 def find_config_file(start_path: Path) -> Path | None:
     """
     Search for a configuration file starting from the given path.
-    
+
     Searches for `.endpoint-detector.yaml` or `.endpoint-detector.yml`
     in the start path and parent directories.
-    
+
     Args:
         start_path: Directory to start searching from.
-        
+
     Returns:
         Path to the config file if found, None otherwise.
     """

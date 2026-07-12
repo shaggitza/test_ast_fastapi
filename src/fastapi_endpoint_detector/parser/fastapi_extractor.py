@@ -28,7 +28,7 @@ class FastAPIExtractorError(Exception):
 class FastAPIExtractor:
     """
     Extract endpoints from a FastAPI application using runtime introspection.
-    
+
     This approach uses FastAPI's app.routes to get all registered endpoints,
     then uses Python's inspect module to determine handler file locations.
     """
@@ -41,7 +41,7 @@ class FastAPIExtractor:
     ) -> None:
         """
         Initialize the extractor.
-        
+
         Args:
             app_path: Path to the FastAPI application file or directory.
             app_variable: Name of the FastAPI app variable (default: "app").
@@ -76,10 +76,10 @@ class FastAPIExtractor:
     def _load_app(self) -> Any:
         """
         Dynamically load the FastAPI application.
-        
+
         Returns:
             The FastAPI application instance.
-            
+
         Raises:
             FastAPIExtractorError: If the app cannot be loaded.
         """
@@ -127,10 +127,10 @@ class FastAPIExtractor:
     def _get_handler_info(self, handler: Callable[..., Any]) -> HandlerInfo:
         """
         Extract information about a route handler function.
-        
+
         Args:
             handler: The route handler function.
-            
+
         Returns:
             HandlerInfo with file path and line numbers.
         """
@@ -170,10 +170,10 @@ class FastAPIExtractor:
     def _extract_dependencies(self, route: Any) -> list[str]:
         """
         Extract FastAPI Depends() dependencies from a route.
-        
+
         Args:
             route: A FastAPI route object.
-            
+
         Returns:
             List of dependency function names.
         """
@@ -209,10 +209,10 @@ class FastAPIExtractor:
     def extract_endpoints(self) -> list[Endpoint]:
         """
         Extract all endpoints from the FastAPI application.
-        
+
         Returns:
             List of Endpoint objects representing all routes.
-            
+
         Raises:
             FastAPIExtractorError: If extraction fails.
         """
@@ -268,7 +268,7 @@ class FastAPIExtractor:
     def get_endpoint_handler_files(self) -> dict[Path, list[Endpoint]]:
         """
         Group endpoints by their handler file.
-        
+
         Returns:
             Dictionary mapping file paths to endpoints defined in that file.
         """

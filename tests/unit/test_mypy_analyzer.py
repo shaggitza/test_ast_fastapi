@@ -175,7 +175,7 @@ class TestMypyAnalyzerLineProgress:
 class UserService:
     def get_user(self, user_id: int):
         return {"id": user_id, "name": "Test"}
-    
+
     def list_users(self):
         return [self.get_user(1), self.get_user(2)]
 """)
