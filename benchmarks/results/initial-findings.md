@@ -165,6 +165,29 @@ Caveats observed during execution:
 JCCI is therefore a useful reference implementation or Java adapter candidate,
 not a polyglot foundation.
 
+## oasdiff 1.23.0
+
+Downloaded the official Linux ARM64 release and ran `oasdiff breaking` against
+the controlled `openapi-breaking-contract` fixture.
+
+Observed JSON:
+
+- rule: `response-required-property-removed`;
+- operation: `GET`;
+- path: `/users/{id}`;
+- message: removed required response property `email` from status `200`;
+- severity level: 3;
+- exact source location in the baseline OpenAPI document;
+- stable fingerprint.
+
+Normalized result: **TP=1, FP=0, FN=0** for both affected entrypoint and
+contract change. No tuning beyond selecting the correct architecture binary was
+required.
+
+This strongly supports integration rather than reimplementation for OpenAPI
+contract compatibility. oasdiff does not trace internal code impact; its JSON
+should be attached to the shared evidence graph and PR report.
+
 ## Consequence for the decision
 
 No tested OSS candidate currently justifies dropping this repository. The
