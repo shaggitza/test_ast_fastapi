@@ -131,10 +131,39 @@ As observed on 2026-07-12:
   traverses impacted classes/methods toward controllers;
 - supports dependent projects according to its documentation.
 
-JCCI is a relevant Java/Spring comparison but not a polyglot foundation. Its
-parser strategy is syntactic and should be tested specifically against
- overloads, inheritance, interfaces, annotations, generated code, and modern
-Java syntax before relying on it.
+JCCI was then executed from PyPI against the controlled
+`spring-overloaded-service` fixture using a local Git repository with before
+and after commits. The fixture changes only
+`PricingService.calculate(String,int)` while leaving the one-argument overload
+unchanged.
+
+Observed output:
+
+- detected the exact changed overload;
+- produced a graph edge to `PricingController.quote(String,int)`;
+- classified that controller method as an API;
+- emitted `[Post]/quotes` in `impacted_api_list`;
+- did not report `GET /prices/{sku}`, which calls the unchanged overload;
+- completed in approximately 6.3 seconds including clone, parse, SQLite graph
+  construction, and output generation.
+
+Normalized result: **TP=1, FP=0, FN=0**. For this Java/Spring case, JCCI does
+exactly the core traversal we want and is currently the strongest directly
+executed alternative.
+
+Caveats observed during execution:
+
+- it is Java-only and uses `javalang` rather than compiler-derived semantics;
+- configuration defaults write project clones and SQLite state inside the
+  installed package directory unless overridden;
+- the library clones through a shell command assembled from the Git URL, which
+  requires security review before processing untrusted input;
+- its `.cci` JSON schema and endpoint notation require normalization;
+- inheritance, interfaces, generated code, modern Java syntax and scale still
+  need benchmark coverage.
+
+JCCI is therefore a useful reference implementation or Java adapter candidate,
+not a polyglot foundation.
 
 ## Consequence for the decision
 
