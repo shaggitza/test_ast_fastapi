@@ -188,6 +188,44 @@ This strongly supports integration rather than reimplementation for OpenAPI
 contract compatibility. oasdiff does not trace internal code impact; its JSON
 should be attached to the shared evidence graph and PR report.
 
+## GraphQL Inspector
+
+Executed `@graphql-inspector/cli` through `npx` against a baseline schema where
+`User.email: String!` exists and a changed schema where the field is removed.
+
+Observed:
+
+- detected exactly one change;
+- identified `User.email` removal;
+- classified it as breaking;
+- exited non-zero, suitable for a CI quality gate.
+
+Normalized contract result: **TP=1, FP=0, FN=0**. Its human-readable output is
+sufficient for Markdown, while machine integration should use its programmatic
+API or structured output rather than parse terminal text.
+
+## Buf Breaking 1.71.0
+
+Executed the official Linux ARM64 binary against two local Protobuf modules. A
+baseline `PricingService.Quote` RPC was removed in the changed module under the
+`FILE` breaking policy.
+
+Observed JSON:
+
+- rule: `RPC_NO_DELETE`;
+- exact changed file and source range;
+- message identifying `PricingService.Quote`;
+- non-zero exit suitable for CI.
+
+Normalized contract result: **TP=1, FP=0, FN=0**. As with oasdiff and GraphQL
+Inspector, Buf should be integrated as authoritative contract evidence, not
+reimplemented in the impact analyzer.
+
+Pact `can-i-deploy` is different: it answers deploy compatibility from verified
+consumer/provider interactions stored in a Pact Broker. A meaningful POC
+requires a broker and version/environment matrix; a local schema fixture would
+not test its actual value.
+
 ## Consequence for the decision
 
 No tested OSS candidate currently justifies dropping this repository. The
