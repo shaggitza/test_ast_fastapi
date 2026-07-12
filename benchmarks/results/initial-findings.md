@@ -23,8 +23,16 @@ Observed:
 - the changed `services.calculate_total` line was reported as orphan;
 - runtime was approximately 4.2 seconds.
 
-Result for this positive case: **TP=0, FN=2**. This confirms that the current
-implementation is a baseline, not evidence that the problem is solved.
+Initial result for this positive case: **TP=0, FN=2**. Investigation showed
+that this was not an inherent mypy limitation: decorated handler bodies were
+not traversed, top-level imported module names did not match the internal
+source-root module names, and call-stack report validation rejected `Path`
+objects. After targeted fixes and explicit handling of FastAPI `Depends`
+callables, the same case reports both expected endpoints: **TP=2, FN=0**.
+
+This demonstrates why candidates need documented onboarding and tuning before
+being scored, while also showing that the benchmark finds real implementation
+defects.
 
 Case: `orphan-negative-control`.
 
@@ -113,9 +121,11 @@ Java syntax before relying on it.
 
 ## Consequence for the decision
 
-No tested OSS candidate currently justifies dropping this repository. Equally,
-the current implementation's failure on the first transitive fixture argues
-against expanding it into hand-built analyzers for every language.
+No tested OSS candidate currently justifies dropping this repository. The
+current implementation required framework-specific corrections to pass the
+first transitive fixture; that success supports keeping the FastAPI layer, but
+also illustrates the maintenance cost of expanding hand-built semantics to
+every language and framework.
 
 The leading hypothesis remains **HYBRID**:
 

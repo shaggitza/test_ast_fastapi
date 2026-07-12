@@ -326,6 +326,21 @@ class MypyAnalyzer:
                 if state and state.path:
                     return state.path, candidate
 
+        # Source files are named relative to source_root.parent so a project in
+        # ``/tmp/example`` is indexed as ``example.services``. Mypy can still
+        # resolve ``from services import func`` as ``services.func`` when the
+        # application directory itself is on Python's import path. Bridge that
+        # representation mismatch, but only when the suffix identifies one
+        # project module unambiguously.
+        suffix_matches = [
+            mod_name
+            for mod_name in self._module_to_path
+            if mod_name.endswith(f".{parts[0]}") or mod_name == parts[0]
+        ]
+        if len(suffix_matches) == 1:
+            module_name = suffix_matches[0]
+            return self._module_to_path[module_name], module_name
+
         # If not found by module path, search for the function/class by fullname match
         # This handles imported functions where fullname might not map directly to module structure
         for mod_name, tree in self._trees.items():
@@ -628,6 +643,21 @@ class MypyAnalyzer:
                         deps.add_reference(current_file, call.line, combined)
                         resolve_and_trace(combined, call.line)
 
+            # FastAPI dependency injection passes callables as values rather
+            # than invoking them in the handler body. Treat the callable given
+            # to Depends() as an executable dependency, while keeping ordinary
+            # NameExpr arguments isolated to avoid broad over-tracing.
+            if isinstance(callee, NameExpr) and callee.name == "Depends":
+                for argument in call.args:
+                    if isinstance(argument, NameExpr) and argument.fullname:
+                        dependency_fullname = import_map.get(
+                            argument.name, argument.fullname
+                        )
+                        deps.add_reference(
+                            current_file, argument.line, dependency_fullname
+                        )
+                        resolve_and_trace(dependency_fullname, argument.line)
+
             # Walk callee and arguments
             walk_node(callee)
             for arg in call.args:
@@ -833,9 +863,16 @@ class MypyAnalyzer:
                 else:
                     # For CallExpr decorators, walk normally
                     walk_node(decorator)
-        # Then walk the body
-        if hasattr(node, 'body') and node.body:
-            walk_node(node.body)
+        # Then walk the function signature and body. Decorated definitions are
+        # represented by mypy as Decorator nodes; their executable function is
+        # stored in ``node.func`` rather than directly on ``node``.
+        function_node = node.func if isinstance(node, Decorator) else node
+        if hasattr(function_node, "arguments"):
+            for argument in function_node.arguments:
+                if hasattr(argument, "initializer") and argument.initializer:
+                    walk_node(argument.initializer)
+        if hasattr(function_node, "body") and function_node.body:
+            walk_node(function_node.body)
 
     def analyze_endpoints(
         self,
