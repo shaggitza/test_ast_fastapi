@@ -203,7 +203,7 @@ class ChangeMapper:
 
                 # Add a marker frame at the beginning to show where this trace originates from
                 call_stack.append(CallStackFrame(
-                    file_path=endpoint.handler.file_path or "",
+                    file_path=str(endpoint.handler.file_path or ""),
                     line_number=endpoint.handler.line_number,
                     function_name=f"[ENDPOINT] {endpoint.identifier}",
                     code_context=f"Handler: {endpoint.handler.name}",

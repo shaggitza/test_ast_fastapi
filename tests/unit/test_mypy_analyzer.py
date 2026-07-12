@@ -22,6 +22,85 @@ from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, 
 class TestMypyAnalyzerBasic:
     """Basic tests for MypyAnalyzer."""
 
+    def test_resolves_top_level_import_from_application_directory(
+        self, tmp_path: Path
+    ) -> None:
+        """Resolve imports whose mypy fullname omits the directory name."""
+        (tmp_path / "services.py").write_text(
+            "def calculate_total(price: float, quantity: int) -> float:\n"
+            "    return price * quantity\n",
+            encoding="utf-8",
+        )
+        main_path = tmp_path / "main.py"
+        main_path.write_text(
+            "from services import calculate_total\n\n"
+            "def order() -> dict:\n"
+            "    return {'total': calculate_total(10, 1)}\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/orders",
+            methods=[EndpointMethod.POST],
+            handler=HandlerInfo(
+                name="order",
+                module="main",
+                file_path=main_path,
+                line_number=3,
+            ),
+        )
+
+        dependencies = MypyAnalyzer(main_path).analyze_endpoint(endpoint)
+
+        service_reference = dependencies.references_symbol_at_line(
+            str(tmp_path / "services.py"), 1
+        )
+        assert service_reference is not None
+        assert service_reference.symbol_name.endswith("services.calculate_total")
+
+    def test_traces_decorated_handler_body_and_fastapi_depends(
+        self, tmp_path: Path
+    ) -> None:
+        """Trace both decorated handlers and Depends callback chains."""
+        service_path = tmp_path / "services.py"
+        service_path.write_text(
+            "def calculate_total(price: float, quantity: int) -> float:\n"
+            "    return price * quantity\n",
+            encoding="utf-8",
+        )
+        main_path = tmp_path / "main.py"
+        main_path.write_text(
+            "from fastapi import Depends, FastAPI\n"
+            "from services import calculate_total\n"
+            "app = FastAPI()\n\n"
+            "def quote_service() -> float:\n"
+            "    return calculate_total(10, 2)\n\n"
+            "@app.post('/quotes')\n"
+            "def quote(total: float = Depends(quote_service)) -> dict:\n"
+            "    return {'total': total}\n\n"
+            "@app.post('/orders')\n"
+            "def order() -> dict:\n"
+            "    return {'total': calculate_total(10, 1)}\n",
+            encoding="utf-8",
+        )
+        analyzer = MypyAnalyzer(main_path)
+
+        for name, path, line in (
+            ("quote", "/quotes", 9),
+            ("order", "/orders", 13),
+        ):
+            endpoint = Endpoint(
+                path=path,
+                methods=[EndpointMethod.POST],
+                handler=HandlerInfo(
+                    name=name,
+                    module="main",
+                    file_path=main_path,
+                    line_number=line,
+                ),
+            )
+            dependencies = analyzer.analyze_endpoint(endpoint)
+            assert dependencies.references_symbol_at_line(str(service_path), 2)
+
     def test_create_analyzer(self, tmp_path: Path) -> None:
         """Test creating a MypyAnalyzer instance."""
         analyzer = MypyAnalyzer(tmp_path)
