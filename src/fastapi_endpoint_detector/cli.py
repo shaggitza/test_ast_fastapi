@@ -8,11 +8,18 @@ and orchestrates the analysis pipeline.
 import json
 import sys
 from pathlib import Path
-from typing import Optional
 
 import click
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn, TimeRemainingColumn
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 
 from fastapi_endpoint_detector import __version__
 from fastapi_endpoint_detector.config import Config, load_config
@@ -29,7 +36,7 @@ console = Console()
     help="Path to configuration file.",
 )
 @click.pass_context
-def cli(ctx: click.Context, config: Optional[Path]) -> None:
+def cli(ctx: click.Context, config: Path | None) -> None:
     """FastAPI Endpoint Change Detector - Identify affected endpoints from code changes."""
     ctx.ensure_object(dict)
     ctx.obj["config"] = load_config(config) if config else Config()
@@ -102,7 +109,7 @@ def analyze(
     app: Path,
     diff: Path,
     output_format: str,
-    output: Optional[Path],
+    output: Path | None,
     app_var: str,
     verbose: bool,
     no_cache: bool,
@@ -113,7 +120,7 @@ def analyze(
     """Analyze code changes and identify affected FastAPI endpoints."""
     from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
     from fastapi_endpoint_detector.output.formatters import get_formatter
-    
+
     config: Config = ctx.obj["config"]
     
     # Validate mutually exclusive options
@@ -137,7 +144,7 @@ def analyze(
             console.print("[blue]Caching:[/blue] disabled")
         if clear_cache:
             console.print("[blue]Clearing cache before analysis[/blue]")
-    
+
     try:
         # Handle VM execution mode
         if vm:
@@ -189,14 +196,14 @@ def analyze(
             app_variable=app_var,
             use_cache=not no_cache,
         )
-        
+
         # Clear cache if requested
         if clear_cache:
             mapper.clear_cache()
-        
+
         # Track current line being analyzed
         current_line_info = {"text": ""}
-        
+
         # Create progress bar
         with Progress(
             SpinnerColumn(),
@@ -210,32 +217,32 @@ def analyze(
             transient=True,  # Remove progress bar when done
         ) as progress:
             task = progress.add_task("Initializing...", total=100, line_info="")
-            
+
             def update_progress(current: int, total: int, description: str) -> None:
                 progress.update(
-                    task, 
-                    completed=current, 
+                    task,
+                    completed=current,
                     description=description,
                     line_info=current_line_info["text"],
                 )
-            
+
             def line_progress(file_path: str, line_num: int, symbol: str) -> None:
                 """Update the current line being analyzed."""
                 from pathlib import Path
                 filename = Path(file_path).name
                 current_line_info["text"] = f"→ {filename}:{line_num} ({symbol})"
                 progress.update(task, line_info=current_line_info["text"])
-            
+
             # Set line progress callback on mypy analyzer
             # Note: This just initializes the analyzer without running analysis
             mapper.mypy_analyzer.set_line_progress_callback(line_progress)
-            
+
             report = mapper.analyze_diff(diff, progress_callback=update_progress)
-        
+
         # Format and output results
         formatter = get_formatter(output_format)
         formatted_output = formatter.format(report)
-        
+
         if output:
             output.write_text(formatted_output, encoding="utf-8")
             console.print(f"[green]Results written to:[/green] {output}")
@@ -243,7 +250,7 @@ def analyze(
             # Print directly to stdout to preserve ANSI codes from formatter
             sys.stdout.write(formatted_output)
             sys.stdout.flush()
-            
+
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         if verbose:
@@ -295,15 +302,15 @@ def list_endpoints(
     ctx: click.Context,
     app: Path,
     output_format: str,
-    output: Optional[Path],
+    output: Path | None,
     app_var: str,
     vm: bool,
     secure_ast: bool,
 ) -> None:
     """List all FastAPI endpoints in the application."""
-    from fastapi_endpoint_detector.parser.fastapi_extractor import FastAPIExtractor
     from fastapi_endpoint_detector.output.formatters import get_formatter
-    
+    from fastapi_endpoint_detector.parser.fastapi_extractor import FastAPIExtractor
+
     # Validate mutually exclusive options
     if vm and secure_ast:
         console.print("[red]Error:[/red] --vm and --secure-ast cannot be used together")
@@ -358,7 +365,7 @@ def list_endpoints(
         
         formatter = get_formatter(output_format)
         formatted_output = formatter.format_endpoints(endpoints)
-        
+
         if output:
             output.write_text(formatted_output, encoding="utf-8")
             console.print(f"[green]Results written to:[/green] {output}")
@@ -367,7 +374,7 @@ def list_endpoints(
             import sys
             sys.stdout.write(formatted_output)
             sys.stdout.flush()
-            
+
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         raise click.Abort()

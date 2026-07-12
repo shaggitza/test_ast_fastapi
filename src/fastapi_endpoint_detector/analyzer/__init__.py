@@ -7,12 +7,12 @@ This package contains modules for:
 - Change-to-endpoint mapping
 """
 
-from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
-from fastapi_endpoint_detector.analyzer.endpoint_registry import EndpointRegistry
 from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
+from fastapi_endpoint_detector.analyzer.endpoint_registry import EndpointRegistry
+from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 
 __all__ = [
-    "MypyAnalyzer",
-    "EndpointRegistry",
     "ChangeMapper",
+    "EndpointRegistry",
+    "MypyAnalyzer",
 ]

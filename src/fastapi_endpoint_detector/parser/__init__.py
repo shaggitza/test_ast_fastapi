@@ -6,10 +6,10 @@ This package contains modules for:
 - Diff file parsing (using unidiff)
 """
 
-from fastapi_endpoint_detector.parser.fastapi_extractor import FastAPIExtractor
 from fastapi_endpoint_detector.parser.diff_parser import DiffParser
+from fastapi_endpoint_detector.parser.fastapi_extractor import FastAPIExtractor
 
 __all__ = [
-    "FastAPIExtractor",
     "DiffParser",
+    "FastAPIExtractor",
 ]

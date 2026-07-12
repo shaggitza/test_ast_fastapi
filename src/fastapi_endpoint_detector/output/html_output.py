@@ -55,12 +55,12 @@ class HtmlFormatter(BaseFormatter):
             HTML string with escaped code context and basic line highlighting.
         """
         return self._get_code_context_range(file_path, line_number, line_number, context)
-    
+
     def _get_code_context_range(
-        self, 
-        file_path: str, 
-        start_line: int, 
-        end_line: int, 
+        self,
+        file_path: str,
+        start_line: int,
+        end_line: int,
         context: int = 3
     ) -> str:
         """
@@ -82,7 +82,7 @@ class HtmlFormatter(BaseFormatter):
         # Convert to 0-indexed
         start_idx = start_line - 1
         end_idx = end_line - 1
-        
+
         # Calculate display range with context
         display_start = max(0, start_idx - context)
         display_end = min(len(lines), end_idx + context + 1)
@@ -107,40 +107,40 @@ class HtmlFormatter(BaseFormatter):
     def _parse_line_range(self, code_context: str | None) -> tuple[int, int] | None:
         """
         Parse line range from code_context field.
-        
+
         The code_context field may contain a '[lines X-Y]' prefix when
         consecutive lines are grouped together in call stack frames.
-        
+
         Args:
             code_context: The code context string that may contain range notation.
-            
+
         Returns:
             Tuple of (start_line, end_line) if range found, None otherwise.
         """
         if not code_context or not code_context.startswith("[lines "):
             return None
-            
+
         match = re.match(r'\[lines (\d+)-(\d+)\]', code_context)
         if match:
             return (int(match.group(1)), int(match.group(2)))
         return None
-    
+
     def _format_frame_label(
-        self, 
-        file_path: str, 
-        start_line: int, 
-        end_line: int | None, 
+        self,
+        file_path: str,
+        start_line: int,
+        end_line: int | None,
         function_name: str
     ) -> str:
         """
         Format a call stack frame label.
-        
+
         Args:
             file_path: Path to the file.
             start_line: Starting line number.
             end_line: Optional ending line number for ranges.
             function_name: Name of the function.
-            
+
         Returns:
             Formatted frame label string.
         """
@@ -149,7 +149,7 @@ class HtmlFormatter(BaseFormatter):
             return f'File "{file_name}", lines {start_line}-{end_line}, in {function_name}'
         else:
             return f'File "{file_name}", line {start_line}, in {function_name}'
-    
+
     def _confidence_color(self, confidence: ConfidenceLevel) -> str:
         """Get CSS color class for a confidence level."""
         colors = {
@@ -529,6 +529,12 @@ class HtmlFormatter(BaseFormatter):
             f'<span class="summary-label">Affected Endpoints:</span> {report.affected_count}'
             f"</div>"
         )
+        content_lines.append(
+            f'<div class="summary-item">'
+            f'<span class="summary-label">Orphan Changes:</span> '
+            f'{report.total_orphan_lines} lines in {report.orphan_count} files'
+            f"</div>"
+        )
         if report.analysis_duration_ms:
             content_lines.append(
                 f'<div class="summary-item">'
@@ -604,40 +610,80 @@ class HtmlFormatter(BaseFormatter):
                         )
 
                     # Call stack with hover on each frame
-                    if ae.call_stack:
+                    if ae.call_stacks:
                         content_lines.append('<div class="call-stack">')
                         content_lines.append("<strong>Call Stack:</strong><br>")
-                        for frame in ae.call_stack:
-                            # Extract line range from code_context if present
-                            # Code context uses '[lines X-Y]' notation for grouped consecutive lines
-                            line_range = self._parse_line_range(frame.code_context)
-                            
-                            if line_range:
-                                start_line, end_line = line_range
-                            else:
-                                start_line = frame.line_number
-                                end_line = frame.line_number
-                            
-                            frame_label = self._format_frame_label(
-                                frame.file_path,
-                                start_line,
-                                end_line if end_line > start_line else None,
-                                frame.function_name
-                            )
-                            
-                            frame_ref = self._format_code_ref(
-                                frame.file_path,
-                                start_line,
-                                frame_label,
-                                end_line,
-                            )
-                            content_lines.append(f"{frame_ref}<br>")
+
+                        for stack_idx, call_stack in enumerate(ae.call_stacks, 1):
+                            # Header for multiple paths
+                            if len(ae.call_stacks) > 1:
+                                content_lines.append(f"<div class='stack-path'><em>Path {stack_idx} of {len(ae.call_stacks)}:</em></div>")
+
+                            for frame in call_stack:
+                                # Extract line range from code_context if present
+                                # Code context uses '[lines X-Y]' notation for grouped consecutive lines
+                                line_range = self._parse_line_range(frame.code_context)
+
+                                if line_range:
+                                    start_line, end_line = line_range
+                                else:
+                                    start_line = frame.line_number
+                                    end_line = frame.line_number
+
+                                frame_label = self._format_frame_label(
+                                    frame.file_path,
+                                    start_line,
+                                    end_line if end_line > start_line else None,
+                                    frame.function_name
+                                )
+
+                                frame_ref = self._format_code_ref(
+                                    frame.file_path,
+                                    start_line,
+                                    frame_label,
+                                    end_line,
+                                )
+                                content_lines.append(f"{frame_ref}<br>")
+
+                            # Add spacing between paths
+                            if stack_idx < len(ae.call_stacks):
+                                content_lines.append("<br>")
+
                         content_lines.append("</div>")
 
                     content_lines.append("</div>")  # end endpoint-card
         else:
             content_lines.append('<div class="no-endpoints">')
             content_lines.append("✅ No endpoints were affected by the changes.")
+            content_lines.append("</div>")
+
+        # Orphan changes
+        if report.orphan_changes:
+            content_lines.append('<div class="warning-box">')
+            content_lines.append("<h3>⚠️ Orphan Code Changes</h3>")
+            content_lines.append(
+                f'<p><em>Changes not related to any endpoint '
+                f'({report.total_orphan_lines} lines in {report.orphan_count} files)</em></p>'
+            )
+            
+            for oc in report.orphan_changes:
+                file_name = Path(oc.file_path).name
+                content_lines.append('<div style="margin: 15px 0; padding: 10px; background: #fff; border-radius: 5px;">')
+                content_lines.append(f'<div style="font-weight: bold; margin-bottom: 5px;">📄 {html.escape(file_name)}</div>')
+                content_lines.append(f'<div style="font-size: 0.9em; color: #666;"><code>{html.escape(oc.file_path)}</code></div>')
+                content_lines.append(f'<div style="margin-top: 8px; font-family: monospace; font-size: 0.9em;">{html.escape(oc.format_lines())}</div>')
+                content_lines.append(f'<div style="margin-top: 5px; font-size: 0.85em; color: #777; font-style: italic;">{html.escape(oc.reason)}</div>')
+                content_lines.append('</div>')
+            
+            content_lines.append('<div style="margin-top: 15px; padding: 10px; background: #f0f0f0; border-radius: 5px; font-size: 0.9em;">')
+            content_lines.append('<strong>💡 Tip:</strong> Orphan changes may indicate:')
+            content_lines.append('<ul style="margin: 5px 0 0 20px;">')
+            content_lines.append('<li>Unused or dead code</li>')
+            content_lines.append('<li>Code with incorrect types preventing dependency analysis</li>')
+            content_lines.append('<li>Utility code not called by any endpoint</li>')
+            content_lines.append('<li>Code outside the analyzed application scope</li>')
+            content_lines.append('</ul>')
+            content_lines.append('</div>')
             content_lines.append("</div>")
 
         # Errors
