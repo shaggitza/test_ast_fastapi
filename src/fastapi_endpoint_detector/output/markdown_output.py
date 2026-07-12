@@ -79,7 +79,7 @@ class MarkdownFormatter(BaseFormatter):
                         lines.append(f"- **Chain:** {chain}")
 
                     # Show call stack if available
-                    if ae.call_stack:
+                    if ae.call_stacks:
                         lines.append("")
                         lines.append("**Call Stack:**")
                         lines.append("")

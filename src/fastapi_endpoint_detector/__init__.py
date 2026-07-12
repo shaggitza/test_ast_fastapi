@@ -6,7 +6,7 @@ are affected. It uses AST parsing, static analysis, and dependency graph
 construction to provide accurate impact analysis.
 """
 
-from importlib.metadata import version, PackageNotFoundError
+from importlib.metadata import PackageNotFoundError, version
 
 try:
     __version__ = version("fastapi-endpoint-detector")
@@ -18,7 +18,7 @@ __email__ = "your.email@example.com"
 
 # Public API exports
 __all__ = [
-    "__version__",
     "__author__",
     "__email__",
+    "__version__",
 ]
