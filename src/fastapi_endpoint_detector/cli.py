@@ -103,6 +103,11 @@ def cli(ctx: click.Context, config: Path | None) -> None:
     is_flag=True,
     help="Use pure AST analysis without importing code (secure mode).",
 )
+@click.option(
+    "--scip",
+    is_flag=True,
+    help="Use SCIP dependency analysis (requires scip-query and scip-python 0.6.6).",
+)
 @click.pass_context
 def analyze(
     ctx: click.Context,
@@ -116,6 +121,7 @@ def analyze(
     clear_cache: bool,
     vm: bool,
     secure_ast: bool,
+    scip: bool,
 ) -> None:
     """Analyze code changes and identify affected FastAPI endpoints."""
     from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
@@ -127,6 +133,9 @@ def analyze(
     if vm and secure_ast:
         console.print("[red]Error:[/red] --vm and --secure-ast cannot be used together")
         raise click.Abort()
+    if vm and scip:
+        console.print("[red]Error:[/red] --vm and --scip cannot be used together")
+        raise click.Abort()
     
     if verbose:
         console.print(f"[blue]Analyzing FastAPI application at:[/blue] {app}")
@@ -137,8 +146,9 @@ def analyze(
             console.print("[blue]Execution mode:[/blue] VM (Docker container)")
         elif secure_ast:
             console.print("[blue]Execution mode:[/blue] Secure AST (no imports)")
-        else:
-            console.print("[blue]Using mypy for dependency analysis[/blue]")
+        console.print(
+            f"[blue]Dependency analysis:[/blue] {'SCIP' if scip else 'mypy'}"
+        )
             
         if no_cache:
             console.print("[blue]Caching:[/blue] disabled")
@@ -192,6 +202,7 @@ def analyze(
             app_variable=app_var,
             use_cache=not no_cache,
             secure_ast=secure_ast,
+            use_scip=scip,
         )
 
         # Clear cache if requested
@@ -232,7 +243,8 @@ def analyze(
 
             # Set line progress callback on mypy analyzer
             # Note: This just initializes the analyzer without running analysis
-            mapper.mypy_analyzer.set_line_progress_callback(line_progress)
+            if not scip:
+                mapper.mypy_analyzer.set_line_progress_callback(line_progress)
 
             report = mapper.analyze_diff(diff, progress_callback=update_progress)
 
