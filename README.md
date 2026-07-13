@@ -21,6 +21,8 @@ This tool is designed for CI/CD pipelines to enable:
 - 🔗 **Dependency Graph**: Build a complete dependency graph from endpoints to all related code
 - 📊 **Diff Analysis**: Parse git diff files to identify changed code sections
 - 🎯 **Endpoint Mapping**: Map changes back to specific FastAPI route handlers
+- 🧭 **Effect Evidence**: Separate call reachability from returned, persisted, outbound,
+  logged, internal, and unresolved data effects ([details](docs/effect-evidence.md))
 - 💾 **Caching**: Cache analysis results for faster subsequent runs
 - 📋 **Multiple Output Formats**: JSON, YAML, Markdown, HTML, or human-readable text reports
 - 🎨 **Rich Progress Display**: Visual progress bars with real-time analysis feedback

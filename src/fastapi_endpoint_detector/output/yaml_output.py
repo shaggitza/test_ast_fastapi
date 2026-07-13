@@ -7,7 +7,7 @@ from typing import Any
 import yaml
 
 from fastapi_endpoint_detector.models.endpoint import Endpoint
-from fastapi_endpoint_detector.models.report import AnalysisReport
+from fastapi_endpoint_detector.models.report import AffectedEndpoint, AnalysisReport
 from fastapi_endpoint_detector.output.formatters import BaseFormatter, register_formatter
 
 
@@ -34,6 +34,24 @@ class YamlFormatter(BaseFormatter):
             "dependencies": endpoint.dependencies,
         }
 
+    def _affected_to_dict(self, affected: AffectedEndpoint) -> dict[str, Any]:
+        return {
+            "endpoint": self._endpoint_to_dict(affected.endpoint),
+            "confidence": affected.confidence.value,
+            "reason": affected.reason,
+            "dependency_chain": affected.dependency_chain,
+            "dependency_chains": affected.all_dependency_chains,
+            "changed_files": affected.changed_files,
+            "call_stacks": [
+                [frame.model_dump(mode="json", exclude_none=True) for frame in stack]
+                for stack in affected.call_stacks
+            ],
+            "effect_evidence": [
+                evidence.model_dump(mode="json", exclude_none=True)
+                for evidence in affected.effect_evidence
+            ],
+        }
+
     def format(self, report: AnalysisReport) -> str:
         """Format an analysis report as YAML."""
         data = {
@@ -43,6 +61,7 @@ class YamlFormatter(BaseFormatter):
             "summary": {
                 "total_endpoints": report.total_endpoints,
                 "affected_endpoints": report.affected_count,
+                "candidate_endpoints": len(report.candidate_endpoints),
                 "high_confidence": report.high_confidence_count,
                 "orphan_files": report.orphan_count,
                 "orphan_lines": report.total_orphan_lines,
@@ -51,19 +70,10 @@ class YamlFormatter(BaseFormatter):
                 "analysis_duration_ms": report.analysis_duration_ms,
             },
             "affected_endpoints": [
-                {
-                    "endpoint": self._endpoint_to_dict(ae.endpoint),
-                    "confidence": ae.confidence.value,
-                    "reason": ae.reason,
-                    "dependency_chain": ae.dependency_chain,
-                    "dependency_chains": ae.all_dependency_chains,
-                    "changed_files": ae.changed_files,
-                    "call_stacks": [
-                        [frame.model_dump(mode="json") for frame in stack]
-                        for stack in ae.call_stacks
-                    ],
-                }
-                for ae in report.affected_endpoints
+                self._affected_to_dict(affected) for affected in report.affected_endpoints
+            ],
+            "candidate_endpoints": [
+                self._affected_to_dict(affected) for affected in report.candidate_endpoints
             ],
             "orphan_changes": [
                 {

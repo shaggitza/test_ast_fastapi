@@ -2,6 +2,7 @@
 Unit tests for output formatters.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -14,12 +15,67 @@ from fastapi_endpoint_detector.models.endpoint import (
 from fastapi_endpoint_detector.models.report import (
     AffectedEndpoint,
     AnalysisReport,
+    ChangeEffectKind,
+    CodeReference,
     ConfidenceLevel,
+    DataObservationKind,
+    EffectDisposition,
+    EffectEvidence,
+    EvidenceProducer,
+    EvidenceStatus,
+    ImpactChannel,
 )
 from fastapi_endpoint_detector.output.formatters import get_formatter
 from fastapi_endpoint_detector.output.html_output import HtmlFormatter
 from fastapi_endpoint_detector.output.json_output import JsonFormatter
 from fastapi_endpoint_detector.output.markdown_output import MarkdownFormatter
+
+
+def test_json_preserves_candidates_and_structured_effect_evidence() -> None:
+    handler = HandlerInfo(
+        name="route",
+        module="main",
+        file_path=Path("/app/main.py"),
+        line_number=3,
+    )
+    candidate = AffectedEndpoint(
+        endpoint=Endpoint(path="/items", methods=[EndpointMethod.GET], handler=handler),
+        confidence=ConfidenceLevel.LOW,
+        reason="Reachable defensive-copy change",
+        effect_evidence=[
+            EffectEvidence(
+                producer=EvidenceProducer.DATA_FLOW,
+                status=EvidenceStatus.CONDITIONAL,
+                effect=ChangeEffectKind.ARGUMENT_MUTATION_ISOLATED,
+                observations=[DataObservationKind.NOT_OBSERVED_AFTER_CALL],
+                channel=ImpactChannel.IN_MEMORY_ALIASING,
+                disposition=EffectDisposition.NOT_OBSERVED_BY_CALLER,
+                summary="Caller does not read the original argument after the call.",
+                changed_location=CodeReference(file_path="service.py", line_number=2),
+            )
+        ],
+    )
+    report = AnalysisReport(
+        app_path="/app",
+        diff_source="change.diff",
+        total_endpoints=1,
+        affected_endpoints=[],
+        candidate_endpoints=[candidate],
+    )
+
+    result = json.loads(JsonFormatter().format(report))
+
+    assert result["affected_endpoints"] == []
+    evidence = result["candidate_endpoints"][0]["effect_evidence"][0]
+    assert evidence["effect"] == "argument_mutation_isolated"
+    assert evidence["observations"] == ["not_observed_after_call"]
+    assert evidence["disposition"] == "not_observed_by_caller"
+
+    html_output = HtmlFormatter().format(report)
+    assert "Reachable Candidates:</span> 1" in html_output
+    assert "Additional Reachable Candidates" in html_output
+    assert "/items" in html_output
+    assert "No endpoints selected by the confidence threshold." in html_output
 
 
 class TestMarkdownFormatter:
@@ -130,7 +186,7 @@ class TestHtmlFormatter:
         assert "<title>FastAPI Endpoint Change Detector" in output
         assert "Total Endpoints" in output
         assert "10" in output
-        assert "✅ No endpoints were affected" in output
+        assert "No endpoints selected by the confidence threshold." in output
 
     def test_format_with_affected_endpoints(self) -> None:
         """Test formatting a report with affected endpoints."""

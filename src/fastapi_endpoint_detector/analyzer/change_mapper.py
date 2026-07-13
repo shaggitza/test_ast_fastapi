@@ -13,6 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from fastapi_endpoint_detector.analyzer.effect_analyzer import EffectAnalyzer
 from fastapi_endpoint_detector.analyzer.endpoint_registry import EndpointRegistry
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.analyzer.scip_analyzer import (
@@ -28,7 +29,14 @@ from fastapi_endpoint_detector.models.report import (
     AffectedEndpoint,
     AnalysisReport,
     CallStackFrame,
+    ChangeEffectKind,
+    CodeReference,
     ConfidenceLevel,
+    EffectDisposition,
+    EffectEvidence,
+    EvidenceProducer,
+    EvidenceStatus,
+    ImpactChannel,
     OrphanChange,
 )
 from fastapi_endpoint_detector.parser.diff_parser import DiffParser
@@ -56,9 +64,18 @@ def _endpoint_result_key(endpoint: Endpoint) -> tuple[str, str, int, str, str]:
     )
 
 
-def _stack_key(stack: list[CallStackFrame]) -> tuple[tuple[str, int, str, str | None], ...]:
+def _stack_key(
+    stack: list[CallStackFrame],
+) -> tuple[tuple[str, int, str, str | None, str | None, int | None], ...]:
     return tuple(
-        (frame.file_path, frame.line_number, frame.function_name, frame.code_context)
+        (
+            frame.file_path,
+            frame.line_number,
+            frame.function_name,
+            frame.code_context,
+            frame.caller_file_path,
+            frame.caller_line_number,
+        )
         for frame in stack
     )
 
@@ -72,6 +89,7 @@ class _AffectedAccumulator:
     changed_files: list[str] = field(default_factory=list)
     dependency_chains: list[list[str]] = field(default_factory=list)
     call_stacks: list[list[CallStackFrame]] = field(default_factory=list)
+    effect_evidence: list[EffectEvidence] = field(default_factory=list)
 
     @classmethod
     def from_candidate(cls, candidate: AffectedEndpoint) -> "_AffectedAccumulator":
@@ -101,6 +119,9 @@ class _AffectedAccumulator:
             if key not in stack_keys:
                 self.call_stacks.append(list(stack))
                 stack_keys.add(key)
+        for evidence in candidate.effect_evidence:
+            if evidence not in self.effect_evidence:
+                self.effect_evidence.append(evidence)
 
     def materialize(self) -> AffectedEndpoint:
         return AffectedEndpoint(
@@ -111,6 +132,7 @@ class _AffectedAccumulator:
             dependency_chains=self.dependency_chains,
             changed_files=self.changed_files,
             call_stacks=self.call_stacks,
+            effect_evidence=self.effect_evidence,
         )
 
 
@@ -226,6 +248,7 @@ class ChangeMapper:
         self._extractor: FastAPIExtractor | SecureASTExtractor | None = None
         self._registry: EndpointRegistry | None = None
         self._mypy_analyzer: MypyAnalyzer | None = None
+        self._effect_analyzer = EffectAnalyzer(target_project_root)
         self._scip_analyzer: SCIPAnalyzer | None = None
         self._baseline_registry: EndpointRegistry | None = None
         self._baseline_scip_analyzer: SCIPAnalyzer | None = None
@@ -290,10 +313,7 @@ class ChangeMapper:
     def mypy_analyzer(self) -> "MypyAnalyzer":
         """Get the mypy analyzer, initializing if needed (does NOT pre-analyze)."""
         if self._mypy_analyzer is None:
-            if self.app_path.is_file():
-                package_path = self.app_path.parent
-            else:
-                package_path = self.app_path
+            package_path = self.app_path.parent if self.app_path.is_file() else self.app_path
 
             effective_depth = (
                 self.config.parser.max_depth if self.config.analysis.track_transitive else 1
@@ -336,11 +356,29 @@ class ChangeMapper:
                 reason=f"Handler function directly modified in {diff_file.path}",
                 dependency_chain=[str(diff_file.path)],
                 changed_files=[str(diff_file.path)],
+                effect_evidence=[
+                    EffectEvidence(
+                        producer=EvidenceProducer.DIRECT,
+                        status=EvidenceStatus.ESTABLISHED,
+                        effect=ChangeEffectKind.HANDLER_IMPLEMENTATION,
+                        channel=ImpactChannel.UNKNOWN,
+                        disposition=EffectDisposition.INTERNAL_EFFECT,
+                        summary=(
+                            "Changed source overlaps the registered endpoint handler; "
+                            "the specific observation channel is not yet classified."
+                        ),
+                        changed_location=CodeReference(
+                            file_path=str(diff_file.path),
+                            line_number=min(all_changed & handler_lines),
+                            symbol=handler.name,
+                        ),
+                    )
+                ],
             )
 
         return None
 
-    def _check_mypy_dependency(
+    def _check_mypy_dependency(  # noqa: PLR0912, PLR0915
         self,
         endpoint: Endpoint,
         diff_file: DiffFile,
@@ -408,6 +446,8 @@ class ChangeMapper:
                             line_number=frame.line_number,
                             function_name=frame.function_name,
                             code_context=frame.code_context,
+                            caller_file_path=frame.caller_file_path,
+                            caller_line_number=frame.caller_line_number,
                         )
                     )
 
@@ -422,7 +462,7 @@ class ChangeMapper:
                     try:
                         file_path_obj = Path(file_path)
                         if file_path_obj.exists():
-                            with open(file_path_obj, encoding="utf-8") as f:
+                            with file_path_obj.open(encoding="utf-8") as f:
                                 lines_list = f.readlines()
                     except (OSError, UnicodeDecodeError):
                         pass
@@ -490,13 +530,48 @@ class ChangeMapper:
                 # Add this completed call stack to the list
                 all_call_stacks.append(call_stack)
 
+            effect_result = self._effect_analyzer.analyze(
+                file_path,
+                set(display_lines),
+                all_call_stacks,
+            )
+            confidence = effect_result.confidence if effect_result else ConfidenceLevel.MEDIUM
+            effect_summary = (
+                f"; effect analysis: {effect_result.evidence[0].summary}" if effect_result else ""
+            )
             return AffectedEndpoint(
                 endpoint=endpoint,
-                confidence=ConfidenceLevel.MEDIUM,
-                reason=f"Type analysis shows dependency on {diff_file.path} (lines {sorted(display_lines)[:5]}{'...' if len(display_lines) > 5 else ''})",
+                confidence=confidence,
+                reason=(
+                    f"Type analysis shows dependency on {diff_file.path} "
+                    f"(lines {sorted(display_lines)[:5]}"
+                    f"{'...' if len(display_lines) > 5 else ''}){effect_summary}"
+                ),
                 dependency_chain=[endpoint.handler.module or "unknown", file_path],
                 changed_files=[file_path],
                 call_stacks=all_call_stacks,
+                effect_evidence=[
+                    EffectEvidence(
+                        producer=EvidenceProducer.MYPY,
+                        status=EvidenceStatus.REACHABILITY_ONLY,
+                        effect=ChangeEffectKind.UNKNOWN,
+                        channel=ImpactChannel.UNKNOWN,
+                        disposition=EffectDisposition.REACHABILITY_ONLY,
+                        summary=(
+                            "Mypy resolves a typed call path; effect evidence is "
+                            "reported separately."
+                        ),
+                        changed_location=CodeReference(
+                            file_path=file_path,
+                            line_number=min(display_lines),
+                        ),
+                        limitations=[
+                            "Call reachability alone does not establish an externally "
+                            "observable effect."
+                        ],
+                    ),
+                    *(list(effect_result.evidence) if effect_result else []),
+                ],
             )
 
         return None
@@ -565,7 +640,7 @@ class ChangeMapper:
             processed_removed_lines,
         )
 
-    def _analyze_with_scip(
+    def _analyze_with_scip(  # noqa: PLR0915
         self,
         python_files: list[DiffFile],
         warnings: list[str],
@@ -680,6 +755,28 @@ class ChangeMapper:
                                 ),
                                 dependency_chain=[seed.symbol, definition.symbol],
                                 changed_files=[str(file_path)],
+                                effect_evidence=[
+                                    EffectEvidence(
+                                        producer=EvidenceProducer.SCIP,
+                                        status=EvidenceStatus.REACHABILITY_ONLY,
+                                        effect=ChangeEffectKind.UNKNOWN,
+                                        channel=ImpactChannel.UNKNOWN,
+                                        disposition=EffectDisposition.REACHABILITY_ONLY,
+                                        summary=(
+                                            f"SCIP resolves a {side} reverse-reference path "
+                                            f"at depth {reached.depth}."
+                                        ),
+                                        changed_location=CodeReference(
+                                            file_path=str(file_path),
+                                            line_number=min(seed_lines),
+                                            symbol=seed.short_name,
+                                        ),
+                                        limitations=[
+                                            "Reference reachability does not establish "
+                                            "runtime data observation."
+                                        ],
+                                    )
+                                ],
                             ),
                         )
                 if reached_endpoint:
@@ -742,7 +839,7 @@ class ChangeMapper:
         ]
         return [item.materialize() for item in affected.values()], orphan_changes
 
-    def analyze_diff(
+    def analyze_diff(  # noqa: PLR0915
         self,
         diff_source: Path | str,
         progress_callback: ProgressCallback | None = None,
@@ -803,6 +900,7 @@ class ChangeMapper:
                 diff_source=diff_source_str,
                 total_endpoints=total_endpoints,
                 affected_endpoints=filtered,
+                candidate_endpoints=scip_affected,
                 orphan_changes=scip_orphans,
                 total_files_changed=len(diff_files),
                 python_files_changed=len(python_files),
@@ -874,6 +972,7 @@ class ChangeMapper:
             diff_source=diff_source_str,
             total_endpoints=len(self.registry),
             affected_endpoints=filtered_affected,
+            candidate_endpoints=materialized,
             orphan_changes=orphan_changes,
             total_files_changed=len(diff_files),
             python_files_changed=len(python_files),
@@ -939,9 +1038,6 @@ class ChangeMapper:
             self._mypy_analyzer.clear_cache()
         else:
             # Initialize and clear the cache file even if analyzer not loaded
-            if self.app_path.is_file():
-                package_path = self.app_path.parent
-            else:
-                package_path = self.app_path
+            package_path = self.app_path.parent if self.app_path.is_file() else self.app_path
             temp_analyzer = MypyAnalyzer(package_path)
             temp_analyzer.clear_cache()

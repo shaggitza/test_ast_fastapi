@@ -3,12 +3,15 @@
 The apparent FP population was split into per-backend/per-PR disagreement
 packets under `inputs/`, then reviewed against frozen Open WebUI merge snapshots
 in disjoint route-family buckets. Complete final reports are under `reviews/`.
-The residual, source-confirmed FP IDs are machine-readable under
-`classifications/`.
+Residual disagreement classifications are machine-readable under
+`classifications/`; they distinguish unrelated reference results from
+call-reachable effects whose public observation is not established.
 
 ## Outcome
 
-- PR #26906: 2 omitted HTTP entrypoints and 10 genuine FPs.
+- PR #26906: 2 omitted HTTP entrypoints, 9 confirmed call-reachable routes
+  without an established caller-visible payload observation, and 1 unrelated
+  SCIP reference result. The 9 routes are not reachability false positives.
 - PR #26911: the sole unmatched SCIP prediction is a genuine FP; its 14
   remaining FNs are already represented in truth.
 - PR #26642: 91 omitted HTTP entrypoints were source-confirmed. They include

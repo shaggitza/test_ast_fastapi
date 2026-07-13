@@ -44,7 +44,10 @@ class AnalysisConfig(BaseModel):
         default=0.5,
         ge=0.0,
         le=1.0,
-        description="Minimum confidence level for reporting affected endpoints.",
+        description=(
+            "Legacy presentation threshold for affected_endpoints; all reachable results "
+            "remain available in candidate_endpoints."
+        ),
     )
     include_test_endpoints: bool = Field(
         default=False,

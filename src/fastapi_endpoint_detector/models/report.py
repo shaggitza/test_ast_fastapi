@@ -8,17 +8,124 @@ import re
 from datetime import datetime
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from fastapi_endpoint_detector.models.endpoint import Endpoint
 
 
 class ConfidenceLevel(str, Enum):
-    """Confidence level for endpoint being affected."""
+    """Legacy prioritization level for endpoint impact."""
 
-    HIGH = "high"  # Direct change to endpoint handler
-    MEDIUM = "medium"  # Change to direct dependency
-    LOW = "low"  # Change to transitive dependency
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class EvidenceProducer(str, Enum):
+    """Analyzer that produced an evidence record."""
+
+    DIRECT = "direct"
+    MYPY = "mypy"
+    SCIP = "scip"
+    DATA_FLOW = "data_flow"
+
+
+class EvidenceStatus(str, Enum):
+    """How strongly source establishes the described effect."""
+
+    ESTABLISHED = "established"
+    CONDITIONAL = "conditional"
+    REACHABILITY_ONLY = "reachability_only"
+    UNRESOLVED = "unresolved"
+
+
+class ChangeEffectKind(str, Enum):
+    """Semantic shape of a source change."""
+
+    HANDLER_IMPLEMENTATION = "handler_implementation"
+    DEFENSIVE_COPY_ADDED = "defensive_copy_added"
+    ARGUMENT_MUTATION_ISOLATED = "argument_mutation_isolated"
+    RETURN_VALUE_CHANGED = "return_value_changed"
+    CONTROL_FLOW_CHANGED = "control_flow_changed"
+    PERSISTENCE_CHANGED = "persistence_changed"
+    OUTBOUND_IO_CHANGED = "outbound_io_changed"
+    EVENT_CHANGED = "event_changed"
+    LOGGING_CHANGED = "logging_changed"
+    UNKNOWN = "unknown"
+
+
+class DataObservationKind(str, Enum):
+    """How changed data is observed after a call."""
+
+    RETURNED = "returned"
+    READ = "read"
+    BRANCH = "branch"
+    LOGGED = "logged"
+    PERSISTED = "persisted"
+    SENT_OUTBOUND = "sent_outbound"
+    EMITTED = "emitted"
+    FORWARDED = "forwarded"
+    DYNAMIC_ESCAPE = "dynamic_escape"
+    NOT_OBSERVED_AFTER_CALL = "not_observed_after_call"
+    UNKNOWN = "unknown"
+
+
+class ImpactChannel(str, Enum):
+    """Externally meaningful channel, if one is established."""
+
+    HTTP_RESPONSE = "http_response"
+    PERSISTENT_STATE = "persistent_state"
+    OUTBOUND_REQUEST = "outbound_request"
+    EVENT_OR_MESSAGE = "event_or_message"
+    LOG_OR_TELEMETRY = "log_or_telemetry"
+    CONTROL_FLOW = "control_flow"
+    IN_MEMORY_ALIASING = "in_memory_aliasing"
+    DYNAMIC_EXTENSION = "dynamic_extension"
+    UNKNOWN = "unknown"
+
+
+class EffectDisposition(str, Enum):
+    """Interpretation of an effect without discarding reachability."""
+
+    OBSERVABLE_BEHAVIOR = "observable_behavior"
+    OPERATIONAL_ONLY = "operational_only"
+    INTERNAL_EFFECT = "internal_effect"
+    NOT_OBSERVED_BY_CALLER = "not_observed_by_caller"
+    DYNAMIC_OR_UNRESOLVED = "dynamic_or_unresolved"
+    REACHABILITY_ONLY = "reachability_only"
+
+
+class CodeReference(BaseModel):
+    """Stable source reference used by structured evidence."""
+
+    file_path: str
+    line_number: int = Field(ge=1)
+    end_line_number: int | None = None
+    symbol: str | None = None
+
+    class Config:
+        frozen = True
+
+
+class EffectEvidence(BaseModel):
+    """Auditable effect and data-observation evidence for one impact path."""
+
+    schema_version: int = 1
+    producer: EvidenceProducer
+    status: EvidenceStatus
+    effect: ChangeEffectKind
+    observations: list[DataObservationKind] = Field(default_factory=list)
+    channel: ImpactChannel = ImpactChannel.UNKNOWN
+    disposition: EffectDisposition
+    summary: str
+    subject: str | None = None
+    changed_location: CodeReference
+    observation_location: CodeReference | None = None
+    conditions: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+    class Config:
+        frozen = True
 
 
 class CallStackFrame(BaseModel):
@@ -28,6 +135,12 @@ class CallStackFrame(BaseModel):
     line_number: int = Field(description="Line number in the file")
     function_name: str = Field(description="Name of the function/method")
     code_context: str | None = Field(default=None, description="The line of code at this location")
+    caller_file_path: str | None = Field(
+        default=None, description="File containing the call into this frame"
+    )
+    caller_line_number: int | None = Field(
+        default=None, description="Line containing the call into this frame"
+    )
 
     class Config:
         frozen = True
@@ -79,7 +192,14 @@ class AffectedEndpoint(BaseModel):
     )
     call_stacks: list[list[CallStackFrame]] = Field(
         default_factory=list,
-        description="All traceback-style call stacks showing different dependency paths. Each inner list represents one path from the endpoint handler to the changed file.",
+        description=(
+            "All traceback-style call stacks showing different dependency paths. "
+            "Each inner list represents one path from the endpoint handler to the changed file."
+        ),
+    )
+    effect_evidence: list[EffectEvidence] = Field(
+        default_factory=list,
+        description="Structured reachability, effect, and data-observation evidence.",
     )
 
     class Config:
@@ -177,7 +297,11 @@ class AnalysisReport(BaseModel):
     total_endpoints: int = Field(description="Total endpoints in the application")
     affected_endpoints: list[AffectedEndpoint] = Field(
         default_factory=list,
-        description="Endpoints affected by changes",
+        description="Endpoints selected by the legacy confidence threshold",
+    )
+    candidate_endpoints: list[AffectedEndpoint] = Field(
+        default_factory=list,
+        description="All reachable candidates before presentation filtering",
     )
     orphan_changes: list[OrphanChange] = Field(
         default_factory=list,
@@ -204,10 +328,22 @@ class AnalysisReport(BaseModel):
         description="Any warnings from the analysis",
     )
 
+    @model_validator(mode="after")
+    def populate_candidates_from_legacy_results(self) -> "AnalysisReport":
+        """Keep manually constructed legacy reports internally consistent."""
+        if not self.candidate_endpoints and self.affected_endpoints:
+            self.candidate_endpoints = list(self.affected_endpoints)
+        return self
+
     @property
     def affected_count(self) -> int:
         """Number of affected endpoints."""
         return len(self.affected_endpoints)
+
+    @property
+    def candidate_count(self) -> int:
+        """Number of reachable candidates before presentation filtering."""
+        return len(self.candidate_endpoints)
 
     @property
     def high_confidence_count(self) -> int:
