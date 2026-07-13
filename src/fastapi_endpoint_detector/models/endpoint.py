@@ -21,6 +21,7 @@ class EndpointMethod(str, Enum):
     OPTIONS = "OPTIONS"
     HEAD = "HEAD"
     TRACE = "TRACE"
+    WEBSOCKET = "WEBSOCKET"
 
 
 class HandlerInfo(BaseModel):

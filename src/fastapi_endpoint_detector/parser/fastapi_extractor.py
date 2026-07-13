@@ -22,6 +22,7 @@ from fastapi_endpoint_detector.models.endpoint import (
 
 class FastAPIExtractorError(Exception):
     """Error during FastAPI endpoint extraction."""
+
     pass
 
 
@@ -97,9 +98,7 @@ class FastAPIExtractor:
                     self.app_path,
                 )
                 if spec is None or spec.loader is None:
-                    raise FastAPIExtractorError(
-                        f"Could not create module spec for {self.app_path}"
-                    )
+                    raise FastAPIExtractorError(f"Could not create module spec for {self.app_path}")
 
                 module = importlib.util.module_from_spec(spec)
                 sys.modules[module_name] = module
@@ -196,11 +195,14 @@ class FastAPIExtractor:
                     if param.default is not inspect.Parameter.empty:
                         default = param.default
                         # Check if it's a Depends instance
-                        if type(default).__name__ == "Depends":
-                            if hasattr(default, "dependency") and default.dependency:
-                                dep = default.dependency
-                                dep_name = getattr(dep, "__name__", None) or type(dep).__name__
-                                dependencies.append(dep_name)
+                        if (
+                            type(default).__name__ == "Depends"
+                            and hasattr(default, "dependency")
+                            and default.dependency
+                        ):
+                            dep = default.dependency
+                            dep_name = getattr(dep, "__name__", None) or type(dep).__name__
+                            dependencies.append(dep_name)
             except (ValueError, TypeError):
                 pass
 
@@ -226,44 +228,55 @@ class FastAPIExtractor:
                 "Is it a FastAPI application?"
             )
 
-        for route in app.routes:
-            # Skip non-API routes (like docs, openapi, etc.)
-            route_class_name = type(route).__name__
+        def join_paths(prefix: str, path: str) -> str:
+            if not prefix:
+                return path if path.startswith("/") else f"/{path}" if path else "/"
+            normalized_prefix = prefix if prefix.startswith("/") else f"/{prefix}"
+            normalized_prefix = normalized_prefix.rstrip("/")
+            if path == "/":
+                return f"{normalized_prefix}/" if normalized_prefix else "/"
+            return f"{normalized_prefix}/{path.lstrip('/')}" if path else normalized_prefix
 
-            if route_class_name == "APIRoute":
-                # Standard API route
-                handler = route.endpoint
-                handler_info = self._get_handler_info(handler)
+        def walk(routes: Any, prefix: str = "", stack: frozenset[int] = frozenset()) -> None:
+            route_collection_id = id(routes)
+            if route_collection_id in stack:
+                return
+            next_stack = stack | {route_collection_id}
+            for route in routes:
+                route_class_name = type(route).__name__
+                if route_class_name == "APIRoute":
+                    handler = route.endpoint
+                    handler_info = self._get_handler_info(handler)
+                    methods = [
+                        EndpointMethod(method.upper())
+                        for method in route.methods
+                        if method.upper() in EndpointMethod.__members__
+                    ]
+                    endpoints.append(
+                        Endpoint(
+                            path=join_paths(prefix, route.path),
+                            methods=methods,
+                            handler=handler_info,
+                            name=route.name,
+                            tags=list(route.tags) if route.tags else [],
+                            dependencies=self._extract_dependencies(route),
+                        )
+                    )
+                elif route_class_name == "APIWebSocketRoute":
+                    endpoints.append(
+                        Endpoint(
+                            path=join_paths(prefix, route.path),
+                            methods=[EndpointMethod.WEBSOCKET],
+                            handler=self._get_handler_info(route.endpoint),
+                            name=route.name,
+                            dependencies=self._extract_dependencies(route),
+                        )
+                    )
+                elif route_class_name == "Mount" and hasattr(route, "routes"):
+                    walk(route.routes, join_paths(prefix, route.path), next_stack)
 
-                # Get HTTP methods
-                methods = [
-                    EndpointMethod(m.upper())
-                    for m in route.methods
-                    if m.upper() in EndpointMethod.__members__
-                ]
-
-                # Get tags
-                tags = list(route.tags) if route.tags else []
-
-                # Get dependencies
-                dependencies = self._extract_dependencies(route)
-
-                endpoint = Endpoint(
-                    path=route.path,
-                    methods=methods,
-                    handler=handler_info,
-                    name=route.name,
-                    tags=tags,
-                    dependencies=dependencies,
-                )
-                endpoints.append(endpoint)
-
-            elif route_class_name == "Mount":
-                # Mounted sub-application - could be another FastAPI app
-                # or static files. Skip for now but log.
-                pass
-
-        return endpoints
+        walk(app.routes)
+        return sorted(endpoints, key=lambda endpoint: endpoint.identifier)
 
     def get_endpoint_handler_files(self) -> dict[Path, list[Endpoint]]:
         """
