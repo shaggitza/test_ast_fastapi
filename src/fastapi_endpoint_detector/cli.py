@@ -182,7 +182,7 @@ def analyze(
             
             return
         
-        if secure_ast:
+        if secure_ast and verbose:
             console.print("[yellow]Secure AST mode: discovering endpoints without imports[/yellow]")
 
         # Run dependency analysis with runtime or secure AST endpoint discovery.

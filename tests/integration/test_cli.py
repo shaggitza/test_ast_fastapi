@@ -2,6 +2,7 @@
 Integration tests for the CLI.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -170,6 +171,8 @@ def test_handler():
 
         assert result.exit_code == 0, result.output
         assert "must not execute" not in result.output
+        report = json.loads(result.output)
+        assert report["affected_endpoints"]
 
 
 class TestVMMode:
