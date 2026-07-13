@@ -33,6 +33,7 @@ class NormalizeEndpointsTests(unittest.TestCase):
             "affected_endpoints": [
                 {"endpoint": {"path": "items", "methods": ["post", "GET", "post"]}},
                 {"endpoint": {"path": "//items///", "methods": "get"}},
+                {"endpoint": {"path": "/events", "methods": "websocket"}},
             ]
         }
 
@@ -41,8 +42,10 @@ class NormalizeEndpointsTests(unittest.TestCase):
         self.assertEqual(
             endpoints,
             [
-                {"id": "HTTP GET /items", "evidence": []},
-                {"id": "HTTP POST /items", "evidence": []},
+                {"id": "HTTP GET /items", "kind": "http", "evidence": []},
+                {"id": "HTTP GET /items/", "kind": "http", "evidence": []},
+                {"id": "HTTP POST /items", "kind": "http", "evidence": []},
+                {"id": "WEBSOCKET /events", "kind": "event", "evidence": []},
             ],
         )
         self.assertEqual(unresolved, [])

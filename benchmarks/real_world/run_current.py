@@ -290,7 +290,7 @@ def normalize_endpoints(report: object) -> tuple[list[dict[str, Any]], list[str]
     if not isinstance(raw_endpoints, list):
         raise RunnerError("analyzer JSON has no affected_endpoints list")
 
-    identifiers: set[str] = set()
+    identifiers: dict[str, str] = {}
     unresolved: list[str] = []
     for index, raw in enumerate(raw_endpoints):
         endpoint = raw.get("endpoint") if isinstance(raw, dict) else None
@@ -311,15 +311,25 @@ def normalize_endpoints(report: object) -> tuple[list[dict[str, Any]], list[str]
         if not normalized_path.startswith("/"):
             normalized_path = f"/{normalized_path}"
         normalized_path = re.sub(r"/{2,}", "/", normalized_path)
-        if normalized_path != "/":
-            normalized_path = normalized_path.rstrip("/")
         for method in methods:
             if not isinstance(method, str) or not method.strip():
                 unresolved.append(f"invalid_endpoint[{index}]: invalid method {method!r}")
                 continue
-            identifiers.add(f"HTTP {method.strip().upper()} {normalized_path}")
+            normalized_method = method.strip().upper()
+            if normalized_method == "WEBSOCKET":
+                identifier = f"WEBSOCKET {normalized_path}"
+                identifiers[identifier] = "event"
+            else:
+                identifier = f"HTTP {normalized_method} {normalized_path}"
+                identifiers[identifier] = "http"
 
-    return ([{"id": identifier, "evidence": []} for identifier in sorted(identifiers)], unresolved)
+    return (
+        [
+            {"id": identifier, "kind": identifiers[identifier], "evidence": []}
+            for identifier in sorted(identifiers)
+        ],
+        unresolved,
+    )
 
 
 def report_unresolved(report: dict[str, Any]) -> list[str]:
