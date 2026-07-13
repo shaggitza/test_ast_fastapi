@@ -1,0 +1,23 @@
+{
+  "adjudicated_prs": 58,
+  "prediction_coverage": 1.0,
+  "micro": {
+    "precision": 0.0,
+    "recall": 0.0,
+    "f1": 0.0,
+    "tp": 0,
+    "fp": 4,
+    "fn": 180
+  },
+  "macro": {
+    "precision": 0.0,
+    "recall": 0.0,
+    "f1": 0.0
+  },
+  "unresolved_items": 37,
+  "latency_seconds": {
+    "samples": 21,
+    "mean": 42.95993912166783,
+    "max": 139.62536342901876
+  }
+}
