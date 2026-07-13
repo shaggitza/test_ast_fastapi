@@ -258,6 +258,36 @@ the proposed HYBRID architecture: compiler-backed, language-agnostic
 references underneath; framework-specific entrypoint classification above.
 It also shows why SCIP alone is not a finished PR impact product.
 
+## SCIP Python blast-radius POC
+
+Executed `@sourcegraph/scip-python` 0.6.6, `scip-query` 0.16.0, and the SCIP CLI
+0.9.0 against the FastAPI transitive fixture. Indexing took 2.00 seconds for
+the baseline and 1.81 seconds for the changed tree. SCIP reported
+`quote_service()` and `order()` at depth 1 and the dependency-injected
+`quote()` handler at depth 2. A 0.05-second AST adapter mapped the affected
+functions' decorators to `POST /quotes` and `POST /orders`, while leaving
+`GET /health` unaffected: **TP=2, FP=0, FN=0**.
+
+Raw SCIP still emits symbols rather than HTTP identities, so its endpoint score
+without the adapter is **TP=0, FN=2**. The adapter must eventually resolve
+routers, prefixes, constants, mounted applications, and custom decorators.
+One important implementation warning emerged: `scip-python-plus` 0.7.5, which
+`scip-query` selected by default, omitted `quote()` and `health()` from its
+outline and lost the dependency-injected endpoint. The successful run used
+Sourcegraph's `scip-python` indexer explicitly.
+
+## SCIP Java blast-radius POC
+
+Attempted `scip-java` v0.13.1 with SCIP CLI 0.9.0, Temurin 21.0.11, and Maven
+3.9.11 against the Spring overload fixture. The compact raw fixture could not
+compile because its annotation types were intentionally undeclared. Adding
+package-local Spring annotation stubs allowed indexing in 7.18 seconds, but
+`scip lint` rejected the resulting index because referenced JDK symbols lacked
+external `SymbolInformation` entries. The run stopped at that validation
+failure, so overload precision was **not established** and no Java SCIP score
+is claimed. This remains an integration blocker to resolve with a normal Maven
+Spring project before comparing SCIP Java with JCCI's successful result.
+
 ## Role of contract analyzers
 
 The oasdiff, GraphQL Inspector and Buf results above are **not blast-radius
