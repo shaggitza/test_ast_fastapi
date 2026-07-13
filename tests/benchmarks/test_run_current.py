@@ -1,0 +1,311 @@
+"""Mocked, stdlib-only tests for the current-analyzer corpus runner."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from benchmarks.real_world import run_current
+
+SHA_A = "a" * 40
+SHA_B = "b" * 40
+SHA_C = "c" * 40
+
+
+def entry(repository: str, pr: int, *, python: bool = True) -> dict[str, object]:
+    suffix = "service.py" if python else "README.md"
+    return {
+        "repository": repository,
+        "number": pr,
+        "mergeCommit": {"oid": SHA_A},
+        "commits": [SHA_C],
+        "files": [{"path": suffix}],
+    }
+
+
+class NormalizeEndpointsTests(unittest.TestCase):
+    def test_explodes_normalizes_sorts_and_deduplicates_methods(self) -> None:
+        report = {
+            "affected_endpoints": [
+                {"endpoint": {"path": "items", "methods": ["post", "GET", "post"]}},
+                {"endpoint": {"path": "//items///", "methods": "get"}},
+            ]
+        }
+
+        endpoints, unresolved = run_current.normalize_endpoints(report)
+
+        self.assertEqual(
+            endpoints,
+            [
+                {"id": "HTTP GET /items", "evidence": []},
+                {"id": "HTTP POST /items", "evidence": []},
+            ],
+        )
+        self.assertEqual(unresolved, [])
+
+
+class ResolutionAndSkipTests(unittest.TestCase):
+    def config(self, temporary: Path, **overrides: object) -> run_current.RunConfig:
+        values: dict[str, object] = {
+            "cache": temporary / "cache",
+            "output": temporary / "output.jsonl",
+            "manifest": temporary / "manifest.json",
+            "timeout": 5.0,
+            "dry_run": False,
+            "allow_upstream_execution": False,
+            "default_app_root": ".",
+            "app_roots": {},
+            "candidate_root": temporary,
+        }
+        values.update(overrides)
+        return run_current.RunConfig(**values)  # type: ignore[arg-type]
+
+    def test_non_python_pr_is_explicitly_unresolved_without_git(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_name:
+            config = self.config(Path(temporary_name))
+            with mock.patch.object(run_current, "ensure_cache") as ensure_cache:
+                prediction, manifest = run_current.process_entry(
+                    entry("owner/repo", 7, python=False), config, "candidate"
+                )
+
+        ensure_cache.assert_not_called()
+        self.assertEqual(prediction["unresolved"], ["non_python_change"])
+        self.assertEqual(prediction["affected_entrypoints"], [])
+        self.assertNotIn("incremental_seconds", prediction)
+        self.assertEqual(manifest["reason"], "non_python_change")
+        self.assertEqual(manifest["merge_sha"], SHA_A)
+
+    def test_python_pr_uses_secure_analysis_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_name:
+            temporary = Path(temporary_name)
+            config = self.config(temporary)
+
+            def make_worktree(_cache: Path, worktree: Path, _base: str) -> None:
+                worktree.mkdir()
+
+            with (
+                mock.patch.object(run_current, "ensure_cache", return_value=temporary / "bare"),
+                mock.patch.object(run_current, "merge_parents", return_value=[SHA_B]),
+                mock.patch.object(run_current, "add_detached_worktree", side_effect=make_worktree),
+                mock.patch.object(run_current, "write_local_diff"),
+                mock.patch.object(run_current, "remove_worktree"),
+                mock.patch.object(
+                    run_current, "invoke_analyzer", return_value=([], [], 0.25)
+                ) as invoke,
+            ):
+                prediction, manifest = run_current.process_entry(
+                    entry("owner/repo", 8), config, "candidate"
+                )
+
+        self.assertTrue(invoke.call_args.kwargs["secure_ast"])
+        self.assertEqual(prediction["unresolved"], [])
+        self.assertEqual(manifest["status"], "completed")
+
+    def test_missing_configured_root_is_unresolved(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_name:
+            temporary = Path(temporary_name)
+            config = self.config(
+                temporary,
+                allow_upstream_execution=True,
+                app_roots={"owner/repo": "backend/missing"},
+            )
+
+            def make_worktree(_cache: Path, worktree: Path, _base: str) -> None:
+                worktree.mkdir()
+
+            with (
+                mock.patch.object(run_current, "ensure_cache", return_value=temporary / "bare"),
+                mock.patch.object(run_current, "merge_parents", return_value=[SHA_B]),
+                mock.patch.object(run_current, "add_detached_worktree", side_effect=make_worktree),
+                mock.patch.object(run_current, "remove_worktree"),
+                mock.patch.object(run_current, "invoke_analyzer") as invoke,
+            ):
+                prediction, manifest = run_current.process_entry(
+                    entry("owner/repo", 8), config, "candidate"
+                )
+
+        invoke.assert_not_called()
+        self.assertIn("configured app root does not exist", prediction["unresolved"][0])
+        self.assertEqual(manifest["base_sha"], SHA_B)
+
+    def test_opt_in_reaches_analyzer(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_name:
+            temporary = Path(temporary_name)
+            config = self.config(temporary, allow_upstream_execution=True)
+
+            def make_worktree(_cache: Path, worktree: Path, _base: str) -> None:
+                worktree.mkdir()
+
+            with (
+                mock.patch.object(run_current, "ensure_cache", return_value=temporary / "bare"),
+                mock.patch.object(run_current, "merge_parents", return_value=[SHA_B]),
+                mock.patch.object(run_current, "add_detached_worktree", side_effect=make_worktree),
+                mock.patch.object(run_current, "write_local_diff"),
+                mock.patch.object(run_current, "remove_worktree"),
+                mock.patch.object(
+                    run_current, "invoke_analyzer", return_value=([], [], 0.25)
+                ) as invoke,
+            ):
+                prediction, manifest = run_current.process_entry(
+                    entry("owner/repo", 9), config, "candidate"
+                )
+
+        invoke.assert_called_once()
+        self.assertFalse(invoke.call_args.kwargs["secure_ast"])
+        self.assertEqual(prediction["unresolved"], [])
+        self.assertEqual(prediction["incremental_seconds"], 0.25)
+        self.assertEqual(manifest["status"], "completed")
+
+    def test_ambiguous_parent_is_unresolved(self) -> None:
+        with self.assertRaisesRegex(run_current.RunnerError, "expected exactly one"):
+            run_current.resolve_base_parent([SHA_A, SHA_B], [])
+
+
+class AnalyzerFailureTests(unittest.TestCase):
+    def test_opt_in_invokes_exact_analyzer_command(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=["uv"],
+            returncode=0,
+            stdout=json.dumps({"affected_endpoints": [], "errors": [], "warnings": []}),
+            stderr="",
+        )
+        with mock.patch.object(run_current, "command", return_value=completed) as command:
+            run_current.invoke_analyzer(
+                Path("candidate"), Path("app"), Path("p.diff"), 2, secure_ast=True
+            )
+
+        command.assert_called_once_with(
+            [
+                "uv",
+                "run",
+                "--frozen",
+                "fastapi-endpoint-detector",
+                "analyze",
+                "--app",
+                "app",
+                "--diff",
+                "p.diff",
+                "--format",
+                "json",
+                "--no-cache",
+                "--secure-ast",
+            ],
+            cwd=Path("candidate"),
+            timeout=2,
+        )
+
+    def test_subprocess_failure_is_preserved_as_unresolved(self) -> None:
+        failed = subprocess.CompletedProcess(
+            args=["uv"], returncode=9, stdout="", stderr="mypy exploded"
+        )
+        with (
+            mock.patch.object(run_current, "command", return_value=failed),
+            self.assertRaisesRegex(
+                run_current.RunnerError, r"analyzer failed \(9\): mypy exploded"
+            ),
+        ):
+            run_current.invoke_analyzer(
+                Path("candidate"), Path("app"), Path("p.diff"), 2, secure_ast=True
+            )
+
+    def test_report_errors_and_warnings_are_preserved(self) -> None:
+        report = {
+            "affected_endpoints": [],
+            "errors": ["could not map change"],
+            "warnings": [{"message": "dynamic route"}],
+        }
+        completed = subprocess.CompletedProcess(
+            args=["uv"], returncode=0, stdout=json.dumps(report), stderr=""
+        )
+        with mock.patch.object(run_current, "command", return_value=completed):
+            _endpoints, unresolved, _elapsed = run_current.invoke_analyzer(
+                Path("candidate"), Path("app"), Path("p.diff"), 2, secure_ast=True
+            )
+
+        self.assertEqual(
+            unresolved,
+            [
+                "analyzer_error: could not map change",
+                'analyzer_warning: {"message": "dynamic route"}',
+            ],
+        )
+
+
+class OutputCardinalityTests(unittest.TestCase):
+    def test_main_rejects_colliding_artifact_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_name:
+            corpus = Path(temporary_name) / "corpus.json"
+            corpus.write_text('{"entries": []}', encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                run_current.main(
+                    [
+                        "--corpus",
+                        str(corpus),
+                        "--output",
+                        str(corpus),
+                        "--manifest",
+                        str(Path(temporary_name) / "manifest.json"),
+                    ]
+                )
+
+    def test_main_writes_one_unique_row_per_selected_pr(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_name:
+            temporary = Path(temporary_name)
+            corpus = temporary / "corpus.json"
+            output = temporary / "predictions.jsonl"
+            manifest = temporary / "manifest.json"
+            corpus.write_text(
+                json.dumps(
+                    {
+                        "entries": [
+                            entry("owner/one", 1, python=False),
+                            entry("owner/two", 2, python=False),
+                            entry("owner/two", 3, python=False),
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            candidate = {
+                "id": "candidate",
+                "name": "fastapi-endpoint-detector",
+                "version": "test",
+                "git_sha": SHA_A,
+                "config_hash": "config",
+                "command": "uv run --frozen fastapi-endpoint-detector analyze",
+            }
+            with mock.patch.object(run_current, "candidate_metadata", return_value=candidate):
+                result = run_current.main(
+                    [
+                        "--corpus",
+                        str(corpus),
+                        "--cache",
+                        str(temporary / "cache"),
+                        "--output",
+                        str(output),
+                        "--manifest",
+                        str(manifest),
+                        "--limit",
+                        "2",
+                    ]
+                )
+
+            rows = [json.loads(line) for line in output.read_text().splitlines()]
+            manifest_data = json.loads(manifest.read_text())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(
+            {(row["repository"], row["pr"]) for row in rows},
+            {("owner/one", 1), ("owner/two", 2)},
+        )
+        self.assertEqual(manifest_data["selection_count"], 2)
+        self.assertEqual(len(manifest_data["prs"]), 2)
+
+
+if __name__ == "__main__":
+    unittest.main()

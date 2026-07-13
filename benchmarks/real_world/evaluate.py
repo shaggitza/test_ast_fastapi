@@ -64,9 +64,14 @@ def main() -> None:
     tp, fp, fn = totals["tp"], totals["fp"], totals["fn"]
     precision = ratio(tp, tp + fp)
     recall = ratio(tp, tp + fn)
+    adjudicated_keys = {
+        record_key
+        for record_key, record in truth.items()
+        if record.get("status", "adjudicated") == "adjudicated"
+    }
     result = {
         "adjudicated_prs": evaluated,
-        "prediction_coverage": ratio(len(set(truth) & set(predictions)), evaluated),
+        "prediction_coverage": ratio(len(adjudicated_keys & set(predictions)), evaluated),
         "micro": {
             "precision": precision,
             "recall": recall,

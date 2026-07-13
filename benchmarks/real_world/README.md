@@ -104,6 +104,28 @@ Use `evaluate.py` to compare predictions. Primary metrics are micro/macro recall
 precision, F1, unresolved rate, evaluable coverage, and latency. A candidate
 cannot improve its score by omitting hard PRs.
 
+### Current candidate runner
+
+`run_current.py` selects corpus PRs, fetches their immutable merge commits into
+a bare cache, and writes one prediction per selected PR plus a reproduction
+manifest. Repository-specific analyzer roots can be supplied without consulting
+labels:
+
+```bash
+python benchmarks/real_world/run_current.py \
+  --output /tmp/current.jsonl \
+  --manifest /tmp/current-manifest.json \
+  --app-root open-webui/open-webui=backend
+```
+
+By default the runner passes `--secure-ast`: endpoint discovery and dependency
+analysis parse source without importing the upstream application. Running with
+`--allow-upstream-execution` disables secure endpoint discovery and is an
+explicit unsafe opt-in recorded in the manifest. Unsafe results are exploratory
+only because imported code can access the host, network, and benchmark labels.
+The secure mode is the official scoring path, with unsupported dynamic routing
+reported through misses or unresolved evidence rather than hidden execution.
+
 ## Reproduction
 
 ```bash
