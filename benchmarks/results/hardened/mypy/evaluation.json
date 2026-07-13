@@ -1,0 +1,81 @@
+{
+  "adjudicated_prs": 58,
+  "prediction_coverage": 1.0,
+  "micro": {
+    "precision": 0.03745318352059925,
+    "recall": 0.05555555555555555,
+    "f1": 0.0447427293064877,
+    "tp": 10,
+    "fp": 257,
+    "fn": 170
+  },
+  "macro": {
+    "precision": 0.0019371749618830802,
+    "recall": 0.02832512315270936,
+    "f1": 0.0036210572752003534
+  },
+  "by_kind": {
+    "cli": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "fp": 0,
+      "fn": 8
+    },
+    "cron": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "fp": 0,
+      "fn": 3
+    },
+    "event": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "fp": 1,
+      "fn": 13
+    },
+    "http": {
+      "precision": 0.03759398496240601,
+      "recall": 0.1282051282051282,
+      "f1": 0.05813953488372093,
+      "tp": 10,
+      "fp": 256,
+      "fn": 68
+    },
+    "other": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "fp": 0,
+      "fn": 73
+    },
+    "sdk": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "fp": 0,
+      "fn": 4
+    },
+    "task": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "fp": 0,
+      "fn": 1
+    }
+  },
+  "unresolved_items": 31,
+  "latency_seconds": {
+    "samples": 27,
+    "mean": 16.76255301548237,
+    "max": 173.17786781099858
+  }
+}
