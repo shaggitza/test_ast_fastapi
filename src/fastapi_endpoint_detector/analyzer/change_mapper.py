@@ -149,12 +149,14 @@ def _merge_affected(
 
 
 def _scip_confidence(seed: SCIPDefinition, depth: int) -> ConfidenceLevel:
+    del seed
     if depth == 0:
         return ConfidenceLevel.HIGH
-    if "(" not in seed.short_name:
-        # Class/module/value seeds over-approximate every consumer of a container.
-        return ConfidenceLevel.LOW
-    return ConfidenceLevel.MEDIUM
+    # A SCIP reverse-reference path establishes call/reference reachability, not
+    # that the changed value is returned, persisted, emitted, or otherwise
+    # observed by the endpoint. Keep every transitive route as a candidate, but
+    # require independent effect/data-flow corroboration before promotion.
+    return ConfidenceLevel.LOW
 
 
 def _normalized_diff_path(path: Path | str) -> str:

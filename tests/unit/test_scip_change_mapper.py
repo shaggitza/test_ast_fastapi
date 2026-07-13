@@ -297,9 +297,10 @@ def test_scip_mapper_reaches_direct_and_depends_endpoints(tmp_path: Path) -> Non
 
     report = mapper.analyze_diff(diff)
 
-    assert {item.endpoint.identifier for item in report.affected_endpoints} == {
+    assert report.affected_endpoints == []
+    assert {item.endpoint.identifier for item in report.candidate_endpoints} == {
         "POST /orders",
         "POST /quotes",
     }
     assert not report.orphan_changes
-    assert all(item.confidence.value == "medium" for item in report.affected_endpoints)
+    assert all(item.confidence.value == "low" for item in report.candidate_endpoints)
