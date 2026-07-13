@@ -104,6 +104,27 @@ Use `evaluate.py` to compare predictions. Primary metrics are micro/macro recall
 precision, F1, unresolved rate, evaluable coverage, and latency. A candidate
 cannot improve its score by omitting hard PRs.
 
+### Current candidate runner
+
+`run_current.py` selects corpus PRs, fetches their immutable merge commits into
+a bare cache, and writes one prediction per selected PR plus a reproduction
+manifest. Repository-specific analyzer roots can be supplied without consulting
+labels:
+
+```bash
+python benchmarks/real_world/run_current.py \
+  --output /tmp/current.jsonl \
+  --manifest /tmp/current-manifest.json \
+  --app-root open-webui/open-webui=backend
+```
+
+The current `analyze` command imports the application module and can therefore
+execute upstream code. The runner refuses this by default and emits
+`unsafe_upstream_execution_required` as unresolved. Running with
+`--allow-upstream-execution` is an explicit unsafe opt-in recorded in the
+manifest. A non-executing implementation of `analyze` is required before this
+runner can produce an official benchmark score without that unsafe opt-in.
+
 ## Reproduction
 
 ```bash
