@@ -83,7 +83,7 @@ def command(
 ) -> subprocess.CompletedProcess[str]:
     """Run a command without a shell and capture its output."""
     command_args = list(args)
-    process = subprocess.Popen(  # noqa: S603 - commands always use argv arrays
+    process = subprocess.Popen(
         command_args,
         cwd=cwd,
         stdout=subprocess.PIPE,
