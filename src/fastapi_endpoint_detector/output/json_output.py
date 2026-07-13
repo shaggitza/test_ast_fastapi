@@ -64,7 +64,12 @@ class JsonFormatter(BaseFormatter):
                     "confidence": ae.confidence.value,
                     "reason": ae.reason,
                     "dependency_chain": ae.dependency_chain,
+                    "dependency_chains": ae.all_dependency_chains,
                     "changed_files": ae.changed_files,
+                    "call_stacks": [
+                        [frame.model_dump(mode="json") for frame in stack]
+                        for stack in ae.call_stacks
+                    ],
                 }
                 for ae in report.affected_endpoints
             ],

@@ -16,9 +16,9 @@ from fastapi_endpoint_detector.models.endpoint import Endpoint
 class ConfidenceLevel(str, Enum):
     """Confidence level for endpoint being affected."""
 
-    HIGH = "high"       # Direct change to endpoint handler
-    MEDIUM = "medium"   # Change to direct dependency
-    LOW = "low"         # Change to transitive dependency
+    HIGH = "high"  # Direct change to endpoint handler
+    MEDIUM = "medium"  # Change to direct dependency
+    LOW = "low"  # Change to transitive dependency
 
 
 class CallStackFrame(BaseModel):
@@ -27,10 +27,7 @@ class CallStackFrame(BaseModel):
     file_path: str = Field(description="Absolute path to the file")
     line_number: int = Field(description="Line number in the file")
     function_name: str = Field(description="Name of the function/method")
-    code_context: str | None = Field(
-        default=None,
-        description="The line of code at this location"
-    )
+    code_context: str | None = Field(default=None, description="The line of code at this location")
 
     class Config:
         frozen = True
@@ -41,7 +38,7 @@ class CallStackFrame(BaseModel):
         line_display = f"line {self.line_number}"
         if self.code_context and self.code_context.startswith("[lines "):
             # Parse "[lines X-Y]" format
-            match = re.match(r'\[lines (\d+)-(\d+)\]', self.code_context)
+            match = re.match(r"\[lines (\d+)-(\d+)\]", self.code_context)
             if match:
                 start_line = match.group(1)
                 end_line = match.group(2)
@@ -51,9 +48,9 @@ class CallStackFrame(BaseModel):
         if self.code_context:
             # Handle multi-line code context (when showing multiple lines in a range)
             context_str = self.code_context.strip()
-            if '\n' in context_str:
+            if "\n" in context_str:
                 # Multi-line context - indent each line
-                lines = context_str.split('\n')
+                lines = context_str.split("\n")
                 for line in lines:
                     result += f"\n    {line}"
             else:
@@ -70,7 +67,11 @@ class AffectedEndpoint(BaseModel):
     reason: str = Field(description="Why this endpoint is considered affected")
     dependency_chain: list[str] = Field(
         default_factory=list,
-        description="Chain of dependencies from change to endpoint",
+        description="Primary dependency chain from change to endpoint",
+    )
+    dependency_chains: list[list[str]] = Field(
+        default_factory=list,
+        description="All distinct dependency chains supporting this result",
     )
     changed_files: list[str] = Field(
         default_factory=list,
@@ -83,6 +84,15 @@ class AffectedEndpoint(BaseModel):
 
     class Config:
         frozen = True
+
+    @property
+    def all_dependency_chains(self) -> list[list[str]]:
+        """Return the primary chain followed by distinct additional chains."""
+        chains: list[list[str]] = []
+        for chain in [self.dependency_chain, *self.dependency_chains]:
+            if chain and chain not in chains:
+                chains.append(chain)
+        return chains
 
     def format_traceback(self) -> str:
         """Format all call stacks like Python tracebacks.
@@ -97,7 +107,9 @@ class AffectedEndpoint(BaseModel):
         for i, call_stack in enumerate(self.call_stacks, 1):
             if len(self.call_stacks) > 1:
                 # Multiple paths - label each one
-                results.append(f"Traceback (dependency chain, path {i} of {len(self.call_stacks)}):")
+                results.append(
+                    f"Traceback (dependency chain, path {i} of {len(self.call_stacks)}):"
+                )
             else:
                 # Single path
                 results.append("Traceback (dependency chain):")
@@ -114,7 +126,7 @@ class AffectedEndpoint(BaseModel):
 
 class OrphanChange(BaseModel):
     """Represents code changes that are not related to any endpoint."""
-    
+
     file_path: str = Field(description="Path to the file with orphan changes")
     added_lines: list[int] = Field(
         default_factory=list,
@@ -128,15 +140,15 @@ class OrphanChange(BaseModel):
         default="Code changes not related to any endpoint",
         description="Why these changes are considered orphan",
     )
-    
+
     class Config:
         frozen = True
-    
+
     @property
     def total_lines(self) -> int:
         """Total number of orphan lines."""
         return len(self.added_lines) + len(self.removed_lines)
-    
+
     def format_lines(self) -> str:
         """Format the orphan lines for display."""
         parts = []
@@ -200,21 +212,18 @@ class AnalysisReport(BaseModel):
     @property
     def high_confidence_count(self) -> int:
         """Number of high confidence affected endpoints."""
-        return sum(
-            1 for ae in self.affected_endpoints
-            if ae.confidence == ConfidenceLevel.HIGH
-        )
+        return sum(1 for ae in self.affected_endpoints if ae.confidence == ConfidenceLevel.HIGH)
 
     @property
     def orphan_count(self) -> int:
         """Number of files with orphan changes."""
         return len(self.orphan_changes)
-    
+
     @property
     def total_orphan_lines(self) -> int:
         """Total number of orphan lines across all files."""
         return sum(oc.total_lines for oc in self.orphan_changes)
-    
+
     @property
     def has_errors(self) -> bool:
         """Check if there were any errors."""
@@ -225,7 +234,4 @@ class AnalysisReport(BaseModel):
         confidence: ConfidenceLevel,
     ) -> list[AffectedEndpoint]:
         """Get affected endpoints filtered by confidence level."""
-        return [
-            ae for ae in self.affected_endpoints
-            if ae.confidence == confidence
-        ]
+        return [ae for ae in self.affected_endpoints if ae.confidence == confidence]

@@ -7,8 +7,10 @@ dependency analysis to determine which endpoints are affected by code changes.
 Uses mypy for type-aware, precise dependency tracking.
 """
 
+import os
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from fastapi_endpoint_detector.analyzer.endpoint_registry import EndpointRegistry
@@ -34,6 +36,119 @@ from fastapi_endpoint_detector.parser.secure_ast_extractor import SecureASTExtra
 
 # Progress callback type: (current, total, description) -> None
 ProgressCallback = Callable[[int, int, str], None]
+
+_CONFIDENCE_SCORE = {
+    ConfidenceLevel.HIGH: 1.0,
+    ConfidenceLevel.MEDIUM: 0.7,
+    ConfidenceLevel.LOW: 0.3,
+}
+
+
+def _endpoint_result_key(endpoint: Endpoint) -> tuple[str, str, int, str, str]:
+    handler = endpoint.handler
+    return (
+        endpoint.identifier,
+        str(handler.file_path.resolve()),
+        handler.line_number,
+        handler.name,
+        handler.module,
+    )
+
+
+def _stack_key(stack: list[CallStackFrame]) -> tuple[tuple[str, int, str, str | None], ...]:
+    return tuple(
+        (frame.file_path, frame.line_number, frame.function_name, frame.code_context)
+        for frame in stack
+    )
+
+
+@dataclass
+class _AffectedAccumulator:
+    endpoint: Endpoint
+    confidence: ConfidenceLevel
+    reason: str
+    dependency_chain: list[str]
+    changed_files: list[str] = field(default_factory=list)
+    dependency_chains: list[list[str]] = field(default_factory=list)
+    call_stacks: list[list[CallStackFrame]] = field(default_factory=list)
+
+    @classmethod
+    def from_candidate(cls, candidate: AffectedEndpoint) -> "_AffectedAccumulator":
+        accumulator = cls(
+            endpoint=candidate.endpoint,
+            confidence=candidate.confidence,
+            reason=candidate.reason,
+            dependency_chain=list(candidate.dependency_chain),
+        )
+        accumulator.merge(candidate)
+        return accumulator
+
+    def merge(self, candidate: AffectedEndpoint) -> None:
+        if _CONFIDENCE_SCORE[candidate.confidence] > _CONFIDENCE_SCORE[self.confidence]:
+            self.confidence = candidate.confidence
+            self.reason = candidate.reason
+            self.dependency_chain = list(candidate.dependency_chain)
+        for file_path in candidate.changed_files:
+            if file_path not in self.changed_files:
+                self.changed_files.append(file_path)
+        for chain in candidate.all_dependency_chains:
+            if chain not in self.dependency_chains:
+                self.dependency_chains.append(list(chain))
+        stack_keys = {_stack_key(stack) for stack in self.call_stacks}
+        for stack in candidate.call_stacks:
+            key = _stack_key(stack)
+            if key not in stack_keys:
+                self.call_stacks.append(list(stack))
+                stack_keys.add(key)
+
+    def materialize(self) -> AffectedEndpoint:
+        return AffectedEndpoint(
+            endpoint=self.endpoint,
+            confidence=self.confidence,
+            reason=self.reason,
+            dependency_chain=self.dependency_chain,
+            dependency_chains=self.dependency_chains,
+            changed_files=self.changed_files,
+            call_stacks=self.call_stacks,
+        )
+
+
+def _merge_affected(
+    accumulated: dict[tuple[str, str, int, str, str], _AffectedAccumulator],
+    candidate: AffectedEndpoint,
+) -> None:
+    key = _endpoint_result_key(candidate.endpoint)
+    existing = accumulated.get(key)
+    if existing is None:
+        accumulated[key] = _AffectedAccumulator.from_candidate(candidate)
+    else:
+        existing.merge(candidate)
+
+
+def _normalized_diff_path(path: Path | str) -> str:
+    return os.path.normcase(os.path.normpath(str(path).replace("\\", "/")))
+
+
+@dataclass
+class _OrphanAccumulator:
+    file_path: str
+    reason: str
+    added: set[int] = field(default_factory=set)
+    removed: set[int] = field(default_factory=set)
+    processed_added: set[int] = field(default_factory=set)
+    processed_removed: set[int] = field(default_factory=set)
+
+    def materialize(self) -> OrphanChange | None:
+        orphan_added = sorted(self.added - self.processed_added)
+        orphan_removed = sorted(self.removed - self.processed_removed)
+        if not orphan_added and not orphan_removed:
+            return None
+        return OrphanChange(
+            file_path=self.file_path,
+            added_lines=orphan_added,
+            removed_lines=orphan_removed,
+            reason=self.reason,
+        )
 
 
 class ChangeMapperError(Exception):
@@ -351,8 +466,7 @@ class ChangeMapper:
             Tuple of (affected endpoints, processed added lines, processed removed lines).
             Processed lines are those that were matched to any endpoint.
         """
-        affected: list[AffectedEndpoint] = []
-        seen_endpoints: set[str] = set()
+        affected: dict[tuple[str, str, int, str, str], _AffectedAccumulator] = {}
         processed_added_lines: set[int] = set()
         processed_removed_lines: set[int] = set()
 
@@ -368,8 +482,7 @@ class ChangeMapper:
                 endpoint, diff_file, added_lines, removed_lines
             )
             if result:
-                affected.append(result)
-                seen_endpoints.add(endpoint.identifier)
+                _merge_affected(affected, result)
                 # Mark lines as processed
                 handler = endpoint.handler
                 handler_end = handler.end_line_number or handler.line_number + 50
@@ -379,13 +492,9 @@ class ChangeMapper:
 
         # Use mypy for type-aware dependency analysis
         for endpoint in self.registry:
-            if endpoint.identifier in seen_endpoints:
-                continue
-
             result = self._check_mypy_dependency(endpoint, diff_file, added_lines, removed_lines)
             if result:
-                affected.append(result)
-                seen_endpoints.add(endpoint.identifier)
+                _merge_affected(affected, result)
                 # Mark lines as processed - get the actual lines that were referenced
                 deps = self.mypy_analyzer.get_endpoint_dependencies(endpoint)
                 if deps:
@@ -402,7 +511,11 @@ class ChangeMapper:
                             ln for ln in removed_lines if ln in referenced
                         )
 
-        return affected, processed_added_lines, processed_removed_lines
+        return (
+            [item.materialize() for item in affected.values()],
+            processed_added_lines,
+            processed_removed_lines,
+        )
 
     def _analyze_with_scip(
         self,
@@ -413,8 +526,8 @@ class ChangeMapper:
         if progress_callback:
             progress_callback(10, 100, "Indexing Python with SCIP...")
         self.scip_analyzer.ensure_index(force=not self.use_cache)
-        affected_by_id: dict[str, AffectedEndpoint] = {}
-        orphan_changes: list[OrphanChange] = []
+        affected: dict[tuple[str, str, int, str, str], _AffectedAccumulator] = {}
+        orphan_evidence: dict[str, _OrphanAccumulator] = {}
         project_root = self.app_path.parent if self.app_path.is_file() else self.app_path
 
         for index, diff_file in enumerate(python_files):
@@ -478,31 +591,30 @@ class ChangeMapper:
                             dependency_chain=[seed.symbol, definition.symbol],
                             changed_files=[str(diff_file.path)],
                         )
-                        existing_endpoint = affected_by_id.get(endpoint.identifier)
-                        if existing_endpoint is None or (
-                            existing_endpoint.confidence != ConfidenceLevel.HIGH
-                            and confidence == ConfidenceLevel.HIGH
-                        ):
-                            affected_by_id[endpoint.identifier] = candidate
+                        _merge_affected(affected, candidate)
                 if seed_reached_endpoint:
                     processed_added.update(seed_added)
                     processed_removed.update(seed_removed)
 
-            orphan_added = [line for line in added_lines if line not in processed_added]
-            orphan_removed = [line for line in removed_lines if line not in processed_removed]
-            if orphan_added or orphan_removed:
-                orphan_changes.append(
-                    OrphanChange(
-                        file_path=str(diff_file.path),
-                        added_lines=orphan_added,
-                        removed_lines=orphan_removed,
-                        reason=(
-                            "Changed lines did not resolve through SCIP to a registered endpoint"
-                        ),
-                    )
-                )
+            orphan_key = _normalized_diff_path(diff_file.path)
+            evidence = orphan_evidence.setdefault(
+                orphan_key,
+                _OrphanAccumulator(
+                    file_path=str(diff_file.path),
+                    reason=("Changed lines did not resolve through SCIP to a registered endpoint"),
+                ),
+            )
+            evidence.added.update(added_lines)
+            evidence.removed.update(removed_lines)
+            evidence.processed_added.update(processed_added)
+            evidence.processed_removed.update(processed_removed)
 
-        return list(affected_by_id.values()), orphan_changes
+        orphan_changes = [
+            orphan
+            for evidence in orphan_evidence.values()
+            if (orphan := evidence.materialize()) is not None
+        ]
+        return [item.materialize() for item in affected.values()], orphan_changes
 
     def analyze_diff(
         self,
@@ -553,13 +665,8 @@ class ChangeMapper:
             report_progress(10, 100, f"Analyzing {total_endpoints} endpoints (SCIP)...")
             scip_affected, scip_orphans = self._analyze_with_scip(python_files, progress_callback)
             threshold = self.config.analysis.confidence_threshold
-            confidence_order = {
-                ConfidenceLevel.HIGH: 1.0,
-                ConfidenceLevel.MEDIUM: 0.7,
-                ConfidenceLevel.LOW: 0.3,
-            }
             filtered = [
-                item for item in scip_affected if confidence_order[item.confidence] >= threshold
+                item for item in scip_affected if _CONFIDENCE_SCORE[item.confidence] >= threshold
             ]
             duration_ms = (time.time() - start_time) * 1000
             report_progress(100, 100, "Complete!")
@@ -582,9 +689,8 @@ class ChangeMapper:
 
         # Analyze each Python file
         report_progress(70, 100, f"Checking {len(python_files)} changed files...")
-        all_affected: list[AffectedEndpoint] = []
-        seen_endpoints: set[str] = set()
-        orphan_changes: list[OrphanChange] = []
+        all_affected: dict[tuple[str, str, int, str, str], _AffectedAccumulator] = {}
+        orphan_evidence: dict[str, _OrphanAccumulator] = {}
 
         for i, diff_file in enumerate(python_files):
             try:
@@ -596,42 +702,39 @@ class ChangeMapper:
                 file_affected, processed_added, processed_removed = self._analyze_diff_file(
                     diff_file
                 )
-                for ae in file_affected:
-                    if ae.endpoint.identifier not in seen_endpoints:
-                        all_affected.append(ae)
-                        seen_endpoints.add(ae.endpoint.identifier)
+                for candidate in file_affected:
+                    _merge_affected(all_affected, candidate)
 
-                # Collect orphan lines (lines not processed by any endpoint)
                 added_lines, removed_lines = DiffParser.get_changed_line_numbers(diff_file)
-                orphan_added = [ln for ln in added_lines if ln not in processed_added]
-                orphan_removed = [ln for ln in removed_lines if ln not in processed_removed]
-
-                if orphan_added or orphan_removed:
-                    orphan_changes.append(
-                        OrphanChange(
-                            file_path=str(diff_file.path),
-                            added_lines=orphan_added,
-                            removed_lines=orphan_removed,
-                            reason=(
-                                "Code changes not related to any endpoint "
-                                "(possibly unused, unrelated, or has type issues)"
-                            ),
-                        )
-                    )
+                orphan_key = _normalized_diff_path(diff_file.path)
+                evidence = orphan_evidence.setdefault(
+                    orphan_key,
+                    _OrphanAccumulator(
+                        file_path=str(diff_file.path),
+                        reason=(
+                            "Code changes not related to any endpoint "
+                            "(possibly unused, unrelated, or has type issues)"
+                        ),
+                    ),
+                )
+                evidence.added.update(added_lines)
+                evidence.removed.update(removed_lines)
+                evidence.processed_added.update(processed_added)
+                evidence.processed_removed.update(processed_removed)
             except Exception as e:
                 warnings.append(f"Error analyzing {diff_file.path}: {e}")
 
         # Filter by confidence threshold
         report_progress(95, 100, "Filtering results...")
         threshold = self.config.analysis.confidence_threshold
-        confidence_order = {
-            ConfidenceLevel.HIGH: 1.0,
-            ConfidenceLevel.MEDIUM: 0.7,
-            ConfidenceLevel.LOW: 0.3,
-        }
-
+        materialized = [item.materialize() for item in all_affected.values()]
         filtered_affected = [
-            ae for ae in all_affected if confidence_order[ae.confidence] >= threshold
+            item for item in materialized if _CONFIDENCE_SCORE[item.confidence] >= threshold
+        ]
+        orphan_changes = [
+            orphan
+            for evidence in orphan_evidence.values()
+            if (orphan := evidence.materialize()) is not None
         ]
 
         # Calculate duration
@@ -667,7 +770,8 @@ class ChangeMapper:
                 self.mypy_analyzer._load_cache()
                 # Check if all endpoints are cached
                 all_cached = all(
-                    ep.identifier in self.mypy_analyzer._endpoint_deps for ep in endpoints
+                    self.mypy_analyzer.get_endpoint_dependencies(endpoint) is not None
+                    for endpoint in endpoints
                 )
                 if all_cached:
                     if progress_callback:
@@ -684,7 +788,7 @@ class ChangeMapper:
                     100,
                     f"Analyzing endpoint {i + 1}/{total}: {endpoint.path}",
                 )
-            if endpoint.identifier not in self.mypy_analyzer._endpoint_deps:
+            if self.mypy_analyzer.get_endpoint_dependencies(endpoint) is None:
                 self.mypy_analyzer.analyze_endpoint(endpoint)
 
         # Save cache after analysis
