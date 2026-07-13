@@ -72,6 +72,94 @@
       "fn": 1
     }
   },
+  "normalized": {
+    "alias_version": 1,
+    "micro": {
+      "precision": 0.031512605042016806,
+      "recall": 0.08196721311475409,
+      "f1": 0.04552352048558422,
+      "tp": 15,
+      "fp": 461,
+      "fn": 168
+    },
+    "macro": {
+      "precision": 0.000544464609800363,
+      "recall": 0.015212981744421906,
+      "f1": 0.0010513036164844407
+    },
+    "by_kind": {
+      "cli": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "tp": 0,
+        "fp": 0,
+        "fn": 8
+      },
+      "cron": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "tp": 0,
+        "fp": 0,
+        "fn": 3
+      },
+      "event": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "tp": 0,
+        "fp": 0,
+        "fn": 13
+      },
+      "http": {
+        "precision": 0.031512605042016806,
+        "recall": 0.18518518518518517,
+        "f1": 0.05385996409335727,
+        "tp": 15,
+        "fp": 461,
+        "fn": 66
+      },
+      "other": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "tp": 0,
+        "fp": 0,
+        "fn": 73
+      },
+      "sdk": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "tp": 0,
+        "fp": 0,
+        "fn": 4
+      },
+      "task": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "tp": 0,
+        "fp": 0,
+        "fn": 1
+      }
+    },
+    "expected_atoms": 183,
+    "predicted_atoms": 476,
+    "matches_by_rule": {
+      "raw_exact": 11,
+      "strict_canonical": 4
+    },
+    "rules": [
+      "raw exact",
+      "composite HTTP method expansion",
+      "template parameter-name normalization with converter preservation",
+      "case-insensitive WebSocket family",
+      "unique generic/qualified relaxation",
+      "frozen repository-scoped explicit aliases"
+    ]
+  },
   "unresolved_items": 34,
   "latency_seconds": {
     "samples": 25,

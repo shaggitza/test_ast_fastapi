@@ -5,9 +5,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from benchmarks.real_world.semantic_normalization import (
+    ALIAS_VERSION,
+    match_records,
+)
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -37,7 +46,7 @@ def ratio(numerator: int | float, denominator: int | float) -> float:
     return numerator / denominator if denominator else 0.0
 
 
-def main() -> None:
+def main() -> None:  # noqa: PLR0915 - raw and normalized metrics share one pass
     parser = argparse.ArgumentParser()
     parser.add_argument("--ground-truth", type=Path, required=True)
     parser.add_argument("--predictions", type=Path, required=True)
@@ -50,6 +59,10 @@ def main() -> None:
     evaluated = 0
     latencies: list[float] = []
     kind_totals: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    normalized_totals: dict[str, int] = defaultdict(int)
+    normalized_macro: dict[str, float] = defaultdict(float)
+    normalized_kinds: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    normalized_rules: dict[str, int] = defaultdict(int)
 
     for record_key, expected_record in truth.items():
         if expected_record.get("status", "adjudicated") != "adjudicated":
@@ -73,6 +86,28 @@ def main() -> None:
             kind_totals[kind]["tp"] += len(expected_kind & predicted_kind)
             kind_totals[kind]["fp"] += len(predicted_kind - expected_kind)
             kind_totals[kind]["fn"] += len(expected_kind - predicted_kind)
+        normalized = match_records(record_key[0], expected_record, predicted_record)
+        for metric in ("tp", "fp", "fn", "expected_atoms", "predicted_atoms"):
+            normalized_totals[metric] += normalized[metric]
+        for rule, count in normalized["matches_by_rule"].items():
+            normalized_rules[rule] += count
+        for match in normalized["matches"]:
+            normalized_kinds[match["kind"]]["tp"] += 1
+        for index, claim in enumerate(normalized["expected_claims"]):
+            if index not in normalized["_matched_expected"]:
+                normalized_kinds[claim.kind]["fn"] += 1
+        for index, claim in enumerate(normalized["predicted_claims"]):
+            if index not in normalized["_matched_predicted"]:
+                normalized_kinds[claim.kind]["fp"] += 1
+        normalized_precision = ratio(normalized["tp"], normalized["tp"] + normalized["fp"])
+        normalized_recall = ratio(normalized["tp"], normalized["tp"] + normalized["fn"])
+        normalized_macro["precision"] += normalized_precision
+        normalized_macro["recall"] += normalized_recall
+        normalized_macro["f1"] += ratio(
+            2 * normalized_precision * normalized_recall,
+            normalized_precision + normalized_recall,
+        )
+
         precision = ratio(tp, tp + fp)
         recall = ratio(tp, tp + fn)
         macro["precision"] += precision
@@ -89,6 +124,19 @@ def main() -> None:
         for record_key, record in truth.items()
         if record.get("status", "adjudicated") == "adjudicated"
     }
+
+    def metrics(counts: dict[str, int]) -> dict[str, int | float]:
+        item_precision = ratio(counts["tp"], counts["tp"] + counts["fp"])
+        item_recall = ratio(counts["tp"], counts["tp"] + counts["fn"])
+        return {
+            "precision": item_precision,
+            "recall": item_recall,
+            "f1": ratio(2 * item_precision * item_recall, item_precision + item_recall),
+            "tp": counts["tp"],
+            "fp": counts["fp"],
+            "fn": counts["fn"],
+        }
+
     result = {
         "adjudicated_prs": evaluated,
         "prediction_coverage": ratio(len(adjudicated_keys & set(predictions)), evaluated),
@@ -115,6 +163,23 @@ def main() -> None:
                 **dict(counts),
             }
             for kind, counts in sorted(kind_totals.items())
+        },
+        "normalized": {
+            "alias_version": ALIAS_VERSION,
+            "micro": metrics(normalized_totals),
+            "macro": {name: ratio(value, evaluated) for name, value in normalized_macro.items()},
+            "by_kind": {kind: metrics(counts) for kind, counts in sorted(normalized_kinds.items())},
+            "expected_atoms": normalized_totals["expected_atoms"],
+            "predicted_atoms": normalized_totals["predicted_atoms"],
+            "matches_by_rule": dict(sorted(normalized_rules.items())),
+            "rules": [
+                "raw exact",
+                "composite HTTP method expansion",
+                "template parameter-name normalization with converter preservation",
+                "case-insensitive WebSocket family",
+                "unique generic/qualified relaxation",
+                "frozen repository-scoped explicit aliases",
+            ],
         },
         "unresolved_items": totals["unresolved"],
         "latency_seconds": {

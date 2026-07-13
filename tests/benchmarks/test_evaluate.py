@@ -49,6 +49,14 @@ def test_stratifies_metrics_by_entrypoint_kind(tmp_path: Path, monkeypatch, caps
     evaluate.main()
 
     result = json.loads(capsys.readouterr().out)
+    assert result["micro"] == {
+        "precision": 0.5,
+        "recall": 0.5,
+        "f1": 0.5,
+        "tp": 1,
+        "fp": 1,
+        "fn": 1,
+    }
     assert result["by_kind"]["http"] == {
         "precision": 0.5,
         "recall": 1.0,
