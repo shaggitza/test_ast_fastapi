@@ -328,12 +328,18 @@ def report_unresolved(report: dict[str, Any]) -> list[str]:
 
 
 def invoke_analyzer(
-    candidate_root: Path, app_root: Path, patch_path: Path, timeout: float
+    candidate_root: Path,
+    app_root: Path,
+    patch_path: Path,
+    timeout: float,
+    *,
+    secure_ast: bool,
 ) -> tuple[list[dict[str, Any]], list[str], float]:
-    """Invoke the candidate after the caller explicitly accepts upstream execution."""
+    """Invoke the frozen candidate in secure or explicitly unsafe mode."""
     args = [
         "uv",
         "run",
+        "--frozen",
         "fastapi-endpoint-detector",
         "analyze",
         "--app",
@@ -344,6 +350,8 @@ def invoke_analyzer(
         "json",
         "--no-cache",
     ]
+    if secure_ast:
+        args.append("--secure-ast")
     started = time.monotonic()
     try:
         result = command(args, cwd=candidate_root, timeout=timeout)
@@ -386,7 +394,7 @@ def prediction_identity(entry: dict[str, Any]) -> tuple[str, int]:
 
 
 def unresolved_prediction(
-    repository: str, pr: int, candidate_id: str, reason: str, elapsed: float
+    repository: str, pr: int, candidate_id: str, reason: str
 ) -> dict[str, Any]:
     return {
         "repository": repository,
@@ -395,7 +403,6 @@ def unresolved_prediction(
         "affected_entrypoints": [],
         "unresolved": [reason],
         "index_seconds": 0.0,
-        "incremental_seconds": elapsed,
     }
 
 
@@ -431,7 +438,7 @@ def process_entry(  # noqa: PLR0915
         timings["total"] = elapsed
         manifest_record["reason"] = "non_python_change"
         return (
-            unresolved_prediction(repository, pr, candidate_id, "non_python_change", elapsed),
+            unresolved_prediction(repository, pr, candidate_id, "non_python_change"),
             manifest_record,
         )
 
@@ -440,8 +447,6 @@ def process_entry(  # noqa: PLR0915
             raise RunnerError("corpus entry has no mergeCommit object")
         merge_sha = validate_sha(merge_data.get("oid"), "merge SHA")
         manifest_record["merge_sha"] = merge_sha
-        if not config.allow_upstream_execution:
-            raise RunnerError("unsafe_upstream_execution_required")
         if config.dry_run:
             raise RunnerError("dry_run: analysis was not executed")
 
@@ -475,7 +480,11 @@ def process_entry(  # noqa: PLR0915
                 phase_started = time.monotonic()
 
                 endpoints, unresolved, analyzer_seconds = invoke_analyzer(
-                    config.candidate_root, app_root, patch_path, config.timeout
+                    config.candidate_root,
+                    app_root,
+                    patch_path,
+                    config.timeout,
+                    secure_ast=not config.allow_upstream_execution,
                 )
                 timings["analyzer"] = analyzer_seconds
             finally:
@@ -502,7 +511,7 @@ def process_entry(  # noqa: PLR0915
         manifest_record["merge_sha"] = merge_sha
         manifest_record["base_sha"] = base_sha
         manifest_record["reason"] = reason
-        return unresolved_prediction(repository, pr, candidate_id, reason, elapsed), manifest_record
+        return unresolved_prediction(repository, pr, candidate_id, reason), manifest_record
 
 
 def parse_app_roots(values: Sequence[str]) -> dict[str, str]:
@@ -561,6 +570,12 @@ def candidate_metadata(
         version = "unknown"
     git_result = command(["git", "rev-parse", "HEAD"], cwd=candidate_root)
     git_sha = git_result.stdout.strip() if git_result.returncode == 0 else "unknown"
+    status_result = command(["git", "status", "--porcelain"], cwd=candidate_root)
+    dirty = bool(status_result.stdout.strip()) if status_result.returncode == 0 else None
+    lock_path = candidate_root / "uv.lock"
+    lock_sha256 = hashlib.sha256(lock_path.read_bytes()).hexdigest() if lock_path.exists() else None
+    uv_result = command(["uv", "--version"], cwd=candidate_root)
+    uv_version = uv_result.stdout.strip() if uv_result.returncode == 0 else "unknown"
     candidate_config = json.dumps(
         {
             "allow_upstream_execution": allow_upstream_execution,
@@ -577,7 +592,10 @@ def candidate_metadata(
         "version": version,
         "git_sha": git_sha,
         "config_hash": config_hash,
-        "command": "uv run fastapi-endpoint-detector analyze",
+        "dirty": dirty,
+        "uv_lock_sha256": lock_sha256,
+        "uv_version": uv_version,
+        "command": "uv run --frozen fastapi-endpoint-detector analyze",
     }
 
 
@@ -621,6 +639,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.limit is not None and args.limit < 0:
         parser.error("--limit must not be negative")
     try:
+        artifact_paths = {
+            args.corpus.resolve(),
+            args.output.resolve(),
+            args.manifest.resolve(),
+        }
+        if len(artifact_paths) != 3:
+            raise RunnerError("--corpus, --output, and --manifest must be distinct paths")
         app_roots = parse_app_roots(args.app_root)
         corpus_bytes = args.corpus.read_bytes()
         corpus = json.loads(corpus_bytes)

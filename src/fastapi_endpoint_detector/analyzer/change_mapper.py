@@ -24,6 +24,7 @@ from fastapi_endpoint_detector.models.report import (
 )
 from fastapi_endpoint_detector.parser.diff_parser import DiffParser
 from fastapi_endpoint_detector.parser.fastapi_extractor import FastAPIExtractor
+from fastapi_endpoint_detector.parser.secure_ast_extractor import SecureASTExtractor
 
 # Progress callback type: (current, total, description) -> None
 ProgressCallback = Callable[[int, int, str], None]
@@ -53,6 +54,7 @@ class ChangeMapper:
         config: Config | None = None,
         app_variable: str = "app",
         use_cache: bool = True,
+        secure_ast: bool = False,
     ) -> None:
         """
         Initialize the change mapper.
@@ -62,22 +64,25 @@ class ChangeMapper:
             config: Optional configuration object.
             app_variable: Name of the FastAPI app variable.
             use_cache: Whether to use cached analysis results (default True).
+            secure_ast: Discover endpoints without importing application code.
         """
         self.app_path = app_path.resolve()
         self.config = config or Config()
         self.app_variable = app_variable
         self.use_cache = use_cache
+        self.secure_ast = secure_ast
 
         # These are lazily initialized
-        self._extractor: FastAPIExtractor | None = None
+        self._extractor: FastAPIExtractor | SecureASTExtractor | None = None
         self._registry: EndpointRegistry | None = None
         self._mypy_analyzer: MypyAnalyzer | None = None
 
     @property
-    def extractor(self) -> FastAPIExtractor:
-        """Get the FastAPI extractor, initializing if needed."""
+    def extractor(self) -> FastAPIExtractor | SecureASTExtractor:
+        """Get the configured endpoint extractor, initializing if needed."""
         if self._extractor is None:
-            self._extractor = FastAPIExtractor(
+            extractor_class = SecureASTExtractor if self.secure_ast else FastAPIExtractor
+            self._extractor = extractor_class(
                 app_path=self.app_path,
                 app_variable=self.app_variable,
             )

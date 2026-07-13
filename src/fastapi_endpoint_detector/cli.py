@@ -182,19 +182,16 @@ def analyze(
             
             return
         
-        # Handle secure AST mode
         if secure_ast:
-            console.print("[yellow]Secure AST mode: Using pure static analysis without imports[/yellow]")
-            console.print("[red]Error: Secure AST mode for analyze command is not yet implemented[/red]")
-            console.print("[yellow]Use 'list --secure-ast' to list endpoints in secure mode[/yellow]")
-            raise click.Abort()
-        
-        # Run the analysis with mypy (default mode)
+            console.print("[yellow]Secure AST mode: discovering endpoints without imports[/yellow]")
+
+        # Run dependency analysis with runtime or secure AST endpoint discovery.
         mapper = ChangeMapper(
             app_path=app,
             config=config,
             app_variable=app_var,
             use_cache=not no_cache,
+            secure_ast=secure_ast,
         )
 
         # Clear cache if requested

@@ -118,12 +118,13 @@ python benchmarks/real_world/run_current.py \
   --app-root open-webui/open-webui=backend
 ```
 
-The current `analyze` command imports the application module and can therefore
-execute upstream code. The runner refuses this by default and emits
-`unsafe_upstream_execution_required` as unresolved. Running with
-`--allow-upstream-execution` is an explicit unsafe opt-in recorded in the
-manifest. A non-executing implementation of `analyze` is required before this
-runner can produce an official benchmark score without that unsafe opt-in.
+By default the runner passes `--secure-ast`: endpoint discovery and dependency
+analysis parse source without importing the upstream application. Running with
+`--allow-upstream-execution` disables secure endpoint discovery and is an
+explicit unsafe opt-in recorded in the manifest. Unsafe results are exploratory
+only because imported code can access the host, network, and benchmark labels.
+The secure mode is the official scoring path, with unsupported dynamic routing
+reported through misses or unresolved evidence rather than hidden execution.
 
 ## Reproduction
 

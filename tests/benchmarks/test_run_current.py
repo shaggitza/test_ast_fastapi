@@ -75,21 +75,35 @@ class ResolutionAndSkipTests(unittest.TestCase):
         ensure_cache.assert_not_called()
         self.assertEqual(prediction["unresolved"], ["non_python_change"])
         self.assertEqual(prediction["affected_entrypoints"], [])
+        self.assertNotIn("incremental_seconds", prediction)
         self.assertEqual(manifest["reason"], "non_python_change")
         self.assertEqual(manifest["merge_sha"], SHA_A)
 
-    def test_python_pr_refuses_upstream_execution_by_default(self) -> None:
+    def test_python_pr_uses_secure_analysis_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_name:
-            config = self.config(Path(temporary_name))
-            with mock.patch.object(run_current, "ensure_cache") as ensure_cache:
+            temporary = Path(temporary_name)
+            config = self.config(temporary)
+
+            def make_worktree(_cache: Path, worktree: Path, _base: str) -> None:
+                worktree.mkdir()
+
+            with (
+                mock.patch.object(run_current, "ensure_cache", return_value=temporary / "bare"),
+                mock.patch.object(run_current, "merge_parents", return_value=[SHA_B]),
+                mock.patch.object(run_current, "add_detached_worktree", side_effect=make_worktree),
+                mock.patch.object(run_current, "write_local_diff"),
+                mock.patch.object(run_current, "remove_worktree"),
+                mock.patch.object(
+                    run_current, "invoke_analyzer", return_value=([], [], 0.25)
+                ) as invoke,
+            ):
                 prediction, manifest = run_current.process_entry(
                     entry("owner/repo", 8), config, "candidate"
                 )
 
-        ensure_cache.assert_not_called()
-        self.assertEqual(prediction["unresolved"], ["unsafe_upstream_execution_required"])
-        self.assertEqual(manifest["merge_sha"], SHA_A)
-        self.assertEqual(manifest["reason"], "unsafe_upstream_execution_required")
+        self.assertTrue(invoke.call_args.kwargs["secure_ast"])
+        self.assertEqual(prediction["unresolved"], [])
+        self.assertEqual(manifest["status"], "completed")
 
     def test_missing_configured_root_is_unresolved(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_name:
@@ -141,6 +155,7 @@ class ResolutionAndSkipTests(unittest.TestCase):
                 )
 
         invoke.assert_called_once()
+        self.assertFalse(invoke.call_args.kwargs["secure_ast"])
         self.assertEqual(prediction["unresolved"], [])
         self.assertEqual(prediction["incremental_seconds"], 0.25)
         self.assertEqual(manifest["status"], "completed")
@@ -159,12 +174,15 @@ class AnalyzerFailureTests(unittest.TestCase):
             stderr="",
         )
         with mock.patch.object(run_current, "command", return_value=completed) as command:
-            run_current.invoke_analyzer(Path("candidate"), Path("app"), Path("p.diff"), 2)
+            run_current.invoke_analyzer(
+                Path("candidate"), Path("app"), Path("p.diff"), 2, secure_ast=True
+            )
 
         command.assert_called_once_with(
             [
                 "uv",
                 "run",
+                "--frozen",
                 "fastapi-endpoint-detector",
                 "analyze",
                 "--app",
@@ -174,6 +192,7 @@ class AnalyzerFailureTests(unittest.TestCase):
                 "--format",
                 "json",
                 "--no-cache",
+                "--secure-ast",
             ],
             cwd=Path("candidate"),
             timeout=2,
@@ -189,7 +208,9 @@ class AnalyzerFailureTests(unittest.TestCase):
                 run_current.RunnerError, r"analyzer failed \(9\): mypy exploded"
             ),
         ):
-            run_current.invoke_analyzer(Path("candidate"), Path("app"), Path("p.diff"), 2)
+            run_current.invoke_analyzer(
+                Path("candidate"), Path("app"), Path("p.diff"), 2, secure_ast=True
+            )
 
     def test_report_errors_and_warnings_are_preserved(self) -> None:
         report = {
@@ -202,7 +223,7 @@ class AnalyzerFailureTests(unittest.TestCase):
         )
         with mock.patch.object(run_current, "command", return_value=completed):
             _endpoints, unresolved, _elapsed = run_current.invoke_analyzer(
-                Path("candidate"), Path("app"), Path("p.diff"), 2
+                Path("candidate"), Path("app"), Path("p.diff"), 2, secure_ast=True
             )
 
         self.assertEqual(
@@ -215,6 +236,22 @@ class AnalyzerFailureTests(unittest.TestCase):
 
 
 class OutputCardinalityTests(unittest.TestCase):
+    def test_main_rejects_colliding_artifact_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_name:
+            corpus = Path(temporary_name) / "corpus.json"
+            corpus.write_text('{"entries": []}', encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                run_current.main(
+                    [
+                        "--corpus",
+                        str(corpus),
+                        "--output",
+                        str(corpus),
+                        "--manifest",
+                        str(Path(temporary_name) / "manifest.json"),
+                    ]
+                )
+
     def test_main_writes_one_unique_row_per_selected_pr(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_name:
             temporary = Path(temporary_name)
@@ -239,7 +276,7 @@ class OutputCardinalityTests(unittest.TestCase):
                 "version": "test",
                 "git_sha": SHA_A,
                 "config_hash": "config",
-                "command": "uv run fastapi-endpoint-detector analyze",
+                "command": "uv run --frozen fastapi-endpoint-detector analyze",
             }
             with mock.patch.object(run_current, "candidate_metadata", return_value=candidate):
                 result = run_current.main(
