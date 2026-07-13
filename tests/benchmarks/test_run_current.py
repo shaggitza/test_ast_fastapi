@@ -91,7 +91,9 @@ class ResolutionAndSkipTests(unittest.TestCase):
             with (
                 mock.patch.object(run_current, "ensure_cache", return_value=temporary / "bare"),
                 mock.patch.object(run_current, "merge_parents", return_value=[SHA_B]),
-                mock.patch.object(run_current, "add_detached_worktree", side_effect=make_worktree),
+                mock.patch.object(
+                    run_current, "add_detached_worktree", side_effect=make_worktree
+                ) as add_worktree,
                 mock.patch.object(run_current, "write_local_diff"),
                 mock.patch.object(run_current, "remove_worktree"),
                 mock.patch.object(
@@ -103,6 +105,7 @@ class ResolutionAndSkipTests(unittest.TestCase):
                 )
 
         self.assertTrue(invoke.call_args.kwargs["secure_ast"])
+        self.assertEqual(add_worktree.call_args.args[2], SHA_A)
         self.assertEqual(prediction["unresolved"], [])
         self.assertEqual(manifest["status"], "completed")
 

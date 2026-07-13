@@ -7,7 +7,8 @@ and extract structured change information.
 
 from pathlib import Path
 
-from unidiff import PatchedFile, PatchSet
+from unidiff import PatchedFile, PatchSet  # type: ignore[import-untyped]
+from unidiff.patch import Hunk  # type: ignore[import-untyped]
 
 from fastapi_endpoint_detector.models.diff import (
     ChangeType,
@@ -18,6 +19,7 @@ from fastapi_endpoint_detector.models.diff import (
 
 class DiffParserError(Exception):
     """Error during diff parsing."""
+
     pass
 
 
@@ -49,7 +51,7 @@ class DiffParser:
             return ChangeType.MODIFIED
 
     @staticmethod
-    def _parse_hunk(hunk: "unidiff.Hunk") -> DiffHunk:  # type: ignore[name-defined]
+    def _parse_hunk(hunk: Hunk) -> DiffHunk:
         """
         Parse a unidiff Hunk into our DiffHunk model.
 
@@ -102,14 +104,14 @@ class DiffParser:
 
         # Get the path - use target for added/modified, source for deleted
         if change_type == ChangeType.DELETED:
-            path = Path(patched_file.source_file.lstrip("a/"))
+            path = Path(DiffParser._strip_git_prefix(patched_file.source_file, "a/"))
         else:
-            path = Path(patched_file.target_file.lstrip("b/"))
+            path = Path(DiffParser._strip_git_prefix(patched_file.target_file, "b/"))
 
         # For renames, also capture the source path
         source_path = None
         if change_type == ChangeType.RENAMED:
-            source_path = Path(patched_file.source_file.lstrip("a/"))
+            source_path = Path(DiffParser._strip_git_prefix(patched_file.source_file, "a/"))
 
         # Parse all hunks
         hunks = [DiffParser._parse_hunk(hunk) for hunk in patched_file]
@@ -122,6 +124,11 @@ class DiffParser:
             added_lines=patched_file.added,
             removed_lines=patched_file.removed,
         )
+
+    @staticmethod
+    def _strip_git_prefix(path: str, prefix: str) -> str:
+        """Remove one exact Git side prefix without stripping path characters."""
+        return path.removeprefix(prefix)
 
     @classmethod
     def parse_file(cls, diff_path: Path, encoding: str = "utf-8") -> list[DiffFile]:

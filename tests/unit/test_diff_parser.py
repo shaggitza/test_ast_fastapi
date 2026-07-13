@@ -11,6 +11,19 @@ from fastapi_endpoint_detector.parser.diff_parser import DiffParser, DiffParserE
 
 
 class TestDiffParser:
+    def test_preserves_leading_characters_after_exact_git_prefix(self) -> None:
+        diff = """diff --git a/backend/app.py b/backend/app.py
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -1 +1 @@
+-old = 1
++new = 1
+"""
+
+        parsed = DiffParser.parse_string(diff)
+
+        assert parsed[0].path == Path("backend/app.py")
+
     """Tests for the DiffParser class."""
 
     def test_parse_simple_diff(self, simple_diff_content: str) -> None:
@@ -35,7 +48,7 @@ class TestDiffParser:
     def test_get_changed_line_numbers(self, simple_diff_content: str) -> None:
         """Test extracting changed line numbers."""
         diff_files = DiffParser.parse_string(simple_diff_content)
-        added, removed = DiffParser.get_changed_line_numbers(diff_files[0])
+        added, _removed = DiffParser.get_changed_line_numbers(diff_files[0])
 
         assert len(added) > 0  # Should have added lines
         assert all(isinstance(line, int) for line in added)
