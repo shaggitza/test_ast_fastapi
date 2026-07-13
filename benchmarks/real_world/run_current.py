@@ -469,11 +469,13 @@ def process_entry(  # noqa: PLR0915
 
         with tempfile.TemporaryDirectory(prefix="current-analyzer-") as temporary_name:
             temporary = Path(temporary_name)
-            worktree = temporary / "base"
+            worktree = temporary / "target"
             patch_path = temporary / "change.diff"
             worktree_added = False
             try:
-                add_detached_worktree(repository_cache, worktree, base_sha)
+                # Changed/added line numbers and endpoint discovery are target-side.
+                # Baseline analysis, when added, must use a separate explicit snapshot.
+                add_detached_worktree(repository_cache, worktree, merge_sha)
                 worktree_added = True
                 app_root = safe_app_root(worktree, configured_root)
                 timings["worktree"] = time.monotonic() - phase_started
