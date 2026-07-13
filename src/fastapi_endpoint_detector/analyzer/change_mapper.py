@@ -19,6 +19,7 @@ from fastapi_endpoint_detector.analyzer.scip_analyzer import (
     SCIPAnalyzer,
     SCIPAnalyzerError,
     SCIPDefinition,
+    SCIPReachedDefinition,
 )
 from fastapi_endpoint_detector.config import Config
 from fastapi_endpoint_detector.models.diff import DiffFile
@@ -624,10 +625,32 @@ class ChangeMapper:
                     else:
                         existing[1].add(line)
             processed: set[int] = set()
+
+            def expanded_affected(seed: SCIPDefinition) -> list[SCIPReachedDefinition]:
+                initial = analyzer.affected(seed, max_depth=max_depth)
+                reached_by_symbol = {item.definition.symbol: item for item in initial}
+                base_resolver = getattr(analyzer, "base_method_definitions", None)
+                if not callable(base_resolver):
+                    return list(reached_by_symbol.values())
+                for reached in list(initial):
+                    if reached.depth >= max_depth:
+                        continue
+                    for base in base_resolver(reached.definition):
+                        remaining = max_depth - reached.depth - 1
+                        for base_reached in analyzer.affected(base, max_depth=remaining):
+                            adjusted = SCIPReachedDefinition(
+                                base_reached.definition,
+                                reached.depth + 1 + base_reached.depth,
+                            )
+                            existing = reached_by_symbol.get(adjusted.definition.symbol)
+                            if existing is None or adjusted.depth < existing.depth:
+                                reached_by_symbol[adjusted.definition.symbol] = adjusted
+                return list(reached_by_symbol.values())
+
             for seed, seed_lines in seeds.values():
                 reached_endpoint = False
                 try:
-                    reached_definitions = analyzer.affected(seed, max_depth=max_depth)
+                    reached_definitions = expanded_affected(seed)
                 except SCIPAnalyzerError as error:
                     warnings.append(
                         f"SCIP skipped unresolved {side} seed {seed.short_name}: {error}"

@@ -13,6 +13,30 @@ from fastapi_endpoint_detector.analyzer.scip_analyzer import (
 from fastapi_endpoint_detector.parser.diff_parser import DiffParser
 
 
+class OverrideEdgeAnalyzer:
+    def ensure_index(self, *, force: bool = False) -> None:
+        assert force
+
+    def definitions_at(self, file_path: Path, lines: set[int]):
+        return (SCIPDefinition("impl", "impl:Impl:run()", Path("impl.py"), 4, 5),)
+
+    def base_method_definitions(self, definition: SCIPDefinition):
+        if definition.symbol == "impl":
+            return (SCIPDefinition("base", "base:Base:run()", Path("base.py"), 2, 3),)
+        return ()
+
+    def affected(self, seed: SCIPDefinition, *, max_depth: int | None = None):
+        if seed.symbol == "base":
+            return (
+                SCIPReachedDefinition(seed, 0),
+                SCIPReachedDefinition(
+                    SCIPDefinition("handler", "main:handler()", Path("main.py"), 4, 6),
+                    1,
+                ),
+            )
+        return (SCIPReachedDefinition(seed, 0),)
+
+
 class PartiallyFailingAnalyzer:
     def ensure_index(self, *, force: bool = False) -> None:
         assert force
@@ -104,6 +128,27 @@ class FakeSCIPAnalyzer:
 def test_programmatic_baseline_requires_scip(tmp_path: Path) -> None:
     with pytest.raises(ChangeMapperError, match="only with use_scip"):
         ChangeMapper(tmp_path, baseline_app_path=tmp_path)
+
+
+def test_scip_expands_proven_override_to_base_method_callers(tmp_path: Path) -> None:
+    (tmp_path / "impl.py").write_text(
+        "from base import Base\n\nclass Impl(Base):\n    def run(self): return 1\n"
+    )
+    (tmp_path / "base.py").write_text("class Base:\n    def run(self): raise NotImplementedError\n")
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n\n"
+        "@app.get('/items')\ndef handler():\n    return 1\n"
+    )
+    diff_file = DiffParser.parse_string(
+        "diff --git a/impl.py b/impl.py\n--- a/impl.py\n+++ b/impl.py\n"
+        "@@ -3,0 +4 @@\n+    def run(self): return 1\n"
+    )[0]
+    mapper = ChangeMapper(tmp_path, use_cache=False, secure_ast=True, use_scip=True)
+    mapper._scip_analyzer = OverrideEdgeAnalyzer()  # type: ignore[assignment]
+
+    affected, _orphans = mapper._analyze_with_scip([diff_file], [], None)
+
+    assert [item.endpoint.identifier for item in affected] == ["GET /items"]
 
 
 def test_scip_seed_failure_does_not_discard_other_seed_results(tmp_path: Path) -> None:

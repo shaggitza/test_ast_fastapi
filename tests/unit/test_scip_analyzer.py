@@ -100,6 +100,26 @@ def test_ast_extends_truncated_scip_callable_range(tmp_path: Path) -> None:
     assert definitions[0].end_line == 4
 
 
+def test_resolves_explicit_inherited_base_method(tmp_path: Path) -> None:
+    (tmp_path / "base.py").write_text(
+        "class Base:\n    def run(self):\n        raise NotImplementedError\n"
+    )
+    (tmp_path / "impl.py").write_text(
+        "from base import Base\n\nclass Impl(Base):\n    def run(self):\n        return 1\n"
+    )
+    analyzer = SCIPAnalyzer(tmp_path)
+    concrete = SCIPDefinition("impl-symbol", "impl:Impl:run()", Path("impl.py"), 4, 5)
+    base = SCIPDefinition("base-symbol", "base:Base:run()", Path("base.py"), 2, 3)
+    with patch.object(
+        analyzer,
+        "outline",
+        side_effect=lambda path: (base,) if path == Path("base.py") else (),
+    ):
+        related = analyzer.base_method_definitions(concrete)
+
+    assert related == (base,)
+
+
 def test_affected_rejects_wrong_or_ambiguous_seed_resolution(tmp_path: Path) -> None:
     analyzer = SCIPAnalyzer(tmp_path)
     seed = SCIPDefinition("exact", "module:changed()", Path("module.py"), 1, 2)
