@@ -48,6 +48,7 @@ class RunConfig:
     timeout: float
     dry_run: bool
     allow_upstream_execution: bool
+    use_scip: bool
     default_app_root: str
     app_roots: dict[str, str]
     candidate_root: Path = PROJECT_ROOT
@@ -334,6 +335,7 @@ def invoke_analyzer(
     timeout: float,
     *,
     secure_ast: bool,
+    use_scip: bool,
 ) -> tuple[list[dict[str, Any]], list[str], float]:
     """Invoke the frozen candidate in secure or explicitly unsafe mode."""
     args = [
@@ -352,6 +354,8 @@ def invoke_analyzer(
     ]
     if secure_ast:
         args.append("--secure-ast")
+    if use_scip:
+        args.append("--scip")
     started = time.monotonic()
     try:
         result = command(args, cwd=candidate_root, timeout=timeout)
@@ -485,6 +489,7 @@ def process_entry(  # noqa: PLR0915
                     patch_path,
                     config.timeout,
                     secure_ast=not config.allow_upstream_execution,
+                    use_scip=config.use_scip,
                 )
                 timings["analyzer"] = analyzer_seconds
             finally:
@@ -563,6 +568,7 @@ def candidate_metadata(
     roots: dict[str, str],
     default_root: str,
     allow_upstream_execution: bool,
+    use_scip: bool,
 ) -> dict[str, Any]:
     try:
         version = importlib.metadata.version("fastapi-endpoint-detector")
@@ -588,6 +594,7 @@ def candidate_metadata(
     candidate_config = json.dumps(
         {
             "allow_upstream_execution": allow_upstream_execution,
+            "use_scip": use_scip,
             "root_config": {"default": default_root, "repositories": roots},
         },
         sort_keys=True,
@@ -630,6 +637,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--default-app-root", default=".")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
+        "--scip",
+        action="store_true",
+        help="Run the opt-in SCIP backend instead of mypy.",
+    )
+    parser.add_argument(
         "--allow-upstream-execution",
         action="store_true",
         help=(
@@ -671,6 +683,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         timeout=args.timeout,
         dry_run=args.dry_run,
         allow_upstream_execution=args.allow_upstream_execution,
+        use_scip=args.scip,
         default_app_root=args.default_app_root,
         app_roots=app_roots,
     )
@@ -679,6 +692,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         app_roots,
         args.default_app_root,
         args.allow_upstream_execution,
+        args.scip,
     )
     started_wall = utc_now()
     started = time.monotonic()
@@ -716,6 +730,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "timeout_seconds": config.timeout,
             "dry_run": config.dry_run,
             "allow_upstream_execution": config.allow_upstream_execution,
+            "use_scip": config.use_scip,
             "filters": {
                 "limit": args.limit,
                 "repositories": args.repository,

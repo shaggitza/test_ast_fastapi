@@ -57,6 +57,7 @@ class ResolutionAndSkipTests(unittest.TestCase):
             "timeout": 5.0,
             "dry_run": False,
             "allow_upstream_execution": False,
+            "use_scip": False,
             "default_app_root": ".",
             "app_roots": {},
             "candidate_root": temporary,
@@ -175,7 +176,12 @@ class AnalyzerFailureTests(unittest.TestCase):
         )
         with mock.patch.object(run_current, "command", return_value=completed) as command:
             run_current.invoke_analyzer(
-                Path("candidate"), Path("app"), Path("p.diff"), 2, secure_ast=True
+                Path("candidate"),
+                Path("app"),
+                Path("p.diff"),
+                2,
+                secure_ast=True,
+                use_scip=True,
             )
 
         command.assert_called_once_with(
@@ -193,6 +199,7 @@ class AnalyzerFailureTests(unittest.TestCase):
                 "json",
                 "--no-cache",
                 "--secure-ast",
+                "--scip",
             ],
             cwd=Path("candidate"),
             timeout=2,
@@ -209,7 +216,12 @@ class AnalyzerFailureTests(unittest.TestCase):
             ),
         ):
             run_current.invoke_analyzer(
-                Path("candidate"), Path("app"), Path("p.diff"), 2, secure_ast=True
+                Path("candidate"),
+                Path("app"),
+                Path("p.diff"),
+                2,
+                secure_ast=True,
+                use_scip=False,
             )
 
     def test_report_errors_and_warnings_are_preserved(self) -> None:
@@ -223,7 +235,12 @@ class AnalyzerFailureTests(unittest.TestCase):
         )
         with mock.patch.object(run_current, "command", return_value=completed):
             _endpoints, unresolved, _elapsed = run_current.invoke_analyzer(
-                Path("candidate"), Path("app"), Path("p.diff"), 2, secure_ast=True
+                Path("candidate"),
+                Path("app"),
+                Path("p.diff"),
+                2,
+                secure_ast=True,
+                use_scip=False,
             )
 
         self.assertEqual(
