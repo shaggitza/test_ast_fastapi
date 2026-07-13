@@ -4,8 +4,8 @@
     "config_hash": "b9634c1f15ba",
     "dirty": false,
     "dirty_sha256": null,
-    "git_sha": "1976a234fe180bce9df766481f7c646b7801e1e7",
-    "id": "fastapi-endpoint-detector/0.1.0/1976a234fe18/b9634c1f15ba",
+    "git_sha": "14cdd876add4571413b55f982ec4ad62d8e42e80",
+    "id": "fastapi-endpoint-detector/0.1.0/14cdd876add4/b9634c1f15ba",
     "name": "fastapi-endpoint-detector",
     "uv_lock_sha256": "8efb5b6ad171aaa25ca89f27b44b6d9243216619f616101d3e553a1919e19ae8",
     "uv_version": "uv 0.9.18",
@@ -20,18 +20,18 @@
       "prs": [],
       "repositories": []
     },
-    "manifest": "/tmp/scip-final2-manifest.json",
-    "output": "/tmp/scip-final2-predictions.jsonl",
-    "timeout_seconds": 300.0,
+    "manifest": "/tmp/scip-final3-manifest.json",
+    "output": "/tmp/scip-final3-predictions.jsonl",
+    "timeout_seconds": 600.0,
     "use_scip": true
   },
   "corpus": {
     "path": "/home/shaggi/test_ast_fastapi/benchmarks/real_world/corpus.json",
     "sha256": "7c4ecfd562d2e01079a955e8214afd4e9e1a408f73ed392d4606eecbc649f062"
   },
-  "created_at": "2026-07-13T14:41:15.471379+00:00",
+  "created_at": "2026-07-13T18:08:46.508348+00:00",
   "git": {
-    "candidate_sha": "1976a234fe180bce9df766481f7c646b7801e1e7"
+    "candidate_sha": "14cdd876add4571413b55f982ec4ad62d8e42e80"
   },
   "platform": "Linux-6.6.114.1-microsoft-standard-WSL2-aarch64-with-glibc2.39",
   "prs": [
@@ -43,12 +43,12 @@
       "repository": "open-webui/open-webui",
       "status": "completed",
       "timing_seconds": {
-        "analyzer": 90.08866613701684,
-        "cache_fetch": 0.013458812958560884,
-        "diff": 0.003337700036354363,
-        "parent_resolution": 0.0022845459752716124,
-        "total": 91.51085626200074,
-        "worktree": 1.2031048270291649
+        "analyzer": 123.84337477700319,
+        "cache_fetch": 0.016683191992342472,
+        "diff": 0.0055768469464965165,
+        "parent_resolution": 0.0025784510071389377,
+        "total": 125.87295404804172,
+        "worktree": 1.708681874035392
       }
     },
     {
@@ -60,7 +60,7 @@
       "repository": "open-webui/open-webui",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 1.698598498478532e-05
+        "total": 3.9444013964384794e-05
       }
     },
     {
@@ -72,7 +72,7 @@
       "repository": "open-webui/open-webui",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 2.6130001060664654e-06
+        "total": 3.925000783056021e-06
       }
     },
     {
@@ -83,12 +83,12 @@
       "repository": "open-webui/open-webui",
       "status": "completed",
       "timing_seconds": {
-        "analyzer": 88.49682389601367,
-        "cache_fetch": 0.012673439981881529,
-        "diff": 0.0030867670429870486,
-        "parent_resolution": 0.0017436679918318987,
-        "total": 89.83057868597098,
-        "worktree": 1.1025121940183453
+        "analyzer": 132.01019912899937,
+        "cache_fetch": 0.018094512983225286,
+        "diff": 0.004280115012079477,
+        "parent_resolution": 0.002955181000288576,
+        "total": 133.98415492201457,
+        "worktree": 1.624224438040983
       }
     },
     {
@@ -100,7 +100,7 @@
       "repository": "open-webui/open-webui",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 2.573797246441245e-05
+        "total": 1.40779884532094e-05
       }
     },
     {
@@ -111,12 +111,12 @@
       "repository": "open-webui/open-webui",
       "status": "completed",
       "timing_seconds": {
-        "analyzer": 45.39064680197043,
-        "cache_fetch": 0.012765700987074524,
-        "diff": 0.0028123960364609957,
-        "parent_resolution": 0.0015198520268313587,
-        "total": 46.777462516969535,
-        "worktree": 1.1548346180352382
+        "analyzer": 62.20949812501203,
+        "cache_fetch": 0.02080001699505374,
+        "diff": 0.003931523999199271,
+        "parent_resolution": 0.003861515026073903,
+        "total": 64.1850717740017,
+        "worktree": 1.6538722640252672
       }
     },
     {
@@ -128,7 +128,7 @@
       "repository": "open-webui/open-webui",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 1.0820978786796331e-05
+        "total": 1.429201802238822e-05
       }
     },
     {
@@ -139,12 +139,12 @@
       "repository": "open-webui/open-webui",
       "status": "completed_with_unresolved",
       "timing_seconds": {
-        "analyzer": 155.7509054649854,
-        "cache_fetch": 0.016718604019843042,
-        "diff": 0.10043369198683649,
-        "parent_resolution": 0.0017242180183529854,
-        "total": 157.28381000400987,
-        "worktree": 1.189890613022726
+        "analyzer": 222.4748331310111,
+        "cache_fetch": 0.01980218500830233,
+        "diff": 0.13280945899896324,
+        "parent_resolution": 0.003101576992776245,
+        "total": 224.63521840097383,
+        "worktree": 1.6959574020002037
       }
     },
     {
@@ -156,7 +156,7 @@
       "repository": "open-webui/open-webui",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 1.3282988220453262e-05
+        "total": 1.950003206729889e-05
       }
     },
     {
@@ -168,7 +168,7 @@
       "repository": "open-webui/open-webui",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 4.014000296592712e-06
+        "total": 4.756031557917595e-06
       }
     },
     {
@@ -180,7 +180,7 @@
       "repository": "open-webui/open-webui",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 2.5799963623285294e-06
+        "total": 2.663990017026663e-06
       }
     },
     {
@@ -192,7 +192,7 @@
       "repository": "open-webui/open-webui",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 2.675980795174837e-06
+        "total": 2.187036443501711e-06
       }
     },
     {
@@ -204,7 +204,7 @@
       "repository": "open-webui/open-webui",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 1.9120052456855774e-06
+        "total": 2.8529902920126915e-06
       }
     },
     {
@@ -216,7 +216,7 @@
       "repository": "open-webui/open-webui",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 2.102984581142664e-06
+        "total": 2.3780157789587975e-06
       }
     },
     {
@@ -228,7 +228,7 @@
       "repository": "open-webui/open-webui",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 2.007000148296356e-06
+        "total": 2.568005584180355e-06
       }
     },
     {
@@ -240,7 +240,7 @@
       "repository": "open-webui/open-webui",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 2.007000148296356e-06
+        "total": 2.568005584180355e-06
       }
     },
     {
@@ -252,7 +252,7 @@
       "repository": "open-webui/open-webui",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 2.7710339054465294e-06
+        "total": 4.280998837202787e-06
       }
     },
     {
@@ -264,7 +264,7 @@
       "repository": "open-webui/open-webui",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 1.9120052456855774e-06
+        "total": 2.9490329325199127e-06
       }
     },
     {
@@ -276,8 +276,8 @@
       "repository": "open-webui/open-webui",
       "status": "unresolved",
       "timing_seconds": {
-        "cache_fetch": 0.013845632027368993,
-        "total": 0.016188514011446387
+        "cache_fetch": 0.020235216012224555,
+        "total": 0.0236256190109998
       }
     },
     {
@@ -289,7 +289,7 @@
       "repository": "open-webui/open-webui",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 7.166992872953415e-06
+        "total": 7.5150164775550365e-06
       }
     },
     {
@@ -301,7 +301,7 @@
       "repository": "langflow-ai/langflow",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 4.778034053742886e-06
+        "total": 3.995024599134922e-06
       }
     },
     {
@@ -313,7 +313,7 @@
       "repository": "langflow-ai/langflow",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 2.294022124260664e-06
+        "total": 3.330002073198557e-06
       }
     },
     {
@@ -325,7 +325,7 @@
       "repository": "langflow-ai/langflow",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 2.389017026871443e-06
+        "total": 4.2800093069672585e-06
       }
     },
     {
@@ -337,7 +337,7 @@
       "repository": "langflow-ai/langflow",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 2.101995050907135e-06
+        "total": 2.7589849196374416e-06
       }
     },
     {
@@ -349,7 +349,7 @@
       "repository": "langflow-ai/langflow",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 2.866028808057308e-06
+        "total": 3.043969627469778e-06
       }
     },
     {
@@ -361,7 +361,7 @@
       "repository": "langflow-ai/langflow",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 5.351030267775059e-06
+        "total": 7.0389942266047e-06
       }
     },
     {
@@ -373,8 +373,8 @@
       "repository": "langflow-ai/langflow",
       "status": "unresolved",
       "timing_seconds": {
-        "cache_fetch": 0.014506029954645783,
-        "total": 0.01678192598046735
+        "cache_fetch": 0.032262619002722204,
+        "total": 0.03522326401434839
       }
     },
     {
@@ -386,7 +386,7 @@
       "repository": "langflow-ai/langflow",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 8.504022844135761e-06
+        "total": 9.132025297731161e-06
       }
     },
     {
@@ -394,15 +394,15 @@
       "configured_app_root": "src/backend/base/langflow",
       "merge_sha": "c17051ccdd25b760f9dc2b720b4b7f4a16b91bbd",
       "pr": 13976,
-      "reason": "analyzer failed (1): stdout:\nError: SCIP could not resolve changed symbol: scip-python python project 0.11.0 \n`langflow.services.database.models`/__all__.\nstderr:\nAborted!",
       "repository": "langflow-ai/langflow",
-      "status": "unresolved",
+      "status": "completed_with_unresolved",
       "timing_seconds": {
-        "cache_fetch": 0.014291598985437304,
-        "diff": 0.006087212008424103,
-        "parent_resolution": 0.001909146027173847,
-        "total": 80.16903256298974,
-        "worktree": 2.3920216989936307
+        "analyzer": 126.1038397049997,
+        "cache_fetch": 0.017488687997683883,
+        "diff": 0.0075475769699551165,
+        "parent_resolution": 0.002351585018914193,
+        "total": 131.33136001497041,
+        "worktree": 4.249003432982136
       }
     },
     {
@@ -414,7 +414,7 @@
       "repository": "langflow-ai/langflow",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 1.5193014405667782e-05
+        "total": 1.597998198121786e-05
       }
     },
     {
@@ -426,7 +426,7 @@
       "repository": "langflow-ai/langflow",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 3.630993887782097e-06
+        "total": 5.516980309039354e-06
       }
     },
     {
@@ -434,15 +434,15 @@
       "configured_app_root": "src/backend/base/langflow",
       "merge_sha": "6bd0e056da0dcb41e08ef28a4aa2d33d5282da6e",
       "pr": 13968,
-      "reason": "analyzer failed (1): stdout:\nError: SCIP resolved the wrong seed for 'scip-python python project 0.11.0 \n`langflow.agentic`/__init__:': {'symbol': 'scip-python python project 0.11.0 \n`langflow.agentic.helpers.validation`/_ReturnChecker#__init__().', 'shortName': \n'langflow.agentic.helpers.validation:_ReturnChecker:__init__()', 'relativePath':\n'agentic/helpers/validation.py'}\nstderr:\nAborted!",
       "repository": "langflow-ai/langflow",
-      "status": "unresolved",
+      "status": "completed_with_unresolved",
       "timing_seconds": {
-        "cache_fetch": 0.014785931969527155,
-        "diff": 0.04034839302767068,
-        "parent_resolution": 0.0020071379840373993,
-        "total": 57.16269191598985,
-        "worktree": 2.3373246639966965
+        "analyzer": 116.93778213101905,
+        "cache_fetch": 0.019315513025503606,
+        "diff": 0.07208653294946998,
+        "parent_resolution": 0.00228946196148172,
+        "total": 122.43969503900735,
+        "worktree": 4.6523899720050395
       }
     },
     {
@@ -453,12 +453,12 @@
       "repository": "langflow-ai/langflow",
       "status": "completed",
       "timing_seconds": {
-        "analyzer": 28.769875065016095,
-        "cache_fetch": 0.014079492015298456,
-        "diff": 0.0034526039962656796,
-        "parent_resolution": 0.002241951005998999,
-        "total": 31.584926232055295,
-        "worktree": 2.4150950990151614
+        "analyzer": 51.82365574798314,
+        "cache_fetch": 0.044000764028169215,
+        "diff": 0.004813025007024407,
+        "parent_resolution": 0.005869502958375961,
+        "total": 56.67756678303704,
+        "worktree": 3.9943225260358304
       }
     },
     {
@@ -469,12 +469,12 @@
       "repository": "langflow-ai/langflow",
       "status": "completed",
       "timing_seconds": {
-        "analyzer": 55.95639021898387,
-        "cache_fetch": 0.015059270954225212,
-        "diff": 0.10756338195642456,
-        "parent_resolution": 0.0028491670382209122,
-        "total": 58.778864669962786,
-        "worktree": 2.3240836189943366
+        "analyzer": 97.82259761204477,
+        "cache_fetch": 0.018619754002429545,
+        "diff": 0.16555416001938283,
+        "parent_resolution": 0.0020538409589789808,
+        "total": 103.33251466299407,
+        "worktree": 4.618699183047283
       }
     },
     {
@@ -486,7 +486,7 @@
       "repository": "langflow-ai/langflow",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 1.0988034773617983e-05
+        "total": 1.8930993974208832e-05
       }
     },
     {
@@ -497,12 +497,12 @@
       "repository": "langflow-ai/langflow",
       "status": "completed",
       "timing_seconds": {
-        "analyzer": 53.0250829239958,
-        "cache_fetch": 0.015321924001909792,
-        "diff": 0.010184044018387794,
-        "parent_resolution": 0.0019421500037424266,
-        "total": 55.8902915759827,
-        "worktree": 2.466571899014525
+        "analyzer": 90.17876032099593,
+        "cache_fetch": 0.01750042603816837,
+        "diff": 0.014996505982708186,
+        "parent_resolution": 0.0019539729692041874,
+        "total": 95.06761652801652,
+        "worktree": 4.268460127001163
       }
     },
     {
@@ -514,7 +514,7 @@
       "repository": "langflow-ai/langflow",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 1.82890216819942e-05
+        "total": 5.6796008720993996e-05
       }
     },
     {
@@ -525,12 +525,12 @@
       "repository": "langflow-ai/langflow",
       "status": "completed",
       "timing_seconds": {
-        "analyzer": 62.23652322398266,
-        "cache_fetch": 0.013308338995557278,
-        "diff": 0.004744979029055685,
-        "parent_resolution": 0.0015896009863354266,
-        "total": 64.78038789099082,
-        "worktree": 2.1612501720082946
+        "analyzer": 111.26948546804488,
+        "cache_fetch": 0.03322525700787082,
+        "diff": 0.013121776981279254,
+        "parent_resolution": 0.004298636980820447,
+        "total": 116.95971959701274,
+        "worktree": 4.930197607027367
       }
     },
     {
@@ -541,12 +541,12 @@
       "repository": "langflow-ai/langflow",
       "status": "completed",
       "timing_seconds": {
-        "analyzer": 54.582598500011954,
-        "cache_fetch": 0.014794401999097317,
-        "diff": 0.0043304249993525445,
-        "parent_resolution": 0.0018299859948456287,
-        "total": 57.181584385980386,
-        "worktree": 2.1826645450200886
+        "analyzer": 97.58855788997607,
+        "cache_fetch": 0.02980945899616927,
+        "diff": 0.01628460403298959,
+        "parent_resolution": 0.0035053410101681948,
+        "total": 102.5595909160329,
+        "worktree": 4.223492722027004
       }
     },
     {
@@ -557,12 +557,12 @@
       "repository": "langflow-ai/langflow",
       "status": "completed",
       "timing_seconds": {
-        "analyzer": 55.1720455220202,
-        "cache_fetch": 0.014065588009543717,
-        "diff": 0.003951693011913449,
-        "parent_resolution": 0.0017348169931210577,
-        "total": 57.85924758203328,
-        "worktree": 2.278473622049205
+        "analyzer": 96.09727145003853,
+        "cache_fetch": 0.021202160976827145,
+        "diff": 0.005863065947778523,
+        "parent_resolution": 0.002578717947471887,
+        "total": 101.2203611980076,
+        "worktree": 4.529663892986719
       }
     },
     {
@@ -573,12 +573,12 @@
       "repository": "khoj-ai/khoj",
       "status": "completed",
       "timing_seconds": {
-        "analyzer": 26.251827778003644,
-        "cache_fetch": 0.012737877026665956,
-        "diff": 0.0027395469951443374,
-        "parent_resolution": 0.0015743729891255498,
-        "total": 26.868614556035027,
-        "worktree": 0.5437087200116366
+        "analyzer": 46.08801526098978,
+        "cache_fetch": 0.0364046769682318,
+        "diff": 0.004249972989782691,
+        "parent_resolution": 0.004737202019896358,
+        "total": 47.929458592960145,
+        "worktree": 1.676605181011837
       }
     },
     {
@@ -589,12 +589,12 @@
       "repository": "khoj-ai/khoj",
       "status": "completed",
       "timing_seconds": {
-        "analyzer": 26.786767493991647,
-        "cache_fetch": 0.015234894002787769,
-        "diff": 0.0031984310480766,
-        "parent_resolution": 0.0017352760187350214,
-        "total": 27.371954686997924,
-        "worktree": 0.5085292760049924
+        "analyzer": 50.438302867056336,
+        "cache_fetch": 0.021024184999987483,
+        "diff": 0.005491584015544504,
+        "parent_resolution": 0.0032402840442955494,
+        "total": 51.57479773199884,
+        "worktree": 0.9575353499967605
       }
     },
     {
@@ -606,7 +606,7 @@
       "repository": "khoj-ai/khoj",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 1.0029005352407694e-05
+        "total": 1.5508034266531467e-05
       }
     },
     {
@@ -617,12 +617,12 @@
       "repository": "khoj-ai/khoj",
       "status": "completed",
       "timing_seconds": {
-        "analyzer": 27.65843903797213,
-        "cache_fetch": 0.01924686599522829,
-        "diff": 0.0028803449822589755,
-        "parent_resolution": 0.00194674200611189,
-        "total": 28.24891156196827,
-        "worktree": 0.5043390379869379
+        "analyzer": 44.96415704902029,
+        "cache_fetch": 0.02367493900237605,
+        "diff": 0.004783605982083827,
+        "parent_resolution": 0.00345359998755157,
+        "total": 46.108248852950055,
+        "worktree": 1.053224921983201
       }
     },
     {
@@ -633,12 +633,12 @@
       "repository": "khoj-ai/khoj",
       "status": "completed",
       "timing_seconds": {
-        "analyzer": 28.990569513989612,
-        "cache_fetch": 0.013739482965320349,
-        "diff": 0.0033142109750770032,
-        "parent_resolution": 0.0020823419908992946,
-        "total": 29.58185069699539,
-        "worktree": 0.5135187100386247
+        "analyzer": 48.84322041401174,
+        "cache_fetch": 0.01367998099885881,
+        "diff": 0.0037054140120744705,
+        "parent_resolution": 0.0024180629989132285,
+        "total": 49.50917837599991,
+        "worktree": 0.5545845510205254
       }
     },
     {
@@ -649,12 +649,12 @@
       "repository": "khoj-ai/khoj",
       "status": "completed",
       "timing_seconds": {
-        "analyzer": 14.623784741968848,
-        "cache_fetch": 0.013437294983305037,
-        "diff": 0.0026588650071062148,
-        "parent_resolution": 0.001785947009921074,
-        "total": 15.211863779986743,
-        "worktree": 0.5146017639781348
+        "analyzer": 25.833502661960665,
+        "cache_fetch": 0.020109595963731408,
+        "diff": 0.0035602040006779134,
+        "parent_resolution": 0.0028466599760577083,
+        "total": 26.85221006697975,
+        "worktree": 0.892641537997406
       }
     },
     {
@@ -665,12 +665,12 @@
       "repository": "khoj-ai/khoj",
       "status": "completed",
       "timing_seconds": {
-        "analyzer": 26.764916582033038,
-        "cache_fetch": 0.01337247301125899,
-        "diff": 0.003050660016015172,
-        "parent_resolution": 0.0021382420090958476,
-        "total": 27.37176702101715,
-        "worktree": 0.5330145800253376
+        "analyzer": 47.10952434997307,
+        "cache_fetch": 0.018619497946929187,
+        "diff": 0.004159934993367642,
+        "parent_resolution": 0.002568953961599618,
+        "total": 48.17109570995672,
+        "worktree": 0.9360979310004041
       }
     },
     {
@@ -681,12 +681,12 @@
       "repository": "khoj-ai/khoj",
       "status": "completed",
       "timing_seconds": {
-        "analyzer": 26.724173185008112,
-        "cache_fetch": 0.013472044025547802,
-        "diff": 0.002633263007737696,
-        "parent_resolution": 0.0017112959758378565,
-        "total": 27.316513288009446,
-        "worktree": 0.5178082999773324
+        "analyzer": 48.54817060404457,
+        "cache_fetch": 0.01465770899085328,
+        "diff": 0.00848228798713535,
+        "parent_resolution": 0.002482702024281025,
+        "total": 49.40289140702225,
+        "worktree": 0.5958283470245078
       }
     },
     {
@@ -697,12 +697,12 @@
       "repository": "khoj-ai/khoj",
       "status": "completed",
       "timing_seconds": {
-        "analyzer": 27.577364333963487,
-        "cache_fetch": 0.015177500958088785,
-        "diff": 0.0030519969877786934,
-        "parent_resolution": 0.001799885998480022,
-        "total": 28.172759965003934,
-        "worktree": 0.5174879339756444
+        "analyzer": 49.02916739298962,
+        "cache_fetch": 0.02984184300294146,
+        "diff": 0.004262894974090159,
+        "parent_resolution": 0.004128443018998951,
+        "total": 50.279310452984646,
+        "worktree": 1.0606235059676692
       }
     },
     {
@@ -713,12 +713,12 @@
       "repository": "khoj-ai/khoj",
       "status": "completed",
       "timing_seconds": {
-        "analyzer": 25.853040001005866,
-        "cache_fetch": 0.01566757302498445,
-        "diff": 0.0027396189980208874,
-        "parent_resolution": 0.0018168920069001615,
-        "total": 26.449786655022763,
-        "worktree": 0.5170029709697701
+        "analyzer": 46.50949643005151,
+        "cache_fetch": 0.029662351997103542,
+        "diff": 0.007219601015094668,
+        "parent_resolution": 0.004415016039274633,
+        "total": 47.68368069297867,
+        "worktree": 1.0077393769752234
       }
     },
     {
@@ -729,12 +729,12 @@
       "repository": "khoj-ai/khoj",
       "status": "completed",
       "timing_seconds": {
-        "analyzer": 25.498214995022863,
-        "cache_fetch": 0.013476504012942314,
-        "diff": 0.0027540039736777544,
-        "parent_resolution": 0.0015851850039325655,
-        "total": 26.103427851048764,
-        "worktree": 0.514353560982272
+        "analyzer": 42.96557413297705,
+        "cache_fetch": 0.023701087979134172,
+        "diff": 0.0041094800108112395,
+        "parent_resolution": 0.0032488059950992465,
+        "total": 43.91139134700643,
+        "worktree": 0.8164091899525374
       }
     },
     {
@@ -746,7 +746,7 @@
       "repository": "khoj-ai/khoj",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 1.6599951777607203e-05
+        "total": 1.331500243395567e-05
       }
     },
     {
@@ -757,12 +757,12 @@
       "repository": "khoj-ai/khoj",
       "status": "completed",
       "timing_seconds": {
-        "analyzer": 28.239389479043894,
-        "cache_fetch": 0.015172583051025867,
-        "diff": 0.0031501600169576705,
-        "parent_resolution": 0.0024130739620886743,
-        "total": 28.84562660905067,
-        "worktree": 0.5293203860055655
+        "analyzer": 50.86182996403659,
+        "cache_fetch": 0.018982418987434357,
+        "diff": 0.004252836981322616,
+        "parent_resolution": 0.0027632639976218343,
+        "total": 51.83926866296679,
+        "worktree": 0.8559075189987198
       }
     },
     {
@@ -774,7 +774,7 @@
       "repository": "khoj-ai/khoj",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 1.1387979611754417e-05
+        "total": 1.5716999769210815e-05
       }
     },
     {
@@ -785,12 +785,12 @@
       "repository": "khoj-ai/khoj",
       "status": "completed",
       "timing_seconds": {
-        "analyzer": 32.824256571999285,
-        "cache_fetch": 0.014231165987439454,
-        "diff": 0.008659781015012413,
-        "parent_resolution": 0.0014041390386410058,
-        "total": 33.42007694899803,
-        "worktree": 0.5170700349844992
+        "analyzer": 58.390540912980214,
+        "cache_fetch": 0.01987634302349761,
+        "diff": 0.014099592983257025,
+        "parent_resolution": 0.0028472209814935923,
+        "total": 59.3138807049836,
+        "worktree": 0.7385767140076496
       }
     },
     {
@@ -802,7 +802,7 @@
       "repository": "khoj-ai/khoj",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 9.568990208208561e-06
+        "total": 2.2863969206809998e-05
       }
     },
     {
@@ -814,7 +814,7 @@
       "repository": "khoj-ai/khoj",
       "status": "unresolved",
       "timing_seconds": {
-        "total": 2.1050218492746353e-06
+        "total": 5.240028258413076e-06
       }
     },
     {
@@ -825,12 +825,12 @@
       "repository": "khoj-ai/khoj",
       "status": "completed",
       "timing_seconds": {
-        "analyzer": 112.80176872300217,
-        "cache_fetch": 0.013666755985468626,
-        "diff": 0.011239777028094977,
-        "parent_resolution": 0.0017934879870153964,
-        "total": 113.3952503700275,
-        "worktree": 0.5057583030429669
+        "analyzer": 268.7847914239974,
+        "cache_fetch": 0.02592778002144769,
+        "diff": 0.02949593699304387,
+        "parent_resolution": 0.003643894975539297,
+        "total": 270.0450600400218,
+        "worktree": 1.1102560270228423
       }
     },
     {
@@ -841,12 +841,12 @@
       "repository": "khoj-ai/khoj",
       "status": "completed",
       "timing_seconds": {
-        "analyzer": 23.77635196800111,
-        "cache_fetch": 0.012815838039387017,
-        "diff": 0.0026990260230377316,
-        "parent_resolution": 0.001991633966099471,
-        "total": 24.36732233199291,
-        "worktree": 0.5178248480078764
+        "analyzer": 42.58741647400893,
+        "cache_fetch": 0.01676536799641326,
+        "diff": 0.004402380029205233,
+        "parent_resolution": 0.002617110963910818,
+        "total": 43.966369148984086,
+        "worktree": 1.2080000580172054
       }
     },
     {
@@ -857,12 +857,12 @@
       "repository": "khoj-ai/khoj",
       "status": "completed",
       "timing_seconds": {
-        "analyzer": 43.49188710999442,
-        "cache_fetch": 0.012516423012129962,
-        "diff": 0.009849163994658738,
-        "parent_resolution": 0.001575913978740573,
-        "total": 44.07042431598529,
-        "worktree": 0.49978046101750806
+        "analyzer": 91.2682639840059,
+        "cache_fetch": 0.036051555944141,
+        "diff": 0.022848327993415296,
+        "parent_resolution": 0.005069950013421476,
+        "total": 92.56421586696524,
+        "worktree": 1.1129161280114204
       }
     }
   ],
@@ -878,8 +878,8 @@
   "schema_version": 1,
   "selection_count": 60,
   "timing": {
-    "finished_at": "2026-07-13T14:41:15.472967+00:00",
-    "started_at": "2026-07-13T14:17:36.274296+00:00",
-    "total_seconds": 1355.6418062199955
+    "finished_at": "2026-07-13T18:08:46.510546+00:00",
+    "started_at": "2026-07-13T17:27:26.166458+00:00",
+    "total_seconds": 2357.4798555009766
   }
 }
