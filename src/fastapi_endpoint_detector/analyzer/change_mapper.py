@@ -374,17 +374,13 @@ class ChangeMapper:
         # Check for line-level intersection
         changed_lines = set(added_lines) | set(removed_lines)
 
-        # Also check context lines (for added lines that don't exist yet)
-        context_lines: set[int] = set()
-        for line in changed_lines:
-            context_lines.update(range(max(1, line - 3), line + 4))
-
-        overlap = deps.references_lines(file_path, changed_lines | context_lines)
+        # Dependency ranges already cover complete callable definitions. Expanding
+        # by nearby physical lines lets a new sibling definition inherit evidence
+        # from the preceding unchanged function and creates massive false fanout.
+        overlap = deps.references_lines(file_path, changed_lines)
 
         if overlap:
-            # Filter to show most relevant lines
-            direct_overlap = deps.references_lines(file_path, changed_lines)
-            display_lines = direct_overlap if direct_overlap else overlap
+            display_lines = overlap
 
             # Get call stacks for traceback-style output - all paths
             all_call_stacks: list[list[CallStackFrame]] = []
@@ -554,10 +550,7 @@ class ChangeMapper:
                 if deps:
                     file_path = str(diff_file.path)
                     changed_lines = set(added_lines) | set(removed_lines)
-                    context_lines: set[int] = set()
-                    for line in changed_lines:
-                        context_lines.update(range(max(1, line - 3), line + 4))
-                    referenced = deps.references_lines(file_path, changed_lines | context_lines)
+                    referenced = deps.references_lines(file_path, changed_lines)
                     if referenced:
                         # Only mark the directly changed lines as processed
                         processed_added_lines.update(ln for ln in added_lines if ln in referenced)
