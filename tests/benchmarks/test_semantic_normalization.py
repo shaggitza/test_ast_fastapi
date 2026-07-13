@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from benchmarks.real_world.semantic_normalization import match_records
+from benchmarks.real_world.semantic_normalization import match_records, split_ranked_claims
 
 
 def record(*items: tuple[str, str]) -> dict:
@@ -82,6 +82,29 @@ def test_relaxes_one_unique_qualifier_but_not_ambiguous_qualifiers() -> None:
         ),
         record(("HTTP GET /items", "http")),
     ) == (0, 1, 2)
+
+
+def test_ranked_alias_duplicate_retains_selected_tier() -> None:
+    selected, low = split_ranked_claims(
+        "open-webui/open-webui",
+        {
+            "candidate_entrypoints": [
+                {
+                    "id": "HTTP POST /api/v1/chat/completions",
+                    "kind": "http",
+                    "confidence": "medium",
+                },
+                {
+                    "id": "HTTP POST /api/chat/completions",
+                    "kind": "http",
+                    "confidence": "low",
+                },
+            ]
+        },
+    )
+
+    assert len(selected) == 1
+    assert low == []
 
 
 def test_uses_only_frozen_repository_scoped_aliases() -> None:

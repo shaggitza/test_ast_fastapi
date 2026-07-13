@@ -10,6 +10,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def test_ranked_kind_preserves_declared_non_http_kind() -> None:
+    record = {"candidate_entrypoints": [{"id": "CLI sync", "kind": "cli", "confidence": "medium"}]}
+
+    assert evaluate.predicted_ids_by_kind(record, {"CLI sync"}) == {"cli": {"CLI sync"}}
+
+
 def test_stratifies_metrics_by_entrypoint_kind(tmp_path: Path, monkeypatch, capsys) -> None:
     truth = tmp_path / "truth.jsonl"
     predictions = tmp_path / "predictions.jsonl"
@@ -132,6 +138,130 @@ def test_fastapi_scope_keeps_http_and_websocket_but_excludes_generic_events(
     assert result["normalized"]["micro"]["tp"] == 2
     assert result["normalized"]["micro"]["fp"] == 0
     assert result["normalized"]["micro"]["fn"] == 0
+
+
+def test_low_confidence_is_diagnostic_and_splits_primary_false_negatives(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    truth = tmp_path / "truth.jsonl"
+    predictions = tmp_path / "predictions.jsonl"
+    truth.write_text(
+        json.dumps(
+            {
+                "repository": "owner/repo",
+                "pr": 1,
+                "status": "adjudicated",
+                "affected_entrypoints": [
+                    {"id": "HTTP GET /a", "kind": "http"},
+                    {"id": "HTTP GET /b", "kind": "http"},
+                    {"id": "HTTP GET /c", "kind": "http"},
+                ],
+                "reachability_only_entrypoints": [{"id": "HTTP GET /low-fp", "kind": "http"}],
+            }
+        )
+        + "\n"
+    )
+    predictions.write_text(
+        json.dumps(
+            {
+                "repository": "owner/repo",
+                "pr": 1,
+                "affected_entrypoints": [
+                    {"id": "HTTP GET /a", "kind": "http"},
+                    {"id": "HTTP GET /selected-fp", "kind": "http"},
+                ],
+                "candidate_entrypoints": [
+                    {"id": "HTTP GET /a", "kind": "http", "confidence": "high"},
+                    {
+                        "id": "HTTP GET /selected-fp",
+                        "kind": "http",
+                        "confidence": "medium",
+                    },
+                    {"id": "HTTP GET /b", "kind": "http", "confidence": "low"},
+                    {"id": "HTTP GET /low-fp", "kind": "http", "confidence": "low"},
+                ],
+            }
+        )
+        + "\n"
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["evaluate.py", "--ground-truth", str(truth), "--predictions", str(predictions)],
+    )
+
+    evaluate.main()
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["micro"] == {
+        "precision": 0.5,
+        "recall": 1 / 3,
+        "f1": 0.4,
+        "tp": 1,
+        "fp": 1,
+        "fn": 2,
+    }
+    assert result["confidence"]["low"] == {
+        "low_tp": 1,
+        "low_fp": 1,
+        "low_candidates": 2,
+        "low_supported_reachability": 1,
+        "low_unmatched": 0,
+        "fn_with_low_candidate": 1,
+        "fn_with_no_candidate": 1,
+        "diagnostic_precision": 0.5,
+        "supported_precision": 1.0,
+    }
+    assert result["by_kind"]["http"] == result["micro"]
+    assert result["confidence"]["candidate_ceiling"]["tp"] == 2
+    assert result["confidence"]["candidate_ceiling"]["fn"] == 1
+
+
+def test_normalized_composite_matches_selected_before_low(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    truth = tmp_path / "truth.jsonl"
+    predictions = tmp_path / "predictions.jsonl"
+    truth.write_text(
+        json.dumps(
+            {
+                "repository": "owner/repo",
+                "pr": 1,
+                "status": "adjudicated",
+                "affected_entrypoints": [{"id": "HTTP GET|POST /items", "kind": "http"}],
+            }
+        )
+        + "\n"
+    )
+    predictions.write_text(
+        json.dumps(
+            {
+                "repository": "owner/repo",
+                "pr": 1,
+                "affected_entrypoints": [{"id": "HTTP GET /items", "kind": "http"}],
+                "candidate_entrypoints": [
+                    {"id": "HTTP GET /items", "kind": "http", "confidence": "high"},
+                    {"id": "HTTP POST /items", "kind": "http", "confidence": "low"},
+                    {"id": "HTTP DELETE /items", "kind": "http", "confidence": "low"},
+                ],
+            }
+        )
+        + "\n"
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["evaluate.py", "--ground-truth", str(truth), "--predictions", str(predictions)],
+    )
+
+    evaluate.main()
+
+    normalized = json.loads(capsys.readouterr().out)["normalized"]
+    assert normalized["micro"]["tp"] == 1
+    assert normalized["micro"]["fn"] == 1
+    assert normalized["confidence"]["low"]["low_tp"] == 1
+    assert normalized["confidence"]["low"]["low_fp"] == 1
+    assert normalized["confidence"]["low"]["fn_with_no_candidate"] == 0
 
 
 def test_prediction_coverage_excludes_not_evaluable_truth(

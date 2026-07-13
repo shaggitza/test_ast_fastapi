@@ -16,7 +16,9 @@ if __package__ in {None, ""}:
 from benchmarks.real_world.benchmark_scope import SCOPES, filter_record
 from benchmarks.real_world.semantic_normalization import (
     ALIAS_VERSION,
-    match_records,
+    claims,
+    match_claims,
+    split_ranked_claims,
 )
 
 
@@ -40,6 +42,64 @@ def entrypoints_by_kind(record: dict[str, Any]) -> dict[str, set[str]]:
         if not isinstance(kind, str):
             kind = "http" if identifier.startswith("HTTP ") else "unknown"
         grouped[kind.lower()].add(identifier)
+    return grouped
+
+
+def ranked_entrypoints(record: dict[str, Any]) -> tuple[set[str], set[str]]:
+    """Return selected and LOW exact IDs after strongest-tier deduplication."""
+    rank = {"low": 0, "medium": 1, "high": 2}
+    items = record.get("candidate_entrypoints")
+    if not items:
+        items = record.get("affected_entrypoints", [])
+    strongest: dict[str, int] = {}
+    for item in items:
+        identifier = item["id"]
+        item_rank = rank.get(str(item.get("confidence", "medium")).lower(), 1)
+        strongest[identifier] = max(strongest.get(identifier, -1), item_rank)
+    return (
+        {identifier for identifier, item_rank in strongest.items() if item_rank >= 1},
+        {identifier for identifier, item_rank in strongest.items() if item_rank == 0},
+    )
+
+
+def low_diagnostics(
+    expected: set[str],
+    selected: set[str],
+    low: set[str],
+    reachability_only: set[str] | None = None,
+) -> dict[str, int]:
+    unmatched_expected = expected - selected
+    low_matches = unmatched_expected & low
+    low_fp = low - expected
+    reachability_matches = low_fp & (reachability_only or set())
+    return {
+        "low_tp": len(low_matches),
+        "low_fp": len(low_fp),
+        "low_candidates": len(low),
+        "low_supported_reachability": len(reachability_matches),
+        "low_unmatched": len(low_fp - reachability_matches),
+        "fn_with_low_candidate": len(low_matches),
+        "fn_with_no_candidate": len(unmatched_expected - low_matches),
+    }
+
+
+def predicted_ids_by_kind(record: dict[str, Any], identifiers: set[str]) -> dict[str, set[str]]:
+    rank = {"low": 0, "medium": 1, "high": 2}
+    items = record.get("candidate_entrypoints")
+    if not items:
+        items = record.get("affected_entrypoints", [])
+    strongest: dict[str, tuple[int, str]] = {}
+    for item in items:
+        identifier = item["id"]
+        if identifier not in identifiers:
+            continue
+        item_rank = rank.get(str(item.get("confidence", "medium")).lower(), 1)
+        kind = str(item.get("kind", "unknown")).lower()
+        if identifier not in strongest or item_rank > strongest[identifier][0]:
+            strongest[identifier] = (item_rank, kind)
+    grouped: dict[str, set[str]] = defaultdict(set)
+    for identifier, (_item_rank, kind) in strongest.items():
+        grouped[kind].add(identifier)
     return grouped
 
 
@@ -67,18 +127,29 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
     normalized_macro: dict[str, float] = defaultdict(float)
     normalized_kinds: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     normalized_rules: dict[str, int] = defaultdict(int)
+    low_rules: dict[str, int] = defaultdict(int)
+    ranked_totals: dict[str, int] = defaultdict(int)
+    ranked_repositories: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    normalized_ranked_totals: dict[str, int] = defaultdict(int)
+    normalized_ranked_repositories: dict[str, dict[str, int]] = defaultdict(
+        lambda: defaultdict(int)
+    )
     repository_totals: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     normalized_repositories: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     truth_positive_prs = 0
     negative_controls_with_fp = 0
+    negative_controls_with_low_fp = 0
 
     for record_key, expected_record in truth.items():
         if expected_record.get("status", "adjudicated") != "adjudicated":
             continue
         evaluated += 1
         expected = entrypoints(expected_record)
+        reachability_only = {
+            item["id"] for item in expected_record.get("reachability_only_entrypoints", [])
+        }
         predicted_record = predictions.get(record_key, {})
-        predicted = entrypoints(predicted_record)
+        predicted, low_predicted = ranked_entrypoints(predicted_record)
         tp = len(expected & predicted)
         fp = len(predicted - expected)
         fn = len(expected - predicted)
@@ -88,22 +159,61 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
         repository_totals[record_key[0]]["tp"] += tp
         repository_totals[record_key[0]]["fp"] += fp
         repository_totals[record_key[0]]["fn"] += fn
+        exact_low = low_diagnostics(expected, predicted, low_predicted, reachability_only)
+        for metric, count in exact_low.items():
+            ranked_totals[metric] += count
+            ranked_repositories[record_key[0]][metric] += count
         if expected:
             truth_positive_prs += 1
         elif predicted:
             negative_controls_with_fp += 1
+        if not expected and low_predicted:
+            negative_controls_with_low_fp += 1
         totals["unresolved"] += len(predicted_record.get("unresolved", []))
         expected_kinds = entrypoints_by_kind(expected_record)
-        predicted_kinds = entrypoints_by_kind(predicted_record)
+        predicted_kinds = predicted_ids_by_kind(predicted_record, predicted)
         for kind in expected_kinds.keys() | predicted_kinds.keys():
             expected_kind = expected_kinds.get(kind, set())
             predicted_kind = predicted_kinds.get(kind, set())
             kind_totals[kind]["tp"] += len(expected_kind & predicted_kind)
             kind_totals[kind]["fp"] += len(predicted_kind - expected_kind)
             kind_totals[kind]["fn"] += len(expected_kind - predicted_kind)
-        normalized = match_records(record_key[0], expected_record, predicted_record)
+        expected_claims = claims(expected_record)
+        selected_claims, low_claims = split_ranked_claims(record_key[0], predicted_record)
+        normalized = match_claims(record_key[0], expected_claims, selected_claims)
+        residual_expected = [
+            claim
+            for index, claim in enumerate(normalized["expected_claims"])
+            if index not in normalized["_matched_expected"]
+        ]
+        normalized_low = match_claims(record_key[0], residual_expected, low_claims)
+        unmatched_low_claims = [
+            claim
+            for index, claim in enumerate(normalized_low["predicted_claims"])
+            if index not in normalized_low["_matched_predicted"]
+        ]
+        reachability_record = {
+            "affected_entrypoints": expected_record.get("reachability_only_entrypoints", [])
+        }
+        normalized_reachability = match_claims(
+            record_key[0], claims(reachability_record), unmatched_low_claims
+        )
         for metric in ("tp", "fp", "fn", "expected_atoms", "predicted_atoms"):
             normalized_totals[metric] += normalized[metric]
+        normalized_low_counts = {
+            "low_tp": normalized_low["tp"],
+            "low_fp": normalized_low["fp"],
+            "low_candidates": normalized_low["predicted_atoms"],
+            "low_supported_reachability": normalized_reachability["tp"],
+            "low_unmatched": normalized_reachability["fp"],
+            "fn_with_low_candidate": normalized_low["tp"],
+            "fn_with_no_candidate": normalized_low["fn"],
+        }
+        for metric, count in normalized_low_counts.items():
+            normalized_ranked_totals[metric] += count
+            normalized_ranked_repositories[record_key[0]][metric] += count
+        for rule, count in normalized_low["matches_by_rule"].items():
+            low_rules[rule] += count
         for metric in ("tp", "fp", "fn"):
             normalized_repositories[record_key[0]][metric] += normalized[metric]
         for rule, count in normalized["matches_by_rule"].items():
@@ -154,6 +264,29 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
             "fn": counts["fn"],
         }
 
+    def confidence_diagnostics(
+        primary: dict[str, int], low_counts: dict[str, int]
+    ) -> dict[str, Any]:
+        low_tp = low_counts["low_tp"]
+        low_fp = low_counts["low_fp"]
+        ceiling = {
+            "tp": primary["tp"] + low_tp,
+            "fp": primary["fp"] + low_fp,
+            "fn": low_counts["fn_with_no_candidate"],
+        }
+        return {
+            "policy": "HIGH and MEDIUM are primary; LOW is diagnostic only",
+            "low": {
+                **dict(low_counts),
+                "diagnostic_precision": ratio(low_tp, low_tp + low_fp),
+                "supported_precision": ratio(
+                    low_tp + low_counts["low_supported_reachability"],
+                    low_counts["low_candidates"],
+                ),
+            },
+            "candidate_ceiling": metrics(ceiling),
+        }
+
     result = {
         "scope": {
             "all": "all-surfaces",
@@ -165,6 +298,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
         "truth_positive_prs": truth_positive_prs,
         "negative_control_prs": evaluated - truth_positive_prs,
         "negative_controls_with_fp": negative_controls_with_fp,
+        "negative_controls_with_low_fp": negative_controls_with_low_fp,
         "micro": {
             "precision": precision,
             "recall": recall,
@@ -172,6 +306,13 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
             "tp": tp,
             "fp": fp,
             "fn": fn,
+        },
+        "confidence": {
+            **confidence_diagnostics(totals, ranked_totals),
+            "by_repository": {
+                repository: confidence_diagnostics(repository_totals[repository], counts)
+                for repository, counts in sorted(ranked_repositories.items())
+            },
         },
         "macro": {name: ratio(value, evaluated) for name, value in macro.items()},
         "by_repository": {
@@ -204,6 +345,14 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
             "expected_atoms": normalized_totals["expected_atoms"],
             "predicted_atoms": normalized_totals["predicted_atoms"],
             "matches_by_rule": dict(sorted(normalized_rules.items())),
+            "low_matches_by_rule": dict(sorted(low_rules.items())),
+            "confidence": {
+                **confidence_diagnostics(normalized_totals, normalized_ranked_totals),
+                "by_repository": {
+                    repository: confidence_diagnostics(normalized_repositories[repository], counts)
+                    for repository, counts in sorted(normalized_ranked_repositories.items())
+                },
+            },
             "rules": [
                 "raw exact",
                 "composite HTTP method expansion",
