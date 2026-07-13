@@ -1,0 +1,883 @@
+{
+  "candidate": {
+    "command": "uv run --frozen fastapi-endpoint-detector analyze",
+    "config_hash": "4bc699fd8b44",
+    "dirty": false,
+    "git_sha": "4938b505adf2bf572f5b398b3253d128e7db251b",
+    "id": "fastapi-endpoint-detector/0.1.0/4938b505adf2/4bc699fd8b44",
+    "name": "fastapi-endpoint-detector",
+    "uv_lock_sha256": "8efb5b6ad171aaa25ca89f27b44b6d9243216619f616101d3e553a1919e19ae8",
+    "uv_version": "uv 0.9.18",
+    "version": "0.1.0"
+  },
+  "configuration": {
+    "allow_upstream_execution": false,
+    "cache": "/tmp/current-corpus-cache",
+    "dry_run": false,
+    "filters": {
+      "limit": null,
+      "prs": [],
+      "repositories": []
+    },
+    "manifest": "/home/shaggi/test_ast_fastapi/benchmarks/results/current/manifest.json",
+    "output": "/home/shaggi/test_ast_fastapi/benchmarks/results/current/predictions.jsonl",
+    "timeout_seconds": 180.0
+  },
+  "corpus": {
+    "path": "/home/shaggi/test_ast_fastapi/benchmarks/real_world/corpus.json",
+    "sha256": "7c4ecfd562d2e01079a955e8214afd4e9e1a408f73ed392d4606eecbc649f062"
+  },
+  "created_at": "2026-07-13T08:10:17.199981+00:00",
+  "git": {
+    "candidate_sha": "4938b505adf2bf572f5b398b3253d128e7db251b"
+  },
+  "platform": "Linux-6.6.114.1-microsoft-standard-WSL2-aarch64-with-glibc2.39",
+  "prs": [
+    {
+      "base_sha": "42f5c3d6f78415df90027b08a2b968fe7886965f",
+      "configured_app_root": "backend/open_webui",
+      "merge_sha": "0f8846b7fc8c210945366defbd1ed941b039a691",
+      "pr": 26924,
+      "repository": "open-webui/open-webui",
+      "status": "completed",
+      "timing_seconds": {
+        "analyzer": 1.7636328170192428,
+        "cache_fetch": 0.02146909898146987,
+        "diff": 0.0036892889766022563,
+        "parent_resolution": 0.0024799529928714037,
+        "total": 2.802457461017184,
+        "worktree": 0.8752227619988844
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "backend/open_webui",
+      "merge_sha": "42f5c3d6f78415df90027b08a2b968fe7886965f",
+      "pr": 26914,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.872697612270713e-05
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "backend/open_webui",
+      "merge_sha": "274729aa477826a041b4e1f044f085757b839baa",
+      "pr": 26913,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 3.1370436772704124e-06
+      }
+    },
+    {
+      "base_sha": "0f8846b7fc8c210945366defbd1ed941b039a691",
+      "configured_app_root": "backend/open_webui",
+      "merge_sha": "f4a6ea9300f130dc2f755d82d935f18160b8f5d2",
+      "pr": 26911,
+      "repository": "open-webui/open-webui",
+      "status": "completed",
+      "timing_seconds": {
+        "analyzer": 1.5276248370064422,
+        "cache_fetch": 0.017338688019663095,
+        "diff": 0.0038726190105080605,
+        "parent_resolution": 0.0019472530111670494,
+        "total": 2.5790471769869328,
+        "worktree": 0.9136001160368323
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "backend/open_webui",
+      "merge_sha": "65a5fad7b97db99d490d81f4e0860282c3a4543c",
+      "pr": 26907,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.2281991075724363e-05
+      }
+    },
+    {
+      "base_sha": "274729aa477826a041b4e1f044f085757b839baa",
+      "configured_app_root": "backend/open_webui",
+      "merge_sha": "f8c0d2fdd690ecbe0444617c91dba3be45d5681e",
+      "pr": 26906,
+      "repository": "open-webui/open-webui",
+      "status": "completed",
+      "timing_seconds": {
+        "analyzer": 1.73595815297449,
+        "cache_fetch": 0.026459260960109532,
+        "diff": 0.01111842697719112,
+        "parent_resolution": 0.004100767022464424,
+        "total": 3.0572511259815656,
+        "worktree": 1.0638423230266199
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "backend/open_webui",
+      "merge_sha": "8c71897bc0df861032ace8baae0facdafb7d6195",
+      "pr": 26881,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.6506004612892866e-05
+      }
+    },
+    {
+      "base_sha": "b711935dd57dbc223ebbf410175a8bbe7e4efafb",
+      "configured_app_root": "backend/open_webui",
+      "merge_sha": "ecd48e2f718220a6400ecf49eafd4867a38feb10",
+      "pr": 26642,
+      "repository": "open-webui/open-webui",
+      "status": "completed",
+      "timing_seconds": {
+        "analyzer": 1.3227275920216925,
+        "cache_fetch": 0.01950782403582707,
+        "diff": 0.22789154498605058,
+        "parent_resolution": 0.0017793959705159068,
+        "total": 2.735441646014806,
+        "worktree": 1.0014792459551245
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "backend/open_webui",
+      "merge_sha": "4b55e69640627304d291233dc40aaa5a6e15e272",
+      "pr": 26641,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.4051038306206465e-05
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "backend/open_webui",
+      "merge_sha": "a78f0c030261954f9dd5bf0e2b7e1a4e7d294b26",
+      "pr": 26625,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 3.3410033211112022e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "backend/open_webui",
+      "merge_sha": "980786f574f4d21eb19fc1582fa2831acfe9d983",
+      "pr": 26463,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 2.750952262431383e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "backend/open_webui",
+      "merge_sha": "2d7fc04bfbbd8747114500afeabdb690440d2054",
+      "pr": 26454,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 2.6529887691140175e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "backend/open_webui",
+      "merge_sha": "9ed7af823c088640ed7bc8758d431a6a4932b15e",
+      "pr": 26409,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 2.4560140445828438e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "backend/open_webui",
+      "merge_sha": "1014c212a4b436c0b8da2f04df7833912d81ff1c",
+      "pr": 26406,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 2.6519992388784885e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "backend/open_webui",
+      "merge_sha": "0e5540c2b295e38906be7ece4d3b104303d6c519",
+      "pr": 26405,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 2.6529887691140175e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "backend/open_webui",
+      "merge_sha": "651a02ed2f3f1f887d13ccd77dbd3495fd8ffe16",
+      "pr": 26391,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 2.6529887691140175e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "backend/open_webui",
+      "merge_sha": "b711935dd57dbc223ebbf410175a8bbe7e4efafb",
+      "pr": 26388,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 3.0460068956017494e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "backend/open_webui",
+      "merge_sha": "6e3020b942482370e834e364ada5981c11a0785d",
+      "pr": 26386,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 2.3579923436045647e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "backend/open_webui",
+      "merge_sha": "4d2e13cf2bcc451b33bb6374bea4d2163e6cc94c",
+      "pr": 26385,
+      "reason": "base parent is unresolved: expected exactly one parent outside the PR commit set, found 2 of 2 parents",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.01993582199793309,
+        "total": 0.022867453983053565
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "backend/open_webui",
+      "merge_sha": "dc1bc41d2edc022dbae11db2159cedb5369c68cd",
+      "pr": 26384,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.0021962225437164e-05
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "src/backend/base/langflow",
+      "merge_sha": "c578a4b07047a78aa3447eb5f512ec4328ee5114",
+      "pr": 14009,
+      "reason": "non_python_change",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 5.698006134480238e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "src/backend/base/langflow",
+      "merge_sha": "db5f3b08c96cf98cf6bee29b41cecdebc0476107",
+      "pr": 14004,
+      "reason": "non_python_change",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 3.635999746620655e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "src/backend/base/langflow",
+      "merge_sha": "cd3f2b994e9f6eb55f2e674ae215fed6491b96c8",
+      "pr": 13996,
+      "reason": "non_python_change",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 3.3400137908756733e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "src/backend/base/langflow",
+      "merge_sha": "7ffd040bdeed991888a8b6a0edd2eb6cf50d931c",
+      "pr": 13995,
+      "reason": "non_python_change",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 2.6627036277204752e-05
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "src/backend/base/langflow",
+      "merge_sha": "1ba8b827b64ce40a135202c65dda9e887adaa021",
+      "pr": 13992,
+      "reason": "non_python_change",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 4.9130176194012165e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "src/backend/base/langflow",
+      "merge_sha": "bf818073edbcf3dd00a7cee36fcb9aa74fcc90a9",
+      "pr": 13987,
+      "reason": "non_python_change",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 8.744013030081987e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "src/backend/base/langflow",
+      "merge_sha": "c98878b2c0bbc7bb8b070728b8e4f7985527b0fd",
+      "pr": 13985,
+      "reason": "base parent is unresolved: expected exactly one parent outside the PR commit set, found 2 of 2 parents",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.026886473002377898,
+        "total": 0.032819988031405956
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "src/backend/base/langflow",
+      "merge_sha": "91cb382895ea2410e3be0287de0788eaef45a679",
+      "pr": 13982,
+      "reason": "non_python_change",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.6605015844106674e-05
+      }
+    },
+    {
+      "base_sha": "c4db860a792390a5fd9cf79556ac9ce026395a03",
+      "configured_app_root": "src/backend/base/langflow",
+      "merge_sha": "c17051ccdd25b760f9dc2b720b4b7f4a16b91bbd",
+      "pr": 13976,
+      "repository": "langflow-ai/langflow",
+      "status": "completed",
+      "timing_seconds": {
+        "analyzer": 1.2130350620136596,
+        "cache_fetch": 0.03366950002964586,
+        "diff": 0.006691551010590047,
+        "parent_resolution": 0.004176422953605652,
+        "total": 3.908350721001625,
+        "worktree": 2.221237559977453
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "src/backend/base/langflow",
+      "merge_sha": "60f3ab2112f8428483a3d49cd07242d19f3a7924",
+      "pr": 13975,
+      "reason": "non_python_change",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.8463004380464554e-05
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "src/backend/base/langflow",
+      "merge_sha": "b40e4aa02661dcc9d630e1e97a0af45d45e88ae4",
+      "pr": 13971,
+      "reason": "non_python_change",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 6.493006367236376e-06
+      }
+    },
+    {
+      "base_sha": "a91c3fdf7abdd149893ce7f9797256219b6b0d57",
+      "configured_app_root": "src/backend/base/langflow",
+      "merge_sha": "6bd0e056da0dcb41e08ef28a4aa2d33d5282da6e",
+      "pr": 13968,
+      "repository": "langflow-ai/langflow",
+      "status": "completed",
+      "timing_seconds": {
+        "analyzer": 1.52767307596514,
+        "cache_fetch": 0.025803080992773175,
+        "diff": 0.055808950040955096,
+        "parent_resolution": 0.002570630982518196,
+        "total": 3.8331919600022957,
+        "worktree": 1.8650837389868684
+      }
+    },
+    {
+      "base_sha": "2b4b628b0cd61d25910a3218e1134a062d573aa9",
+      "configured_app_root": "src/backend/base/langflow",
+      "merge_sha": "c4db860a792390a5fd9cf79556ac9ce026395a03",
+      "pr": 13966,
+      "repository": "langflow-ai/langflow",
+      "status": "completed",
+      "timing_seconds": {
+        "analyzer": 1.483989414991811,
+        "cache_fetch": 0.018185733002610505,
+        "diff": 0.015590969007462263,
+        "parent_resolution": 0.002364648040384054,
+        "total": 3.8941796149592847,
+        "worktree": 1.885512676963117
+      }
+    },
+    {
+      "base_sha": "b40e4aa02661dcc9d630e1e97a0af45d45e88ae4",
+      "configured_app_root": "src/backend/base/langflow",
+      "merge_sha": "a69a47ff1b5c99ce9c50edc4df45de4397151f17",
+      "pr": 13960,
+      "repository": "langflow-ai/langflow",
+      "status": "completed",
+      "timing_seconds": {
+        "analyzer": 1.5129999190103263,
+        "cache_fetch": 0.03354203799972311,
+        "diff": 0.18552745500346646,
+        "parent_resolution": 0.004778944014105946,
+        "total": 4.034426388039719,
+        "worktree": 2.0806086069787852
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "src/backend/base/langflow",
+      "merge_sha": "8136694a5c64f149aa5dd2c9eabf14437cbe4534",
+      "pr": 13959,
+      "reason": "non_python_change",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.4176999684423208e-05
+      }
+    },
+    {
+      "base_sha": "df8752a2d712f04f13f833b17ef8154dd042868d",
+      "configured_app_root": "src/backend/base/langflow",
+      "merge_sha": "106760a5fcca908c4f2921ea4016e68bfe2a62d6",
+      "pr": 13954,
+      "repository": "langflow-ai/langflow",
+      "status": "completed",
+      "timing_seconds": {
+        "analyzer": 1.173196457035374,
+        "cache_fetch": 0.02329717099200934,
+        "diff": 0.013092281995341182,
+        "parent_resolution": 0.004788362013641745,
+        "total": 3.2826029310235754,
+        "worktree": 1.8438420679885894
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "src/backend/base/langflow",
+      "merge_sha": "0a0732717b0c46cdc38a29d0442d25349f7815b4",
+      "pr": 13953,
+      "reason": "non_python_change",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.9181985408067703e-05
+      }
+    },
+    {
+      "base_sha": "737c6b578f2511442d2c1e5ed8ae3ef6b21e6e4e",
+      "configured_app_root": "src/backend/base/langflow",
+      "merge_sha": "ab14dc0c21cb3e4bcc96cd35e84147f0a2279dda",
+      "pr": 13952,
+      "repository": "langflow-ai/langflow",
+      "status": "completed",
+      "timing_seconds": {
+        "analyzer": 1.4498004830093123,
+        "cache_fetch": 0.016913331986870617,
+        "diff": 0.005909423984121531,
+        "parent_resolution": 0.002062394982203841,
+        "total": 3.7836414629709907,
+        "worktree": 2.025781178032048
+      }
+    },
+    {
+      "base_sha": "4f8ab3375e15f41ed29b09894ec17f4553160ae1",
+      "configured_app_root": "src/backend/base/langflow",
+      "merge_sha": "203a67c164c2cd73c82e4fed7b399c8247fad7b7",
+      "pr": 13950,
+      "repository": "langflow-ai/langflow",
+      "status": "completed",
+      "timing_seconds": {
+        "analyzer": 1.3145973039790988,
+        "cache_fetch": 0.026869147026445717,
+        "diff": 0.007154537015594542,
+        "parent_resolution": 0.003178454004228115,
+        "total": 3.824564075039234,
+        "worktree": 2.1175370999844745
+      }
+    },
+    {
+      "base_sha": "e6c63b8cf459ee2659c35acb1208182fd8c530d3",
+      "configured_app_root": "src/backend/base/langflow",
+      "merge_sha": "4f8ab3375e15f41ed29b09894ec17f4553160ae1",
+      "pr": 13949,
+      "repository": "langflow-ai/langflow",
+      "status": "completed",
+      "timing_seconds": {
+        "analyzer": 1.3867539110360667,
+        "cache_fetch": 0.021558951993938535,
+        "diff": 0.004908210947178304,
+        "parent_resolution": 0.0030426569865085185,
+        "total": 3.776419188012369,
+        "worktree": 2.0041450189892203
+      }
+    },
+    {
+      "base_sha": "f285132ff6aee5660de9429d4482ad65937c64c2",
+      "configured_app_root": "src/khoj",
+      "merge_sha": "3c3d8ee5747cbdafd4249d72ba229ceba579cba4",
+      "pr": 1349,
+      "repository": "khoj-ai/khoj",
+      "status": "completed",
+      "timing_seconds": {
+        "analyzer": 15.38952758803498,
+        "cache_fetch": 0.020935565000399947,
+        "diff": 0.0037117049796506763,
+        "parent_resolution": 0.0022905179648660123,
+        "total": 15.991787828039378,
+        "worktree": 0.5223051190259866
+      }
+    },
+    {
+      "base_sha": "60608845a42b7d9bf6549ca9650c4d9c925e85fa",
+      "configured_app_root": "src/khoj",
+      "merge_sha": "0292d0f33418f364a419b99d08c1343e35d2b679",
+      "pr": 1348,
+      "repository": "khoj-ai/khoj",
+      "status": "completed",
+      "timing_seconds": {
+        "analyzer": 16.93460572999902,
+        "cache_fetch": 0.036788467958103865,
+        "diff": 0.0055878120474517345,
+        "parent_resolution": 0.0049142149509862065,
+        "total": 17.518637167988345,
+        "worktree": 0.4973750290228054
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "src/khoj",
+      "merge_sha": "f285132ff6aee5660de9429d4482ad65937c64c2",
+      "pr": 1319,
+      "reason": "non_python_change",
+      "repository": "khoj-ai/khoj",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.4441029634326696e-05
+      }
+    },
+    {
+      "base_sha": "e1da98067c1e3eec584ff0381b6b4242e1644adc",
+      "configured_app_root": "src/khoj",
+      "merge_sha": "60608845a42b7d9bf6549ca9650c4d9c925e85fa",
+      "pr": 1312,
+      "repository": "khoj-ai/khoj",
+      "status": "completed",
+      "timing_seconds": {
+        "analyzer": 15.544115684984718,
+        "cache_fetch": 0.01922006200766191,
+        "diff": 0.0046147709945216775,
+        "parent_resolution": 0.0024311699671670794,
+        "total": 16.037614156026393,
+        "worktree": 0.4275384519714862
+      }
+    },
+    {
+      "base_sha": "7475a781bc151bd97240f7c0ff667ce01d6f6378",
+      "configured_app_root": "src/khoj",
+      "merge_sha": "8b8504edb8be2cde7ef16f5be476864be0810093",
+      "pr": 1296,
+      "repository": "khoj-ai/khoj",
+      "status": "completed",
+      "timing_seconds": {
+        "analyzer": 15.478480709018186,
+        "cache_fetch": 0.015879669052083045,
+        "diff": 0.004008757008705288,
+        "parent_resolution": 0.0017945569707080722,
+        "total": 15.92680943000596,
+        "worktree": 0.3808107550139539
+      }
+    },
+    {
+      "base_sha": "e8631261400e0a04c5063e91e498b549976ffc53",
+      "configured_app_root": "src/khoj",
+      "merge_sha": "530443a4f6ccd5281cefe8bbb82ab146fddf952b",
+      "pr": 1292,
+      "repository": "khoj-ai/khoj",
+      "status": "completed",
+      "timing_seconds": {
+        "analyzer": 15.82064047298627,
+        "cache_fetch": 0.02239592798287049,
+        "diff": 0.0038500630180351436,
+        "parent_resolution": 0.0026511219912208617,
+        "total": 16.38170516601531,
+        "worktree": 0.4814100629882887
+      }
+    },
+    {
+      "base_sha": "530443a4f6ccd5281cefe8bbb82ab146fddf952b",
+      "configured_app_root": "src/khoj",
+      "merge_sha": "0e169159f8fbaba58d32a60ba2e236fb7225f536",
+      "pr": 1284,
+      "repository": "khoj-ai/khoj",
+      "status": "completed",
+      "timing_seconds": {
+        "analyzer": 15.515073934977408,
+        "cache_fetch": 0.01751260698074475,
+        "diff": 0.005414749030023813,
+        "parent_resolution": 0.0024686859687790275,
+        "total": 16.0113022790174,
+        "worktree": 0.4200498699792661
+      }
+    },
+    {
+      "base_sha": "678549c6b06c9db90aa9156db3bc740f432505b5",
+      "configured_app_root": "src/khoj",
+      "merge_sha": "e8631261400e0a04c5063e91e498b549976ffc53",
+      "pr": 1277,
+      "repository": "khoj-ai/khoj",
+      "status": "completed",
+      "timing_seconds": {
+        "analyzer": 15.518424132023938,
+        "cache_fetch": 0.026828350964933634,
+        "diff": 0.0035720409941859543,
+        "parent_resolution": 0.004221380979288369,
+        "total": 16.120884964009747,
+        "worktree": 0.5078873110469431
+      }
+    },
+    {
+      "base_sha": "0e9878c070993697ed546e46871428dfb40d4c77",
+      "configured_app_root": "src/khoj",
+      "merge_sha": "6735d33af2ee0e8d6ccacd4b27f56dcb9816ff14",
+      "pr": 1271,
+      "repository": "khoj-ai/khoj",
+      "status": "completed",
+      "timing_seconds": {
+        "analyzer": 15.758857868961059,
+        "cache_fetch": 0.028526798996608704,
+        "diff": 0.003465012996457517,
+        "parent_resolution": 0.003952606988605112,
+        "total": 16.23919928498799,
+        "worktree": 0.39432698697783053
+      }
+    },
+    {
+      "base_sha": "6735d33af2ee0e8d6ccacd4b27f56dcb9816ff14",
+      "configured_app_root": "src/khoj",
+      "merge_sha": "678549c6b06c9db90aa9156db3bc740f432505b5",
+      "pr": 1269,
+      "repository": "khoj-ai/khoj",
+      "status": "completed",
+      "timing_seconds": {
+        "analyzer": 16.057879948988557,
+        "cache_fetch": 0.021386691951192915,
+        "diff": 0.003909449034836143,
+        "parent_resolution": 0.0033046500175260007,
+        "total": 16.55588799796533,
+        "worktree": 0.42680654395371675
+      }
+    },
+    {
+      "base_sha": "17be2d4800c4573c586d99501064955321dc030d",
+      "configured_app_root": "src/khoj",
+      "merge_sha": "2c829678071f4d8cbf6bec88d390bcfa68b4f973",
+      "pr": 1265,
+      "repository": "khoj-ai/khoj",
+      "status": "completed",
+      "timing_seconds": {
+        "analyzer": 17.13332939299289,
+        "cache_fetch": 0.017776802997104824,
+        "diff": 0.003688536991830915,
+        "parent_resolution": 0.0024215169833041728,
+        "total": 17.59738324698992,
+        "worktree": 0.3934075229917653
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "src/khoj",
+      "merge_sha": "0e9878c070993697ed546e46871428dfb40d4c77",
+      "pr": 1263,
+      "reason": "non_python_change",
+      "repository": "khoj-ai/khoj",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.4825025573372841e-05
+      }
+    },
+    {
+      "base_sha": "b0cd8dc8fd8047e67d47d1b825a46264ad4b8b62",
+      "configured_app_root": "src/khoj",
+      "merge_sha": "5a51f17a71f122af7333893e93c745f1d658d6ee",
+      "pr": 1238,
+      "repository": "khoj-ai/khoj",
+      "status": "completed",
+      "timing_seconds": {
+        "analyzer": 16.221446333976928,
+        "cache_fetch": 0.018805101979523897,
+        "diff": 0.0050861689960584044,
+        "parent_resolution": 0.002238456974737346,
+        "total": 16.730390259996057,
+        "worktree": 0.4114431720227003
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "src/khoj",
+      "merge_sha": "f413ce7354c3981f1e22c9d784f4197ac253a41a",
+      "pr": 1235,
+      "reason": "non_python_change",
+      "repository": "khoj-ai/khoj",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 2.9541959520429373e-05
+      }
+    },
+    {
+      "base_sha": "2ac735909218817319b93965eecacd72b829fe2d",
+      "configured_app_root": "src/khoj",
+      "merge_sha": "349618961884cd0c2b080f402f51c3a8d638c718",
+      "pr": 1229,
+      "repository": "khoj-ai/khoj",
+      "status": "completed_with_unresolved",
+      "timing_seconds": {
+        "analyzer": 15.867350201006047,
+        "cache_fetch": 0.030016047006938607,
+        "diff": 0.013154488988220692,
+        "parent_resolution": 0.003943606978282332,
+        "total": 16.415288023999892,
+        "worktree": 0.4468934150063433
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "src/khoj",
+      "merge_sha": "1fd6e16cff416da413da9e5b469dd5ade42bd556",
+      "pr": 1221,
+      "reason": "non_python_change",
+      "repository": "khoj-ai/khoj",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.8430990166962147e-05
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_root": "src/khoj",
+      "merge_sha": "573c6a32e1a2b722893df6e745838976201caa56",
+      "pr": 1216,
+      "reason": "non_python_change",
+      "repository": "khoj-ai/khoj",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 4.582980182021856e-06
+      }
+    },
+    {
+      "base_sha": "9096f628d03584a6c306343cd593d4c4d043d600",
+      "configured_app_root": "src/khoj",
+      "merge_sha": "c6670e815a4bf864d3227c932a5617943c19800f",
+      "pr": 1212,
+      "repository": "khoj-ai/khoj",
+      "status": "completed_with_unresolved",
+      "timing_seconds": {
+        "analyzer": 19.00672664499143,
+        "cache_fetch": 0.02831261302344501,
+        "diff": 0.024072259955573827,
+        "parent_resolution": 0.00295182503759861,
+        "total": 19.590376772044692,
+        "worktree": 0.4853240529773757
+      }
+    },
+    {
+      "base_sha": "f5d12b7546b1a502cbb4b1dd5a56da01370832ef",
+      "configured_app_root": "src/khoj",
+      "merge_sha": "b82d4fe68fa249cb9c87cd15c4a5314eede38678",
+      "pr": 1211,
+      "repository": "khoj-ai/khoj",
+      "status": "completed",
+      "timing_seconds": {
+        "analyzer": 15.546753517992329,
+        "cache_fetch": 0.019530713965650648,
+        "diff": 0.0031393119716085494,
+        "parent_resolution": 0.0028151440201327205,
+        "total": 16.142812319973018,
+        "worktree": 0.42169921996537596
+      }
+    },
+    {
+      "base_sha": "99ed796c00d3b6f278065cf54c9d0aee7b4ec240",
+      "configured_app_root": "src/khoj",
+      "merge_sha": "de7668daec5a1e140bce1dba3ee84187ed93bf30",
+      "pr": 1207,
+      "repository": "khoj-ai/khoj",
+      "status": "completed_with_unresolved",
+      "timing_seconds": {
+        "analyzer": 17.100426085002255,
+        "cache_fetch": 0.047843640961218625,
+        "diff": 0.02134305302752182,
+        "parent_resolution": 0.005208631977438927,
+        "total": 17.676134045002982,
+        "worktree": 0.41632317600306123
+      }
+    }
+  ],
+  "python": "3.12.3 (main, Mar 23 2026, 19:04:32) [GCC 13.3.0]",
+  "root_config": {
+    "default": ".",
+    "repositories": {
+      "khoj-ai/khoj": "src/khoj",
+      "langflow-ai/langflow": "src/backend/base/langflow",
+      "open-webui/open-webui": "backend/open_webui"
+    }
+  },
+  "schema_version": 1,
+  "selection_count": 60,
+  "timing": {
+    "finished_at": "2026-07-13T08:10:17.203029+00:00",
+    "started_at": "2026-07-13T08:05:17.020552+00:00",
+    "total_seconds": 292.5083368429914
+  }
+}
