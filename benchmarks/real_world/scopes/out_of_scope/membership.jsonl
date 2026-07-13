@@ -1,0 +1,99 @@
+{"id": "HTTP * (all routes and HTTP-mounted applications served by open_webui.main.app)", "kind": "http", "pr": 26924, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "Browser window message: input:prompt|input:prompt:submit|action:submit", "kind": "event", "pr": 26914, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "Web UI /", "kind": "other", "pr": 26914, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "Web UI /c/{id}", "kind": "other", "pr": 26914, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "Web UI /playground", "kind": "other", "pr": 26914, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "Socket.IO connect event", "kind": "event", "pr": 26913, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "Socket.IO chat:active event", "kind": "event", "pr": 26913, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "Web UI /", "kind": "other", "pr": 26913, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "Web UI /c/{id}", "kind": "other", "pr": 26913, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "Web UI / \u2014 terminal HTML file preview", "kind": "other", "pr": 26907, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "Web UI /c/{id} \u2014 terminal HTML file preview", "kind": "other", "pr": 26907, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "Web UI with ja-JP locale", "kind": "other", "pr": 26881, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "event model.provider_request.failed", "kind": "event", "pr": 26642, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "Web UI routes using shared application layouts", "kind": "other", "pr": 26642, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "UI: run Python code block", "kind": "other", "pr": 26625, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "Socket event execute:python", "kind": "event", "pr": 26625, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "UI: format Python code", "kind": "other", "pr": 26625, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "UI: Pyodide file navigator", "kind": "other", "pr": 26625, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "Web UI sidebar chat list", "kind": "other", "pr": 26463, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "Web UI /automations/[id] run history", "kind": "other", "pr": 26463, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "Web UI authenticated app routes \u2014 sidebar chat time-ago indicator", "kind": "other", "pr": 26454, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "Web UI with ca-ES locale", "kind": "other", "pr": 26409, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "Web UI with th-TH locale", "kind": "other", "pr": 26406, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "UI chat completion on / and /c/[id]", "kind": "other", "pr": 26405, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "UI chat search modal", "kind": "other", "pr": 26405, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "builtin tool search_chats", "kind": "other", "pr": 26405, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "Web UI with pt-BR locale", "kind": "other", "pr": 26391, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "Web UI authenticated backend requests on all routes", "kind": "other", "pr": 26388, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "Web UI with de-DE locale", "kind": "other", "pr": 26386, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "Web UI pinned-note drag-and-drop into chat composer", "kind": "other", "pr": 26384, "reason": "not representable by FastAPI adapter v1", "repository": "open-webui/open-webui"}
+{"id": "UI /flow/:id[/folder/:folderId] editor Share dropdown", "kind": "other", "pr": 14009, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "UI editable flow canvas update-review toast", "kind": "other", "pr": 14004, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "UI read-only flow canvas update-review toast", "kind": "other", "pr": 14004, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "UI flow editor global-variable-enabled parameter input", "kind": "other", "pr": 13995, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "UI node parameter dialog global-variable input", "kind": "other", "pr": 13995, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "UI inspection/customization parameter global-variable input", "kind": "other", "pr": 13995, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "UI global-variable modal credential/apply-to-fields inputs", "kind": "other", "pr": 13995, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "Container CLI langflow run (standard and extras runtime images)", "kind": "cli", "pr": 13992, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "Container CLI langflow-base run (base runtime image)", "kind": "cli", "pr": 13992, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "HTTP flow execution with an MCP component configured for Stdio/npx", "kind": "http", "pr": 13992, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "UI /assets/files", "kind": "other", "pr": 13987, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "UI /assets/knowledge-bases", "kind": "other", "pr": 13987, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "CLI langflow migrate-mcp [--dry-run]", "kind": "cli", "pr": 13976, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "Application startup lifespan", "kind": "other", "pr": 13976, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "UI /flow/:id[/folder/:folderId] welcome-overlay template handoff", "kind": "other", "pr": 13975, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "UI My Collection flow-card deletion", "kind": "other", "pr": 13975, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "UI /flow/:id[/folder/:folderId] saved-component deletion", "kind": "other", "pr": 13975, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "UI flow creation with override enabled", "kind": "other", "pr": 13975, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "CLI langflow", "kind": "cli", "pr": 13971, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "CLI langflow-base", "kind": "cli", "pr": 13971, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "CLI lfx", "kind": "cli", "pr": 13971, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "CLI lfx-mcp", "kind": "cli", "pr": 13971, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "SDK package langflow-sdk", "kind": "sdk", "pr": 13971, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "LFX bundled component registry consumers", "kind": "sdk", "pr": 13971, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "ExaSearchToolkit tool search", "kind": "sdk", "pr": 13968, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "ExaSearchToolkit tool get_contents", "kind": "sdk", "pr": 13968, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "Saved-flow component ext:exa:ExaSearchToolkit@official", "kind": "other", "pr": 13968, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "Agent invocation of Exa toolkit tools", "kind": "other", "pr": 13968, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "MCP exposure or invocation of Exa toolkit tools", "kind": "other", "pr": 13968, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "Component-backed tool synchronous invocation", "kind": "other", "pr": 13966, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "Component-backed tool asynchronous invocation", "kind": "other", "pr": 13966, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "ArXivComponent output Table / search_papers_dataframe", "kind": "other", "pr": 13954, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "ArXivComponent run_model", "kind": "other", "pr": 13954, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "Research Translation Loop starter-flow execution", "kind": "other", "pr": 13954, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "UI /settings/*", "kind": "other", "pr": 13953, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "UI /settings/api-keys", "kind": "other", "pr": 13953, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "UI /settings/shortcuts", "kind": "other", "pr": 13953, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "UI /settings/global-variables", "kind": "other", "pr": 13953, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "UI /settings/model-providers", "kind": "other", "pr": 13953, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "UI /assets/files", "kind": "other", "pr": 13953, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "UI /assets/knowledge", "kind": "other", "pr": 13953, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "UI /flow/:id", "kind": "other", "pr": 13953, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "A2A JSON-RPC tasks/cancel", "kind": "other", "pr": 13952, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "A2A JSON-RPC tasks/get", "kind": "other", "pr": 13952, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "A2A JSON-RPC message/send", "kind": "other", "pr": 13952, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "A2A JSON-RPC message/stream", "kind": "other", "pr": 13952, "reason": "not representable by FastAPI adapter v1", "repository": "langflow-ai/langflow"}
+{"id": "Scheduled automation chat execution", "kind": "cron", "pr": 1348, "reason": "not representable by FastAPI adapter v1", "repository": "khoj-ai/khoj"}
+{"id": "HTTP /server/admin/database/chatmodel/*", "kind": "http", "pr": 1277, "reason": "not representable by FastAPI adapter v1", "repository": "khoj-ai/khoj"}
+{"id": "HTTP /server/admin/database/{agent,serverchatsettings,userconversationconfig}/*", "kind": "http", "pr": 1277, "reason": "not representable by FastAPI adapter v1", "repository": "khoj-ai/khoj"}
+{"id": "Android MAIN/LAUNCHER dev.khoj.app.LauncherActivity", "kind": "other", "pr": 1263, "reason": "not representable by FastAPI adapter v1", "repository": "khoj-ai/khoj"}
+{"id": "Android VIEW https://@string/hostName -> dev.khoj.app.LauncherActivity", "kind": "other", "pr": 1263, "reason": "not representable by FastAPI adapter v1", "repository": "khoj-ai/khoj"}
+{"id": "Obsidian settings: Include Folders / Exclude Folders", "kind": "other", "pr": 1235, "reason": "not representable by FastAPI adapter v1", "repository": "khoj-ai/khoj"}
+{"id": "Obsidian command: Sync new changes", "kind": "other", "pr": 1235, "reason": "not representable by FastAPI adapter v1", "repository": "khoj-ai/khoj"}
+{"id": "Obsidian settings: Force Sync", "kind": "other", "pr": 1235, "reason": "not representable by FastAPI adapter v1", "repository": "khoj-ai/khoj"}
+{"id": "Obsidian automatic sync timer", "kind": "cron", "pr": 1235, "reason": "not representable by FastAPI adapter v1", "repository": "khoj-ai/khoj"}
+{"id": "HTTP /server/admin/database/mcpserver/", "kind": "http", "pr": 1229, "reason": "not representable by FastAPI adapter v1", "repository": "khoj-ai/khoj"}
+{"id": "Outbound MCP SSE endpoint configured by McpServer.path", "kind": "other", "pr": 1229, "reason": "not representable by FastAPI adapter v1", "repository": "khoj-ai/khoj"}
+{"id": "Outbound MCP stdio subprocess configured by McpServer.path", "kind": "other", "pr": 1229, "reason": "not representable by FastAPI adapter v1", "repository": "khoj-ai/khoj"}
+{"id": "Obsidian command: Sync new changes", "kind": "other", "pr": 1221, "reason": "not representable by FastAPI adapter v1", "repository": "khoj-ai/khoj"}
+{"id": "Obsidian automatic vault sync timer", "kind": "task", "pr": 1221, "reason": "not representable by FastAPI adapter v1", "repository": "khoj-ai/khoj"}
+{"id": "Obsidian settings: Force Sync", "kind": "other", "pr": 1221, "reason": "not representable by FastAPI adapter v1", "repository": "khoj-ai/khoj"}
+{"id": "Obsidian settings: sync scope and storage display", "kind": "other", "pr": 1221, "reason": "not representable by FastAPI adapter v1", "repository": "khoj-ai/khoj"}
+{"id": "Obsidian command: New Chat", "kind": "other", "pr": 1216, "reason": "not representable by FastAPI adapter v1", "repository": "khoj-ai/khoj"}
+{"id": "Obsidian chat hotkey: Ctrl+Alt+N", "kind": "other", "pr": 1216, "reason": "not representable by FastAPI adapter v1", "repository": "khoj-ai/khoj"}
+{"id": "Obsidian chat header: New Chat button", "kind": "other", "pr": 1216, "reason": "not representable by FastAPI adapter v1", "repository": "khoj-ai/khoj"}
+{"id": "Obsidian conversation history: New button", "kind": "other", "pr": 1216, "reason": "not representable by FastAPI adapter v1", "repository": "khoj-ai/khoj"}
+{"id": "Obsidian chat agent selector", "kind": "other", "pr": 1216, "reason": "not representable by FastAPI adapter v1", "repository": "khoj-ai/khoj"}
+{"id": "CLI khoj", "kind": "cli", "pr": 1212, "reason": "not representable by FastAPI adapter v1", "repository": "khoj-ai/khoj"}
+{"id": "Scheduled content-index refresh", "kind": "cron", "pr": 1212, "reason": "not representable by FastAPI adapter v1", "repository": "khoj-ai/khoj"}

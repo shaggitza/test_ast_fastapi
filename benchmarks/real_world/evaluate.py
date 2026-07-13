@@ -13,6 +13,7 @@ from typing import Any
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from benchmarks.real_world.benchmark_scope import SCOPES, filter_record
 from benchmarks.real_world.semantic_normalization import (
     ALIAS_VERSION,
     match_records,
@@ -46,14 +47,17 @@ def ratio(numerator: int | float, denominator: int | float) -> float:
     return numerator / denominator if denominator else 0.0
 
 
-def main() -> None:  # noqa: PLR0915 - raw and normalized metrics share one pass
+def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share one pass
     parser = argparse.ArgumentParser()
     parser.add_argument("--ground-truth", type=Path, required=True)
     parser.add_argument("--predictions", type=Path, required=True)
+    parser.add_argument("--scope", choices=SCOPES, default="all")
     args = parser.parse_args()
 
-    truth = {key(item): item for item in read_jsonl(args.ground_truth)}
-    predictions = {key(item): item for item in read_jsonl(args.predictions)}
+    truth = {key(item): filter_record(item, args.scope) for item in read_jsonl(args.ground_truth)}
+    predictions = {
+        key(item): filter_record(item, args.scope) for item in read_jsonl(args.predictions)
+    }
     totals: dict[str, int] = defaultdict(int)
     macro: dict[str, float] = defaultdict(float)
     evaluated = 0
@@ -63,6 +67,10 @@ def main() -> None:  # noqa: PLR0915 - raw and normalized metrics share one pass
     normalized_macro: dict[str, float] = defaultdict(float)
     normalized_kinds: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     normalized_rules: dict[str, int] = defaultdict(int)
+    repository_totals: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    normalized_repositories: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    truth_positive_prs = 0
+    negative_controls_with_fp = 0
 
     for record_key, expected_record in truth.items():
         if expected_record.get("status", "adjudicated") != "adjudicated":
@@ -77,6 +85,13 @@ def main() -> None:  # noqa: PLR0915 - raw and normalized metrics share one pass
         totals["tp"] += tp
         totals["fp"] += fp
         totals["fn"] += fn
+        repository_totals[record_key[0]]["tp"] += tp
+        repository_totals[record_key[0]]["fp"] += fp
+        repository_totals[record_key[0]]["fn"] += fn
+        if expected:
+            truth_positive_prs += 1
+        elif predicted:
+            negative_controls_with_fp += 1
         totals["unresolved"] += len(predicted_record.get("unresolved", []))
         expected_kinds = entrypoints_by_kind(expected_record)
         predicted_kinds = entrypoints_by_kind(predicted_record)
@@ -89,6 +104,8 @@ def main() -> None:  # noqa: PLR0915 - raw and normalized metrics share one pass
         normalized = match_records(record_key[0], expected_record, predicted_record)
         for metric in ("tp", "fp", "fn", "expected_atoms", "predicted_atoms"):
             normalized_totals[metric] += normalized[metric]
+        for metric in ("tp", "fp", "fn"):
+            normalized_repositories[record_key[0]][metric] += normalized[metric]
         for rule, count in normalized["matches_by_rule"].items():
             normalized_rules[rule] += count
         for match in normalized["matches"]:
@@ -138,8 +155,16 @@ def main() -> None:  # noqa: PLR0915 - raw and normalized metrics share one pass
         }
 
     result = {
+        "scope": {
+            "all": "all-surfaces",
+            "fastapi": "fastapi-adapter-v1",
+            "out-of-scope": "out-of-scope-v1",
+        }[args.scope],
         "adjudicated_prs": evaluated,
         "prediction_coverage": ratio(len(adjudicated_keys & set(predictions)), evaluated),
+        "truth_positive_prs": truth_positive_prs,
+        "negative_control_prs": evaluated - truth_positive_prs,
+        "negative_controls_with_fp": negative_controls_with_fp,
         "micro": {
             "precision": precision,
             "recall": recall,
@@ -149,6 +174,9 @@ def main() -> None:  # noqa: PLR0915 - raw and normalized metrics share one pass
             "fn": fn,
         },
         "macro": {name: ratio(value, evaluated) for name, value in macro.items()},
+        "by_repository": {
+            repository: metrics(counts) for repository, counts in sorted(repository_totals.items())
+        },
         "by_kind": {
             kind: {
                 "precision": ratio(counts["tp"], counts["tp"] + counts["fp"]),
@@ -168,6 +196,10 @@ def main() -> None:  # noqa: PLR0915 - raw and normalized metrics share one pass
             "alias_version": ALIAS_VERSION,
             "micro": metrics(normalized_totals),
             "macro": {name: ratio(value, evaluated) for name, value in normalized_macro.items()},
+            "by_repository": {
+                repository: metrics(counts)
+                for repository, counts in sorted(normalized_repositories.items())
+            },
             "by_kind": {kind: metrics(counts) for kind, counts in sorted(normalized_kinds.items())},
             "expected_atoms": normalized_totals["expected_atoms"],
             "predicted_atoms": normalized_totals["predicted_atoms"],

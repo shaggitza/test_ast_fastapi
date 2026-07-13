@@ -1,0 +1,1964 @@
+{
+  "backend": "mypy",
+  "repository": "open-webui/open-webui",
+  "pr": 26642,
+  "truth": [
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/main.py:1007-1008 maps /api/chat/completions and its /api/v1/chat/completions alias to the directly changed chat_completion handler",
+        "backend/open_webui/utils/middleware.py:2423 changes memory-context injection reached during chat payload processing",
+        "backend/open_webui/utils/middleware.py:3440 and the changed streaming handlers alter persisted or emitted assistant output"
+      ],
+      "id": "HTTP POST /api/chat/completions",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/main.py:982-984 maps /api/embeddings and its /api/v1/embeddings alias to embeddings",
+        "backend/open_webui/routers/openai.py changes the embeddings provider helper reached by that handler"
+      ],
+      "id": "HTTP POST /api/embeddings",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/routers/audio.py:94 adds OPENAI_API_REQUEST_FORMAT to STT_CONFIG_KEYS",
+        "backend/open_webui/routers/audio.py:253-276 exposes the changed STT configuration through the GET handler"
+      ],
+      "id": "HTTP GET /api/v1/audio/config",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/routers/audio.py:253-284 changes STTConfigForm and persists OPENAI_API_REQUEST_FORMAT through the configuration update handler"
+      ],
+      "id": "HTTP POST /api/v1/audio/config/update",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/main.py:739 mounts the audio router at /api/v1/audio",
+        "backend/open_webui/routers/audio.py:646 changes _transcribe_openai to support configurable JSON/base64 or multipart upstream requests",
+        "backend/open_webui/routers/audio.py:1145-1146 routes transcription through the changed helper"
+      ],
+      "id": "HTTP POST /api/v1/audio/transcriptions",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/routers/auths.py:105 adds ENABLE_MEMORY_SYSTEM_CONTEXT to ADMIN_CONFIG_KEYS",
+        "backend/open_webui/routers/auths.py:1119-1121 returns the changed admin configuration"
+      ],
+      "id": "HTTP GET /api/v1/auths/admin/config",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/routers/auths.py:1143-1172 adds ENABLE_MEMORY_SYSTEM_CONTEXT to AdminConfig and persists it through the POST handler"
+      ],
+      "id": "HTTP POST /api/v1/auths/admin/config",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/routers/models.py:684-729 directly changes update_model_by_id so an omitted base_model_id preserves the existing value"
+      ],
+      "id": "HTTP POST /api/v1/models/model/update",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/routers/users.py:321-330 directly changes update_user_settings_by_session_user to obtain user.permissions through Config"
+      ],
+      "id": "HTTP POST /api/v1/users/user/settings/update",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/main.py:732 mounts the OpenAI router at /openai",
+        "backend/open_webui/routers/openai.py:1104-1236 directly changes generate_chat_completion to record the requested model and publish provider-failure events"
+      ],
+      "id": "HTTP POST /openai/chat/completions",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/routers/openai.py:1439-1557 directly changes the responses handler to publish provider-failure events for upstream errors"
+      ],
+      "id": "HTTP POST /openai/responses",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/routers/openai.py:1538-1621 directly changes the catch-all proxy error path to publish provider-failure events"
+      ],
+      "id": "HTTP GET|POST|PUT|DELETE /openai/{path:path}",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/events.py:415 adds MODEL_PROVIDER_REQUEST_FAILED",
+        "backend/open_webui/events.py:1086-1172 defines publish_model_provider_request_failed",
+        "backend/open_webui/routers/openai.py and backend/open_webui/routers/ollama.py invoke the publisher on upstream provider failures"
+      ],
+      "id": "event model.provider_request.failed",
+      "kind": "event"
+    },
+    {
+      "confidence": "probable",
+      "evidence": [
+        "src/routes/+layout.svelte and src/routes/(app)/+layout.svelte are directly modified shared route layouts",
+        "Changed shared chat, sidebar, search, settings, knowledge, and model components are mounted dynamically beneath those layouts, but the exact conditional route set is unresolved"
+      ],
+      "id": "Web UI routes using shared application layouts",
+      "kind": "other"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-data.md"
+      ],
+      "id": "HTTP GET /api/v1/chats/search",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-data.md"
+      ],
+      "id": "HTTP GET /api/v1/chats/{id}",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-data.md"
+      ],
+      "id": "HTTP POST /api/v1/chats/config",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-data.md"
+      ],
+      "id": "HTTP POST /api/v1/files/",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-data.md"
+      ],
+      "id": "HTTP DELETE /api/v1/knowledge/external/connections/{id}",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-data.md"
+      ],
+      "id": "HTTP PATCH /api/v1/knowledge/external/connections/{id}",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-data.md"
+      ],
+      "id": "HTTP PATCH /api/v1/knowledge/external/source/{id}",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-data.md"
+      ],
+      "id": "HTTP POST /api/v1/knowledge/external/connections",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-data.md"
+      ],
+      "id": "HTTP POST /api/v1/knowledge/external/connections/{id}/test",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-data.md"
+      ],
+      "id": "HTTP POST /api/v1/knowledge/external/source/create",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-data.md"
+      ],
+      "id": "HTTP POST /api/v1/knowledge/{id}/dirs/create",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-data.md"
+      ],
+      "id": "HTTP POST /api/v1/knowledge/{id}/sync/diff",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-data.md"
+      ],
+      "id": "HTTP POST /api/v1/retrieval/config/update",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-data.md"
+      ],
+      "id": "HTTP POST /api/v1/retrieval/embedding/update",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-data.md"
+      ],
+      "id": "HTTP POST /api/v1/retrieval/process/web/search",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-admin.md"
+      ],
+      "id": "HTTP POST /api/v1/configs/import",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-admin.md"
+      ],
+      "id": "HTTP POST /api/v1/configs/connections",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-admin.md"
+      ],
+      "id": "HTTP POST /api/v1/configs/tool_servers",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-admin.md"
+      ],
+      "id": "HTTP POST /api/v1/configs/terminal_servers",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-admin.md"
+      ],
+      "id": "HTTP POST /api/v1/configs/code_execution",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-admin.md"
+      ],
+      "id": "HTTP POST /api/v1/configs/models",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-admin.md"
+      ],
+      "id": "HTTP POST /api/v1/configs/suggestions",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-admin.md"
+      ],
+      "id": "HTTP POST /api/v1/configs/banners",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-admin.md"
+      ],
+      "id": "HTTP POST /api/v1/auths/admin/config/ldap/server",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-admin.md"
+      ],
+      "id": "HTTP POST /api/v1/auths/admin/config/ldap",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-admin.md"
+      ],
+      "id": "HTTP POST /api/v1/auths/admin/config/oauth",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-admin.md"
+      ],
+      "id": "HTTP POST /api/v1/auths/signup",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-admin.md"
+      ],
+      "id": "HTTP POST /api/v1/auths/signin",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-admin.md"
+      ],
+      "id": "HTTP POST /api/v1/users/default/permissions",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-admin.md"
+      ],
+      "id": "HTTP GET /api/v1/configs/export",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-admin.md"
+      ],
+      "id": "HTTP GET /api/v1/configs/namespace/{namespace}",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-admin.md"
+      ],
+      "id": "HTTP POST /api/v1/channels/{id}/messages/post",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-admin.md"
+      ],
+      "id": "HTTP GET /oauth/clients/{client_id}/callback",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-admin.md"
+      ],
+      "id": "HTTP GET /oauth/{provider}/callback",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-admin.md"
+      ],
+      "id": "HTTP GET /oauth/{provider}/login/callback",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-extensions.md"
+      ],
+      "id": "HTTP GET /api/v1/pipelines/list",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-extensions.md"
+      ],
+      "id": "HTTP POST /api/v1/automations/{id}/run",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-extensions.md"
+      ],
+      "id": "HTTP POST /api/v1/evaluations/config",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-extensions.md"
+      ],
+      "id": "HTTP POST /api/v1/images/config/update",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-extensions.md"
+      ],
+      "id": "HTTP POST /api/v1/images/edit",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-extensions.md"
+      ],
+      "id": "HTTP POST /api/v1/images/generations",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-extensions.md"
+      ],
+      "id": "HTTP POST /api/v1/tasks/auto/completions",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-extensions.md"
+      ],
+      "id": "HTTP POST /api/v1/tasks/config/update",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-extensions.md"
+      ],
+      "id": "HTTP POST /api/v1/tasks/emoji/completions",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-extensions.md"
+      ],
+      "id": "HTTP POST /api/v1/tasks/follow_up/completions",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-extensions.md"
+      ],
+      "id": "HTTP POST /api/v1/tasks/image_prompt/completions",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-extensions.md"
+      ],
+      "id": "HTTP POST /api/v1/tasks/moa/completions",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-extensions.md"
+      ],
+      "id": "HTTP POST /api/v1/tasks/queries/completions",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-extensions.md"
+      ],
+      "id": "HTTP POST /api/v1/tasks/tags/completions",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-extensions.md"
+      ],
+      "id": "HTTP POST /api/v1/tasks/title/completions",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP GET /api/events",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP GET /api/events/webhooks",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /api/events/webhooks",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP PUT /api/events/webhooks/{webhook_id}",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP DELETE /api/events/webhooks/{webhook_id}",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP GET /ollama/api/tags/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP GET /ollama/api/version/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP GET /ollama/v1/models/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP DELETE /ollama/api/delete",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP DELETE /ollama/api/delete/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP DELETE /ollama/api/push",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP DELETE /ollama/api/push/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /ollama/api/chat",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /ollama/api/chat/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /ollama/api/copy",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /ollama/api/copy/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /ollama/api/create",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /ollama/api/create/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /ollama/api/embed",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /ollama/api/embed/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /ollama/api/embeddings",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /ollama/api/embeddings/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /ollama/api/generate",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /ollama/api/generate/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /ollama/api/pull",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /ollama/api/pull/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /ollama/api/show",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /ollama/api/unload",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /ollama/v1/chat/completions",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /ollama/v1/chat/completions/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /ollama/v1/completions",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /ollama/v1/completions/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /ollama/v1/messages",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /ollama/v1/messages/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /ollama/v1/responses",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /ollama/v1/responses/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /ollama/config/update",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /openai/config/update",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /api/v1/audio/speech",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /api/message",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; full source trace: benchmarks/results/hardened/audit/reviews/pr26642-other.md"
+      ],
+      "id": "HTTP POST /api/v1/messages",
+      "kind": "http"
+    }
+  ],
+  "predictions": [
+    {
+      "evidence": [],
+      "id": "HTTP DELETE /api/events/webhooks/{webhook_id}",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP DELETE /api/v1/knowledge/external/connections/{id}",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP DELETE /api/v1/knowledge/{id}/delete",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP DELETE /ollama/api/delete",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP DELETE /ollama/api/delete/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP DELETE /ollama/api/push",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP DELETE /ollama/api/push/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP DELETE /openai/{path:path}",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP GET /api/v1/pipelines/list",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP GET /api/v1/retrieval/config",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP GET /oauth/clients/{client_id}/authorize",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP GET /ollama/api/tags",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP GET /ollama/api/tags/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP GET /ollama/api/version",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP GET /ollama/api/version/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP GET /ollama/v1/models",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP GET /ollama/v1/models/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP GET /openai/models",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP GET /openai/models/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP GET /openai/{path:path}",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP PATCH /api/v1/knowledge/external/connections/{id}",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP PATCH /api/v1/knowledge/external/source/{id}",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/chat/actions/{action_id}",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/chat/completions",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/embeddings",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/events/webhooks",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/message",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/audio/config/update",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/audio/transcriptions",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/auths/admin/config",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/auths/admin/config/ldap",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/auths/admin/config/ldap/server",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/auths/admin/config/oauth",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/auths/signin",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/auths/signup",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/automations/{id}/run",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/channels/{id}/messages/post",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/chat/completions",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/chats/config",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/chats/{id}/compact",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/configs/banners",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/configs/code_execution",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/configs/connections",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/configs/import",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/configs/models",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/configs/suggestions",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/configs/terminal_servers",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/configs/tool_servers",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/embeddings",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/evaluations/config",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/files/",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/images/config/update",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/images/edit",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/images/generations",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/knowledge/external/connections",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/knowledge/external/connections/{id}/test",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/knowledge/external/source/create",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/messages",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/models/model/update",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/retrieval/config/update",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/retrieval/embedding/update",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/retrieval/process/web/search",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/tasks/auto/completions",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/tasks/config/update",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/tasks/emoji/completions",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/tasks/follow_up/completions",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/tasks/image_prompt/completions",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/tasks/moa/completions",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/tasks/queries/completions",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/tasks/tags/completions",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/tasks/title/completions",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/users/default/permissions",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/users/user/settings/update",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /ollama/api/chat",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /ollama/api/chat/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /ollama/api/copy",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /ollama/api/copy/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /ollama/api/create",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /ollama/api/create/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /ollama/api/embed",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /ollama/api/embed/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /ollama/api/embeddings",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /ollama/api/embeddings/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /ollama/api/generate",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /ollama/api/generate/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /ollama/api/pull",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /ollama/api/pull/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /ollama/api/show",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /ollama/api/unload",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /ollama/config/update",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /ollama/v1/chat/completions",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /ollama/v1/chat/completions/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /ollama/v1/completions",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /ollama/v1/completions/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /ollama/v1/messages",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /ollama/v1/messages/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /ollama/v1/responses",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /ollama/v1/responses/{url_idx}",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /openai/chat/completions",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /openai/config/update",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /openai/responses",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /openai/{path:path}",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP PUT /api/events/webhooks/{webhook_id}",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP PUT /openai/{path:path}",
+      "kind": "http"
+    }
+  ],
+  "normalized_matches": [
+    {
+      "expected": "HTTP DELETE /api/events/webhooks/{webhook_id}",
+      "predicted": "HTTP DELETE /api/events/webhooks/{webhook_id}",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP DELETE /api/v1/knowledge/external/connections/{id}",
+      "predicted": "HTTP DELETE /api/v1/knowledge/external/connections/{id}",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP DELETE /ollama/api/delete",
+      "predicted": "HTTP DELETE /ollama/api/delete",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP DELETE /ollama/api/delete/{url_idx}",
+      "predicted": "HTTP DELETE /ollama/api/delete/{url_idx}",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP DELETE /ollama/api/push",
+      "predicted": "HTTP DELETE /ollama/api/push",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP DELETE /ollama/api/push/{url_idx}",
+      "predicted": "HTTP DELETE /ollama/api/push/{url_idx}",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP GET|POST|PUT|DELETE /openai/{path:path}",
+      "predicted": "HTTP DELETE /openai/{path:path}",
+      "rule": "strict_canonical",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP GET /api/v1/pipelines/list",
+      "predicted": "HTTP GET /api/v1/pipelines/list",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP GET /ollama/api/tags/{url_idx}",
+      "predicted": "HTTP GET /ollama/api/tags/{url_idx}",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP GET /ollama/api/version/{url_idx}",
+      "predicted": "HTTP GET /ollama/api/version/{url_idx}",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP GET /ollama/v1/models/{url_idx}",
+      "predicted": "HTTP GET /ollama/v1/models/{url_idx}",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP GET|POST|PUT|DELETE /openai/{path:path}",
+      "predicted": "HTTP GET /openai/{path:path}",
+      "rule": "strict_canonical",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP PATCH /api/v1/knowledge/external/connections/{id}",
+      "predicted": "HTTP PATCH /api/v1/knowledge/external/connections/{id}",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP PATCH /api/v1/knowledge/external/source/{id}",
+      "predicted": "HTTP PATCH /api/v1/knowledge/external/source/{id}",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/chat/completions",
+      "predicted": "HTTP POST /api/chat/completions",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/embeddings",
+      "predicted": "HTTP POST /api/embeddings",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/events/webhooks",
+      "predicted": "HTTP POST /api/events/webhooks",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/message",
+      "predicted": "HTTP POST /api/message",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/audio/config/update",
+      "predicted": "HTTP POST /api/v1/audio/config/update",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/audio/transcriptions",
+      "predicted": "HTTP POST /api/v1/audio/transcriptions",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/auths/admin/config",
+      "predicted": "HTTP POST /api/v1/auths/admin/config",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/auths/admin/config/ldap",
+      "predicted": "HTTP POST /api/v1/auths/admin/config/ldap",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/auths/admin/config/ldap/server",
+      "predicted": "HTTP POST /api/v1/auths/admin/config/ldap/server",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/auths/admin/config/oauth",
+      "predicted": "HTTP POST /api/v1/auths/admin/config/oauth",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/auths/signin",
+      "predicted": "HTTP POST /api/v1/auths/signin",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/auths/signup",
+      "predicted": "HTTP POST /api/v1/auths/signup",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/automations/{id}/run",
+      "predicted": "HTTP POST /api/v1/automations/{id}/run",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/channels/{id}/messages/post",
+      "predicted": "HTTP POST /api/v1/channels/{id}/messages/post",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/chats/config",
+      "predicted": "HTTP POST /api/v1/chats/config",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/configs/banners",
+      "predicted": "HTTP POST /api/v1/configs/banners",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/configs/code_execution",
+      "predicted": "HTTP POST /api/v1/configs/code_execution",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/configs/connections",
+      "predicted": "HTTP POST /api/v1/configs/connections",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/configs/import",
+      "predicted": "HTTP POST /api/v1/configs/import",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/configs/models",
+      "predicted": "HTTP POST /api/v1/configs/models",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/configs/suggestions",
+      "predicted": "HTTP POST /api/v1/configs/suggestions",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/configs/terminal_servers",
+      "predicted": "HTTP POST /api/v1/configs/terminal_servers",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/configs/tool_servers",
+      "predicted": "HTTP POST /api/v1/configs/tool_servers",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/evaluations/config",
+      "predicted": "HTTP POST /api/v1/evaluations/config",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/files/",
+      "predicted": "HTTP POST /api/v1/files/",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/images/config/update",
+      "predicted": "HTTP POST /api/v1/images/config/update",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/images/edit",
+      "predicted": "HTTP POST /api/v1/images/edit",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/images/generations",
+      "predicted": "HTTP POST /api/v1/images/generations",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/knowledge/external/connections",
+      "predicted": "HTTP POST /api/v1/knowledge/external/connections",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/knowledge/external/connections/{id}/test",
+      "predicted": "HTTP POST /api/v1/knowledge/external/connections/{id}/test",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/knowledge/external/source/create",
+      "predicted": "HTTP POST /api/v1/knowledge/external/source/create",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/messages",
+      "predicted": "HTTP POST /api/v1/messages",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/models/model/update",
+      "predicted": "HTTP POST /api/v1/models/model/update",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/retrieval/config/update",
+      "predicted": "HTTP POST /api/v1/retrieval/config/update",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/retrieval/embedding/update",
+      "predicted": "HTTP POST /api/v1/retrieval/embedding/update",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/retrieval/process/web/search",
+      "predicted": "HTTP POST /api/v1/retrieval/process/web/search",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/tasks/auto/completions",
+      "predicted": "HTTP POST /api/v1/tasks/auto/completions",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/tasks/config/update",
+      "predicted": "HTTP POST /api/v1/tasks/config/update",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/tasks/emoji/completions",
+      "predicted": "HTTP POST /api/v1/tasks/emoji/completions",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/tasks/follow_up/completions",
+      "predicted": "HTTP POST /api/v1/tasks/follow_up/completions",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/tasks/image_prompt/completions",
+      "predicted": "HTTP POST /api/v1/tasks/image_prompt/completions",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/tasks/moa/completions",
+      "predicted": "HTTP POST /api/v1/tasks/moa/completions",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/tasks/queries/completions",
+      "predicted": "HTTP POST /api/v1/tasks/queries/completions",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/tasks/tags/completions",
+      "predicted": "HTTP POST /api/v1/tasks/tags/completions",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/tasks/title/completions",
+      "predicted": "HTTP POST /api/v1/tasks/title/completions",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/users/default/permissions",
+      "predicted": "HTTP POST /api/v1/users/default/permissions",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/users/user/settings/update",
+      "predicted": "HTTP POST /api/v1/users/user/settings/update",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /ollama/api/chat",
+      "predicted": "HTTP POST /ollama/api/chat",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /ollama/api/chat/{url_idx}",
+      "predicted": "HTTP POST /ollama/api/chat/{url_idx}",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /ollama/api/copy",
+      "predicted": "HTTP POST /ollama/api/copy",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /ollama/api/copy/{url_idx}",
+      "predicted": "HTTP POST /ollama/api/copy/{url_idx}",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /ollama/api/create",
+      "predicted": "HTTP POST /ollama/api/create",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /ollama/api/create/{url_idx}",
+      "predicted": "HTTP POST /ollama/api/create/{url_idx}",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /ollama/api/embed",
+      "predicted": "HTTP POST /ollama/api/embed",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /ollama/api/embed/{url_idx}",
+      "predicted": "HTTP POST /ollama/api/embed/{url_idx}",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /ollama/api/embeddings",
+      "predicted": "HTTP POST /ollama/api/embeddings",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /ollama/api/embeddings/{url_idx}",
+      "predicted": "HTTP POST /ollama/api/embeddings/{url_idx}",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /ollama/api/generate",
+      "predicted": "HTTP POST /ollama/api/generate",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /ollama/api/generate/{url_idx}",
+      "predicted": "HTTP POST /ollama/api/generate/{url_idx}",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /ollama/api/pull",
+      "predicted": "HTTP POST /ollama/api/pull",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /ollama/api/pull/{url_idx}",
+      "predicted": "HTTP POST /ollama/api/pull/{url_idx}",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /ollama/api/show",
+      "predicted": "HTTP POST /ollama/api/show",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /ollama/api/unload",
+      "predicted": "HTTP POST /ollama/api/unload",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /ollama/config/update",
+      "predicted": "HTTP POST /ollama/config/update",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /ollama/v1/chat/completions",
+      "predicted": "HTTP POST /ollama/v1/chat/completions",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /ollama/v1/chat/completions/{url_idx}",
+      "predicted": "HTTP POST /ollama/v1/chat/completions/{url_idx}",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /ollama/v1/completions",
+      "predicted": "HTTP POST /ollama/v1/completions",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /ollama/v1/completions/{url_idx}",
+      "predicted": "HTTP POST /ollama/v1/completions/{url_idx}",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /ollama/v1/messages",
+      "predicted": "HTTP POST /ollama/v1/messages",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /ollama/v1/messages/{url_idx}",
+      "predicted": "HTTP POST /ollama/v1/messages/{url_idx}",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /ollama/v1/responses",
+      "predicted": "HTTP POST /ollama/v1/responses",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /ollama/v1/responses/{url_idx}",
+      "predicted": "HTTP POST /ollama/v1/responses/{url_idx}",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /openai/chat/completions",
+      "predicted": "HTTP POST /openai/chat/completions",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /openai/config/update",
+      "predicted": "HTTP POST /openai/config/update",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /openai/responses",
+      "predicted": "HTTP POST /openai/responses",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP GET|POST|PUT|DELETE /openai/{path:path}",
+      "predicted": "HTTP POST /openai/{path:path}",
+      "rule": "strict_canonical",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP PUT /api/events/webhooks/{webhook_id}",
+      "predicted": "HTTP PUT /api/events/webhooks/{webhook_id}",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP GET|POST|PUT|DELETE /openai/{path:path}",
+      "predicted": "HTTP PUT /openai/{path:path}",
+      "rule": "strict_canonical",
+      "kind": "http"
+    }
+  ],
+  "unmatched_predictions": [
+    "HTTP DELETE /api/v1/knowledge/{id}/delete",
+    "HTTP GET /api/v1/retrieval/config",
+    "HTTP GET /oauth/clients/{client_id}/authorize",
+    "HTTP GET /ollama/api/tags",
+    "HTTP GET /ollama/api/version",
+    "HTTP GET /ollama/v1/models",
+    "HTTP GET /openai/models",
+    "HTTP GET /openai/models/{url_idx}",
+    "HTTP POST /api/chat/actions/{action_id}",
+    "HTTP POST /api/v1/chats/{id}/compact"
+  ],
+  "unmatched_truth": [
+    "HTTP GET /api/v1/audio/config",
+    "HTTP GET /api/v1/auths/admin/config",
+    "event model.provider_request.failed",
+    "Web UI routes using shared application layouts",
+    "HTTP GET /api/v1/chats/search",
+    "HTTP GET /api/v1/chats/{id}",
+    "HTTP POST /api/v1/knowledge/{id}/dirs/create",
+    "HTTP POST /api/v1/knowledge/{id}/sync/diff",
+    "HTTP GET /api/v1/configs/export",
+    "HTTP GET /api/v1/configs/namespace/{namespace}",
+    "HTTP GET /oauth/clients/{client_id}/callback",
+    "HTTP GET /oauth/{provider}/callback",
+    "HTTP GET /oauth/{provider}/login/callback",
+    "HTTP GET /api/events",
+    "HTTP GET /api/events/webhooks",
+    "HTTP POST /api/v1/audio/speech"
+  ]
+}

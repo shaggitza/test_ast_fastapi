@@ -1,0 +1,12 @@
+{
+  "scope": "fastapi-adapter-v1",
+  "source": "benchmarks/real_world/adjudicated.jsonl",
+  "source_sha256": "7ef0b1467e6ef0dd6a054855215d4e789e30d4f14490b487eaed8a01f9bf9f56",
+  "entrypoints": 174,
+  "truth_positive_prs": 26,
+  "negative_control_prs": 32,
+  "by_adjudicated_kind": {
+    "event": 8,
+    "http": 166
+  }
+}

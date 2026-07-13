@@ -1,0 +1,30 @@
+{
+  "source": "benchmarks/real_world/adjudicated.jsonl",
+  "source_sha256": "7ef0b1467e6ef0dd6a054855215d4e789e30d4f14490b487eaed8a01f9bf9f56",
+  "classifier": "fastapi-adapter-v1",
+  "scopes": {
+    "fastapi": {
+      "entrypoints": 174,
+      "truth_positive_prs": 26,
+      "negative_control_prs": 32,
+      "by_adjudicated_kind": {
+        "event": 8,
+        "http": 166
+      }
+    },
+    "out-of-scope": {
+      "entrypoints": 99,
+      "truth_positive_prs": 37,
+      "negative_control_prs": 21,
+      "by_adjudicated_kind": {
+        "cli": 8,
+        "cron": 3,
+        "event": 5,
+        "http": 5,
+        "other": 73,
+        "sdk": 4,
+        "task": 1
+      }
+    }
+  }
+}

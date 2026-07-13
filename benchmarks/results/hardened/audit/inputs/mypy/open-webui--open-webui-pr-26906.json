@@ -1,0 +1,133 @@
+{
+  "backend": "mypy",
+  "repository": "open-webui/open-webui",
+  "pr": 26906,
+  "truth": [
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/main.py:1007-1009 maps both /api/chat/completions and its /api/v1/chat/completions alias to chat_completion",
+        "backend/open_webui/utils/chat.py:280-282 dispatches pipe-backed models to generate_function_chat_completion",
+        "backend/open_webui/functions.py:206-270 now shallow-copies form_data before base-model substitution and other top-level mutations",
+        "backend/open_webui/utils/middleware.py:4931-4985,5180-5195 retains the caller payload and derives continuation requests from it, so the fix preserves the preset model ID during native tool-call continuation"
+      ],
+      "id": "HTTP POST /api/chat/completions",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; source trace: benchmarks/results/hardened/audit/reviews/pr26906.md"
+      ],
+      "id": "HTTP POST /api/message",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; source trace: benchmarks/results/hardened/audit/reviews/pr26906.md"
+      ],
+      "id": "HTTP POST /api/v1/messages",
+      "kind": "http"
+    }
+  ],
+  "predictions": [
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/chat/completions",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/message",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/chat/completions",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/chats/{id}/compact",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/messages",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/tasks/auto/completions",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/tasks/emoji/completions",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/tasks/follow_up/completions",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/tasks/image_prompt/completions",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/tasks/moa/completions",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/tasks/queries/completions",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/tasks/tags/completions",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/tasks/title/completions",
+      "kind": "http"
+    }
+  ],
+  "normalized_matches": [
+    {
+      "expected": "HTTP POST /api/chat/completions",
+      "predicted": "HTTP POST /api/chat/completions",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/message",
+      "predicted": "HTTP POST /api/message",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/messages",
+      "predicted": "HTTP POST /api/v1/messages",
+      "rule": "raw_exact",
+      "kind": "http"
+    }
+  ],
+  "unmatched_predictions": [
+    "HTTP POST /api/v1/chats/{id}/compact",
+    "HTTP POST /api/v1/tasks/auto/completions",
+    "HTTP POST /api/v1/tasks/emoji/completions",
+    "HTTP POST /api/v1/tasks/follow_up/completions",
+    "HTTP POST /api/v1/tasks/image_prompt/completions",
+    "HTTP POST /api/v1/tasks/moa/completions",
+    "HTTP POST /api/v1/tasks/queries/completions",
+    "HTTP POST /api/v1/tasks/tags/completions",
+    "HTTP POST /api/v1/tasks/title/completions"
+  ],
+  "unmatched_truth": []
+}

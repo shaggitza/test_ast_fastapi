@@ -100,9 +100,14 @@ plus runtime metadata:
 }
 ```
 
-Use `evaluate.py` to compare predictions. Primary metrics are micro/macro recall,
-precision, F1, unresolved rate, evaluable coverage, and latency. A candidate
-cannot improve its score by omitting hard PRs.
+Use `evaluate.py` to compare predictions. The product score is
+`--scope fastapi`: finite HTTP method/path claims and explicit WebSocket routes
+that the FastAPI adapter can emit. The default `--scope all` preserves the
+broader cross-surface research score. Raw exact and normalized metrics are both
+reported. Primary metrics are micro/macro recall, precision, F1, unresolved
+rate, evaluable coverage, and latency. A candidate cannot improve its score by
+omitting hard PRs. Versioned scope membership and source hashes live under
+`scopes/`.
 
 ### Current candidate runner
 
@@ -131,6 +136,7 @@ reported through misses or unresolved evidence rather than hidden execution.
 ```bash
 python benchmarks/real_world/collect_prs.py
 python benchmarks/real_world/evaluate.py \
+  --scope fastapi \
   --ground-truth benchmarks/real_world/adjudicated.jsonl \
   --predictions path/to/predictions.jsonl
 ```

@@ -1,22 +1,22 @@
 {
-  "scope": "all-surfaces",
+  "scope": "fastapi-adapter-v1",
   "adjudicated_prs": 58,
   "prediction_coverage": 1.0,
-  "truth_positive_prs": 50,
-  "negative_control_prs": 8,
+  "truth_positive_prs": 26,
+  "negative_control_prs": 32,
   "negative_controls_with_fp": 0,
   "micro": {
     "precision": 0.7777777777777778,
-    "recall": 0.3333333333333333,
-    "f1": 0.4666666666666666,
+    "recall": 0.5229885057471264,
+    "f1": 0.6254295532646048,
     "tp": 91,
     "fp": 26,
-    "fn": 182
+    "fn": 83
   },
   "macro": {
     "precision": 0.01856763925729443,
-    "recall": 0.03169129720853859,
-    "f1": 0.02098457350272232
+    "recall": 0.031971878138600605,
+    "f1": 0.021124854239546895
   },
   "by_repository": {
     "khoj-ai/khoj": {
@@ -25,7 +25,7 @@
       "f1": 0.0,
       "tp": 0,
       "fp": 0,
-      "fn": 55
+      "fn": 32
     },
     "langflow-ai/langflow": {
       "precision": 0.0,
@@ -33,19 +33,19 @@
       "f1": 0.0,
       "tp": 0,
       "fp": 0,
-      "fn": 62
+      "fn": 16
     },
     "open-webui/open-webui": {
       "precision": 0.7777777777777778,
-      "recall": 0.5833333333333334,
-      "f1": 0.6666666666666666,
+      "recall": 0.7222222222222222,
+      "f1": 0.7489711934156379,
       "tp": 91,
       "fp": 26,
-      "fn": 65
+      "fn": 35
     }
   },
   "by_kind": {
-    "cli": {
+    "event": {
       "precision": 0.0,
       "recall": 0.0,
       "f1": 0.0,
@@ -53,69 +53,29 @@
       "fp": 0,
       "fn": 8
     },
-    "cron": {
-      "precision": 0.0,
-      "recall": 0.0,
-      "f1": 0.0,
-      "tp": 0,
-      "fp": 0,
-      "fn": 3
-    },
-    "event": {
-      "precision": 0.0,
-      "recall": 0.0,
-      "f1": 0.0,
-      "tp": 0,
-      "fp": 0,
-      "fn": 13
-    },
     "http": {
       "precision": 0.7777777777777778,
-      "recall": 0.5321637426900585,
-      "f1": 0.6319444444444445,
+      "recall": 0.5481927710843374,
+      "f1": 0.6431095406360424,
       "tp": 91,
       "fp": 26,
-      "fn": 80
-    },
-    "other": {
-      "precision": 0.0,
-      "recall": 0.0,
-      "f1": 0.0,
-      "tp": 0,
-      "fp": 0,
-      "fn": 73
-    },
-    "sdk": {
-      "precision": 0.0,
-      "recall": 0.0,
-      "f1": 0.0,
-      "tp": 0,
-      "fp": 0,
-      "fn": 4
-    },
-    "task": {
-      "precision": 0.0,
-      "recall": 0.0,
-      "f1": 0.0,
-      "tp": 0,
-      "fp": 0,
-      "fn": 1
+      "fn": 75
     }
   },
   "normalized": {
     "alias_version": 1,
     "micro": {
       "precision": 0.8333333333333334,
-      "recall": 0.3442028985507246,
-      "f1": 0.4871794871794871,
+      "recall": 0.536723163841808,
+      "f1": 0.6529209621993127,
       "tp": 95,
       "fp": 19,
-      "fn": 181
+      "fn": 82
     },
     "macro": {
       "precision": 0.019861392832995265,
-      "recall": 0.031928480204342274,
-      "f1": 0.022003284072249586
+      "recall": 0.03220559531554977,
+      "f1": 0.022148541114058354
     },
     "by_repository": {
       "khoj-ai/khoj": {
@@ -124,7 +84,7 @@
         "f1": 0.0,
         "tp": 0,
         "fp": 0,
-        "fn": 55
+        "fn": 32
       },
       "langflow-ai/langflow": {
         "precision": 0.0,
@@ -132,19 +92,19 @@
         "f1": 0.0,
         "tp": 0,
         "fp": 0,
-        "fn": 62
+        "fn": 16
       },
       "open-webui/open-webui": {
         "precision": 0.8333333333333334,
-        "recall": 0.5974842767295597,
-        "f1": 0.6959706959706959,
+        "recall": 0.7364341085271318,
+        "f1": 0.7818930041152263,
         "tp": 95,
         "fp": 19,
-        "fn": 64
+        "fn": 34
       }
     },
     "by_kind": {
-      "cli": {
+      "event": {
         "precision": 0.0,
         "recall": 0.0,
         "f1": 0.0,
@@ -152,56 +112,16 @@
         "fp": 0,
         "fn": 8
       },
-      "cron": {
-        "precision": 0.0,
-        "recall": 0.0,
-        "f1": 0.0,
-        "tp": 0,
-        "fp": 0,
-        "fn": 3
-      },
-      "event": {
-        "precision": 0.0,
-        "recall": 0.0,
-        "f1": 0.0,
-        "tp": 0,
-        "fp": 0,
-        "fn": 13
-      },
       "http": {
         "precision": 0.8333333333333334,
-        "recall": 0.5459770114942529,
-        "f1": 0.6597222222222223,
+        "recall": 0.5621301775147929,
+        "f1": 0.6713780918727915,
         "tp": 95,
         "fp": 19,
-        "fn": 79
-      },
-      "other": {
-        "precision": 0.0,
-        "recall": 0.0,
-        "f1": 0.0,
-        "tp": 0,
-        "fp": 0,
-        "fn": 73
-      },
-      "sdk": {
-        "precision": 0.0,
-        "recall": 0.0,
-        "f1": 0.0,
-        "tp": 0,
-        "fp": 0,
-        "fn": 4
-      },
-      "task": {
-        "precision": 0.0,
-        "recall": 0.0,
-        "f1": 0.0,
-        "tp": 0,
-        "fp": 0,
-        "fn": 1
+        "fn": 74
       }
     },
-    "expected_atoms": 276,
+    "expected_atoms": 177,
     "predicted_atoms": 114,
     "matches_by_rule": {
       "raw_exact": 91,

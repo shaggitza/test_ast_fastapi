@@ -68,6 +68,72 @@ def test_stratifies_metrics_by_entrypoint_kind(tmp_path: Path, monkeypatch, caps
     assert result["by_kind"]["event"]["fn"] == 1
 
 
+def test_fastapi_scope_keeps_http_and_websocket_but_excludes_generic_events(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    truth = tmp_path / "truth.jsonl"
+    predictions = tmp_path / "predictions.jsonl"
+    truth.write_text(
+        json.dumps(
+            {
+                "repository": "owner/repo",
+                "pr": 1,
+                "status": "adjudicated",
+                "affected_entrypoints": [
+                    {"id": "HTTP GET /items", "kind": "http"},
+                    {"id": "WEBSOCKET /events", "kind": "event"},
+                    {"id": "Socket.IO connect event", "kind": "event"},
+                    {"id": "Web UI settings", "kind": "other"},
+                ],
+            }
+        )
+        + "\n"
+    )
+    predictions.write_text(
+        json.dumps(
+            {
+                "repository": "owner/repo",
+                "pr": 1,
+                "affected_entrypoints": [
+                    {"id": "HTTP GET /items", "kind": "http"},
+                    {"id": "WebSocket /events", "kind": "event"},
+                    {"id": "Socket.IO connect event", "kind": "event"},
+                ],
+            }
+        )
+        + "\n"
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "evaluate.py",
+            "--ground-truth",
+            str(truth),
+            "--predictions",
+            str(predictions),
+            "--scope",
+            "fastapi",
+        ],
+    )
+
+    evaluate.main()
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["scope"] == "fastapi-adapter-v1"
+    assert result["micro"] == {
+        "precision": 0.5,
+        "recall": 0.5,
+        "f1": 0.5,
+        "tp": 1,
+        "fp": 1,
+        "fn": 1,
+    }
+    assert result["normalized"]["micro"]["tp"] == 2
+    assert result["normalized"]["micro"]["fp"] == 0
+    assert result["normalized"]["micro"]["fn"] == 0
+
+
 def test_prediction_coverage_excludes_not_evaluable_truth(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
