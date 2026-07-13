@@ -103,6 +103,81 @@ def test_depth_traversal_is_independent_of_first_encounter_order(tmp_path: Path)
     assert deps.references_symbol_at_line("graph.py", 1) is not None
 
 
+def test_handler_line_disambiguates_duplicate_class_methods(tmp_path: Path) -> None:
+    (tmp_path / "deps.py").write_text(
+        "def dep_a() -> int:\n    return 1\n\ndef dep_b() -> int:\n    return 2\n"
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from deps import dep_a, dep_b\n\n"
+        "class First:\n"
+        "    def run(self) -> int:\n"
+        "        return dep_a()\n\n"
+        "class Second:\n"
+        "    def run(self) -> int:\n"
+        "        return dep_b()\n"
+    )
+    endpoint = Endpoint(
+        path="/second",
+        methods=[EndpointMethod.GET],
+        handler=HandlerInfo(
+            name="run",
+            module="main",
+            file_path=main,
+            line_number=8,
+            end_line_number=9,
+        ),
+    )
+
+    deps = MypyAnalyzer(tmp_path).analyze_endpoint(endpoint)
+
+    assert deps.references_symbol_at_line("deps.py", 4) is not None
+    assert deps.references_symbol_at_line("deps.py", 1) is None
+
+
+def test_decorator_line_disambiguates_duplicate_class_handlers(tmp_path: Path) -> None:
+    (tmp_path / "deps.py").write_text(
+        "def dep_a() -> int:\n    return 1\n\ndef dep_b() -> int:\n    return 2\n"
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from deps import dep_a, dep_b\n\n"
+        "def deco(func):\n    return func\n\n"
+        "class First:\n    @deco\n    def run(self) -> int:\n        return dep_a()\n\n"
+        "class Second:\n    @deco\n    def run(self) -> int:\n        return dep_b()\n"
+    )
+    endpoint = Endpoint(
+        path="/decorated",
+        methods=[EndpointMethod.GET],
+        handler=HandlerInfo(name="run", module="main", file_path=main, line_number=12),
+    )
+
+    deps = MypyAnalyzer(tmp_path).analyze_endpoint(endpoint)
+
+    assert deps.references_symbol_at_line("deps.py", 4) is not None
+    assert deps.references_symbol_at_line("deps.py", 1) is None
+
+
+def test_imported_class_method_calls_resolve_exactly(tmp_path: Path) -> None:
+    (tmp_path / "deps.py").write_text("def dep() -> int:\n    return 1\n")
+    (tmp_path / "services.py").write_text(
+        "from deps import dep\n\n"
+        "class Static:\n    @staticmethod\n    def run() -> int:\n        return dep()\n\n"
+        "class Instance:\n    def run(self) -> int:\n        return dep()\n"
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from services import Instance, Static\n\n"
+        "def handler() -> int:\n    return Static.run() + Instance().run()\n"
+    )
+
+    deps = MypyAnalyzer(tmp_path, max_depth=3).analyze_endpoint(_endpoint(main))
+
+    assert deps.references_symbol_at_line("services.py", 5) is not None
+    assert deps.references_symbol_at_line("services.py", 9) is not None
+    assert deps.references_symbol_at_line("deps.py", 1) is not None
+
+
 def test_cache_rejects_source_edits_depth_changes_legacy_and_malformed(
     tmp_path: Path,
 ) -> None:
