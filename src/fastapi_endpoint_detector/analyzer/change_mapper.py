@@ -125,6 +125,15 @@ def _merge_affected(
         existing.merge(candidate)
 
 
+def _scip_confidence(seed: SCIPDefinition, depth: int) -> ConfidenceLevel:
+    if depth == 0:
+        return ConfidenceLevel.HIGH
+    if "(" not in seed.short_name:
+        # Class/module/value seeds over-approximate every consumer of a container.
+        return ConfidenceLevel.LOW
+    return ConfidenceLevel.MEDIUM
+
+
 def _normalized_diff_path(path: Path | str) -> str:
     return os.path.normcase(os.path.normpath(str(path).replace("\\", "/")))
 
@@ -635,9 +644,7 @@ class ChangeMapper:
                         endpoint = (
                             target_equivalent(discovered) if side == "baseline" else discovered
                         )
-                        confidence = (
-                            ConfidenceLevel.HIGH if reached.depth == 0 else ConfidenceLevel.MEDIUM
-                        )
+                        confidence = _scip_confidence(seed, reached.depth)
                         _merge_affected(
                             affected,
                             AffectedEndpoint(
