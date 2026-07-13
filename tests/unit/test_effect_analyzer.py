@@ -203,6 +203,44 @@ def test_same_named_nested_invocations_do_not_cross_credit_returns(tmp_path: Pat
     assert result.confidence != ConfidenceLevel.HIGH
 
 
+def test_indirect_nested_call_is_not_credited_from_same_named_attribute(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def endpoint(other):\n"
+        "    def process(payload):\n"
+        "        dispatch(payload)\n"
+        "        return payload\n"
+        "    callbacks = [process]\n"
+        "    first = {'model': 'first'}\n"
+        "    callbacks[0](first)\n"
+        "    second = {'model': 'second'}\n"
+        "    return other.process(second)\n"
+    )
+    stack = [
+        CallStackFrame(file_path=str(main), line_number=1, function_name="main.endpoint"),
+        CallStackFrame(
+            file_path=str(main),
+            line_number=2,
+            function_name="main.endpoint.process",
+            caller_file_path=str(main),
+            caller_line_number=7,
+        ),
+        CallStackFrame(
+            file_path=str(service),
+            line_number=1,
+            function_name="service.dispatch",
+            caller_file_path=str(main),
+            caller_line_number=3,
+        ),
+    ]
+
+    result = EffectAnalyzer(tmp_path).analyze(str(service), {2}, [stack])
+
+    assert result is not None
+    assert result.confidence != ConfidenceLevel.HIGH
+
+
 def test_intermediate_return_ignored_by_endpoint_is_not_high(tmp_path: Path) -> None:
     service = _service(tmp_path)
     main = tmp_path / "main.py"
@@ -278,6 +316,26 @@ def test_use_in_conditional_branch_is_not_established_for_every_call(tmp_path: P
     assert result.evidence[0].status.value == "conditional"
 
 
+def test_match_and_loop_observations_are_conditional(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    for body in (
+        "    match flag:\n        case True:\n            return payload\n",
+        "    for _ in values:\n        return payload\n",
+    ):
+        main = tmp_path / "main.py"
+        main.write_text(
+            "def endpoint(flag=True, values=(1,)):\n"
+            "    payload = {'model': 'preset'}\n"
+            "    dispatch(payload)\n"
+            f"{body}"
+            "    return {'ok': True}\n"
+        )
+        result = EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 3)])
+        assert result is not None
+        assert result.confidence == ConfidenceLevel.MEDIUM
+        assert result.evidence[0].status.value == "conditional"
+
+
 def test_name_only_insert_is_dynamic_forwarding_not_persistence(tmp_path: Path) -> None:
     service = _service(tmp_path)
     main = tmp_path / "main.py"
@@ -313,6 +371,23 @@ def test_function_name_containing_print_is_not_classified_as_logging(tmp_path: P
     assert result is not None
     assert result.evidence[0].observations == [DataObservationKind.FORWARDED]
     assert result.evidence[0].disposition == EffectDisposition.DYNAMIC_OR_UNRESOLVED
+
+
+def test_bare_warning_is_dynamic_forwarding_not_logging(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def endpoint():\n"
+        "    payload = {'model': 'preset'}\n"
+        "    dispatch(payload)\n"
+        "    warning(payload)\n"
+        "    return {'ok': True}\n"
+    )
+
+    result = EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 3)])
+
+    assert result is not None
+    assert result.evidence[0].observations == [DataObservationKind.FORWARDED]
 
 
 def test_derived_context_return_is_an_observable_response(tmp_path: Path) -> None:

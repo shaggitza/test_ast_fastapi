@@ -448,7 +448,8 @@ class EffectAnalyzer:
             node
             for node in nodes
             if isinstance(node, ast.Call)
-            and self._call_name(node.func).rsplit(".", 1)[-1] == function.name
+            and isinstance(node.func, ast.Name)
+            and node.func.id == function.name
         ]
         if len(calls) != 1:
             return False
@@ -673,8 +674,10 @@ class EffectAnalyzer:
         use: ast.Name,
         parents: dict[ast.AST, ast.AST],
     ) -> tuple[bool, bool]:
-        def signature(node: ast.AST) -> dict[ast.If, str]:
-            result: dict[ast.If, str] = {}
+        def signature(  # noqa: PLR0912 - explicit control-region taxonomy
+            node: ast.AST,
+        ) -> dict[ast.AST, str]:
+            result: dict[ast.AST, str] = {}
             child = node
             parent = parents.get(child)
             while parent is not None:
@@ -685,6 +688,40 @@ class EffectAnalyzer:
                         result[parent] = "orelse"
                     else:
                         result[parent] = "test"
+                elif isinstance(parent, ast.Match):
+                    arm = next(
+                        (
+                            f"case:{index}"
+                            for index, case in enumerate(parent.cases)
+                            if child is case
+                        ),
+                        "subject",
+                    )
+                    result[parent] = arm
+                elif isinstance(parent, (ast.For, ast.AsyncFor, ast.While)):
+                    if child in parent.body:
+                        result[parent] = "body"
+                    elif child in parent.orelse:
+                        result[parent] = "orelse"
+                    else:
+                        result[parent] = "header"
+                elif isinstance(parent, ast.Try):
+                    if child in parent.body:
+                        result[parent] = "body"
+                    elif child in parent.orelse:
+                        result[parent] = "orelse"
+                    elif child in parent.finalbody:
+                        result[parent] = "finally"
+                    else:
+                        handler = next(
+                            (
+                                f"handler:{index}"
+                                for index, item in enumerate(parent.handlers)
+                                if child is item
+                            ),
+                            "handler",
+                        )
+                        result[parent] = handler
                 child = parent
                 parent = parents.get(child)
             return result
@@ -693,9 +730,13 @@ class EffectAnalyzer:
         use_signature = signature(use)
         for branch, arm in call_signature.items():
             use_arm = use_signature.get(branch)
-            if use_arm is not None and use_arm != arm:
+            if use_arm is not None and use_arm != arm and isinstance(branch, (ast.If, ast.Match)):
                 return True, False
-        conditional = set(call_signature) != set(use_signature)
+        controls = set(call_signature) | set(use_signature)
+        conditional = set(call_signature) != set(use_signature) or any(
+            isinstance(control, (ast.Match, ast.For, ast.AsyncFor, ast.While, ast.Try))
+            for control in controls
+        )
         return False, conditional
 
     def _classify_use(
@@ -740,7 +781,7 @@ class EffectAnalyzer:
                 if (
                     name == "print"
                     or name.startswith(("logger.", "logging."))
-                    or name in {"warnings.warn", "warning"}
+                    or name == "warnings.warn"
                 ):
                     return _Observation(
                         DataObservationKind.LOGGED,
