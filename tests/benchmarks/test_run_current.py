@@ -285,6 +285,26 @@ class AnalyzerFailureTests(unittest.TestCase):
                 use_scip=False,
             )
 
+    def test_subprocess_failure_preserves_both_output_streams(self) -> None:
+        failed = subprocess.CompletedProcess(
+            args=["uv"], returncode=1, stdout="Error: useful detail", stderr="Aborted!"
+        )
+        with (
+            mock.patch.object(run_current, "command", return_value=failed),
+            self.assertRaisesRegex(
+                run_current.RunnerError,
+                r"stdout:\nError: useful detail\nstderr:\nAborted!",
+            ),
+        ):
+            run_current.invoke_analyzer(
+                Path("candidate"),
+                Path("app"),
+                Path("p.diff"),
+                2,
+                secure_ast=True,
+                use_scip=False,
+            )
+
     def test_report_errors_and_warnings_are_preserved(self) -> None:
         report = {
             "affected_endpoints": [],
