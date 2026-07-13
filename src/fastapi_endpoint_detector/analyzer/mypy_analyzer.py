@@ -291,37 +291,48 @@ class MypyAnalyzer:
         finally:
             sys.path = original_path
 
-    def _find_func_in_tree(self, tree: Any, func_name: str) -> tuple[Any, str] | None:
-        """
-        Find a function/method definition in a mypy AST.
-
-        Returns (func_node, qualified_name) or None.
-        Note: Returns the Decorator node if the function is decorated, otherwise FuncDef.
-        """
+    def _find_func_in_tree(
+        self,
+        tree: Any,
+        func_name: str,
+        *,
+        qualified_name: str | None = None,
+        line_hint: int | None = None,
+    ) -> tuple[Any, str] | None:
+        """Resolve one function by qualified identity or source location."""
         from mypy.nodes import ClassDef, Decorator, FuncDef, OverloadedFuncDef
 
+        candidates: list[tuple[Any, str]] = []
         for defn in tree.defs:
             if isinstance(defn, FuncDef) and defn.name == func_name:
-                return defn, defn.name
-            if isinstance(defn, Decorator) and defn.func.name == func_name:
-                # Return the Decorator node so we can walk decorators
-                return defn, defn.func.name
-            if isinstance(defn, OverloadedFuncDef) and defn.name == func_name:
-                # For overloaded functions, get the first implementation
+                candidates.append((defn, defn.name))
+            elif isinstance(defn, Decorator) and defn.func.name == func_name:
+                candidates.append((defn, defn.func.name))
+            elif isinstance(defn, OverloadedFuncDef) and defn.name == func_name:
                 if defn.items:
-                    first = defn.items[0]
-                    if isinstance(first, Decorator):
-                        return first, first.func.name
-                return None
-            if isinstance(defn, ClassDef):
-                # Search methods in class
+                    candidates.append((defn.items[0], defn.name))
+            elif isinstance(defn, ClassDef):
                 for item in defn.defs.body:
                     if isinstance(item, FuncDef) and item.name == func_name:
-                        return item, f"{defn.name}.{item.name}"
-                    if isinstance(item, Decorator) and item.func.name == func_name:
-                        # Return the Decorator node
-                        return item, f"{defn.name}.{item.func.name}"
-        return None
+                        candidates.append((item, f"{defn.name}.{item.name}"))
+                    elif isinstance(item, Decorator) and item.func.name == func_name:
+                        candidates.append((item, f"{defn.name}.{item.func.name}"))
+
+        if qualified_name:
+            exact = [candidate for candidate in candidates if candidate[1] == qualified_name]
+            if len(exact) == 1:
+                return exact[0]
+        if line_hint is not None:
+            at_line = []
+            for candidate in candidates:
+                node = candidate[0].func if isinstance(candidate[0], Decorator) else candidate[0]
+                start, end = self._get_func_lines(node)
+                declaration_start = min(start, getattr(candidate[0], "line", start))
+                if declaration_start <= line_hint <= end:
+                    at_line.append(candidate)
+            if len(at_line) == 1:
+                return at_line[0]
+        return candidates[0] if len(candidates) == 1 else None
 
     def _get_func_lines(self, func_node: Any) -> tuple[int, int]:
         """Get the start and end lines of a function node."""
@@ -386,6 +397,27 @@ class MypyAnalyzer:
         """Get the type of an AST node from mypy's type map."""
         return self._types_map.get(node)
 
+    def _import_map_for_tree(self, tree: Any, module_name: str) -> dict[str, str]:
+        """Build local-to-full symbol aliases for one module's imports."""
+        from mypy.nodes import Import, ImportFrom
+
+        import_map: dict[str, str] = {}
+        for definition in getattr(tree, "defs", []):
+            if isinstance(definition, ImportFrom):
+                imported_module = definition.id
+                sibling = (
+                    f"{module_name.rsplit('.', 1)[0]}.{imported_module}"
+                    if "." in module_name
+                    else imported_module
+                )
+                full_module = sibling if sibling in self._module_to_path else imported_module
+                for original, alias in definition.names:
+                    import_map[alias or original] = f"{full_module}.{original}"
+            elif isinstance(definition, Import):
+                for imported_module, alias in definition.ids:
+                    import_map[alias or imported_module] = imported_module
+        return import_map
+
     @staticmethod
     def _endpoint_key(endpoint: Endpoint) -> str:
         """Key dependency data by public route and physical handler identity."""
@@ -433,9 +465,9 @@ class MypyAnalyzer:
                 continue
 
         if not handler_module or handler_module not in self._trees:
-            # Module not found - add handler file as reference
+            # Module not found - retain only the attested handler span.
             start = handler.line_number
-            end = handler.end_line_number or start + 50
+            end = handler.end_line_number or start
             deps.add_symbol_reference(handler_path, handler.name, start, end)
             self._endpoint_deps[self._endpoint_key(endpoint)] = deps
             return deps
@@ -443,10 +475,10 @@ class MypyAnalyzer:
         tree = self._trees[handler_module]
 
         # Find the handler function
-        result = self._find_func_in_tree(tree, handler.name)
+        result = self._find_func_in_tree(tree, handler.name, line_hint=handler.line_number)
         if not result:
             start = handler.line_number
-            end = handler.end_line_number or start + 50
+            end = handler.end_line_number or start
             deps.add_symbol_reference(handler_path, handler.name, start, end)
             self._endpoint_deps[self._endpoint_key(endpoint)] = deps
             return deps
@@ -461,47 +493,7 @@ class MypyAnalyzer:
         start, end = self._get_func_lines(actual_func)
         deps.add_symbol_reference(handler_path, handler.name, start, end)
 
-        # Build import map for this module to resolve imported names
-        import_map: dict[str, str] = {}  # local_name -> actual_fullname
-        if hasattr(tree, "defs"):
-            from mypy.nodes import Import, ImportFrom
-
-            for defn in tree.defs:
-                if isinstance(defn, ImportFrom):
-                    # from module import name
-                    if hasattr(defn, "id") and hasattr(defn, "names"):
-                        module_name = defn.id
-                        # Resolve relative module name to full module name
-                        if not module_name.startswith("."):
-                            # Absolute import - prefix with current package if needed
-                            # Check if this is a sibling module
-                            sibling_module = (
-                                f"{handler_module.rsplit('.', 1)[0]}.{module_name}"
-                                if "." in handler_module
-                                else module_name
-                            )
-                            if sibling_module in self._module_to_path:
-                                full_module_name = sibling_module
-                            else:
-                                full_module_name = module_name
-                        else:
-                            # Relative import
-                            full_module_name = module_name  # TODO: Handle relative imports properly
-
-                        for name_info in defn.names:
-                            local_name = name_info[0]  # The name as imported
-                            original_name = (
-                                name_info[1] if name_info[1] else local_name
-                            )  # Alias or same
-                            # Map local name to actual fullname
-                            import_map[local_name] = f"{full_module_name}.{original_name}"
-                elif isinstance(defn, Import):
-                    # import module or import module as alias
-                    if hasattr(defn, "ids"):
-                        for module_info in defn.ids:
-                            module_name = module_info[0]
-                            alias = module_info[1] if module_info[1] else module_name
-                            import_map[alias] = module_name
+        import_map = self._import_map_for_tree(tree, handler_module)
 
         # Trace all references in the function body
         visited: dict[str, int] = {}
@@ -550,6 +542,7 @@ class MypyAnalyzer:
             AwaitExpr,
             Block,
             CallExpr,
+            ClassDef,
             ComparisonExpr,
             ConditionalExpr,
             Decorator,
@@ -624,7 +617,11 @@ class MypyAnalyzer:
 
             # Try to find the function in the target tree
             func_name = symbol_name.split(".")[-1] if symbol_name else parts[-1]
-            func_result = self._find_func_in_tree(target_tree, func_name)
+            func_result = self._find_func_in_tree(
+                target_tree,
+                func_name,
+                qualified_name=symbol_name or None,
+            )
 
             if func_result:
                 target_func, qname = func_result
@@ -651,17 +648,26 @@ class MypyAnalyzer:
                         target_module,
                         new_stack,
                         visited,
-                        import_map,
+                        self._import_map_for_tree(target_tree, target_module),
                         depth=target_depth,
                     )
             else:
-                # Couldn't find specific function, add module reference
-                deps.add_symbol_reference(target_path, fullname, 1, 20)
-                if target_path not in deps.call_stacks:
-                    deps.call_stacks[target_path] = []
-                current_stack = list(call_stack)
-                if current_stack not in deps.call_stacks[target_path]:
-                    deps.call_stacks[target_path].append(current_stack)
+                class_candidates = [
+                    definition
+                    for definition in target_tree.defs
+                    if isinstance(definition, ClassDef) and definition.name == func_name
+                ]
+                if len(class_candidates) == 1:
+                    class_node = class_candidates[0]
+                    start = class_node.line
+                    end = class_node.end_line or start
+                    deps.add_symbol_reference(target_path, fullname, start, end)
+                    current_stack = list(call_stack)
+                    stacks = deps.call_stacks.setdefault(target_path, [])
+                    if current_stack not in stacks:
+                        stacks.append(current_stack)
+                # Ambiguous or unresolved symbols are not converted into
+                # fabricated module ranges; doing so creates unrelated impacts.
 
         def handle_call_expr(call: CallExpr) -> None:
             """Handle a function/method call expression."""
@@ -710,8 +716,20 @@ class MypyAnalyzer:
                         resolve_and_trace(method_fullname, call.line)
                     # No type info - try to trace the receiver
                     elif isinstance(callee.expr, NameExpr) and callee.expr.fullname:
-                        # Receiver is a module or class
-                        combined = f"{callee.expr.fullname}.{callee.name}"
+                        # Receiver is an imported module or class.
+                        receiver = import_map.get(callee.expr.name, callee.expr.fullname)
+                        combined = f"{receiver}.{callee.name}"
+                        deps.add_reference(current_file, call.line, combined)
+                        resolve_and_trace(combined, call.line)
+                    elif (
+                        isinstance(callee.expr, CallExpr)
+                        and isinstance(callee.expr.callee, NameExpr)
+                        and callee.expr.callee.fullname
+                    ):
+                        # Immediate construction: ImportedClass().method().
+                        constructor = callee.expr.callee
+                        receiver = import_map.get(constructor.name, constructor.fullname)
+                        combined = f"{receiver}.{callee.name}"
                         deps.add_reference(current_file, call.line, combined)
                         resolve_and_trace(combined, call.line)
 
