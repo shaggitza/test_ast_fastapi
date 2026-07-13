@@ -137,6 +137,49 @@ def test_depth_traversal_is_independent_of_first_encounter_order(tmp_path: Path)
     assert deps.references_symbol_at_line("graph.py", 1) is not None
 
 
+def test_annotated_dependency_alias_traces_provider_and_nested_calls(tmp_path: Path) -> None:
+    dependencies = tmp_path / "dependencies.py"
+    dependencies.write_text(
+        "from typing import Annotated\nfrom fastapi import Depends\n\n"
+        "def nested() -> int:\n    return 1\n\n"
+        "def provider(value: Annotated[int, Depends(nested)]) -> int:\n    return value\n"
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from typing import Annotated\n"
+        "from fastapi import Depends\n"
+        "from dependencies import provider\n\n"
+        "Provider = Annotated[int, Depends(provider)]\n\n"
+        "def handler(value: Provider) -> int:\n    return value\n"
+    )
+    endpoint = Endpoint(
+        path="/annotated",
+        methods=[EndpointMethod.GET],
+        handler=HandlerInfo(
+            name="handler", module="main", file_path=main, line_number=7, end_line_number=8
+        ),
+    )
+
+    deps = MypyAnalyzer(tmp_path, max_depth=3).analyze_endpoint(endpoint)
+
+    assert deps.references_symbol_at_line("dependencies.py", 7) is not None
+    assert deps.references_symbol_at_line("dependencies.py", 4) is not None
+
+
+def test_imported_global_is_referenced_at_definition(tmp_path: Path) -> None:
+    config = tmp_path / "config.py"
+    config.write_text("DEFAULT = {'used': 1}\nUNRELATED = 2\n")
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from config import DEFAULT\n\ndef handler() -> int:\n    return DEFAULT['used']\n"
+    )
+
+    deps = MypyAnalyzer(tmp_path).analyze_endpoint(_endpoint(main))
+
+    assert deps.references_symbol_at_line("config.py", 1) is not None
+    assert deps.references_symbol_at_line("config.py", 2) is None
+
+
 def test_handler_line_disambiguates_duplicate_class_methods(tmp_path: Path) -> None:
     (tmp_path / "deps.py").write_text(
         "def dep_a() -> int:\n    return 1\n\ndef dep_b() -> int:\n    return 2\n"
@@ -190,6 +233,26 @@ def test_decorator_line_disambiguates_duplicate_class_handlers(tmp_path: Path) -
 
     assert deps.references_symbol_at_line("deps.py", 4) is not None
     assert deps.references_symbol_at_line("deps.py", 1) is None
+
+
+def test_constructor_does_not_reference_unrelated_class_methods(tmp_path: Path) -> None:
+    services = tmp_path / "services.py"
+    services.write_text(
+        "class Service:\n"
+        "    def __init__(self) -> None:\n        self.ready = True\n\n"
+        "    def used(self) -> int:\n        return 1\n\n"
+        "    def unused(self) -> int:\n        return 2\n"
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from services import Service\n\ndef handler() -> int:\n    return Service().used()\n"
+    )
+
+    deps = MypyAnalyzer(tmp_path, max_depth=3).analyze_endpoint(_endpoint(main))
+
+    assert deps.references_symbol_at_line("services.py", 2) is not None
+    assert deps.references_symbol_at_line("services.py", 5) is not None
+    assert deps.references_symbol_at_line("services.py", 8) is None
 
 
 def test_imported_class_method_calls_resolve_exactly(tmp_path: Path) -> None:

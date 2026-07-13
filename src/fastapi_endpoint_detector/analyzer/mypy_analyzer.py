@@ -11,6 +11,7 @@ using mypy's internal data structures to track file/line references.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -173,7 +174,7 @@ class MypyAnalyzer:
     and extract precise file/line information for all references.
     """
 
-    CACHE_SCHEMA_VERSION = 3
+    CACHE_SCHEMA_VERSION = 4
 
     def __init__(self, app_path: Path, *, max_depth: int = 10) -> None:
         """Initialize the mypy analyzer."""
@@ -192,6 +193,10 @@ class MypyAnalyzer:
         self._trees: dict[str, Any] = {}  # module_name -> MypyFile
         self._module_to_path: dict[str, str] = {}
         self._types_map: dict[Any, Any] = {}  # AST node -> Type
+        self._project_modules: set[str] = set()
+        self._global_value_cache: dict[str, SymbolReference | None] = {}
+        self._python_dependency_cache: dict[tuple[str, int, str], set[str]] = {}
+        self._python_ast_cache: dict[str, ast.Module | None] = {}
 
     @property
     def cache_path(self) -> Path:
@@ -288,6 +293,14 @@ class MypyAnalyzer:
                 if tree is not None:
                     self._trees[module_name] = tree
 
+            self._project_modules = set()
+            for module_name, module_path in self._module_to_path.items():
+                try:
+                    Path(module_path).resolve().relative_to(self.source_root)
+                except ValueError:
+                    continue
+                self._project_modules.add(module_name)
+
         finally:
             sys.path = original_path
 
@@ -366,11 +379,15 @@ class MypyAnalyzer:
         # application directory itself is on Python's import path. Bridge that
         # representation mismatch, but only when the suffix identifies one
         # project module unambiguously.
-        suffix_matches = [
-            mod_name
-            for mod_name in self._module_to_path
-            if mod_name.endswith(f".{parts[0]}") or mod_name == parts[0]
-        ]
+        suffix_matches = []
+        for mod_name, module_path in self._module_to_path.items():
+            if not (mod_name.endswith(f".{parts[0]}") or mod_name == parts[0]):
+                continue
+            try:
+                Path(module_path).resolve().relative_to(self.source_root)
+            except ValueError:
+                continue
+            suffix_matches.append(mod_name)
         if len(suffix_matches) == 1:
             module_name = suffix_matches[0]
             return self._module_to_path[module_name], module_name
@@ -392,6 +409,61 @@ class MypyAnalyzer:
                                 return state.path, mod_name
 
         return None
+
+    def _add_global_value_reference(self, deps: EndpointDependencies, fullname: str) -> None:
+        """Record a project global at its definition rather than its use-site."""
+        first_component = fullname.split(".", maxsplit=1)[0]
+        if not any(
+            fullname.startswith(f"{module}.") or module.endswith(f".{first_component}")
+            for module in self._project_modules
+        ):
+            return
+        if fullname in self._global_value_cache:
+            reference = self._global_value_cache[fullname]
+            if reference is not None and reference not in deps.referenced_symbols:
+                deps.add_symbol_reference(
+                    reference.file_path,
+                    reference.symbol_name,
+                    reference.start_line,
+                    reference.end_line,
+                )
+            return
+        resolved = self._resolve_fullname_to_file(fullname)
+        if resolved is None:
+            self._global_value_cache[fullname] = None
+            return
+        target_path, target_module = resolved
+        tree = self._trees.get(target_module)
+        if tree is None:
+            self._global_value_cache[fullname] = None
+            return
+        symbol_name = fullname.rsplit(".", maxsplit=1)[-1]
+        symbol = getattr(tree, "names", {}).get(symbol_name)
+        node = getattr(symbol, "node", None)
+        if node is None or type(node).__name__ != "Var":
+            self._global_value_cache[fullname] = None
+            return
+        node_fullname = getattr(node, "fullname", None)
+        if node_fullname and node_fullname != fullname:
+            self._global_value_cache[fullname] = None
+            return
+        line = getattr(node, "line", 0)
+        if line <= 0:
+            self._global_value_cache[fullname] = None
+            return
+        reference = SymbolReference(
+            target_path,
+            fullname,
+            line,
+            getattr(node, "end_line", None) or line,
+        )
+        self._global_value_cache[fullname] = reference
+        deps.add_symbol_reference(
+            reference.file_path,
+            reference.symbol_name,
+            reference.start_line,
+            reference.end_line,
+        )
 
     def _get_type_from_node(self, node: Any) -> Any:
         """Get the type of an AST node from mypy's type map."""
@@ -417,6 +489,203 @@ class MypyAnalyzer:
                 for imported_module, alias in definition.ids:
                     import_map[alias or imported_module] = imported_module
         return import_map
+
+    def _python_dependency_fullnames(self, endpoint: Endpoint) -> set[str]:
+        """Resolve explicit FastAPI Depends/Security callables without execution."""
+        path = endpoint.handler.file_path
+        cache_key = (str(path.resolve()), endpoint.handler.line_number, endpoint.handler.name)
+        cached = self._python_dependency_cache.get(cache_key)
+        if cached is not None:
+            return set(cached)
+        path_key = str(path.resolve())
+        if path_key not in self._python_ast_cache:
+            try:
+                self._python_ast_cache[path_key] = ast.parse(
+                    path.read_text(encoding="utf-8"), filename=str(path)
+                )
+            except (OSError, SyntaxError, UnicodeError):
+                self._python_ast_cache[path_key] = None
+        tree = self._python_ast_cache[path_key]
+        if tree is None:
+            return set()
+        imports: dict[str, str] = {}
+        aliases: dict[str, ast.expr] = {}
+        package = endpoint.handler.module.rpartition(".")[0]
+        for statement in tree.body:
+            if isinstance(statement, ast.ImportFrom):
+                module = statement.module or ""
+                if statement.level and package:
+                    parts = package.split(".")
+                    parts = parts[: len(parts) - max(statement.level - 1, 0)]
+                    module = ".".join([*parts, module] if module else parts)
+                for name in statement.names:
+                    imports[name.asname or name.name] = f"{module}.{name.name}"
+            elif isinstance(statement, ast.Import):
+                for name in statement.names:
+                    imports[name.asname or name.name.split(".")[0]] = name.name
+            elif isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                assigned = (
+                    statement.target.id
+                    if isinstance(statement, ast.AnnAssign)
+                    and isinstance(statement.target, ast.Name)
+                    else statement.targets[0].id
+                    if isinstance(statement, ast.Assign)
+                    and len(statement.targets) == 1
+                    and isinstance(statement.targets[0], ast.Name)
+                    else None
+                )
+                if assigned is not None and statement.value is not None:
+                    aliases[assigned] = statement.value
+
+        functions = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == endpoint.handler.name
+            and (
+                node.lineno <= endpoint.handler.line_number <= (node.end_lineno or node.lineno)
+                or endpoint.handler.line_number
+                <= node.lineno
+                <= (endpoint.handler.end_line_number or endpoint.handler.line_number)
+            )
+        ]
+        if len(functions) != 1:
+            return set()
+        function = functions[0]
+        expressions: list[ast.expr] = [*function.decorator_list]
+        expressions.extend(
+            expression
+            for argument in [
+                *function.args.posonlyargs,
+                *function.args.args,
+                *function.args.kwonlyargs,
+            ]
+            if (expression := argument.annotation) is not None
+        )
+        expressions.extend(expression for expression in function.args.defaults if expression)
+        expressions.extend(
+            expression for expression in function.args.kw_defaults if expression is not None
+        )
+
+        def callable_fullname(expression: ast.expr) -> str | None:
+            if isinstance(expression, ast.Name):
+                return imports.get(expression.id, f"{endpoint.handler.module}.{expression.id}")
+            if isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name):
+                owner = imports.get(expression.value.id)
+                if owner:
+                    return f"{owner}.{expression.attr}"
+            return None
+
+        found: set[str] = set()
+        visited_aliases: set[str] = set()
+
+        def inspect(expression: ast.expr) -> None:
+            if isinstance(expression, ast.Name) and expression.id in aliases:
+                if expression.id not in visited_aliases:
+                    visited_aliases.add(expression.id)
+                    inspect(aliases[expression.id])
+                return
+            for node in ast.walk(expression):
+                if not isinstance(node, ast.Call):
+                    continue
+                name = (
+                    node.func.id
+                    if isinstance(node.func, ast.Name)
+                    else node.func.attr
+                    if isinstance(node.func, ast.Attribute)
+                    else ""
+                )
+                if name not in {"Depends", "Security"} or not node.args:
+                    continue
+                fullname = callable_fullname(node.args[0])
+                if fullname is not None:
+                    found.add(fullname)
+
+        for expression in expressions:
+            inspect(expression)
+
+        def injected_type(expression: ast.expr | None, seen: set[str]) -> str | None:
+            if isinstance(expression, ast.Name):
+                if expression.id in aliases and expression.id not in seen:
+                    return injected_type(aliases[expression.id], seen | {expression.id})
+                return imports.get(expression.id, f"{endpoint.handler.module}.{expression.id}")
+            if isinstance(expression, ast.Subscript):
+                owner = (
+                    expression.value.id
+                    if isinstance(expression.value, ast.Name)
+                    else expression.value.attr
+                    if isinstance(expression.value, ast.Attribute)
+                    else ""
+                )
+                if owner == "Annotated":
+                    elements = (
+                        expression.slice.elts
+                        if isinstance(expression.slice, ast.Tuple)
+                        else [expression.slice]
+                    )
+                    return injected_type(elements[0], seen) if elements else None
+            return None
+
+        parameter_types: dict[str, str] = {}
+        for argument in [
+            *function.args.posonlyargs,
+            *function.args.args,
+            *function.args.kwonlyargs,
+        ]:
+            fullname = injected_type(argument.annotation, set())
+            if fullname is not None:
+                parameter_types[argument.arg] = fullname
+        for node in ast.walk(function):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in parameter_types
+            ):
+                found.add(f"{parameter_types[node.func.value.id]}.{node.func.attr}")
+        self._python_dependency_cache[cache_key] = set(found)
+        return found
+
+    def _python_dependency_closure(self, endpoint: Endpoint) -> dict[str, int]:
+        """Expand explicit FastAPI dependency annotations to the configured depth."""
+        depths: dict[str, int] = {}
+        queue = [(fullname, 1) for fullname in self._python_dependency_fullnames(endpoint)]
+        while queue:
+            fullname, depth = queue.pop(0)
+            previous = depths.get(fullname)
+            if depth > self.max_depth or (previous is not None and previous <= depth):
+                continue
+            depths[fullname] = depth
+            resolved = self._resolve_fullname_to_file(fullname)
+            if resolved is None or depth >= self.max_depth:
+                continue
+            dependency_path, dependency_module = resolved
+            dependency_tree = self._trees.get(dependency_module)
+            if dependency_tree is None:
+                continue
+            symbol_name = fullname.rsplit(".", maxsplit=1)[-1]
+            dependency_result = self._find_func_in_tree(dependency_tree, symbol_name)
+            if dependency_result is None:
+                continue
+            node, _qualified = dependency_result
+            start, end = self._get_func_lines(node)
+            nested_endpoint = endpoint.model_copy(
+                update={
+                    "handler": endpoint.handler.model_copy(
+                        update={
+                            "name": symbol_name,
+                            "module": dependency_module,
+                            "file_path": Path(dependency_path),
+                            "line_number": start,
+                            "end_line_number": end,
+                        }
+                    )
+                }
+            )
+            queue.extend(
+                (nested, depth + 1) for nested in self._python_dependency_fullnames(nested_endpoint)
+            )
+        return depths
 
     @staticmethod
     def _endpoint_key(endpoint: Endpoint) -> str:
@@ -495,9 +764,41 @@ class MypyAnalyzer:
 
         import_map = self._import_map_for_tree(tree, handler_module)
 
-        # Trace all references in the function body
+        # Trace all references in the function body.
         visited: dict[str, int] = {}
         call_stack = [CallFrame(handler_path, start, handler.name)]
+
+        for dependency_fullname, dependency_depth in sorted(
+            self._python_dependency_closure(endpoint).items()
+        ):
+            resolved = self._resolve_fullname_to_file(dependency_fullname)
+            if resolved is None:
+                continue
+            dependency_path, dependency_module = resolved
+            dependency_tree = self._trees.get(dependency_module)
+            if dependency_tree is None:
+                continue
+            symbol_name = (
+                dependency_fullname[len(dependency_module) + 1 :]
+                if dependency_fullname.startswith(f"{dependency_module}.")
+                else dependency_fullname.rsplit(".", maxsplit=1)[-1]
+            )
+            dependency_result = self._find_func_in_tree(
+                dependency_tree,
+                symbol_name.rsplit(".", maxsplit=1)[-1],
+                qualified_name=symbol_name,
+            )
+            if dependency_result is None:
+                continue
+            dependency_node, _qualified_name = dependency_result
+            dependency_start, dependency_end = self._get_func_lines(dependency_node)
+            deps.add_symbol_reference(
+                dependency_path,
+                dependency_fullname,
+                dependency_start,
+                dependency_end,
+            )
+            visited[dependency_fullname] = dependency_depth
 
         self._trace_references(
             func_node,
@@ -659,13 +960,33 @@ class MypyAnalyzer:
                 ]
                 if len(class_candidates) == 1:
                     class_node = class_candidates[0]
-                    start = class_node.line
-                    end = class_node.end_line or start
-                    deps.add_symbol_reference(target_path, fullname, start, end)
+                    class_line = class_node.line
+                    deps.add_symbol_reference(target_path, fullname, class_line, class_line)
                     current_stack = list(call_stack)
                     stacks = deps.call_stacks.setdefault(target_path, [])
                     if current_stack not in stacks:
                         stacks.append(current_stack)
+                    initializer = self._find_func_in_tree(
+                        target_tree,
+                        "__init__",
+                        qualified_name=f"{class_node.name}.__init__",
+                    )
+                    if initializer is not None:
+                        initializer_node, _initializer_name = initializer
+                        start, end = self._get_func_lines(initializer_node)
+                        initializer_fullname = f"{fullname}.__init__"
+                        deps.add_symbol_reference(target_path, initializer_fullname, start, end)
+                        if should_recurse and target_depth < self.max_depth:
+                            self._trace_references(
+                                initializer_node,
+                                deps,
+                                target_path,
+                                target_module,
+                                [*call_stack, CallFrame(target_path, start, initializer_fullname)],
+                                visited,
+                                self._import_map_for_tree(target_tree, target_module),
+                                depth=target_depth,
+                            )
                 # Ambiguous or unresolved symbols are not converted into
                 # fabricated module ranges; doing so creates unrelated impacts.
 
@@ -760,6 +1081,7 @@ class MypyAnalyzer:
             elif isinstance(n, MemberExpr):
                 if n.fullname:
                     deps.add_reference(current_file, n.line, n.fullname)
+                    self._add_global_value_reference(deps, n.fullname)
                 walk_node(n.expr)
 
             elif isinstance(n, NameExpr):
@@ -770,6 +1092,8 @@ class MypyAnalyzer:
                         actual_fullname = import_map[n.name]
 
                     deps.add_reference(current_file, n.line, actual_fullname)
+                    if n.name in import_map:
+                        self._add_global_value_reference(deps, actual_fullname)
                     # Note: We don't trace into every NameExpr to avoid over-tracing
                     # Decorators are handled specially by walking them explicitly
 

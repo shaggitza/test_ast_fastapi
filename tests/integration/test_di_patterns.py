@@ -6,12 +6,22 @@ dependency injection patterns to ensure it correctly identifies affected
 endpoints when dependencies are modified.
 """
 
+import json
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
 from fastapi_endpoint_detector.cli import cli
+
+
+def affected_ids(output: str) -> set[str]:
+    report = json.loads(output)
+    return {
+        f"{method} {item['endpoint']['path']}"
+        for item in report["affected_endpoints"]
+        for method in item["endpoint"]["methods"]
+    }
 
 
 @pytest.fixture
@@ -55,10 +65,7 @@ class TestClassBasedDependencies:
         # Should execute successfully
         assert result.exit_code == 0, f"CLI failed: {result.output}"
 
-        # Output should contain affected endpoints
-        output = result.output.lower()
-        # The change to DatabaseService.get_item should affect the GET /items/{item_id} endpoint
-        assert "items" in output or "endpoint" in output
+        assert affected_ids(result.output) == {"GET /items/{item_id}"}
 
 
 class TestFunctionBasedDependencies:
@@ -89,9 +96,11 @@ class TestFunctionBasedDependencies:
 
         assert result.exit_code == 0, f"CLI failed: {result.output}"
 
-        # The change to get_current_user should affect /users/me, /users, and /users/me/settings
-        output = result.output.lower()
-        assert "users" in output or "endpoint" in output
+        assert affected_ids(result.output) == {
+            "GET /users",
+            "GET /users/me",
+            "POST /users/me/settings",
+        }
 
 
 class TestNestedDependencies:
@@ -122,10 +131,11 @@ class TestNestedDependencies:
 
         assert result.exit_code == 0, f"CLI failed: {result.output}"
 
-        # Changes to base dependency (get_api_key) should affect all endpoints
-        # due to transitive dependencies
-        output = result.output.lower()
-        assert "users" in output or "endpoint" in output
+        assert affected_ids(result.output) == {
+            "GET /users",
+            "GET /users/{user_id}",
+            "POST /users",
+        }
 
 
 class TestSecurityDependencies:
@@ -156,9 +166,12 @@ class TestSecurityDependencies:
 
         assert result.exit_code == 0, f"CLI failed: {result.output}"
 
-        # Changes to decode_token should affect all endpoints using authentication
-        output = result.output.lower()
-        assert "users" in output or "items" in output or "endpoint" in output
+        assert affected_ids(result.output) == {
+            "DELETE /users/{user_id}",
+            "GET /protected",
+            "GET /users/me",
+            "GET /users/me/items",
+        }
 
 
 class TestDatabaseSessionDependencies:
@@ -189,9 +202,11 @@ class TestDatabaseSessionDependencies:
 
         assert result.exit_code == 0, f"CLI failed: {result.output}"
 
-        # Changes to Session class should affect all endpoints using database sessions
-        output = result.output.lower()
-        assert "users" in output or "endpoint" in output
+        # Only handlers that call the changed Session.query member are affected.
+        assert affected_ids(result.output) == {
+            "GET /users",
+            "GET /users/{user_id}",
+        }
 
 
 class TestRequestContextDependencies:
@@ -222,9 +237,12 @@ class TestRequestContextDependencies:
 
         assert result.exit_code == 0, f"CLI failed: {result.output}"
 
-        # Changes to get_client_ip should affect endpoints using request context
-        output = result.output.lower()
-        assert "info" in output or "tracked" in output or "endpoint" in output
+        assert affected_ids(result.output) == {
+            "GET /info",
+            "GET /profile",
+            "GET /tracked",
+            "POST /action",
+        }
 
 
 class TestAllDIPatterns:
