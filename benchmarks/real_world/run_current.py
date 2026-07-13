@@ -376,7 +376,12 @@ def invoke_analyzer(
         raise RunnerError(f"analyzer timed out after {timeout:g} seconds") from error
     elapsed = time.monotonic() - started
     if result.returncode:
-        detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic output"
+        streams = []
+        if result.stdout.strip():
+            streams.append(f"stdout:\n{result.stdout.strip()}")
+        if result.stderr.strip():
+            streams.append(f"stderr:\n{result.stderr.strip()}")
+        detail = "\n".join(streams) or "no diagnostic output"
         raise RunnerError(f"analyzer failed ({result.returncode}): {detail}")
     try:
         decoded = json.loads(result.stdout)
