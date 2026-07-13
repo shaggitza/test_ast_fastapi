@@ -89,11 +89,9 @@ def parse_claims(item: dict[str, Any]) -> list[AtomicClaim]:
     return [AtomicClaim(identifier, kind, "opaque", "", identifier, "", opaque=True)]
 
 
-def claims(record: dict[str, Any]) -> list[AtomicClaim]:
-    """Parse and collapse semantically identical claims in one record."""
-    parsed = [
-        claim for item in record.get("affected_entrypoints", []) for claim in parse_claims(item)
-    ]
+def claims(record: dict[str, Any], field: str = "affected_entrypoints") -> list[AtomicClaim]:
+    """Parse and collapse semantically identical claims in one record field."""
+    parsed = [claim for item in record.get(field, []) for claim in parse_claims(item)]
     unique: dict[tuple[str, str, str, str, str, bool], AtomicClaim] = {}
     for claim in parsed:
         key = (
@@ -125,6 +123,35 @@ def _collapse_aliases(repository: str, items: list[AtomicClaim]) -> list[AtomicC
         )
         unique.setdefault(key, claim)
     return list(unique.values())
+
+
+def split_ranked_claims(
+    repository: str, record: dict[str, Any]
+) -> tuple[list[AtomicClaim], list[AtomicClaim]]:
+    """Collapse candidate atoms across tiers, retaining the strongest confidence."""
+    rank = {"low": 0, "medium": 1, "high": 2}
+    unique: dict[tuple[str, str, str, str, str, bool], tuple[int, AtomicClaim]] = {}
+    items = record.get("candidate_entrypoints")
+    if not items:
+        items = record.get("affected_entrypoints", [])
+    for item in items:
+        confidence = str(item.get("confidence", "medium")).lower()
+        item_rank = rank.get(confidence, 1)
+        for claim in parse_claims(item):
+            key = (
+                claim.kind,
+                claim.family,
+                claim.operation,
+                _alias_path(repository, claim),
+                claim.qualifier,
+                claim.opaque,
+            )
+            existing = unique.get(key)
+            if existing is None or item_rank > existing[0]:
+                unique[key] = (item_rank, claim)
+    selected = [claim for item_rank, claim in unique.values() if item_rank >= 1]
+    low = [claim for item_rank, claim in unique.values() if item_rank == 0]
+    return selected, low
 
 
 def _edge_rule(  # noqa: PLR0911 - ordered conservative matching rules
@@ -160,14 +187,14 @@ def _edge_rule(  # noqa: PLR0911 - ordered conservative matching rules
     return None
 
 
-def match_records(
+def match_claims(
     repository: str,
-    expected_record: dict[str, Any],
-    predicted_record: dict[str, Any],
+    expected_claims: list[AtomicClaim],
+    predicted_claims: list[AtomicClaim],
 ) -> dict[str, Any]:
-    """Return deterministic one-to-one semantic matches and diagnostics."""
-    expected = _collapse_aliases(repository, claims(expected_record))
-    predicted = _collapse_aliases(repository, claims(predicted_record))
+    """Return deterministic one-to-one matches for explicit atomic claim lists."""
+    expected = _collapse_aliases(repository, expected_claims)
+    predicted = _collapse_aliases(repository, predicted_claims)
     expected_counts = Counter(claim.route_key for claim in expected if not claim.opaque)
     predicted_counts = Counter(claim.route_key for claim in predicted if not claim.opaque)
     edges: dict[int, list[tuple[int, int, str]]] = defaultdict(list)
@@ -238,3 +265,12 @@ def match_records(
         "_matched_expected": matched_expected,
         "_matched_predicted": set(predicted_match),
     }
+
+
+def match_records(
+    repository: str,
+    expected_record: dict[str, Any],
+    predicted_record: dict[str, Any],
+) -> dict[str, Any]:
+    """Return deterministic one-to-one semantic matches and diagnostics."""
+    return match_claims(repository, claims(expected_record), claims(predicted_record))

@@ -50,6 +50,53 @@ class NormalizeEndpointsTests(unittest.TestCase):
         )
         self.assertEqual(unresolved, [])
 
+    def test_candidates_preserve_confidence_evidence_and_strongest_duplicate(self) -> None:
+        evidence = {"effect": "argument_mutation_isolated", "schema_version": 1}
+        report = {
+            "affected_endpoints": [],
+            "candidate_endpoints": [
+                {
+                    "endpoint": {"path": "/items", "methods": ["GET", "POST"]},
+                    "confidence": "low",
+                    "effect_evidence": [evidence],
+                },
+                {
+                    "endpoint": {"path": "/items", "methods": ["GET"]},
+                    "confidence": "high",
+                    "effect_evidence": [evidence],
+                },
+            ],
+        }
+
+        candidates, unresolved = run_current.normalize_candidate_endpoints(report)
+
+        self.assertEqual(unresolved, [])
+        self.assertEqual(
+            candidates,
+            [
+                {
+                    "id": "HTTP GET /items",
+                    "kind": "http",
+                    "confidence": "high",
+                    "effect_evidence": [evidence],
+                },
+                {
+                    "id": "HTTP POST /items",
+                    "kind": "http",
+                    "confidence": "low",
+                    "effect_evidence": [evidence],
+                },
+            ],
+        )
+
+    def test_candidates_fall_back_to_legacy_affected_as_medium(self) -> None:
+        candidates, unresolved = run_current.normalize_candidate_endpoints(
+            {"affected_endpoints": [{"endpoint": {"path": "/x", "methods": ["GET"]}}]}
+        )
+
+        self.assertEqual(unresolved, [])
+        self.assertEqual(candidates[0]["confidence"], "medium")
+
 
 class ResolutionAndSkipTests(unittest.TestCase):
     def config(self, temporary: Path, **overrides: object) -> run_current.RunConfig:
@@ -100,7 +147,7 @@ class ResolutionAndSkipTests(unittest.TestCase):
                 mock.patch.object(run_current, "write_local_diff"),
                 mock.patch.object(run_current, "remove_worktree"),
                 mock.patch.object(
-                    run_current, "invoke_analyzer", return_value=([], [], 0.25)
+                    run_current, "invoke_analyzer", return_value=([], [], [], 0.25)
                 ) as invoke,
             ):
                 prediction, manifest = run_current.process_entry(
@@ -129,7 +176,7 @@ class ResolutionAndSkipTests(unittest.TestCase):
                 mock.patch.object(run_current, "write_local_diff"),
                 mock.patch.object(run_current, "remove_worktree") as remove_worktree,
                 mock.patch.object(
-                    run_current, "invoke_analyzer", return_value=([], [], 0.1)
+                    run_current, "invoke_analyzer", return_value=([], [], [], 0.1)
                 ) as invoke,
             ):
                 prediction, _manifest = run_current.process_entry(
@@ -209,7 +256,7 @@ class ResolutionAndSkipTests(unittest.TestCase):
                 mock.patch.object(run_current, "write_local_diff"),
                 mock.patch.object(run_current, "remove_worktree"),
                 mock.patch.object(
-                    run_current, "invoke_analyzer", return_value=([], [], 0.25)
+                    run_current, "invoke_analyzer", return_value=([], [], [], 0.25)
                 ) as invoke,
             ):
                 prediction, manifest = run_current.process_entry(
@@ -319,7 +366,7 @@ class AnalyzerFailureTests(unittest.TestCase):
             args=["uv"], returncode=0, stdout=json.dumps(report), stderr=""
         )
         with mock.patch.object(run_current, "command", return_value=completed):
-            _endpoints, unresolved, _elapsed = run_current.invoke_analyzer(
+            _endpoints, _candidates, unresolved, _elapsed = run_current.invoke_analyzer(
                 Path("candidate"),
                 Path("app"),
                 Path("p.diff"),

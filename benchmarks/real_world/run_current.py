@@ -332,6 +332,86 @@ def normalize_endpoints(report: object) -> tuple[list[dict[str, Any]], list[str]
     )
 
 
+def normalize_candidate_endpoints(  # noqa: PLR0912, PLR0915
+    report: object,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Preserve every ranked candidate, choosing the strongest duplicate tier."""
+    if not isinstance(report, dict):
+        raise RunnerError("analyzer JSON must be an object")
+    raw_candidates = report.get("candidate_endpoints")
+    if not isinstance(raw_candidates, list) or not raw_candidates:
+        raw_candidates = report.get("affected_endpoints")
+    if not isinstance(raw_candidates, list):
+        raise RunnerError("analyzer JSON has no candidate_endpoints list")
+
+    rank = {"low": 0, "medium": 1, "high": 2}
+    candidates: dict[str, dict[str, Any]] = {}
+    unresolved: list[str] = []
+    for index, raw in enumerate(raw_candidates):
+        endpoint = raw.get("endpoint") if isinstance(raw, dict) else None
+        if not isinstance(endpoint, dict):
+            unresolved.append(f"invalid_candidate[{index}]: missing endpoint object")
+            continue
+        path = endpoint.get("path")
+        methods = endpoint.get("methods")
+        if not isinstance(path, str) or not path.strip():
+            unresolved.append(f"invalid_candidate[{index}]: missing path")
+            continue
+        if isinstance(methods, str):
+            methods = [methods]
+        if not isinstance(methods, list) or not methods:
+            unresolved.append(f"invalid_candidate[{index}]: missing methods")
+            continue
+        confidence = raw.get("confidence", "medium")
+        if confidence not in rank:
+            unresolved.append(f"invalid_candidate[{index}]: invalid confidence {confidence!r}")
+            continue
+        raw_evidence = raw.get("effect_evidence", [])
+        if not isinstance(raw_evidence, list):
+            unresolved.append(f"invalid_candidate[{index}]: effect_evidence must be a list")
+            raw_evidence = []
+        evidence: list[dict[str, Any]] = []
+        evidence_keys: set[str] = set()
+        for evidence_index, item in enumerate(raw_evidence):
+            if not isinstance(item, dict):
+                unresolved.append(
+                    f"invalid_candidate[{index}].effect_evidence[{evidence_index}]: expected object"
+                )
+                continue
+            evidence_key = json.dumps(item, sort_keys=True)
+            if evidence_key not in evidence_keys:
+                evidence.append(item)
+                evidence_keys.add(evidence_key)
+        normalized_path = re.sub(r"/{2,}", "/", f"/{path.strip().lstrip('/')}")
+        for method in methods:
+            if not isinstance(method, str) or not method.strip():
+                unresolved.append(f"invalid_candidate[{index}]: invalid method {method!r}")
+                continue
+            normalized_method = method.strip().upper()
+            identifier = (
+                f"WEBSOCKET {normalized_path}"
+                if normalized_method == "WEBSOCKET"
+                else f"HTTP {normalized_method} {normalized_path}"
+            )
+            kind = "event" if normalized_method == "WEBSOCKET" else "http"
+            existing = candidates.get(identifier)
+            if existing is None:
+                candidates[identifier] = {
+                    "id": identifier,
+                    "kind": kind,
+                    "confidence": confidence,
+                    "effect_evidence": evidence,
+                }
+                continue
+            if rank[confidence] > rank[existing["confidence"]]:
+                existing["confidence"] = confidence
+            known = {json.dumps(item, sort_keys=True) for item in existing["effect_evidence"]}
+            existing["effect_evidence"].extend(
+                item for item in evidence if json.dumps(item, sort_keys=True) not in known
+            )
+    return [candidates[key] for key in sorted(candidates)], unresolved
+
+
 def report_unresolved(report: dict[str, Any]) -> list[str]:
     """Preserve analyzer-reported errors and warnings in prediction coverage."""
     unresolved: list[str] = []
@@ -356,7 +436,7 @@ def invoke_analyzer(
     secure_ast: bool,
     use_scip: bool,
     baseline_app_root: Path | None = None,
-) -> tuple[list[dict[str, Any]], list[str], float]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], float]:
     """Invoke the frozen candidate in secure or explicitly unsafe mode."""
     args = [
         "uv",
@@ -398,8 +478,10 @@ def invoke_analyzer(
     except json.JSONDecodeError as error:
         raise RunnerError(f"analyzer returned invalid JSON: {error}") from error
     endpoints, unresolved = normalize_endpoints(decoded)
+    candidates, candidate_unresolved = normalize_candidate_endpoints(decoded)
+    unresolved.extend(candidate_unresolved)
     unresolved.extend(report_unresolved(decoded))
-    return endpoints, unresolved, elapsed
+    return endpoints, candidates, unresolved, elapsed
 
 
 def is_python_change(entry: dict[str, Any]) -> bool:
@@ -428,10 +510,12 @@ def unresolved_prediction(
     repository: str, pr: int, candidate_id: str, reason: str
 ) -> dict[str, Any]:
     return {
+        "schema_version": 2,
         "repository": repository,
         "pr": pr,
         "candidate": candidate_id,
         "affected_entrypoints": [],
+        "candidate_entrypoints": [],
         "unresolved": [reason],
         "index_seconds": 0.0,
     }
@@ -519,7 +603,7 @@ def process_entry(  # noqa: PLR0915
                 timings["diff"] = time.monotonic() - phase_started
                 phase_started = time.monotonic()
 
-                endpoints, unresolved, analyzer_seconds = invoke_analyzer(
+                endpoints, candidates, unresolved, analyzer_seconds = invoke_analyzer(
                     config.candidate_root,
                     app_root,
                     patch_path,
@@ -538,11 +622,21 @@ def process_entry(  # noqa: PLR0915
         elapsed = time.monotonic() - started
         timings["total"] = elapsed
         manifest_record["status"] = "completed" if not unresolved else "completed_with_unresolved"
+        manifest_record["candidate_endpoint_count"] = len(candidates)
+        manifest_record["candidate_confidence_counts"] = {
+            confidence: sum(1 for candidate in candidates if candidate["confidence"] == confidence)
+            for confidence in ("high", "medium", "low")
+        }
+        manifest_record["effect_evidence_count"] = sum(
+            len(candidate["effect_evidence"]) for candidate in candidates
+        )
         prediction = {
             "repository": repository,
             "pr": pr,
             "candidate": candidate_id,
+            "schema_version": 2,
             "affected_entrypoints": endpoints,
+            "candidate_entrypoints": candidates,
             "unresolved": unresolved,
             "index_seconds": 0.0,
             "incremental_seconds": timings["analyzer"],
