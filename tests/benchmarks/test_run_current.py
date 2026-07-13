@@ -273,7 +273,8 @@ class AnalyzerFailureTests(unittest.TestCase):
         with (
             mock.patch.object(run_current, "command", return_value=failed),
             self.assertRaisesRegex(
-                run_current.RunnerError, r"analyzer failed \(9\): mypy exploded"
+                run_current.RunnerError,
+                r"analyzer failed \(9\): stderr:\nmypy exploded",
             ),
         ):
             run_current.invoke_analyzer(
