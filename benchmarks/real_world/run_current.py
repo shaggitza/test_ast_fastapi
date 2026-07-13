@@ -567,7 +567,16 @@ def candidate_metadata(
     try:
         version = importlib.metadata.version("fastapi-endpoint-detector")
     except importlib.metadata.PackageNotFoundError:
-        version = "unknown"
+        pyproject = candidate_root / "pyproject.toml"
+        try:
+            match = re.search(
+                r'^version\s*=\s*["\']([^"\']+)["\']',
+                pyproject.read_text(encoding="utf-8"),
+                flags=re.MULTILINE,
+            )
+            version = match.group(1) if match else "unknown"
+        except OSError:
+            version = "unknown"
     git_result = command(["git", "rev-parse", "HEAD"], cwd=candidate_root)
     git_sha = git_result.stdout.strip() if git_result.returncode == 0 else "unknown"
     status_result = command(["git", "status", "--porcelain"], cwd=candidate_root)
