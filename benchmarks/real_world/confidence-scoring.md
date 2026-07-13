@@ -18,7 +18,11 @@ After primary one-to-one matching is frozen, LOW candidates are matched only
 against truth atoms still counted as primary FN:
 
 - `low_tp`: primary FN atoms covered by a LOW candidate;
-- `low_fp`: LOW candidate atoms not supported by remaining truth;
+- `low_fp`: LOW candidate atoms not in behavioral ground truth;
+- `low_supported_reachability`: LOW atoms independently confirmed to execute the
+  changed path without an established public/behavioral observation;
+- `low_unmatched`: LOW atoms supported by neither behavioral nor supplemental
+  reachability truth;
 - `fn_with_low_candidate`: equal to `low_tp`;
 - `fn_with_no_candidate`: primary FN atoms with no matching LOW candidate;
 - `diagnostic_precision`: `low_tp / (low_tp + low_fp)`.
@@ -70,7 +74,8 @@ to affected endpoints at MEDIUM confidence.
 ## Interpretation
 
 - LOW TP is a promotion opportunity, not primary credit.
-- LOW FP is diagnostic noise, not a primary penalty.
+- LOW FP is outside behavioral truth and is not a primary penalty; consult
+  `low_supported_reachability` before calling it unrelated noise.
 - Unresolved analysis is not LOW; it remains an abstention/failure.
 - Raw exact and conservative normalized results remain co-reported.
 - Per-repository results remain mandatory because aggregate micro scores can

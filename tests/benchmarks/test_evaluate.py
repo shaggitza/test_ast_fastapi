@@ -150,6 +150,7 @@ def test_low_confidence_is_diagnostic_and_splits_primary_false_negatives(
                     {"id": "HTTP GET /b", "kind": "http"},
                     {"id": "HTTP GET /c", "kind": "http"},
                 ],
+                "reachability_only_entrypoints": [{"id": "HTTP GET /low-fp", "kind": "http"}],
             }
         )
         + "\n"
@@ -198,10 +199,14 @@ def test_low_confidence_is_diagnostic_and_splits_primary_false_negatives(
         "low_tp": 1,
         "low_fp": 1,
         "low_candidates": 2,
+        "low_supported_reachability": 1,
+        "low_unmatched": 0,
         "fn_with_low_candidate": 1,
         "fn_with_no_candidate": 1,
         "diagnostic_precision": 0.5,
+        "supported_precision": 1.0,
     }
+    assert result["by_kind"]["http"] == result["micro"]
     assert result["confidence"]["candidate_ceiling"]["tp"] == 2
     assert result["confidence"]["candidate_ceiling"]["fn"] == 1
 

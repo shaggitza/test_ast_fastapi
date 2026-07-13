@@ -62,17 +62,33 @@ def ranked_entrypoints(record: dict[str, Any]) -> tuple[set[str], set[str]]:
     )
 
 
-def low_diagnostics(expected: set[str], selected: set[str], low: set[str]) -> dict[str, int]:
+def low_diagnostics(
+    expected: set[str],
+    selected: set[str],
+    low: set[str],
+    reachability_only: set[str] | None = None,
+) -> dict[str, int]:
     unmatched_expected = expected - selected
     low_matches = unmatched_expected & low
     low_fp = low - expected
+    reachability_matches = low_fp & (reachability_only or set())
     return {
         "low_tp": len(low_matches),
         "low_fp": len(low_fp),
         "low_candidates": len(low),
+        "low_supported_reachability": len(reachability_matches),
+        "low_unmatched": len(low_fp - reachability_matches),
         "fn_with_low_candidate": len(low_matches),
         "fn_with_no_candidate": len(unmatched_expected - low_matches),
     }
+
+
+def predicted_ids_by_kind(identifiers: set[str]) -> dict[str, set[str]]:
+    grouped: dict[str, set[str]] = defaultdict(set)
+    for identifier in identifiers:
+        kind = "http" if identifier.startswith("HTTP ") else "event"
+        grouped[kind].add(identifier)
+    return grouped
 
 
 def ratio(numerator: int | float, denominator: int | float) -> float:
@@ -117,6 +133,9 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
             continue
         evaluated += 1
         expected = entrypoints(expected_record)
+        reachability_only = {
+            item["id"] for item in expected_record.get("reachability_only_entrypoints", [])
+        }
         predicted_record = predictions.get(record_key, {})
         predicted, low_predicted = ranked_entrypoints(predicted_record)
         tp = len(expected & predicted)
@@ -128,7 +147,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
         repository_totals[record_key[0]]["tp"] += tp
         repository_totals[record_key[0]]["fp"] += fp
         repository_totals[record_key[0]]["fn"] += fn
-        exact_low = low_diagnostics(expected, predicted, low_predicted)
+        exact_low = low_diagnostics(expected, predicted, low_predicted, reachability_only)
         for metric, count in exact_low.items():
             ranked_totals[metric] += count
             ranked_repositories[record_key[0]][metric] += count
@@ -140,7 +159,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
             negative_controls_with_low_fp += 1
         totals["unresolved"] += len(predicted_record.get("unresolved", []))
         expected_kinds = entrypoints_by_kind(expected_record)
-        predicted_kinds = entrypoints_by_kind(predicted_record)
+        predicted_kinds = predicted_ids_by_kind(predicted)
         for kind in expected_kinds.keys() | predicted_kinds.keys():
             expected_kind = expected_kinds.get(kind, set())
             predicted_kind = predicted_kinds.get(kind, set())
@@ -156,12 +175,25 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
             if index not in normalized["_matched_expected"]
         ]
         normalized_low = match_claims(record_key[0], residual_expected, low_claims)
+        unmatched_low_claims = [
+            claim
+            for index, claim in enumerate(normalized_low["predicted_claims"])
+            if index not in normalized_low["_matched_predicted"]
+        ]
+        reachability_record = {
+            "affected_entrypoints": expected_record.get("reachability_only_entrypoints", [])
+        }
+        normalized_reachability = match_claims(
+            record_key[0], claims(reachability_record), unmatched_low_claims
+        )
         for metric in ("tp", "fp", "fn", "expected_atoms", "predicted_atoms"):
             normalized_totals[metric] += normalized[metric]
         normalized_low_counts = {
             "low_tp": normalized_low["tp"],
             "low_fp": normalized_low["fp"],
             "low_candidates": normalized_low["predicted_atoms"],
+            "low_supported_reachability": normalized_reachability["tp"],
+            "low_unmatched": normalized_reachability["fp"],
             "fn_with_low_candidate": normalized_low["tp"],
             "fn_with_no_candidate": normalized_low["fn"],
         }
@@ -235,6 +267,10 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
             "low": {
                 **dict(low_counts),
                 "diagnostic_precision": ratio(low_tp, low_tp + low_fp),
+                "supported_precision": ratio(
+                    low_tp + low_counts["low_supported_reachability"],
+                    low_counts["low_candidates"],
+                ),
             },
             "candidate_ceiling": metrics(ceiling),
         }

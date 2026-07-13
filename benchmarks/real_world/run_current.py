@@ -864,7 +864,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     jsonl = "".join(json.dumps(item, sort_keys=True) + "\n" for item in predictions)
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "prediction_schema_version": 2,
         "created_at": utc_now(),
         "candidate": candidate,
         "git": {"candidate_sha": candidate["git_sha"]},

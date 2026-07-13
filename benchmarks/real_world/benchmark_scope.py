@@ -29,7 +29,11 @@ def entrypoint_in_scope(item: dict[str, Any], scope: str) -> bool:
 def filter_record(record: dict[str, Any], scope: str) -> dict[str, Any]:
     """Copy a record with only entrypoints belonging to ``scope``."""
     filtered = dict(record)
-    for field in ("affected_entrypoints", "candidate_entrypoints"):
+    for field in (
+        "affected_entrypoints",
+        "candidate_entrypoints",
+        "reachability_only_entrypoints",
+    ):
         if field in record:
             filtered[field] = [
                 item for item in record.get(field, []) if entrypoint_in_scope(item, scope)
