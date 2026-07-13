@@ -531,6 +531,12 @@ class HtmlFormatter(BaseFormatter):
         )
         content_lines.append(
             f'<div class="summary-item">'
+            f'<span class="summary-label">Reachable Candidates:</span> '
+            f'{report.candidate_count}'
+            f"</div>"
+        )
+        content_lines.append(
+            f'<div class="summary-item">'
             f'<span class="summary-label">Orphan Changes:</span> '
             f'{report.total_orphan_lines} lines in {report.orphan_count} files'
             f"</div>"
@@ -598,6 +604,16 @@ class HtmlFormatter(BaseFormatter):
                         f"</div>"
                     )
 
+                    for evidence in ae.effect_evidence:
+                        content_lines.append(
+                            '<div class="info-item">'
+                            '<span class="label">Effect:</span> '
+                            f'[{html.escape(evidence.status.value)} / '
+                            f'{html.escape(evidence.disposition.value)}] '
+                            f'{html.escape(evidence.summary)}'
+                            '</div>'
+                        )
+
                     # Dependency chain
                     if ae.dependency_chain and len(ae.dependency_chain) > 1:
                         chain_html = " → ".join(
@@ -654,8 +670,39 @@ class HtmlFormatter(BaseFormatter):
                     content_lines.append("</div>")  # end endpoint-card
         else:
             content_lines.append('<div class="no-endpoints">')
-            content_lines.append("✅ No endpoints were affected by the changes.")
+            content_lines.append("No endpoints selected by the confidence threshold.")
             content_lines.append("</div>")
+
+        additional = [
+            candidate
+            for candidate in report.candidate_endpoints
+            if candidate not in report.affected_endpoints
+        ]
+        if additional:
+            content_lines.append("<h2>Additional Reachable Candidates</h2>")
+            content_lines.append(
+                "<p><em>Retained for inspection; not selected by the legacy threshold.</em></p>"
+            )
+            for candidate in additional:
+                endpoint = candidate.endpoint
+                methods = ", ".join(method.value for method in endpoint.methods)
+                content_lines.append('<div class="endpoint-card confidence-low">')
+                content_lines.append(
+                    f'<div class="endpoint-header"><strong>{html.escape(methods)}</strong> '
+                    f'<span class="endpoint-path">{html.escape(endpoint.path)}</span></div>'
+                )
+                content_lines.append(
+                    f'<div class="info-item"><span class="label">Confidence:</span> '
+                    f'{html.escape(candidate.confidence.value)}</div>'
+                )
+                for evidence in candidate.effect_evidence:
+                    content_lines.append(
+                        '<div class="info-item"><span class="label">Effect:</span> '
+                        f'[{html.escape(evidence.status.value)} / '
+                        f'{html.escape(evidence.disposition.value)}] '
+                        f'{html.escape(evidence.summary)}</div>'
+                    )
+                content_lines.append("</div>")
 
         # Orphan changes
         if report.orphan_changes:

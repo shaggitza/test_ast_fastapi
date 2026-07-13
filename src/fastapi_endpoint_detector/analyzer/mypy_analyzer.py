@@ -43,6 +43,8 @@ class CallFrame:
     line_number: int
     function_name: str
     code_context: str = ""
+    caller_file_path: str | None = None
+    caller_line_number: int | None = None
 
 
 @dataclass
@@ -174,7 +176,7 @@ class MypyAnalyzer:
     and extract precise file/line information for all references.
     """
 
-    CACHE_SCHEMA_VERSION = 4
+    CACHE_SCHEMA_VERSION = 6
 
     def __init__(self, app_path: Path, *, max_depth: int = 10) -> None:
         """Initialize the mypy analyzer."""
@@ -799,6 +801,24 @@ class MypyAnalyzer:
                 dependency_end,
             )
             visited[dependency_fullname] = dependency_depth
+            if dependency_depth < self.max_depth:
+                self._trace_references(
+                    dependency_node,
+                    deps,
+                    dependency_path,
+                    dependency_module,
+                    [
+                        *call_stack,
+                        CallFrame(
+                            dependency_path,
+                            dependency_start,
+                            dependency_fullname,
+                        ),
+                    ],
+                    visited,
+                    self._import_map_for_tree(dependency_tree, dependency_module),
+                    depth=dependency_depth,
+                )
 
         self._trace_references(
             func_node,
@@ -929,17 +949,19 @@ class MypyAnalyzer:
                 start, end = self._get_func_lines(target_func)
                 deps.add_symbol_reference(target_path, fullname, start, end)
 
-                # Record call stack - store all unique paths
-                if target_path not in deps.call_stacks:
-                    deps.call_stacks[target_path] = []
-                # Add this call stack if it's unique (not already recorded)
-                current_stack = list(call_stack)
-                if current_stack not in deps.call_stacks[target_path]:
-                    deps.call_stacks[target_path].append(current_stack)
-
-                # Recursively trace into the target function
-                new_frame = CallFrame(target_path, start, fullname)
-                new_stack = call_stack + [new_frame]
+                # Record the edge as well as target definition provenance. The
+                # caller location is required for later effect/alias analysis.
+                new_frame = CallFrame(
+                    target_path,
+                    start,
+                    fullname,
+                    caller_file_path=current_file,
+                    caller_line_number=call_line,
+                )
+                new_stack = [*call_stack, new_frame]
+                stacks = deps.call_stacks.setdefault(target_path, [])
+                if new_stack not in stacks:
+                    stacks.append(new_stack)
 
                 if should_recurse and target_depth < self.max_depth:
                     self._trace_references(
@@ -962,10 +984,19 @@ class MypyAnalyzer:
                     class_node = class_candidates[0]
                     class_line = class_node.line
                     deps.add_symbol_reference(target_path, fullname, class_line, class_line)
-                    current_stack = list(call_stack)
+                    class_stack = [
+                        *call_stack,
+                        CallFrame(
+                            target_path,
+                            class_line,
+                            fullname,
+                            caller_file_path=current_file,
+                            caller_line_number=call_line,
+                        ),
+                    ]
                     stacks = deps.call_stacks.setdefault(target_path, [])
-                    if current_stack not in stacks:
-                        stacks.append(current_stack)
+                    if class_stack not in stacks:
+                        stacks.append(class_stack)
                     initializer = self._find_func_in_tree(
                         target_tree,
                         "__init__",
@@ -1372,6 +1403,8 @@ class MypyAnalyzer:
                                 "line_number": frame.line_number,
                                 "function_name": frame.function_name,
                                 "code_context": frame.code_context,
+                                "caller_file_path": frame.caller_file_path,
+                                "caller_line_number": frame.caller_line_number,
                             }
                             for frame in stack
                         ]
@@ -1439,6 +1472,8 @@ class MypyAnalyzer:
                                 line_number=frame["line_number"],
                                 function_name=frame["function_name"],
                                 code_context=frame.get("code_context", ""),
+                                caller_file_path=frame.get("caller_file_path"),
+                                caller_line_number=frame.get("caller_line_number"),
                             )
                             for frame in stack_data
                         ]

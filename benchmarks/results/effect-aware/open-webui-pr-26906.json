@@ -1,0 +1,598 @@
+{
+  "schema_version": 1,
+  "analyzer_revision": "4188b66",
+  "generation_command": "uv run --frozen fastapi-endpoint-detector analyze --app <open-webui-merge>/backend/open_webui --diff <pr-26906.diff> --secure-ast --no-cache --format json",
+  "repository": "open-webui/open-webui",
+  "pr": 26906,
+  "merge_commit": "f8c0d2fdd690ecbe0444617c91dba3be45d5681e",
+  "source": "https://github.com/open-webui/open-webui/pull/26906",
+  "changed_effect": "defensive_copy_added",
+  "selected_count": 4,
+  "candidate_count": 13,
+  "candidates": [
+    {
+      "id": "POST /api/chat/completions",
+      "confidence": "medium",
+      "effect_evidence": [
+        {
+          "schema_version": 1,
+          "producer": "data_flow",
+          "status": "conditional",
+          "effect": "argument_mutation_isolated",
+          "observations": [
+            "not_observed_after_call"
+          ],
+          "channel": "in_memory_aliasing",
+          "disposition": "not_observed_by_caller",
+          "summary": "The local argument 'payload' is not observed by this caller after the call.",
+          "subject": "form_data",
+          "changed_location": {
+            "file_path": "functions.py",
+            "line_number": 211,
+            "symbol": "generate_function_chat_completion"
+          },
+          "observation_location": {
+            "file_path": "routers/tasks.py",
+            "line_number": 268,
+            "symbol": "generate_follow_ups"
+          },
+          "conditions": [
+            "The path must select the changed callable at runtime."
+          ],
+          "limitations": [
+            "The copy is shallow; nested mutable values remain aliased.",
+            "Dynamic callees may still observe object identity or retain the copied value."
+          ]
+        },
+        {
+          "schema_version": 1,
+          "producer": "data_flow",
+          "status": "conditional",
+          "effect": "argument_mutation_isolated",
+          "observations": [
+            "returned"
+          ],
+          "channel": "http_response",
+          "disposition": "observable_behavior",
+          "summary": "The caller argument 'form_data' is returned after the call.",
+          "subject": "form_data",
+          "changed_location": {
+            "file_path": "functions.py",
+            "line_number": 211,
+            "symbol": "generate_function_chat_completion"
+          },
+          "observation_location": {
+            "file_path": "main.py",
+            "line_number": 1497,
+            "symbol": "process_chat"
+          },
+          "conditions": [
+            "The path must select the changed callable at runtime."
+          ],
+          "limitations": [
+            "The copy is shallow; nested mutable values remain aliased."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "POST /api/message",
+      "confidence": "medium",
+      "effect_evidence": [
+        {
+          "schema_version": 1,
+          "producer": "data_flow",
+          "status": "conditional",
+          "effect": "argument_mutation_isolated",
+          "observations": [
+            "not_observed_after_call"
+          ],
+          "channel": "in_memory_aliasing",
+          "disposition": "not_observed_by_caller",
+          "summary": "The local argument 'payload' is not observed by this caller after the call.",
+          "subject": "form_data",
+          "changed_location": {
+            "file_path": "functions.py",
+            "line_number": 211,
+            "symbol": "generate_function_chat_completion"
+          },
+          "observation_location": {
+            "file_path": "routers/tasks.py",
+            "line_number": 268,
+            "symbol": "generate_follow_ups"
+          },
+          "conditions": [
+            "The path must select the changed callable at runtime."
+          ],
+          "limitations": [
+            "The copy is shallow; nested mutable values remain aliased.",
+            "Dynamic callees may still observe object identity or retain the copied value."
+          ]
+        },
+        {
+          "schema_version": 1,
+          "producer": "data_flow",
+          "status": "conditional",
+          "effect": "argument_mutation_isolated",
+          "observations": [
+            "returned"
+          ],
+          "channel": "http_response",
+          "disposition": "observable_behavior",
+          "summary": "The caller argument 'call result' is returned after the call.",
+          "subject": "form_data",
+          "changed_location": {
+            "file_path": "functions.py",
+            "line_number": 211,
+            "symbol": "generate_function_chat_completion"
+          },
+          "observation_location": {
+            "file_path": "main.py",
+            "line_number": 1719,
+            "symbol": "generate_messages"
+          },
+          "conditions": [
+            "The path must select the changed callable at runtime."
+          ],
+          "limitations": [
+            "The copy is shallow; nested mutable values remain aliased."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "POST /api/v1/chat/completions",
+      "confidence": "medium",
+      "effect_evidence": [
+        {
+          "schema_version": 1,
+          "producer": "data_flow",
+          "status": "conditional",
+          "effect": "argument_mutation_isolated",
+          "observations": [
+            "not_observed_after_call"
+          ],
+          "channel": "in_memory_aliasing",
+          "disposition": "not_observed_by_caller",
+          "summary": "The local argument 'payload' is not observed by this caller after the call.",
+          "subject": "form_data",
+          "changed_location": {
+            "file_path": "functions.py",
+            "line_number": 211,
+            "symbol": "generate_function_chat_completion"
+          },
+          "observation_location": {
+            "file_path": "routers/tasks.py",
+            "line_number": 268,
+            "symbol": "generate_follow_ups"
+          },
+          "conditions": [
+            "The path must select the changed callable at runtime."
+          ],
+          "limitations": [
+            "The copy is shallow; nested mutable values remain aliased.",
+            "Dynamic callees may still observe object identity or retain the copied value."
+          ]
+        },
+        {
+          "schema_version": 1,
+          "producer": "data_flow",
+          "status": "conditional",
+          "effect": "argument_mutation_isolated",
+          "observations": [
+            "returned"
+          ],
+          "channel": "http_response",
+          "disposition": "observable_behavior",
+          "summary": "The caller argument 'form_data' is returned after the call.",
+          "subject": "form_data",
+          "changed_location": {
+            "file_path": "functions.py",
+            "line_number": 211,
+            "symbol": "generate_function_chat_completion"
+          },
+          "observation_location": {
+            "file_path": "main.py",
+            "line_number": 1497,
+            "symbol": "process_chat"
+          },
+          "conditions": [
+            "The path must select the changed callable at runtime."
+          ],
+          "limitations": [
+            "The copy is shallow; nested mutable values remain aliased."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "POST /api/v1/chats/{id}/compact",
+      "confidence": "low",
+      "effect_evidence": [
+        {
+          "schema_version": 1,
+          "producer": "data_flow",
+          "status": "conditional",
+          "effect": "argument_mutation_isolated",
+          "observations": [
+            "not_observed_after_call"
+          ],
+          "channel": "in_memory_aliasing",
+          "disposition": "not_observed_by_caller",
+          "summary": "The local argument 'payload' is not observed by this caller after the call.",
+          "subject": "form_data",
+          "changed_location": {
+            "file_path": "functions.py",
+            "line_number": 211,
+            "symbol": "generate_function_chat_completion"
+          },
+          "observation_location": {
+            "file_path": "utils/context_compaction.py",
+            "line_number": 306,
+            "symbol": "_generate_summary"
+          },
+          "conditions": [
+            "The path must select the changed callable at runtime."
+          ],
+          "limitations": [
+            "The copy is shallow; nested mutable values remain aliased.",
+            "Dynamic callees may still observe object identity or retain the copied value."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "POST /api/v1/messages",
+      "confidence": "medium",
+      "effect_evidence": [
+        {
+          "schema_version": 1,
+          "producer": "data_flow",
+          "status": "conditional",
+          "effect": "argument_mutation_isolated",
+          "observations": [
+            "not_observed_after_call"
+          ],
+          "channel": "in_memory_aliasing",
+          "disposition": "not_observed_by_caller",
+          "summary": "The local argument 'payload' is not observed by this caller after the call.",
+          "subject": "form_data",
+          "changed_location": {
+            "file_path": "functions.py",
+            "line_number": 211,
+            "symbol": "generate_function_chat_completion"
+          },
+          "observation_location": {
+            "file_path": "routers/tasks.py",
+            "line_number": 268,
+            "symbol": "generate_follow_ups"
+          },
+          "conditions": [
+            "The path must select the changed callable at runtime."
+          ],
+          "limitations": [
+            "The copy is shallow; nested mutable values remain aliased.",
+            "Dynamic callees may still observe object identity or retain the copied value."
+          ]
+        },
+        {
+          "schema_version": 1,
+          "producer": "data_flow",
+          "status": "conditional",
+          "effect": "argument_mutation_isolated",
+          "observations": [
+            "returned"
+          ],
+          "channel": "http_response",
+          "disposition": "observable_behavior",
+          "summary": "The caller argument 'call result' is returned after the call.",
+          "subject": "form_data",
+          "changed_location": {
+            "file_path": "functions.py",
+            "line_number": 211,
+            "symbol": "generate_function_chat_completion"
+          },
+          "observation_location": {
+            "file_path": "main.py",
+            "line_number": 1719,
+            "symbol": "generate_messages"
+          },
+          "conditions": [
+            "The path must select the changed callable at runtime."
+          ],
+          "limitations": [
+            "The copy is shallow; nested mutable values remain aliased."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "POST /api/v1/tasks/auto/completions",
+      "confidence": "low",
+      "effect_evidence": [
+        {
+          "schema_version": 1,
+          "producer": "data_flow",
+          "status": "conditional",
+          "effect": "argument_mutation_isolated",
+          "observations": [
+            "not_observed_after_call"
+          ],
+          "channel": "in_memory_aliasing",
+          "disposition": "not_observed_by_caller",
+          "summary": "The local argument 'payload' is not observed by this caller after the call.",
+          "subject": "form_data",
+          "changed_location": {
+            "file_path": "functions.py",
+            "line_number": 211,
+            "symbol": "generate_function_chat_completion"
+          },
+          "observation_location": {
+            "file_path": "routers/tasks.py",
+            "line_number": 565,
+            "symbol": "generate_autocompletion"
+          },
+          "conditions": [
+            "The path must select the changed callable at runtime."
+          ],
+          "limitations": [
+            "The copy is shallow; nested mutable values remain aliased.",
+            "Dynamic callees may still observe object identity or retain the copied value."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "POST /api/v1/tasks/emoji/completions",
+      "confidence": "low",
+      "effect_evidence": [
+        {
+          "schema_version": 1,
+          "producer": "data_flow",
+          "status": "conditional",
+          "effect": "argument_mutation_isolated",
+          "observations": [
+            "not_observed_after_call"
+          ],
+          "channel": "in_memory_aliasing",
+          "disposition": "not_observed_by_caller",
+          "summary": "The local argument 'payload' is not observed by this caller after the call.",
+          "subject": "form_data",
+          "changed_location": {
+            "file_path": "functions.py",
+            "line_number": 211,
+            "symbol": "generate_function_chat_completion"
+          },
+          "observation_location": {
+            "file_path": "routers/tasks.py",
+            "line_number": 632,
+            "symbol": "generate_emoji"
+          },
+          "conditions": [
+            "The path must select the changed callable at runtime."
+          ],
+          "limitations": [
+            "The copy is shallow; nested mutable values remain aliased.",
+            "Dynamic callees may still observe object identity or retain the copied value."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "POST /api/v1/tasks/follow_up/completions",
+      "confidence": "low",
+      "effect_evidence": [
+        {
+          "schema_version": 1,
+          "producer": "data_flow",
+          "status": "conditional",
+          "effect": "argument_mutation_isolated",
+          "observations": [
+            "not_observed_after_call"
+          ],
+          "channel": "in_memory_aliasing",
+          "disposition": "not_observed_by_caller",
+          "summary": "The local argument 'payload' is not observed by this caller after the call.",
+          "subject": "form_data",
+          "changed_location": {
+            "file_path": "functions.py",
+            "line_number": 211,
+            "symbol": "generate_function_chat_completion"
+          },
+          "observation_location": {
+            "file_path": "routers/tasks.py",
+            "line_number": 268,
+            "symbol": "generate_follow_ups"
+          },
+          "conditions": [
+            "The path must select the changed callable at runtime."
+          ],
+          "limitations": [
+            "The copy is shallow; nested mutable values remain aliased.",
+            "Dynamic callees may still observe object identity or retain the copied value."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "POST /api/v1/tasks/image_prompt/completions",
+      "confidence": "low",
+      "effect_evidence": [
+        {
+          "schema_version": 1,
+          "producer": "data_flow",
+          "status": "conditional",
+          "effect": "argument_mutation_isolated",
+          "observations": [
+            "not_observed_after_call"
+          ],
+          "channel": "in_memory_aliasing",
+          "disposition": "not_observed_by_caller",
+          "summary": "The local argument 'payload' is not observed by this caller after the call.",
+          "subject": "form_data",
+          "changed_location": {
+            "file_path": "functions.py",
+            "line_number": 211,
+            "symbol": "generate_function_chat_completion"
+          },
+          "observation_location": {
+            "file_path": "routers/tasks.py",
+            "line_number": 402,
+            "symbol": "generate_image_prompt"
+          },
+          "conditions": [
+            "The path must select the changed callable at runtime."
+          ],
+          "limitations": [
+            "The copy is shallow; nested mutable values remain aliased.",
+            "Dynamic callees may still observe object identity or retain the copied value."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "POST /api/v1/tasks/moa/completions",
+      "confidence": "low",
+      "effect_evidence": [
+        {
+          "schema_version": 1,
+          "producer": "data_flow",
+          "status": "conditional",
+          "effect": "argument_mutation_isolated",
+          "observations": [
+            "not_observed_after_call"
+          ],
+          "channel": "in_memory_aliasing",
+          "disposition": "not_observed_by_caller",
+          "summary": "The local argument 'payload' is not observed by this caller after the call.",
+          "subject": "form_data",
+          "changed_location": {
+            "file_path": "functions.py",
+            "line_number": 211,
+            "symbol": "generate_function_chat_completion"
+          },
+          "observation_location": {
+            "file_path": "routers/tasks.py",
+            "line_number": 685,
+            "symbol": "generate_moa_response"
+          },
+          "conditions": [
+            "The path must select the changed callable at runtime."
+          ],
+          "limitations": [
+            "The copy is shallow; nested mutable values remain aliased.",
+            "Dynamic callees may still observe object identity or retain the copied value."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "POST /api/v1/tasks/queries/completions",
+      "confidence": "low",
+      "effect_evidence": [
+        {
+          "schema_version": 1,
+          "producer": "data_flow",
+          "status": "conditional",
+          "effect": "argument_mutation_isolated",
+          "observations": [
+            "not_observed_after_call"
+          ],
+          "channel": "in_memory_aliasing",
+          "disposition": "not_observed_by_caller",
+          "summary": "The local argument 'payload' is not observed by this caller after the call.",
+          "subject": "form_data",
+          "changed_location": {
+            "file_path": "functions.py",
+            "line_number": 211,
+            "symbol": "generate_function_chat_completion"
+          },
+          "observation_location": {
+            "file_path": "routers/tasks.py",
+            "line_number": 484,
+            "symbol": "generate_queries"
+          },
+          "conditions": [
+            "The path must select the changed callable at runtime."
+          ],
+          "limitations": [
+            "The copy is shallow; nested mutable values remain aliased.",
+            "Dynamic callees may still observe object identity or retain the copied value."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "POST /api/v1/tasks/tags/completions",
+      "confidence": "low",
+      "effect_evidence": [
+        {
+          "schema_version": 1,
+          "producer": "data_flow",
+          "status": "conditional",
+          "effect": "argument_mutation_isolated",
+          "observations": [
+            "not_observed_after_call"
+          ],
+          "channel": "in_memory_aliasing",
+          "disposition": "not_observed_by_caller",
+          "summary": "The local argument 'payload' is not observed by this caller after the call.",
+          "subject": "form_data",
+          "changed_location": {
+            "file_path": "functions.py",
+            "line_number": 211,
+            "symbol": "generate_function_chat_completion"
+          },
+          "observation_location": {
+            "file_path": "routers/tasks.py",
+            "line_number": 338,
+            "symbol": "generate_chat_tags"
+          },
+          "conditions": [
+            "The path must select the changed callable at runtime."
+          ],
+          "limitations": [
+            "The copy is shallow; nested mutable values remain aliased.",
+            "Dynamic callees may still observe object identity or retain the copied value."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "POST /api/v1/tasks/title/completions",
+      "confidence": "low",
+      "effect_evidence": [
+        {
+          "schema_version": 1,
+          "producer": "data_flow",
+          "status": "conditional",
+          "effect": "argument_mutation_isolated",
+          "observations": [
+            "not_observed_after_call"
+          ],
+          "channel": "in_memory_aliasing",
+          "disposition": "not_observed_by_caller",
+          "summary": "The local argument 'payload' is not observed by this caller after the call.",
+          "subject": "form_data",
+          "changed_location": {
+            "file_path": "functions.py",
+            "line_number": 211,
+            "symbol": "generate_function_chat_completion"
+          },
+          "observation_location": {
+            "file_path": "routers/tasks.py",
+            "line_number": 198,
+            "symbol": "generate_title"
+          },
+          "conditions": [
+            "The path must select the changed callable at runtime."
+          ],
+          "limitations": [
+            "The copy is shallow; nested mutable values remain aliased.",
+            "Dynamic callees may still observe object identity or retain the copied value."
+          ]
+        }
+      ]
+    }
+  ]
+}

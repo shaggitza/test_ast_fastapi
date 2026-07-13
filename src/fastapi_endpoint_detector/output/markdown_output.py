@@ -44,7 +44,11 @@ class MarkdownFormatter(BaseFormatter):
             f"- **Files Changed:** {report.total_files_changed} ({report.python_files_changed} Python)"
         )
         lines.append(f"- **Affected Endpoints:** {report.affected_count}")
-        lines.append(f"- **Orphan Changes:** {report.total_orphan_lines} lines in {report.orphan_count} files")
+        if report.candidate_endpoints:
+            lines.append(f"- **Reachable Candidates:** {len(report.candidate_endpoints)}")
+        lines.append(
+            f"- **Orphan Changes:** {report.total_orphan_lines} lines in {report.orphan_count} files"
+        )
         if report.analysis_duration_ms:
             lines.append(f"- **Analysis Time:** {report.analysis_duration_ms:.2f}ms")
         lines.append("")
@@ -76,6 +80,11 @@ class MarkdownFormatter(BaseFormatter):
                         f"- **Location:** `{ep.handler.file_path}:{ep.handler.line_number}`"
                     )
                     lines.append(f"- **Reason:** {ae.reason}")
+                    for evidence in ae.effect_evidence:
+                        lines.append(
+                            f"- **Effect ({evidence.status.value}/{evidence.disposition.value}):** "
+                            f"{evidence.summary}"
+                        )
 
                     if ae.dependency_chain and len(ae.dependency_chain) > 1:
                         chain = " → ".join(f"`{dep}`" for dep in ae.dependency_chain)
@@ -99,6 +108,25 @@ class MarkdownFormatter(BaseFormatter):
             lines.append("No endpoints were affected by the changes.")
             lines.append("")
 
+        additional = [
+            candidate
+            for candidate in report.candidate_endpoints
+            if candidate not in report.affected_endpoints
+        ]
+        if additional:
+            lines.append("## Additional Reachable Candidates")
+            lines.append("")
+            lines.append("_Retained for inspection; not selected by the legacy threshold._")
+            lines.append("")
+            for candidate in additional:
+                methods = ", ".join(method.value for method in candidate.endpoint.methods)
+                lines.append(
+                    f"- **{methods} `{candidate.endpoint.path}`** ({candidate.confidence.value})"
+                )
+                for evidence in candidate.effect_evidence:
+                    lines.append(f"  - {evidence.disposition.value}: {evidence.summary}")
+            lines.append("")
+
         # Orphan changes
         if report.orphan_changes:
             lines.append("## ⚠️ Orphan Code Changes")
@@ -108,7 +136,7 @@ class MarkdownFormatter(BaseFormatter):
                 f"({report.total_orphan_lines} lines in {report.orphan_count} files)_"
             )
             lines.append("")
-            
+
             for oc in report.orphan_changes:
                 file_name = Path(oc.file_path).name
                 lines.append(f"### 📄 `{file_name}`")
@@ -117,7 +145,7 @@ class MarkdownFormatter(BaseFormatter):
                 lines.append(f"- **Changes:** {oc.format_lines()}")
                 lines.append(f"- **Reason:** {oc.reason}")
                 lines.append("")
-            
+
             lines.append("> **💡 Tip:** Orphan changes may indicate:")
             lines.append("> - Unused or dead code")
             lines.append("> - Code with incorrect types preventing dependency analysis")

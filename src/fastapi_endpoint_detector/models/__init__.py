@@ -24,10 +24,18 @@ from fastapi_endpoint_detector.models.endpoint import (
 from fastapi_endpoint_detector.models.report import (
     AffectedEndpoint,
     AnalysisReport,
+    ChangeEffectKind,
+    CodeReference,
     ConfidenceLevel,
+    DataObservationKind,
+    EffectDisposition,
+    EffectEvidence,
+    EvidenceProducer,
+    EvidenceStatus,
+    ImpactChannel,
 )
 
-__all__ = [
+__all__ = [  # noqa: RUF022 - grouped by public model domain
     # Endpoint models
     "Endpoint",
     "EndpointMethod",
@@ -44,5 +52,13 @@ __all__ = [
     # Report models
     "AffectedEndpoint",
     "AnalysisReport",
+    "ChangeEffectKind",
+    "CodeReference",
     "ConfidenceLevel",
+    "DataObservationKind",
+    "EffectDisposition",
+    "EffectEvidence",
+    "EvidenceProducer",
+    "EvidenceStatus",
+    "ImpactChannel",
 ]
