@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "analyzer_revision": "632d96f",
+  "analyzer_revision": "4188b66",
   "generation_command": "uv run --frozen fastapi-endpoint-detector analyze --app <open-webui-merge>/backend/open_webui --diff <pr-26906.diff> --secure-ast --no-cache --format json",
   "repository": "open-webui/open-webui",
   "pr": 26906,
@@ -12,7 +12,7 @@
   "candidates": [
     {
       "id": "POST /api/chat/completions",
-      "confidence": "high",
+      "confidence": "medium",
       "effect_evidence": [
         {
           "schema_version": 1,
@@ -47,7 +47,7 @@
         {
           "schema_version": 1,
           "producer": "data_flow",
-          "status": "established",
+          "status": "conditional",
           "effect": "argument_mutation_isolated",
           "observations": [
             "returned"
@@ -142,7 +142,7 @@
     },
     {
       "id": "POST /api/v1/chat/completions",
-      "confidence": "high",
+      "confidence": "medium",
       "effect_evidence": [
         {
           "schema_version": 1,
@@ -177,7 +177,7 @@
         {
           "schema_version": 1,
           "producer": "data_flow",
-          "status": "established",
+          "status": "conditional",
           "effect": "argument_mutation_isolated",
           "observations": [
             "returned"

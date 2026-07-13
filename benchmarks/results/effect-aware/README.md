@@ -8,19 +8,19 @@ The PR adds a shallow defensive copy before pipe base-model substitution. The
 new analyzer keeps all 13 call-reachable HTTP candidates and separates execution
 reachability from caller-visible observation:
 
-- **HIGH (2 route aliases):** `/api/chat/completions` and
-  `/api/v1/chat/completions`. The original payload flows into a derived response
-  context returned to response processing and later continuation behavior.
-- **MEDIUM (2 route aliases):** `/api/message` and `/api/v1/messages`. They
-  consume the changed chat-completion result and return a converted response,
-  but the concrete response branch is runtime-dependent.
+- **MEDIUM (4 route aliases):** `/api/chat/completions`,
+  `/api/v1/chat/completions`, `/api/message`, and `/api/v1/messages`. The
+  original payload flows into guarded response/continuation processing, while
+  the Anthropic-compatible routes additionally return a runtime-selected
+  converted response. The call paths are exact, but the observable branch is
+  conditional.
 - **LOW (9):** chat compaction and eight task-completion routes. They execute the
   changed callable, so they are not reachability false positives. Their locally
   constructed caller payload has no established post-call observation. Dynamic
   pipe code may still observe object identity, and the copy remains shallow.
 
-The two high- and two medium-confidence aliases remain in the legacy selected
-output. The nine low-confidence routes remain available under
+The four medium-confidence aliases remain in the legacy selected output. The
+nine low-confidence routes remain available under
 `candidate_endpoints`; they are not
 silently discarded from the canonical evidence.
 
