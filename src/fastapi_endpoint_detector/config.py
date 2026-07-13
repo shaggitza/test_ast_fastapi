@@ -28,6 +28,7 @@ class ParserConfig(BaseModel):
     )
     max_depth: int = Field(
         default=10,
+        ge=1,
         description="Maximum depth for dependency traversal.",
     )
 

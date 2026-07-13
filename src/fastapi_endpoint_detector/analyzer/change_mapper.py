@@ -12,6 +12,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from fastapi_endpoint_detector.analyzer.endpoint_registry import EndpointRegistry
+from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.analyzer.scip_analyzer import (
     SCIPAnalyzer,
     SCIPAnalyzerError,
@@ -119,16 +120,15 @@ class ChangeMapper:
     def mypy_analyzer(self) -> "MypyAnalyzer":
         """Get the mypy analyzer, initializing if needed (does NOT pre-analyze)."""
         if self._mypy_analyzer is None:
-            from fastapi_endpoint_detector.analyzer.mypy_analyzer import (
-                MypyAnalyzer,
-            )
-
             if self.app_path.is_file():
                 package_path = self.app_path.parent
             else:
                 package_path = self.app_path
 
-            self._mypy_analyzer = MypyAnalyzer(package_path)
+            effective_depth = (
+                self.config.parser.max_depth if self.config.analysis.track_transitive else 1
+            )
+            self._mypy_analyzer = MypyAnalyzer(package_path, max_depth=effective_depth)
             # NOTE: We don't pre-analyze here - that's done in _preanalyze_mypy
             # with progress reporting
         return self._mypy_analyzer
@@ -191,7 +191,7 @@ class ChangeMapper:
         Returns:
             AffectedEndpoint if dependencies intersect, None otherwise.
         """
-        deps = self.mypy_analyzer.get_endpoint_dependencies(endpoint.identifier)
+        deps = self.mypy_analyzer.get_endpoint_dependencies(endpoint)
 
         if not deps:
             return None
@@ -206,7 +206,7 @@ class ChangeMapper:
         changed_lines = set(added_lines) | set(removed_lines)
 
         # Also check context lines (for added lines that don't exist yet)
-        context_lines = set()
+        context_lines: set[int] = set()
         for line in changed_lines:
             context_lines.update(range(max(1, line - 3), line + 4))
 
@@ -298,13 +298,15 @@ class ChangeMapper:
                             if lines_list and 0 < first_line <= len(lines_list):
                                 if len(group) > 1:
                                     # Multiple lines - show all of them
-                                    context_lines = []
+                                    context_code_lines = []
                                     for line_num in group:
                                         if 0 < line_num <= len(lines_list):
-                                            context_lines.append(lines_list[line_num - 1].rstrip())
+                                            context_code_lines.append(
+                                                lines_list[line_num - 1].rstrip()
+                                            )
                                     code_context = (
                                         f"[lines {first_line}-{last_line}]\n"
-                                        + "\n".join(context_lines)
+                                        + "\n".join(context_code_lines)
                                     )
                                 else:
                                     # Single line
@@ -385,11 +387,11 @@ class ChangeMapper:
                 affected.append(result)
                 seen_endpoints.add(endpoint.identifier)
                 # Mark lines as processed - get the actual lines that were referenced
-                deps = self.mypy_analyzer.get_endpoint_dependencies(endpoint.identifier)
+                deps = self.mypy_analyzer.get_endpoint_dependencies(endpoint)
                 if deps:
                     file_path = str(diff_file.path)
                     changed_lines = set(added_lines) | set(removed_lines)
-                    context_lines = set()
+                    context_lines: set[int] = set()
                     for line in changed_lines:
                         context_lines.update(range(max(1, line - 3), line + 4))
                     referenced = deps.references_lines(file_path, changed_lines | context_lines)
@@ -435,16 +437,16 @@ class ChangeMapper:
             for hunk in diff_file.hunks:
                 for line in hunk.added_lines:
                     for seed in self.scip_analyzer.definitions_at(diff_file.path, {line}):
-                        existing = seed_evidence.get(seed.symbol)
-                        if existing is None:
+                        existing_seed = seed_evidence.get(seed.symbol)
+                        if existing_seed is None:
                             seed_evidence[seed.symbol] = (
                                 seed,
                                 {line},
                                 set(hunk.removed_lines),
                             )
                         else:
-                            existing[1].add(line)
-                            existing[2].update(hunk.removed_lines)
+                            existing_seed[1].add(line)
+                            existing_seed[2].update(hunk.removed_lines)
 
             processed_added: set[int] = set()
             processed_removed: set[int] = set()
@@ -476,9 +478,9 @@ class ChangeMapper:
                             dependency_chain=[seed.symbol, definition.symbol],
                             changed_files=[str(diff_file.path)],
                         )
-                        existing = affected_by_id.get(endpoint.identifier)
-                        if existing is None or (
-                            existing.confidence != ConfidenceLevel.HIGH
+                        existing_endpoint = affected_by_id.get(endpoint.identifier)
+                        if existing_endpoint is None or (
+                            existing_endpoint.confidence != ConfidenceLevel.HIGH
                             and confidence == ConfidenceLevel.HIGH
                         ):
                             affected_by_id[endpoint.identifier] = candidate
@@ -705,10 +707,6 @@ class ChangeMapper:
             self._mypy_analyzer.clear_cache()
         else:
             # Initialize and clear the cache file even if analyzer not loaded
-            from fastapi_endpoint_detector.analyzer.mypy_analyzer import (
-                MypyAnalyzer,
-            )
-
             if self.app_path.is_file():
                 package_path = self.app_path.parent
             else:

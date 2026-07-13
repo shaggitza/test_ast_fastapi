@@ -11,11 +11,15 @@ using mypy's internal data structures to track file/line references.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import sys
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from fastapi_endpoint_detector.models.endpoint import Endpoint
@@ -26,12 +30,14 @@ LineProgressCallback = Callable[[str, int, str], None]
 
 class MypyAnalyzerError(Exception):
     """Error during mypy analysis."""
+
     pass
 
 
 @dataclass
 class CallFrame:
     """A single frame in the call stack."""
+
     file_path: str
     line_number: int
     function_name: str
@@ -41,6 +47,7 @@ class CallFrame:
 @dataclass
 class SymbolReference:
     """A reference to a specific symbol (function/method/class) with its line range."""
+
     file_path: str
     symbol_name: str
     start_line: int
@@ -64,6 +71,8 @@ class EndpointDependencies:
     """List of symbol references with their file paths and line ranges."""
     call_stacks: dict[str, list[list[CallFrame]]] = field(default_factory=dict)
     """Mapping of file path -> list of call stacks showing all paths from handler to that file."""
+    source_root: str = ""
+    project_files: set[str] = field(default_factory=set)
 
     def add_reference(self, file_path: str, line: int, symbol_name: str = "") -> None:
         """Add a line reference to dependencies."""
@@ -71,7 +80,9 @@ class EndpointDependencies:
             self.referenced_files[file_path] = set()
         self.referenced_files[file_path].add(line)
 
-    def add_symbol_reference(self, file_path: str, symbol_name: str, start_line: int, end_line: int) -> None:
+    def add_symbol_reference(
+        self, file_path: str, symbol_name: str, start_line: int, end_line: int
+    ) -> None:
         """Add a symbol reference and its line range to dependencies."""
         ref = SymbolReference(file_path, symbol_name, start_line, end_line)
         self.referenced_symbols.append(ref)
@@ -80,73 +91,78 @@ class EndpointDependencies:
             self.referenced_files[file_path] = set()
         self.referenced_files[file_path].update(range(start_line, end_line + 1))
 
+    @staticmethod
+    def _parts(path: str) -> tuple[str, ...]:
+        return PurePosixPath(path.replace("\\", "/")).parts
+
+    def _canonical(self, path: str) -> str:
+        candidate = Path(path.replace("\\", os.sep))
+        if not candidate.is_absolute() and self.source_root:
+            candidate = Path(self.source_root) / candidate
+        return str(candidate.resolve())
+
+    def _matching_paths(self, file_path: str, keys: set[str]) -> set[str]:
+        """Resolve one query to project files, failing closed when ambiguous."""
+        if not keys:
+            return set()
+        inventory = self.project_files or keys
+        canonical_inventory: dict[str, set[str]] = {}
+        for item in inventory:
+            canonical_inventory.setdefault(self._canonical(item), set()).add(item)
+
+        query_canonical = self._canonical(file_path)
+        exact = canonical_inventory.get(query_canonical, set())
+        if len(exact) == 1:
+            selected = query_canonical
+        else:
+            query_parts = self._parts(file_path)
+            suffixes = {
+                canonical
+                for canonical in canonical_inventory
+                if len(query_parts) <= len(self._parts(canonical))
+                and self._parts(canonical)[-len(query_parts) :] == query_parts
+            }
+            if len(suffixes) != 1:
+                return set()
+            selected = next(iter(suffixes))
+        return {key for key in keys if self._canonical(key) == selected}
+
     def references_symbol_at_line(self, file_path: str, line: int) -> SymbolReference | None:
-        """Check if any referenced symbol contains the given line."""
-        file_path_resolved = str(Path(file_path).resolve())
-        file_name = Path(file_path).name
-        for ref in self.referenced_symbols:
-            ref_resolved = str(Path(ref.file_path).resolve())
-            ref_name = Path(ref.file_path).name
-            # Match by resolved path, ending, or filename
-            if (ref_resolved == file_path_resolved or
-                ref.file_path.endswith(str(file_path)) or
-                file_path.endswith(ref.file_path) or
-                ref_name == file_name):
-                if ref.contains_line(line):
-                    return ref
-        return None
+        """Check if any unambiguously resolved symbol contains the given line."""
+        keys = {ref.file_path for ref in self.referenced_symbols}
+        matches = self._matching_paths(file_path, keys)
+        return next(
+            (
+                ref
+                for ref in self.referenced_symbols
+                if ref.file_path in matches and ref.contains_line(line)
+            ),
+            None,
+        )
 
     def references_file(self, file_path: str) -> bool:
-        """Check if this endpoint references a file."""
-        file_path_resolved = str(Path(file_path).resolve())
-        file_name = Path(file_path).name
-
-        for ref_path in self.referenced_files:
-            ref_resolved = str(Path(ref_path).resolve())
-            ref_name = Path(ref_path).name
-            if (ref_resolved == file_path_resolved or
-                ref_path.endswith(str(file_path)) or
-                file_path.endswith(ref_path) or
-                ref_name == file_name):
-                return True
-
-        return False
+        """Check if this endpoint unambiguously references a file."""
+        return bool(self._matching_paths(file_path, set(self.referenced_files)))
 
     def references_lines(self, file_path: str, lines: set[int]) -> set[int]:
-        """Get the intersection of referenced lines with given lines."""
-        file_path_resolved = str(Path(file_path).resolve())
-        file_name = Path(file_path).name
-
-        for ref_path, ref_lines in self.referenced_files.items():
-            ref_resolved = str(Path(ref_path).resolve())
-            ref_name = Path(ref_path).name
-            if (ref_resolved == file_path_resolved or
-                ref_path.endswith(str(file_path)) or
-                file_path.endswith(ref_path) or
-                ref_name == file_name):
-                return ref_lines & lines
-
-        return set()
+        """Get referenced changed lines for one unambiguously resolved file."""
+        matches = self._matching_paths(file_path, set(self.referenced_files))
+        return (
+            set().union(*(self.referenced_files[path] & lines for path in matches))
+            if matches
+            else set()
+        )
 
     def get_call_stack(self, file_path: str) -> list[list[CallFrame]]:
-        """Get all call stacks showing how the handler reaches a specific file.
-
-        Returns a list of call stacks (each call stack is a list of CallFrame).
-        Multiple call stacks indicate different paths to reach the same file.
-        """
-        file_path_resolved = str(Path(file_path).resolve())
-        file_name = Path(file_path).name
-
-        for ref_path, stacks in self.call_stacks.items():
-            ref_resolved = str(Path(ref_path).resolve())
-            ref_name = Path(ref_path).name
-            if (ref_resolved == file_path_resolved or
-                ref_path.endswith(str(file_path)) or
-                file_path.endswith(ref_path) or
-                ref_name == file_name):
-                return stacks
-
-        return []
+        """Get all unique call stacks for one unambiguously resolved file."""
+        matches = self._matching_paths(file_path, set(self.call_stacks))
+        stacks: list[list[CallFrame]] = []
+        for path in self.call_stacks:
+            if path in matches:
+                for stack in self.call_stacks[path]:
+                    if stack not in stacks:
+                        stacks.append(stack)
+        return stacks
 
 
 class MypyAnalyzer:
@@ -157,9 +173,15 @@ class MypyAnalyzer:
     and extract precise file/line information for all references.
     """
 
-    def __init__(self, app_path: Path) -> None:
+    CACHE_SCHEMA_VERSION = 3
+
+    def __init__(self, app_path: Path, *, max_depth: int = 10) -> None:
         """Initialize the mypy analyzer."""
+        if max_depth < 1:
+            raise ValueError("max_depth must be at least 1")
         self.app_path = app_path.resolve()
+        self.source_root = self.app_path.parent if self.app_path.is_file() else self.app_path
+        self.max_depth = max_depth
         self._endpoint_deps: dict[str, EndpointDependencies] = {}
         self._mypy_available = self._check_mypy_available()
         self._cache_file: Path | None = None
@@ -176,7 +198,7 @@ class MypyAnalyzer:
         """Path to the mypy analysis cache file."""
         if self._cache_file:
             return self._cache_file
-        return self.app_path.parent / ".endpoint_mypy_cache.json"
+        return self.source_root / ".endpoint_mypy_cache.json"
 
     def set_cache_path(self, path: Path) -> None:
         """Set a custom cache file path."""
@@ -191,6 +213,7 @@ class MypyAnalyzer:
         try:
             from mypy.build import build
             from mypy.nodes import MypyFile
+
             return True
         except ImportError:
             return False
@@ -219,15 +242,15 @@ class MypyAnalyzer:
         # Collect all Python files
         sources: list[BuildSource] = []
         for py_file in source_root.rglob("*.py"):
-            if any(part.startswith(('.', '__pycache__')) for part in py_file.parts):
+            if any(part.startswith((".", "__pycache__")) for part in py_file.parts):
                 continue
 
             try:
                 rel_path = py_file.relative_to(source_root.parent)
                 if rel_path.name == "__init__.py":
-                    module_name = str(rel_path.parent).replace('/', '.').replace('\\', '.')
+                    module_name = str(rel_path.parent).replace("/", ".").replace("\\", ".")
                 else:
-                    module_name = str(rel_path.with_suffix('')).replace('/', '.').replace('\\', '.')
+                    module_name = str(rel_path.with_suffix("")).replace("/", ".").replace("\\", ".")
             except ValueError:
                 module_name = py_file.stem
 
@@ -237,7 +260,7 @@ class MypyAnalyzer:
         # Configure mypy for full analysis with AST retention
         options = Options()
         options.ignore_missing_imports = True
-        options.follow_imports = 'normal'
+        options.follow_imports = "normal"
         options.mypy_path = [str(source_root.parent)]
         options.namespace_packages = True
         options.explicit_package_bases = True
@@ -303,7 +326,7 @@ class MypyAnalyzer:
     def _get_func_lines(self, func_node: Any) -> tuple[int, int]:
         """Get the start and end lines of a function node."""
         start = func_node.line
-        end = getattr(func_node, 'end_line', None)
+        end = getattr(func_node, "end_line", None)
         if end is None:
             end = start + 50  # Estimate
         return start, end
@@ -314,11 +337,11 @@ class MypyAnalyzer:
 
         Returns None if not found in our project.
         """
-        parts = fullname.split('.')
+        parts = fullname.split(".")
 
         # Try progressively shorter module paths
         for i in range(len(parts), 0, -1):
-            candidate = '.'.join(parts[:i])
+            candidate = ".".join(parts[:i])
             if candidate in self._module_to_path:
                 return self._module_to_path[candidate], candidate
             if candidate in self._trees:
@@ -344,10 +367,10 @@ class MypyAnalyzer:
         # If not found by module path, search for the function/class by fullname match
         # This handles imported functions where fullname might not map directly to module structure
         for mod_name, tree in self._trees.items():
-            if hasattr(tree, 'defs'):
+            if hasattr(tree, "defs"):
                 for defn in tree.defs:
                     # Check if this definition's fullname matches what we're looking for
-                    if hasattr(defn, 'fullname'):
+                    if hasattr(defn, "fullname"):
                         # Look for exact fullname match or name-based match
                         if defn.fullname == fullname:
                             # Exact match - this is the definition
@@ -363,12 +386,29 @@ class MypyAnalyzer:
         """Get the type of an AST node from mypy's type map."""
         return self._types_map.get(node)
 
+    @staticmethod
+    def _endpoint_key(endpoint: Endpoint) -> str:
+        """Key dependency data by public route and physical handler identity."""
+        handler = endpoint.handler
+        return json.dumps(
+            [
+                endpoint.identifier,
+                str(handler.file_path.resolve()),
+                handler.line_number,
+                handler.name,
+                handler.module,
+            ],
+            separators=(",", ":"),
+        )
+
     def analyze_endpoint(self, endpoint: Endpoint) -> EndpointDependencies:
         """Analyze a single endpoint using mypy's typed AST."""
         deps = EndpointDependencies(
             endpoint_id=endpoint.identifier,
             methods=[m.value for m in endpoint.methods],
             path=endpoint.path,
+            source_root=str(self.source_root),
+            project_files={str(path.resolve()) for path in self.source_root.rglob("*.py")},
         )
 
         handler = endpoint.handler
@@ -397,7 +437,7 @@ class MypyAnalyzer:
             start = handler.line_number
             end = handler.end_line_number or start + 50
             deps.add_symbol_reference(handler_path, handler.name, start, end)
-            self._endpoint_deps[endpoint.identifier] = deps
+            self._endpoint_deps[self._endpoint_key(endpoint)] = deps
             return deps
 
         tree = self._trees[handler_module]
@@ -408,13 +448,14 @@ class MypyAnalyzer:
             start = handler.line_number
             end = handler.end_line_number or start + 50
             deps.add_symbol_reference(handler_path, handler.name, start, end)
-            self._endpoint_deps[endpoint.identifier] = deps
+            self._endpoint_deps[self._endpoint_key(endpoint)] = deps
             return deps
 
         func_node, func_qname = result
 
         # If we got a Decorator, get the actual function for line numbers
         from mypy.nodes import Decorator as DecoratorNode
+
         actual_func = func_node.func if isinstance(func_node, DecoratorNode) else func_node
 
         start, end = self._get_func_lines(actual_func)
@@ -422,18 +463,23 @@ class MypyAnalyzer:
 
         # Build import map for this module to resolve imported names
         import_map: dict[str, str] = {}  # local_name -> actual_fullname
-        if hasattr(tree, 'defs'):
+        if hasattr(tree, "defs"):
             from mypy.nodes import Import, ImportFrom
+
             for defn in tree.defs:
                 if isinstance(defn, ImportFrom):
                     # from module import name
-                    if hasattr(defn, 'id') and hasattr(defn, 'names'):
+                    if hasattr(defn, "id") and hasattr(defn, "names"):
                         module_name = defn.id
                         # Resolve relative module name to full module name
-                        if not module_name.startswith('.'):
+                        if not module_name.startswith("."):
                             # Absolute import - prefix with current package if needed
                             # Check if this is a sibling module
-                            sibling_module = f"{handler_module.rsplit('.', 1)[0]}.{module_name}" if '.' in handler_module else module_name
+                            sibling_module = (
+                                f"{handler_module.rsplit('.', 1)[0]}.{module_name}"
+                                if "." in handler_module
+                                else module_name
+                            )
                             if sibling_module in self._module_to_path:
                                 full_module_name = sibling_module
                             else:
@@ -444,24 +490,35 @@ class MypyAnalyzer:
 
                         for name_info in defn.names:
                             local_name = name_info[0]  # The name as imported
-                            original_name = name_info[1] if name_info[1] else local_name  # Alias or same
+                            original_name = (
+                                name_info[1] if name_info[1] else local_name
+                            )  # Alias or same
                             # Map local name to actual fullname
                             import_map[local_name] = f"{full_module_name}.{original_name}"
                 elif isinstance(defn, Import):
                     # import module or import module as alias
-                    if hasattr(defn, 'ids'):
+                    if hasattr(defn, "ids"):
                         for module_info in defn.ids:
                             module_name = module_info[0]
                             alias = module_info[1] if module_info[1] else module_name
                             import_map[alias] = module_name
 
         # Trace all references in the function body
-        visited: set[str] = set()
+        visited: dict[str, int] = {}
         call_stack = [CallFrame(handler_path, start, handler.name)]
 
-        self._trace_references(func_node, deps, handler_path, handler_module, call_stack, visited, import_map)
+        self._trace_references(
+            func_node,
+            deps,
+            handler_path,
+            handler_module,
+            call_stack,
+            visited,
+            import_map,
+            depth=0,
+        )
 
-        self._endpoint_deps[endpoint.identifier] = deps
+        self._endpoint_deps[self._endpoint_key(endpoint)] = deps
         return deps
 
     def _trace_references(
@@ -471,8 +528,10 @@ class MypyAnalyzer:
         current_file: str,
         current_module: str,
         call_stack: list[CallFrame],
-        visited: set[str],
+        visited: dict[str, int],
         import_map: dict[str, str] | None = None,
+        *,
+        depth: int,
     ) -> None:
         """
         Trace all references in a mypy AST node.
@@ -525,15 +584,19 @@ class MypyAnalyzer:
         from mypy.types import Instance
 
         def resolve_and_trace(fullname: str, call_line: int) -> None:
-            """Resolve a fullname to file/line and trace into it."""
-            if fullname in visited:
+            """Resolve a fullname at the next call depth and trace into it."""
+            target_depth = depth + 1
+            if target_depth > self.max_depth:
                 return
-            visited.add(fullname)
+            previous_depth = visited.get(fullname)
+            should_recurse = previous_depth is None or target_depth < previous_depth
+            if should_recurse:
+                visited[fullname] = target_depth
 
             # Report progress
             if self._line_progress_callback:
                 self._line_progress_callback(
-                    current_file, call_line, fullname.rsplit('.', maxsplit=1)[-1]
+                    current_file, call_line, fullname.rsplit(".", maxsplit=1)[-1]
                 )
 
             # Try to find the target file
@@ -550,15 +613,17 @@ class MypyAnalyzer:
             target_tree = self._trees[target_module]
 
             # Extract the symbol name from fullname
-            parts = fullname.split('.')
+            parts = fullname.split(".")
             # The symbol name is everything after the module name
             if fullname.startswith(target_module):
-                symbol_name = fullname[len(target_module) + 1:] if len(fullname) > len(target_module) else ""
+                symbol_name = (
+                    fullname[len(target_module) + 1 :] if len(fullname) > len(target_module) else ""
+                )
             else:
                 symbol_name = parts[-1]
 
             # Try to find the function in the target tree
-            func_name = symbol_name.split('.')[-1] if symbol_name else parts[-1]
+            func_name = symbol_name.split(".")[-1] if symbol_name else parts[-1]
             func_result = self._find_func_in_tree(target_tree, func_name)
 
             if func_result:
@@ -578,10 +643,17 @@ class MypyAnalyzer:
                 new_frame = CallFrame(target_path, start, fullname)
                 new_stack = call_stack + [new_frame]
 
-                self._trace_references(
-                    target_func, deps, target_path, target_module,
-                    new_stack, visited, import_map
-                )
+                if should_recurse and target_depth < self.max_depth:
+                    self._trace_references(
+                        target_func,
+                        deps,
+                        target_path,
+                        target_module,
+                        new_stack,
+                        visited,
+                        import_map,
+                        depth=target_depth,
+                    )
             else:
                 # Couldn't find specific function, add module reference
                 deps.add_symbol_reference(target_path, fullname, 1, 20)
@@ -604,10 +676,10 @@ class MypyAnalyzer:
                     if callee.name in import_map:
                         actual_fullname = import_map[callee.name]
                     # Try to get the actual definition location from the node
-                    elif hasattr(callee, 'node') and callee.node:
+                    elif hasattr(callee, "node") and callee.node:
                         node = callee.node
                         # Check if the node has a fullname (it's the actual definition)
-                        if hasattr(node, 'fullname') and node.fullname:
+                        if hasattr(node, "fullname") and node.fullname:
                             actual_fullname = node.fullname
 
                     deps.add_reference(current_file, call.line, actual_fullname)
@@ -621,9 +693,9 @@ class MypyAnalyzer:
 
                     # Try to get actual definition location
                     actual_fullname = callee.fullname
-                    if hasattr(callee, 'node') and callee.node:
+                    if hasattr(callee, "node") and callee.node:
                         node = callee.node
-                        if hasattr(node, 'fullname') and node.fullname:
+                        if hasattr(node, "fullname") and node.fullname:
                             actual_fullname = node.fullname
 
                     resolve_and_trace(actual_fullname, call.line)
@@ -650,12 +722,8 @@ class MypyAnalyzer:
             if isinstance(callee, NameExpr) and callee.name == "Depends":
                 for argument in call.args:
                     if isinstance(argument, NameExpr) and argument.fullname:
-                        dependency_fullname = import_map.get(
-                            argument.name, argument.fullname
-                        )
-                        deps.add_reference(
-                            current_file, argument.line, dependency_fullname
-                        )
+                        dependency_fullname = import_map.get(argument.name, argument.fullname)
+                        deps.add_reference(current_file, argument.line, dependency_fullname)
                         resolve_and_trace(dependency_fullname, argument.line)
 
             # Walk callee and arguments
@@ -689,20 +757,20 @@ class MypyAnalyzer:
 
             elif isinstance(n, FuncDef):
                 # Walk function arguments for default values and annotations
-                if hasattr(n, 'arguments'):
+                if hasattr(n, "arguments"):
                     for arg in n.arguments:
                         # Walk default argument values
-                        if hasattr(arg, 'initializer') and arg.initializer:
+                        if hasattr(arg, "initializer") and arg.initializer:
                             walk_node(arg.initializer)
                         # Walk type annotations
-                        if hasattr(arg, 'type_annotation') and arg.type_annotation:
+                        if hasattr(arg, "type_annotation") and arg.type_annotation:
                             walk_node(arg.type_annotation)
                 # Walk decorators
-                if hasattr(n, 'decorators'):
+                if hasattr(n, "decorators"):
                     for decorator in n.decorators:
                         walk_node(decorator)
                 # Walk function body
-                if hasattr(n, 'body'):
+                if hasattr(n, "body"):
                     walk_node(n.body)
 
             elif isinstance(n, Block):
@@ -743,7 +811,7 @@ class MypyAnalyzer:
                 for handler in n.handlers:
                     walk_node(handler)
                 # Walk exception types
-                if hasattr(n, 'types') and n.types:
+                if hasattr(n, "types") and n.types:
                     for exc_type in n.types:
                         if exc_type:
                             walk_node(exc_type)
@@ -772,15 +840,15 @@ class MypyAnalyzer:
 
             elif isinstance(n, ConditionalExpr):
                 # mypy uses cond/if_true/if_false but some versions use different names
-                if hasattr(n, 'cond'):
+                if hasattr(n, "cond"):
                     walk_node(n.cond)
-                if hasattr(n, 'if_true'):
+                if hasattr(n, "if_true"):
                     walk_node(n.if_true)
-                elif hasattr(n, 'then'):
+                elif hasattr(n, "then"):
                     walk_node(n.then)
-                if hasattr(n, 'if_false'):
+                if hasattr(n, "if_false"):
                     walk_node(n.if_false)
-                elif hasattr(n, 'else_'):
+                elif hasattr(n, "else_"):
                     walk_node(n.else_)
 
             elif isinstance(n, (ListExpr, TupleExpr, SetExpr)):
@@ -794,37 +862,37 @@ class MypyAnalyzer:
 
             elif isinstance(n, ListComprehension):
                 # ListComprehension has a generator attribute
-                if hasattr(n, 'generator'):
+                if hasattr(n, "generator"):
                     walk_node(n.generator)
 
             elif isinstance(n, (SetComprehension, DictionaryComprehension)):
                 # These might also have generator attribute
-                if hasattr(n, 'generator'):
+                if hasattr(n, "generator"):
                     walk_node(n.generator)
 
             elif isinstance(n, GeneratorExpr):
                 # Walk the generator/element expression
-                if hasattr(n, 'left_expr'):
+                if hasattr(n, "left_expr"):
                     walk_node(n.left_expr)
                 # Walk generator clauses (for x in sequence if condition)
-                if hasattr(n, 'sequences'):
+                if hasattr(n, "sequences"):
                     for seq in n.sequences:
                         walk_node(seq)
-                if hasattr(n, 'condlists'):
+                if hasattr(n, "condlists"):
                     for conds in n.condlists:
                         for cond in conds:
                             walk_node(cond)
                 # For dict comprehensions, also walk key and value
-                if hasattr(n, 'key'):
+                if hasattr(n, "key"):
                     walk_node(n.key)
-                if hasattr(n, 'value'):
+                if hasattr(n, "value"):
                     walk_node(n.value)
 
             elif isinstance(n, LambdaExpr):
                 # Walk lambda arguments (for default values)
-                if hasattr(n, 'arguments'):
+                if hasattr(n, "arguments"):
                     for arg in n.arguments:
-                        if hasattr(arg, 'initializer') and arg.initializer:
+                        if hasattr(arg, "initializer") and arg.initializer:
                             walk_node(arg.initializer)
                 # Walk lambda body
                 walk_node(n.body)
@@ -840,16 +908,16 @@ class MypyAnalyzer:
 
             elif isinstance(n, Decorator):
                 # Walk decorator arguments
-                if hasattr(n, 'decorators'):
+                if hasattr(n, "decorators"):
                     for decorator in n.decorators:
                         walk_node(decorator)
                 # Walk the decorated function
-                if hasattr(n, 'func'):
+                if hasattr(n, "func"):
                     walk_node(n.func)
 
         # Start walking from the function
         # Walk decorators first
-        if hasattr(node, 'decorators') and node.decorators:
+        if hasattr(node, "decorators") and node.decorators:
             for decorator in node.decorators:
                 # Special handling for decorators - trace into them
                 if isinstance(decorator, NameExpr) and decorator.fullname:
@@ -881,17 +949,14 @@ class MypyAnalyzer:
     ) -> dict[str, EndpointDependencies]:
         """Analyze multiple endpoints."""
         # Try to load from cache
-        if use_cache and self.cache_path.exists():
-            try:
-                self._load_cache()
-                all_cached = all(
-                    ep.identifier in self._endpoint_deps
-                    for ep in endpoints
-                )
-                if all_cached:
-                    return self._endpoint_deps
-            except Exception:
-                pass
+        if use_cache and self.cache_path.exists() and self._load_cache():
+            all_cached = all(self._endpoint_key(ep) in self._endpoint_deps for ep in endpoints)
+            if all_cached:
+                return self._endpoint_deps
+        else:
+            self._endpoint_deps.clear()
+
+        analysis_fingerprint, _sources = self._cache_fingerprint()
 
         # Build mypy once for all endpoints
         try:
@@ -901,25 +966,53 @@ class MypyAnalyzer:
 
         # Analyze uncached endpoints
         for endpoint in endpoints:
-            if endpoint.identifier not in self._endpoint_deps:
+            if self._endpoint_key(endpoint) not in self._endpoint_deps:
                 self.analyze_endpoint(endpoint)
 
         # Save cache
         if use_cache:
-            self._save_cache()
+            current_fingerprint, _sources = self._cache_fingerprint()
+            if current_fingerprint == analysis_fingerprint:
+                self._save_cache()
 
         return self._endpoint_deps
 
+    def _cache_fingerprint(self) -> tuple[str, dict[str, str]]:
+        """Fingerprint all Python inputs and analysis semantics."""
+        sources: dict[str, str] = {}
+        for path in sorted(self.source_root.rglob("*.py")):
+            try:
+                relative = path.resolve().relative_to(self.source_root).as_posix()
+                sources[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError:
+                continue
+        try:
+            mypy_version = version("mypy")
+        except PackageNotFoundError:
+            mypy_version = "missing"
+        payload = json.dumps(
+            {
+                "schema": self.CACHE_SCHEMA_VERSION,
+                "max_depth": self.max_depth,
+                "mypy": mypy_version,
+                "python": list(sys.version_info[:3]),
+                "source_root": str(self.source_root.resolve()),
+                "sources": sources,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(payload.encode()).hexdigest(), sources
+
     def _save_cache(self) -> None:
-        """Save analysis data to cache file."""
-        cache_data: dict[str, Any] = {}
-        for endpoint_id, deps in self._endpoint_deps.items():
-            cache_data[endpoint_id] = {
+        """Atomically save versioned analysis data to the cache file."""
+        endpoints_data: dict[str, Any] = {}
+        for analysis_key, deps in self._endpoint_deps.items():
+            endpoints_data[analysis_key] = {
+                "endpoint_id": deps.endpoint_id,
                 "methods": deps.methods,
                 "path": deps.path,
-                "referenced_files": {
-                    f: list(lines) for f, lines in deps.referenced_files.items()
-                },
+                "referenced_files": {f: list(lines) for f, lines in deps.referenced_files.items()},
                 "referenced_symbols": [
                     {
                         "file_path": ref.file_path,
@@ -946,20 +1039,55 @@ class MypyAnalyzer:
                 },
             }
 
+        fingerprint, sources = self._cache_fingerprint()
+        data = {
+            "schema_version": self.CACHE_SCHEMA_VERSION,
+            "fingerprint": fingerprint,
+            "metadata": {
+                "source_root": str(self.source_root),
+                "max_depth": self.max_depth,
+                "sources": sources,
+            },
+            "endpoints": endpoints_data,
+        }
         try:
-            self.cache_path.write_text(
-                json.dumps(cache_data, indent=2),
-                encoding="utf-8",
+            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{self.cache_path.name}.", dir=self.cache_path.parent
             )
-        except Exception:
+            temporary = Path(temporary_name)
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    json.dump(data, handle, indent=2)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                temporary.replace(self.cache_path)
+            finally:
+                temporary.unlink(missing_ok=True)
+        except OSError:
             pass
 
-    def _load_cache(self) -> None:
-        """Load analysis data from cache file."""
+    def _load_cache(self) -> bool:
+        """Load only a current cache matching all source and semantic inputs."""
+        self._endpoint_deps.clear()
         try:
             data = json.loads(self.cache_path.read_text(encoding="utf-8"))
+            fingerprint, _sources = self._cache_fingerprint()
+            if not isinstance(data, dict):
+                return False
+            if data.get("schema_version") != self.CACHE_SCHEMA_VERSION:
+                return False
+            if data.get("fingerprint") != fingerprint:
+                return False
+            endpoints_data = data.get("endpoints")
+            if not isinstance(endpoints_data, dict):
+                return False
+            project_files = {str(path.resolve()) for path in self.source_root.rglob("*.py")}
 
-            for endpoint_id, deps_data in data.items():
+            for analysis_key, deps_data in endpoints_data.items():
+                if not isinstance(analysis_key, str) or not isinstance(deps_data, dict):
+                    self._endpoint_deps.clear()
+                    return False
                 call_stacks: dict[str, list[list[CallFrame]]] = {}
                 for f, stacks_data in deps_data.get("call_stacks", {}).items():
                     call_stacks[f] = [
@@ -978,26 +1106,43 @@ class MypyAnalyzer:
                 symbol_refs: list[SymbolReference] = []
                 for ref_data in deps_data.get("referenced_symbols", []):
                     if isinstance(ref_data, dict):
-                        symbol_refs.append(SymbolReference(
-                            file_path=ref_data["file_path"],
-                            symbol_name=ref_data["symbol_name"],
-                            start_line=ref_data["start_line"],
-                            end_line=ref_data["end_line"],
-                        ))
+                        symbol_refs.append(
+                            SymbolReference(
+                                file_path=ref_data["file_path"],
+                                symbol_name=ref_data["symbol_name"],
+                                start_line=ref_data["start_line"],
+                                end_line=ref_data["end_line"],
+                            )
+                        )
 
-                self._endpoint_deps[endpoint_id] = EndpointDependencies(
+                endpoint_id = deps_data.get("endpoint_id")
+                if not isinstance(endpoint_id, str):
+                    self._endpoint_deps.clear()
+                    return False
+                self._endpoint_deps[analysis_key] = EndpointDependencies(
                     endpoint_id=endpoint_id,
                     methods=deps_data["methods"],
                     path=deps_data["path"],
                     referenced_files={
-                        f: set(lines)
-                        for f, lines in deps_data["referenced_files"].items()
+                        f: set(lines) for f, lines in deps_data["referenced_files"].items()
                     },
                     referenced_symbols=symbol_refs,
                     call_stacks=call_stacks,
+                    source_root=str(self.source_root),
+                    project_files=project_files,
                 )
-        except Exception:
-            pass
+            return True
+        except (
+            AttributeError,
+            IndexError,
+            OSError,
+            ValueError,
+            KeyError,
+            TypeError,
+            json.JSONDecodeError,
+        ):
+            self._endpoint_deps.clear()
+            return False
 
     def clear_cache(self) -> None:
         """Clear the analysis cache."""
@@ -1007,7 +1152,8 @@ class MypyAnalyzer:
 
     def get_endpoint_dependencies(
         self,
-        endpoint_id: str,
+        endpoint: Endpoint | str,
     ) -> EndpointDependencies | None:
-        """Get dependencies for a specific endpoint."""
-        return self._endpoint_deps.get(endpoint_id)
+        """Get dependencies for a handler-aware endpoint key."""
+        key = self._endpoint_key(endpoint) if isinstance(endpoint, Endpoint) else endpoint
+        return self._endpoint_deps.get(key)
