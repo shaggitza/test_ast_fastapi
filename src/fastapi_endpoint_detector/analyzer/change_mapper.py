@@ -12,8 +12,13 @@ from collections.abc import Callable
 from pathlib import Path
 
 from fastapi_endpoint_detector.analyzer.endpoint_registry import EndpointRegistry
+from fastapi_endpoint_detector.analyzer.scip_analyzer import (
+    SCIPAnalyzer,
+    SCIPAnalyzerError,
+    SCIPDefinition,
+)
 from fastapi_endpoint_detector.config import Config
-from fastapi_endpoint_detector.models.diff import DiffFile
+from fastapi_endpoint_detector.models.diff import ChangeType, DiffFile
 from fastapi_endpoint_detector.models.endpoint import Endpoint
 from fastapi_endpoint_detector.models.report import (
     AffectedEndpoint,
@@ -32,6 +37,7 @@ ProgressCallback = Callable[[int, int, str], None]
 
 class ChangeMapperError(Exception):
     """Error during change mapping."""
+
     pass
 
 
@@ -55,6 +61,7 @@ class ChangeMapper:
         app_variable: str = "app",
         use_cache: bool = True,
         secure_ast: bool = False,
+        use_scip: bool = False,
     ) -> None:
         """
         Initialize the change mapper.
@@ -65,17 +72,20 @@ class ChangeMapper:
             app_variable: Name of the FastAPI app variable.
             use_cache: Whether to use cached analysis results (default True).
             secure_ast: Discover endpoints without importing application code.
+            use_scip: Use SCIP rather than mypy for reverse dependency analysis.
         """
         self.app_path = app_path.resolve()
         self.config = config or Config()
         self.app_variable = app_variable
         self.use_cache = use_cache
         self.secure_ast = secure_ast
+        self.use_scip = use_scip
 
         # These are lazily initialized
         self._extractor: FastAPIExtractor | SecureASTExtractor | None = None
         self._registry: EndpointRegistry | None = None
         self._mypy_analyzer: MypyAnalyzer | None = None
+        self._scip_analyzer: SCIPAnalyzer | None = None
 
     @property
     def extractor(self) -> FastAPIExtractor | SecureASTExtractor:
@@ -96,6 +106,14 @@ class ChangeMapper:
             endpoints = self.extractor.extract_endpoints()
             self._registry.register_many(endpoints)
         return self._registry
+
+    @property
+    def scip_analyzer(self) -> SCIPAnalyzer:
+        """Get the SCIP analyzer, initializing if needed."""
+        if self._scip_analyzer is None:
+            package_path = self.app_path.parent if self.app_path.is_file() else self.app_path
+            self._scip_analyzer = SCIPAnalyzer(package_path, use_cache=self.use_cache)
+        return self._scip_analyzer
 
     @property
     def mypy_analyzer(self) -> "MypyAnalyzer":
@@ -207,21 +225,25 @@ class ChangeMapper:
                 call_stack: list[CallStackFrame] = []
 
                 # Add a marker frame at the beginning to show where this trace originates from
-                call_stack.append(CallStackFrame(
-                    file_path=str(endpoint.handler.file_path or ""),
-                    line_number=endpoint.handler.line_number,
-                    function_name=f"[ENDPOINT] {endpoint.identifier}",
-                    code_context=f"Handler: {endpoint.handler.name}",
-                ))
+                call_stack.append(
+                    CallStackFrame(
+                        file_path=str(endpoint.handler.file_path or ""),
+                        line_number=endpoint.handler.line_number,
+                        function_name=f"[ENDPOINT] {endpoint.identifier}",
+                        code_context=f"Handler: {endpoint.handler.name}",
+                    )
+                )
 
                 # Add the actual call stack frames
                 for frame in raw_stack:
-                    call_stack.append(CallStackFrame(
-                        file_path=frame.file_path,
-                        line_number=frame.line_number,
-                        function_name=frame.function_name,
-                        code_context=frame.code_context,
-                    ))
+                    call_stack.append(
+                        CallStackFrame(
+                            file_path=frame.file_path,
+                            line_number=frame.line_number,
+                            function_name=frame.function_name,
+                            code_context=frame.code_context,
+                        )
+                    )
 
                 # Add frames showing the actual changed lines
                 # Group consecutive lines together for cleaner display
@@ -245,7 +267,7 @@ class ChangeMapper:
                         current_group = [sorted_lines[0]]
 
                         for i in range(1, len(sorted_lines)):
-                            if sorted_lines[i] == sorted_lines[i-1] + 1:
+                            if sorted_lines[i] == sorted_lines[i - 1] + 1:
                                 # Consecutive line, add to current group
                                 current_group.append(sorted_lines[i])
                             else:
@@ -264,8 +286,9 @@ class ChangeMapper:
                             # Try to get the function name from symbol references
                             function_name = "module"
                             for sym_ref in deps.referenced_symbols:
-                                if (sym_ref.file_path == file_path and
-                                    sym_ref.contains_line(first_line)):
+                                if sym_ref.file_path == file_path and sym_ref.contains_line(
+                                    first_line
+                                ):
                                     function_name = sym_ref.symbol_name
                                     break
 
@@ -279,17 +302,22 @@ class ChangeMapper:
                                     for line_num in group:
                                         if 0 < line_num <= len(lines_list):
                                             context_lines.append(lines_list[line_num - 1].rstrip())
-                                    code_context = f"[lines {first_line}-{last_line}]\n" + "\n".join(context_lines)
+                                    code_context = (
+                                        f"[lines {first_line}-{last_line}]\n"
+                                        + "\n".join(context_lines)
+                                    )
                                 else:
                                     # Single line
                                     code_context = lines_list[first_line - 1].rstrip()
 
-                            call_stack.append(CallStackFrame(
-                                file_path=file_path,
-                                line_number=first_line,
-                                function_name=function_name,
-                                code_context=code_context,
-                            ))
+                            call_stack.append(
+                                CallStackFrame(
+                                    file_path=file_path,
+                                    line_number=first_line,
+                                    function_name=function_name,
+                                    code_context=code_context,
+                                )
+                            )
 
                 # Add this completed call stack to the list
                 all_call_stacks.append(call_stack)
@@ -325,7 +353,7 @@ class ChangeMapper:
         seen_endpoints: set[str] = set()
         processed_added_lines: set[int] = set()
         processed_removed_lines: set[int] = set()
-        
+
         # Get changed lines
         added_lines, removed_lines = DiffParser.get_changed_line_numbers(diff_file)
 
@@ -346,15 +374,13 @@ class ChangeMapper:
                 handler_lines = set(range(handler.line_number, handler_end + 1))
                 processed_added_lines.update(ln for ln in added_lines if ln in handler_lines)
                 processed_removed_lines.update(ln for ln in removed_lines if ln in handler_lines)
-        
+
         # Use mypy for type-aware dependency analysis
         for endpoint in self.registry:
             if endpoint.identifier in seen_endpoints:
                 continue
 
-            result = self._check_mypy_dependency(
-                endpoint, diff_file, added_lines, removed_lines
-            )
+            result = self._check_mypy_dependency(endpoint, diff_file, added_lines, removed_lines)
             if result:
                 affected.append(result)
                 seen_endpoints.add(endpoint.identifier)
@@ -370,10 +396,112 @@ class ChangeMapper:
                     if referenced:
                         # Only mark the directly changed lines as processed
                         processed_added_lines.update(ln for ln in added_lines if ln in referenced)
-                        processed_removed_lines.update(ln for ln in removed_lines if ln in referenced)
-        
+                        processed_removed_lines.update(
+                            ln for ln in removed_lines if ln in referenced
+                        )
+
         return affected, processed_added_lines, processed_removed_lines
-    
+
+    def _analyze_with_scip(
+        self,
+        python_files: list[DiffFile],
+        progress_callback: ProgressCallback | None,
+    ) -> tuple[list[AffectedEndpoint], list[OrphanChange]]:
+        """Map changed definitions through SCIP reverse impact to endpoint handlers."""
+        if progress_callback:
+            progress_callback(10, 100, "Indexing Python with SCIP...")
+        self.scip_analyzer.ensure_index(force=not self.use_cache)
+        affected_by_id: dict[str, AffectedEndpoint] = {}
+        orphan_changes: list[OrphanChange] = []
+        project_root = self.app_path.parent if self.app_path.is_file() else self.app_path
+
+        for index, diff_file in enumerate(python_files):
+            if progress_callback:
+                progress_callback(
+                    20 + int(70 * (index + 1) / max(len(python_files), 1)),
+                    100,
+                    f"Querying SCIP impact for {diff_file.path.name}...",
+                )
+            added_lines, removed_lines = DiffParser.get_changed_line_numbers(diff_file)
+            if diff_file.change_type == ChangeType.DELETED or any(
+                hunk.removed_lines and not hunk.added_lines for hunk in diff_file.hunks
+            ):
+                raise SCIPAnalyzerError(
+                    f"SCIP post-change index cannot analyze deleted definitions in {diff_file.path}; "
+                    "baseline dual-index support is required"
+                )
+
+            seed_evidence: dict[str, tuple[SCIPDefinition, set[int], set[int]]] = {}
+            for hunk in diff_file.hunks:
+                for line in hunk.added_lines:
+                    for seed in self.scip_analyzer.definitions_at(diff_file.path, {line}):
+                        existing = seed_evidence.get(seed.symbol)
+                        if existing is None:
+                            seed_evidence[seed.symbol] = (
+                                seed,
+                                {line},
+                                set(hunk.removed_lines),
+                            )
+                        else:
+                            existing[1].add(line)
+                            existing[2].update(hunk.removed_lines)
+
+            processed_added: set[int] = set()
+            processed_removed: set[int] = set()
+            for seed_value, seed_added, seed_removed in seed_evidence.values():
+                seed = seed_value
+                seed_reached_endpoint = False
+                max_depth = (
+                    self.config.parser.max_depth if self.config.analysis.track_transitive else 1
+                )
+                for reached in self.scip_analyzer.affected(seed, max_depth=max_depth):
+                    definition = reached.definition
+                    endpoints = self.registry.get_by_line_range(
+                        project_root / definition.file_path,
+                        definition.start_line,
+                        definition.end_line,
+                    )
+                    for endpoint in endpoints:
+                        seed_reached_endpoint = True
+                        confidence = (
+                            ConfidenceLevel.HIGH if reached.depth == 0 else ConfidenceLevel.MEDIUM
+                        )
+                        candidate = AffectedEndpoint(
+                            endpoint=endpoint,
+                            confidence=confidence,
+                            reason=(
+                                f"SCIP reverse impact from {seed.short_name} "
+                                f"to {definition.short_name} at depth {reached.depth}"
+                            ),
+                            dependency_chain=[seed.symbol, definition.symbol],
+                            changed_files=[str(diff_file.path)],
+                        )
+                        existing = affected_by_id.get(endpoint.identifier)
+                        if existing is None or (
+                            existing.confidence != ConfidenceLevel.HIGH
+                            and confidence == ConfidenceLevel.HIGH
+                        ):
+                            affected_by_id[endpoint.identifier] = candidate
+                if seed_reached_endpoint:
+                    processed_added.update(seed_added)
+                    processed_removed.update(seed_removed)
+
+            orphan_added = [line for line in added_lines if line not in processed_added]
+            orphan_removed = [line for line in removed_lines if line not in processed_removed]
+            if orphan_added or orphan_removed:
+                orphan_changes.append(
+                    OrphanChange(
+                        file_path=str(diff_file.path),
+                        added_lines=orphan_added,
+                        removed_lines=orphan_removed,
+                        reason=(
+                            "Changed lines did not resolve through SCIP to a registered endpoint"
+                        ),
+                    )
+                )
+
+        return list(affected_by_id.values()), orphan_changes
+
     def analyze_diff(
         self,
         diff_source: Path | str,
@@ -419,6 +547,33 @@ class ChangeMapper:
         report_progress(5, 100, "Extracting endpoints...")
         total_endpoints = len(self.registry)
 
+        if self.use_scip:
+            report_progress(10, 100, f"Analyzing {total_endpoints} endpoints (SCIP)...")
+            scip_affected, scip_orphans = self._analyze_with_scip(python_files, progress_callback)
+            threshold = self.config.analysis.confidence_threshold
+            confidence_order = {
+                ConfidenceLevel.HIGH: 1.0,
+                ConfidenceLevel.MEDIUM: 0.7,
+                ConfidenceLevel.LOW: 0.3,
+            }
+            filtered = [
+                item for item in scip_affected if confidence_order[item.confidence] >= threshold
+            ]
+            duration_ms = (time.time() - start_time) * 1000
+            report_progress(100, 100, "Complete!")
+            return AnalysisReport(
+                app_path=str(self.app_path),
+                diff_source=diff_source_str,
+                total_endpoints=total_endpoints,
+                affected_endpoints=filtered,
+                orphan_changes=scip_orphans,
+                total_files_changed=len(diff_files),
+                python_files_changed=len(python_files),
+                analysis_duration_ms=duration_ms,
+                errors=errors,
+                warnings=warnings,
+            )
+
         # Pre-analyze endpoints with mypy
         report_progress(10, 100, f"Analyzing {total_endpoints} endpoints (mypy)...")
         self._preanalyze_mypy(progress_callback)
@@ -428,25 +583,27 @@ class ChangeMapper:
         all_affected: list[AffectedEndpoint] = []
         seen_endpoints: set[str] = set()
         orphan_changes: list[OrphanChange] = []
-        
+
         for i, diff_file in enumerate(python_files):
             try:
                 report_progress(
                     70 + int(20 * (i + 1) / max(len(python_files), 1)),
                     100,
-                    f"Analyzing {diff_file.path.name}..."
+                    f"Analyzing {diff_file.path.name}...",
                 )
-                file_affected, processed_added, processed_removed = self._analyze_diff_file(diff_file)
+                file_affected, processed_added, processed_removed = self._analyze_diff_file(
+                    diff_file
+                )
                 for ae in file_affected:
                     if ae.endpoint.identifier not in seen_endpoints:
                         all_affected.append(ae)
                         seen_endpoints.add(ae.endpoint.identifier)
-                
+
                 # Collect orphan lines (lines not processed by any endpoint)
                 added_lines, removed_lines = DiffParser.get_changed_line_numbers(diff_file)
                 orphan_added = [ln for ln in added_lines if ln not in processed_added]
                 orphan_removed = [ln for ln in removed_lines if ln not in processed_removed]
-                
+
                 if orphan_added or orphan_removed:
                     orphan_changes.append(
                         OrphanChange(
@@ -472,8 +629,7 @@ class ChangeMapper:
         }
 
         filtered_affected = [
-            ae for ae in all_affected
-            if confidence_order[ae.confidence] >= threshold
+            ae for ae in all_affected if confidence_order[ae.confidence] >= threshold
         ]
 
         # Calculate duration
@@ -509,8 +665,7 @@ class ChangeMapper:
                 self.mypy_analyzer._load_cache()
                 # Check if all endpoints are cached
                 all_cached = all(
-                    ep.identifier in self.mypy_analyzer._endpoint_deps
-                    for ep in endpoints
+                    ep.identifier in self.mypy_analyzer._endpoint_deps for ep in endpoints
                 )
                 if all_cached:
                     if progress_callback:
@@ -525,7 +680,7 @@ class ChangeMapper:
                 progress_callback(
                     10 + int(55 * (i + 1) / max(total, 1)),
                     100,
-                    f"Analyzing endpoint {i + 1}/{total}: {endpoint.path}"
+                    f"Analyzing endpoint {i + 1}/{total}: {endpoint.path}",
                 )
             if endpoint.identifier not in self.mypy_analyzer._endpoint_deps:
                 self.mypy_analyzer.analyze_endpoint(endpoint)
@@ -539,7 +694,13 @@ class ChangeMapper:
         return self.registry.get_all()
 
     def clear_cache(self) -> None:
-        """Clear cached analysis results for mypy."""
+        """Clear or bypass cached analysis results for the selected backend."""
+        if self.use_scip:
+            # scip-query owns its cache; force a deterministic reindex for this run.
+            self.use_cache = False
+            if self._scip_analyzer is not None:
+                self._scip_analyzer.use_cache = False
+            return
         if self._mypy_analyzer is not None:
             self._mypy_analyzer.clear_cache()
         else:
@@ -547,6 +708,7 @@ class ChangeMapper:
             from fastapi_endpoint_detector.analyzer.mypy_analyzer import (
                 MypyAnalyzer,
             )
+
             if self.app_path.is_file():
                 package_path = self.app_path.parent
             else:

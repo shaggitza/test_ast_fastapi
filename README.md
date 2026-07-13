@@ -53,6 +53,9 @@ fastapi-endpoint-detector analyze --app path/to/main.py --diff changes.diff
 # Output as JSON
 fastapi-endpoint-detector analyze --app path/to/main.py --diff changes.diff --format json
 
+# Use SCIP instead of mypy for reverse dependency analysis
+fastapi-endpoint-detector analyze --app path/to/project --diff changes.diff --scip --secure-ast
+
 # Output as Markdown
 fastapi-endpoint-detector analyze --app path/to/main.py --diff changes.diff --format markdown
 
@@ -99,7 +102,26 @@ fastapi-endpoint-detector analyze [OPTIONS]
 | `--verbose` | `-v` | No | Enable verbose output |
 | `--no-cache` | | No | Disable caching of analysis results |
 | `--clear-cache` | | No | Clear cached analysis data before running |
+| `--scip` | | No | Use SCIP reverse-impact analysis instead of mypy |
+| `--secure-ast` | | No | Discover endpoints without importing application code |
 | `--config` | `-c` | No | Path to configuration file |
+
+`--scip` requires pinned external tools on `PATH`: `scip-query` 0.16.0,
+`@sourcegraph/scip-python` 0.6.6, and SCIP CLI. Install Node tooling outside the
+analyzed repository so it does not affect indexing:
+
+```bash
+mkdir -p ~/.local/share/fastapi-endpoint-detector-scip
+cd ~/.local/share/fastapi-endpoint-detector-scip
+npm install --omit=optional scip-query@0.16.0 @sourcegraph/scip-python@0.6.6
+export PATH="$PWD/node_modules/.bin:$PATH"  # also add the SCIP CLI directory
+```
+
+`scip-python-plus` must not be visible because it missed dependency-injected
+callers in validation. The command fails explicitly rather than silently
+falling back to mypy. Deleted definitions currently require a future baseline
+SCIP index and therefore fail explicitly; `--secure-ast` also retains its known
+limitation around dynamic router/mount prefix composition.
 
 ### `list` - List Endpoints
 
