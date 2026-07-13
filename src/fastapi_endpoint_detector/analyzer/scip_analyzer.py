@@ -136,7 +136,7 @@ class SCIPAnalyzer:
         if commands and not any("scip-python index" in command for command in commands):
             raise SCIPAnalyzerError(f"Unexpected Python SCIP indexer provenance: {commands!r}")
 
-    def _relative_file(self, file_path: Path) -> Path:
+    def _relative_file(self, file_path: Path, *, repository_relative: bool = False) -> Path:
         if file_path.is_absolute():
             try:
                 return file_path.resolve().relative_to(self.project_root)
@@ -145,6 +145,13 @@ class SCIPAnalyzer:
                     f"Changed file is outside SCIP project: {file_path}"
                 ) from error
         candidate = file_path
+        if repository_relative and self.project_root.name in candidate.parts:
+            root_index = (
+                len(candidate.parts) - 1 - candidate.parts[::-1].index(self.project_root.name)
+            )
+            stripped = Path(*candidate.parts[root_index + 1 :])
+            if stripped.parts and (self.project_root / stripped).exists():
+                return stripped
         if (self.project_root / candidate).exists():
             return candidate
         parts = candidate.parts
@@ -194,7 +201,8 @@ class SCIPAnalyzer:
 
     def definitions_at(self, file_path: Path, lines: set[int]) -> tuple[SCIPDefinition, ...]:
         found: dict[str, SCIPDefinition] = {}
-        definitions = self.outline(file_path)
+        relative = self._relative_file(file_path, repository_relative=True)
+        definitions = self.outline(relative)
         for line in lines:
             containing = [item for item in definitions if item.start_line <= line <= item.end_line]
             if containing:

@@ -108,9 +108,9 @@ class DiffParser:
         else:
             path = Path(DiffParser._strip_git_prefix(patched_file.target_file, "b/"))
 
-        # For renames, also capture the source path
+        # Preserve the old-side path for every change that has a source file.
         source_path = None
-        if change_type == ChangeType.RENAMED:
+        if change_type != ChangeType.ADDED:
             source_path = Path(DiffParser._strip_git_prefix(patched_file.source_file, "a/"))
 
         # Parse all hunks

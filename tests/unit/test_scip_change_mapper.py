@@ -4,13 +4,44 @@ from pathlib import Path
 
 import pytest
 
-from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
+from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper, ChangeMapperError
 from fastapi_endpoint_detector.analyzer.scip_analyzer import (
     SCIPAnalyzerError,
     SCIPDefinition,
     SCIPReachedDefinition,
 )
 from fastapi_endpoint_detector.parser.diff_parser import DiffParser
+
+
+class BaselineDeletionAnalyzer:
+    def ensure_index(self, *, force: bool = False) -> None:
+        assert force
+
+    def definitions_at(self, file_path: Path, lines: set[int]):
+        assert file_path == Path("services.py")
+        assert lines in ({1}, {2})
+        return (SCIPDefinition("removed", "services:removed()", Path("services.py"), 1, 2),)
+
+    def affected(self, _seed: SCIPDefinition, *, max_depth: int | None = None):
+        assert max_depth == 10
+        return (
+            SCIPReachedDefinition(
+                SCIPDefinition("handler", "main:items()", Path("main.py"), 5, 7),
+                1,
+            ),
+        )
+
+
+class EmptyTargetAnalyzer:
+    def ensure_index(self, *, force: bool = False) -> None:
+        assert force
+
+    def definitions_at(self, _file_path: Path, _lines: set[int]):
+        return ()
+
+    def affected(self, _seed: SCIPDefinition, *, max_depth: int | None = None):
+        assert max_depth is not None
+        return ()
 
 
 class FakeSCIPAnalyzer:
@@ -47,6 +78,22 @@ class FakeSCIPAnalyzer:
         )
 
 
+def test_programmatic_baseline_requires_scip(tmp_path: Path) -> None:
+    with pytest.raises(ChangeMapperError, match="only with use_scip"):
+        ChangeMapper(tmp_path, baseline_app_path=tmp_path)
+
+
+def test_scip_mapper_rejects_identical_target_and_baseline(tmp_path: Path) -> None:
+    with pytest.raises(ChangeMapperError, match="must differ"):
+        ChangeMapper(
+            tmp_path,
+            use_cache=False,
+            secure_ast=True,
+            use_scip=True,
+            baseline_app_path=tmp_path,
+        )
+
+
 def test_scip_mapper_rejects_deleted_definitions_without_baseline_index(
     tmp_path: Path,
 ) -> None:
@@ -62,17 +109,64 @@ def test_scip_mapper_rejects_deleted_definitions_without_baseline_index(
         "-    return 1\n"
     )[0]
 
-    with pytest.raises(SCIPAnalyzerError, match="baseline dual-index"):
+    with pytest.raises(SCIPAnalyzerError, match="--baseline-app"):
         mapper._analyze_with_scip([diff_file], None)
 
 
+def test_deleted_helper_uses_baseline_index_and_unchanged_target_endpoint(
+    tmp_path: Path,
+) -> None:
+    baseline = tmp_path / "baseline"
+    target = tmp_path / "target"
+    baseline.mkdir()
+    target.mkdir()
+    main_source = (
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n\n"
+        "@app.get('/items')\n"
+        "def items():\n"
+        "    return 1\n"
+    )
+    (baseline / "main.py").write_text(main_source)
+    (target / "main.py").write_text(main_source)
+    (baseline / "services.py").write_text("def removed():\n    return 1\n")
+    diff_file = DiffParser.parse_string(
+        "diff --git a/services.py b/services.py\n"
+        "deleted file mode 100644\n"
+        "--- a/services.py\n"
+        "+++ /dev/null\n"
+        "@@ -1,2 +0,0 @@\n"
+        "-def removed():\n"
+        "-    return 1\n"
+    )[0]
+    mapper = ChangeMapper(
+        target,
+        use_cache=False,
+        secure_ast=True,
+        use_scip=True,
+        baseline_app_path=baseline,
+    )
+    mapper._scip_analyzer = EmptyTargetAnalyzer()  # type: ignore[assignment]
+    mapper._baseline_scip_analyzer = BaselineDeletionAnalyzer()  # type: ignore[assignment]
+
+    affected, orphans = mapper._analyze_with_scip([diff_file], None)
+
+    assert [item.endpoint.identifier for item in affected] == ["GET /items"]
+    assert affected[0].endpoint.handler.file_path == target / "main.py"
+    assert not orphans
+
+
 def test_scip_mapper_reaches_direct_and_depends_endpoints(tmp_path: Path) -> None:
-    (tmp_path / "services.py").write_text(
+    target = tmp_path / "target"
+    baseline = tmp_path / "baseline"
+    target.mkdir()
+    baseline.mkdir()
+    (target / "services.py").write_text(
         "def calculate_total(price: float, quantity: int) -> float:\n"
         "    return round(price * quantity, 2)\n",
         encoding="utf-8",
     )
-    (tmp_path / "main.py").write_text(
+    (target / "main.py").write_text(
         "from fastapi import Depends, FastAPI\n"
         "from services import calculate_total\n"
         "app = FastAPI()\n\n"
@@ -96,8 +190,17 @@ def test_scip_mapper_reaches_direct_and_depends_endpoints(tmp_path: Path) -> Non
         "+    return round(price * quantity, 2)\n",
         encoding="utf-8",
     )
-    mapper = ChangeMapper(tmp_path, use_cache=False, secure_ast=True, use_scip=True)
+    for name in ("services.py", "main.py"):
+        (baseline / name).write_text((target / name).read_text(encoding="utf-8"))
+    mapper = ChangeMapper(
+        target,
+        use_cache=False,
+        secure_ast=True,
+        use_scip=True,
+        baseline_app_path=baseline,
+    )
     mapper._scip_analyzer = FakeSCIPAnalyzer()  # type: ignore[assignment]
+    mapper._baseline_scip_analyzer = FakeSCIPAnalyzer()  # type: ignore[assignment]
 
     report = mapper.analyze_diff(diff)
 

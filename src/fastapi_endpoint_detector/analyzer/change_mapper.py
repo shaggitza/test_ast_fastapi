@@ -21,7 +21,7 @@ from fastapi_endpoint_detector.analyzer.scip_analyzer import (
     SCIPDefinition,
 )
 from fastapi_endpoint_detector.config import Config
-from fastapi_endpoint_detector.models.diff import ChangeType, DiffFile
+from fastapi_endpoint_detector.models.diff import DiffFile
 from fastapi_endpoint_detector.models.endpoint import Endpoint
 from fastapi_endpoint_detector.models.report import (
     AffectedEndpoint,
@@ -178,6 +178,7 @@ class ChangeMapper:
         use_cache: bool = True,
         secure_ast: bool = False,
         use_scip: bool = False,
+        baseline_app_path: Path | None = None,
     ) -> None:
         """
         Initialize the change mapper.
@@ -189,6 +190,7 @@ class ChangeMapper:
             use_cache: Whether to use cached analysis results (default True).
             secure_ast: Discover endpoints without importing application code.
             use_scip: Use SCIP rather than mypy for reverse dependency analysis.
+            baseline_app_path: Explicit baseline snapshot used for removed SCIP lines.
         """
         self.app_path = app_path.resolve()
         self.config = config or Config()
@@ -196,12 +198,27 @@ class ChangeMapper:
         self.use_cache = use_cache
         self.secure_ast = secure_ast
         self.use_scip = use_scip
+        if baseline_app_path is not None and not use_scip:
+            raise ChangeMapperError("baseline_app_path is valid only with use_scip=True")
+        self.baseline_app_path = baseline_app_path.resolve() if baseline_app_path else None
+        target_project_root = self.app_path.parent if self.app_path.is_file() else self.app_path
+        baseline_project_root = (
+            self.baseline_app_path.parent
+            if self.baseline_app_path is not None and self.baseline_app_path.is_file()
+            else self.baseline_app_path
+        )
+        if baseline_project_root == target_project_root:
+            raise ChangeMapperError(
+                "baseline_app_path project root must differ from the target app_path root"
+            )
 
         # These are lazily initialized
         self._extractor: FastAPIExtractor | SecureASTExtractor | None = None
         self._registry: EndpointRegistry | None = None
         self._mypy_analyzer: MypyAnalyzer | None = None
         self._scip_analyzer: SCIPAnalyzer | None = None
+        self._baseline_registry: EndpointRegistry | None = None
+        self._baseline_scip_analyzer: SCIPAnalyzer | None = None
 
     @property
     def extractor(self) -> FastAPIExtractor | SecureASTExtractor:
@@ -230,6 +247,34 @@ class ChangeMapper:
             package_path = self.app_path.parent if self.app_path.is_file() else self.app_path
             self._scip_analyzer = SCIPAnalyzer(package_path, use_cache=self.use_cache)
         return self._scip_analyzer
+
+    @property
+    def baseline_registry(self) -> EndpointRegistry:
+        """Securely discover endpoints from the explicit baseline snapshot."""
+        if self.baseline_app_path is None:
+            raise SCIPAnalyzerError("Removed Python lines require --baseline-app with --scip")
+        if self._baseline_registry is None:
+            extractor = SecureASTExtractor(
+                app_path=self.baseline_app_path,
+                app_variable=self.app_variable,
+            )
+            self._baseline_registry = EndpointRegistry()
+            self._baseline_registry.register_many(extractor.extract_endpoints())
+        return self._baseline_registry
+
+    @property
+    def baseline_scip_analyzer(self) -> SCIPAnalyzer:
+        """Get the SCIP analyzer for the explicit baseline snapshot."""
+        if self.baseline_app_path is None:
+            raise SCIPAnalyzerError("Removed Python lines require --baseline-app with --scip")
+        if self._baseline_scip_analyzer is None:
+            package_path = (
+                self.baseline_app_path.parent
+                if self.baseline_app_path.is_file()
+                else self.baseline_app_path
+            )
+            self._baseline_scip_analyzer = SCIPAnalyzer(package_path, use_cache=self.use_cache)
+        return self._baseline_scip_analyzer
 
     @property
     def mypy_analyzer(self) -> "MypyAnalyzer":
@@ -522,13 +567,93 @@ class ChangeMapper:
         python_files: list[DiffFile],
         progress_callback: ProgressCallback | None,
     ) -> tuple[list[AffectedEndpoint], list[OrphanChange]]:
-        """Map changed definitions through SCIP reverse impact to endpoint handlers."""
+        """Map target additions and baseline removals through separate SCIP indexes."""
+        has_removed = any(
+            (diff_file.source_path or diff_file.path).suffix == ".py"
+            and bool(DiffParser.get_changed_line_numbers(diff_file)[1])
+            for diff_file in python_files
+        )
+        if has_removed and self.baseline_app_path is None:
+            raise SCIPAnalyzerError(
+                "SCIP analysis of removed Python lines requires an explicit --baseline-app snapshot"
+            )
         if progress_callback:
-            progress_callback(10, 100, "Indexing Python with SCIP...")
+            progress_callback(10, 100, "Indexing target Python with SCIP...")
         self.scip_analyzer.ensure_index(force=not self.use_cache)
+        if has_removed:
+            self.baseline_scip_analyzer.ensure_index(force=not self.use_cache)
+
         affected: dict[tuple[str, str, int, str, str], _AffectedAccumulator] = {}
         orphan_evidence: dict[str, _OrphanAccumulator] = {}
-        project_root = self.app_path.parent if self.app_path.is_file() else self.app_path
+        target_root = self.app_path.parent if self.app_path.is_file() else self.app_path
+        baseline_root = (
+            self.baseline_app_path.parent
+            if self.baseline_app_path is not None and self.baseline_app_path.is_file()
+            else self.baseline_app_path
+        )
+        max_depth = self.config.parser.max_depth if self.config.analysis.track_transitive else 1
+
+        def target_equivalent(endpoint: Endpoint) -> Endpoint:
+            # Public route identity survives ordinary handler/module renames. Use
+            # the target occurrence when it is unambiguous; otherwise preserve
+            # baseline evidence rather than guessing among duplicate routes.
+            matches = [
+                candidate
+                for candidate in self.registry
+                if candidate.identifier == endpoint.identifier
+            ]
+            return matches[0] if len(matches) == 1 else endpoint
+
+        def analyze_side(
+            analyzer: SCIPAnalyzer,
+            registry: EndpointRegistry,
+            root: Path,
+            file_path: Path,
+            lines: list[int],
+            side: str,
+        ) -> set[int]:
+            seeds: dict[str, tuple[SCIPDefinition, set[int]]] = {}
+            for line in lines:
+                for seed in analyzer.definitions_at(file_path, {line}):
+                    existing = seeds.get(seed.symbol)
+                    if existing is None:
+                        seeds[seed.symbol] = (seed, {line})
+                    else:
+                        existing[1].add(line)
+            processed: set[int] = set()
+            for seed, seed_lines in seeds.values():
+                reached_endpoint = False
+                for reached in analyzer.affected(seed, max_depth=max_depth):
+                    definition = reached.definition
+                    endpoints = registry.get_by_line_range(
+                        root / definition.file_path,
+                        definition.start_line,
+                        definition.end_line,
+                    )
+                    for discovered in endpoints:
+                        reached_endpoint = True
+                        endpoint = (
+                            target_equivalent(discovered) if side == "baseline" else discovered
+                        )
+                        confidence = (
+                            ConfidenceLevel.HIGH if reached.depth == 0 else ConfidenceLevel.MEDIUM
+                        )
+                        _merge_affected(
+                            affected,
+                            AffectedEndpoint(
+                                endpoint=endpoint,
+                                confidence=confidence,
+                                reason=(
+                                    f"SCIP {side} reverse impact from {seed.short_name} "
+                                    f"to {definition.short_name} at depth {reached.depth}"
+                                ),
+                                dependency_chain=[seed.symbol, definition.symbol],
+                                changed_files=[str(file_path)],
+                            ),
+                        )
+                if reached_endpoint:
+                    processed.update(seed_lines)
+            return processed
 
         for index, diff_file in enumerate(python_files):
             if progress_callback:
@@ -538,76 +663,46 @@ class ChangeMapper:
                     f"Querying SCIP impact for {diff_file.path.name}...",
                 )
             added_lines, removed_lines = DiffParser.get_changed_line_numbers(diff_file)
-            if diff_file.change_type == ChangeType.DELETED or any(
-                hunk.removed_lines and not hunk.added_lines for hunk in diff_file.hunks
-            ):
-                raise SCIPAnalyzerError(
-                    f"SCIP post-change index cannot analyze deleted definitions in {diff_file.path}; "
-                    "baseline dual-index support is required"
-                )
-
-            seed_evidence: dict[str, tuple[SCIPDefinition, set[int], set[int]]] = {}
-            for hunk in diff_file.hunks:
-                for line in hunk.added_lines:
-                    for seed in self.scip_analyzer.definitions_at(diff_file.path, {line}):
-                        existing_seed = seed_evidence.get(seed.symbol)
-                        if existing_seed is None:
-                            seed_evidence[seed.symbol] = (
-                                seed,
-                                {line},
-                                set(hunk.removed_lines),
-                            )
-                        else:
-                            existing_seed[1].add(line)
-                            existing_seed[2].update(hunk.removed_lines)
-
             processed_added: set[int] = set()
-            processed_removed: set[int] = set()
-            for seed_value, seed_added, seed_removed in seed_evidence.values():
-                seed = seed_value
-                seed_reached_endpoint = False
-                max_depth = (
-                    self.config.parser.max_depth if self.config.analysis.track_transitive else 1
+            if diff_file.path.suffix == ".py" and added_lines:
+                processed_added = analyze_side(
+                    self.scip_analyzer,
+                    self.registry,
+                    target_root,
+                    diff_file.path,
+                    added_lines,
+                    "target",
                 )
-                for reached in self.scip_analyzer.affected(seed, max_depth=max_depth):
-                    definition = reached.definition
-                    endpoints = self.registry.get_by_line_range(
-                        project_root / definition.file_path,
-                        definition.start_line,
-                        definition.end_line,
-                    )
-                    for endpoint in endpoints:
-                        seed_reached_endpoint = True
-                        confidence = (
-                            ConfidenceLevel.HIGH if reached.depth == 0 else ConfidenceLevel.MEDIUM
-                        )
-                        candidate = AffectedEndpoint(
-                            endpoint=endpoint,
-                            confidence=confidence,
-                            reason=(
-                                f"SCIP reverse impact from {seed.short_name} "
-                                f"to {definition.short_name} at depth {reached.depth}"
-                            ),
-                            dependency_chain=[seed.symbol, definition.symbol],
-                            changed_files=[str(diff_file.path)],
-                        )
-                        _merge_affected(affected, candidate)
-                if seed_reached_endpoint:
-                    processed_added.update(seed_added)
-                    processed_removed.update(seed_removed)
+            processed_removed: set[int] = set()
+            source_path = diff_file.source_path or diff_file.path
+            if removed_lines and source_path.suffix == ".py":
+                assert baseline_root is not None
+                processed_removed = analyze_side(
+                    self.baseline_scip_analyzer,
+                    self.baseline_registry,
+                    baseline_root,
+                    source_path,
+                    removed_lines,
+                    "baseline",
+                )
 
-            orphan_key = _normalized_diff_path(diff_file.path)
-            evidence = orphan_evidence.setdefault(
-                orphan_key,
-                _OrphanAccumulator(
-                    file_path=str(diff_file.path),
-                    reason=("Changed lines did not resolve through SCIP to a registered endpoint"),
-                ),
-            )
-            evidence.added.update(added_lines)
-            evidence.removed.update(removed_lines)
-            evidence.processed_added.update(processed_added)
-            evidence.processed_removed.update(processed_removed)
+            reason = "Changed lines did not resolve through SCIP to a registered endpoint"
+            if diff_file.path.suffix == ".py" and added_lines:
+                target_key = _normalized_diff_path(diff_file.path)
+                target_evidence = orphan_evidence.setdefault(
+                    target_key,
+                    _OrphanAccumulator(file_path=str(diff_file.path), reason=reason),
+                )
+                target_evidence.added.update(added_lines)
+                target_evidence.processed_added.update(processed_added)
+            if source_path.suffix == ".py" and removed_lines:
+                source_key = _normalized_diff_path(source_path)
+                source_evidence = orphan_evidence.setdefault(
+                    source_key,
+                    _OrphanAccumulator(file_path=str(source_path), reason=reason),
+                )
+                source_evidence.removed.update(removed_lines)
+                source_evidence.processed_removed.update(processed_removed)
 
         orphan_changes = [
             orphan

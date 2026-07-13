@@ -16,6 +16,7 @@ import os
 import platform
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -81,16 +82,24 @@ def command(
     timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a command without a shell and capture its output."""
-    return subprocess.run(
-        list(args),
+    command_args = list(args)
+    process = subprocess.Popen(  # noqa: S603 - commands always use argv arrays
+        command_args,
         cwd=cwd,
-        timeout=timeout,
-        check=False,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
         errors="replace",
+        start_new_session=True,
     )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
+        raise
+    return subprocess.CompletedProcess(command_args, process.returncode, stdout, stderr)
 
 
 def checked_command(args: Sequence[str], *, cwd: Path | None = None) -> str:
@@ -336,6 +345,7 @@ def invoke_analyzer(
     *,
     secure_ast: bool,
     use_scip: bool,
+    baseline_app_root: Path | None = None,
 ) -> tuple[list[dict[str, Any]], list[str], float]:
     """Invoke the frozen candidate in secure or explicitly unsafe mode."""
     args = [
@@ -356,6 +366,8 @@ def invoke_analyzer(
         args.append("--secure-ast")
     if use_scip:
         args.append("--scip")
+        if baseline_app_root is not None:
+            args.extend(["--baseline-app", str(baseline_app_root)])
     started = time.monotonic()
     try:
         result = command(args, cwd=candidate_root, timeout=timeout)
@@ -470,14 +482,21 @@ def process_entry(  # noqa: PLR0915
         with tempfile.TemporaryDirectory(prefix="current-analyzer-") as temporary_name:
             temporary = Path(temporary_name)
             worktree = temporary / "target"
+            baseline_worktree = temporary / "baseline"
             patch_path = temporary / "change.diff"
             worktree_added = False
+            baseline_worktree_added = False
             try:
                 # Changed/added line numbers and endpoint discovery are target-side.
                 # Baseline analysis, when added, must use a separate explicit snapshot.
-                add_detached_worktree(repository_cache, worktree, merge_sha)
                 worktree_added = True
+                add_detached_worktree(repository_cache, worktree, merge_sha)
                 app_root = safe_app_root(worktree, configured_root)
+                baseline_app_root: Path | None = None
+                if config.use_scip:
+                    baseline_worktree_added = True
+                    add_detached_worktree(repository_cache, baseline_worktree, base_sha)
+                    baseline_app_root = safe_app_root(baseline_worktree, configured_root)
                 timings["worktree"] = time.monotonic() - phase_started
                 phase_started = time.monotonic()
 
@@ -492,9 +511,12 @@ def process_entry(  # noqa: PLR0915
                     config.timeout,
                     secure_ast=not config.allow_upstream_execution,
                     use_scip=config.use_scip,
+                    baseline_app_root=baseline_app_root,
                 )
                 timings["analyzer"] = analyzer_seconds
             finally:
+                if baseline_worktree_added:
+                    remove_worktree(repository_cache, baseline_worktree)
                 if worktree_added:
                     remove_worktree(repository_cache, worktree)
 
@@ -589,6 +611,24 @@ def candidate_metadata(
     git_sha = git_result.stdout.strip() if git_result.returncode == 0 else "unknown"
     status_result = command(["git", "status", "--porcelain"], cwd=candidate_root)
     dirty = bool(status_result.stdout.strip()) if status_result.returncode == 0 else None
+    dirty_sha256: str | None = None
+    if dirty:
+        digest = hashlib.sha256(status_result.stdout.encode())
+        diff_result = command(["git", "diff", "--binary", "HEAD"], cwd=candidate_root)
+        digest.update(diff_result.stdout.encode())
+        untracked = command(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            cwd=candidate_root,
+        )
+        for relative in sorted(path for path in untracked.stdout.split("\0") if path):
+            path_bytes = relative.encode()
+            digest.update(len(path_bytes).to_bytes(8, "big"))
+            digest.update(path_bytes)
+            candidate_file = candidate_root / relative
+            content = candidate_file.read_bytes() if candidate_file.is_file() else b""
+            digest.update(len(content).to_bytes(8, "big"))
+            digest.update(content)
+        dirty_sha256 = digest.hexdigest()
     lock_path = candidate_root / "uv.lock"
     lock_sha256 = hashlib.sha256(lock_path.read_bytes()).hexdigest() if lock_path.exists() else None
     uv_result = command(["uv", "--version"], cwd=candidate_root)
@@ -603,7 +643,10 @@ def candidate_metadata(
         separators=(",", ":"),
     )
     config_hash = hashlib.sha256(candidate_config.encode()).hexdigest()[:12]
-    candidate_id = f"fastapi-endpoint-detector/{version}/{git_sha[:12]}/{config_hash}"
+    source_id = git_sha[:12]
+    if dirty_sha256 is not None:
+        source_id = f"{source_id}+dirty.{dirty_sha256[:12]}"
+    candidate_id = f"fastapi-endpoint-detector/{version}/{source_id}/{config_hash}"
     return {
         "id": candidate_id,
         "name": "fastapi-endpoint-detector",
@@ -611,6 +654,7 @@ def candidate_metadata(
         "git_sha": git_sha,
         "config_hash": config_hash,
         "dirty": dirty,
+        "dirty_sha256": dirty_sha256,
         "uv_lock_sha256": lock_sha256,
         "uv_version": uv_version,
         "command": "uv run --frozen fastapi-endpoint-detector analyze",

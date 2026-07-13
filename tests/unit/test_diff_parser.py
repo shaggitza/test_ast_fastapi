@@ -11,6 +11,19 @@ from fastapi_endpoint_detector.parser.diff_parser import DiffParser, DiffParserE
 
 
 class TestDiffParser:
+    def test_rename_preserves_old_path_and_python_identity(self) -> None:
+        diff = """diff --git a/old.py b/new.txt
+similarity index 100%
+rename from old.py
+rename to new.txt
+"""
+
+        parsed = DiffParser.parse_string(diff)
+
+        assert parsed[0].path == Path("new.txt")
+        assert parsed[0].source_path == Path("old.py")
+        assert parsed[0].is_python_file
+
     def test_preserves_leading_characters_after_exact_git_prefix(self) -> None:
         diff = """diff --git a/backend/app.py b/backend/app.py
 --- a/backend/app.py
@@ -23,6 +36,7 @@ class TestDiffParser:
         parsed = DiffParser.parse_string(diff)
 
         assert parsed[0].path == Path("backend/app.py")
+        assert parsed[0].source_path == Path("backend/app.py")
 
     """Tests for the DiffParser class."""
 
