@@ -83,10 +83,22 @@ def low_diagnostics(
     }
 
 
-def predicted_ids_by_kind(identifiers: set[str]) -> dict[str, set[str]]:
+def predicted_ids_by_kind(record: dict[str, Any], identifiers: set[str]) -> dict[str, set[str]]:
+    rank = {"low": 0, "medium": 1, "high": 2}
+    items = record.get("candidate_entrypoints")
+    if not items:
+        items = record.get("affected_entrypoints", [])
+    strongest: dict[str, tuple[int, str]] = {}
+    for item in items:
+        identifier = item["id"]
+        if identifier not in identifiers:
+            continue
+        item_rank = rank.get(str(item.get("confidence", "medium")).lower(), 1)
+        kind = str(item.get("kind", "unknown")).lower()
+        if identifier not in strongest or item_rank > strongest[identifier][0]:
+            strongest[identifier] = (item_rank, kind)
     grouped: dict[str, set[str]] = defaultdict(set)
-    for identifier in identifiers:
-        kind = "http" if identifier.startswith("HTTP ") else "event"
+    for identifier, (_item_rank, kind) in strongest.items():
         grouped[kind].add(identifier)
     return grouped
 
@@ -159,7 +171,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
             negative_controls_with_low_fp += 1
         totals["unresolved"] += len(predicted_record.get("unresolved", []))
         expected_kinds = entrypoints_by_kind(expected_record)
-        predicted_kinds = predicted_ids_by_kind(predicted)
+        predicted_kinds = predicted_ids_by_kind(predicted_record, predicted)
         for kind in expected_kinds.keys() | predicted_kinds.keys():
             expected_kind = expected_kinds.get(kind, set())
             predicted_kind = predicted_kinds.get(kind, set())

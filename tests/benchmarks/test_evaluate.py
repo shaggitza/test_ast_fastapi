@@ -10,6 +10,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def test_ranked_kind_preserves_declared_non_http_kind() -> None:
+    record = {"candidate_entrypoints": [{"id": "CLI sync", "kind": "cli", "confidence": "medium"}]}
+
+    assert evaluate.predicted_ids_by_kind(record, {"CLI sync"}) == {"cli": {"CLI sync"}}
+
+
 def test_stratifies_metrics_by_entrypoint_kind(tmp_path: Path, monkeypatch, capsys) -> None:
     truth = tmp_path / "truth.jsonl"
     predictions = tmp_path / "predictions.jsonl"
