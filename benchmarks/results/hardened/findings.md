@@ -1,56 +1,76 @@
 # Hardened mypy vs SCIP real-world score
 
-Candidate commit: `14cdd876add4571413b55f982ec4ad62d8e42e80`.
+Analyzer candidate: `14cdd876add4571413b55f982ec4ad62d8e42e80`.
+Ground truth was subsequently amended by an evidence-backed FP source audit;
+Review A and Review B remain unchanged.
 
-Corpus: 60 PRs, 58 adjudicated/evaluable, 180 raw labels. Of those, 78 are
-HTTP; the remaining 102 are CLI, cron, event, UI/other, SDK, or task entrypoints
-outside the current FastAPI HTTP adapter.
+## Scope correction
 
-## Raw exact score
+The complete corpus now has 273 adjudicated labels over 58 evaluable PRs.
+The versioned `fastapi-adapter-v1` product scope contains 174 labels:
+166 finite HTTP claims and 8 explicit WebSocket routes. The other 99 labels are
+preserved under `out-of-scope-v1` for future UI, CLI, cron, SDK, task, generic
+event, mounted-app, or wildcard adapters. They no longer depress the FastAPI
+product recall.
 
-| Backend | TP | FP | FN | Precision | Recall | F1 |
-|---|---:|---:|---:|---:|---:|---:|
-| mypy | 10 | 107 | 170 | 8.55% | 5.56% | 6.73% |
-| SCIP dual snapshot + override edges | 15 | 468 | 165 | 3.11% | 8.33% | 4.52% |
+Five labels annotated as HTTP are excluded from the adapter scope because they
+are methodless, mounted-app, descriptive, or global wildcard claims that the
+current method/path output contract cannot emit.
 
-## Conservative normalized score
+## FastAPI-adapter-v1 score
 
-Normalization expands composite methods and handles compatible template names,
-WebSocket casing, unique qualifiers, and frozen evidence-backed aliases. Raw
-metrics above remain unchanged and auditable.
-
-| Backend | TP | FP | FN | Precision | Recall | F1 |
-|---|---:|---:|---:|---:|---:|---:|
-| mypy normalized | 14 | 100 | 169 | 12.28% | 7.65% | 9.43% |
-| SCIP normalized | 19 | 462 | 164 | 3.95% | 10.38% | 5.72% |
-
-The normalized truth contains 183 atomic claims because the four-method OpenAI
-catch-all expands from one display label into four independently matchable
-operations.
-
-## HTTP-only
+### Raw exact
 
 | Backend | TP | FP | FN | Precision | Recall | F1 |
 |---|---:|---:|---:|---:|---:|---:|
-| mypy raw | 10 | 107 | 68 | 8.55% | 12.82% | 10.26% |
-| mypy normalized | 14 | 100 | 67 | 12.28% | 17.28% | 14.36% |
-| SCIP raw | 15 | 468 | 63 | 3.11% | 19.23% | 5.35% |
-| SCIP normalized | 19 | 462 | 62 | 3.95% | 23.46% | 6.76% |
+| mypy | 91 | 26 | 83 | 77.78% | 52.30% | 62.54% |
+| SCIP dual snapshot + override edges | 106 | 377 | 68 | 21.95% | 60.92% | 32.27% |
 
-## What changed
+### Conservative semantic normalization
 
-- Semantic evaluation no longer scores one composite HTTP label as one FN plus
-  four method-specific FPs.
-- Removing the mypy ±3-line heuristic cut the dominant PR #26642 prediction set
-  from 254 to 104 while retaining all 9 raw TP: its FP count fell from 245 to 95.
-- Exact `Annotated[..., Depends/Security(...)]`, nested DI, injected member calls,
-  imported globals, and constructor/`__init__` evidence are modeled by mypy.
-- SCIP seed failures are isolated per symbol instead of aborting a PR.
-- Explicit concrete-to-base override edges recover four HTTP labels on Open
-  WebUI PR #26911 with one additional FP.
+| Backend | TP | FP | FN | Precision | Recall | F1 |
+|---|---:|---:|---:|---:|---:|---:|
+| mypy normalized | **95** | **19** | 82 | **83.33%** | 53.67% | **65.29%** |
+| SCIP normalized | **110** | 371 | **67** | 22.87% | **62.15%** | 33.43% |
 
-SCIP now has materially better HTTP recall; mypy has materially better precision
-and latency. Remaining misses are dominated by non-Python/non-HTTP scope,
-persistent-state effects, dynamic plugin/registry dispatch, ORM/data-flow
-semantics, and conditional runtime behavior. Remaining SCIP FP is still
-dominated by broad compiler reachability in Open WebUI PR #26642.
+Raw exact scoring remains available alongside normalized atomic-claim scoring.
+The normalized scope has 177 atoms because the four-method OpenAI catch-all
+expands into four independently matched operations.
+
+## Repository breakdown (normalized adapter scope)
+
+| Backend | Repository | TP | FP | FN | Precision | Recall |
+|---|---|---:|---:|---:|---:|---:|
+| mypy | Open WebUI | 95 | 19 | 34 | 83.33% | 73.64% |
+| mypy | Langflow | 0 | 0 | 16 | 0% | 0% |
+| mypy | Khoj | 0 | 0 | 32 | 0% | 0% |
+| SCIP | Open WebUI | 110 | 371 | 19 | 22.87% | 85.27% |
+| SCIP | Langflow | 0 | 0 | 16 | 0% | 0% |
+| SCIP | Khoj | 0 | 0 | 32 | 0% | 0% |
+
+The aggregate improvement is therefore real but concentrated in Open WebUI.
+Neither backend currently emits predictions for the evaluated Langflow or Khoj
+PRs.
+
+## FP source audit
+
+Parallel source audits examined normalized disagreements by PR and route family.
+They found 93 valid HTTP surfaces omitted from the original adjudication:
+91 on Open WebUI #26642 and 2 on #26906. Evidence and complete classification
+reports live under `audit/`; machine-readable additions live in
+`benchmarks/real_world/adjudication-amendments.jsonl`.
+
+The remaining mypy FP set is small and mostly consists of call-reachable routes
+without an observable changed behavior. SCIP still expands structural symbols
+to many sibling CRUD routes, so path/data-flow and configuration corroboration
+remain its primary precision need.
+
+## Full all-surface view
+
+For historical comparison, normalized all-surface metrics are:
+
+- mypy: 95 TP / 19 FP / 181 FN, precision 83.33%, recall 34.42%.
+- SCIP: 110 TP / 371 FP / 166 FN, precision 22.87%, recall 39.86%.
+
+These recall values intentionally include the 99 claims requiring other
+adapters and are not the FastAPI product score.

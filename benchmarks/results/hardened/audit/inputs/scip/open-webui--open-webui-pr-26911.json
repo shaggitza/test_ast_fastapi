@@ -1,0 +1,241 @@
+{
+  "backend": "scip",
+  "repository": "open-webui/open-webui",
+  "pr": 26911,
+  "truth": [
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/routers/memories.py:127-153 add_memory calls ASYNC_VECTOR_DB_CLIENT.upsert",
+        "backend/open_webui/retrieval/vector/dbs/milvus_multitenancy.py:146-174 first-write upsert reaches _create_shared_collection"
+      ],
+      "id": "HTTP POST /api/v1/memories/add",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/routers/memories.py:175-226 bulk memory update calls upsert for create/update operations",
+        "Milvus multitenancy upsert reaches the changed shared-collection creation path when the collection is absent"
+      ],
+      "id": "HTTP POST /api/v1/memories/update",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/routers/memories.py:388-415 reset deletes the collection and upserts a nonempty retained memory list",
+        "That upsert recreates the shared collection through the changed method"
+      ],
+      "id": "HTTP POST /api/v1/memories/reset",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/routers/memories.py:476-518 updates a memory and upserts changed content",
+        "A first write reaches MilvusClient._create_shared_collection"
+      ],
+      "id": "HTTP POST /api/v1/memories/{memory_id}/update",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/routers/retrieval.py:1809-1987 process_file calls save_docs_to_vector_db",
+        "save_docs_to_vector_db calls VECTOR_DB_CLIENT.insert, which delegates to Milvus multitenancy upsert and collection creation"
+      ],
+      "id": "HTTP POST /api/v1/retrieval/process/file",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/routers/retrieval.py:2060-2082 process_text calls save_docs_to_vector_db",
+        "The insert/upsert path reaches changed first-write collection creation"
+      ],
+      "id": "HTTP POST /api/v1/retrieval/process/text",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/routers/retrieval.py:2105-2135 processes web documents through save_docs_to_vector_db",
+        "The Milvus insert/upsert path reaches _create_shared_collection"
+      ],
+      "id": "HTTP POST /api/v1/retrieval/process/web",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/routers/retrieval.py:2104 exposes the YouTube route on the same processing function",
+        "Its document-save path reaches Milvus first-write collection creation"
+      ],
+      "id": "HTTP POST /api/v1/retrieval/process/youtube",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/routers/retrieval.py:2515-2650 web search saves resulting documents through save_docs_to_vector_db",
+        "The configured Milvus multitenancy insert path reaches the changed method"
+      ],
+      "id": "HTTP POST /api/v1/retrieval/process/web/search",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/routers/retrieval.py:2961-3052 saves nonempty batch documents through save_docs_to_vector_db",
+        "The Milvus insert/upsert path reaches _create_shared_collection"
+      ],
+      "id": "HTTP POST /api/v1/retrieval/process/files/batch",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/routers/files.py upload handling calls retrieval.process_file",
+        "process_file reaches VECTOR_DB_CLIENT.insert and Milvus first-write collection creation"
+      ],
+      "id": "HTTP POST /api/v1/files/",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/routers/files.py content-update handling calls retrieval.process_file",
+        "process_file reaches the changed Milvus collection-creation path"
+      ],
+      "id": "HTTP POST /api/v1/files/{id}/data/content/update",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/routers/knowledge.py:269-299 create calls embed_knowledge_base_metadata",
+        "backend/open_webui/routers/knowledge.py:77 metadata embedding calls ASYNC_VECTOR_DB_CLIENT.upsert"
+      ],
+      "id": "HTTP POST /api/v1/knowledge/create",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/routers/knowledge.py:409-426 reindex calls embed_knowledge_base_metadata",
+        "Metadata embedding reaches Milvus multitenancy upsert and collection creation"
+      ],
+      "id": "HTTP POST /api/v1/knowledge/metadata/reindex",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/routers/knowledge.py:834-880 external knowledge creation calls embed_knowledge_base_metadata",
+        "The metadata upsert reaches the changed first-write path"
+      ],
+      "id": "HTTP POST /api/v1/knowledge/external/knowledge/create",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/routers/knowledge.py:884-945 external source creation calls embed_knowledge_base_metadata",
+        "The metadata upsert reaches _create_shared_collection"
+      ],
+      "id": "HTTP POST /api/v1/knowledge/external/source/create",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/routers/knowledge.py:949-1025 external source update calls embed_knowledge_base_metadata",
+        "The metadata upsert reaches changed collection creation when absent"
+      ],
+      "id": "HTTP PATCH /api/v1/knowledge/external/source/{id}",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/routers/knowledge.py:1086-1130 knowledge update calls embed_knowledge_base_metadata",
+        "The metadata upsert reaches Milvus first-write shared-collection creation"
+      ],
+      "id": "HTTP POST /api/v1/knowledge/{id}/update",
+      "kind": "http"
+    }
+  ],
+  "predictions": [
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/knowledge/create",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/knowledge/metadata/reindex",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/knowledge/{id}/update",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/memories/reset",
+      "kind": "http"
+    },
+    {
+      "evidence": [],
+      "id": "HTTP POST /api/v1/retrieval/embedding/update",
+      "kind": "http"
+    }
+  ],
+  "normalized_matches": [
+    {
+      "expected": "HTTP POST /api/v1/knowledge/create",
+      "predicted": "HTTP POST /api/v1/knowledge/create",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/knowledge/metadata/reindex",
+      "predicted": "HTTP POST /api/v1/knowledge/metadata/reindex",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/knowledge/{id}/update",
+      "predicted": "HTTP POST /api/v1/knowledge/{id}/update",
+      "rule": "raw_exact",
+      "kind": "http"
+    },
+    {
+      "expected": "HTTP POST /api/v1/memories/reset",
+      "predicted": "HTTP POST /api/v1/memories/reset",
+      "rule": "raw_exact",
+      "kind": "http"
+    }
+  ],
+  "unmatched_predictions": [
+    "HTTP POST /api/v1/retrieval/embedding/update"
+  ],
+  "unmatched_truth": [
+    "HTTP POST /api/v1/memories/add",
+    "HTTP POST /api/v1/memories/update",
+    "HTTP POST /api/v1/memories/{memory_id}/update",
+    "HTTP POST /api/v1/retrieval/process/file",
+    "HTTP POST /api/v1/retrieval/process/text",
+    "HTTP POST /api/v1/retrieval/process/web",
+    "HTTP POST /api/v1/retrieval/process/youtube",
+    "HTTP POST /api/v1/retrieval/process/web/search",
+    "HTTP POST /api/v1/retrieval/process/files/batch",
+    "HTTP POST /api/v1/files/",
+    "HTTP POST /api/v1/files/{id}/data/content/update",
+    "HTTP POST /api/v1/knowledge/external/knowledge/create",
+    "HTTP POST /api/v1/knowledge/external/source/create",
+    "HTTP PATCH /api/v1/knowledge/external/source/{id}"
+  ]
+}

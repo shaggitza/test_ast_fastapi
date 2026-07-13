@@ -1,0 +1,50 @@
+{
+  "backend": "scip",
+  "repository": "open-webui/open-webui",
+  "pr": 26906,
+  "truth": [
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "backend/open_webui/main.py:1007-1009 maps both /api/chat/completions and its /api/v1/chat/completions alias to chat_completion",
+        "backend/open_webui/utils/chat.py:280-282 dispatches pipe-backed models to generate_function_chat_completion",
+        "backend/open_webui/functions.py:206-270 now shallow-copies form_data before base-model substitution and other top-level mutations",
+        "backend/open_webui/utils/middleware.py:4931-4985,5180-5195 retains the caller payload and derives continuation requests from it, so the fix preserves the preset model ID during native tool-call continuation"
+      ],
+      "id": "HTTP POST /api/chat/completions",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; source trace: benchmarks/results/hardened/audit/reviews/pr26906.md"
+      ],
+      "id": "HTTP POST /api/message",
+      "kind": "http"
+    },
+    {
+      "confidence": "confirmed",
+      "evidence": [
+        "Post-adjudication FP audit classified this prediction as a ground-truth gap; source trace: benchmarks/results/hardened/audit/reviews/pr26906.md"
+      ],
+      "id": "HTTP POST /api/v1/messages",
+      "kind": "http"
+    }
+  ],
+  "predictions": [
+    {
+      "evidence": [],
+      "id": "HTTP GET /api/v1/functions/",
+      "kind": "http"
+    }
+  ],
+  "normalized_matches": [],
+  "unmatched_predictions": [
+    "HTTP GET /api/v1/functions/"
+  ],
+  "unmatched_truth": [
+    "HTTP POST /api/chat/completions",
+    "HTTP POST /api/message",
+    "HTTP POST /api/v1/messages"
+  ]
+}
