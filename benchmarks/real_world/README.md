@@ -113,9 +113,21 @@ python benchmarks/real_world/evaluate.py \
   --predictions path/to/predictions.jsonl
 ```
 
-## Important limitation
+## Label status and limitations
 
-The corpus metadata is ready, but labels are intentionally not fabricated.
-Calling agent-generated labels “manual ground truth” without independent review
-and adjudication would bias the comparison. Label completion is tracked as part
-of the benchmark milestone.
+The corpus has complete independent Review A and Review B files plus
+`adjudicated.jsonl`. Two release-scale PRs remain `not_evaluable`; their empty
+or partial endpoint lists must not be interpreted as negative labels.
+
+Pre-adjudication agreement can be reproduced with:
+
+```bash
+python benchmarks/real_world/agreement.py \
+  benchmarks/real_world/review-a.jsonl \
+  benchmarks/real_world/review-b.jsonl
+```
+
+Agreement is intentionally computed from raw entrypoint IDs, before semantic
+aliases are resolved during adjudication. This is conservative: spelling and
+granularity differences count as disagreement even when both reviewers traced
+the same behavior.
