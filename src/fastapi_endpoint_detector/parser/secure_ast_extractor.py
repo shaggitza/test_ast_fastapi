@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path  # noqa: TC003 - Pydantic models consume paths at runtime
-from typing import ClassVar, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, HandlerInfo
 
@@ -45,6 +49,28 @@ class _Edge:
     child_cutoff: int | None
 
 
+@dataclass(frozen=True)
+class _FactoryCall:
+    variable: str
+    line: int
+    call: ast.Call
+
+
+@dataclass(frozen=True)
+class _ImportBinding:
+    line: int
+    module: str
+    symbol: str | None = None
+
+
+@dataclass
+class _FactoryGraph:
+    root: _Object
+    objects: list[_Object] = field(default_factory=list)
+    routes: list[_Route] = field(default_factory=list)
+    edges: list[_Edge] = field(default_factory=list)
+
+
 @dataclass
 class _Module:
     name: str
@@ -53,12 +79,21 @@ class _Module:
     is_package: bool
     imports: dict[str, tuple[str, str]] = field(default_factory=dict)
     module_imports: dict[str, str] = field(default_factory=dict)
+    import_lines: dict[str, int] = field(default_factory=dict)
+    import_bindings: dict[str, list[_ImportBinding]] = field(default_factory=dict)
     fastapi_names: set[str] = field(default_factory=set)
     router_names: set[str] = field(default_factory=set)
     functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = field(default_factory=dict)
+    function_history: dict[str, list[ast.FunctionDef | ast.AsyncFunctionDef]] = field(
+        default_factory=dict
+    )
     objects: dict[str, list[_Object]] = field(default_factory=dict)
     assignments: dict[str, list[int]] = field(default_factory=dict)
     strings: dict[str, list[tuple[int, str | None]]] = field(default_factory=dict)
+    factory_calls: list[_FactoryCall] = field(default_factory=list)
+    factory_objects: list[_Object] = field(default_factory=list)
+    factory_routes: list[_Route] = field(default_factory=list)
+    factory_edges: list[_Edge] = field(default_factory=list)
 
 
 class SecureASTExtractor:
@@ -88,22 +123,39 @@ class SecureASTExtractor:
         aliases = self._module_aliases(modules)
         for module in modules.values():
             self._collect_symbols(module, aliases, modules)
+        # Factory-created exports can be consumed by modules sorted before their
+        # providers. Iterate to a fixed point; each call is materialized once.
+        for _iteration in range(len(modules) + 1):
+            before = sum(len(module.factory_objects) for module in modules.values())
+            for module in modules.values():
+                self._collect_factory_graphs(module, aliases, modules)
+            after = sum(len(module.factory_objects) for module in modules.values())
+            if after == before:
+                break
 
         objects = {
             item.key: item
             for module in modules.values()
-            for history in module.objects.values()
-            for item in history
+            for item in [
+                *(object_item for history in module.objects.values() for object_item in history),
+                *module.factory_objects,
+            ]
         }
         routes = [
             route
             for module in modules.values()
-            for route in self._collect_routes(module, aliases, modules)
+            for route in [
+                *self._collect_routes(module, aliases, modules),
+                *module.factory_routes,
+            ]
         ]
         edges = [
             edge
             for module in modules.values()
-            for edge in self._collect_edges(module, aliases, modules)
+            for edge in [
+                *self._collect_edges(module, aliases, modules),
+                *module.factory_edges,
+            ]
         ]
 
         referenced = {edge.child for edge in edges}
@@ -125,8 +177,8 @@ class SecureASTExtractor:
         # must never silently fall back to a differently named app/router.
         if not roots and entry_module is not None:
             module = modules[entry_module]
-            history = module.objects.get(self.app_variable, [])
-            roots = [history[-1].key] if history and history[-1].kind == "router" else []
+            selected = self._object_at(module, self.app_variable, None)
+            roots = [selected.key] if selected is not None and selected.kind == "router" else []
 
         routes_by_owner: dict[ObjectKey, list[_Route]] = {}
         edges_by_parent: dict[ObjectKey, list[_Edge]] = {}
@@ -221,7 +273,7 @@ class SecureASTExtractor:
             aliases[f"{root_name}.{name}"] = name
         return aliases
 
-    def _collect_symbols(  # noqa: PLR0912 - one ordered pass models module execution
+    def _collect_symbols(  # noqa: PLR0912, PLR0915 - ordered module interpreter
         self,
         module: _Module,
         aliases: dict[str, str],
@@ -232,11 +284,16 @@ class SecureASTExtractor:
                 target_module = self._absolute_import(module, node)
                 for alias in node.names:
                     local = alias.asname or alias.name
+                    module.import_lines[local] = node.lineno
+                    module.functions.pop(local, None)
                     submodule = aliases.get(f"{target_module}.{alias.name}")
                     if submodule in modules:
                         module.module_imports[local] = submodule
+                        binding = _ImportBinding(node.lineno, submodule)
                     else:
                         module.imports[local] = (target_module, alias.name)
+                        binding = _ImportBinding(node.lineno, target_module, alias.name)
+                    module.import_bindings.setdefault(local, []).append(binding)
                     if node.module == "fastapi" and alias.name == "FastAPI":
                         module.fastapi_names.add(local)
                     if node.module == "fastapi" and alias.name == "APIRouter":
@@ -244,49 +301,149 @@ class SecureASTExtractor:
             elif isinstance(node, ast.Import):
                 for alias in node.names:
                     local = alias.asname or alias.name.split(".")[0]
+                    module.import_lines[local] = node.lineno
+                    module.functions.pop(local, None)
                     imported_module = alias.name if alias.asname else alias.name.split(".")[0]
+                    module.import_bindings.setdefault(local, []).append(
+                        _ImportBinding(node.lineno, imported_module)
+                    )
                     module.module_imports[local] = aliases.get(imported_module, imported_module)
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 module.functions[node.name] = node
+                module.function_history.setdefault(node.name, []).append(node)
+                module.assignments.setdefault(node.name, []).append(node.lineno)
+            elif isinstance(node, ast.ClassDef):
+                module.assignments.setdefault(node.name, []).append(node.lineno)
+                module.functions.pop(node.name, None)
+            elif isinstance(node, ast.Delete):
+                for target in node.targets:
+                    for name in _bound_names(target):
+                        module.assignments.setdefault(name, []).append(node.lineno)
+                        module.functions.pop(name, None)
+                        module.strings.setdefault(name, []).append((node.lineno, None))
+                        module.fastapi_names.discard(name)
+                        module.router_names.discard(name)
             elif isinstance(node, (ast.Assign, ast.AnnAssign)):
                 assigned_name = _assignment_name(node)
                 value = node.value
                 if assigned_name is None or value is None:
+                    targets: list[ast.expr] = (
+                        [node.target] if isinstance(node, ast.AnnAssign) else node.targets
+                    )
+                    for target in targets:
+                        for name in _bound_names(target):
+                            module.assignments.setdefault(name, []).append(node.lineno)
+                            module.functions.pop(name, None)
                     continue
                 module.assignments.setdefault(assigned_name, []).append(node.lineno)
+                module.functions.pop(assigned_name, None)
                 string = self._literal_string(value, module, node.lineno)
                 module.strings.setdefault(assigned_name, []).append((node.lineno, string))
-                constructor = self._constructor_kind(value, module)
+                constructor = self._constructor_kind(value, module, node.lineno)
                 if constructor is not None:
                     assert isinstance(value, ast.Call)
                     prefix = self._keyword_string(value, "prefix", module, node.lineno) or ""
                     item = _Object(
-                        key=(module.name, f"{assigned_name}@{node.lineno}"),
+                        key=(module.name, f"{assigned_name}@{_node_token(node)}"),
                         variable=assigned_name,
                         kind=constructor,
                         prefix=prefix,
                         line=node.lineno,
                     )
                     module.objects.setdefault(assigned_name, []).append(item)
+                elif isinstance(value, ast.Call):
+                    # Resolve candidate factories only after every module's symbols
+                    # are collected, so module iteration order cannot affect results.
+                    module.factory_calls.append(_FactoryCall(assigned_name, node.lineno, value))
                 # Python assignments can shadow imported constructors. Constructor
                 # recognition after this statement must follow the rebound name.
                 module.fastapi_names.discard(assigned_name)
                 module.router_names.discard(assigned_name)
 
-    def _constructor_kind(self, value: ast.expr, module: _Module) -> ObjectKind | None:
+    def _latest_assignment(self, module: _Module, name: str, line: int) -> int | None:
+        eligible = [item for item in module.assignments.get(name, []) if item <= line]
+        if not eligible or eligible.count(eligible[-1]) > 1:
+            return None
+        return eligible[-1]
+
+    def _latest_binding_line(self, module: _Module, name: str, line: int) -> int | None:
+        candidates = [
+            *(item for item in module.assignments.get(name, []) if item <= line),
+            *(item.line for item in module.import_bindings.get(name, []) if item.line <= line),
+        ]
+        return max(candidates) if candidates else None
+
+    def _import_binding_at(self, module: _Module, name: str, line: int) -> _ImportBinding | None:
+        eligible = [item for item in module.import_bindings.get(name, []) if item.line <= line]
+        if not eligible:
+            return None
+        binding = eligible[-1]
+        assigned = self._latest_assignment(module, name, line)
+        return binding if assigned is None or binding.line > assigned else None
+
+    def _function_at(
+        self, module: _Module, name: str, line: int
+    ) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+        eligible = [item for item in module.function_history.get(name, []) if item.lineno <= line]
+        if not eligible:
+            return None
+        function = eligible[-1]
+        return (
+            function if self._latest_binding_line(module, name, line) == function.lineno else None
+        )
+
+    def _factory_target(
+        self,
+        value: ast.expr,
+        module: _Module,
+        aliases: dict[str, str],
+        modules: dict[str, _Module],
+        line: int,
+    ) -> tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef] | None:
         if not isinstance(value, ast.Call):
             return None
         if isinstance(value.func, ast.Name):
-            if value.func.id in module.fastapi_names:
+            local = self._function_at(module, value.func.id, line)
+            if local is not None:
+                return module, local
+            binding = self._import_binding_at(module, value.func.id, line)
+            if binding is not None and binding.symbol is not None:
+                target = modules.get(aliases.get(binding.module, binding.module))
+                if target is not None:
+                    function = self._function_at(target, binding.symbol, 2**31 - 1)
+                    if function is not None:
+                        return target, function
+        elif isinstance(value.func, ast.Attribute) and isinstance(value.func.value, ast.Name):
+            binding = self._import_binding_at(module, value.func.value.id, line)
+            target_name = binding.module if binding is not None and binding.symbol is None else ""
+            target = modules.get(aliases.get(target_name, target_name))
+            if target is not None:
+                function = self._function_at(target, value.func.attr, 2**31 - 1)
+                if function is not None:
+                    return target, function
+        return None
+
+    def _constructor_kind(self, value: ast.expr, module: _Module, line: int) -> ObjectKind | None:
+        if not isinstance(value, ast.Call):
+            return None
+
+        if isinstance(value.func, ast.Name):
+            binding = self._import_binding_at(module, value.func.id, line)
+            imported = (binding.module, binding.symbol) if binding is not None else None
+            if imported == ("fastapi", "FastAPI"):
                 return "app"
-            if value.func.id in module.router_names:
+            if imported == ("fastapi", "APIRouter"):
                 return "router"
         if isinstance(value.func, ast.Attribute) and isinstance(value.func.value, ast.Name):
-            imported = module.module_imports.get(value.func.value.id)
-            if imported == "fastapi" and value.func.attr == "FastAPI":
-                return "app"
-            if imported == "fastapi" and value.func.attr == "APIRouter":
-                return "router"
+            binding = self._import_binding_at(module, value.func.value.id, line)
+            imported_module = (
+                binding.module if binding is not None and binding.symbol is None else None
+            )
+            if imported_module == "fastapi":
+                if value.func.attr == "FastAPI":
+                    return "app"
+                if value.func.attr == "APIRouter":
+                    return "router"
         return None
 
     def _object_at(self, module: _Module, name: str, line: int | None) -> _Object | None:
@@ -299,7 +456,574 @@ class SecureASTExtractor:
             assignments if line is None else [item for item in assignments if item <= line]
         )
         item = eligible[-1]
-        return item if eligible_assignments and item.line == eligible_assignments[-1] else None
+        if eligible_assignments.count(eligible_assignments[-1]) > 1:
+            return None
+        latest_binding = self._latest_binding_line(
+            module, name, line if line is not None else 2**31 - 1
+        )
+        return item if eligible_assignments and item.line == latest_binding else None
+
+    def _collect_factory_graphs(
+        self,
+        module: _Module,
+        aliases: dict[str, str],
+        modules: dict[str, _Module],
+    ) -> None:
+        for call in module.factory_calls:
+            call_token = _node_token(call.call)
+            desired_key = (module.name, f"{call.variable}@{call_token}")
+            if any(
+                item.key == desired_key for history in module.objects.values() for item in history
+            ):
+                continue
+            target = self._factory_target(call.call, module, aliases, modules, call.line)
+            if target is None:
+                continue
+            definition_module, function = target
+            resolve_call_argument: Callable[[ast.expr], str | None] = partial(
+                self._literal_string, module=module, line=call.line
+            )
+
+            graph = self._summarize_factory(
+                definition_module,
+                function,
+                aliases,
+                modules,
+                desired_key=desired_key,
+                desired_variable=call.variable,
+                call_line=call.line,
+                namespace=f"{module.name}:{call.variable}@{call_token}",
+                stack=frozenset(),
+                call=call.call,
+                argument_resolver=resolve_call_argument,
+            )
+            if graph is None:
+                continue
+            history = module.objects.setdefault(call.variable, [])
+            root = _Object(
+                graph.root.key,
+                graph.root.variable,
+                graph.root.kind,
+                graph.root.prefix,
+                call.line,
+            )
+            history.append(root)
+            history.sort(key=lambda item: item.line)
+            module.factory_objects.extend(graph.objects)
+            module.factory_routes.extend(graph.routes)
+            module.factory_edges.extend(graph.edges)
+
+    def _bind_factory_arguments(
+        self,
+        function: ast.FunctionDef | ast.AsyncFunctionDef,
+        call: ast.Call,
+        resolve_call: Callable[[ast.expr], str | None],
+        resolve_default: Callable[[ast.expr], str | None],
+    ) -> dict[str, str] | None:
+        """Bind a safe subset of literal factory arguments."""
+        if function.args.vararg or function.args.kwarg:
+            return None
+        positional_only = list(function.args.posonlyargs)
+        positional = [*positional_only, *function.args.args]
+        keyword_only = list(function.args.kwonlyargs)
+        if len(call.args) > len(positional) or any(
+            keyword.arg is None for keyword in call.keywords
+        ):
+            return None
+        expressions: dict[str, ast.expr] = {
+            parameter.arg: argument
+            for parameter, argument in zip(positional, call.args, strict=False)
+        }
+        known = {parameter.arg for parameter in [*positional, *keyword_only]}
+        for keyword in call.keywords:
+            assert keyword.arg is not None
+            if (
+                keyword.arg not in known
+                or keyword.arg in expressions
+                or keyword.arg in {parameter.arg for parameter in positional_only}
+            ):
+                return None
+            expressions[keyword.arg] = keyword.value
+        defaults: dict[str, ast.expr] = {}
+        if function.args.defaults:
+            defaults.update(
+                {
+                    parameter.arg: default
+                    for parameter, default in zip(
+                        positional[-len(function.args.defaults) :],
+                        function.args.defaults,
+                        strict=True,
+                    )
+                }
+            )
+        defaults.update(
+            {
+                parameter.arg: default
+                for parameter, default in zip(keyword_only, function.args.kw_defaults, strict=True)
+                if default is not None
+            }
+        )
+        bound: dict[str, str] = {}
+        for parameter in [*positional, *keyword_only]:
+            expression = expressions.get(parameter.arg)
+            is_default = expression is None
+            if expression is None:
+                expression = defaults.get(parameter.arg)
+            if expression is None:
+                return None
+            value = resolve_default(expression) if is_default else resolve_call(expression)
+            if value is None:
+                return None
+            bound[parameter.arg] = value
+        return bound
+
+    def _summarize_factory(  # noqa: PLR0911, PLR0912, PLR0915 - safe subset
+        self,
+        module: _Module,
+        function: ast.FunctionDef | ast.AsyncFunctionDef,
+        aliases: dict[str, str],
+        modules: dict[str, _Module],
+        *,
+        desired_key: ObjectKey,
+        desired_variable: str,
+        call_line: int,
+        namespace: str,
+        stack: frozenset[str],
+        call: ast.Call,
+        argument_resolver: Callable[[ast.expr], str | None] | None = None,
+    ) -> _FactoryGraph | None:
+        function_identity = f"{module.name}.{function.name}@{_node_token(function)}"
+        if (
+            isinstance(function, ast.AsyncFunctionDef)
+            or function.decorator_list
+            or function_identity in stack
+        ):
+            return None
+        resolver = argument_resolver or (
+            lambda expression: self._literal_string(expression, module, call_line)
+        )
+        bound_arguments = self._bind_factory_arguments(
+            function,
+            call,
+            resolver,
+            lambda expression: self._literal_string(expression, module, function.lineno),
+        )
+        if bound_arguments is None:
+            return None
+        meaningful = [
+            statement
+            for statement in function.body
+            if not isinstance(statement, ast.Pass)
+            and not (
+                isinstance(statement, ast.Expr)
+                and isinstance(statement.value, ast.Constant)
+                and isinstance(statement.value.value, str)
+            )
+        ]
+        if not meaningful or not isinstance(meaningful[-1], ast.Return):
+            return None
+        returns = _returns_outside_nested_functions(function.body)
+        if len(returns) != 1 or not isinstance(returns[0].value, ast.Name):
+            return None
+        returned_name = returns[0].value.id
+        returned_binding_tokens = [
+            _node_token(statement)
+            for statement in meaningful
+            if isinstance(statement, (ast.Assign, ast.AnnAssign))
+            and _assignment_name(statement) == returned_name
+        ]
+        if not returned_binding_tokens:
+            return None
+        final_returned_binding = returned_binding_tokens[-1]
+
+        local_objects: dict[str, _Object] = {}
+        local_strings: dict[str, str | None] = dict(bound_arguments)
+        local_bindings = _function_bindings(function)
+        local_functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+        emitted_objects: list[_Object] = []
+        routes: list[_Route] = []
+        edges: list[_Edge] = []
+        module_object_keys = {
+            item.key
+            for candidate_module in modules.values()
+            for history in candidate_module.objects.values()
+            for item in history
+        }
+
+        def literal(expression: ast.expr | None, line: int) -> str | None:
+            if isinstance(expression, ast.Name):
+                if expression.id in local_strings:
+                    return local_strings[expression.id]
+                if expression.id in local_bindings:
+                    return None
+            if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add):
+                left = literal(expression.left, line)
+                right = literal(expression.right, line)
+                return left + right if left is not None and right is not None else None
+            return self._literal_string(expression, module, call_line)
+
+        def object_for(expression: ast.expr | None) -> _Object | None:
+            if isinstance(expression, ast.Name):
+                if expression.id in local_objects:
+                    return local_objects[expression.id]
+                if expression.id in local_bindings:
+                    return None
+            if (
+                isinstance(expression, ast.Attribute)
+                and isinstance(expression.value, ast.Name)
+                and expression.value.id in local_bindings
+            ):
+                return None
+            return self._resolve_object(expression, module, aliases, modules, call_line)
+
+        def snapshot_local_object(item: _Object, operation: ast.AST) -> _Object:
+            """Freeze current local routes/edges at an include or mount operation."""
+            snapshot_key = (
+                module.name,
+                f"{namespace}:snapshot:{item.variable}@{_node_token(operation)}",
+            )
+            snapshot = _Object(
+                snapshot_key,
+                item.variable,
+                item.kind,
+                item.prefix,
+                call_line,
+            )
+            emitted_objects.append(snapshot)
+            routes.extend(
+                _Route(snapshot_key, route.path, route.methods, route.handler, call_line)
+                for route in list(routes)
+                if route.owner == item.key
+            )
+            edges.extend(
+                _Edge(
+                    snapshot_key,
+                    edge.child,
+                    edge.prefix,
+                    call_line,
+                    edge.child_cutoff,
+                )
+                for edge in list(edges)
+                if edge.parent == item.key
+            )
+            return snapshot
+
+        def handler_for(expression: ast.expr | None) -> HandlerInfo | None:
+            if isinstance(expression, ast.Name):
+                if expression.id in local_functions:
+                    return self._handler(module, local_functions[expression.id])
+                if expression.id in local_bindings:
+                    return None
+            return self._resolve_handler(expression, module, aliases, modules, call_line)
+
+        def touches_modeled_binding(node: ast.AST) -> bool:
+            modeled = set(local_objects)
+
+            def inspect(current: ast.AST) -> bool:  # noqa: PLR0911
+                if isinstance(
+                    current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+                ):
+                    return False
+                if (
+                    isinstance(current, ast.Name)
+                    and current.id in modeled
+                    and isinstance(current.ctx, (ast.Store, ast.Del))
+                ):
+                    return True
+                if (
+                    isinstance(current, ast.Attribute)
+                    and isinstance(current.ctx, (ast.Store, ast.Del))
+                    and any(
+                        isinstance(descendant, ast.Name) and descendant.id in modeled
+                        for descendant in ast.walk(current.value)
+                    )
+                ):
+                    return True
+                if isinstance(current, (ast.Assign, ast.AnnAssign)):
+                    value = current.value
+                    if (
+                        isinstance(current, ast.Assign)
+                        and len(current.targets) != 1
+                        and value is not None
+                        and any(
+                            isinstance(descendant, ast.Name) and descendant.id in modeled
+                            for descendant in ast.walk(value)
+                        )
+                    ):
+                        return True
+                    if value is not None and any(
+                        isinstance(descendant, ast.Name) and descendant.id in modeled
+                        for descendant in ast.walk(value)
+                    ):
+                        target = (
+                            current.target
+                            if isinstance(current, ast.AnnAssign)
+                            else current.targets[0]
+                        )
+                        if not isinstance(target, ast.Name):
+                            return True
+                if isinstance(current, ast.Call):
+                    if isinstance(current.func, ast.Name) and current.func.id in local_functions:
+                        return True
+                    if isinstance(current.func, ast.Attribute) and any(
+                        isinstance(descendant, ast.Name) and descendant.id in modeled
+                        for descendant in ast.walk(current.func.value)
+                    ):
+                        return True
+                    arguments = [
+                        *current.args,
+                        *(keyword.value for keyword in current.keywords),
+                    ]
+                    if any(
+                        any(
+                            isinstance(descendant, ast.Name) and descendant.id in modeled
+                            for descendant in ast.walk(argument)
+                        )
+                        for argument in arguments
+                    ):
+                        return True
+                return any(inspect(child) for child in ast.iter_child_nodes(current))
+
+            return inspect(node)
+
+        for statement in meaningful:
+            if isinstance(statement, ast.Return):
+                break
+            if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                assigned = _assignment_name(statement)
+                value = statement.value
+                if assigned is None or value is None:
+                    if touches_modeled_binding(statement):
+                        return None
+                    continue
+                aliased_object = object_for(value)
+                if aliased_object is not None:
+                    local_objects[assigned] = aliased_object
+                    local_strings.pop(assigned, None)
+                    continue
+
+                constructor_receiver = None
+                if isinstance(value, ast.Call):
+                    if isinstance(value.func, ast.Name):
+                        constructor_receiver = value.func.id
+                    elif isinstance(value.func, ast.Attribute) and isinstance(
+                        value.func.value, ast.Name
+                    ):
+                        constructor_receiver = value.func.value.id
+                constructor = (
+                    None
+                    if constructor_receiver in local_bindings
+                    else self._constructor_kind(value, module, call_line)
+                )
+                if constructor is not None:
+                    assert isinstance(value, ast.Call)
+                    statement_token = _node_token(statement)
+                    key = (
+                        desired_key
+                        if assigned == returned_name and statement_token == final_returned_binding
+                        else (module.name, f"{namespace}:{assigned}@{statement_token}")
+                    )
+                    variable = desired_variable if assigned == returned_name else assigned
+                    prefix = literal(_keyword_expr(value, "prefix"), statement.lineno) or ""
+                    item = _Object(key, variable, constructor, prefix, call_line)
+                    local_objects[assigned] = item
+                    local_strings.pop(assigned, None)
+                    if key != desired_key:
+                        emitted_objects.append(item)
+                    continue
+
+                helper_target: tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef] | None = None
+                if isinstance(value, ast.Call):
+                    if isinstance(value.func, ast.Name) and value.func.id in local_functions:
+                        helper_target = module, local_functions[value.func.id]
+                    elif not (
+                        isinstance(value.func, ast.Name) and value.func.id in local_bindings
+                    ) and not (
+                        isinstance(value.func, ast.Attribute)
+                        and isinstance(value.func.value, ast.Name)
+                        and value.func.value.id in local_bindings
+                    ):
+                        helper_target = self._factory_target(
+                            value, module, aliases, modules, call_line
+                        )
+                if helper_target is not None:
+                    assert isinstance(value, ast.Call)
+                    helper_module, helper = helper_target
+                    nested_line = statement.lineno
+
+                    def resolve_nested_argument(
+                        expression: ast.expr, line: int = nested_line
+                    ) -> str | None:
+                        return literal(expression, line)
+
+                    statement_token = _node_token(statement)
+                    key = (
+                        desired_key
+                        if assigned == returned_name and statement_token == final_returned_binding
+                        else (module.name, f"{namespace}:{assigned}@{statement_token}")
+                    )
+                    nested = self._summarize_factory(
+                        helper_module,
+                        helper,
+                        aliases,
+                        modules,
+                        desired_key=key,
+                        desired_variable=(
+                            desired_variable if assigned == returned_name else assigned
+                        ),
+                        call_line=(call_line if helper_module.name == module.name else 2**31 - 1),
+                        namespace=f"{namespace}:{assigned}@{statement_token}",
+                        stack=stack | {function_identity},
+                        call=value,
+                        argument_resolver=resolve_nested_argument,
+                    )
+                    if nested is not None:
+                        local_objects[assigned] = nested.root
+                        if nested.root.key != desired_key:
+                            emitted_objects.append(nested.root)
+                        emitted_objects.extend(nested.objects)
+                        routes.extend(nested.routes)
+                        edges.extend(nested.edges)
+                        continue
+                if any(
+                    isinstance(descendant, ast.Name) and descendant.id in local_objects
+                    for descendant in ast.walk(value)
+                ):
+                    return None
+                local_objects.pop(assigned, None)
+                local_strings[assigned] = literal(value, statement.lineno)
+                continue
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                local_functions[statement.name] = statement
+                handler = self._handler(module, statement)
+                for decorator in statement.decorator_list:
+                    if not (
+                        isinstance(decorator, ast.Call)
+                        and isinstance(decorator.func, ast.Attribute)
+                    ):
+                        continue
+                    owner = object_for(decorator.func.value)
+                    method = decorator.func.attr
+                    if owner is None or (method not in self.HTTP_METHODS and method != "api_route"):
+                        continue
+                    path_expr = (
+                        decorator.args[0] if decorator.args else _keyword_expr(decorator, "path")
+                    )
+                    path = literal(path_expr, statement.lineno)
+                    if path is None:
+                        continue
+                    methods_expr = _keyword_expr(decorator, "methods")
+                    methods = (
+                        _literal_methods(methods_expr)
+                        if method == "api_route" and methods_expr is not None
+                        else (("GET",) if method == "api_route" else (method.upper(),))
+                    )
+                    if method == "websocket":
+                        methods = ("WEBSOCKET",)
+                    if methods:
+                        routes.append(_Route(owner.key, path, methods, handler, call_line))
+                continue
+            if not (
+                isinstance(statement, ast.Expr)
+                and isinstance(statement.value, ast.Call)
+                and isinstance(statement.value.func, ast.Attribute)
+            ):
+                # Ignore unrelated setup, but reject control-flow or helpers that
+                # can rebind/mutate an object whose public routes we are proving.
+                if touches_modeled_binding(statement):
+                    return None
+                continue
+            call = statement.value
+            call_function = call.func
+            if not isinstance(call_function, ast.Attribute):
+                continue
+            parent = object_for(call_function.value)
+            if parent is None:
+                if touches_modeled_binding(statement):
+                    return None
+                continue
+            if call_function.attr == "include_router":
+                child_expr = call.args[0] if call.args else _keyword_expr(call, "router")
+                child = object_for(child_expr)
+                if child is None or child.kind != "router":
+                    return None
+                prefix = literal(_keyword_expr(call, "prefix"), statement.lineno) or ""
+                cutoff = (
+                    call_line
+                    if child.key in module_object_keys and child.key[0] == module.name
+                    else None
+                )
+                included_child = (
+                    child
+                    if child.key in module_object_keys
+                    else snapshot_local_object(child, statement)
+                )
+                edges.append(_Edge(parent.key, included_child.key, prefix, call_line, cutoff))
+            elif call_function.attr == "mount":
+                path_expr = call.args[0] if call.args else _keyword_expr(call, "path")
+                child_expr = call.args[1] if len(call.args) > 1 else _keyword_expr(call, "app")
+                path = literal(path_expr, statement.lineno)
+                child = object_for(child_expr)
+                if path is None or child is None or child.kind != "app":
+                    return None
+                cutoff = (
+                    call_line
+                    if child.key in module_object_keys and child.key[0] == module.name
+                    else None
+                )
+                mounted_child = (
+                    child
+                    if child.key in module_object_keys
+                    else snapshot_local_object(child, statement)
+                )
+                edges.append(_Edge(parent.key, mounted_child.key, path, call_line, cutoff))
+            elif call_function.attr == "add_api_route":
+                path_expr = call.args[0] if call.args else _keyword_expr(call, "path")
+                handler_expr = (
+                    call.args[1] if len(call.args) > 1 else _keyword_expr(call, "endpoint")
+                )
+                path = literal(path_expr, statement.lineno)
+                imperative_handler = handler_for(handler_expr)
+                methods_expr = _keyword_expr(call, "methods")
+                methods = _literal_methods(methods_expr) if methods_expr is not None else ("GET",)
+                if path is None or imperative_handler is None or not methods:
+                    return None
+                routes.append(_Route(parent.key, path, methods, imperative_handler, call_line))
+            elif call_function.attr not in {
+                "add_exception_handler",
+                "add_event_handler",
+                "add_middleware",
+            }:
+                return None
+
+        root = local_objects.get(returned_name)
+        if root is None:
+            return None
+        if root.key != desired_key:
+            old_key = root.key
+            root = _Object(desired_key, desired_variable, root.kind, root.prefix, call_line)
+            emitted_objects = [item for item in emitted_objects if item.key != old_key]
+            routes = [
+                _Route(
+                    desired_key if route.owner == old_key else route.owner,
+                    route.path,
+                    route.methods,
+                    route.handler,
+                    route.line,
+                )
+                for route in routes
+            ]
+            edges = [
+                _Edge(
+                    desired_key if edge.parent == old_key else edge.parent,
+                    desired_key if edge.child == old_key else edge.child,
+                    edge.prefix,
+                    edge.line,
+                    edge.child_cutoff,
+                )
+                for edge in edges
+            ]
+        return _FactoryGraph(root, emitted_objects, routes, edges)
 
     def _collect_routes(
         self,
@@ -340,7 +1064,9 @@ class SecureASTExtractor:
                     call.args[1] if len(call.args) > 1 else _keyword_expr(call, "endpoint")
                 )
                 imperative_path = self._literal_string(path_expr, module, node.lineno)
-                imperative_handler = self._resolve_handler(handler_expr, module, aliases, modules)
+                imperative_handler = self._resolve_handler(
+                    handler_expr, module, aliases, modules, node.lineno
+                )
                 if imperative_path is None or imperative_handler is None:
                     continue
                 methods_expr = _keyword_expr(call, "methods")
@@ -429,14 +1155,15 @@ class SecureASTExtractor:
             local = self._object_at(module, expression.id, line)
             if local is not None:
                 return local
-            imported = module.imports.get(expression.id)
-            if imported is not None:
-                target = modules.get(aliases.get(imported[0], ""))
+            binding = self._import_binding_at(module, expression.id, line)
+            if binding is not None and binding.symbol is not None:
+                target = modules.get(aliases.get(binding.module, ""))
                 if target is not None:
-                    return self._object_at(target, imported[1], None)
+                    return self._object_at(target, binding.symbol, None)
         if isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name):
-            target_name = module.module_imports.get(expression.value.id)
-            target = modules.get(aliases.get(target_name or "", target_name or ""))
+            binding = self._import_binding_at(module, expression.value.id, line)
+            target_name = binding.module if binding is not None and binding.symbol is None else ""
+            target = modules.get(aliases.get(target_name, target_name))
             if target is not None:
                 return self._object_at(target, expression.attr, None)
         return None
@@ -447,21 +1174,28 @@ class SecureASTExtractor:
         module: _Module,
         aliases: dict[str, str],
         modules: dict[str, _Module],
+        line: int | None = None,
     ) -> HandlerInfo | None:
+        lookup_line = line if line is not None else 2**31 - 1
         if isinstance(expression, ast.Name):
-            function = module.functions.get(expression.id)
+            function = self._function_at(module, expression.id, lookup_line)
             if function is not None:
                 return self._handler(module, function)
-            imported = module.imports.get(expression.id)
-            if imported is not None:
-                target = modules.get(aliases.get(imported[0], ""))
-                if target is not None and imported[1] in target.functions:
-                    return self._handler(target, target.functions[imported[1]])
+            binding = self._import_binding_at(module, expression.id, lookup_line)
+            if binding is not None and binding.symbol is not None:
+                target = modules.get(aliases.get(binding.module, ""))
+                if target is not None:
+                    function = self._function_at(target, binding.symbol, 2**31 - 1)
+                    if function is not None:
+                        return self._handler(target, function)
         if isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name):
-            target_name = module.module_imports.get(expression.value.id, "")
+            binding = self._import_binding_at(module, expression.value.id, lookup_line)
+            target_name = binding.module if binding is not None and binding.symbol is None else ""
             target = modules.get(aliases.get(target_name, target_name))
-            if target is not None and expression.attr in target.functions:
-                return self._handler(target, target.functions[expression.attr])
+            if target is not None:
+                function = self._function_at(target, expression.attr, 2**31 - 1)
+                if function is not None:
+                    return self._handler(target, function)
         return None
 
     def _literal_string(
@@ -470,9 +1204,15 @@ class SecureASTExtractor:
         if isinstance(expression, ast.Constant) and isinstance(expression.value, str):
             return expression.value
         if isinstance(expression, ast.Name):
-            history = module.strings.get(expression.id, [])
-            values = [value for item_line, value in history if item_line <= line]
-            return values[-1] if values else None
+            history = [item for item in module.strings.get(expression.id, []) if item[0] <= line]
+            if not history:
+                return None
+            item_line, value = history[-1]
+            return (
+                value
+                if item_line == self._latest_binding_line(module, expression.id, line)
+                else None
+            )
         if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add):
             left = self._literal_string(expression.left, module, line)
             right = self._literal_string(expression.right, module, line)
@@ -504,6 +1244,96 @@ class SecureASTExtractor:
         if node.module:
             parts.extend(node.module.split("."))
         return ".".join(parts)
+
+
+def _returns_outside_nested_functions(statements: list[ast.stmt]) -> list[ast.Return]:
+    """Collect returns belonging to one function, including control-flow branches."""
+    returns: list[ast.Return] = []
+
+    def visit(node: ast.AST) -> None:
+        if isinstance(node, ast.Return):
+            returns.append(node)
+            return
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            return
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+
+    for statement in statements:
+        visit(statement)
+    return returns
+
+
+def _function_bindings(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> set[str]:
+    """Collect bindings in one function scope without descending into nested scopes."""
+
+    class BindingVisitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.names: set[str] = set()
+
+        def visit_Name(self, node: ast.Name) -> None:
+            if isinstance(node.ctx, (ast.Store, ast.Del)):
+                self.names.add(node.id)
+
+        def visit_Import(self, node: ast.Import) -> None:
+            for alias in node.names:
+                self.names.add(alias.asname or alias.name.split(".")[0])
+
+        def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+            for alias in node.names:
+                self.names.add(alias.asname or alias.name)
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            self.names.add(node.name)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            self.names.add(node.name)
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            self.names.add(node.name)
+
+        def visit_Lambda(self, _node: ast.Lambda) -> None:
+            return
+
+    visitor = BindingVisitor()
+    visitor.names.update(
+        argument.arg
+        for argument in [
+            *function.args.posonlyargs,
+            *function.args.args,
+            *function.args.kwonlyargs,
+        ]
+    )
+    for statement in function.body:
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            visitor.names.add(statement.name)
+        else:
+            visitor.visit(statement)
+    return visitor.names
+
+
+def _bound_names(target: ast.AST) -> set[str]:
+    """Return names bound or deleted by one assignment target."""
+    if isinstance(target, ast.Name):
+        return {target.id}
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return {name for item in target.elts for name in _bound_names(item)}
+    return set()
+
+
+def _node_token(node: ast.AST) -> str:
+    """Return a deterministic source-position identity for one operation."""
+    return ":".join(
+        str(value)
+        for value in (
+            getattr(node, "lineno", 0),
+            getattr(node, "col_offset", 0),
+            getattr(node, "end_lineno", 0),
+            getattr(node, "end_col_offset", 0),
+        )
+    )
 
 
 def _assignment_name(node: ast.Assign | ast.AnnAssign) -> str | None:

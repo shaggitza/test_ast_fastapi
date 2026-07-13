@@ -417,6 +417,632 @@ router.add_api_route("/late", late)
 
         assert SecureASTExtractor(app_file).extract_endpoints() == []
 
+    def test_factory_composes_imported_router_prefixes_from_file_entry(
+        self, tmp_path: Path
+    ) -> None:
+        routes = tmp_path / "routes.py"
+        routes.write_text(
+            """from fastapi import APIRouter
+router = APIRouter(prefix="/items")
+
+@router.get("/{item_id}")
+def item(item_id: str):
+    return item_id
+"""
+        )
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+from routes import router
+
+API_PREFIX = "/api" + "/v1"
+
+def create_app():
+    application = FastAPI()
+    unused = FastAPI()
+
+    @unused.get("/not-public")
+    def hidden():
+        return None
+
+    application.include_router(router, prefix=API_PREFIX)
+    return application
+
+app = create_app()
+"""
+        )
+
+        endpoints = SecureASTExtractor(main).extract_endpoints()
+
+        assert [endpoint.identifier for endpoint in endpoints] == ["GET /api/v1/items/{item_id}"]
+        assert endpoints[0].handler.file_path == routes
+
+    def test_factory_skips_conditional_and_dynamic_registration(self, tmp_path: Path) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI, APIRouter
+router = APIRouter()
+
+@router.get("/conditional")
+def conditional():
+    return None
+
+def create_app():
+    app = FastAPI()
+    if unknown_flag:
+        app.include_router(router)
+    for prefix in prefixes:
+        app.include_router(router, prefix=prefix)
+    return app
+
+app = create_app()
+"""
+        )
+
+        assert SecureASTExtractor(main).extract_endpoints() == []
+
+    def test_factory_preserves_router_include_snapshot_and_reassignment(
+        self, tmp_path: Path
+    ) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import APIRouter, FastAPI
+
+def create_app():
+    app = FastAPI()
+    router = APIRouter(prefix="/factory")
+
+    @router.get("/before")
+    def before():
+        return None
+
+    app.include_router(router)
+
+    @router.get("/after")
+    def after():
+        return None
+
+    return app
+
+app = create_app()
+"""
+        )
+
+        assert [
+            endpoint.identifier for endpoint in SecureASTExtractor(main).extract_endpoints()
+        ] == ["GET /factory/before"]
+
+        main.write_text(main.read_text().replace("return app", "app = object()\n    return app"))
+        assert SecureASTExtractor(main).extract_endpoints() == []
+
+    def test_factory_supports_simple_direct_helper_and_langflow_style_router(
+        self, tmp_path: Path
+    ) -> None:
+        api = tmp_path / "api"
+        api.mkdir()
+        (api / "__init__.py").write_text("")
+        route_file = api / "v1.py"
+        route_file.write_text(
+            """from fastapi import APIRouter
+router = APIRouter(prefix="/flows")
+
+@router.post("/{flow_id}/run")
+def run_flow(flow_id: str):
+    return flow_id
+"""
+        )
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+from api.v1 import router as v1_router
+
+def health():
+    return {"ok": True}
+
+def base_app():
+    result = FastAPI()
+    result.add_api_route("/health", health, methods=["GET"])
+    return result
+
+def create_app():
+    application = base_app()
+    application.include_router(v1_router, prefix="/api/v1")
+    return application
+
+app = create_app()
+"""
+        )
+
+        # Langflow-style modules bind the selected app to the factory result.
+        endpoints = SecureASTExtractor(tmp_path).extract_endpoints()
+
+        assert {endpoint.identifier for endpoint in endpoints} == {
+            "GET /health",
+            "POST /api/v1/flows/{flow_id}/run",
+        }
+        flow = next(endpoint for endpoint in endpoints if endpoint.path.endswith("/run"))
+        assert flow.handler.file_path == route_file
+
+    def test_uncalled_factory_is_not_synthesized(self, tmp_path: Path) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+
+def create_app():
+    app = FastAPI()
+    @app.get("/phantom")
+    def phantom():
+        return None
+    return app
+"""
+        )
+
+        assert SecureASTExtractor(main).extract_endpoints() == []
+
+    def test_factory_constructor_reassignment_uses_only_returned_identity(
+        self, tmp_path: Path
+    ) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+
+def create_app():
+    app = FastAPI()
+    @app.get("/old")
+    def old():
+        return None
+    app = FastAPI()
+    @app.get("/new")
+    def new():
+        return None
+    return app
+
+app = create_app()
+"""
+        )
+
+        assert [
+            endpoint.identifier for endpoint in SecureASTExtractor(main).extract_endpoints()
+        ] == ["GET /new"]
+
+    def test_factory_call_respects_function_rebinding(self, tmp_path: Path) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+
+def create_app():
+    app = FastAPI()
+    return app
+
+create_app = lambda: object()
+app = create_app()
+"""
+        )
+
+        assert SecureASTExtractor(main).extract_endpoints() == []
+
+    def test_factory_respects_import_shadowing_before_call(self, tmp_path: Path) -> None:
+        (tmp_path / "routes.py").write_text(
+            """from fastapi import APIRouter
+router = APIRouter()
+@router.get("/wrong")
+def wrong():
+    return None
+"""
+        )
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+from routes import router
+
+def create_app():
+    app = FastAPI()
+    app.include_router(router)
+    return app
+
+router = object()
+app = create_app()
+"""
+        )
+
+        assert SecureASTExtractor(main).extract_endpoints() == []
+
+    @pytest.mark.parametrize(
+        "unsafe_body",
+        [
+            "del app",
+            "if flag:\n        app = FastAPI()",
+            "configure(app)",
+            "if flag:\n        app.include_router(router)",
+        ],
+    )
+    def test_factory_rejects_conditional_rebinding_and_unknown_mutation(
+        self, tmp_path: Path, unsafe_body: str
+    ) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            f"""from fastapi import APIRouter, FastAPI
+router = APIRouter()
+
+def configure(value):
+    return value
+
+def create_app():
+    app = FastAPI()
+    {unsafe_body}
+    return app
+
+app = create_app()
+"""
+        )
+
+        assert SecureASTExtractor(main).extract_endpoints() == []
+
+    @pytest.mark.parametrize(
+        "return_body",
+        [
+            "if flag:\n        return app\n    return app",
+            "if flag:\n        return app\n    else:\n        return app",
+            "return app\n    return app",
+        ],
+    )
+    def test_factory_rejects_ambiguous_returns(self, tmp_path: Path, return_body: str) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            f"""from fastapi import FastAPI
+
+def create_app():
+    app = FastAPI()
+    {return_body}
+
+app = create_app()
+"""
+        )
+
+        assert SecureASTExtractor(main).extract_endpoints() == []
+
+    def test_factory_binds_default_and_keyword_literal_parameters(self, tmp_path: Path) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+
+def health():
+    return None
+
+def create_app(base="/default", *, suffix="/health"):
+    app = FastAPI()
+    app.add_api_route(base + suffix, health)
+    return app
+
+app = create_app(base="/api")
+"""
+        )
+
+        assert [
+            endpoint.identifier for endpoint in SecureASTExtractor(main).extract_endpoints()
+        ] == ["GET /api/health"]
+
+    def test_factory_binds_required_and_positional_only_parameters(self, tmp_path: Path) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+
+def health():
+    return None
+
+def create_app(base, /, suffix):
+    app = FastAPI()
+    app.add_api_route(base + suffix, health)
+    return app
+
+app = create_app("/api", "/health")
+"""
+        )
+
+        assert [
+            endpoint.identifier for endpoint in SecureASTExtractor(main).extract_endpoints()
+        ] == ["GET /api/health"]
+
+    def test_factory_default_captures_definition_time_global(self, tmp_path: Path) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+
+PREFIX = "/old"
+def health():
+    return None
+
+def create_app(prefix=PREFIX):
+    app = FastAPI()
+    app.add_api_route(prefix + "/health", health)
+    return app
+
+PREFIX = "/new"
+app = create_app()
+"""
+        )
+
+        assert [
+            endpoint.identifier for endpoint in SecureASTExtractor(main).extract_endpoints()
+        ] == ["GET /old/health"]
+
+    @pytest.mark.parametrize(
+        "shadow",
+        [
+            "FastAPI = lambda: object()",
+            "def FastAPI():\n        return object()",
+            "del FastAPI",
+            "from fake import FastAPI",
+        ],
+    )
+    def test_factory_local_constructor_shadowing_fails_closed(
+        self, tmp_path: Path, shadow: str
+    ) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            f"""from fastapi import FastAPI
+
+def create_app():
+    {shadow}
+    app = FastAPI()
+    return app
+
+app = create_app()
+"""
+        )
+
+        assert SecureASTExtractor(main).extract_endpoints() == []
+
+    def test_factory_local_router_and_helper_shadowing_fails_closed(self, tmp_path: Path) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import APIRouter, FastAPI
+router = APIRouter()
+@router.get("/false")
+def false_route():
+    return None
+
+def base_app():
+    app = FastAPI()
+    return app
+
+def create_app():
+    def base_app():
+        return object()
+    router = object()
+    app = base_app()
+    app.include_router(router)
+    return app
+
+app = create_app()
+"""
+        )
+
+        assert SecureASTExtractor(main).extract_endpoints() == []
+
+    def test_module_delete_and_rebinding_invalidate_app_and_router(self, tmp_path: Path) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import APIRouter, FastAPI
+router = APIRouter()
+@router.get("/false")
+def false_route():
+    return None
+
+del router
+app = FastAPI()
+app.include_router(router)
+del app
+"""
+        )
+
+        assert SecureASTExtractor(main).extract_endpoints() == []
+
+    def test_factory_chained_alias_mutation_is_rejected(self, tmp_path: Path) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+
+def create_app():
+    app = FastAPI()
+    @app.get("/false")
+    def route():
+        return None
+    alias = other = app
+    alias.routes.clear()
+    return app
+
+app = create_app()
+"""
+        )
+
+        assert SecureASTExtractor(main).extract_endpoints() == []
+
+    def test_factory_called_nested_mutator_is_rejected(self, tmp_path: Path) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+
+def create_app():
+    app = FastAPI()
+    @app.get("/false")
+    def route():
+        return None
+    def wipe():
+        app.routes.clear()
+    wipe()
+    return app
+
+app = create_app()
+"""
+        )
+
+        assert SecureASTExtractor(main).extract_endpoints() == []
+
+    def test_factory_alias_registration_and_unknown_alias_mutation(self, tmp_path: Path) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import APIRouter, FastAPI
+router = APIRouter()
+@router.get("/ok")
+def ok():
+    return None
+
+def create_app():
+    app = FastAPI()
+    alias = app
+    alias.include_router(router)
+    return app
+
+app = create_app()
+"""
+        )
+        assert [
+            endpoint.identifier for endpoint in SecureASTExtractor(main).extract_endpoints()
+        ] == ["GET /ok"]
+
+        main.write_text(
+            main.read_text().replace("alias.include_router(router)", "configure(alias)")
+        )
+        assert SecureASTExtractor(main).extract_endpoints() == []
+
+    def test_factory_rejects_nested_receiver_mutation_of_alias(self, tmp_path: Path) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+
+def create_app():
+    app = FastAPI()
+    holder = app
+    holder.routes.clear()
+    return app
+
+app = create_app()
+"""
+        )
+
+        assert SecureASTExtractor(main).extract_endpoints() == []
+
+    def test_factory_nested_helper_routes_use_runtime_snapshot_not_source_lines(
+        self, tmp_path: Path
+    ) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import APIRouter, FastAPI
+
+def create_app():
+    app = FastAPI()
+    router = make_router()
+    app.include_router(router)
+    return app
+
+def make_router():
+    router = APIRouter(prefix="/nested")
+    @router.get("/ok")
+    def ok():
+        return None
+    return router
+
+app = create_app()
+"""
+        )
+
+        assert [
+            endpoint.identifier for endpoint in SecureASTExtractor(main).extract_endpoints()
+        ] == ["GET /nested/ok"]
+
+    def test_factory_snapshots_module_router_at_call_time(self, tmp_path: Path) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import APIRouter, FastAPI
+router = APIRouter()
+@router.get("/before")
+def before():
+    return None
+
+def create_app():
+    app = FastAPI()
+    app.include_router(router)
+    return app
+
+app = create_app()
+
+@router.get("/after")
+def after():
+    return None
+"""
+        )
+
+        assert [
+            endpoint.identifier for endpoint in SecureASTExtractor(main).extract_endpoints()
+        ] == ["GET /before"]
+
+    def test_factory_same_line_objects_have_unique_identity(self, tmp_path: Path) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+
+def health():
+    return None
+
+def create_app():
+    first = FastAPI(); second = FastAPI(); second.add_api_route("/ok", health); return second
+
+app = create_app()
+"""
+        )
+
+        assert [
+            endpoint.identifier for endpoint in SecureASTExtractor(main).extract_endpoints()
+        ] == ["GET /ok"]
+
+    def test_router_file_fallback_requires_latest_router_binding(self, tmp_path: Path) -> None:
+        router_file = tmp_path / "routes.py"
+        router_file.write_text(
+            """from fastapi import APIRouter
+router = APIRouter()
+@router.get("/false")
+def false_route():
+    return None
+router = object()
+"""
+        )
+
+        assert SecureASTExtractor(router_file, app_variable="router").extract_endpoints() == []
+
+    def test_cross_module_factory_resolution_is_file_order_independent(
+        self, tmp_path: Path
+    ) -> None:
+        caller = tmp_path / "a_caller.py"
+        caller.write_text(
+            """from z_factory import create_app
+app = create_app()
+"""
+        )
+        (tmp_path / "y_helper.py").write_text(
+            """from fastapi import FastAPI
+
+def base_app():
+    app = FastAPI()
+    @app.get("/cross-module")
+    def route():
+        return None
+    return app
+"""
+        )
+        (tmp_path / "z_factory.py").write_text(
+            """from y_helper import base_app
+
+def create_app():
+    app = base_app()
+    return app
+"""
+        )
+
+        assert [
+            endpoint.identifier for endpoint in SecureASTExtractor(caller).extract_endpoints()
+        ] == ["GET /cross-module"]
+
     def test_ignores_unproven_route_receivers_and_dynamic_paths(self, tmp_path: Path) -> None:
         """Do not interpret arbitrary methods or unresolved paths as FastAPI routes."""
         app_file = tmp_path / "app.py"
