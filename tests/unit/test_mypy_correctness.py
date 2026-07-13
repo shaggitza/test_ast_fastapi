@@ -12,6 +12,7 @@ from fastapi_endpoint_detector.analyzer.mypy_analyzer import (
     MypyAnalyzer,
 )
 from fastapi_endpoint_detector.config import AnalysisConfig, Config, ParserConfig
+from fastapi_endpoint_detector.models.diff import ChangeType, DiffFile
 from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, HandlerInfo
 
 
@@ -21,6 +22,39 @@ def _endpoint(main: Path) -> Endpoint:
         methods=[EndpointMethod.GET],
         handler=HandlerInfo(name="handler", module="main", file_path=main, line_number=3),
     )
+
+
+def test_adjacent_new_definition_does_not_inherit_previous_function_evidence(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "events.py"
+    source.write_text("def previous():\n    return 1\n\ndef added():\n    return 2\n")
+    endpoint = Endpoint(
+        path="/events",
+        methods=[EndpointMethod.GET],
+        handler=HandlerInfo(
+            name="handler", module="main", file_path=tmp_path / "main.py", line_number=1
+        ),
+    )
+    deps = EndpointDependencies(
+        endpoint_id=endpoint.identifier,
+        methods=["GET"],
+        path=endpoint.path,
+        source_root=str(tmp_path),
+        project_files={str(source)},
+    )
+    deps.add_symbol_reference(str(source), "events.previous", 1, 2)
+
+    class FakeAnalyzer:
+        def get_endpoint_dependencies(self, _endpoint: Endpoint) -> EndpointDependencies:
+            return deps
+
+    mapper = ChangeMapper(tmp_path)
+    mapper._mypy_analyzer = FakeAnalyzer()  # type: ignore[assignment]
+    diff_file = DiffFile(path=Path("events.py"), change_type=ChangeType.MODIFIED)
+
+    assert mapper._check_mypy_dependency(endpoint, diff_file, [4, 5], []) is None
+    assert mapper._check_mypy_dependency(endpoint, diff_file, [2], []) is not None
 
 
 def test_duplicate_basenames_fail_closed_but_unique_suffix_resolves(tmp_path: Path) -> None:
