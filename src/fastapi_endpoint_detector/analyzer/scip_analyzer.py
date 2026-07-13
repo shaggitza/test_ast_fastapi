@@ -47,6 +47,8 @@ class SCIPAnalyzer:
         self.use_cache = use_cache
         self.timeout = timeout
         self._outline_cache: dict[Path, tuple[SCIPDefinition, ...]] = {}
+        self._base_method_cache: dict[str, tuple[SCIPDefinition, ...]] = {}
+        self._module_paths: dict[str, Path] | None = None
 
     def _executable(self, name: str) -> str:
         executable = shutil.which(name)
@@ -235,6 +237,75 @@ class SCIPAnalyzer:
                 )
                 found[narrowest.symbol] = narrowest
         return tuple(found.values())
+
+    def _project_module_paths(self) -> dict[str, Path]:
+        if self._module_paths is None:
+            paths: dict[str, Path] = {}
+            for path in self.project_root.rglob("*.py"):
+                relative = path.relative_to(self.project_root).with_suffix("")
+                parts = list(relative.parts)
+                if parts and parts[-1] == "__init__":
+                    parts.pop()
+                module = ".".join(parts)
+                if module:
+                    paths[module] = relative.with_suffix(".py")
+                    paths[f"{self.project_root.name}.{module}"] = relative.with_suffix(".py")
+            self._module_paths = paths
+        return self._module_paths
+
+    def base_method_definitions(self, definition: SCIPDefinition) -> tuple[SCIPDefinition, ...]:
+        """Resolve explicitly inherited base methods for one concrete method."""
+        cached = self._base_method_cache.get(definition.symbol)
+        if cached is not None:
+            return cached
+        parts = definition.short_name.split(":")
+        if len(parts) < 3 or not parts[-1].endswith("()"):
+            self._base_method_cache[definition.symbol] = ()
+            return ()
+        class_name = parts[-2]
+        method_name = parts[-1][:-2]
+        source = self.project_root / definition.file_path
+        try:
+            tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        except (OSError, SyntaxError, UnicodeError):
+            self._base_method_cache[definition.symbol] = ()
+            return ()
+        imports: dict[str, tuple[str, str]] = {}
+        for statement in tree.body:
+            if isinstance(statement, ast.ImportFrom) and statement.module:
+                for import_alias in statement.names:
+                    imports[import_alias.asname or import_alias.name] = (
+                        statement.module,
+                        import_alias.name,
+                    )
+        classes = [
+            node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name
+        ]
+        if len(classes) != 1:
+            self._base_method_cache[definition.symbol] = ()
+            return ()
+        module_paths = self._project_module_paths()
+        found: dict[str, SCIPDefinition] = {}
+        for base in classes[0].bases:
+            if not isinstance(base, ast.Name):
+                continue
+            import_info = imports.get(base.id)
+            base_path: Path | None
+            if import_info is None:
+                base_path = definition.file_path
+                base_name = base.id
+            else:
+                base_path = module_paths.get(import_info[0])
+                base_name = import_info[1]
+            if base_path is None:
+                continue
+            suffix = f":{base_name}:{method_name}()"
+            matches = [item for item in self.outline(base_path) if item.short_name.endswith(suffix)]
+            if len(matches) == 1:
+                found[matches[0].symbol] = matches[0]
+        result = tuple(found.values())
+        self._base_method_cache[definition.symbol] = result
+        return result
 
     def _definition_for_affected(self, file_path: Path, short_name: str) -> SCIPDefinition | None:
         matches = [item for item in self.outline(file_path) if item.short_name == short_name]
