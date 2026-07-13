@@ -567,6 +567,7 @@ class ChangeMapper:
     def _analyze_with_scip(
         self,
         python_files: list[DiffFile],
+        warnings: list[str],
         progress_callback: ProgressCallback | None,
     ) -> tuple[list[AffectedEndpoint], list[OrphanChange]]:
         """Map target additions and baseline removals through separate SCIP indexes."""
@@ -625,7 +626,14 @@ class ChangeMapper:
             processed: set[int] = set()
             for seed, seed_lines in seeds.values():
                 reached_endpoint = False
-                for reached in analyzer.affected(seed, max_depth=max_depth):
+                try:
+                    reached_definitions = analyzer.affected(seed, max_depth=max_depth)
+                except SCIPAnalyzerError as error:
+                    warnings.append(
+                        f"SCIP skipped unresolved {side} seed {seed.short_name}: {error}"
+                    )
+                    continue
+                for reached in reached_definitions:
                     definition = reached.definition
                     endpoints = registry.get_by_line_range(
                         root / definition.file_path,
@@ -758,7 +766,9 @@ class ChangeMapper:
 
         if self.use_scip:
             report_progress(10, 100, f"Analyzing {total_endpoints} endpoints (SCIP)...")
-            scip_affected, scip_orphans = self._analyze_with_scip(python_files, progress_callback)
+            scip_affected, scip_orphans = self._analyze_with_scip(
+                python_files, warnings, progress_callback
+            )
             threshold = self.config.analysis.confidence_threshold
             filtered = [
                 item for item in scip_affected if _CONFIDENCE_SCORE[item.confidence] >= threshold

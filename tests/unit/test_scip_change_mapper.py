@@ -13,6 +13,29 @@ from fastapi_endpoint_detector.analyzer.scip_analyzer import (
 from fastapi_endpoint_detector.parser.diff_parser import DiffParser
 
 
+class PartiallyFailingAnalyzer:
+    def ensure_index(self, *, force: bool = False) -> None:
+        assert force
+
+    def definitions_at(self, file_path: Path, lines: set[int]):
+        assert file_path == Path("services.py")
+        return (
+            SCIPDefinition("bad", "services:__all__", Path("services.py"), 1, 1),
+            SCIPDefinition("good", "services:changed()", Path("services.py"), 1, 1),
+        )
+
+    def affected(self, seed: SCIPDefinition, *, max_depth: int | None = None):
+        if seed.symbol == "bad":
+            raise SCIPAnalyzerError("ambiguous export")
+        return (
+            SCIPReachedDefinition(seed, 0),
+            SCIPReachedDefinition(
+                SCIPDefinition("handler", "main:handler()", Path("main.py"), 4, 6),
+                1,
+            ),
+        )
+
+
 class BaselineDeletionAnalyzer:
     def ensure_index(self, *, force: bool = False) -> None:
         assert force
@@ -83,6 +106,31 @@ def test_programmatic_baseline_requires_scip(tmp_path: Path) -> None:
         ChangeMapper(tmp_path, baseline_app_path=tmp_path)
 
 
+def test_scip_seed_failure_does_not_discard_other_seed_results(tmp_path: Path) -> None:
+    (tmp_path / "services.py").write_text("def changed():\n    return 1\n")
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n\n"
+        "@app.get('/items')\ndef handler():\n    return 1\n"
+    )
+    diff_file = DiffParser.parse_string(
+        "diff --git a/services.py b/services.py\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        "+++ b/services.py\n"
+        "@@ -0,0 +1 @@\n"
+        "+def changed(): pass\n"
+    )[0]
+    mapper = ChangeMapper(tmp_path, use_cache=False, secure_ast=True, use_scip=True)
+    mapper._scip_analyzer = PartiallyFailingAnalyzer()  # type: ignore[assignment]
+    warnings: list[str] = []
+
+    affected, _orphans = mapper._analyze_with_scip([diff_file], warnings, None)
+
+    assert [item.endpoint.identifier for item in affected] == ["GET /items"]
+    assert len(warnings) == 1
+    assert "services:__all__" in warnings[0]
+
+
 def test_scip_mapper_rejects_identical_target_and_baseline(tmp_path: Path) -> None:
     with pytest.raises(ChangeMapperError, match="must differ"):
         ChangeMapper(
@@ -110,7 +158,7 @@ def test_scip_mapper_rejects_deleted_definitions_without_baseline_index(
     )[0]
 
     with pytest.raises(SCIPAnalyzerError, match="--baseline-app"):
-        mapper._analyze_with_scip([diff_file], None)
+        mapper._analyze_with_scip([diff_file], [], None)
 
 
 def test_deleted_helper_uses_baseline_index_and_unchanged_target_endpoint(
@@ -149,7 +197,7 @@ def test_deleted_helper_uses_baseline_index_and_unchanged_target_endpoint(
     mapper._scip_analyzer = EmptyTargetAnalyzer()  # type: ignore[assignment]
     mapper._baseline_scip_analyzer = BaselineDeletionAnalyzer()  # type: ignore[assignment]
 
-    affected, orphans = mapper._analyze_with_scip([diff_file], None)
+    affected, orphans = mapper._analyze_with_scip([diff_file], [], None)
 
     assert [item.endpoint.identifier for item in affected] == ["GET /items"]
     assert affected[0].endpoint.handler.file_path == target / "main.py"
