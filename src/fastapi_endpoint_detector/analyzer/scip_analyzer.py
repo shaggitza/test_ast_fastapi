@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import shutil
@@ -195,6 +196,28 @@ class SCIPAnalyzer:
                 collect(children)
 
         collect(result)
+        source_path = self.project_root / relative
+        try:
+            tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+        except (OSError, SyntaxError, UnicodeError):
+            tree = None
+        if tree is not None:
+            callable_ends = {
+                node.lineno: node.end_lineno
+                for node in ast.walk(tree)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                and node.end_lineno is not None
+            }
+            definitions = [
+                SCIPDefinition(
+                    definition.symbol,
+                    definition.short_name,
+                    definition.file_path,
+                    definition.start_line,
+                    max(definition.end_line, callable_ends.get(definition.start_line, 0)),
+                )
+                for definition in definitions
+            ]
         value = tuple(definitions)
         self._outline_cache[relative] = value
         return value
@@ -225,7 +248,7 @@ class SCIPAnalyzer:
             [
                 self._executable("scip-query"),
                 "affected",
-                seed.symbol,
+                seed.short_name,
                 "--max-depth",
                 str(depth_limit),
                 "--json",
@@ -234,6 +257,16 @@ class SCIPAnalyzer:
         )
         if not isinstance(result, dict) or result.get("matched") is not True:
             raise SCIPAnalyzerError(f"SCIP could not resolve changed symbol: {seed.symbol}")
+        resolved = result.get("resolved")
+        if not isinstance(resolved, dict) or resolved.get("symbol") != seed.symbol:
+            raise SCIPAnalyzerError(
+                f"SCIP resolved the wrong seed for {seed.symbol!r}: {resolved!r}"
+            )
+        if result.get("totalMatches") != 1:
+            raise SCIPAnalyzerError(
+                f"SCIP seed was ambiguous for {seed.symbol!r}: "
+                f"{result.get('totalMatches')!r} matches"
+            )
         reached: list[SCIPReachedDefinition] = [SCIPReachedDefinition(seed, 0)]
         raw_affected = result.get("affected", [])
         if not isinstance(raw_affected, list):
