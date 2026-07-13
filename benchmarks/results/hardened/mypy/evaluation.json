@@ -72,6 +72,94 @@
       "fn": 1
     }
   },
+  "normalized": {
+    "alias_version": 1,
+    "micro": {
+      "precision": 0.05303030303030303,
+      "recall": 0.07650273224043716,
+      "f1": 0.06263982102908278,
+      "tp": 14,
+      "fp": 250,
+      "fn": 169
+    },
+    "macro": {
+      "precision": 0.002326217843459223,
+      "recall": 0.030425963488843813,
+      "f1": 0.004318972912742942
+    },
+    "by_kind": {
+      "cli": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "tp": 0,
+        "fp": 0,
+        "fn": 8
+      },
+      "cron": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "tp": 0,
+        "fp": 0,
+        "fn": 3
+      },
+      "event": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "tp": 0,
+        "fp": 1,
+        "fn": 13
+      },
+      "http": {
+        "precision": 0.053231939163498096,
+        "recall": 0.1728395061728395,
+        "f1": 0.0813953488372093,
+        "tp": 14,
+        "fp": 249,
+        "fn": 67
+      },
+      "other": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "tp": 0,
+        "fp": 0,
+        "fn": 73
+      },
+      "sdk": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "tp": 0,
+        "fp": 0,
+        "fn": 4
+      },
+      "task": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "tp": 0,
+        "fp": 0,
+        "fn": 1
+      }
+    },
+    "expected_atoms": 183,
+    "predicted_atoms": 264,
+    "matches_by_rule": {
+      "raw_exact": 10,
+      "strict_canonical": 4
+    },
+    "rules": [
+      "raw exact",
+      "composite HTTP method expansion",
+      "template parameter-name normalization with converter preservation",
+      "case-insensitive WebSocket family",
+      "unique generic/qualified relaxation",
+      "frozen repository-scoped explicit aliases"
+    ]
+  },
   "unresolved_items": 31,
   "latency_seconds": {
     "samples": 27,
