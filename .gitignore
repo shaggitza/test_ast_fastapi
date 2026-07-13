@@ -174,6 +174,7 @@ Thumbs.db
 *~
 
 # Project-specific
+.pi-subagents/
 /output/
 /reports/
 *.analysis.json
