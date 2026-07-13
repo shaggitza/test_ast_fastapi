@@ -32,7 +32,7 @@ class NormalizeEndpointsTests(unittest.TestCase):
         report = {
             "affected_endpoints": [
                 {"endpoint": {"path": "items", "methods": ["post", "GET", "post"]}},
-                {"endpoint": {"path": "/items", "methods": "get"}},
+                {"endpoint": {"path": "//items///", "methods": "get"}},
             ]
         }
 

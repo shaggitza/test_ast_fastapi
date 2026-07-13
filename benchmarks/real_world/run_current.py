@@ -300,6 +300,9 @@ def normalize_endpoints(report: object) -> tuple[list[dict[str, Any]], list[str]
         normalized_path = path.strip()
         if not normalized_path.startswith("/"):
             normalized_path = f"/{normalized_path}"
+        normalized_path = re.sub(r"/{2,}", "/", normalized_path)
+        if normalized_path != "/":
+            normalized_path = normalized_path.rstrip("/")
         for method in methods:
             if not isinstance(method, str) or not method.strip():
                 unresolved.append(f"invalid_endpoint[{index}]: invalid method {method!r}")
@@ -327,7 +330,7 @@ def report_unresolved(report: dict[str, Any]) -> list[str]:
 def invoke_analyzer(
     candidate_root: Path, app_root: Path, patch_path: Path, timeout: float
 ) -> tuple[list[dict[str, Any]], list[str], float]:
-    """Invoke the installed candidate without running any upstream source."""
+    """Invoke the candidate after the caller explicitly accepts upstream execution."""
     args = [
         "uv",
         "run",
