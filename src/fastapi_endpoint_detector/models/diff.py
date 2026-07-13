@@ -61,7 +61,9 @@ class DiffFile(BaseModel):
     @property
     def is_python_file(self) -> bool:
         """Check if this is a Python file."""
-        return self.path.suffix == ".py"
+        return self.path.suffix == ".py" or (
+            self.source_path is not None and self.source_path.suffix == ".py"
+        )
 
     def get_affected_line_ranges(self) -> list[tuple[int, int]]:
         """Get list of (start, end) line ranges affected by changes."""

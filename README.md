@@ -103,6 +103,7 @@ fastapi-endpoint-detector analyze [OPTIONS]
 | `--no-cache` | | No | Disable caching of analysis results |
 | `--clear-cache` | | No | Clear cached analysis data before running |
 | `--scip` | | No | Use SCIP reverse-impact analysis instead of mypy |
+| `--baseline-app` | | No | Explicit baseline snapshot for removed SCIP lines (requires `--scip`) |
 | `--secure-ast` | | No | Discover endpoints without importing application code |
 | `--config` | `-c` | No | Path to configuration file |
 
@@ -119,9 +120,12 @@ export PATH="$PWD/node_modules/.bin:$PATH"  # also add the SCIP CLI directory
 
 `scip-python-plus` must not be visible because it missed dependency-injected
 callers in validation. The command fails explicitly rather than silently
-falling back to mypy. Deleted definitions currently require a future baseline
-SCIP index and therefore fail explicitly; `--secure-ast` also retains its known
-limitation around dynamic router/mount prefix composition.
+falling back to mypy. Added lines are indexed from `--app`; removed lines are
+indexed from the explicit `--baseline-app` snapshot. If a diff removes Python
+lines and no baseline is supplied, analysis fails explicitly rather than
+inventing old source. Baseline discovery is always execution-free; target
+discovery is execution-free when `--secure-ast` is supplied (as in the official
+benchmark). Dynamic/control-flow route registration remains conservatively unresolved.
 
 ### `list` - List Endpoints
 

@@ -41,6 +41,7 @@ class TestCLI:
         assert "--vm" in result.output
         assert "--secure-ast" in result.output
         assert "--scip" in result.output
+        assert "--baseline-app" in result.output
 
     def test_list_help(self, runner: CliRunner) -> None:
         """Test the list command help."""
@@ -81,6 +82,28 @@ class TestCLI:
         )
         assert result.exit_code != 0
         assert "--vm and --scip cannot be used together" in result.output
+
+    def test_baseline_app_requires_scip(self, runner: CliRunner, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text("from fastapi import FastAPI\napp = FastAPI()\n")
+        diff_file = tmp_path / "test.diff"
+        diff_file.write_text("dummy diff\n")
+
+        result = runner.invoke(
+            cli,
+            [
+                "analyze",
+                "--app",
+                str(app_file),
+                "--baseline-app",
+                str(app_file),
+                "--diff",
+                str(diff_file),
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "--baseline-app requires --scip" in result.output
 
     def test_vm_and_secure_ast_mutually_exclusive_list(
         self, runner: CliRunner, tmp_path: Path

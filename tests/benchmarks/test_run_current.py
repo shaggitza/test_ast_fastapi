@@ -109,6 +109,61 @@ class ResolutionAndSkipTests(unittest.TestCase):
         self.assertEqual(prediction["unresolved"], [])
         self.assertEqual(manifest["status"], "completed")
 
+    def test_scip_materializes_and_cleans_target_and_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_name:
+            temporary = Path(temporary_name)
+            config = self.config(temporary, use_scip=True)
+
+            def make_worktree(_cache: Path, worktree: Path, _sha: str) -> None:
+                worktree.mkdir()
+
+            with (
+                mock.patch.object(run_current, "ensure_cache", return_value=temporary / "bare"),
+                mock.patch.object(run_current, "merge_parents", return_value=[SHA_B]),
+                mock.patch.object(
+                    run_current, "add_detached_worktree", side_effect=make_worktree
+                ) as add_worktree,
+                mock.patch.object(run_current, "write_local_diff"),
+                mock.patch.object(run_current, "remove_worktree") as remove_worktree,
+                mock.patch.object(
+                    run_current, "invoke_analyzer", return_value=([], [], 0.1)
+                ) as invoke,
+            ):
+                prediction, _manifest = run_current.process_entry(
+                    entry("owner/repo", 8), config, "candidate"
+                )
+
+        assert [call.args[2] for call in add_worktree.call_args_list] == [SHA_A, SHA_B]
+        assert remove_worktree.call_count == 2
+        assert invoke.call_args.kwargs["baseline_app_root"].name == "baseline"
+        assert prediction["unresolved"] == []
+
+    def test_scip_cleans_partially_created_baseline_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_name:
+            temporary = Path(temporary_name)
+            config = self.config(temporary, use_scip=True)
+            calls = 0
+
+            def fail_baseline(_cache: Path, worktree: Path, _sha: str) -> None:
+                nonlocal calls
+                calls += 1
+                worktree.mkdir()
+                if calls == 2:
+                    raise run_current.RunnerError("partial baseline failure")
+
+            with (
+                mock.patch.object(run_current, "ensure_cache", return_value=temporary / "bare"),
+                mock.patch.object(run_current, "merge_parents", return_value=[SHA_B]),
+                mock.patch.object(run_current, "add_detached_worktree", side_effect=fail_baseline),
+                mock.patch.object(run_current, "remove_worktree") as remove_worktree,
+            ):
+                prediction, _manifest = run_current.process_entry(
+                    entry("owner/repo", 8), config, "candidate"
+                )
+
+        assert remove_worktree.call_count == 2
+        assert "partial baseline failure" in prediction["unresolved"][0]
+
     def test_missing_configured_root_is_unresolved(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_name:
             temporary = Path(temporary_name)
@@ -185,6 +240,7 @@ class AnalyzerFailureTests(unittest.TestCase):
                 2,
                 secure_ast=True,
                 use_scip=True,
+                baseline_app_root=Path("baseline"),
             )
 
         command.assert_called_once_with(
@@ -203,6 +259,8 @@ class AnalyzerFailureTests(unittest.TestCase):
                 "--no-cache",
                 "--secure-ast",
                 "--scip",
+                "--baseline-app",
+                "baseline",
             ],
             cwd=Path("candidate"),
             timeout=2,
