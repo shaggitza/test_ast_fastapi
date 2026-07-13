@@ -110,7 +110,7 @@ class TestMypyAnalyzerBasic:
     def test_cache_path_default(self, tmp_path: Path) -> None:
         """Test default cache path location."""
         analyzer = MypyAnalyzer(tmp_path)
-        expected = tmp_path.parent / ".endpoint_mypy_cache.json"
+        expected = tmp_path / ".endpoint_mypy_cache.json"
         assert analyzer.cache_path == expected
 
     def test_set_cache_path(self, tmp_path: Path) -> None:

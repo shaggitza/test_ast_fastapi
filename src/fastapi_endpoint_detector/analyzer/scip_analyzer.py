@@ -127,11 +127,12 @@ class SCIPAnalyzer:
         shards = result.get("shards")
         if not isinstance(shards, list) or not shards:
             raise SCIPAnalyzerError("scip-query reindex did not report indexer provenance")
-        commands = [
-            shard.get("command")
-            for shard in shards
-            if isinstance(shard, dict) and isinstance(shard.get("command"), str)
-        ]
+        commands: list[str] = []
+        for shard in shards:
+            if isinstance(shard, dict):
+                command = shard.get("command")
+                if isinstance(command, str):
+                    commands.append(command)
         if commands and not any("scip-python index" in command for command in commands):
             raise SCIPAnalyzerError(f"Unexpected Python SCIP indexer provenance: {commands!r}")
 
