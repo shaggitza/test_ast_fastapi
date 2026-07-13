@@ -38,7 +38,7 @@ Proiectul curent oferă pentru Python/FastAPI:
 Limitări importante:
 
 - este Python/FastAPI-specific, nu language-agnostic;
-- AST secure nu este încă integrat în analiza completă a diff-ului;
+- AST secure este integrat în analiza completă a diff-ului, dar nu compune încă prefixele `APIRouter`/mount în identitatea publică;
 - precizia depinde de mypy și de pattern-urile pe care le înțelegem;
 - nu oferă cross-repository consumers;
 - nu unește încă test coverage și contract diff;
@@ -195,14 +195,35 @@ Continuăm proiectul, dar reducem scope-ul la stratul framework-aware, dacă inf
 
 Construim mai mult intern numai dacă niciun candidat nu poate furniza evidence/provenance, extensibilitate și precizie acceptabile.
 
-## 8. Recomandare inițială
+## 8. Recomandare finală: HYBRID / ADOPT, cu BUY condiționat
 
-1. **Nu extindem încă analyzerul curent cu alte limbaje.**
-2. **Evaluăm întâi Sourcegraph Enterprise + SCIP** ca opțiune BUY/HYBRID.
-3. **Construim un POC SCIP OSS** pentru a măsura cât de subțire poate rămâne stratul nostru.
-4. **Evaluăm CodeQL** ca alternativă query-driven, inclusiv licența pentru scenariul comercial/intern.
-5. **Cumpărăm test impact separat** dacă Harness/Datadog oferă valoare; nu îl confundăm cu entrypoint impact.
-6. Păstrăm codul actual ca baseline FastAPI și set de benchmark până la decizia finală; nu îl ștergem înainte de comparația măsurată.
+### Decizie
+
+**Nu construim intern un motor semantic cross-language și nu extindem analyzerul curent limbaj cu limbaj. Adoptăm SCIP/compiler indexes ca fundație și construim numai adaptoarele framework-aware și evidence graph-ul. Nu cumpărăm încă Sourcegraph Enterprise fără POC-ul cross-repository pe instanța reală.**
+
+Dovezile măsurate:
+
+- baseline-ul curent, rulat fără execuția codului pe cele 58 PR-uri evaluabile, a obținut `TP=0`, `FP=40`, `FN=180`, deci precision/recall/F1 zero;
+- chiar și subsetul HTTP necesită compunerea router/mount și propagare prin middleware, persistence și configurare; 102 din cele 180 entrypoint-uri adjudecate nu sunt HTTP;
+- SCIP Python plus un adaptor FastAPI de 0,05 secunde a obținut `TP=2/FP=0/FN=0` pe fixture-ul transitive, inclusiv `Depends`;
+- SCIP TypeScript plus un adaptor NestJS subțire a obținut `TP=2/FP=0/FN=0` pe fixture;
+- JCCI a obținut `TP=1/FP=0/FN=0` pe overload-ul Spring; SCIP Java rămâne nevalidat din cauza indexului incomplet pentru simbolurile JDK;
+- oasdiff, GraphQL Inspector și Buf au identificat exact schimbările controlate de contract, confirmând că integrarea este preferabilă reimplementării;
+- CoDD oferă impact de arhitectură după onboarding, dar nu identități de entrypoint.
+
+### Ce păstrăm și ce oprim
+
+1. **Păstrăm repository-ul**, benchmark-ul adjudecat, schema comună, evaluatorul, provenance și raportarea `unknown/unresolved`.
+2. **Înghețăm analyzerul FastAPI actual ca adaptor/prototip**, cu mentenanță pentru benchmark și defecte critice; nu investim în semantica altor limbaje.
+3. **Adoptăm SCIP** pentru Python și TypeScript după pinning/version qualification; `scip-python-plus` nu este acceptat deoarece a pierdut endpoint-ul injectat.
+4. **Folosim JCCI numai ca referință/adaptor Java temporar**; pentru producție cerem index bazat pe compilator și refacem POC-ul SCIP Java într-un proiect Maven Spring real.
+5. **Integrăm oasdiff, GraphQL Inspector și Buf** ca evidence separat de blast radius. Pact rămâne condiționat de existența brokerului și matricei de deployment.
+6. **Separăm achiziția de test-impact**: Harness/Datadog/Develocity se justifică numai prin economie de CI și coverage export, nu ca motor de business impact.
+7. **Sourcegraph Enterprise este BUY condiționat** de demonstrarea precise indexes, cross-repo consumers, API stabil/exportabil, security/data residency și TCO pe instanța organizației.
+
+### Următorul increment recomandat
+
+Timebox de 4–6 săptămâni pentru un vertical slice: SCIP Python + TypeScript, adaptor FastAPI/NestJS cu prefix composition, evidence graph comun, output GitHub Check și atașarea oasdiff/GraphQL/Buf. Prag de continuare: minimum 80% recall HTTP pe corpus fără execuție de cod, provenance complet și latență incrementală sub cinci minute. Dacă pragul nu este atins, oprim produsul intern și reevaluăm exclusiv BUY.
 
 ## 9. Surse inițiale
 
