@@ -165,6 +165,40 @@ def test_shared_query_cache_is_bounded(tmp_path: Path) -> None:
     assert "missing-1099.py" in index._query_cache
 
 
+def test_symbol_and_function_resolution_are_memoized_per_typed_snapshot(
+    tmp_path: Path, monkeypatch
+) -> None:
+    main = tmp_path / "main.py"
+    main.write_text("def handler() -> int:\n    return 1\n")
+    analyzer = MypyAnalyzer(tmp_path)
+    analyzer._ensure_mypy_built()
+    tree = next(iter(analyzer._trees.values()))
+    fullname_calls = 0
+    function_calls = 0
+    original_fullname = analyzer._resolve_fullname_to_file_uncached
+    original_function = analyzer._find_func_in_tree_uncached
+
+    def counted_fullname(fullname: str):
+        nonlocal fullname_calls
+        fullname_calls += 1
+        return original_fullname(fullname)
+
+    def counted_function(*args, **kwargs):
+        nonlocal function_calls
+        function_calls += 1
+        return original_function(*args, **kwargs)
+
+    monkeypatch.setattr(analyzer, "_resolve_fullname_to_file_uncached", counted_fullname)
+    monkeypatch.setattr(analyzer, "_find_func_in_tree_uncached", counted_function)
+
+    for _ in range(20):
+        analyzer._resolve_fullname_to_file("missing.symbol")
+        analyzer._find_func_in_tree(tree, "handler", line_hint=1)
+
+    assert fullname_calls == 1
+    assert function_calls == 1
+
+
 def test_normal_analysis_reuses_build_inventory_and_handler_reverse_index(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -271,6 +271,10 @@ class MypyAnalyzer:
         self._python_ast_cache: dict[str, ast.Module | None] = {}
         self._built_source_fingerprint: str | None = None
         self._expected_source_fingerprint: str | None = None
+        self._fullname_resolution_cache: dict[str, tuple[str, str] | None] = {}
+        self._function_lookup_cache: dict[
+            tuple[int, str, str | None, int | None], tuple[Any, str] | None
+        ] = {}
 
     @property
     def cache_path(self) -> Path:
@@ -398,10 +402,31 @@ class MypyAnalyzer:
         self._python_ast_cache.clear()
         self._modules_by_canonical_path.clear()
         self._shared_path_index = None
+        self._fullname_resolution_cache.clear()
+        self._function_lookup_cache.clear()
         self._built_source_fingerprint = None
         self._endpoint_deps.clear()
 
     def _find_func_in_tree(
+        self,
+        tree: Any,
+        func_name: str,
+        *,
+        qualified_name: str | None = None,
+        line_hint: int | None = None,
+    ) -> tuple[Any, str] | None:
+        """Resolve one function with snapshot-local memoization."""
+        key = (id(tree), func_name, qualified_name, line_hint)
+        if key not in self._function_lookup_cache:
+            self._function_lookup_cache[key] = self._find_func_in_tree_uncached(
+                tree,
+                func_name,
+                qualified_name=qualified_name,
+                line_hint=line_hint,
+            )
+        return self._function_lookup_cache[key]
+
+    def _find_func_in_tree_uncached(
         self,
         tree: Any,
         func_name: str,
@@ -453,6 +478,14 @@ class MypyAnalyzer:
         return start, end
 
     def _resolve_fullname_to_file(self, fullname: str) -> tuple[str, str] | None:
+        """Resolve one fullname with snapshot-local memoization."""
+        if fullname not in self._fullname_resolution_cache:
+            self._fullname_resolution_cache[fullname] = self._resolve_fullname_to_file_uncached(
+                fullname
+            )
+        return self._fullname_resolution_cache[fullname]
+
+    def _resolve_fullname_to_file_uncached(self, fullname: str) -> tuple[str, str] | None:
         """
         Try to resolve a fullname to (file_path, module_name).
 
