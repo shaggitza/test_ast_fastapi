@@ -439,7 +439,12 @@ class SecureASTExtractor:
                     module.import_lines[local] = node.lineno
                     module.functions.pop(local, None)
                     submodule = aliases.get(f"{target_module}.{alias.name}")
-                    if submodule in modules:
+                    package_name = aliases.get(target_module, target_module)
+                    package = modules.get(package_name)
+                    package_exports_symbol = package is not None and _module_binds_name(
+                        package.tree, alias.name
+                    )
+                    if submodule in modules and not package_exports_symbol:
                         module.module_imports[local] = submodule
                         binding = _ImportBinding(node.lineno, submodule)
                     else:
@@ -483,6 +488,10 @@ class SecureASTExtractor:
                     )
                     module.objects.setdefault(conditional_name, []).append(item)
                 for name in bound_names:
+                    self._invalidate_binding(module, name, binding_line)
+            elif isinstance(node, (ast.For, ast.AsyncFor)):
+                binding_line = node.end_lineno or node.lineno
+                for name in _bound_names(node.target):
                     self._invalidate_binding(module, name, binding_line)
             elif isinstance(node, ast.Delete):
                 for target in node.targets:
@@ -583,8 +592,10 @@ class SecureASTExtractor:
         if not eligible:
             return None
         binding = eligible[-1]
-        assigned = self._latest_assignment(module, name, line)
-        return binding if assigned is None or binding.line > assigned else None
+        if sum(item.line == binding.line for item in eligible) != 1:
+            return None
+        assigned_lines = [item for item in module.assignments.get(name, []) if item <= line]
+        return binding if not assigned_lines or binding.line > max(assigned_lines) else None
 
     def _function_at(
         self, module: _Module, name: str, line: int
@@ -1484,22 +1495,74 @@ class SecureASTExtractor:
         modules: dict[str, _Module],
         line: int,
     ) -> _Object | None:
+        hop_budget = min(len(modules) + 1, 64)
         if isinstance(expression, ast.Name):
             local = self._object_at(module, expression.id, line)
             if local is not None:
                 return local
-            binding = self._import_binding_at(module, expression.id, line)
-            if binding is not None and binding.symbol is not None:
-                target = modules.get(aliases.get(binding.module, ""))
-                if target is not None:
-                    return self._object_at(target, binding.symbol, None)
+            return self._resolve_exported_object(
+                module,
+                expression.id,
+                line,
+                aliases,
+                modules,
+                frozenset(),
+                hop_budget,
+            )
         if isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name):
             binding = self._import_binding_at(module, expression.value.id, line)
-            target_name = binding.module if binding is not None and binding.symbol is None else ""
-            target = modules.get(aliases.get(target_name, target_name))
-            if target is not None:
-                return self._object_at(target, expression.attr, None)
+            if binding is None or binding.symbol is not None:
+                return None
+            target_name = aliases.get(binding.module, binding.module)
+            target = modules.get(target_name)
+            if target is None:
+                return None
+            return self._resolve_exported_object(
+                target,
+                expression.attr,
+                2**31 - 1,
+                aliases,
+                modules,
+                frozenset(),
+                hop_budget,
+            )
         return None
+
+    def _resolve_exported_object(
+        self,
+        module: _Module,
+        symbol: str,
+        line: int,
+        aliases: dict[str, str],
+        modules: dict[str, _Module],
+        visited: frozenset[tuple[str, str, int]],
+        remaining_hops: int,
+    ) -> _Object | None:
+        """Follow exact project-local symbol re-exports to one modeled object."""
+        if remaining_hops <= 0:
+            return None
+        local = self._object_at(module, symbol, line)
+        if local is not None:
+            return local
+        binding = self._import_binding_at(module, symbol, line)
+        if binding is None or binding.symbol is None or binding.symbol == "*":
+            return None
+        target_name = aliases.get(binding.module, binding.module)
+        target = modules.get(target_name)
+        if target is None:
+            return None
+        token = (module.name, symbol, binding.line)
+        if token in visited:
+            return None
+        return self._resolve_exported_object(
+            target,
+            binding.symbol,
+            2**31 - 1,
+            aliases,
+            modules,
+            visited | {token},
+            remaining_hops - 1,
+        )
 
     def _resolve_handler(
         self,
@@ -1751,6 +1814,47 @@ def _node_token(node: ast.AST) -> str:
             getattr(node, "end_col_offset", 0),
         )
     )
+
+
+def _module_binds_name(tree: ast.Module, name: str) -> bool:
+    """Return whether package initialization may bind or synthesize a name."""
+    if any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "__getattr__"
+        for node in tree.body
+    ):
+        return True
+    return any(_statement_may_bind_name(node, name) for node in tree.body)
+
+
+def _statement_may_bind_name(node: ast.stmt, name: str) -> bool:  # noqa: PLR0911
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return node.name == name
+    if isinstance(node, ast.Import):
+        return any((alias.asname or alias.name.split(".")[0]) == name for alias in node.names)
+    if isinstance(node, ast.ImportFrom):
+        return any(
+            alias.name == "*" or (alias.asname or alias.name) == name for alias in node.names
+        )
+    if isinstance(node, (ast.Assign, ast.AnnAssign)):
+        targets = [node.target] if isinstance(node, ast.AnnAssign) else node.targets
+        return any(name in _bound_names(target) for target in targets)
+    if isinstance(node, (ast.For, ast.AsyncFor)) and name in _bound_names(node.target):
+        return True
+    if isinstance(node, (ast.With, ast.AsyncWith)) and any(
+        item.optional_vars is not None and name in _bound_names(item.optional_vars)
+        for item in node.items
+    ):
+        return True
+    nested: list[ast.stmt] = []
+    for attribute in ("body", "orelse", "finalbody"):
+        value = getattr(node, attribute, None)
+        if isinstance(value, list):
+            nested.extend(item for item in value if isinstance(item, ast.stmt))
+    if isinstance(node, ast.Try):
+        nested.extend(item for handler in node.handlers for item in handler.body)
+    if isinstance(node, ast.Match):
+        nested.extend(item for case in node.cases for item in case.body)
+    return any(_statement_may_bind_name(item, name) for item in nested)
 
 
 def _assignment_name(node: ast.Assign | ast.AnnAssign) -> str | None:
