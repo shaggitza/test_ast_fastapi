@@ -10,15 +10,11 @@ Uses mypy for type-aware, precise dependency tracking.
 import heapq
 import os
 import time
-from collections import defaultdict, deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from fastapi_endpoint_detector.analyzer.effect_analyzer import (
-    EffectAnalyzer,
-    supports_endpoint_visible_effect,
-)
+from fastapi_endpoint_detector.analyzer.effect_analyzer import EffectAnalyzer
 from fastapi_endpoint_detector.analyzer.endpoint_registry import EndpointRegistry
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.analyzer.scip_analyzer import (
@@ -26,7 +22,6 @@ from fastapi_endpoint_detector.analyzer.scip_analyzer import (
     SCIPAnalyzerError,
     SCIPDefinition,
     SCIPReachedDefinition,
-    SCIPReverseCallEdge,
 )
 from fastapi_endpoint_detector.config import Config
 from fastapi_endpoint_detector.models.diff import DiffFile
@@ -172,19 +167,6 @@ class _ExpandedSCIPDefinition:
     dependency_chain: tuple[str, ...]
 
 
-@dataclass(frozen=True)
-class _SCIPEndpointCallPath:
-    """A direct-call-only path, stored from changed seed to endpoint."""
-
-    endpoint: Endpoint
-    definitions: tuple[SCIPDefinition, ...]
-    edges: tuple[SCIPReverseCallEdge, ...]
-
-
-_SCIP_PATHS_PER_DEFINITION = 8
-_SCIP_PATHS_PER_SEED = 32
-
-
 def _scip_definition_key(definition: SCIPDefinition) -> tuple[str, str, str, int, int]:
     return (
         definition.symbol,
@@ -311,108 +293,6 @@ def _expanded_scip_affected(  # noqa: PLR0912, PLR0915
             key=lambda item: (best_depth_by_symbol[item], item),
         )
     )
-
-
-def _bounded_scip_endpoint_paths(
-    analyzer: SCIPAnalyzer,
-    seed: SCIPDefinition,
-    registry: EndpointRegistry,
-    root: Path,
-    max_depth: int,
-    warnings: list[str],
-) -> tuple[_SCIPEndpointCallPath, ...]:
-    """Build bounded deterministic reverse-BFS paths using proven direct calls only."""
-    reverse_edges = getattr(analyzer, "reverse_call_edges", None)
-    if not callable(reverse_edges):
-        return ()
-
-    queue: deque[tuple[tuple[SCIPDefinition, ...], tuple[SCIPReverseCallEdge, ...]]] = deque(
-        [((seed,), ())]
-    )
-    paths_at_symbol: defaultdict[str, int] = defaultdict(int)
-    paths_at_symbol[seed.symbol] = 1
-    completed: list[_SCIPEndpointCallPath] = []
-    edge_cache: dict[str, tuple[SCIPReverseCallEdge, ...] | SCIPAnalyzerError] = {}
-
-    while queue and len(completed) < _SCIP_PATHS_PER_SEED:
-        definitions, edges = queue.popleft()
-        current = definitions[-1]
-        endpoints = sorted(
-            registry.get_by_line_range(
-                root / current.file_path,
-                current.start_line,
-                current.end_line,
-            ),
-            key=_endpoint_result_key,
-        )
-        if endpoints:
-            completed.extend(
-                _SCIPEndpointCallPath(endpoint, definitions, edges)
-                for endpoint in endpoints[: _SCIP_PATHS_PER_SEED - len(completed)]
-            )
-            # An endpoint is a terminal observation boundary. Do not traverse
-            # callers above it, even if the handler is itself called elsewhere.
-            continue
-        if len(edges) >= max_depth:
-            continue
-
-        cached = edge_cache.get(current.symbol)
-        if cached is None:
-            try:
-                cached = tuple(reverse_edges(current))
-            except SCIPAnalyzerError as error:
-                cached = error
-                warnings.append(f"SCIP direct-call paths from {current.short_name} failed: {error}")
-            edge_cache[current.symbol] = cached
-        if isinstance(cached, SCIPAnalyzerError):
-            continue
-
-        ordered_edges = sorted(
-            cached,
-            key=lambda edge: (
-                _scip_definition_key(edge.caller),
-                _scip_definition_key(edge.callee),
-                edge.occurrence.file_path.as_posix(),
-                edge.occurrence.line,
-            ),
-        )
-        symbols = {definition.symbol for definition in definitions}
-        for edge in ordered_edges:
-            if edge.callee.symbol != current.symbol:
-                warnings.append(
-                    f"SCIP ignored inconsistent direct-call edge to {current.short_name}"
-                )
-                continue
-            caller = edge.caller
-            if caller.symbol in symbols:
-                continue
-            if paths_at_symbol[caller.symbol] >= _SCIP_PATHS_PER_DEFINITION:
-                continue
-            paths_at_symbol[caller.symbol] += 1
-            queue.append(((*definitions, caller), (*edges, edge)))
-
-    return tuple(completed)
-
-
-def _scip_call_stack(path: _SCIPEndpointCallPath, root: Path) -> list[CallStackFrame]:
-    """Convert seed-to-endpoint traversal into EffectAnalyzer endpoint-first order."""
-    reversed_definitions = tuple(reversed(path.definitions))
-    edge_by_callee = {edge.callee.symbol: edge for edge in path.edges}
-    frames: list[CallStackFrame] = []
-    for definition in reversed_definitions:
-        edge = edge_by_callee.get(definition.symbol)
-        frames.append(
-            CallStackFrame(
-                file_path=str(root / definition.file_path),
-                line_number=definition.start_line,
-                function_name=definition.short_name,
-                caller_file_path=(
-                    str(root / edge.occurrence.file_path) if edge is not None else None
-                ),
-                caller_line_number=edge.occurrence.line if edge is not None else None,
-            )
-        )
-    return frames
 
 
 def _normalized_diff_path(path: Path | str) -> str:
@@ -941,7 +821,7 @@ class ChangeMapper:
             ]
             return matches[0] if len(matches) == 1 else endpoint
 
-        def analyze_side(  # noqa: PLR0912
+        def analyze_side(
             analyzer: SCIPAnalyzer,
             registry: EndpointRegistry,
             root: Path,
@@ -1018,84 +898,6 @@ class ChangeMapper:
                                 ],
                             ),
                         )
-
-                # Flat SCIP affected/override evidence above remains authoritative
-                # candidate reachability. Direct-call paths only add call-site
-                # provenance for the narrow defensive-copy effect analyzer.
-                paths = _bounded_scip_endpoint_paths(
-                    analyzer, seed, registry, root, max_depth, warnings
-                )
-                paths_by_endpoint: defaultdict[
-                    tuple[str, str, int, str, str], list[_SCIPEndpointCallPath]
-                ] = defaultdict(list)
-                for path in paths:
-                    endpoint = (
-                        target_equivalent(path.endpoint) if side == "baseline" else path.endpoint
-                    )
-                    paths_by_endpoint[_endpoint_result_key(endpoint)].append(
-                        _SCIPEndpointCallPath(endpoint, path.definitions, path.edges)
-                    )
-
-                for endpoint_paths in paths_by_endpoint.values():
-                    reached_endpoint = True
-                    endpoint = endpoint_paths[0].endpoint
-                    call_stacks = [_scip_call_stack(path, root) for path in endpoint_paths]
-                    effect_result = None
-                    if side == "target" and any(path.edges for path in endpoint_paths):
-                        try:
-                            effect_result = self._effect_analyzer.analyze(
-                                str(file_path), set(seed_lines), call_stacks
-                            )
-                        except Exception as error:  # Evidence must fail open.
-                            warnings.append(
-                                f"SCIP effect path analysis from {seed.short_name} failed: {error}"
-                            )
-                    confidence = ConfidenceLevel.LOW
-                    if effect_result is not None and any(
-                        supports_endpoint_visible_effect(item) for item in effect_result.evidence
-                    ):
-                        confidence = ConfidenceLevel.MEDIUM
-                    depth = min(len(path.edges) for path in endpoint_paths)
-                    evidence = [
-                        EffectEvidence(
-                            producer=EvidenceProducer.SCIP,
-                            status=EvidenceStatus.REACHABILITY_ONLY,
-                            effect=ChangeEffectKind.UNKNOWN,
-                            channel=ImpactChannel.UNKNOWN,
-                            disposition=EffectDisposition.REACHABILITY_ONLY,
-                            summary=(
-                                f"SCIP proves a direct-call-only {side} path at depth {depth}."
-                            ),
-                            changed_location=CodeReference(
-                                file_path=str(file_path),
-                                line_number=min(seed_lines),
-                                symbol=seed.short_name,
-                            ),
-                            limitations=[
-                                "Direct call reachability alone does not establish "
-                                "runtime data observation."
-                            ],
-                        )
-                    ]
-                    if effect_result is not None:
-                        evidence.extend(effect_result.evidence)
-                    _merge_affected(
-                        affected,
-                        AffectedEndpoint(
-                            endpoint=endpoint,
-                            confidence=confidence,
-                            reason=(
-                                f"SCIP {side} proven call path from {seed.short_name} "
-                                f"to endpoint at depth {depth}"
-                            ),
-                            dependency_chain=[
-                                definition.symbol for definition in endpoint_paths[0].definitions
-                            ],
-                            changed_files=[str(file_path)],
-                            call_stacks=call_stacks,
-                            effect_evidence=evidence,
-                        ),
-                    )
                 if reached_endpoint:
                     processed.update(seed_lines)
             return processed

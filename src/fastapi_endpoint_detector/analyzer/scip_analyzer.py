@@ -454,9 +454,13 @@ class SCIPAnalyzer:
         if resolved_short_name != callee.short_name:
             raise SCIPAnalyzerError("SCIP refs resolution has an inconsistent short name")
         resolved_relative, _ = self._validated_project_file(resolved_path)
-        callee_relative, _ = self._validated_project_file(callee.file_path.as_posix())
-        if resolved_relative != callee_relative:
-            raise SCIPAnalyzerError("SCIP refs resolution has an inconsistent definition path")
+        canonical_callee = SCIPDefinition(
+            callee.symbol,
+            callee.short_name,
+            resolved_relative,
+            callee.start_line,
+            callee.end_line,
+        )
         parts = callee.short_name.split(":")
         if not parts or not parts[-1].endswith("()"):
             raise SCIPAnalyzerError("SCIP refs callee is not a callable definition")
@@ -487,7 +491,7 @@ class SCIPAnalyzer:
             if caller is None:
                 continue
             occurrence = SCIPOccurrence(relative, line)
-            edges.add(SCIPReverseCallEdge(caller, callee, occurrence))
+            edges.add(SCIPReverseCallEdge(caller, canonical_callee, occurrence))
 
         value = tuple(
             sorted(

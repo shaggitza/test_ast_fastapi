@@ -2,71 +2,17 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import pytest
-
-from fastapi_endpoint_detector.analyzer.effect_analyzer import (
-    EffectAnalyzer,
-    supports_endpoint_visible_effect,
-)
+from fastapi_endpoint_detector.analyzer.effect_analyzer import EffectAnalyzer
 from fastapi_endpoint_detector.models.report import (
     CallStackFrame,
-    ChangeEffectKind,
-    CodeReference,
     ConfidenceLevel,
     DataObservationKind,
     EffectDisposition,
-    EffectEvidence,
-    EvidenceProducer,
-    EvidenceStatus,
     ImpactChannel,
 )
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-
-@pytest.mark.parametrize(
-    ("observation", "channel", "disposition", "expected"),
-    [
-        (
-            DataObservationKind.RETURNED,
-            ImpactChannel.HTTP_RESPONSE,
-            EffectDisposition.OBSERVABLE_BEHAVIOR,
-            True,
-        ),
-        (
-            DataObservationKind.LOGGED,
-            ImpactChannel.LOG_OR_TELEMETRY,
-            EffectDisposition.OPERATIONAL_ONLY,
-            False,
-        ),
-        (
-            DataObservationKind.NOT_OBSERVED_AFTER_CALL,
-            ImpactChannel.IN_MEMORY_ALIASING,
-            EffectDisposition.NOT_OBSERVED_BY_CALLER,
-            False,
-        ),
-    ],
-)
-def test_scip_promotion_requires_endpoint_visible_data_flow(
-    observation: DataObservationKind,
-    channel: ImpactChannel,
-    disposition: EffectDisposition,
-    expected: bool,
-) -> None:
-    evidence = EffectEvidence(
-        producer=EvidenceProducer.DATA_FLOW,
-        status=EvidenceStatus.ESTABLISHED,
-        effect=ChangeEffectKind.ARGUMENT_MUTATION_ISOLATED,
-        observations=[observation],
-        channel=channel,
-        disposition=disposition,
-        summary="test",
-        changed_location=CodeReference(file_path="service.py", line_number=1),
-        observation_location=CodeReference(file_path="main.py", line_number=2),
-    )
-
-    assert supports_endpoint_visible_effect(evidence) is expected
 
 
 def _service(tmp_path: Path) -> Path:

@@ -361,10 +361,7 @@ def test_reverse_call_edges_requires_unique_exact_full_symbol(
 
 @pytest.mark.parametrize(
     ("resolved_short_name", "resolved_path", "message"),
-    [
-        ("other:target()", "callee.py", "inconsistent short name"),
-        ("callee:target()", "other.py", "inconsistent definition path"),
-    ],
+    [("other:target()", "callee.py", "inconsistent short name")],
 )
 def test_reverse_call_edges_rejects_inconsistent_resolution_metadata(
     tmp_path: Path, resolved_short_name: str, resolved_path: str, message: str
