@@ -1,0 +1,204 @@
+{
+  "scope": "fastapi-adapter-v1",
+  "verification_set": {
+    "id": "open-webui-26642-stress-v1",
+    "path": "benchmarks/real_world/verification_sets/open-webui-26642-stress-v1.json",
+    "selection": "include",
+    "selected_keys": [
+      {
+        "repository": "open-webui/open-webui",
+        "pr": 26642
+      }
+    ],
+    "matched_prs": 1,
+    "sha256": "73a693a5f6b9dca226edc5ae637715ba9a4e488cecb50a1c2406715af141e9ed"
+  },
+  "adjudicated_prs": 1,
+  "prediction_coverage": 1.0,
+  "truth_positive_prs": 1,
+  "negative_control_prs": 0,
+  "negative_controls_with_fp": 0,
+  "negative_controls_with_low_fp": 0,
+  "micro": {
+    "precision": 0.8461538461538461,
+    "recall": 0.8543689320388349,
+    "f1": 0.8502415458937198,
+    "tp": 88,
+    "fp": 16,
+    "fn": 15
+  },
+  "confidence": {
+    "policy": "HIGH and MEDIUM are primary; LOW is diagnostic only",
+    "low": {
+      "low_tp": 0,
+      "low_fp": 0,
+      "low_candidates": 0,
+      "low_supported_reachability": 0,
+      "low_unmatched": 0,
+      "fn_with_low_candidate": 0,
+      "fn_with_no_candidate": 15,
+      "diagnostic_precision": 0.0,
+      "supported_precision": 0.0
+    },
+    "candidate_ceiling": {
+      "precision": 0.8461538461538461,
+      "recall": 0.8543689320388349,
+      "f1": 0.8502415458937198,
+      "tp": 88,
+      "fp": 16,
+      "fn": 15
+    },
+    "by_repository": {
+      "open-webui/open-webui": {
+        "policy": "HIGH and MEDIUM are primary; LOW is diagnostic only",
+        "low": {
+          "low_tp": 0,
+          "low_fp": 0,
+          "low_candidates": 0,
+          "low_supported_reachability": 0,
+          "low_unmatched": 0,
+          "fn_with_low_candidate": 0,
+          "fn_with_no_candidate": 15,
+          "diagnostic_precision": 0.0,
+          "supported_precision": 0.0
+        },
+        "candidate_ceiling": {
+          "precision": 0.8461538461538461,
+          "recall": 0.8543689320388349,
+          "f1": 0.8502415458937198,
+          "tp": 88,
+          "fp": 16,
+          "fn": 15
+        }
+      }
+    }
+  },
+  "macro": {
+    "precision": 0.8461538461538461,
+    "recall": 0.8543689320388349,
+    "f1": 0.8502415458937198
+  },
+  "by_repository": {
+    "open-webui/open-webui": {
+      "precision": 0.8461538461538461,
+      "recall": 0.8543689320388349,
+      "f1": 0.8502415458937198,
+      "tp": 88,
+      "fp": 16,
+      "fn": 15
+    }
+  },
+  "by_kind": {
+    "http": {
+      "precision": 0.8461538461538461,
+      "recall": 0.8543689320388349,
+      "f1": 0.8502415458937198,
+      "tp": 88,
+      "fp": 16,
+      "fn": 15
+    }
+  },
+  "normalized": {
+    "alias_version": 1,
+    "micro": {
+      "precision": 0.9019607843137255,
+      "recall": 0.8679245283018868,
+      "f1": 0.8846153846153846,
+      "tp": 92,
+      "fp": 10,
+      "fn": 14
+    },
+    "macro": {
+      "precision": 0.9019607843137255,
+      "recall": 0.8679245283018868,
+      "f1": 0.8846153846153846
+    },
+    "by_repository": {
+      "open-webui/open-webui": {
+        "precision": 0.9019607843137255,
+        "recall": 0.8679245283018868,
+        "f1": 0.8846153846153846,
+        "tp": 92,
+        "fp": 10,
+        "fn": 14
+      }
+    },
+    "by_kind": {
+      "http": {
+        "precision": 0.9019607843137255,
+        "recall": 0.8679245283018868,
+        "f1": 0.8846153846153846,
+        "tp": 92,
+        "fp": 10,
+        "fn": 14
+      }
+    },
+    "expected_atoms": 106,
+    "predicted_atoms": 102,
+    "matches_by_rule": {
+      "raw_exact": 88,
+      "strict_canonical": 4
+    },
+    "low_matches_by_rule": {},
+    "confidence": {
+      "policy": "HIGH and MEDIUM are primary; LOW is diagnostic only",
+      "low": {
+        "low_tp": 0,
+        "low_fp": 0,
+        "low_candidates": 0,
+        "low_supported_reachability": 0,
+        "low_unmatched": 0,
+        "fn_with_low_candidate": 0,
+        "fn_with_no_candidate": 14,
+        "diagnostic_precision": 0.0,
+        "supported_precision": 0.0
+      },
+      "candidate_ceiling": {
+        "precision": 0.9019607843137255,
+        "recall": 0.8679245283018868,
+        "f1": 0.8846153846153846,
+        "tp": 92,
+        "fp": 10,
+        "fn": 14
+      },
+      "by_repository": {
+        "open-webui/open-webui": {
+          "policy": "HIGH and MEDIUM are primary; LOW is diagnostic only",
+          "low": {
+            "low_tp": 0,
+            "low_fp": 0,
+            "low_candidates": 0,
+            "low_supported_reachability": 0,
+            "low_unmatched": 0,
+            "fn_with_low_candidate": 0,
+            "fn_with_no_candidate": 14,
+            "diagnostic_precision": 0.0,
+            "supported_precision": 0.0
+          },
+          "candidate_ceiling": {
+            "precision": 0.9019607843137255,
+            "recall": 0.8679245283018868,
+            "f1": 0.8846153846153846,
+            "tp": 92,
+            "fp": 10,
+            "fn": 14
+          }
+        }
+      }
+    },
+    "rules": [
+      "raw exact",
+      "composite HTTP method expansion",
+      "template parameter-name normalization with converter preservation",
+      "case-insensitive WebSocket family",
+      "unique generic/qualified relaxation",
+      "frozen repository-scoped explicit aliases"
+    ]
+  },
+  "unresolved_items": 0,
+  "latency_seconds": {
+    "samples": 1,
+    "mean": 180.09900511201704,
+    "max": 180.09900511201704
+  }
+}

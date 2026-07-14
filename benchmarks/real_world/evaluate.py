@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from collections import defaultdict
@@ -103,6 +104,42 @@ def predicted_ids_by_kind(record: dict[str, Any], identifiers: set[str]) -> dict
     return grouped
 
 
+def read_verification_selection(
+    path: Path,
+) -> tuple[dict[str, Any], str, set[tuple[str, int]], str]:
+    """Load and validate a versioned PR-level verification selection."""
+    content = path.read_bytes()
+    manifest = json.loads(content)
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
+        raise ValueError("verification set must use schema_version 1")
+    identifier = manifest.get("id")
+    base_scope = manifest.get("base_scope")
+    selection = manifest.get("selection", "exclude")
+    if not isinstance(identifier, str) or not identifier.strip():
+        raise ValueError("verification set must have a non-empty id")
+    if not isinstance(base_scope, str) or not base_scope.strip():
+        raise ValueError("verification set must have a non-empty base_scope")
+    if selection not in {"include", "exclude"}:
+        raise ValueError("verification set selection must be include or exclude")
+    field = "included" if selection == "include" else "excluded"
+    raw_items = manifest.get(field)
+    if not isinstance(raw_items, list) or not raw_items:
+        raise ValueError(f"verification set {field} must be a non-empty list")
+    selected: set[tuple[str, int]] = set()
+    for item in raw_items:
+        repository = item.get("repository") if isinstance(item, dict) else None
+        if not isinstance(repository, str) or not repository.strip():
+            raise ValueError(f"malformed verification-set {field} entry")
+        pr = item.get("pr")
+        if type(pr) is not int:
+            raise ValueError("verification-set PR must be an integer")
+        record_key = (repository, pr)
+        if record_key in selected:
+            raise ValueError(f"duplicate verification-set {field} entry: {record_key}")
+        selected.add(record_key)
+    return manifest, selection, selected, hashlib.sha256(content).hexdigest()
+
+
 def ratio(numerator: int | float, denominator: int | float) -> float:
     return numerator / denominator if denominator else 0.0
 
@@ -112,9 +149,43 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
     parser.add_argument("--ground-truth", type=Path, required=True)
     parser.add_argument("--predictions", type=Path, required=True)
     parser.add_argument("--scope", choices=SCOPES, default="all")
+    parser.add_argument("--verification-set", type=Path)
     args = parser.parse_args()
 
-    truth = {key(item): filter_record(item, args.scope) for item in read_jsonl(args.ground_truth)}
+    scope_id = {
+        "all": "all-surfaces",
+        "fastapi": "fastapi-adapter-v1",
+        "out-of-scope": "out-of-scope-v1",
+    }[args.scope]
+    verification_manifest: dict[str, Any] | None = None
+    verification_selection: str | None = None
+    verification_keys: set[tuple[str, int]] = set()
+    verification_sha256: str | None = None
+    if args.verification_set is not None:
+        (
+            verification_manifest,
+            verification_selection,
+            verification_keys,
+            verification_sha256,
+        ) = read_verification_selection(args.verification_set)
+        if verification_manifest["base_scope"] != scope_id:
+            raise ValueError(
+                f"verification set requires scope {verification_manifest['base_scope']!r}, "
+                f"not {scope_id!r}"
+            )
+
+    truth_records = read_jsonl(args.ground_truth)
+    truth_keys = {key(item) for item in truth_records}
+    unmatched = verification_keys - truth_keys
+    if unmatched:
+        raise ValueError(f"verification-set keys absent from ground truth: {sorted(unmatched)}")
+    truth = {
+        key(item): filter_record(item, args.scope)
+        for item in truth_records
+        if verification_selection is None
+        or (verification_selection == "include" and key(item) in verification_keys)
+        or (verification_selection == "exclude" and key(item) not in verification_keys)
+    }
     predictions = {
         key(item): filter_record(item, args.scope) for item in read_jsonl(args.predictions)
     }
@@ -288,11 +359,22 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
         }
 
     result = {
-        "scope": {
-            "all": "all-surfaces",
-            "fastapi": "fastapi-adapter-v1",
-            "out-of-scope": "out-of-scope-v1",
-        }[args.scope],
+        "scope": scope_id,
+        "verification_set": (
+            {
+                "id": verification_manifest["id"],
+                "path": str(args.verification_set),
+                "selection": verification_selection,
+                "selected_keys": [
+                    {"repository": repository, "pr": pr}
+                    for repository, pr in sorted(verification_keys)
+                ],
+                "matched_prs": len(verification_keys),
+                "sha256": verification_sha256,
+            }
+            if verification_manifest is not None
+            else None
+        ),
         "adjudicated_prs": evaluated,
         "prediction_coverage": ratio(len(adjudicated_keys & set(predictions)), evaluated),
         "truth_positive_prs": truth_positive_prs,

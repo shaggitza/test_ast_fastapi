@@ -18,7 +18,13 @@ python benchmarks/real_world/partition_scopes.py \
   --output benchmarks/real_world/scopes
 ```
 
-Use `evaluate.py --scope fastapi` for the product score. The default
+Use `evaluate.py --scope fastapi` for the complete adapter scope. For the
+primary cross-PR verification score, additionally pass
+`--verification-set benchmarks/real_world/verification_sets/fastapi-verification-v1.json`.
+Verification-set exclusions preserve canonical truth and are reported as
+separate stress holdouts.
+
+The default
 `--scope all` preserves the complete cross-surface historical view. Scope
 selection never replaces raw exact scoring with normalized scoring; both are
 reported together.
