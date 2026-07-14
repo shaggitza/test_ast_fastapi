@@ -1,6 +1,6 @@
 # Observation-calibrated SCIP baseline
 
-Analyzer revision: `87ca780` on the frozen 60-PR corpus.
+Analyzer revision: `3bff609` on the frozen 60-PR corpus.
 
 This baseline supersedes the permissive SCIP primary score for product-facing
 claims. Direct changed endpoint definitions remain HIGH. Every transitive SCIP

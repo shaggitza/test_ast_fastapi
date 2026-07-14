@@ -1,0 +1,329 @@
+{
+  "scope": "fastapi-adapter-v1",
+  "adjudicated_prs": 58,
+  "prediction_coverage": 1.0,
+  "truth_positive_prs": 26,
+  "negative_control_prs": 32,
+  "negative_controls_with_fp": 0,
+  "negative_controls_with_low_fp": 0,
+  "micro": {
+    "precision": 0.5,
+    "recall": 0.028735632183908046,
+    "f1": 0.05434782608695652,
+    "tp": 5,
+    "fp": 5,
+    "fn": 169
+  },
+  "confidence": {
+    "policy": "HIGH and MEDIUM are primary; LOW is diagnostic only",
+    "low": {
+      "low_tp": 101,
+      "low_fp": 372,
+      "low_candidates": 473,
+      "low_supported_reachability": 0,
+      "low_unmatched": 372,
+      "fn_with_low_candidate": 101,
+      "fn_with_no_candidate": 68,
+      "diagnostic_precision": 0.2135306553911205,
+      "supported_precision": 0.2135306553911205
+    },
+    "candidate_ceiling": {
+      "precision": 0.2194616977225673,
+      "recall": 0.6091954022988506,
+      "f1": 0.3226788432267884,
+      "tp": 106,
+      "fp": 377,
+      "fn": 68
+    },
+    "by_repository": {
+      "khoj-ai/khoj": {
+        "policy": "HIGH and MEDIUM are primary; LOW is diagnostic only",
+        "low": {
+          "low_tp": 0,
+          "low_fp": 0,
+          "low_candidates": 0,
+          "low_supported_reachability": 0,
+          "low_unmatched": 0,
+          "fn_with_low_candidate": 0,
+          "fn_with_no_candidate": 32,
+          "diagnostic_precision": 0.0,
+          "supported_precision": 0.0
+        },
+        "candidate_ceiling": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 32
+        }
+      },
+      "langflow-ai/langflow": {
+        "policy": "HIGH and MEDIUM are primary; LOW is diagnostic only",
+        "low": {
+          "low_tp": 0,
+          "low_fp": 0,
+          "low_candidates": 0,
+          "low_supported_reachability": 0,
+          "low_unmatched": 0,
+          "fn_with_low_candidate": 0,
+          "fn_with_no_candidate": 16,
+          "diagnostic_precision": 0.0,
+          "supported_precision": 0.0
+        },
+        "candidate_ceiling": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 16
+        }
+      },
+      "open-webui/open-webui": {
+        "policy": "HIGH and MEDIUM are primary; LOW is diagnostic only",
+        "low": {
+          "low_tp": 101,
+          "low_fp": 372,
+          "low_candidates": 473,
+          "low_supported_reachability": 0,
+          "low_unmatched": 372,
+          "fn_with_low_candidate": 101,
+          "fn_with_no_candidate": 20,
+          "diagnostic_precision": 0.2135306553911205,
+          "supported_precision": 0.2135306553911205
+        },
+        "candidate_ceiling": {
+          "precision": 0.2194616977225673,
+          "recall": 0.8412698412698413,
+          "f1": 0.34811165845648606,
+          "tp": 106,
+          "fp": 377,
+          "fn": 20
+        }
+      }
+    }
+  },
+  "macro": {
+    "precision": 0.008620689655172414,
+    "recall": 0.0008369601606963508,
+    "f1": 0.0015257857796765334
+  },
+  "by_repository": {
+    "khoj-ai/khoj": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "fp": 0,
+      "fn": 32
+    },
+    "langflow-ai/langflow": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "fp": 0,
+      "fn": 16
+    },
+    "open-webui/open-webui": {
+      "precision": 0.5,
+      "recall": 0.03968253968253968,
+      "f1": 0.07352941176470588,
+      "tp": 5,
+      "fp": 5,
+      "fn": 121
+    }
+  },
+  "by_kind": {
+    "event": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "fp": 0,
+      "fn": 8
+    },
+    "http": {
+      "precision": 0.5,
+      "recall": 0.030120481927710843,
+      "f1": 0.056818181818181816,
+      "tp": 5,
+      "fp": 5,
+      "fn": 161
+    }
+  },
+  "normalized": {
+    "alias_version": 1,
+    "micro": {
+      "precision": 1.0,
+      "recall": 0.05084745762711865,
+      "f1": 0.0967741935483871,
+      "tp": 9,
+      "fp": 0,
+      "fn": 168
+    },
+    "macro": {
+      "precision": 0.017241379310344827,
+      "recall": 0.0014638906961613532,
+      "f1": 0.0026986506746626685
+    },
+    "by_repository": {
+      "khoj-ai/khoj": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "tp": 0,
+        "fp": 0,
+        "fn": 32
+      },
+      "langflow-ai/langflow": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "tp": 0,
+        "fp": 0,
+        "fn": 16
+      },
+      "open-webui/open-webui": {
+        "precision": 1.0,
+        "recall": 0.06976744186046512,
+        "f1": 0.13043478260869565,
+        "tp": 9,
+        "fp": 0,
+        "fn": 120
+      }
+    },
+    "by_kind": {
+      "event": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "tp": 0,
+        "fp": 0,
+        "fn": 8
+      },
+      "http": {
+        "precision": 1.0,
+        "recall": 0.05325443786982249,
+        "f1": 0.10112359550561797,
+        "tp": 9,
+        "fp": 0,
+        "fn": 160
+      }
+    },
+    "expected_atoms": 177,
+    "predicted_atoms": 9,
+    "matches_by_rule": {
+      "raw_exact": 5,
+      "strict_canonical": 4
+    },
+    "low_matches_by_rule": {
+      "raw_exact": 101
+    },
+    "confidence": {
+      "policy": "HIGH and MEDIUM are primary; LOW is diagnostic only",
+      "low": {
+        "low_tp": 101,
+        "low_fp": 371,
+        "low_candidates": 472,
+        "low_supported_reachability": 0,
+        "low_unmatched": 371,
+        "fn_with_low_candidate": 101,
+        "fn_with_no_candidate": 67,
+        "diagnostic_precision": 0.21398305084745764,
+        "supported_precision": 0.21398305084745764
+      },
+      "candidate_ceiling": {
+        "precision": 0.2286902286902287,
+        "recall": 0.6214689265536724,
+        "f1": 0.33434650455927056,
+        "tp": 110,
+        "fp": 371,
+        "fn": 67
+      },
+      "by_repository": {
+        "khoj-ai/khoj": {
+          "policy": "HIGH and MEDIUM are primary; LOW is diagnostic only",
+          "low": {
+            "low_tp": 0,
+            "low_fp": 0,
+            "low_candidates": 0,
+            "low_supported_reachability": 0,
+            "low_unmatched": 0,
+            "fn_with_low_candidate": 0,
+            "fn_with_no_candidate": 32,
+            "diagnostic_precision": 0.0,
+            "supported_precision": 0.0
+          },
+          "candidate_ceiling": {
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "tp": 0,
+            "fp": 0,
+            "fn": 32
+          }
+        },
+        "langflow-ai/langflow": {
+          "policy": "HIGH and MEDIUM are primary; LOW is diagnostic only",
+          "low": {
+            "low_tp": 0,
+            "low_fp": 0,
+            "low_candidates": 0,
+            "low_supported_reachability": 0,
+            "low_unmatched": 0,
+            "fn_with_low_candidate": 0,
+            "fn_with_no_candidate": 16,
+            "diagnostic_precision": 0.0,
+            "supported_precision": 0.0
+          },
+          "candidate_ceiling": {
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "tp": 0,
+            "fp": 0,
+            "fn": 16
+          }
+        },
+        "open-webui/open-webui": {
+          "policy": "HIGH and MEDIUM are primary; LOW is diagnostic only",
+          "low": {
+            "low_tp": 101,
+            "low_fp": 371,
+            "low_candidates": 472,
+            "low_supported_reachability": 0,
+            "low_unmatched": 371,
+            "fn_with_low_candidate": 101,
+            "fn_with_no_candidate": 19,
+            "diagnostic_precision": 0.21398305084745764,
+            "supported_precision": 0.21398305084745764
+          },
+          "candidate_ceiling": {
+            "precision": 0.2286902286902287,
+            "recall": 0.8527131782945736,
+            "f1": 0.36065573770491804,
+            "tp": 110,
+            "fp": 371,
+            "fn": 19
+          }
+        }
+      }
+    },
+    "rules": [
+      "raw exact",
+      "composite HTTP method expansion",
+      "template parameter-name normalization with converter preservation",
+      "case-insensitive WebSocket family",
+      "unique generic/qualified relaxation",
+      "frozen repository-scoped explicit aliases"
+    ]
+  },
+  "unresolved_items": 39,
+  "latency_seconds": {
+    "samples": 27,
+    "mean": 50.51124265507355,
+    "max": 154.38848093000706
+  }
+}
