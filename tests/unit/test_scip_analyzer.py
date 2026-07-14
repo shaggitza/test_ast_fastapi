@@ -11,6 +11,8 @@ from fastapi_endpoint_detector.analyzer.scip_analyzer import (
     SCIPAnalyzer,
     SCIPAnalyzerError,
     SCIPDefinition,
+    SCIPOccurrence,
+    SCIPReverseCallEdge,
 )
 
 
@@ -228,3 +230,256 @@ def test_command_failure_is_explicit(tmp_path: Path) -> None:
         pytest.raises(SCIPAnalyzerError, match="broken index"),
     ):
         analyzer._run(["scip-query", "outline", "x.py", "--json"], json_output=True)
+
+
+def test_reverse_call_edges_proves_calls_deduplicates_sorts_and_caches(tmp_path: Path) -> None:
+    (tmp_path / "callee.py").write_text("def target():\n    return None\n")
+    (tmp_path / "z.py").write_text(
+        "def z_caller():\n"
+        "    target()\n"
+        "    value = target\n"
+        "target()\n"
+        "def ambiguous():\n"
+        "    target(); target()\n"
+        "def outer():\n"
+        "    def nested():\n"
+        "        target()\n"
+    )
+    (tmp_path / "a.py").write_text("async def a_caller():\n    await target()\n")
+    analyzer = SCIPAnalyzer(tmp_path)
+    callee = SCIPDefinition("full target symbol", "callee:target()", Path("callee.py"), 1, 2)
+    z_caller = SCIPDefinition("z symbol", "z:z_caller()", Path("z.py"), 1, 3)
+    a_caller = SCIPDefinition("a symbol", "a:a_caller()", Path("a.py"), 1, 2)
+    payload = {
+        "matched": True,
+        "resolved": {
+            "symbol": callee.symbol,
+            "shortName": callee.short_name,
+            "relativePath": "callee.py",
+        },
+        "otherMatches": [],
+        "totalMatches": 1,
+        "references": [
+            {"relativePath": "z.py", "line": 1},
+            {"relativePath": "z.py", "line": 2},
+            {"relativePath": "z.py", "line": 3},
+            {"relativePath": "z.py", "line": 5},
+            {"relativePath": "z.py", "line": 8},
+            {"relativePath": "z.py", "line": 1},
+            {"relativePath": "a.py", "line": 1},
+        ],
+    }
+
+    with (
+        patch.object(analyzer, "_run", return_value=payload) as run,
+        patch.object(analyzer, "_executable", return_value="scip-query"),
+        patch.object(
+            analyzer,
+            "outline",
+            side_effect=lambda path: (a_caller,) if path == Path("a.py") else (z_caller,),
+        ),
+    ):
+        first = analyzer.reverse_call_edges(callee)
+        second = analyzer.reverse_call_edges(callee)
+
+    assert first == (
+        SCIPReverseCallEdge(a_caller, callee, SCIPOccurrence(Path("a.py"), 2)),
+        SCIPReverseCallEdge(z_caller, callee, SCIPOccurrence(Path("z.py"), 2)),
+    )
+    assert second is first
+    run.assert_called_once_with(["scip-query", "refs", callee.symbol, "--json"], json_output=True)
+
+
+def test_reverse_call_edges_rejects_reference_lines_without_callee_call(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "callee.py").write_text("def target(): ...\n")
+    (tmp_path / "caller.py").write_text(
+        "def caller():\n    consume(target)\n    alias = target; other()\n"
+    )
+    analyzer = SCIPAnalyzer(tmp_path)
+    callee = SCIPDefinition("target", "callee:target()", Path("callee.py"), 1, 1)
+    caller = SCIPDefinition("caller", "caller:caller()", Path("caller.py"), 1, 3)
+    payload = {
+        "matched": True,
+        "resolved": {
+            "symbol": "target",
+            "shortName": "callee:target()",
+            "relativePath": "callee.py",
+        },
+        "otherMatches": [],
+        "totalMatches": 1,
+        "references": [
+            {"relativePath": "caller.py", "line": 1},
+            {"relativePath": "caller.py", "line": 2},
+        ],
+    }
+    with (
+        patch.object(analyzer, "_run", return_value=payload),
+        patch.object(analyzer, "_executable", return_value="scip-query"),
+        patch.object(analyzer, "outline", return_value=(caller,)),
+    ):
+        assert analyzer.reverse_call_edges(callee) == ()
+
+
+@pytest.mark.parametrize(
+    ("resolved_symbol", "total_matches", "message"),
+    [
+        ("wrong", 1, "wrong refs seed"),
+        ("full target symbol", 2, "ambiguous"),
+        ("full target symbol", True, "ambiguous"),
+    ],
+)
+def test_reverse_call_edges_requires_unique_exact_full_symbol(
+    tmp_path: Path, resolved_symbol: str, total_matches: object, message: str
+) -> None:
+    (tmp_path / "callee.py").write_text("def target(): ...\n")
+    analyzer = SCIPAnalyzer(tmp_path)
+    callee = SCIPDefinition("full target symbol", "callee:target()", Path("callee.py"), 1, 1)
+    payload = {
+        "matched": True,
+        "resolved": {
+            "symbol": resolved_symbol,
+            "shortName": "callee:target()",
+            "relativePath": "callee.py",
+        },
+        "otherMatches": [],
+        "totalMatches": total_matches,
+        "references": [],
+    }
+    with (
+        patch.object(analyzer, "_run", return_value=payload),
+        patch.object(analyzer, "_executable", return_value="scip-query"),
+        pytest.raises(SCIPAnalyzerError, match=message),
+    ):
+        analyzer.reverse_call_edges(callee)
+
+
+@pytest.mark.parametrize(
+    ("resolved_short_name", "resolved_path", "message"),
+    [
+        ("other:target()", "callee.py", "inconsistent short name"),
+        ("callee:target()", "other.py", "inconsistent definition path"),
+    ],
+)
+def test_reverse_call_edges_rejects_inconsistent_resolution_metadata(
+    tmp_path: Path, resolved_short_name: str, resolved_path: str, message: str
+) -> None:
+    (tmp_path / "callee.py").write_text("def target(): ...\n")
+    (tmp_path / "other.py").write_text("def target(): ...\n")
+    analyzer = SCIPAnalyzer(tmp_path)
+    callee = SCIPDefinition("target", "callee:target()", Path("callee.py"), 1, 1)
+    payload = {
+        "matched": True,
+        "resolved": {
+            "symbol": "target",
+            "shortName": resolved_short_name,
+            "relativePath": resolved_path,
+        },
+        "otherMatches": [],
+        "totalMatches": 1,
+        "references": [],
+    }
+    with (
+        patch.object(analyzer, "_run", return_value=payload),
+        patch.object(analyzer, "_executable", return_value="scip-query"),
+        pytest.raises(SCIPAnalyzerError, match=message),
+    ):
+        analyzer.reverse_call_edges(callee)
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        {"relativePath": "../outside.py", "line": 0},
+        {"relativePath": "/outside.py", "line": 0},
+        {"relativePath": "caller.py", "line": -1},
+        {"relativePath": "caller.py", "line": True},
+        {"relativePath": "caller.py"},
+    ],
+)
+def test_reverse_call_edges_rejects_malformed_or_outside_references(
+    tmp_path: Path, reference: dict[str, object]
+) -> None:
+    (tmp_path / "callee.py").write_text("def target(): ...\n")
+    (tmp_path / "caller.py").write_text("def caller():\n    target()\n")
+    analyzer = SCIPAnalyzer(tmp_path)
+    callee = SCIPDefinition("target", "callee:target()", Path("callee.py"), 1, 1)
+    payload = {
+        "matched": True,
+        "resolved": {
+            "symbol": "target",
+            "shortName": "callee:target()",
+            "relativePath": "callee.py",
+        },
+        "otherMatches": [],
+        "totalMatches": 1,
+        "references": [reference],
+    }
+    with (
+        patch.object(analyzer, "_run", return_value=payload),
+        patch.object(analyzer, "_executable", return_value="scip-query"),
+        pytest.raises(SCIPAnalyzerError),
+    ):
+        analyzer.reverse_call_edges(callee)
+
+
+def test_reverse_call_edges_rejects_symlink_escape(tmp_path: Path) -> None:
+    outside = tmp_path.parent / "outside.py"
+    outside.write_text("def caller():\n    target()\n")
+    (tmp_path / "callee.py").write_text("def target(): ...\n")
+    (tmp_path / "escape.py").symlink_to(outside)
+    analyzer = SCIPAnalyzer(tmp_path)
+    callee = SCIPDefinition("target", "callee:target()", Path("callee.py"), 1, 1)
+    payload = {
+        "matched": True,
+        "resolved": {
+            "symbol": "target",
+            "shortName": "callee:target()",
+            "relativePath": "callee.py",
+        },
+        "otherMatches": [],
+        "totalMatches": 1,
+        "references": [{"relativePath": "escape.py", "line": 1}],
+    }
+    with (
+        patch.object(analyzer, "_run", return_value=payload),
+        patch.object(analyzer, "_executable", return_value="scip-query"),
+        pytest.raises(SCIPAnalyzerError, match="Invalid SCIP reference path"),
+    ):
+        analyzer.reverse_call_edges(callee)
+
+
+def test_reverse_call_edges_uses_sanitized_pinned_schema_and_argv(tmp_path: Path) -> None:
+    fixture = Path("tests/fixtures/scip_refs_0_16_0.json")
+    payload = fixture.read_text(encoding="utf-8")
+    (tmp_path / "services.py").write_text("def calculate():\n    return 1\n")
+    (tmp_path / "routers.py").write_text(
+        "def quote():\n    value = 1\n    value += 1\n    return calculate()\n"
+    )
+    analyzer = SCIPAnalyzer(tmp_path)
+    callee = SCIPDefinition(
+        "scip-python python fixture 0.0.0 `services`/calculate().",
+        "services:calculate()",
+        Path("services.py"),
+        1,
+        2,
+    )
+    caller = SCIPDefinition(
+        "scip-python python fixture 0.0.0 `routers`/quote().",
+        "routers:quote()",
+        Path("routers.py"),
+        1,
+        4,
+    )
+    with (
+        patch.object(analyzer, "_executable", return_value="/tools/scip-query"),
+        patch("subprocess.run", return_value=completed(payload)) as run,
+        patch.object(analyzer, "outline", return_value=(caller,)),
+    ):
+        edges = analyzer.reverse_call_edges(callee)
+
+    assert edges == (SCIPReverseCallEdge(caller, callee, SCIPOccurrence(Path("routers.py"), 4)),)
+    argv = run.call_args.args[0]
+    assert argv == ["/tools/scip-query", "refs", callee.symbol, "--json"]
+    assert "shell" not in run.call_args.kwargs

@@ -1,0 +1,18 @@
+{
+  "result": {
+    "matched": true,
+    "resolved": {
+      "symbol": "scip-python python fixture 0.0.0 `services`/calculate().",
+      "shortName": "services:calculate()",
+      "relativePath": "services.py"
+    },
+    "otherMatches": [],
+    "totalMatches": 1,
+    "references": [
+      {
+        "relativePath": "routers.py",
+        "line": 3
+      }
+    ]
+  }
+}
