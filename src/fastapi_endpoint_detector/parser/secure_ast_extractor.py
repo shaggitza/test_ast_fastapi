@@ -28,6 +28,8 @@ class SecureASTExtractorError(Exception):
 
 ObjectKey = tuple[str, str]
 ObjectKind = Literal["app", "router"]
+CompositionMode = Literal["copy", "live"]
+_ORDER_SCALE = 1_000_000
 
 
 @dataclass(frozen=True)
@@ -57,6 +59,7 @@ class _Edge:
     prefix: str
     line: int
     child_cutoff: int | None
+    mode: CompositionMode
 
 
 @dataclass(frozen=True)
@@ -104,6 +107,9 @@ class _Module:
     factory_objects: list[_Object] = field(default_factory=list)
     factory_routes: list[_Route] = field(default_factory=list)
     factory_edges: list[_Edge] = field(default_factory=list)
+    object_limitations: dict[ObjectKey, list[EndpointDiscoveryCondition]] = field(
+        default_factory=dict
+    )
 
 
 class SecureASTExtractor:
@@ -312,6 +318,12 @@ class SecureASTExtractor:
         for edge in edges:
             edges_by_parent.setdefault(edge.parent, []).append(edge)
 
+        object_limitations: dict[ObjectKey, tuple[EndpointDiscoveryCondition, ...]] = {}
+        for candidate in modules.values():
+            for key, conditions in candidate.object_limitations.items():
+                object_limitations[key] = _merge_discovery_conditions(
+                    object_limitations.get(key, ()), tuple(conditions)
+                )
         found: list[Endpoint] = []
         inventory_limitations: tuple[EndpointDiscoveryCondition, ...] = ()
 
@@ -328,7 +340,9 @@ class SecureASTExtractor:
             item = objects[owner]
             prefix = _join_paths(inherited, item.prefix)
             object_conditions = _merge_discovery_conditions(
-                inherited_conditions, item.discovery_conditions
+                inherited_conditions,
+                item.discovery_conditions,
+                object_limitations.get(owner, ()),
             )
             inventory_limitations = _merge_discovery_conditions(
                 inventory_limitations, object_conditions
@@ -710,6 +724,9 @@ class SecureASTExtractor:
                 desired_key=desired_key,
                 desired_variable=call.variable,
                 call_line=call.line,
+                call_order=(
+                    _line_end_order(call.line) if call.line >= 2**31 - 1 else _node_order(call.call)
+                ),
                 namespace=f"{module.name}:{call.variable}@{call_token}",
                 stack=frozenset(),
                 call=call.call,
@@ -807,6 +824,7 @@ class SecureASTExtractor:
         desired_key: ObjectKey,
         desired_variable: str,
         call_line: int,
+        call_order: int,
         namespace: str,
         stack: frozenset[str],
         call: ast.Call,
@@ -899,7 +917,7 @@ class SecureASTExtractor:
             return self._resolve_object(expression, module, aliases, modules, call_line)
 
         def snapshot_local_object(item: _Object, operation: ast.AST) -> _Object:
-            """Freeze current local routes/edges at an include or mount operation."""
+            """Freeze current local routes/edges at an include operation."""
             snapshot_key = (
                 module.name,
                 f"{namespace}:snapshot:{item.variable}@{_node_token(operation)}",
@@ -919,7 +937,7 @@ class SecureASTExtractor:
                     route.path,
                     route.methods,
                     route.handler,
-                    call_line,
+                    call_order,
                     route.discovery_conditions,
                 )
                 for route in list(routes)
@@ -930,8 +948,9 @@ class SecureASTExtractor:
                     snapshot_key,
                     edge.child,
                     edge.prefix,
-                    call_line,
+                    call_order,
                     edge.child_cutoff,
+                    edge.mode,
                 )
                 for edge in list(edges)
                 if edge.parent == item.key
@@ -1151,6 +1170,7 @@ class SecureASTExtractor:
                             desired_variable if assigned == returned_name else assigned
                         ),
                         call_line=(call_line if helper_module.name == module.name else 2**31 - 1),
+                        call_order=call_order,
                         namespace=f"{namespace}:{assigned}@{statement_token}",
                         stack=stack | {function_identity},
                         call=value,
@@ -1201,7 +1221,15 @@ class SecureASTExtractor:
                     if method == "websocket":
                         methods = ("WEBSOCKET",)
                     if methods:
-                        routes.append(_Route(owner.key, path, methods, handler, call_line))
+                        routes.append(
+                            _Route(
+                                owner.key,
+                                path,
+                                methods,
+                                handler,
+                                call_order,
+                            )
+                        )
                 continue
             if (
                 isinstance(statement, ast.Expr)
@@ -1255,7 +1283,7 @@ class SecureASTExtractor:
                     continue
                 prefix = literal(_keyword_expr(call, "prefix"), statement.lineno) or ""
                 cutoff = (
-                    call_line
+                    call_order
                     if child.key in module_object_keys and child.key[0] == module.name
                     else None
                 )
@@ -1264,7 +1292,16 @@ class SecureASTExtractor:
                     if child.key in module_object_keys
                     else snapshot_local_object(child, statement)
                 )
-                edges.append(_Edge(parent.key, included_child.key, prefix, call_line, cutoff))
+                edges.append(
+                    _Edge(
+                        parent.key,
+                        included_child.key,
+                        prefix,
+                        call_order,
+                        cutoff,
+                        "copy",
+                    )
+                )
             elif call_function.attr == "mount":
                 path_expr = call.args[0] if call.args else _keyword_expr(call, "path")
                 child_expr = call.args[1] if len(call.args) > 1 else _keyword_expr(call, "app")
@@ -1278,26 +1315,35 @@ class SecureASTExtractor:
                         "unresolved mount may mutate the explicitly selected app",
                     )
                     continue
-                cutoff = (
-                    call_line
-                    if child.key in module_object_keys and child.key[0] == module.name
-                    else None
+                # Mount retains this exact object; later name rebinding cannot redirect it.
+                edges.append(
+                    _Edge(
+                        parent.key,
+                        child.key,
+                        path,
+                        call_order,
+                        None,
+                        "live",
+                    )
                 )
-                mounted_child = (
-                    child
-                    if child.key in module_object_keys
-                    else snapshot_local_object(child, statement)
-                )
-                edges.append(_Edge(parent.key, mounted_child.key, path, call_line, cutoff))
-            elif call_function.attr == "add_api_route":
+            elif call_function.attr in {
+                "add_api_route",
+                "add_api_websocket_route",
+                "add_websocket_route",
+            }:
                 path_expr = call.args[0] if call.args else _keyword_expr(call, "path")
                 handler_expr = (
                     call.args[1] if len(call.args) > 1 else _keyword_expr(call, "endpoint")
                 )
                 path = literal(path_expr, statement.lineno)
                 imperative_handler = handler_for(handler_expr)
-                methods_expr = _keyword_expr(call, "methods")
-                methods = _literal_methods(methods_expr) if methods_expr is not None else ("GET",)
+                if call_function.attr == "add_api_route":
+                    methods_expr = _keyword_expr(call, "methods")
+                    methods = (
+                        _literal_methods(methods_expr) if methods_expr is not None else ("GET",)
+                    )
+                else:
+                    methods = ("WEBSOCKET",)
                 if path is None or imperative_handler is None or not methods:
                     if not allow_conditional:
                         return None
@@ -1306,7 +1352,15 @@ class SecureASTExtractor:
                         "unresolved imperative route may mutate the explicitly selected app",
                     )
                     continue
-                routes.append(_Route(parent.key, path, methods, imperative_handler, call_line))
+                routes.append(
+                    _Route(
+                        parent.key,
+                        path,
+                        methods,
+                        imperative_handler,
+                        call_order,
+                    )
+                )
             elif call_function.attr not in {
                 "add_exception_handler",
                 "add_event_handler",
@@ -1354,6 +1408,7 @@ class SecureASTExtractor:
                     edge.prefix,
                     edge.line,
                     edge.child_cutoff,
+                    edge.mode,
                 )
                 for edge in edges
             ]
@@ -1369,7 +1424,23 @@ class SecureASTExtractor:
             emitted_objects = [root if item.key == root.key else item for item in emitted_objects]
         return _FactoryGraph(root, emitted_objects, routes, edges)
 
-    def _collect_routes(
+    @staticmethod
+    def _record_object_limitation(
+        module: _Module,
+        owner: _Object,
+        node: ast.AST,
+        reason: str,
+    ) -> None:
+        condition = EndpointDiscoveryCondition(
+            source_path=module.path,
+            source_line=getattr(node, "lineno", 1),
+            reason=reason,
+        )
+        limitations = module.object_limitations.setdefault(owner.key, [])
+        if condition not in limitations:
+            limitations.append(condition)
+
+    def _collect_routes(  # noqa: PLR0912 - registration forms stay explicit
         self,
         module: _Module,
         aliases: dict[str, str],
@@ -1389,19 +1460,29 @@ class SecureASTExtractor:
                                 decorated_path,
                                 methods,
                                 handler,
-                                node.lineno,
+                                _node_order(node),
                             )
                         )
             elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
                 call = node.value
-                if not isinstance(call.func, ast.Attribute) or call.func.attr != "add_api_route":
+                if not isinstance(call.func, ast.Attribute) or call.func.attr not in {
+                    "add_api_route",
+                    "add_api_websocket_route",
+                    "add_websocket_route",
+                }:
                     continue
                 imperative_owner = self._resolve_object(
                     call.func.value, module, aliases, modules, node.lineno
                 )
-                if imperative_owner is None or imperative_owner.key[0] != module.name:
-                    # Mutating an imported router/app requires cross-module execution
-                    # ordering. Skip rather than violating include-time snapshots.
+                if imperative_owner is None:
+                    continue
+                if imperative_owner.key[0] != module.name:
+                    self._record_object_limitation(
+                        module,
+                        imperative_owner,
+                        node,
+                        "imperative registration mutates an imported route object",
+                    )
                     continue
                 path_expr = call.args[0] if call.args else _keyword_expr(call, "path")
                 handler_expr = (
@@ -1412,9 +1493,28 @@ class SecureASTExtractor:
                     handler_expr, module, aliases, modules, node.lineno
                 )
                 if imperative_path is None or imperative_handler is None:
+                    self._record_object_limitation(
+                        module,
+                        imperative_owner,
+                        node,
+                        "imperative route path or handler could not be resolved",
+                    )
                     continue
-                methods_expr = _keyword_expr(call, "methods")
-                methods = _literal_methods(methods_expr) if methods_expr is not None else ("GET",)
+                if call.func.attr == "add_api_route":
+                    methods_expr = _keyword_expr(call, "methods")
+                    methods = (
+                        _literal_methods(methods_expr) if methods_expr is not None else ("GET",)
+                    )
+                else:
+                    methods = ("WEBSOCKET",)
+                if not methods:
+                    self._record_object_limitation(
+                        module,
+                        imperative_owner,
+                        node,
+                        "imperative route methods could not be resolved",
+                    )
+                    continue
                 if methods:
                     routes.append(
                         _Route(
@@ -1422,7 +1522,7 @@ class SecureASTExtractor:
                             imperative_path,
                             methods,
                             imperative_handler,
-                            node.lineno,
+                            _node_order(node),
                         )
                     )
         return routes
@@ -1465,26 +1565,62 @@ class SecureASTExtractor:
             if not isinstance(call.func, ast.Attribute):
                 continue
             parent = self._resolve_object(call.func.value, module, aliases, modules, node.lineno)
-            if parent is None or parent.key[0] != module.name:
-                # Mutating an imported parent is dynamic cross-module state.
+            if parent is None:
+                continue
+            if parent.key[0] != module.name:
+                self._record_object_limitation(
+                    module,
+                    parent,
+                    node,
+                    "composition mutates an imported route object",
+                )
                 continue
             if call.func.attr == "include_router":
                 child_expr = call.args[0] if call.args else _keyword_expr(call, "router")
                 child = self._resolve_object(child_expr, module, aliases, modules, node.lineno)
                 if child is None or child.kind != "router":
+                    self._record_object_limitation(
+                        module,
+                        parent,
+                        node,
+                        "included router could not be resolved",
+                    )
                     continue
                 prefix = self._keyword_string(call, "prefix", module, node.lineno) or ""
-                cutoff = node.lineno if child.key[0] == module.name else None
-                edges.append(_Edge(parent.key, child.key, prefix, node.lineno, cutoff))
+                cutoff = _node_order(node) if child.key[0] == module.name else None
+                edges.append(
+                    _Edge(
+                        parent.key,
+                        child.key,
+                        prefix,
+                        _node_order(node),
+                        cutoff,
+                        "copy",
+                    )
+                )
             elif call.func.attr == "mount":
                 path_expr = call.args[0] if call.args else _keyword_expr(call, "path")
                 child_expr = call.args[1] if len(call.args) > 1 else _keyword_expr(call, "app")
                 path = self._literal_string(path_expr, module, node.lineno)
                 child = self._resolve_object(child_expr, module, aliases, modules, node.lineno)
                 if path is None or child is None or child.kind != "app":
+                    self._record_object_limitation(
+                        module,
+                        parent,
+                        node,
+                        "mounted path or application could not be resolved",
+                    )
                     continue
-                cutoff = node.lineno if child.key[0] == module.name else None
-                edges.append(_Edge(parent.key, child.key, path, node.lineno, cutoff))
+                edges.append(
+                    _Edge(
+                        parent.key,
+                        child.key,
+                        path,
+                        _node_order(node),
+                        None,
+                        "live",
+                    )
+                )
         return edges
 
     def _resolve_object(
@@ -1814,6 +1950,16 @@ def _node_token(node: ast.AST) -> str:
             getattr(node, "end_col_offset", 0),
         )
     )
+
+
+def _node_order(node: ast.AST) -> int:
+    """Return a deterministic source-order token, including same-line statements."""
+    return getattr(node, "lineno", 0) * _ORDER_SCALE + getattr(node, "col_offset", 0)
+
+
+def _line_end_order(line: int) -> int:
+    """Return an order token after every statement starting on one source line."""
+    return line * _ORDER_SCALE + (_ORDER_SCALE - 1)
 
 
 def _module_binds_name(tree: ast.Module, name: str) -> bool:
