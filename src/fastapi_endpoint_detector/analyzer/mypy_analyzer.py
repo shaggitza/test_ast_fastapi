@@ -21,7 +21,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, ClassVar
 
 from fastapi_endpoint_detector.models.effect_contract import (
     CallResolutionStatus,
@@ -345,11 +345,17 @@ class MypyAnalyzer:
     and extract precise file/line information for all references.
     """
 
-    CACHE_SCHEMA_VERSION = 9
+    CACHE_SCHEMA_VERSION = 10
     MAX_POINTS_TO_TARGETS = 8
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
     MAX_POINTS_TO_EDGES = 4096
+    EXECUTION_SUMMARY_VERSION = 1
+    EXECUTOR_SUMMARIES: ClassVar[dict[str, tuple[int, bool]]] = {
+        "asyncio.threads.to_thread": (0, False),
+        "anyio.to_thread.run_sync": (0, True),
+        "starlette.concurrency.run_in_threadpool": (0, True),
+    }
 
     def __init__(self, app_path: Path, *, max_depth: int = 10) -> None:
         """Initialize the mypy analyzer."""
@@ -1919,6 +1925,73 @@ class MypyAnalyzer:
             declarations.add(declaration)
         return next(iter(declarations)) if len(declarations) == 1 else None
 
+    def _executor_callback_expression(self, call: Any, wrapper_symbol: str) -> Any | None:
+        """Bind the callback slot by formal name without confusing control kwargs."""
+        from mypy.nodes import ARG_NAMED, ARG_POS  # noqa: PLC0415
+
+        callback_index, allow_keyword = self.EXECUTOR_SUMMARIES[wrapper_symbol]
+        for expression, kind, name in zip(call.args, call.arg_kinds, call.arg_names, strict=True):
+            if allow_keyword and kind == ARG_NAMED and name == "func":
+                return expression
+        positional = [
+            expression
+            for expression, kind, name in zip(
+                call.args, call.arg_kinds, call.arg_names, strict=True
+            )
+            if kind == ARG_POS and name is None
+        ]
+        return positional[callback_index] if callback_index < len(positional) else None
+
+    def _synchronous_callback_body(self, fullname: str) -> bool:
+        """Reject callbacks whose invocation only creates deferred execution."""
+        resolved = self._function_node_for_fullname(fullname)
+        if resolved is None:
+            return False
+        function = self._actual_function(resolved[0])
+        return not any(
+            bool(getattr(function, attribute, False))
+            for attribute in ("is_coroutine", "is_generator", "is_async_generator")
+        )
+
+    def _exact_executor_callback(
+        self,
+        expression: Any,
+        environment: dict[str, _FinitePointsTo],
+        import_map: dict[str, str],
+        budget: list[int],
+    ) -> tuple[tuple[str, InvocationKind], _FinitePointsTo | None] | None:
+        """Resolve one source-proven project callback without callable fanout."""
+        from mypy.nodes import MemberExpr  # noqa: PLC0415
+
+        if isinstance(expression, MemberExpr):
+            receiver = self._finite_expression_value(
+                expression.expr, environment, import_map, (), budget
+            )
+            declaration = (
+                self._finite_member_declaration(receiver, expression.name)
+                if receiver is not None
+                else None
+            )
+            return (
+                (declaration, receiver)
+                if declaration is not None and self._synchronous_callback_body(declaration[0])
+                else None
+            )
+        imported = self._explicit_import_fullname(expression, import_map)
+        declaration = (
+            self._exact_finite_project_callable(imported) if imported is not None else None
+        )
+        if declaration is None:
+            direct = self._callable_declaration(getattr(expression, "node", None))
+            declaration = (
+                direct
+                if direct is not None and self._exact_project_identity(direct[0]) is not None
+                else None
+            )
+        if declaration is None or not self._synchronous_callback_body(declaration[0]):
+            return None
+        return declaration, None
+
     def _member_call_resolution(  # noqa: PLR0911, PLR0912, PLR0915
         self,
         callee: Any,
@@ -2245,6 +2318,7 @@ class MypyAnalyzer:
             self_name = function_node.arguments[0].variable.name
             flow_environment[self_name] = receiver_value
         finite_budget = [0]
+        awaited_call_ids: set[int] = set()
 
         def resolve_and_trace(  # noqa: PLR0912, PLR0915
             fullname: str,
@@ -2252,6 +2326,7 @@ class MypyAnalyzer:
             *,
             low_confidence_edge: bool = False,
             target_receiver: _FinitePointsTo | None = None,
+            edge_kind: str | None = None,
         ) -> None:
             """Resolve a fullname and preserve LOW provenance through descendants."""
             target_depth = depth + 1
@@ -2322,6 +2397,7 @@ class MypyAnalyzer:
                     target_path,
                     start,
                     fullname,
+                    code_context=f"Execution summary: {edge_kind}" if edge_kind else "",
                     caller_file_path=current_file,
                     caller_line_number=call_line,
                 )
@@ -2409,6 +2485,35 @@ class MypyAnalyzer:
                 deps.add_resolved_call_site(call_site)
             callee = call.callee
             traced = False
+
+            wrapper_symbol = (
+                call_site.canonical_symbol
+                if call_site is not None and call_site.status == CallResolutionStatus.EXACT
+                else None
+            )
+            callback_expression = (
+                self._executor_callback_expression(call, wrapper_symbol)
+                if wrapper_symbol in self.EXECUTOR_SUMMARIES and id(call) in awaited_call_ids
+                else None
+            )
+            if callback_expression is not None:
+                callback = self._exact_executor_callback(
+                    callback_expression,
+                    flow_environment,
+                    import_map,
+                    finite_budget,
+                )
+                if callback is not None:
+                    declaration, callback_receiver = callback
+                    callback_fullname, _callback_invocation = declaration
+                    deps.add_reference(current_file, call.line, callback_fullname)
+                    resolve_and_trace(
+                        callback_fullname,
+                        call.line,
+                        low_confidence_edge=True,
+                        target_receiver=callback_receiver,
+                        edge_kind=f"executor_callback:{wrapper_symbol}",
+                    )
 
             if isinstance(callee, MemberExpr) and (
                 call_site is None or call_site.status != CallResolutionStatus.EXACT
@@ -2586,7 +2691,12 @@ class MypyAnalyzer:
                     walk_node(n.finally_body)
                 flow_environment.clear()
 
-            elif isinstance(n, RaiseStmt) or isinstance(n, AssertStmt) or isinstance(n, AwaitExpr):
+            elif isinstance(n, AwaitExpr):
+                if isinstance(n.expr, CallExpr):
+                    awaited_call_ids.add(id(n.expr))
+                walk_node(n.expr)
+
+            elif isinstance(n, (RaiseStmt, AssertStmt)):
                 walk_node(n.expr)
 
             elif isinstance(n, IndexExpr):
@@ -2771,6 +2881,8 @@ class MypyAnalyzer:
                     "max_factory_returns": self.MAX_FACTORY_RETURNS,
                     "max_factory_states": self.MAX_FACTORY_STATES,
                     "max_edges": self.MAX_POINTS_TO_EDGES,
+                    "execution_summary_version": self.EXECUTION_SUMMARY_VERSION,
+                    "executor_summaries": self.EXECUTOR_SUMMARIES,
                 },
                 "mypy": mypy_version,
                 "python": list(sys.version_info[:3]),
