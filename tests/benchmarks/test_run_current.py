@@ -290,6 +290,7 @@ class AnalyzerFailureTests(unittest.TestCase):
                 2,
                 secure_ast=True,
                 use_scip=True,
+                app_entry="main:create_app",
                 baseline_app_root=Path("baseline"),
             )
 
@@ -308,6 +309,8 @@ class AnalyzerFailureTests(unittest.TestCase):
                 "json",
                 "--no-cache",
                 "--secure-ast",
+                "--app-entry",
+                "main:create_app",
                 "--scip",
                 "--baseline-app",
                 "baseline",

@@ -344,6 +344,7 @@ class ChangeMapper:
         app_path: Path,
         config: Config | None = None,
         app_variable: str = "app",
+        app_entry: str | None = None,
         use_cache: bool = True,
         secure_ast: bool = False,
         use_scip: bool = False,
@@ -356,6 +357,7 @@ class ChangeMapper:
             app_path: Path to the FastAPI application.
             config: Optional configuration object.
             app_variable: Name of the FastAPI app variable.
+            app_entry: Exact secure-AST MODULE:SYMBOL root selection.
             use_cache: Whether to use cached analysis results (default True).
             secure_ast: Discover endpoints without importing application code.
             use_scip: Use SCIP rather than mypy for reverse dependency analysis.
@@ -364,9 +366,12 @@ class ChangeMapper:
         self.app_path = app_path.resolve()
         self.config = config or Config()
         self.app_variable = app_variable
+        self.app_entry = app_entry
         self.use_cache = use_cache
         self.secure_ast = secure_ast
         self.use_scip = use_scip
+        if app_entry is not None and not secure_ast:
+            raise ChangeMapperError("app_entry requires secure_ast=True")
         if baseline_app_path is not None and not use_scip:
             raise ChangeMapperError("baseline_app_path is valid only with use_scip=True")
         self.baseline_app_path = baseline_app_path.resolve() if baseline_app_path else None
@@ -394,11 +399,17 @@ class ChangeMapper:
     def extractor(self) -> FastAPIExtractor | SecureASTExtractor:
         """Get the configured endpoint extractor, initializing if needed."""
         if self._extractor is None:
-            extractor_class = SecureASTExtractor if self.secure_ast else FastAPIExtractor
-            self._extractor = extractor_class(
-                app_path=self.app_path,
-                app_variable=self.app_variable,
-            )
+            if self.secure_ast:
+                self._extractor = SecureASTExtractor(
+                    app_path=self.app_path,
+                    app_variable=self.app_variable,
+                    app_entry=self.app_entry,
+                )
+            else:
+                self._extractor = FastAPIExtractor(
+                    app_path=self.app_path,
+                    app_variable=self.app_variable,
+                )
         return self._extractor
 
     @property
@@ -427,6 +438,7 @@ class ChangeMapper:
             extractor = SecureASTExtractor(
                 app_path=self.baseline_app_path,
                 app_variable=self.app_variable,
+                app_entry=self.app_entry,
             )
             self._baseline_registry = EndpointRegistry()
             self._baseline_registry.register_many(extractor.extract_endpoints())

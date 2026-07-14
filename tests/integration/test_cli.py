@@ -42,6 +42,7 @@ class TestCLI:
         assert "--secure-ast" in result.output
         assert "--scip" in result.output
         assert "--baseline-app" in result.output
+        assert "--app-entry" in result.output
 
     def test_list_help(self, runner: CliRunner) -> None:
         """Test the list command help."""
@@ -50,6 +51,19 @@ class TestCLI:
         assert "--app" in result.output
         assert "--vm" in result.output
         assert "--secure-ast" in result.output
+        assert "--app-entry" in result.output
+
+    def test_app_entry_requires_secure_ast(self, runner: CliRunner, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text("from fastapi import FastAPI\napp = FastAPI()\n")
+
+        result = runner.invoke(
+            cli,
+            ["list", "--app", str(app_file), "--app-entry", "app:app"],
+        )
+
+        assert result.exit_code != 0
+        assert "--app-entry requires --secure-ast" in result.output
 
     def test_vm_and_secure_ast_mutually_exclusive_analyze(
         self, runner: CliRunner, tmp_path: Path

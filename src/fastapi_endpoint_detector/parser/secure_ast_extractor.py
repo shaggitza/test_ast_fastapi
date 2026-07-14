@@ -111,11 +111,33 @@ class SecureASTExtractor:
         "websocket",
     }
 
-    def __init__(self, app_path: Path, app_variable: str = "app") -> None:
+    def __init__(
+        self,
+        app_path: Path,
+        app_variable: str = "app",
+        app_entry: str | None = None,
+    ) -> None:
         self.app_path = app_path.resolve()
         self.app_variable = app_variable
+        self.app_entry = app_entry
+        self._app_entry_parts = self._parse_app_entry(app_entry)
 
-    def extract_endpoints(self) -> list[Endpoint]:
+    @staticmethod
+    def _parse_app_entry(value: str | None) -> tuple[str, str] | None:
+        if value is None:
+            return None
+        parts = value.split(":")
+        if (
+            len(parts) != 2
+            or not parts[0]
+            or not parts[1]
+            or any(not part.isidentifier() for part in parts[0].split("."))
+            or not parts[1].isidentifier()
+        ):
+            raise SecureASTExtractorError("app_entry must use an exact project-local MODULE:SYMBOL")
+        return parts[0], parts[1]
+
+    def extract_endpoints(self) -> list[Endpoint]:  # noqa: PLR0912, PLR0915
         modules, entry_module = self._load_modules()
         if not modules:
             return []
@@ -123,6 +145,46 @@ class SecureASTExtractor:
         aliases = self._module_aliases(modules)
         for module in modules.values():
             self._collect_symbols(module, aliases, modules)
+
+        explicit_module: _Module | None = None
+        explicit_variable: str | None = None
+        explicit_object: _Object | None = None
+        if self._app_entry_parts is not None:
+            module_name, symbol = self._app_entry_parts
+            explicit_module = modules.get(module_name)
+            if explicit_module is None:
+                raise SecureASTExtractorError(
+                    f"explicit app entry module {module_name!r} is not project-local or unique"
+                )
+            explicit_object = self._object_at(explicit_module, symbol, None)
+            if explicit_object is not None:
+                if explicit_object.kind != "app":
+                    raise SecureASTExtractorError("explicit app entry object is not a FastAPI app")
+            else:
+                factory_bindings = [
+                    call
+                    for call in explicit_module.factory_calls
+                    if call.variable == symbol
+                    and self._latest_binding_line(explicit_module, symbol, 2**31 - 1) == call.line
+                ]
+                if len(factory_bindings) == 1:
+                    explicit_variable = symbol
+                else:
+                    history = explicit_module.function_history.get(symbol, [])
+                    function = self._function_at(explicit_module, symbol, 2**31 - 1)
+                    if len(history) != 1 or function is None:
+                        raise SecureASTExtractorError(
+                            f"explicit app entry symbol {self.app_entry!r} is absent, "
+                            "ambiguous, or rebound"
+                        )
+                    explicit_variable = f"__explicit_app_entry_{symbol}"
+                    explicit_module.assignments.setdefault(explicit_variable, []).append(2**31 - 1)
+                    call = ast.Call(func=ast.Name(id=symbol, ctx=ast.Load()), args=[], keywords=[])
+                    ast.copy_location(call, function)
+                    explicit_module.factory_calls.append(
+                        _FactoryCall(explicit_variable, 2**31 - 1, call)
+                    )
+
         # Factory-created exports can be consumed by modules sorted before their
         # providers. Iterate to a fixed point; each call is materialized once.
         for _iteration in range(len(modules) + 1):
@@ -159,26 +221,38 @@ class SecureASTExtractor:
         ]
 
         referenced = {edge.child for edge in edges}
-        candidates = [
-            item
-            for module in modules.values()
-            if (item := self._object_at(module, self.app_variable, None)) is not None
-            and item.kind == "app"
-        ]
-        if entry_module is not None:
-            candidates = [item for item in candidates if item.key[0] == entry_module]
-        roots = (
-            [item.key for item in candidates]
-            if entry_module is not None
-            else [item.key for item in candidates if item.key not in referenced]
-        )
+        if self._app_entry_parts is not None:
+            if explicit_object is not None:
+                roots = [explicit_object.key]
+            else:
+                assert explicit_module is not None and explicit_variable is not None
+                selected = self._object_at(explicit_module, explicit_variable, None)
+                if selected is None or selected.kind != "app":
+                    raise SecureASTExtractorError(
+                        f"explicit app entry factory {self.app_entry!r} cannot be summarized safely"
+                    )
+                roots = [selected.key]
+        else:
+            candidates = [
+                item
+                for module in modules.values()
+                if (item := self._object_at(module, self.app_variable, None)) is not None
+                and item.kind == "app"
+            ]
+            if entry_module is not None:
+                candidates = [item for item in candidates if item.key[0] == entry_module]
+            roots = (
+                [item.key for item in candidates]
+                if entry_module is not None
+                else [item.key for item in candidates if item.key not in referenced]
+            )
 
-        # A router-only file is useful when explicitly selected, but an app selection
-        # must never silently fall back to a differently named app/router.
-        if not roots and entry_module is not None:
-            module = modules[entry_module]
-            selected = self._object_at(module, self.app_variable, None)
-            roots = [selected.key] if selected is not None and selected.kind == "router" else []
+            # A router-only file is useful when explicitly selected, but an app selection
+            # must never silently fall back to a differently named app/router.
+            if not roots and entry_module is not None:
+                module = modules[entry_module]
+                selected = self._object_at(module, self.app_variable, None)
+                roots = [selected.key] if selected is not None and selected.kind == "router" else []
 
         routes_by_owner: dict[ObjectKey, list[_Route]] = {}
         edges_by_parent: dict[ObjectKey, list[_Edge]] = {}
