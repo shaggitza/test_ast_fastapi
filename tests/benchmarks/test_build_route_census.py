@@ -103,10 +103,11 @@ def test_invoke_secure_list_uses_argv_and_output_file(tmp_path: Path, monkeypatc
     monkeypatch.setattr(census, "command", fake_command)
 
     items, unresolved, _elapsed = census.invoke_secure_list(
-        tmp_path, app_root, tmp_path, "app", output, 10
+        tmp_path, app_root, tmp_path, "app", output, 10, "main:create_app"
     )
 
     assert "--secure-ast" in seen
+    assert seen[seen.index("--app-entry") + 1] == "main:create_app"
     assert "--vm" not in seen
     assert seen[:5] == ["uv", "run", "--frozen", "fastapi-endpoint-detector", "list"]
     assert items[0]["id"] == "HTTP GET /items"
@@ -145,18 +146,25 @@ def test_invoke_secure_list_timeout_is_explicit(tmp_path: Path, monkeypatch) -> 
 def test_process_entry_extracts_target_and_baseline_for_non_python_pr(
     tmp_path: Path, monkeypatch
 ) -> None:
-    calls: list[tuple[str, str]] = []
+    calls: list[tuple[str, str, str | None]] = []
     monkeypatch.setattr(census, "ensure_cache", lambda *_args: tmp_path / "cache.git")
     monkeypatch.setattr(census, "merge_parents", lambda *_args: ["b" * 40])
     monkeypatch.setattr(census, "resolve_base_parent", lambda *_args: "b" * 40)
 
-    def extract(_cache, sha, _worktree, _root, _config, label):
-        calls.append((label, sha))
+    def extract(_cache, sha, _worktree, _root, _config, label, app_entry=None):
+        calls.append((label, sha, app_entry))
         return ({"status": "completed", "entrypoints": [], "unresolved": []}, 0.1)
 
     monkeypatch.setattr(census, "_extract_side", extract)
     config = census.CensusConfig(
-        tmp_path, tmp_path / "out", tmp_path / "manifest", tmp_path, 1, ".", {}
+        tmp_path,
+        tmp_path / "out",
+        tmp_path / "manifest",
+        tmp_path,
+        1,
+        ".",
+        {},
+        {"owner/repo": "main:create_app"},
     )
     entry = {
         "repository": "owner/repo",
@@ -168,7 +176,10 @@ def test_process_entry_extracts_target_and_baseline_for_non_python_pr(
 
     record, manifest = census.process_entry(entry, config, "candidate")
 
-    assert calls == [("target", "a" * 40), ("baseline", "b" * 40)]
+    assert calls == [
+        ("target", "a" * 40, "main:create_app"),
+        ("baseline", "b" * 40, "main:create_app"),
+    ]
     assert record["status"] == "completed"
     assert record["complete"] is True
     assert manifest["target_status"] == manifest["baseline_status"] == "completed"

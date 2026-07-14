@@ -12,7 +12,7 @@ import sys
 import tempfile
 import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -32,6 +32,7 @@ from benchmarks.real_world.run_current import (
     command,
     ensure_cache,
     merge_parents,
+    parse_app_entries,
     parse_app_roots,
     prediction_identity,
     remove_worktree,
@@ -55,6 +56,7 @@ class CensusConfig:
     timeout: float
     default_app_root: str
     app_roots: dict[str, str]
+    app_entries: dict[str, str] = field(default_factory=dict)
 
 
 def _normalized_path(value: str) -> str:
@@ -169,6 +171,7 @@ def invoke_secure_list(
     configured_root: str,
     output_path: Path,
     timeout: float,
+    app_entry: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[str], float]:
     """Invoke only the execution-free secure list command."""
     args = [
@@ -185,6 +188,8 @@ def invoke_secure_list(
         "--output",
         str(output_path),
     ]
+    if app_entry is not None:
+        args.extend(["--app-entry", app_entry])
     started = time.monotonic()
     try:
         result = command(args, cwd=candidate_root, timeout=timeout)
@@ -213,6 +218,7 @@ def _extract_side(
     configured_root: str,
     config: CensusConfig,
     label: str,
+    app_entry: str | None = None,
 ) -> tuple[dict[str, Any], float]:
     added = False
     started = time.monotonic()
@@ -228,6 +234,7 @@ def _extract_side(
             configured_root,
             output_path,
             config.timeout,
+            app_entry,
         )
         return (
             {
@@ -249,6 +256,7 @@ def process_entry(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     repository, pr = prediction_identity(entry)
     configured_root = config.app_roots.get(repository, config.default_app_root)
+    configured_entry = config.app_entries.get(repository)
     started = time.monotonic()
     merge_sha: str | None = None
     base_sha: str | None = None
@@ -273,6 +281,7 @@ def process_entry(
                 configured_root,
                 config,
                 "target",
+                configured_entry,
             )
             baseline, baseline_seconds = _extract_side(
                 repository_cache,
@@ -281,6 +290,7 @@ def process_entry(
                 configured_root,
                 config,
                 "baseline",
+                configured_entry,
             )
     except (RunnerError, OSError) as error:
         reason = str(error)
@@ -300,6 +310,7 @@ def process_entry(
         "pr": pr,
         "candidate": candidate_id,
         "configured_app_root": configured_root,
+        "configured_app_entry": configured_entry,
         "merge_sha": merge_sha,
         "base_sha": base_sha,
         "status": status,
@@ -312,6 +323,7 @@ def process_entry(
         "pr": pr,
         "merge_sha": merge_sha,
         "base_sha": base_sha,
+        "configured_app_entry": configured_entry,
         "status": status,
         "target_status": target["status"],
         "baseline_status": baseline["status"],
@@ -340,6 +352,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repository", action="append", default=[])
     parser.add_argument("--pr", type=int, action="append", default=[])
     parser.add_argument("--app-root", action="append", default=[])
+    parser.add_argument("--app-entry", action="append", default=[])
     parser.add_argument("--default-app-root", default=".")
     return parser
 
@@ -360,6 +373,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not isinstance(corpus, dict):
             raise RunnerError("corpus JSON must be an object")
         roots = parse_app_roots(args.app_root)
+        app_entries = parse_app_entries(args.app_entry)
         entries = select_entries(corpus, args.repository, args.pr, args.limit)
     except (RunnerError, OSError, json.JSONDecodeError, argparse.ArgumentTypeError) as error:
         parser.error(str(error))
@@ -371,9 +385,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         timeout=args.timeout,
         default_app_root=args.default_app_root,
         app_roots=roots,
+        app_entries=app_entries,
     )
     candidate = candidate_metadata(
-        config.candidate_root, roots, args.default_app_root, False, False
+        config.candidate_root,
+        roots,
+        args.default_app_root,
+        False,
+        False,
+        app_entries,
     )
     candidate["command"] = (
         "uv run --frozen fastapi-endpoint-detector list --secure-ast --format json"
@@ -402,6 +422,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "default": args.default_app_root,
             "repositories": dict(sorted(roots.items())),
         },
+        "app_entry_config": dict(sorted(app_entries.items())),
         "command_contract": [
             "uv",
             "run",
@@ -413,6 +434,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "--format",
             "json",
             "--secure-ast",
+            "--app-entry",
+            "<optional-module:symbol>",
             "--output",
             "<temporary-file>",
         ],

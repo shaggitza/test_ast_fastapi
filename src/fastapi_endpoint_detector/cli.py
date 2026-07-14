@@ -83,6 +83,11 @@ def cli(ctx: click.Context, config: Path | None) -> None:
     help="Name of the FastAPI app variable (default: app).",
 )
 @click.option(
+    "--app-entry",
+    type=str,
+    help="Exact secure-AST entry MODULE:SYMBOL (object or zero-argument factory).",
+)
+@click.option(
     "--verbose",
     "-v",
     is_flag=True,
@@ -122,6 +127,7 @@ def analyze(
     output_format: str,
     output: Path | None,
     app_var: str,
+    app_entry: str | None,
     verbose: bool,
     no_cache: bool,
     clear_cache: bool,
@@ -142,6 +148,9 @@ def analyze(
     if vm and scip:
         console.print("[red]Error:[/red] --vm and --scip cannot be used together")
         raise click.Abort()
+    if app_entry is not None and not secure_ast:
+        console.print("[red]Error:[/red] --app-entry requires --secure-ast")
+        raise click.Abort()
     if baseline_app is not None and not scip:
         console.print("[red]Error:[/red] --baseline-app requires --scip")
         raise click.Abort()
@@ -150,6 +159,8 @@ def analyze(
         console.print(f"[blue]Analyzing FastAPI application at:[/blue] {app}")
         console.print(f"[blue]Using diff file:[/blue] {diff}")
         console.print(f"[blue]App variable:[/blue] {app_var}")
+        if app_entry is not None:
+            console.print(f"[blue]App entry:[/blue] {app_entry}")
 
         if vm:
             console.print("[blue]Execution mode:[/blue] VM (Docker container)")
@@ -165,7 +176,7 @@ def analyze(
     try:
         # Handle VM execution mode
         if vm:
-            from fastapi_endpoint_detector.executor.vm_executor import VMExecutor, VMExecutorError
+            from fastapi_endpoint_detector.executor.vm_executor import VMExecutor
 
             executor = VMExecutor()
 
@@ -208,6 +219,7 @@ def analyze(
             app_path=app,
             config=config,
             app_variable=app_var,
+            app_entry=app_entry,
             use_cache=not no_cache,
             secure_ast=secure_ast,
             use_scip=scip,
@@ -308,6 +320,11 @@ def analyze(
     help="Name of the FastAPI app variable (default: app).",
 )
 @click.option(
+    "--app-entry",
+    type=str,
+    help="Exact secure-AST entry MODULE:SYMBOL (object or zero-argument factory).",
+)
+@click.option(
     "--vm",
     is_flag=True,
     help="Execute analysis in isolated Docker container for untrusted code.",
@@ -324,6 +341,7 @@ def list_endpoints(
     output_format: str,
     output: Path | None,
     app_var: str,
+    app_entry: str | None,
     vm: bool,
     secure_ast: bool,
 ) -> None:
@@ -334,6 +352,9 @@ def list_endpoints(
     # Validate mutually exclusive options
     if vm and secure_ast:
         console.print("[red]Error:[/red] --vm and --secure-ast cannot be used together")
+        raise click.Abort()
+    if app_entry is not None and not secure_ast:
+        console.print("[red]Error:[/red] --app-entry requires --secure-ast")
         raise click.Abort()
 
     try:
@@ -376,7 +397,11 @@ def list_endpoints(
             from fastapi_endpoint_detector.parser.secure_ast_extractor import SecureASTExtractor
 
             console.print("[blue]Using secure AST mode (no code execution)[/blue]")
-            extractor_obj = SecureASTExtractor(app_path=app, app_variable=app_var)
+            extractor_obj = SecureASTExtractor(
+                app_path=app,
+                app_variable=app_var,
+                app_entry=app_entry,
+            )
             endpoints = extractor_obj.extract_endpoints()
         else:
             # Use default runtime introspection
@@ -391,8 +416,6 @@ def list_endpoints(
             console.print(f"[green]Results written to:[/green] {output}")
         else:
             # Print directly to stdout to preserve ANSI codes from formatter
-            import sys
-
             sys.stdout.write(formatted_output)
             sys.stdout.flush()
 

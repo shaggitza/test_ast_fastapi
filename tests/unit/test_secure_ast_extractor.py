@@ -8,6 +8,7 @@ import pytest
 
 from fastapi_endpoint_detector.parser.secure_ast_extractor import (
     SecureASTExtractor,
+    SecureASTExtractorError,
 )
 
 
@@ -23,6 +24,86 @@ class TestSecureASTExtractor:
 
         assert extractor.app_path == app_file.resolve()
         assert extractor.app_variable == "app"
+
+    def test_explicit_app_entry_selects_object_as_only_root(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "main.py"
+        app_file.write_text(
+            """from fastapi import FastAPI
+primary = FastAPI()
+secondary = FastAPI()
+@primary.get('/primary')
+def primary_route(): return {}
+@secondary.get('/secondary')
+def secondary_route(): return {}
+"""
+        )
+
+        endpoints = SecureASTExtractor(tmp_path, app_entry="main:primary").extract_endpoints()
+
+        assert [endpoint.identifier for endpoint in endpoints] == ["GET /primary"]
+
+    def test_explicit_app_entry_authorizes_uncalled_zero_arg_factory(self, tmp_path: Path) -> None:
+        (tmp_path / "routes.py").write_text(
+            """from fastapi import APIRouter
+router = APIRouter()
+@router.get('/items')
+def items(): return []
+"""
+        )
+        (tmp_path / "main.py").write_text(
+            """from fastapi import FastAPI
+from routes import router
+def create_app(title='safe'):
+    app = FastAPI(title=title)
+    app.include_router(router, prefix='/api')
+    return app
+"""
+        )
+
+        assert SecureASTExtractor(tmp_path).extract_endpoints() == []
+        endpoints = SecureASTExtractor(tmp_path, app_entry="main:create_app").extract_endpoints()
+
+        assert [endpoint.identifier for endpoint in endpoints] == ["GET /api/items"]
+
+    def test_explicit_app_entry_selects_factory_produced_object(self, tmp_path: Path) -> None:
+        (tmp_path / "main.py").write_text(
+            """from fastapi import FastAPI
+def create_app():
+    service = FastAPI()
+    @service.get('/factory-object')
+    def route(): return {}
+    return service
+app = create_app()
+"""
+        )
+
+        endpoints = SecureASTExtractor(tmp_path, app_entry="main:app").extract_endpoints()
+
+        assert [endpoint.identifier for endpoint in endpoints] == ["GET /factory-object"]
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "async def create_app():\n    return None\n",
+            "@decorator\ndef create_app():\n    return None\n",
+            "def create_app(required):\n    return required\n",
+            "def create_app():\n    return None\ncreate_app = other\n",
+            "def create_app():\n    return None\ndef create_app():\n    return None\n",
+        ],
+    )
+    def test_explicit_app_entry_rejects_unsafe_factory(self, tmp_path: Path, source: str) -> None:
+        app_file = tmp_path / "main.py"
+        app_file.write_text("from fastapi import FastAPI\n" + source)
+
+        with pytest.raises(SecureASTExtractorError):
+            SecureASTExtractor(tmp_path, app_entry="main:create_app").extract_endpoints()
+
+    @pytest.mark.parametrize("entry", ["main", "main:", ":app", "main:app:extra", "bad-name:app"])
+    def test_explicit_app_entry_requires_exact_module_symbol(
+        self, tmp_path: Path, entry: str
+    ) -> None:
+        with pytest.raises(SecureASTExtractorError, match="MODULE:SYMBOL"):
+            SecureASTExtractor(tmp_path, app_entry=entry)
 
     def test_extract_simple_get_endpoint(self, tmp_path: Path) -> None:
         """Test extracting a simple GET endpoint."""
