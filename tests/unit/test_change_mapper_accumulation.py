@@ -113,8 +113,9 @@ def test_transitive_scip_references_are_low_confidence_unless_direct() -> None:
     structural = SCIPDefinition("class", "module:Config", Path("module.py"), 1, 20)
     callable_seed = SCIPDefinition("function", "module:load_config()", Path("module.py"), 2, 5)
 
-    assert _scip_confidence(structural, 0) == ConfidenceLevel.HIGH
+    assert _scip_confidence(structural, 0) == ConfidenceLevel.LOW
     assert _scip_confidence(structural, 1) == ConfidenceLevel.LOW
+    assert _scip_confidence(callable_seed, 0) == ConfidenceLevel.HIGH
     assert _scip_confidence(callable_seed, 1) == ConfidenceLevel.LOW
 
 

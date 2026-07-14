@@ -150,8 +150,7 @@ def _merge_affected(
 
 
 def _scip_confidence(seed: SCIPDefinition, depth: int) -> ConfidenceLevel:
-    del seed
-    if depth == 0:
+    if depth == 0 and "(" in seed.short_name:
         return ConfidenceLevel.HIGH
     # A SCIP reverse-reference path establishes call/reference reachability, not
     # that the changed value is returned, persisted, emitted, or otherwise

@@ -6,7 +6,7 @@
 - Those 26 records contain the entire **177 normalized atoms** in the ranked `fastapi-adapter-v1` truth. Broader UI, CLI, event, deployment, or generic truth is described in individual reports but never mixed into scored TP/FN.
 - Predictions came from `benchmarks/results/ranked/{mypy,scip}/predictions.jsonl`; selected HIGH/MEDIUM atoms were matched before LOW using the repository alias table and deterministic one-to-one matcher.
 - Every merge SHA and first parent was resolved in the three bare clones under `/tmp/current-corpus-cache`; changed paths/hunks and canonical path references were checked against those snapshots.
-- Analyzer interpretation used `run_current.py:487-494` (non-Python gate), `mypy_analyzer.py:939-976` (typed call-edge tracing), `change_mapper.py:533-570` (mypy reachability/effect projection), and `change_mapper.py:745-777` (SCIP reverse-reference evidence and its reachability-only limitation).
+- Analyzer interpretation used the frozen `de31b3a` sources: `run_current.py:487-494` (non-Python gate), `mypy_analyzer.py:939-976` (typed call-edge tracing), `change_mapper.py:533-570` (mypy reachability/effect projection), and `change_mapper.py:745-777` (SCIP reverse-reference evidence and its reachability-only limitation). These are revision-pinned historical line ranges, not current-HEAD locations.
 
 ## Aggregate exact normalized accounting
 
@@ -74,7 +74,7 @@
 
 - Open WebUI #26906 separates behavior from reachability correctly. Mypy selects three behavioral routes (3 TP, 0 FP, 0 FN) and retains nine task/compaction routes as LOW. All nine are behavioral LOW FP but independently reachability-supported; they do not change primary precision.
 - SCIP currently lacks that effect-aware projection: on #26906 it misses all three behavioral routes and selects `GET /api/v1/functions/`; on #26642 it promotes broad reverse reachability to MEDIUM, yielding 369 FP.
-- `change_mapper.py:759-777` itself describes SCIP evidence as reachability-only and says runtime observation is not established. The general fix is to keep reverse reachability as a candidate pool and promote only with direct change or corroborating data-flow/effect evidence.
+- `de31b3a:change_mapper.py:759-777` describes SCIP evidence as reachability-only and says runtime observation is not established. The general fix is to keep reverse reachability as a candidate pool and promote only with direct change or corroborating data-flow/effect evidence.
 
 ## Deep-case conclusions
 
