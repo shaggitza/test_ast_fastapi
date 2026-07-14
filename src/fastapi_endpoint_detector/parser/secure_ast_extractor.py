@@ -63,6 +63,13 @@ class _Edge:
 
 
 @dataclass(frozen=True)
+class _OrderedInventoryLimitation:
+    origin_module: str
+    order: int
+    condition: EndpointDiscoveryCondition
+
+
+@dataclass(frozen=True)
 class _FactoryCall:
     variable: str
     line: int
@@ -111,6 +118,9 @@ class _Module:
         default_factory=dict
     )
     inventory_only_limitations: dict[ObjectKey, list[EndpointDiscoveryCondition]] = field(
+        default_factory=dict
+    )
+    ordered_inventory_limitations: dict[ObjectKey, list[_OrderedInventoryLimitation]] = field(
         default_factory=dict
     )
 
@@ -265,6 +275,8 @@ class SecureASTExtractor:
                 *module.factory_edges,
             ]
         ]
+        for module in modules.values():
+            self._collect_control_flow_limitations(module, aliases, modules)
 
         referenced = {edge.child for edge in edges}
         if self._app_entry_parts is not None:
@@ -361,6 +373,7 @@ class SecureASTExtractor:
 
         object_limitations: dict[ObjectKey, tuple[EndpointDiscoveryCondition, ...]] = {}
         inventory_only_limitations: dict[ObjectKey, tuple[EndpointDiscoveryCondition, ...]] = {}
+        ordered_inventory_limitations: dict[ObjectKey, tuple[_OrderedInventoryLimitation, ...]] = {}
         for candidate in modules.values():
             for key, conditions in candidate.object_limitations.items():
                 object_limitations[key] = _merge_discovery_conditions(
@@ -369,6 +382,10 @@ class SecureASTExtractor:
             for key, conditions in candidate.inventory_only_limitations.items():
                 inventory_only_limitations[key] = _merge_discovery_conditions(
                     inventory_only_limitations.get(key, ()), tuple(conditions)
+                )
+            for key, limitations in candidate.ordered_inventory_limitations.items():
+                ordered_inventory_limitations[key] = _merge_ordered_limitations(
+                    ordered_inventory_limitations.get(key, ()), tuple(limitations)
                 )
         found: list[Endpoint] = []
         inventory_limitations: tuple[EndpointDiscoveryCondition, ...] = ()
@@ -390,10 +407,20 @@ class SecureASTExtractor:
                 item.discovery_conditions,
                 object_limitations.get(owner, ()),
             )
+            ordered_conditions = tuple(
+                limitation.condition
+                for limitation in ordered_inventory_limitations.get(owner, ())
+                if (
+                    cutoff is None
+                    or limitation.origin_module != owner[0]
+                    or limitation.order <= cutoff
+                )
+            )
             inventory_limitations = _merge_discovery_conditions(
                 inventory_limitations,
                 object_conditions,
                 inventory_only_limitations.get(owner, ()),
+                ordered_conditions,
             )
             for route in routes_by_owner.get(owner, []):
                 if cutoff is not None and route.line > cutoff:
@@ -2077,6 +2104,290 @@ class SecureASTExtractor:
         if condition not in limitations:
             limitations.append(condition)
 
+    @staticmethod
+    def _record_ordered_inventory_limitation(
+        module: _Module,
+        owner: _Object,
+        node: ast.AST,
+        reason: str,
+    ) -> None:
+        limitation = _OrderedInventoryLimitation(
+            origin_module=module.name,
+            order=_node_order(node),
+            condition=EndpointDiscoveryCondition(
+                source_path=module.path,
+                source_line=getattr(node, "lineno", 1),
+                reason=reason,
+            ),
+        )
+        limitations = module.ordered_inventory_limitations.setdefault(owner.key, [])
+        if limitation not in limitations:
+            limitations.append(limitation)
+
+    def _collect_control_flow_limitations(  # noqa: PLR0915
+        self,
+        module: _Module,
+        aliases: dict[str, str],
+        modules: dict[str, _Module],
+    ) -> None:
+        """Record source-ordered uncertainty from module-level compound statements."""
+        registration_methods = {
+            *self.HTTP_METHODS,
+            "api_route",
+            "include_router",
+            "include_routes",
+            "mount",
+            "add_route",
+            "add_api_route",
+            "add_api_websocket_route",
+            "add_websocket_route",
+        }
+        route_collection_mutators = {
+            "append",
+            "clear",
+            "extend",
+            "insert",
+            "pop",
+            "remove",
+            "reverse",
+            "sort",
+        }
+        known_aliases: dict[str, frozenset[_Object]] = {}
+
+        def object_root(  # noqa: PLR0911
+            expression: ast.expr | None, line: int
+        ) -> _Object | None:
+            if expression is None:
+                return None
+            if isinstance(expression, ast.Name):
+                aliased = known_aliases.get(expression.id, frozenset())
+                if len(aliased) == 1:
+                    return next(iter(aliased))
+            resolved = self._resolve_object(expression, module, aliases, modules, line)
+            if resolved is not None:
+                return resolved
+            current = expression.value if isinstance(expression, ast.Subscript) else expression
+            if isinstance(current, ast.Name):
+                aliased = known_aliases.get(current.id, frozenset())
+                if len(aliased) == 1:
+                    return next(iter(aliased))
+            attributes = attribute_names(current)
+            if attributes not in {("router",), ("routes",), ("router", "routes")}:
+                return None
+            while isinstance(current, ast.Attribute):
+                current = current.value
+                resolved = self._resolve_object(current, module, aliases, modules, line)
+                if resolved is not None:
+                    return resolved
+            return None
+
+        def attribute_names(expression: ast.expr | None) -> tuple[str, ...]:
+            names: list[str] = []
+            current = expression
+            while isinstance(current, (ast.Attribute, ast.Subscript)):
+                if isinstance(current, ast.Attribute):
+                    names.append(current.attr)
+                current = current.value
+            return tuple(reversed(names))
+
+        def route_state_owner(expression: ast.expr, line: int) -> _Object | None:
+            attributes = attribute_names(expression)
+            if not attributes or attributes[0] not in {"router", "routes"}:
+                return None
+            current: ast.expr = expression
+            while isinstance(current, (ast.Attribute, ast.Subscript)):
+                resolved = object_root(current, line)
+                if resolved is not None:
+                    return resolved
+                current = current.value
+            return None
+
+        def referenced_objects(expression: ast.AST, line: int) -> set[_Object]:
+            found: set[_Object] = set()
+
+            def collect(item: ast.AST) -> None:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                    return
+                if isinstance(item, (ast.Name, ast.Attribute)):
+                    if isinstance(item, ast.Name):
+                        found.update(known_aliases.get(item.id, ()))
+                    resolved = object_root(item, line)
+                    if resolved is not None:
+                        found.add(resolved)
+                    # Passing app.title does not pass app itself. An exact imported
+                    # module.router attribute, however, resolves above.
+                    return
+                for child in ast.iter_child_nodes(item):
+                    collect(child)
+
+            collect(expression)
+            return found
+
+        def alias_objects(expression: ast.expr, line: int) -> frozenset[_Object]:
+            if isinstance(expression, ast.Name):
+                aliased = known_aliases.get(expression.id)
+                if aliased is not None:
+                    return aliased
+                resolved = self._resolve_object(expression, module, aliases, modules, line)
+                return frozenset({resolved}) if resolved is not None else frozenset()
+            if isinstance(expression, ast.Attribute):
+                resolved = object_root(expression, line)
+                return frozenset({resolved}) if resolved is not None else frozenset()
+            if isinstance(expression, (ast.List, ast.Tuple, ast.Set)):
+                return frozenset(
+                    owner for item in expression.elts for owner in alias_objects(item, line)
+                )
+            if isinstance(expression, ast.Dict):
+                return frozenset(
+                    owner for item in expression.values for owner in alias_objects(item, line)
+                )
+            return frozenset()
+
+        def update_aliases(statement: ast.stmt) -> None:
+            assignments: list[tuple[str, ast.expr]] = []
+            rebound: set[str] = set()
+            if isinstance(statement, ast.Assign):
+                for target in statement.targets:
+                    names = _bound_names(target)
+                    rebound.update(names)
+                    if len(names) == 1:
+                        assignments.append((next(iter(names)), statement.value))
+            elif isinstance(statement, ast.AnnAssign):
+                names = _bound_names(statement.target)
+                rebound.update(names)
+                if statement.value is not None and len(names) == 1:
+                    assignments.append((next(iter(names)), statement.value))
+            else:
+                rebound.update(_bound_names(statement))
+            for name in rebound:
+                known_aliases.pop(name, None)
+            for name, value in assignments:
+                resolved = alias_objects(value, statement.lineno)
+                if resolved:
+                    known_aliases[name] = resolved
+
+        def record(owner: _Object, node: ast.AST, reason: str) -> None:
+            self._record_ordered_inventory_limitation(module, owner, node, reason)
+
+        def visit(node: ast.AST) -> None:  # noqa: PLR0912
+            if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+                loop_evidence = node.iter if isinstance(node, ast.comprehension) else node
+                for owner in referenced_objects(node.iter, loop_evidence.lineno):
+                    record(
+                        owner,
+                        loop_evidence,
+                        "module-level loop aliases a route object conditionally",
+                    )
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for decorator in node.decorator_list:
+                    visit(decorator)
+                for default in [*node.args.defaults, *node.args.kw_defaults]:
+                    if default is not None:
+                        visit(default)
+                return
+            if isinstance(node, ast.Lambda):
+                for default in [*node.args.defaults, *node.args.kw_defaults]:
+                    if default is not None:
+                        visit(default)
+                return
+            if isinstance(node, ast.Call):
+                receiver_expression = (
+                    node.func.value if isinstance(node.func, ast.Attribute) else None
+                )
+                exact_receiver = self._resolve_object(
+                    receiver_expression, module, aliases, modules, node.lineno
+                )
+                receiver = object_root(receiver_expression, node.lineno)
+                operation = node.func.attr if isinstance(node.func, ast.Attribute) else ""
+                receiver_attributes = attribute_names(receiver_expression)
+                mutates_routes = operation in registration_methods or (
+                    operation in route_collection_mutators
+                    and ("routes" in receiver_attributes or "router" in receiver_attributes)
+                )
+                if receiver is not None and mutates_routes:
+                    record(
+                        receiver,
+                        node,
+                        "module-level control flow may conditionally mutate route inventory",
+                    )
+                elif receiver is None and operation in registration_methods:
+                    for owner in referenced_objects(receiver_expression or node.func, node.lineno):
+                        record(
+                            owner,
+                            node,
+                            "module-level control flow has a conditional registration receiver",
+                        )
+                elif receiver is not None:
+                    record(
+                        receiver,
+                        node,
+                        "module-level control flow invokes an unresolved route-state method",
+                    )
+                if operation not in registration_methods:
+                    if exact_receiver is not None and receiver is None:
+                        record(
+                            exact_receiver,
+                            node,
+                            "module-level control flow invokes an unresolved route-object method",
+                        )
+                    for argument in [*node.args, *(item.value for item in node.keywords)]:
+                        for owner in referenced_objects(argument, node.lineno):
+                            record(
+                                owner,
+                                node,
+                                "module-level control flow passes a route object "
+                                "to an unresolved call",
+                            )
+            elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Delete)):
+                targets: list[ast.expr] = []
+                value = node.value if not isinstance(node, ast.Delete) else None
+                if value is not None:
+                    for owner in referenced_objects(value, node.lineno):
+                        record(
+                            owner,
+                            node,
+                            "module-level control flow aliases a route object conditionally",
+                        )
+                if isinstance(node, ast.Assign):
+                    targets.extend(node.targets)
+                elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+                    targets.append(node.target)
+                else:
+                    targets.extend(node.targets)
+                for target in targets:
+                    attribute_target = target.value if isinstance(target, ast.Subscript) else target
+                    target_attributes = attribute_names(attribute_target)
+                    if "routes" not in target_attributes and "router" not in target_attributes:
+                        continue
+                    target_owner = route_state_owner(target, node.lineno)
+                    if target_owner is not None:
+                        record(
+                            target_owner,
+                            node,
+                            "module-level control flow may conditionally replace route state",
+                        )
+            for child in ast.iter_child_nodes(node):
+                visit(child)
+
+        control_flow_types = (
+            ast.If,
+            ast.For,
+            ast.AsyncFor,
+            ast.While,
+            ast.Try,
+            ast.With,
+            ast.AsyncWith,
+            ast.Match,
+        )
+        for statement in module.tree.body:
+            if isinstance(statement, control_flow_types) or any(
+                isinstance(item, (ast.comprehension, ast.BoolOp, ast.IfExp, ast.NamedExpr))
+                for item in ast.walk(statement)
+            ):
+                visit(statement)
+            if not isinstance(statement, control_flow_types):
+                update_aliases(statement)
+
     def _collect_routes(  # noqa: PLR0912 - registration forms stay explicit
         self,
         module: _Module,
@@ -2578,6 +2889,24 @@ def _merge_discovery_conditions(
         (str(condition.source_path), condition.source_line, condition.reason): condition
         for group in groups
         for condition in group
+    }
+    return tuple(unique[key] for key in sorted(unique))
+
+
+def _merge_ordered_limitations(
+    *groups: tuple[_OrderedInventoryLimitation, ...],
+) -> tuple[_OrderedInventoryLimitation, ...]:
+    """Merge source-ordered inventory limitations deterministically."""
+    unique = {
+        (
+            limitation.origin_module,
+            limitation.order,
+            str(limitation.condition.source_path),
+            limitation.condition.source_line,
+            limitation.condition.reason,
+        ): limitation
+        for group in groups
+        for limitation in group
     }
     return tuple(unique[key] for key in sorted(unique))
 

@@ -646,6 +646,374 @@ def safe():
 
         assert [endpoint.identifier for endpoint in endpoints] == ["GET /safe"]
 
+    def test_module_loop_registration_makes_inventory_conditional(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            """from fastapi import FastAPI
+app = FastAPI()
+@app.get('/known')
+def known(): return None
+for route in configured_routes:
+    app.router.include_routes(route)
+"""
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /known"]
+        assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.ESTABLISHED
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert inventory.limitations[0].source_line == 6
+        assert "module-level control flow" in inventory.limitations[0].reason
+
+    def test_module_conditional_decorator_makes_empty_inventory_conditional(
+        self, tmp_path: Path
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            """from fastapi import FastAPI
+app = FastAPI()
+if enabled:
+    @app.get('/optional')
+    def optional(): return None
+"""
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.endpoints == []
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert inventory.limitations[0].source_line == 4
+
+    def test_module_conditional_helper_object_escape_is_conditional(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            """from fastapi import FastAPI
+app = FastAPI()
+if enabled:
+    configure(app)
+"""
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert "unresolved call" in inventory.limitations[0].reason
+
+    def test_conditional_router_mutation_after_copy_does_not_weaken_parent_inventory(
+        self, tmp_path: Path
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            """from fastapi import APIRouter, FastAPI
+app = FastAPI()
+router = APIRouter()
+@router.get('/known')
+def known(): return None
+def late(): return None
+app.include_router(router)
+if enabled:
+    router.add_api_route('/late', late)
+"""
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /known"]
+        assert inventory.status == InventoryStatus.ESTABLISHED
+        assert inventory.limitations == ()
+
+    def test_conditional_router_mutation_before_copy_weakens_parent_inventory(
+        self, tmp_path: Path
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            """from fastapi import APIRouter, FastAPI
+app = FastAPI()
+router = APIRouter()
+@router.get('/known')
+def known(): return None
+def optional(): return None
+if enabled:
+    router.add_api_route('/optional', optional)
+app.include_router(router)
+"""
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /known"]
+        assert inventory.status == InventoryStatus.CONDITIONAL
+
+    def test_conditional_child_mutation_after_live_mount_weakens_parent_inventory(
+        self, tmp_path: Path
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            """from fastapi import FastAPI
+app = FastAPI()
+child = FastAPI()
+@child.get('/known')
+def known(): return None
+def optional(): return None
+app.mount('/child', child)
+if enabled:
+    child.add_api_route('/optional', optional)
+"""
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /child/known"]
+        assert inventory.status == InventoryStatus.CONDITIONAL
+
+    def test_deferred_function_body_does_not_weaken_module_inventory(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            """from fastapi import FastAPI
+app = FastAPI()
+@app.get('/known')
+def known(): return None
+if enabled:
+    def configure_later():
+        app.add_api_route('/not-executed', handler)
+"""
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /known"]
+        assert inventory.status == InventoryStatus.ESTABLISHED
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "if enabled:\n    target = app\n    target.add_api_route('/optional', handler)",
+            "for target in [app]:\n    target.add_api_route('/optional', handler)",
+            "target = app\nif enabled:\n    target.add_api_route('/optional', handler)",
+            (
+                "registry = [app]\nfor target in registry:\n"
+                "    target.add_api_route('/optional', handler)"
+            ),
+            ("registry = [app]\nif enabled:\n    registry[0].add_api_route('/optional', handler)"),
+            (
+                "registry = {'primary': app}\nif enabled:\n"
+                "    registry['primary'].add_api_route('/optional', handler)"
+            ),
+        ],
+    )
+    def test_control_flow_alias_of_app_is_conservatively_conditional(
+        self, tmp_path: Path, body: str
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            f"""from fastapi import FastAPI
+app = FastAPI()
+def handler(): return None
+{body}
+"""
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert inventory.limitations
+
+    @pytest.mark.parametrize(
+        "expression",
+        [
+            "[app.add_api_route(path, handler) for path in plugin_paths]",
+            "app.add_api_route('/optional', handler) if enabled else None",
+            "enabled and app.add_api_route('/optional', handler)",
+            "(app if enabled else other).add_api_route('/optional', handler)",
+        ],
+    )
+    def test_expression_form_control_flow_is_conditional(
+        self, tmp_path: Path, expression: str
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            f"""from fastapi import FastAPI
+app = FastAPI()
+def handler(): return None
+{expression}
+"""
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+
+    def test_cross_module_limitation_is_not_filtered_by_local_copy_cutoff(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "main.py").write_text(
+            """from fastapi import APIRouter, FastAPI
+app = FastAPI()
+router = APIRouter()
+import plugin
+app.include_router(router)
+"""
+        )
+        (tmp_path / "plugin.py").write_text(
+            """from main import router
+
+
+
+
+
+
+
+
+
+
+if enabled:
+    @router.get('/conditional')
+    def conditional(): return None
+"""
+        )
+
+        inventory = SecureASTExtractor(tmp_path, app_entry="main:app").extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert inventory.limitations[0].source_path.name == "plugin.py"
+
+    def test_unresolved_registration_receiver_does_not_taint_child_router(
+        self, tmp_path: Path
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            """from fastapi import APIRouter, FastAPI
+app = FastAPI()
+router = APIRouter()
+@router.get('/known')
+def known(): return None
+if enabled:
+    client.include_router(router)
+app.include_router(router)
+"""
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /known"]
+        assert inventory.status == InventoryStatus.ESTABLISHED
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "if enabled:\n    configure(app.router)",
+            "routes = app.routes\nif enabled:\n    routes.clear()",
+            "if enabled:\n    app.router.routes[0].path = '/changed'",
+        ],
+    )
+    def test_nested_route_state_escape_or_mutation_is_conditional(
+        self, tmp_path: Path, body: str
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            f"""from fastapi import FastAPI
+app = FastAPI()
+{body}
+"""
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert inventory.limitations
+
+    def test_unknown_route_object_method_tracks_receiver_and_object_arguments(
+        self, tmp_path: Path
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            """from fastapi import APIRouter, FastAPI
+app = FastAPI()
+router = APIRouter()
+if enabled:
+    router.configure(app)
+"""
+        )
+
+        inventory = SecureASTExtractor(app_file, app_entry="app:app").extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert any("unresolved call" in item.reason for item in inventory.limitations)
+
+    def test_unknown_nested_route_state_method_is_conditional(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            """from fastapi import FastAPI
+app = FastAPI()
+if enabled:
+    app.router.configure()
+"""
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert "route-state method" in inventory.limitations[0].reason
+
+    @pytest.mark.parametrize(
+        "mutation",
+        [
+            "app.router.routes[0] = replacement",
+            "del app.router.routes[:]",
+        ],
+    )
+    def test_conditional_route_collection_subscript_mutation_is_conditional(
+        self, tmp_path: Path, mutation: str
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            f"""from fastapi import FastAPI
+app = FastAPI()
+if enabled:
+    {mutation}
+"""
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert "replace route state" in inventory.limitations[0].reason
+
+    def test_unknown_direct_app_method_is_conditional(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            """from fastapi import FastAPI
+app = FastAPI()
+if enabled:
+    app.configure()
+"""
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert "unresolved route-state method" in inventory.limitations[0].reason
+
+    def test_unrelated_conditional_app_attribute_read_does_not_weaken_inventory(
+        self, tmp_path: Path
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            """from fastapi import FastAPI
+app = FastAPI()
+@app.get('/known')
+def known(): return None
+if enabled:
+    print(app.title)
+    app.state.client.get('/health')
+"""
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.ESTABLISHED
+
     @pytest.mark.parametrize("method", ["get", "post", "put", "patch", "delete"])
     def test_extract_different_http_methods(self, tmp_path: Path, method: str) -> None:
         """Test extracting different HTTP methods."""
