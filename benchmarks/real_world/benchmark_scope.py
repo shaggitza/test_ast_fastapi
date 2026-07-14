@@ -26,6 +26,11 @@ def entrypoint_in_scope(item: dict[str, Any], scope: str) -> bool:
     raise ValueError(f"unknown benchmark scope: {scope}")
 
 
+def filter_entrypoint_items(items: list[dict[str, Any]], scope: str) -> list[dict[str, Any]]:
+    """Return entrypoint-like items belonging to ``scope``."""
+    return [item for item in items if entrypoint_in_scope(item, scope)]
+
+
 def filter_record(record: dict[str, Any], scope: str) -> dict[str, Any]:
     """Copy a record with only entrypoints belonging to ``scope``."""
     filtered = dict(record)
@@ -35,7 +40,5 @@ def filter_record(record: dict[str, Any], scope: str) -> dict[str, Any]:
         "reachability_only_entrypoints",
     ):
         if field in record:
-            filtered[field] = [
-                item for item in record.get(field, []) if entrypoint_in_scope(item, scope)
-            ]
+            filtered[field] = filter_entrypoint_items(record.get(field, []), scope)
     return filtered

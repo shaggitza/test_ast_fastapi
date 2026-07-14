@@ -24,6 +24,10 @@ primary cross-PR verification score, additionally pass
 Verification-set exclusions preserve canonical truth and are reported as
 separate stress holdouts.
 
+A route census is orthogonal to scope membership. It asks whether an atom exists
+in the configured target/baseline static route inventory after scoring is
+frozen; it never makes an atom applicable or earns prediction credit.
+
 The default
 `--scope all` preserves the complete cross-surface historical view. Scope
 selection never replaces raw exact scoring with normalized scoring; both are

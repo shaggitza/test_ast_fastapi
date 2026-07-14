@@ -347,6 +347,174 @@ def test_verification_set_rejects_malformed_or_duplicate_entries(
         evaluate.read_verification_selection(path)
 
 
+def test_route_census_partitions_fn_without_changing_metrics(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    truth = tmp_path / "truth.jsonl"
+    predictions = tmp_path / "predictions.jsonl"
+    census = tmp_path / "census.jsonl"
+    truth.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "repository": "owner/repo",
+                    "pr": pr,
+                    "status": "adjudicated",
+                    "affected_entrypoints": [{"id": f"HTTP GET /{pr}", "kind": "http"}],
+                }
+            )
+            + "\n"
+            for pr in range(1, 5)
+        )
+    )
+    predictions.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "repository": "owner/repo",
+                    "pr": pr,
+                    "candidate_entrypoints": (
+                        [
+                            {
+                                "id": "HTTP GET /1",
+                                "kind": "http",
+                                "confidence": "low",
+                            }
+                        ]
+                        if pr == 1
+                        else []
+                    ),
+                    "affected_entrypoints": [],
+                }
+            )
+            + "\n"
+            for pr in range(1, 5)
+        )
+    )
+
+    def side(items: list[dict], status: str = "completed") -> dict:
+        return {"status": status, "entrypoints": items, "unresolved": []}
+
+    census_records = []
+    for pr in range(1, 5):
+        item = {
+            "id": f"HTTP GET /{pr}",
+            "kind": "http",
+            "occurrences": [
+                {
+                    "file": "main.py",
+                    "line": pr,
+                    "end_line": pr,
+                    "handler": f"route_{pr}",
+                    "module": "main",
+                    "root": ".",
+                }
+            ],
+        }
+        target = side([item] if pr == 2 else [], "partial" if pr == 4 else "completed")
+        baseline = side([], "completed")
+        status = "partial" if pr == 4 else "completed"
+        census_records.append(
+            {
+                "schema_version": 1,
+                "repository": "owner/repo",
+                "pr": pr,
+                "status": status,
+                "complete": status == "completed",
+                "target": target,
+                "baseline": baseline,
+            }
+        )
+    census.write_text("".join(json.dumps(item) + "\n" for item in census_records))
+
+    base_argv = [
+        "evaluate.py",
+        "--ground-truth",
+        str(truth),
+        "--predictions",
+        str(predictions),
+        "--scope",
+        "fastapi",
+    ]
+    monkeypatch.setattr(sys, "argv", base_argv)
+    evaluate.main()
+    without_census = json.loads(capsys.readouterr().out)
+    monkeypatch.setattr(sys, "argv", [*base_argv, "--route-census", str(census)])
+    evaluate.main()
+    with_census = json.loads(capsys.readouterr().out)
+
+    diagnostics = with_census.pop("fn_stages")
+    assert with_census == without_census
+    assert diagnostics["exact"]["totals"] == {
+        "observation_missing": 1,
+        "propagation_missing": 1,
+        "discovery_missing": 1,
+        "inventory_unavailable": 1,
+    }
+    assert diagnostics["normalized"]["totals"] == diagnostics["exact"]["totals"]
+    assert sum(diagnostics["normalized"]["totals"].values()) == 4
+    assert with_census["normalized"]["micro"]["tp"] == 0
+    assert with_census["normalized"]["confidence"]["candidate_ceiling"]["tp"] == 1
+
+
+def test_route_census_rejects_duplicate_and_missing_selected_keys(tmp_path: Path) -> None:
+    path = tmp_path / "census.jsonl"
+    record = {
+        "schema_version": 1,
+        "repository": "owner/repo",
+        "pr": 1,
+        "status": "completed",
+        "complete": True,
+        "target": {"status": "completed", "entrypoints": [], "unresolved": []},
+        "baseline": {"status": "completed", "entrypoints": [], "unresolved": []},
+    }
+    path.write_text(json.dumps(record) + "\n" + json.dumps(record) + "\n")
+    with pytest.raises(ValueError, match="duplicate"):
+        evaluate.read_route_census(path, {("owner/repo", 1)}, {("owner/repo", 1)}, "fastapi")
+    path.write_text(json.dumps(record) + "\n")
+    with pytest.raises(ValueError, match="missing selected"):
+        evaluate.read_route_census(
+            path,
+            {("owner/repo", 1), ("owner/repo", 2)},
+            {("owner/repo", 1), ("owner/repo", 2)},
+            "fastapi",
+        )
+
+
+def test_route_census_rejects_unknown_key_and_malformed_occurrence(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "census.jsonl"
+    malformed = {
+        "schema_version": 1,
+        "repository": "owner/repo",
+        "pr": 1,
+        "status": "completed",
+        "complete": True,
+        "target": {
+            "status": "completed",
+            "entrypoints": [
+                {
+                    "id": "HTTP GET /items",
+                    "kind": "http",
+                    "occurrences": [{"file": "../escape.py", "line": 0}],
+                }
+            ],
+            "unresolved": [],
+        },
+        "baseline": {"status": "completed", "entrypoints": [], "unresolved": []},
+    }
+    path.write_text(json.dumps(malformed) + "\n")
+    with pytest.raises(ValueError, match="malformed occurrence"):
+        evaluate.read_route_census(path, {("owner/repo", 1)}, {("owner/repo", 1)}, "fastapi")
+
+    malformed["target"]["entrypoints"] = []
+    malformed["pr"] = 9
+    path.write_text(json.dumps(malformed) + "\n")
+    with pytest.raises(ValueError, match="absent from ground truth"):
+        evaluate.read_route_census(path, {("owner/repo", 9)}, {("owner/repo", 1)}, "fastapi")
+
+
 def test_verification_set_excludes_pr_without_deleting_truth(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:

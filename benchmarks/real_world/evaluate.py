@@ -14,7 +14,11 @@ from typing import Any
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from benchmarks.real_world.benchmark_scope import SCOPES, filter_record
+from benchmarks.real_world.benchmark_scope import (
+    SCOPES,
+    filter_entrypoint_items,
+    filter_record,
+)
 from benchmarks.real_world.semantic_normalization import (
     ALIAS_VERSION,
     claims,
@@ -140,6 +144,116 @@ def read_verification_selection(
     return manifest, selection, selected, hashlib.sha256(content).hexdigest()
 
 
+def _validate_census_entrypoint(item: object, side_name: str, record_key: tuple[str, int]) -> None:
+    if not isinstance(item, dict):
+        raise ValueError(f"route census has malformed {side_name} entrypoint for {record_key}")
+    identifier = item.get("id")
+    kind = item.get("kind")
+    occurrences = item.get("occurrences")
+    if (
+        not isinstance(identifier, str)
+        or not identifier.strip()
+        or not isinstance(kind, str)
+        or kind not in {"http", "event"}
+        or not isinstance(occurrences, list)
+        or not occurrences
+    ):
+        raise ValueError(f"route census has malformed {side_name} entrypoint for {record_key}")
+    for occurrence in occurrences:
+        if not isinstance(occurrence, dict):
+            raise ValueError(f"route census has malformed occurrence for {record_key}")
+        file_name = occurrence.get("file")
+        line = occurrence.get("line")
+        end_line = occurrence.get("end_line")
+        if (
+            not isinstance(file_name, str)
+            or not file_name
+            or Path(file_name).is_absolute()
+            or ".." in Path(file_name).parts
+            or type(line) is not int
+            or line < 1
+            or (end_line is not None and (type(end_line) is not int or end_line < line))
+            or not isinstance(occurrence.get("handler"), str)
+            or not occurrence["handler"]
+            or not isinstance(occurrence.get("module"), str)
+            or not occurrence["module"]
+            or not isinstance(occurrence.get("root"), str)
+            or not occurrence["root"]
+        ):
+            raise ValueError(f"route census has malformed occurrence for {record_key}")
+
+
+def read_route_census(  # noqa: PLR0912
+    path: Path,
+    selected_truth_keys: set[tuple[str, int]],
+    all_truth_keys: set[tuple[str, int]],
+    scope: str,
+) -> tuple[dict[tuple[str, int], dict[str, Any]], str]:
+    """Load a strict route-census v1 without feeding it into scoring."""
+    content = path.read_bytes()
+    records: dict[tuple[str, int], dict[str, Any]] = {}
+    for line_number, line in enumerate(content.decode().splitlines(), start=1):
+        if not line.strip():
+            continue
+        item = json.loads(line)
+        if not isinstance(item, dict) or item.get("schema_version") != 1:
+            raise ValueError(f"route census line {line_number} must use schema_version 1")
+        record_key = key(item)
+        if record_key in records:
+            raise ValueError(f"duplicate route-census record: {record_key}")
+        if record_key not in all_truth_keys:
+            raise ValueError(f"route-census key absent from ground truth: {record_key}")
+        status = item.get("status")
+        complete = item.get("complete")
+        if status not in {"completed", "partial", "unresolved"} or type(complete) is not bool:
+            raise ValueError(f"route census has invalid status for {record_key}")
+        filtered = dict(item)
+        for side_name in ("target", "baseline"):
+            side = item.get(side_name)
+            if not isinstance(side, dict):
+                raise ValueError(f"route census is missing {side_name} for {record_key}")
+            side_status = side.get("status")
+            entrypoint_items = side.get("entrypoints")
+            unresolved = side.get("unresolved")
+            if (
+                side_status not in {"completed", "partial", "unresolved"}
+                or not isinstance(entrypoint_items, list)
+                or not isinstance(unresolved, list)
+            ):
+                raise ValueError(f"route census has malformed {side_name} for {record_key}")
+            for entrypoint_item in entrypoint_items:
+                _validate_census_entrypoint(entrypoint_item, side_name, record_key)
+            filtered[side_name] = {
+                **side,
+                "entrypoints": filter_entrypoint_items(entrypoint_items, scope),
+            }
+        side_statuses = {filtered[side_name]["status"] for side_name in ("target", "baseline")}
+        if side_statuses == {"completed"}:
+            derived_status = "completed"
+        elif side_statuses == {"unresolved"}:
+            derived_status = "unresolved"
+        else:
+            derived_status = "partial"
+        if status != derived_status or complete != (derived_status == "completed"):
+            raise ValueError(f"route census complete/status mismatch for {record_key}")
+        records[record_key] = filtered
+    missing = selected_truth_keys - set(records)
+    if missing:
+        raise ValueError(f"route census is missing selected truth keys: {sorted(missing)}")
+    return records, hashlib.sha256(content).hexdigest()
+
+
+def _stage_counts(
+    observation: int, propagation: int, discovery: int, unavailable: int
+) -> dict[str, int]:
+    return {
+        "observation_missing": observation,
+        "propagation_missing": propagation,
+        "discovery_missing": discovery,
+        "inventory_unavailable": unavailable,
+    }
+
+
 def ratio(numerator: int | float, denominator: int | float) -> float:
     return numerator / denominator if denominator else 0.0
 
@@ -150,6 +264,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
     parser.add_argument("--predictions", type=Path, required=True)
     parser.add_argument("--scope", choices=SCOPES, default="all")
     parser.add_argument("--verification-set", type=Path)
+    parser.add_argument("--route-census", type=Path)
     args = parser.parse_args()
 
     scope_id = {
@@ -189,6 +304,12 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
     predictions = {
         key(item): filter_record(item, args.scope) for item in read_jsonl(args.predictions)
     }
+    census: dict[tuple[str, int], dict[str, Any]] | None = None
+    census_sha256: str | None = None
+    if args.route_census is not None:
+        census, census_sha256 = read_route_census(
+            args.route_census, set(truth), truth_keys, args.scope
+        )
     totals: dict[str, int] = defaultdict(int)
     macro: dict[str, float] = defaultdict(float)
     evaluated = 0
@@ -210,6 +331,12 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
     truth_positive_prs = 0
     negative_controls_with_fp = 0
     negative_controls_with_low_fp = 0
+    exact_stage_totals: dict[str, int] = defaultdict(int)
+    normalized_stage_totals: dict[str, int] = defaultdict(int)
+    exact_stage_repositories: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    normalized_stage_repositories: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    exact_stage_prs: dict[tuple[str, int], dict[str, int]] = {}
+    normalized_stage_prs: dict[tuple[str, int], dict[str, int]] = {}
 
     for record_key, expected_record in truth.items():
         if expected_record.get("status", "adjudicated") != "adjudicated":
@@ -234,6 +361,34 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
         for metric, count in exact_low.items():
             ranked_totals[metric] += count
             ranked_repositories[record_key[0]][metric] += count
+        census_record = census.get(record_key) if census is not None else None
+        if census is not None:
+            exact_observation_ids = (expected - predicted) & low_predicted
+            exact_after_low = (expected - predicted) - exact_observation_ids
+            inventory_ids: set[str] = set()
+            if census_record is not None:
+                for side_name in ("target", "baseline"):
+                    inventory_ids.update(
+                        item["id"] for item in census_record[side_name]["entrypoints"]
+                    )
+            exact_propagation_ids = exact_after_low & inventory_ids
+            exact_after_inventory = exact_after_low - exact_propagation_ids
+            exact_stage = _stage_counts(
+                len(exact_observation_ids),
+                len(exact_propagation_ids),
+                len(exact_after_inventory)
+                if census_record is not None and census_record["complete"]
+                else 0,
+                len(exact_after_inventory)
+                if census_record is None or not census_record["complete"]
+                else 0,
+            )
+            if sum(exact_stage.values()) != fn:
+                raise AssertionError(f"exact FN-stage partition failed for {record_key}")
+            exact_stage_prs[record_key] = exact_stage
+            for metric, count in exact_stage.items():
+                exact_stage_totals[metric] += count
+                exact_stage_repositories[record_key[0]][metric] += count
         if expected:
             truth_positive_prs += 1
         elif predicted:
@@ -283,6 +438,38 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
         for metric, count in normalized_low_counts.items():
             normalized_ranked_totals[metric] += count
             normalized_ranked_repositories[record_key[0]][metric] += count
+        if census is not None:
+            normalized_after_low = [
+                claim
+                for index, claim in enumerate(normalized_low["expected_claims"])
+                if index not in normalized_low["_matched_expected"]
+            ]
+            census_items: list[dict[str, Any]] = []
+            if census_record is not None:
+                for side_name in ("target", "baseline"):
+                    census_items.extend(census_record[side_name]["entrypoints"])
+            inventory_match = match_claims(
+                record_key[0],
+                normalized_after_low,
+                claims({"affected_entrypoints": census_items}),
+            )
+            normalized_remaining = inventory_match["fn"]
+            normalized_stage = _stage_counts(
+                normalized_low["tp"],
+                inventory_match["tp"],
+                normalized_remaining
+                if census_record is not None and census_record["complete"]
+                else 0,
+                normalized_remaining
+                if census_record is None or not census_record["complete"]
+                else 0,
+            )
+            if sum(normalized_stage.values()) != normalized["fn"]:
+                raise AssertionError(f"normalized FN-stage partition failed for {record_key}")
+            normalized_stage_prs[record_key] = normalized_stage
+            for metric, count in normalized_stage.items():
+                normalized_stage_totals[metric] += count
+                normalized_stage_repositories[record_key[0]][metric] += count
         for rule, count in normalized_low["matches_by_rule"].items():
             low_rules[rule] += count
         for metric in ("tp", "fp", "fn"):
@@ -451,6 +638,57 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
             "max": max(latencies, default=0.0),
         },
     }
+    if census is not None:
+        if sum(exact_stage_totals.values()) != totals["fn"]:
+            raise AssertionError("global exact FN-stage partition failed")
+        if sum(normalized_stage_totals.values()) != normalized_totals["fn"]:
+            raise AssertionError("global normalized FN-stage partition failed")
+        result["fn_stages"] = {
+            "schema_version": 1,
+            "route_census": {
+                "path": str(args.route_census),
+                "sha256": census_sha256,
+            },
+            "definitions": {
+                "observation_missing": (
+                    "Primary FN matched only by a LOW candidate; this is operational, "
+                    "not a causal diagnosis."
+                ),
+                "propagation_missing": (
+                    "Primary FN absent from LOW but present in target or baseline "
+                    "static route inventory."
+                ),
+                "discovery_missing": (
+                    "Primary FN absent from both sides of a complete configured static inventory."
+                ),
+                "inventory_unavailable": (
+                    "Primary FN could not be classified because inventory was missing "
+                    "or incomplete."
+                ),
+            },
+            "exact": {
+                "totals": dict(exact_stage_totals),
+                "by_repository": {
+                    repository: dict(counts)
+                    for repository, counts in sorted(exact_stage_repositories.items())
+                },
+                "by_pr": [
+                    {"repository": repository, "pr": pr, **counts}
+                    for (repository, pr), counts in sorted(exact_stage_prs.items())
+                ],
+            },
+            "normalized": {
+                "totals": dict(normalized_stage_totals),
+                "by_repository": {
+                    repository: dict(counts)
+                    for repository, counts in sorted(normalized_stage_repositories.items())
+                },
+                "by_pr": [
+                    {"repository": repository, "pr": pr, **counts}
+                    for (repository, pr), counts in sorted(normalized_stage_prs.items())
+                ],
+            },
+        }
     print(json.dumps(result, indent=2))
 
 

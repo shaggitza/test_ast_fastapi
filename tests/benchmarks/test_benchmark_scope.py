@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from benchmarks.real_world.benchmark_scope import filter_record, is_fastapi_entrypoint
+from benchmarks.real_world.benchmark_scope import (
+    filter_entrypoint_items,
+    filter_record,
+    is_fastapi_entrypoint,
+)
 
 
 def test_fastapi_scope_includes_http_aliases_and_websocket_event_labels() -> None:
@@ -26,4 +30,9 @@ def test_fastapi_scope_includes_http_aliases_and_websocket_event_labels() -> Non
         items[1],
         items[3],
         items[4],
+    ]
+    census_items = [{**item, "occurrences": [{"file": "app.py", "line": 1}]} for item in items]
+    assert filter_entrypoint_items(census_items, "fastapi") == [
+        census_items[0],
+        census_items[2],
     ]
