@@ -88,6 +88,11 @@ def cli(ctx: click.Context, config: Path | None) -> None:
     help="Exact secure-AST entry MODULE:SYMBOL (object or zero-argument factory).",
 )
 @click.option(
+    "--bootstrap-entry",
+    type=str,
+    help="Exact secure-AST bootstrap MODULE:FUNCTION for registration effects.",
+)
+@click.option(
     "--verbose",
     "-v",
     is_flag=True,
@@ -128,6 +133,7 @@ def analyze(
     output: Path | None,
     app_var: str,
     app_entry: str | None,
+    bootstrap_entry: str | None,
     verbose: bool,
     no_cache: bool,
     clear_cache: bool,
@@ -150,6 +156,9 @@ def analyze(
         raise click.Abort()
     if app_entry is not None and not secure_ast:
         console.print("[red]Error:[/red] --app-entry requires --secure-ast")
+        raise click.Abort()
+    if bootstrap_entry is not None and not secure_ast:
+        console.print("[red]Error:[/red] --bootstrap-entry requires --secure-ast")
         raise click.Abort()
     if baseline_app is not None and not scip:
         console.print("[red]Error:[/red] --baseline-app requires --scip")
@@ -220,6 +229,7 @@ def analyze(
             config=config,
             app_variable=app_var,
             app_entry=app_entry,
+            bootstrap_entry=bootstrap_entry,
             use_cache=not no_cache,
             secure_ast=secure_ast,
             use_scip=scip,
@@ -325,6 +335,11 @@ def analyze(
     help="Exact secure-AST entry MODULE:SYMBOL (object or zero-argument factory).",
 )
 @click.option(
+    "--bootstrap-entry",
+    type=str,
+    help="Exact secure-AST bootstrap MODULE:FUNCTION for registration effects.",
+)
+@click.option(
     "--vm",
     is_flag=True,
     help="Execute analysis in isolated Docker container for untrusted code.",
@@ -342,6 +357,7 @@ def list_endpoints(
     output: Path | None,
     app_var: str,
     app_entry: str | None,
+    bootstrap_entry: str | None,
     vm: bool,
     secure_ast: bool,
 ) -> None:
@@ -355,6 +371,9 @@ def list_endpoints(
         raise click.Abort()
     if app_entry is not None and not secure_ast:
         console.print("[red]Error:[/red] --app-entry requires --secure-ast")
+        raise click.Abort()
+    if bootstrap_entry is not None and not secure_ast:
+        console.print("[red]Error:[/red] --bootstrap-entry requires --secure-ast")
         raise click.Abort()
 
     try:
@@ -401,6 +420,7 @@ def list_endpoints(
                 app_path=app,
                 app_variable=app_var,
                 app_entry=app_entry,
+                bootstrap_entry=bootstrap_entry,
             )
             inventory = extractor_obj.extract_inventory()
             endpoints = inventory.endpoints

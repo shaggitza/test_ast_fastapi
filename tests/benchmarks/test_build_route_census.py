@@ -243,13 +243,22 @@ def test_invoke_secure_list_timeout_is_explicit(tmp_path: Path, monkeypatch) -> 
 def test_process_entry_extracts_target_and_baseline_for_non_python_pr(
     tmp_path: Path, monkeypatch
 ) -> None:
-    calls: list[tuple[str, str, str | None]] = []
+    calls: list[tuple[str, str, str | None, str | None]] = []
     monkeypatch.setattr(census, "ensure_cache", lambda *_args: tmp_path / "cache.git")
     monkeypatch.setattr(census, "merge_parents", lambda *_args: ["b" * 40])
     monkeypatch.setattr(census, "resolve_base_parent", lambda *_args: "b" * 40)
 
-    def extract(_cache, sha, _worktree, _root, _config, label, app_entry=None):
-        calls.append((label, sha, app_entry))
+    def extract(
+        _cache,
+        sha,
+        _worktree,
+        _root,
+        _config,
+        label,
+        app_entry=None,
+        bootstrap_entry=None,
+    ):
+        calls.append((label, sha, app_entry, bootstrap_entry))
         return ({"status": "completed", "entrypoints": [], "unresolved": []}, 0.1)
 
     monkeypatch.setattr(census, "_extract_side", extract)
@@ -262,6 +271,7 @@ def test_process_entry_extracts_target_and_baseline_for_non_python_pr(
         ".",
         {},
         {"owner/repo": "main:create_app"},
+        {"owner/repo": "main:run"},
     )
     entry = {
         "repository": "owner/repo",
@@ -274,8 +284,8 @@ def test_process_entry_extracts_target_and_baseline_for_non_python_pr(
     record, manifest = census.process_entry(entry, config, "candidate")
 
     assert calls == [
-        ("target", "a" * 40, "main:create_app"),
-        ("baseline", "b" * 40, "main:create_app"),
+        ("target", "a" * 40, "main:create_app", "main:run"),
+        ("baseline", "b" * 40, "main:create_app", "main:run"),
     ]
     assert record["status"] == "completed"
     assert record["complete"] is True

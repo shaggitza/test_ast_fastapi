@@ -241,6 +241,224 @@ def create_app():
         assert inventory.limitations
         assert extractor.extract_endpoints() == []
 
+    def test_explicit_bootstrap_applies_imported_nested_registration_helpers(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "routes.py").write_text(
+            """from fastapi import APIRouter
+router = APIRouter()
+@router.get('/items')
+def items(): return []
+"""
+        )
+        (tmp_path / "configure.py").write_text(
+            """def nested(target, router, prefix):
+    alias = target
+    alias.include_router(router, prefix=prefix)
+def configure(app):
+    from routes import router
+    nested(target=app, router=router, prefix='/api')
+"""
+        )
+        (tmp_path / "main.py").write_text(
+            """from fastapi import FastAPI
+from configure import configure
+app = FastAPI()
+def run(enabled=True):
+    configure(app)
+"""
+        )
+
+        endpoints = SecureASTExtractor(tmp_path, bootstrap_entry="main:run").extract_endpoints()
+
+        assert [endpoint.identifier for endpoint in endpoints] == ["GET /api/items"]
+
+    def test_bootstrap_never_aliases_selected_root_to_conventional_app_name(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "main.py").write_text("from fastapi import FastAPI\nservice = FastAPI()\n")
+        (tmp_path / "boot.py").write_text(
+            """from fastapi import APIRouter, FastAPI
+app = FastAPI()
+router = APIRouter()
+@router.get('/private')
+def private(): return None
+def run():
+    app.include_router(router)
+"""
+        )
+
+        inventory = SecureASTExtractor(
+            tmp_path,
+            app_entry="main:service",
+            bootstrap_entry="boot:run",
+        ).extract_inventory()
+
+        assert inventory.endpoints == []
+        assert inventory.status == InventoryStatus.ESTABLISHED
+
+    def test_bootstrap_zero_argument_defaults_and_return_stop_execution(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "main.py").write_text(
+            """from fastapi import APIRouter, FastAPI
+app = FastAPI()
+router = APIRouter()
+@router.get('/late')
+def late(): return None
+def run(target=None):
+    return
+    app.include_router(router)
+"""
+        )
+
+        assert SecureASTExtractor(tmp_path, bootstrap_entry="main:run").extract_endpoints() == []
+
+    @pytest.mark.parametrize(
+        "registration",
+        [
+            "app.include_router(*[router])",
+            "app.include_router(router, **{'prefix': '/x'})",
+            "app.include_router(router, prefix=dynamic)",
+            "choose().include_router(router)",
+        ],
+    )
+    def test_bootstrap_ambiguous_direct_registration_is_conditional(
+        self, tmp_path: Path, registration: str
+    ) -> None:
+        (tmp_path / "main.py").write_text(
+            f"""from fastapi import APIRouter, FastAPI
+app = FastAPI()
+router = APIRouter()
+def run():
+    {registration}
+"""
+        )
+
+        inventory = SecureASTExtractor(tmp_path, bootstrap_entry="main:run").extract_inventory()
+
+        assert inventory.endpoints == []
+        assert inventory.status == InventoryStatus.CONDITIONAL
+
+    def test_bootstrap_helper_rebinding_and_object_escape_are_conditional(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "helpers.py").write_text("def configure(app): pass\n")
+        (tmp_path / "main.py").write_text(
+            """from fastapi import FastAPI
+from helpers import configure
+app = FastAPI()
+def other(value): pass
+def run():
+    configure = other
+    configure(app)
+"""
+        )
+
+        inventory = SecureASTExtractor(tmp_path, bootstrap_entry="main:run").extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert inventory.limitations
+
+    @pytest.mark.parametrize(
+        "escape",
+        ["box = [app]", "consume(app)", "global saved\nsaved = app", "return app"],
+    )
+    def test_bootstrap_object_escape_is_conditional(self, tmp_path: Path, escape: str) -> None:
+        indented = "\n".join(f"    {line}" for line in escape.splitlines())
+        (tmp_path / "main.py").write_text(
+            f"from fastapi import FastAPI\napp = FastAPI()\ndef run():\n{indented}\n"
+        )
+
+        inventory = SecureASTExtractor(tmp_path, bootstrap_entry="main:run").extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert inventory.limitations
+
+    def test_bootstrap_formal_rebinding_does_not_fall_back_to_global(self, tmp_path: Path) -> None:
+        (tmp_path / "main.py").write_text(
+            """from fastapi import APIRouter, FastAPI
+app = FastAPI()
+router = APIRouter()
+@router.get('/false')
+def false(): return None
+def configure(app):
+    app = None
+    app.include_router(router)
+def run():
+    configure(app)
+"""
+        )
+
+        inventory = SecureASTExtractor(tmp_path, bootstrap_entry="main:run").extract_inventory()
+        assert inventory.endpoints == []
+        assert inventory.status == InventoryStatus.CONDITIONAL
+
+    def test_bootstrap_module_attribute_helper_and_copy_cutoff(self, tmp_path: Path) -> None:
+        (tmp_path / "helpers.py").write_text(
+            """def configure(app, router):
+    app.include_router(router)
+"""
+        )
+        (tmp_path / "main.py").write_text(
+            """from fastapi import APIRouter, FastAPI
+import helpers
+app = FastAPI()
+router = APIRouter()
+def before(): return None
+def after(): return None
+def run():
+    router.add_api_route('/before', before)
+    helpers.configure(app, router)
+    router.add_api_route('/after', after)
+"""
+        )
+
+        assert [
+            endpoint.identifier
+            for endpoint in SecureASTExtractor(
+                tmp_path, bootstrap_entry="main:run"
+            ).extract_endpoints()
+        ] == ["GET /before"]
+
+    def test_bootstrap_does_not_follow_helper_without_object_flow(self, tmp_path: Path) -> None:
+        (tmp_path / "main.py").write_text(
+            """from fastapi import APIRouter, FastAPI
+app = FastAPI()
+router = APIRouter()
+@router.get('/false')
+def false(): return None
+def hidden():
+    app.include_router(router)
+def run():
+    hidden()
+"""
+        )
+
+        inventory = SecureASTExtractor(
+            tmp_path, bootstrap_entry="main:run"
+        ).extract_inventory()
+        assert inventory.endpoints == []
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert inventory.limitations
+
+    @pytest.mark.parametrize(
+        "bootstrap",
+        [
+            "async def run():\n    pass\n",
+            "@decorator\ndef run():\n    pass\n",
+            "def run(required):\n    pass\n",
+            "def run():\n    pass\nrun = other\n",
+        ],
+    )
+    def test_explicit_bootstrap_rejects_unsafe_entry(self, tmp_path: Path, bootstrap: str) -> None:
+        (tmp_path / "main.py").write_text(
+            "from fastapi import FastAPI\napp = FastAPI()\n" + bootstrap
+        )
+
+        with pytest.raises(SecureASTExtractorError):
+            SecureASTExtractor(tmp_path, bootstrap_entry="main:run").extract_endpoints()
+
     def test_extract_simple_get_endpoint(self, tmp_path: Path) -> None:
         """Test extracting a simple GET endpoint."""
         app_file = tmp_path / "app.py"

@@ -291,6 +291,7 @@ class AnalyzerFailureTests(unittest.TestCase):
                 secure_ast=True,
                 use_scip=True,
                 app_entry="main:create_app",
+                bootstrap_entry="main:run",
                 baseline_app_root=Path("baseline"),
             )
 
@@ -311,6 +312,8 @@ class AnalyzerFailureTests(unittest.TestCase):
                 "--secure-ast",
                 "--app-entry",
                 "main:create_app",
+                "--bootstrap-entry",
+                "main:run",
                 "--scip",
                 "--baseline-app",
                 "baseline",

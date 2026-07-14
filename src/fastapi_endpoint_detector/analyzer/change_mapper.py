@@ -382,6 +382,7 @@ class ChangeMapper:
         secure_ast: bool = False,
         use_scip: bool = False,
         baseline_app_path: Path | None = None,
+        bootstrap_entry: str | None = None,
     ) -> None:
         """
         Initialize the change mapper.
@@ -395,16 +396,20 @@ class ChangeMapper:
             secure_ast: Discover endpoints without importing application code.
             use_scip: Use SCIP rather than mypy for reverse dependency analysis.
             baseline_app_path: Explicit baseline snapshot used for removed SCIP lines.
+            bootstrap_entry: Exact secure-AST MODULE:FUNCTION registration seed.
         """
         self.app_path = app_path.resolve()
         self.config = config or Config()
         self.app_variable = app_variable
         self.app_entry = app_entry
+        self.bootstrap_entry = bootstrap_entry
         self.use_cache = use_cache
         self.secure_ast = secure_ast
         self.use_scip = use_scip
         if app_entry is not None and not secure_ast:
             raise ChangeMapperError("app_entry requires secure_ast=True")
+        if bootstrap_entry is not None and not secure_ast:
+            raise ChangeMapperError("bootstrap_entry requires secure_ast=True")
         if baseline_app_path is not None and not use_scip:
             raise ChangeMapperError("baseline_app_path is valid only with use_scip=True")
         self.baseline_app_path = baseline_app_path.resolve() if baseline_app_path else None
@@ -437,6 +442,7 @@ class ChangeMapper:
                     app_path=self.app_path,
                     app_variable=self.app_variable,
                     app_entry=self.app_entry,
+                    bootstrap_entry=self.bootstrap_entry,
                 )
             else:
                 self._extractor = FastAPIExtractor(
@@ -472,6 +478,7 @@ class ChangeMapper:
                 app_path=self.baseline_app_path,
                 app_variable=self.app_variable,
                 app_entry=self.app_entry,
+                bootstrap_entry=self.bootstrap_entry,
             )
             self._baseline_registry = EndpointRegistry()
             self._baseline_registry.register_many(extractor.extract_endpoints())
