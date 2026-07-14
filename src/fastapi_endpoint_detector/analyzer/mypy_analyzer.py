@@ -17,7 +17,7 @@ import json
 import os
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path, PurePosixPath
@@ -62,6 +62,56 @@ class SymbolReference:
 
 
 @dataclass
+class _ProjectPathIndex:
+    """Shared canonical project inventory with fail-closed query resolution."""
+
+    source_root: str
+    project_files: frozenset[str]
+    _canonical_inventory: dict[str, set[str]] = field(init=False, repr=False)
+    _query_cache: dict[str, str | None] = field(default_factory=dict, init=False, repr=False)
+    _MAX_QUERY_CACHE: int = field(default=1024, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        canonical_inventory: dict[str, set[str]] = {}
+        for item in self.project_files:
+            canonical_inventory.setdefault(self.canonical(item), set()).add(item)
+        self._canonical_inventory = canonical_inventory
+
+    @staticmethod
+    def parts(path: str) -> tuple[str, ...]:
+        return PurePosixPath(path.replace("\\", "/")).parts
+
+    def canonical(self, path: str) -> str:
+        candidate = Path(path.replace("\\", os.sep))
+        if not candidate.is_absolute() and self.source_root:
+            candidate = Path(self.source_root) / candidate
+        return str(candidate.resolve())
+
+    def resolve(self, file_path: str) -> str | None:
+        """Resolve once against the shared inventory, preserving ambiguity."""
+        if file_path in self._query_cache:
+            return self._query_cache[file_path]
+        query_canonical = self.canonical(file_path)
+        exact = self._canonical_inventory.get(query_canonical, set())
+        if len(exact) == 1:
+            selected: str | None = query_canonical
+        else:
+            query_parts = self.parts(file_path)
+            suffixes = {
+                canonical
+                for canonical, originals in self._canonical_inventory.items()
+                if len(originals) == 1
+                and len(query_parts) <= len(self.parts(canonical))
+                and self.parts(canonical)[-len(query_parts) :] == query_parts
+            }
+            selected = next(iter(suffixes)) if len(suffixes) == 1 else None
+        if len(self._query_cache) >= self._MAX_QUERY_CACHE:
+            self._query_cache.pop(next(iter(self._query_cache)))
+        self._query_cache[file_path] = selected
+        return selected
+
+
+@dataclass
 class EndpointDependencies:
     """Dependencies for a single endpoint determined by mypy."""
 
@@ -75,12 +125,17 @@ class EndpointDependencies:
     call_stacks: dict[str, list[list[CallFrame]]] = field(default_factory=dict)
     """Mapping of file path -> list of call stacks showing all paths from handler to that file."""
     source_root: str = ""
-    project_files: set[str] = field(default_factory=set)
+    project_files: set[str] | frozenset[str] = field(default_factory=set)
+    _path_index: _ProjectPathIndex | None = field(default=None, repr=False, compare=False)
+    _canonical_key_indexes: dict[str, dict[str, frozenset[str]]] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
 
     def add_reference(self, file_path: str, line: int, symbol_name: str = "") -> None:
         """Add a line reference to dependencies."""
         if file_path not in self.referenced_files:
             self.referenced_files[file_path] = set()
+            self._canonical_key_indexes.pop("referenced_files", None)
         self.referenced_files[file_path].add(line)
 
     def add_symbol_reference(
@@ -89,51 +144,64 @@ class EndpointDependencies:
         """Add a symbol reference and its line range to dependencies."""
         ref = SymbolReference(file_path, symbol_name, start_line, end_line)
         self.referenced_symbols.append(ref)
+        self._canonical_key_indexes.pop("referenced_symbols", None)
 
         if file_path not in self.referenced_files:
             self.referenced_files[file_path] = set()
+            self._canonical_key_indexes.pop("referenced_files", None)
         self.referenced_files[file_path].update(range(start_line, end_line + 1))
 
-    @staticmethod
-    def _parts(path: str) -> tuple[str, ...]:
-        return PurePosixPath(path.replace("\\", "/")).parts
+    def add_call_stack(self, file_path: str, stack: list[CallFrame]) -> None:
+        """Add one stack and invalidate only its lazy category index."""
+        stacks = self.call_stacks.setdefault(file_path, [])
+        if stack not in stacks:
+            stacks.append(stack)
+            self._canonical_key_indexes.pop("call_stacks", None)
 
-    def _canonical(self, path: str) -> str:
-        candidate = Path(path.replace("\\", os.sep))
-        if not candidate.is_absolute() and self.source_root:
-            candidate = Path(self.source_root) / candidate
-        return str(candidate.resolve())
-
-    def _matching_paths(self, file_path: str, keys: set[str]) -> set[str]:
-        """Resolve one query to project files, failing closed when ambiguous."""
-        if not keys:
-            return set()
-        inventory = self.project_files or keys
-        canonical_inventory: dict[str, set[str]] = {}
-        for item in inventory:
-            canonical_inventory.setdefault(self._canonical(item), set()).add(item)
-
-        query_canonical = self._canonical(file_path)
-        exact = canonical_inventory.get(query_canonical, set())
-        if len(exact) == 1:
-            selected = query_canonical
-        else:
-            query_parts = self._parts(file_path)
-            suffixes = {
-                canonical
-                for canonical in canonical_inventory
-                if len(query_parts) <= len(self._parts(canonical))
-                and self._parts(canonical)[-len(query_parts) :] == query_parts
-            }
-            if len(suffixes) != 1:
+    def _matching_paths(
+        self,
+        file_path: str,
+        keys: Iterable[str],
+        category: str,
+    ) -> set[str]:
+        """Resolve one query with one lazy canonical index per evidence category."""
+        canonical_keys = self._canonical_key_indexes.get(category)
+        index = self._path_index
+        if canonical_keys is None:
+            materialized = list(keys)
+            if not materialized:
+                self._canonical_key_indexes[category] = {}
                 return set()
-            selected = next(iter(suffixes))
-        return {key for key in keys if self._canonical(key) == selected}
+            if index is None:
+                inventory = frozenset(self.project_files) or frozenset(
+                    {
+                        *self.referenced_files,
+                        *(ref.file_path for ref in self.referenced_symbols),
+                        *self.call_stacks,
+                    }
+                )
+                index = _ProjectPathIndex(self.source_root, inventory)
+                self._path_index = index
+            grouped: dict[str, set[str]] = {}
+            for key in materialized:
+                grouped.setdefault(index.canonical(key), set()).add(key)
+            canonical_keys = {
+                canonical: frozenset(originals) for canonical, originals in grouped.items()
+            }
+            self._canonical_key_indexes[category] = canonical_keys
+        elif index is None:
+            index = _ProjectPathIndex(self.source_root, frozenset(self.project_files))
+            self._path_index = index
+        selected = index.resolve(file_path)
+        return set(canonical_keys.get(selected, ())) if selected is not None else set()
 
     def references_symbol_at_line(self, file_path: str, line: int) -> SymbolReference | None:
         """Check if any unambiguously resolved symbol contains the given line."""
-        keys = {ref.file_path for ref in self.referenced_symbols}
-        matches = self._matching_paths(file_path, keys)
+        matches = self._matching_paths(
+            file_path,
+            (ref.file_path for ref in self.referenced_symbols),
+            "referenced_symbols",
+        )
         return next(
             (
                 ref
@@ -145,11 +213,11 @@ class EndpointDependencies:
 
     def references_file(self, file_path: str) -> bool:
         """Check if this endpoint unambiguously references a file."""
-        return bool(self._matching_paths(file_path, set(self.referenced_files)))
+        return bool(self._matching_paths(file_path, self.referenced_files, "referenced_files"))
 
     def references_lines(self, file_path: str, lines: set[int]) -> set[int]:
         """Get referenced changed lines for one unambiguously resolved file."""
-        matches = self._matching_paths(file_path, set(self.referenced_files))
+        matches = self._matching_paths(file_path, self.referenced_files, "referenced_files")
         return (
             set().union(*(self.referenced_files[path] & lines for path in matches))
             if matches
@@ -158,7 +226,7 @@ class EndpointDependencies:
 
     def get_call_stack(self, file_path: str) -> list[list[CallFrame]]:
         """Get all unique call stacks for one unambiguously resolved file."""
-        matches = self._matching_paths(file_path, set(self.call_stacks))
+        matches = self._matching_paths(file_path, self.call_stacks, "call_stacks")
         stacks: list[list[CallFrame]] = []
         for path in self.call_stacks:
             if path in matches:
@@ -189,6 +257,8 @@ class MypyAnalyzer:
         self._mypy_available = self._check_mypy_available()
         self._cache_file: Path | None = None
         self._line_progress_callback: LineProgressCallback | None = None
+        self._shared_path_index: _ProjectPathIndex | None = None
+        self._modules_by_canonical_path: dict[str, tuple[str, ...]] = {}
 
         # Mypy build results - stored to prevent GC
         self._build_result: Any = None
@@ -199,6 +269,8 @@ class MypyAnalyzer:
         self._global_value_cache: dict[str, SymbolReference | None] = {}
         self._python_dependency_cache: dict[tuple[str, int, str], set[str]] = {}
         self._python_ast_cache: dict[str, ast.Module | None] = {}
+        self._built_source_fingerprint: str | None = None
+        self._expected_source_fingerprint: str | None = None
 
     @property
     def cache_path(self) -> Path:
@@ -296,15 +368,38 @@ class MypyAnalyzer:
                     self._trees[module_name] = tree
 
             self._project_modules = set()
+            modules_by_path: dict[str, list[str]] = {}
             for module_name, module_path in self._module_to_path.items():
                 try:
-                    Path(module_path).resolve().relative_to(self.source_root)
-                except ValueError:
+                    canonical = str(Path(module_path).resolve())
+                    Path(canonical).relative_to(self.source_root)
+                except (OSError, ValueError):
                     continue
                 self._project_modules.add(module_name)
+                modules_by_path.setdefault(canonical, []).append(module_name)
+            self._modules_by_canonical_path = {
+                path: tuple(sorted(module_names)) for path, module_names in modules_by_path.items()
+            }
+            self._shared_path_index = None
+            self._built_source_fingerprint = self._expected_source_fingerprint
 
         finally:
             sys.path = original_path
+
+    def _reset_build_state(self) -> None:
+        """Discard one stale typed snapshot before an explicit bulk rebuild."""
+        self._build_result = None
+        self._trees.clear()
+        self._module_to_path.clear()
+        self._types_map.clear()
+        self._project_modules.clear()
+        self._global_value_cache.clear()
+        self._python_dependency_cache.clear()
+        self._python_ast_cache.clear()
+        self._modules_by_canonical_path.clear()
+        self._shared_path_index = None
+        self._built_source_fingerprint = None
+        self._endpoint_deps.clear()
 
     def _find_func_in_tree(
         self,
@@ -704,36 +799,58 @@ class MypyAnalyzer:
             separators=(",", ":"),
         )
 
+    def _project_path_index(self) -> _ProjectPathIndex:
+        """Build one lookup inventory, reusing mypy's module paths when available."""
+        if self._shared_path_index is None:
+            project_files: set[str] = set()
+            candidates: Iterable[Path]
+            if self._module_to_path:
+                candidates = (Path(path) for path in self._module_to_path.values())
+            else:
+                candidates = self.source_root.rglob("*.py")
+            for path in candidates:
+                try:
+                    canonical = path.resolve()
+                    canonical.relative_to(self.source_root)
+                except (OSError, ValueError):
+                    continue
+                if canonical.suffix == ".py":
+                    project_files.add(str(canonical))
+            self._shared_path_index = _ProjectPathIndex(
+                str(self.source_root), frozenset(project_files)
+            )
+        return self._shared_path_index
+
     def analyze_endpoint(self, endpoint: Endpoint) -> EndpointDependencies:
         """Analyze a single endpoint using mypy's typed AST."""
+        try:
+            self._ensure_mypy_built()
+        except MypyAnalyzerError:
+            pass
+        path_index = self._project_path_index()
         deps = EndpointDependencies(
             endpoint_id=endpoint.identifier,
             methods=[m.value for m in endpoint.methods],
             path=endpoint.path,
             source_root=str(self.source_root),
-            project_files={str(path.resolve()) for path in self.source_root.rglob("*.py")},
+            project_files=path_index.project_files,
+            _path_index=path_index,
         )
 
         handler = endpoint.handler
-        if not handler.file_path:
+        if not handler.file_path or not self._trees:
             return deps
 
-        try:
-            self._ensure_mypy_built()
-        except MypyAnalyzerError:
-            return deps
-
-        # Find the module containing the handler
+        # Find the module containing the handler through the build-time reverse index.
         handler_path = str(Path(handler.file_path).resolve())
-        handler_module: str | None = None
-
-        for mod_name, mod_path in self._module_to_path.items():
-            try:
-                if Path(mod_path).resolve() == Path(handler_path).resolve():
-                    handler_module = mod_name
-                    break
-            except Exception:
-                continue
+        module_candidates = self._modules_by_canonical_path.get(handler_path, ())
+        handler_module = (
+            handler.module
+            if handler.module in module_candidates
+            else module_candidates[0]
+            if module_candidates
+            else None
+        )
 
         if not handler_module or handler_module not in self._trees:
             # Module not found - retain only the attested handler span.
@@ -959,9 +1076,7 @@ class MypyAnalyzer:
                     caller_line_number=call_line,
                 )
                 new_stack = [*call_stack, new_frame]
-                stacks = deps.call_stacks.setdefault(target_path, [])
-                if new_stack not in stacks:
-                    stacks.append(new_stack)
+                deps.add_call_stack(target_path, new_stack)
 
                 if should_recurse and target_depth < self.max_depth:
                     self._trace_references(
@@ -994,9 +1109,7 @@ class MypyAnalyzer:
                             caller_line_number=call_line,
                         ),
                     ]
-                    stacks = deps.call_stacks.setdefault(target_path, [])
-                    if class_stack not in stacks:
-                        stacks.append(class_stack)
+                    deps.add_call_stack(target_path, class_stack)
                     initializer = self._find_func_in_tree(
                         target_tree,
                         "__init__",
@@ -1330,12 +1443,20 @@ class MypyAnalyzer:
             self._endpoint_deps.clear()
 
         analysis_fingerprint, _sources = self._cache_fingerprint()
+        if self._trees and (
+            self._built_source_fingerprint is None
+            or self._built_source_fingerprint != analysis_fingerprint
+        ):
+            self._reset_build_state()
 
         # Build mypy once for all endpoints
+        self._expected_source_fingerprint = analysis_fingerprint
         try:
             self._ensure_mypy_built()
         except MypyAnalyzerError:
             pass
+        finally:
+            self._expected_source_fingerprint = None
 
         # Analyze uncached endpoints
         for endpoint in endpoints:
@@ -1353,11 +1474,12 @@ class MypyAnalyzer:
     def _cache_fingerprint(self) -> tuple[str, dict[str, str]]:
         """Fingerprint all Python inputs and analysis semantics."""
         sources: dict[str, str] = {}
-        for path in sorted(self.source_root.rglob("*.py")):
+        for discovered in sorted(self.source_root.rglob("*.py")):
             try:
-                relative = path.resolve().relative_to(self.source_root).as_posix()
+                path = discovered.resolve()
+                relative = path.relative_to(self.source_root).as_posix()
                 sources[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
-            except OSError:
+            except (OSError, ValueError):
                 continue
         try:
             mypy_version = version("mypy")
@@ -1447,7 +1569,7 @@ class MypyAnalyzer:
         self._endpoint_deps.clear()
         try:
             data = json.loads(self.cache_path.read_text(encoding="utf-8"))
-            fingerprint, _sources = self._cache_fingerprint()
+            fingerprint, current_sources = self._cache_fingerprint()
             if not isinstance(data, dict):
                 return False
             if data.get("schema_version") != self.CACHE_SCHEMA_VERSION:
@@ -1457,7 +1579,12 @@ class MypyAnalyzer:
             endpoints_data = data.get("endpoints")
             if not isinstance(endpoints_data, dict):
                 return False
-            project_files = {str(path.resolve()) for path in self.source_root.rglob("*.py")}
+            if self._shared_path_index is None:
+                project_files = frozenset(
+                    str((self.source_root / relative).resolve()) for relative in current_sources
+                )
+                self._shared_path_index = _ProjectPathIndex(str(self.source_root), project_files)
+            path_index = self._shared_path_index
 
             for analysis_key, deps_data in endpoints_data.items():
                 if not isinstance(analysis_key, str) or not isinstance(deps_data, dict):
@@ -1506,7 +1633,8 @@ class MypyAnalyzer:
                     referenced_symbols=symbol_refs,
                     call_stacks=call_stacks,
                     source_root=str(self.source_root),
-                    project_files=project_files,
+                    project_files=path_index.project_files,
+                    _path_index=path_index,
                 )
             return True
         except (
