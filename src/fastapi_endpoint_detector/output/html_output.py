@@ -6,7 +6,7 @@ import html
 import re
 from pathlib import Path
 
-from fastapi_endpoint_detector.models.endpoint import Endpoint
+from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointInventory
 from fastapi_endpoint_detector.models.report import AnalysisReport, ConfidenceLevel
 from fastapi_endpoint_detector.output.formatters import BaseFormatter, register_formatter
 
@@ -779,6 +779,25 @@ class HtmlFormatter(BaseFormatter):
         # Wrap in template
         content = "\n".join(content_lines)
         return self._get_html_template().replace("{CONTENT}", content)
+
+    def format_inventory(self, inventory: EndpointInventory) -> str:
+        """Format endpoints with visible whole-inventory strength."""
+        rendered = self.format_endpoints(inventory.endpoints)
+        details = [
+            '<div class="warning-box">',
+            "<h3>Inventory strength</h3>",
+            f"<p>{html.escape(inventory.status.value)}</p>",
+        ]
+        if inventory.limitations:
+            details.append("<ul>")
+            for item in inventory.limitations:
+                details.append(
+                    f"<li>{html.escape(str(item.source_path))}:{item.source_line}: "
+                    f"{html.escape(item.reason)}</li>"
+                )
+            details.append("</ul>")
+        details.append("</div>")
+        return rendered.replace("</body>", "\n".join(details) + "\n</body>")
 
     def format_endpoints(self, endpoints: list[Endpoint]) -> str:
         """Format a list of endpoints as an HTML table."""

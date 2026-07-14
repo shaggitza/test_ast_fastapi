@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from fastapi_endpoint_detector.models.endpoint import Endpoint
+    from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointInventory
     from fastapi_endpoint_detector.models.report import AnalysisReport
 
 
@@ -29,6 +29,10 @@ class BaseFormatter(ABC):
             Formatted string representation.
         """
         pass
+
+    def format_inventory(self, inventory: "EndpointInventory") -> str:
+        """Format a strength-aware inventory; legacy formatters retain endpoint output."""
+        return self.format_endpoints(inventory.endpoints)
 
     @abstractmethod
     def format_endpoints(self, endpoints: list["Endpoint"]) -> str:

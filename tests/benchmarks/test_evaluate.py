@@ -457,6 +457,155 @@ def test_route_census_partitions_fn_without_changing_metrics(
     assert with_census["normalized"]["confidence"]["candidate_ceiling"]["tp"] == 1
 
 
+def test_route_census_v2_uses_occurrence_and_inventory_strength(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    truth = tmp_path / "truth.jsonl"
+    predictions = tmp_path / "predictions.jsonl"
+    census = tmp_path / "census.jsonl"
+    truth.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "repository": "owner/repo",
+                    "pr": pr,
+                    "status": "adjudicated",
+                    "affected_entrypoints": [{"id": f"HTTP GET /{pr}", "kind": "http"}],
+                }
+            )
+            + "\n"
+            for pr in range(1, 5)
+        )
+    )
+    predictions.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "repository": "owner/repo",
+                    "pr": pr,
+                    "affected_entrypoints": [],
+                }
+            )
+            + "\n"
+            for pr in range(1, 5)
+        )
+    )
+
+    limitation = {"source": "main.py", "line": 1, "reason": "unknown helper"}
+
+    def occurrence(pr: int, status: str) -> dict:
+        result = {
+            "file": "main.py",
+            "line": pr,
+            "end_line": pr,
+            "handler": f"route_{pr}",
+            "module": "main",
+            "root": ".",
+            "discovery_status": status,
+            "discovery_conditions": [],
+        }
+        if status == "conditional":
+            result["discovery_conditions"] = [limitation]
+        return result
+
+    def side(status: str, entrypoints: list[dict]) -> dict:
+        return {
+            "status": {"established": "completed", "conditional": "partial"}[status],
+            "inventory_status": status,
+            "inventory_limitations": [] if status == "established" else [limitation],
+            "entrypoints": entrypoints,
+            "unresolved": [],
+        }
+
+    records = []
+    for pr in range(1, 5):
+        route = {
+            "id": f"HTTP GET /{pr}",
+            "kind": "http",
+            "occurrences": [occurrence(pr, "conditional")],
+        }
+        target = side("conditional", [route] if pr in {1, 2} else [])
+        baseline = side("conditional", [])
+        if pr == 2:
+            route["occurrences"].append(occurrence(pr, "established"))
+            target = side("established", [route])
+            baseline = side("established", [])
+        elif pr == 4:
+            target = side("established", [])
+            baseline = side("established", [])
+        records.append(
+            {
+                "schema_version": 2,
+                "repository": "owner/repo",
+                "pr": pr,
+                "status": (
+                    "completed"
+                    if target["status"] == baseline["status"] == "completed"
+                    else "partial"
+                ),
+                "complete": target["status"] == baseline["status"] == "completed",
+                "target": target,
+                "baseline": baseline,
+            }
+        )
+    census.write_text("".join(json.dumps(record) + "\n" for record in records))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "evaluate.py",
+            "--ground-truth",
+            str(truth),
+            "--predictions",
+            str(predictions),
+            "--scope",
+            "fastapi",
+            "--route-census",
+            str(census),
+        ],
+    )
+
+    evaluate.main()
+
+    result = json.loads(capsys.readouterr().out)
+    expected = {
+        "observation_missing": 0,
+        "propagation_missing": 1,
+        "discovery_missing": 1,
+        "inventory_unavailable": 2,
+    }
+    assert result["fn_stages"]["exact"]["totals"] == expected
+    assert result["fn_stages"]["normalized"]["totals"] == expected
+    assert result["micro"] == result["normalized"]["micro"]
+    assert result["micro"]["fn"] == sum(expected.values())
+
+
+def test_route_census_v2_rejects_malformed_operational_unavailable(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "census.jsonl"
+    unavailable = {
+        "status": "unresolved",
+        "inventory_status": "unavailable",
+        "inventory_limitations": [],
+        "entrypoints": [],
+        "unresolved": [""],
+    }
+    record = {
+        "schema_version": 2,
+        "repository": "owner/repo",
+        "pr": 1,
+        "status": "unresolved",
+        "complete": False,
+        "target": unavailable,
+        "baseline": {**unavailable, "unresolved": ["tool failed"]},
+    }
+    path.write_text(json.dumps(record) + "\n")
+
+    with pytest.raises(ValueError, match="malformed target"):
+        evaluate.read_route_census(path, {("owner/repo", 1)}, {("owner/repo", 1)}, "fastapi")
+
+
 def test_route_census_rejects_duplicate_and_missing_selected_keys(tmp_path: Path) -> None:
     path = tmp_path / "census.jsonl"
     record = {

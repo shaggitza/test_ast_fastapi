@@ -33,12 +33,14 @@ def test_normalize_inventory_expands_methods_and_preserves_occurrences(tmp_path:
     second.write_text("def items(): ...\n")
     report = {"endpoints": [endpoint(first), endpoint(second), endpoint(first)]}
 
-    items, unresolved = census.normalize_inventory(report, tmp_path, ".")
+    items, unresolved, status, limitations = census.normalize_inventory(report, tmp_path, ".")
 
     assert [item["id"] for item in items] == ["HTTP GET /items", "HTTP POST /items"]
     assert len(items[0]["occurrences"]) == 2
     assert [item["file"] for item in items[0]["occurrences"]] == ["a.py", "b.py"]
     assert unresolved == []
+    assert status == "established"
+    assert limitations == []
 
 
 def test_normalize_inventory_keeps_websocket_and_rejects_escape(tmp_path: Path) -> None:
@@ -53,7 +55,7 @@ def test_normalize_inventory_keeps_websocket_and_rejects_escape(tmp_path: Path) 
         ]
     }
 
-    items, unresolved = census.normalize_inventory(report, tmp_path, "src")
+    items, unresolved, _status, _limitations = census.normalize_inventory(report, tmp_path, "src")
 
     assert [item["id"] for item in items] == ["WEBSOCKET /items"]
     assert items[0]["kind"] == "event"
@@ -77,7 +79,9 @@ def test_normalize_inventory_preserves_conditional_discovery(tmp_path: Path) -> 
         }
     )
 
-    items, unresolved = census.normalize_inventory({"endpoints": [route]}, tmp_path, ".")
+    items, unresolved, status, limitations = census.normalize_inventory(
+        {"endpoints": [route]}, tmp_path, "."
+    )
 
     occurrence = items[0]["occurrences"][0]
     assert occurrence["discovery_status"] == "conditional"
@@ -85,6 +89,68 @@ def test_normalize_inventory_preserves_conditional_discovery(tmp_path: Path) -> 
         {"source": "app.py", "line": 1, "reason": "unknown helper may mutate app"}
     ]
     assert unresolved == []
+    assert status == "conditional"
+    assert limitations == [
+        {"source": "app.py", "line": 1, "reason": "unknown helper may mutate app"}
+    ]
+
+
+def test_normalize_inventory_preserves_conditional_whole_inventory(tmp_path: Path) -> None:
+    source = tmp_path / "main.py"
+    source.write_text("def route(): ...\n")
+    report = {
+        "schema_version": 2,
+        "inventory_status": "conditional",
+        "inventory_limitations": [
+            {
+                "source_path": str(source),
+                "source_line": 1,
+                "reason": "unknown plugin may register routes",
+            }
+        ],
+        "endpoints": [],
+    }
+
+    items, unresolved, status, limitations = census.normalize_inventory(report, tmp_path, ".")
+
+    assert items == []
+    assert unresolved == []
+    assert status == "conditional"
+    assert limitations == [
+        {"source": "main.py", "line": 1, "reason": "unknown plugin may register routes"}
+    ]
+
+
+def test_normalize_inventory_rejects_established_endpoint_in_unavailable_inventory(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "main.py"
+    source.write_text("def route(): ...\n")
+    report = {
+        "inventory_status": "unavailable",
+        "inventory_limitations": [
+            {"source_path": str(source), "source_line": 1, "reason": "root unresolved"}
+        ],
+        "endpoints": [endpoint(source, methods=["GET"])],
+    }
+
+    with pytest.raises(census.RunnerError, match="established endpoints"):
+        census.normalize_inventory(report, tmp_path, ".")
+
+
+def test_normalize_inventory_rejects_inventory_limitation_escape(tmp_path: Path) -> None:
+    outside = tmp_path.parent / "outside-inventory.py"
+    outside.write_text("pass\n")
+    report = {
+        "inventory_status": "conditional",
+        "inventory_limitations": [
+            {"source_path": str(outside), "source_line": 1, "reason": "unknown plugin"}
+        ],
+        "endpoints": [],
+    }
+
+    with pytest.raises(census.RunnerError, match="invalid"):
+        census.normalize_inventory(report, tmp_path, ".")
 
 
 def test_normalize_inventory_rejects_symlink_escape(tmp_path: Path) -> None:
@@ -93,7 +159,7 @@ def test_normalize_inventory_rejects_symlink_escape(tmp_path: Path) -> None:
     link = tmp_path / "linked.py"
     link.symlink_to(outside)
 
-    items, unresolved = census.normalize_inventory(
+    items, unresolved, _status, _limitations = census.normalize_inventory(
         {"endpoints": [endpoint(link, methods=["GET"])]}, tmp_path, "."
     )
 
@@ -105,7 +171,7 @@ def test_normalize_inventory_rejects_unsupported_method(tmp_path: Path) -> None:
     source = tmp_path / "app.py"
     source.write_text("def route(): ...\n")
 
-    items, unresolved = census.normalize_inventory(
+    items, unresolved, _status, _limitations = census.normalize_inventory(
         {"endpoints": [endpoint(source, methods=["BREW"])]}, tmp_path, "."
     )
 
@@ -129,7 +195,7 @@ def test_invoke_secure_list_uses_argv_and_output_file(tmp_path: Path, monkeypatc
 
     monkeypatch.setattr(census, "command", fake_command)
 
-    items, unresolved, _elapsed = census.invoke_secure_list(
+    items, unresolved, status, limitations, _elapsed = census.invoke_secure_list(
         tmp_path, app_root, tmp_path, "app", output, 10, "main:create_app"
     )
 
@@ -139,6 +205,8 @@ def test_invoke_secure_list_uses_argv_and_output_file(tmp_path: Path, monkeypatc
     assert seen[:5] == ["uv", "run", "--frozen", "fastapi-endpoint-detector", "list"]
     assert items[0]["id"] == "HTTP GET /items"
     assert unresolved == []
+    assert status == "established"
+    assert limitations == []
 
 
 def test_real_secure_list_never_imports_analyzed_application(tmp_path: Path) -> None:
@@ -153,12 +221,14 @@ def test_real_secure_list_never_imports_analyzed_application(tmp_path: Path) -> 
     )
     output = tmp_path / "routes.json"
 
-    items, unresolved, _elapsed = census.invoke_secure_list(
+    items, unresolved, status, limitations, _elapsed = census.invoke_secure_list(
         census.PROJECT_ROOT, app_root, tmp_path, "app", output, 60
     )
 
     assert [item["id"] for item in items] == ["HTTP GET /safe"]
     assert unresolved == []
+    assert status == "established"
+    assert limitations == []
 
 
 def test_invoke_secure_list_timeout_is_explicit(tmp_path: Path, monkeypatch) -> None:
@@ -249,7 +319,13 @@ def test_extract_side_always_removes_worktree(tmp_path: Path, monkeypatch) -> No
     monkeypatch.setattr(census, "safe_app_root", lambda worktree, _root: worktree)
 
     def invoke(*_args, **_kwargs):
-        return ([{"id": "HTTP GET /", "kind": "http"}], [], 0.1)
+        return (
+            [{"id": "HTTP GET /", "kind": "http"}],
+            [],
+            "established",
+            [],
+            0.1,
+        )
 
     monkeypatch.setattr(census, "invoke_secure_list", invoke)
     config = census.CensusConfig(

@@ -1,9 +1,11 @@
 # Route-census FN diagnostics
 
-Schema v1 stores one record per corpus PR with separate target and baseline
-secure-AST inventories. Every public route ID retains its physical handler
-occurrences and configured root provenance. The manifest records candidate,
-corpus, lock, root, command, status, timing, and output hashes.
+Schema v1 stores the original census artifact. New census runs use schema v2,
+with separate target and baseline secure-AST inventories plus whole-inventory
+strength (`established`, `conditional`, or `unavailable`). Every public route ID
+retains physical handler occurrences, occurrence-level discovery strength, and
+configured root provenance. The manifest records candidate, corpus, lock, root,
+command, status, timing, and output hashes.
 
 `evaluate.py --route-census` partitions primary FN in this order:
 
@@ -11,10 +13,10 @@ corpus, lock, root, command, status, timing, and output hashes.
    not prove that effect analysis is the only defect.
 2. `propagation_missing`: no LOW match, but the route exists in target or
    baseline inventory.
-3. `discovery_missing`: absent from both sides of a complete configured static
-   inventory. Static absence is not proof of runtime absence.
-4. `inventory_unavailable`: missing, partial, or unresolved inventory prevents
-   classification.
+3. `discovery_missing`: absent from both sides only when both configured static
+   inventories are established. Static absence is not proof of runtime absence.
+4. `inventory_unavailable`: conditional-only presence, or missing, partial, or
+   unresolved inventory, prevents a stronger classification.
 
 Invariant, globally and per PR/repository:
 

@@ -19,8 +19,10 @@ from fastapi_endpoint_detector.models.endpoint import (
     Endpoint,
     EndpointDiscoveryCondition,
     EndpointDiscoveryStatus,
+    EndpointInventory,
     EndpointMethod,
     HandlerInfo,
+    InventoryStatus,
 )
 from fastapi_endpoint_detector.models.report import (
     AffectedEndpoint,
@@ -91,6 +93,24 @@ def test_merges_confidence_files_chains_and_stacks_before_threshold(tmp_path: Pa
     assert result.changed_files == ["a.py", "b.py"]
     assert len(result.call_stacks) == 2
     assert _CONFIDENCE_SCORE[result.confidence] >= 1.0
+
+
+def test_inventory_strength_requires_source_backed_limitations(tmp_path: Path) -> None:
+    condition = EndpointDiscoveryCondition(
+        source_path=tmp_path / "main.py", source_line=1, reason="unknown plugin"
+    )
+
+    assert EndpointInventory().status == InventoryStatus.ESTABLISHED
+    with pytest.raises(ValueError, match="established inventory forbids limitations"):
+        EndpointInventory(status=InventoryStatus.CONDITIONAL)
+    with pytest.raises(ValueError, match="established inventory forbids limitations"):
+        EndpointInventory(limitations=(condition,))
+    with pytest.raises(ValueError, match="only conditional endpoints"):
+        EndpointInventory(
+            endpoints=[_endpoint(tmp_path / "main.py")],
+            status=InventoryStatus.UNAVAILABLE,
+            limitations=(condition,),
+        )
 
 
 def test_endpoint_discovery_provenance_requires_consistent_status(tmp_path: Path) -> None:

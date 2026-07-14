@@ -43,7 +43,7 @@ from benchmarks.real_world.run_current import (
     validate_sha,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "TRACE"}
 
 
@@ -80,10 +80,41 @@ def _relative_source(worktree: Path, value: object) -> tuple[str | None, str | N
 
 def normalize_inventory(  # noqa: PLR0912, PLR0915
     report: object, worktree: Path, configured_root: str
-) -> tuple[list[dict[str, Any]], list[str]]:
-    """Normalize secure list output while retaining physical occurrences."""
+) -> tuple[list[dict[str, Any]], list[str], str, list[dict[str, Any]]]:
+    """Normalize secure list output while retaining occurrence and inventory strength."""
     if not isinstance(report, dict) or not isinstance(report.get("endpoints"), list):
         raise RunnerError("secure list JSON must contain an endpoints list")
+    has_status = "inventory_status" in report
+    has_limitations = "inventory_limitations" in report
+    if has_status != has_limitations:
+        raise RunnerError("secure list inventory metadata must be complete")
+    inventory_status = report.get("inventory_status", "established")
+    raw_limitations = report.get("inventory_limitations", [])
+    if inventory_status not in {"established", "conditional", "unavailable"}:
+        raise RunnerError("secure list has invalid inventory status")
+    if (
+        not isinstance(raw_limitations, list)
+        or (inventory_status == "established" and raw_limitations)
+        or (inventory_status != "established" and not raw_limitations)
+    ):
+        raise RunnerError("secure list has invalid inventory limitations")
+    normalized_limitations: list[dict[str, Any]] = []
+    for index, limitation in enumerate(raw_limitations):
+        if not isinstance(limitation, dict):
+            raise RunnerError(f"inventory_limitation[{index}] must be an object")
+        source, source_error = _relative_source(worktree, limitation.get("source_path"))
+        source_line = limitation.get("source_line")
+        reason = limitation.get("reason")
+        if (
+            source_error is not None
+            or type(source_line) is not int
+            or source_line < 1
+            or not isinstance(reason, str)
+            or not reason.strip()
+        ):
+            raise RunnerError(f"inventory_limitation[{index}] is invalid")
+        normalized_limitations.append({"source": source, "line": source_line, "reason": reason})
+    normalized_limitations.sort(key=lambda item: (item["source"], item["line"], item["reason"]))
     grouped: dict[str, dict[str, Any]] = {}
     unresolved: list[str] = []
     for index, raw in enumerate(report["endpoints"]):
@@ -204,7 +235,31 @@ def normalize_inventory(  # noqa: PLR0912, PLR0915
                 occurrence["root"],
             )
         )
-    return [grouped[identifier] for identifier in sorted(grouped)], sorted(set(unresolved))
+    if inventory_status == "unavailable" and any(
+        occurrence["discovery_status"] == "established"
+        for item in grouped.values()
+        for occurrence in item["occurrences"]
+    ):
+        raise RunnerError("unavailable inventory cannot contain established endpoints")
+    if not has_status:
+        inferred_limitations = {
+            (condition["source"], condition["line"], condition["reason"]): condition
+            for item in grouped.values()
+            for occurrence in item["occurrences"]
+            if occurrence["discovery_status"] == "conditional"
+            for condition in occurrence["discovery_conditions"]
+        }
+        if inferred_limitations:
+            inventory_status = "conditional"
+            normalized_limitations = [
+                inferred_limitations[key] for key in sorted(inferred_limitations)
+            ]
+    return (
+        [grouped[identifier] for identifier in sorted(grouped)],
+        sorted(set(unresolved)),
+        inventory_status,
+        normalized_limitations,
+    )
 
 
 def invoke_secure_list(
@@ -215,7 +270,7 @@ def invoke_secure_list(
     output_path: Path,
     timeout: float,
     app_entry: str | None = None,
-) -> tuple[list[dict[str, Any]], list[str], float]:
+) -> tuple[list[dict[str, Any]], list[str], str, list[dict[str, Any]], float]:
     """Invoke only the execution-free secure list command."""
     args = [
         "uv",
@@ -246,12 +301,20 @@ def invoke_secure_list(
         report = json.loads(output_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise RunnerError(f"secure route census output is invalid: {error}") from error
-    inventory, unresolved = normalize_inventory(report, worktree, configured_root)
-    return inventory, unresolved, elapsed
+    inventory, unresolved, inventory_status, limitations = normalize_inventory(
+        report, worktree, configured_root
+    )
+    return inventory, unresolved, inventory_status, limitations, elapsed
 
 
 def _unresolved_side(reason: str) -> dict[str, Any]:
-    return {"status": "unresolved", "entrypoints": [], "unresolved": [reason]}
+    return {
+        "status": "unresolved",
+        "inventory_status": "unavailable",
+        "inventory_limitations": [],
+        "entrypoints": [],
+        "unresolved": [reason],
+    }
 
 
 def _extract_side(
@@ -270,7 +333,7 @@ def _extract_side(
         add_detached_worktree(repository_cache, worktree, sha)
         app_root = safe_app_root(worktree, configured_root)
         output_path = worktree.parent / f"{label}-routes.json"
-        inventory, unresolved, elapsed = invoke_secure_list(
+        inventory, unresolved, inventory_status, limitations, elapsed = invoke_secure_list(
             config.candidate_root,
             app_root,
             worktree,
@@ -279,9 +342,18 @@ def _extract_side(
             config.timeout,
             app_entry,
         )
+        side_status = {
+            "established": "completed",
+            "conditional": "partial",
+            "unavailable": "unresolved",
+        }[inventory_status]
+        if unresolved and side_status == "completed":
+            side_status = "partial"
         return (
             {
-                "status": "partial" if unresolved else "completed",
+                "status": side_status,
+                "inventory_status": inventory_status,
+                "inventory_limitations": limitations,
                 "entrypoints": inventory,
                 "unresolved": unresolved,
             },

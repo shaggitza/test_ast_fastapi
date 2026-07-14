@@ -15,8 +15,10 @@ from fastapi_endpoint_detector.models.endpoint import (
     Endpoint,
     EndpointDiscoveryCondition,
     EndpointDiscoveryStatus,
+    EndpointInventory,
     EndpointMethod,
     HandlerInfo,
+    InventoryStatus,
 )
 
 
@@ -145,10 +147,25 @@ class SecureASTExtractor:
             raise SecureASTExtractorError("app_entry must use an exact project-local MODULE:SYMBOL")
         return parts[0], parts[1]
 
-    def extract_endpoints(self) -> list[Endpoint]:  # noqa: PLR0912, PLR0915
+    def extract_endpoints(self) -> list[Endpoint]:
+        """Compatibility wrapper returning only discovered endpoints."""
+        return self.extract_inventory().endpoints
+
+    def extract_inventory(self) -> EndpointInventory:  # noqa: PLR0912, PLR0915
+        """Return endpoints together with whole-inventory completeness evidence."""
         modules, entry_module = self._load_modules()
         if not modules:
-            return []
+            if self.app_path.is_file():
+                limitation = EndpointDiscoveryCondition(
+                    source_path=self.app_path,
+                    source_line=1,
+                    reason="configured source did not contain a parseable project-local module",
+                )
+                return EndpointInventory(
+                    status=InventoryStatus.UNAVAILABLE,
+                    limitations=(limitation,),
+                )
+            raise SecureASTExtractorError("no parseable project-local Python modules were found")
 
         aliases = self._module_aliases(modules)
         for module in modules.values():
@@ -271,6 +288,23 @@ class SecureASTExtractor:
                 selected = self._object_at(module, self.app_variable, None)
                 roots = [selected.key] if selected is not None and selected.kind == "router" else []
 
+        if not roots:
+            source_module = (
+                modules[entry_module] if entry_module is not None else modules[sorted(modules)[0]]
+            )
+            limitation = EndpointDiscoveryCondition(
+                source_path=source_module.path,
+                source_line=1,
+                reason=(
+                    f"configured app variable {self.app_variable!r} did not resolve "
+                    "to an app or router"
+                ),
+            )
+            return EndpointInventory(
+                status=InventoryStatus.UNAVAILABLE,
+                limitations=(limitation,),
+            )
+
         routes_by_owner: dict[ObjectKey, list[_Route]] = {}
         edges_by_parent: dict[ObjectKey, list[_Edge]] = {}
         for route in routes:
@@ -279,6 +313,7 @@ class SecureASTExtractor:
             edges_by_parent.setdefault(edge.parent, []).append(edge)
 
         found: list[Endpoint] = []
+        inventory_limitations: tuple[EndpointDiscoveryCondition, ...] = ()
 
         def visit(
             owner: ObjectKey,
@@ -287,12 +322,16 @@ class SecureASTExtractor:
             stack: frozenset[ObjectKey],
             inherited_conditions: tuple[EndpointDiscoveryCondition, ...],
         ) -> None:
+            nonlocal inventory_limitations
             if owner in stack:
                 return
             item = objects[owner]
             prefix = _join_paths(inherited, item.prefix)
             object_conditions = _merge_discovery_conditions(
                 inherited_conditions, item.discovery_conditions
+            )
+            inventory_limitations = _merge_discovery_conditions(
+                inventory_limitations, object_conditions
             )
             for route in routes_by_owner.get(owner, []):
                 if cutoff is not None and route.line > cutoff:
@@ -325,13 +364,22 @@ class SecureASTExtractor:
 
         for root in sorted(set(roots)):
             visit(root, "", None, frozenset(), ())
-        return sorted(
+        endpoints = sorted(
             found,
             key=lambda endpoint: (
                 endpoint.identifier,
                 str(endpoint.handler.file_path),
                 endpoint.handler.line_number,
             ),
+        )
+        return EndpointInventory(
+            endpoints=endpoints,
+            status=(
+                InventoryStatus.CONDITIONAL
+                if inventory_limitations
+                else InventoryStatus.ESTABLISHED
+            ),
+            limitations=inventory_limitations,
         )
 
     def _source_root(self) -> Path:

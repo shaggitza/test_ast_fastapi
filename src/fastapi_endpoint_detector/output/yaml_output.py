@@ -6,7 +6,7 @@ from typing import Any
 
 import yaml
 
-from fastapi_endpoint_detector.models.endpoint import Endpoint
+from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointInventory
 from fastapi_endpoint_detector.models.report import AffectedEndpoint, AnalysisReport
 from fastapi_endpoint_detector.output.formatters import BaseFormatter, register_formatter
 
@@ -93,6 +93,19 @@ class YamlFormatter(BaseFormatter):
             "warnings": report.warnings,
         }
 
+        return yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+    def format_inventory(self, inventory: EndpointInventory) -> str:
+        """Format endpoints with whole-inventory strength metadata."""
+        data = {
+            "schema_version": 2,
+            "inventory_status": inventory.status.value,
+            "inventory_limitations": [
+                limitation.model_dump(mode="json") for limitation in inventory.limitations
+            ],
+            "total": len(inventory.endpoints),
+            "endpoints": [self._endpoint_to_dict(ep) for ep in inventory.endpoints],
+        }
         return yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
     def format_endpoints(self, endpoints: list[Endpoint]) -> str:

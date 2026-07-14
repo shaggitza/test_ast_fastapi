@@ -9,7 +9,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from fastapi_endpoint_detector.models.endpoint import Endpoint
+from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointInventory
 from fastapi_endpoint_detector.models.report import AnalysisReport, ConfidenceLevel
 from fastapi_endpoint_detector.output.formatters import BaseFormatter, register_formatter
 
@@ -199,6 +199,15 @@ class TextFormatter(BaseFormatter):
             console.print()
 
         return output.getvalue()
+
+    def format_inventory(self, inventory: EndpointInventory) -> str:
+        """Format endpoints with visible whole-inventory strength."""
+        details = [f"Inventory status: {inventory.status.value}"]
+        details.extend(
+            f"Limitation: {item.source_path}:{item.source_line}: {item.reason}"
+            for item in inventory.limitations
+        )
+        return "\n".join(details) + "\n" + self.format_endpoints(inventory.endpoints)
 
     def format_endpoints(self, endpoints: list[Endpoint]) -> str:
         """Format a list of endpoints as a table."""
