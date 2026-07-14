@@ -297,7 +297,7 @@ class MypyAnalyzer:
     and extract precise file/line information for all references.
     """
 
-    CACHE_SCHEMA_VERSION = 7
+    CACHE_SCHEMA_VERSION = 8
 
     def __init__(self, app_path: Path, *, max_depth: int = 10) -> None:
         """Initialize the mypy analyzer."""
@@ -343,6 +343,11 @@ class MypyAnalyzer:
         if self._cache_file:
             return self._cache_file
         return self.source_root / ".endpoint_mypy_cache.json"
+
+    @property
+    def resolver_version(self) -> str:
+        """Version of the typed resolver used for call-site provenance."""
+        return self._resolver_version
 
     def set_cache_path(self, path: Path) -> None:
         """Set a custom cache file path."""
@@ -1453,9 +1458,13 @@ class MypyAnalyzer:
         current_file: str,
         import_map: dict[str, str],
     ) -> ResolvedCallSite | None:
-        """Resolve one physical mypy call node for the analyzer-wide occurrence cache."""
+        """Resolve one physical project-source call for the analyzer-wide cache."""
         from mypy.nodes import MemberExpr, NameExpr, TypeInfo, Var  # noqa: PLC0415
 
+        try:
+            Path(current_file).resolve().relative_to(self.source_root.resolve())
+        except ValueError:
+            return None
         identity = self._call_source_identity(current_file, call.callee)
         if identity is None:
             return None

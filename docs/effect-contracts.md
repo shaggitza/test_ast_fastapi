@@ -2,7 +2,7 @@
 
 Effect contracts describe the semantics of exact Python callables that read or mutate external state. They are data-only: the detector never imports a contract module or executes a plugin.
 
-The current schema release establishes validation, provenance, canonical hashes, and the backend-neutral resolved-call boundary. Contract-driven analysis is intentionally disabled until exact typed call matching is connected; configuring `analysis.effect_contracts` therefore fails explicitly instead of silently producing incomplete evidence.
+The current release provides validation, provenance, canonical hashes, source-backed typed call capture, and a separate dry-run audit. Contract matches do not create effect evidence, add endpoint candidates, or change confidence. Ordinary diff analysis still fails explicitly when `analysis.effect_contracts` is configured until the later evidence-integration phase.
 
 Validate a document with:
 
@@ -12,13 +12,33 @@ fastapi-endpoint-detector validate-effect-contracts \
   --format json
 ```
 
-The result contains:
+The validation result contains:
 
 - a raw source-byte SHA-256;
 - a canonical semantic configuration SHA-256;
 - a canonical preset SHA-256;
 - one canonical hash per contract;
-- `matching_status: not_evaluated` until typed call matching is enabled.
+- `matching_status: not_evaluated`, because validation does not analyze an application.
+
+Dry-run exact matching is available separately:
+
+```bash
+fastapi-endpoint-detector audit-effect-contracts \
+  --app ./src \
+  --contracts .effect-contracts.yaml \
+  --format json
+```
+
+This command always uses execution-free route discovery and mypy call resolution. It audits only physical source calls reachable from the discovered endpoint inventory, not whole-project contract usage. Calls shared by multiple endpoints are counted once and retain handler-aware endpoint links. Because unmatched-contract coverage requires exhaustive route roots, conditional or unavailable endpoint inventories fail closed instead of producing a misleading `complete` report.
+
+The exhaustive call classifications are:
+
+- `matched`: an exact canonical symbol and invocation equal one contract key;
+- `unmatched`: an exact call has no equal contract key;
+- `ambiguous`: mypy reports multiple finite receiver definitions;
+- `unresolved`: no exact symbol identity is available.
+
+Source spelling, receiver candidates, suffixes, bare method names, package metadata, and reason codes are never fallback match keys. Package applicability remains `not_evaluated` in schema v1.
 
 Equivalent YAML/JSON/TOML key and contract ordering produces the same semantic hashes. Formatting changes can change only the raw hash.
 
@@ -86,7 +106,7 @@ analysis:
   effect_contracts: .effect-contracts.yaml
 ```
 
-The path is resolved relative to that YAML file and validated immediately. Analysis currently rejects this setting with an explicit validation-only error. A later phase will match only exact typed symbols and append contract evidence without adding candidates or changing confidence.
+The path is resolved relative to that YAML file and validated immediately. `audit-effect-contracts` uses this configured path when `--contracts` is omitted and rejects dual sources. Ordinary `analyze` still rejects the setting because dry-run matches are not effect evidence. A later phase may append configured evidence only to already reachable endpoints without adding candidates or changing confidence.
 
 ## Safety boundaries
 
@@ -96,4 +116,7 @@ The path is resolved relative to that YAML file and validated immediately. Analy
 - Resource identity remains separate from effect certainty.
 - Contracts declare semantics, not endpoint blast radius.
 - Ambiguous receivers and dynamic imports remain unresolved.
-- Contract evidence will not promote or filter candidates.
+- Dry-run matches are reported separately and never promote or filter candidates.
+- Project source paths are relative and deterministic across checkout relocation; contract files outside the app root use a content-addressed `content://sha256/...` source label.
+- Conflicting resolver records for one physical span fail closed.
+- External library internals are excluded; external calls remain auditable at their project source occurrence.
