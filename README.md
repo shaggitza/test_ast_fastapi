@@ -18,6 +18,9 @@ This tool is designed for CI/CD pipelines to enable:
 ## Features
 
 - 🔍 **Type-Aware Analysis**: Uses mypy for precise dependency tracking
+- 🧭 **Bounded Receiver Analysis**: Adds LOW-only, source-proven constructor, alias,
+  finite-factory, constructor-field, and exact-MRO propagation; dynamic or
+  overflowing receiver sets fail closed
 - 🔗 **Dependency Graph**: Build a complete dependency graph from endpoints to all related code
 - 📊 **Diff Analysis**: Parse git diff files to identify changed code sections
 - 🎯 **Endpoint Mapping**: Map changes back to specific FastAPI route handlers

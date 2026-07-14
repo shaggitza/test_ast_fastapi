@@ -52,14 +52,15 @@ class CallFrame:
     caller_line_number: int | None = None
 
 
-@dataclass
+@dataclass(frozen=True)
 class SymbolReference:
-    """A reference to a specific symbol (function/method/class) with its line range."""
+    """A source range reached through standard or finite points-to propagation."""
 
     file_path: str
     symbol_name: str
     start_line: int
     end_line: int
+    low_confidence: bool = False
 
     def contains_line(self, line: int) -> bool:
         """Check if a line number falls within this symbol's range."""
@@ -152,10 +153,24 @@ class EndpointDependencies:
         self.referenced_files[file_path].add(line)
 
     def add_symbol_reference(
-        self, file_path: str, symbol_name: str, start_line: int, end_line: int
+        self,
+        file_path: str,
+        symbol_name: str,
+        start_line: int,
+        end_line: int,
+        *,
+        low_confidence: bool = False,
     ) -> None:
-        """Add a symbol reference and its line range to dependencies."""
-        ref = SymbolReference(file_path, symbol_name, start_line, end_line)
+        """Add a symbol range while preserving finite points-to provenance."""
+        ref = SymbolReference(
+            file_path,
+            symbol_name,
+            start_line,
+            end_line,
+            low_confidence=low_confidence,
+        )
+        if ref in self.referenced_symbols:
+            return
         self.referenced_symbols.append(ref)
         self._canonical_key_indexes.pop("referenced_symbols", None)
 
@@ -237,6 +252,20 @@ class EndpointDependencies:
         """Check if this endpoint unambiguously references a file."""
         return bool(self._matching_paths(file_path, self.referenced_files, "referenced_files"))
 
+    def references_lines_low_only(self, file_path: str, lines: set[int]) -> bool:
+        """Return whether every symbol path overlapping changed lines is LOW-only."""
+        matches = self._matching_paths(
+            file_path,
+            (ref.file_path for ref in self.referenced_symbols),
+            "referenced_symbols",
+        )
+        overlapping = [
+            ref
+            for ref in self.referenced_symbols
+            if ref.file_path in matches and any(ref.contains_line(line) for line in lines)
+        ]
+        return bool(overlapping) and all(ref.low_confidence for ref in overlapping)
+
     def references_lines(self, file_path: str, lines: set[int]) -> set[int]:
         """Get referenced changed lines for one unambiguously resolved file."""
         matches = self._matching_paths(file_path, self.referenced_files, "referenced_files")
@@ -289,6 +318,25 @@ class EndpointDependencies:
         return stacks
 
 
+@dataclass(frozen=True)
+class _FinitePointsTo:
+    """A bounded source-proven object set with exact constructor field values."""
+
+    types: tuple[str, ...]
+    fields: tuple[tuple[str, _FinitePointsTo], ...] = ()
+
+    def field(self, name: str) -> _FinitePointsTo | None:
+        return dict(self.fields).get(name)
+
+    def with_field(self, name: str, value: _FinitePointsTo | None) -> _FinitePointsTo:
+        fields = dict(self.fields)
+        if value is None:
+            fields.pop(name, None)
+        else:
+            fields[name] = value
+        return _FinitePointsTo(self.types, tuple(sorted(fields.items())))
+
+
 class MypyAnalyzer:
     """
     Analyze endpoint dependencies using mypy's type system.
@@ -297,7 +345,11 @@ class MypyAnalyzer:
     and extract precise file/line information for all references.
     """
 
-    CACHE_SCHEMA_VERSION = 8
+    CACHE_SCHEMA_VERSION = 9
+    MAX_POINTS_TO_TARGETS = 8
+    MAX_FACTORY_RETURNS = 64
+    MAX_FACTORY_STATES = 512
+    MAX_POINTS_TO_EDGES = 4096
 
     def __init__(self, app_path: Path, *, max_depth: int = 10) -> None:
         """Initialize the mypy analyzer."""
@@ -329,6 +381,9 @@ class MypyAnalyzer:
         self._python_call_span_cache: dict[str, dict[tuple[int, int], tuple[int, int]]] = {}
         self._source_bytes_cache: dict[str, tuple[bytes, ...] | None] = {}
         self._resolved_call_site_cache: dict[int, ResolvedCallSite | None] = {}
+        self._finite_global_value_cache: dict[str, _FinitePointsTo | None] = {}
+        self._finite_global_in_progress: set[str] = set()
+        self._exact_project_identity_cache: dict[str, tuple[str, str] | None] = {}
         self._built_source_fingerprint: str | None = None
         self._expected_source_fingerprint: str | None = None
         self._fullname_resolution_cache: dict[str, tuple[str, str] | None] = {}
@@ -469,6 +524,9 @@ class MypyAnalyzer:
         self._python_call_span_cache.clear()
         self._source_bytes_cache.clear()
         self._resolved_call_site_cache.clear()
+        self._finite_global_value_cache.clear()
+        self._finite_global_in_progress.clear()
+        self._exact_project_identity_cache.clear()
         self._modules_by_canonical_path.clear()
         self._shared_path_index = None
         self._fullname_resolution_cache.clear()
@@ -987,7 +1045,7 @@ class MypyAnalyzer:
         import_map = self._import_map_for_tree(tree, handler_module)
 
         # Trace all references in the function body.
-        visited: dict[str, int] = {}
+        visited: dict[tuple[str, bool, _FinitePointsTo | None], int] = {}
         call_stack = [CallFrame(handler_path, start, handler.name)]
 
         for dependency_fullname, dependency_depth in sorted(
@@ -1020,7 +1078,7 @@ class MypyAnalyzer:
                 dependency_start,
                 dependency_end,
             )
-            visited[dependency_fullname] = dependency_depth
+            visited[(dependency_fullname, False, None)] = dependency_depth
             if dependency_depth < self.max_depth:
                 self._trace_references(
                     dependency_node,
@@ -1317,7 +1375,551 @@ class MypyAnalyzer:
         member = info.get(member_name) if info is not None else None
         return self._callable_declaration(member.node) if member is not None else None
 
-    def _member_call_resolution(  # noqa: PLR0912
+    @classmethod
+    def _join_finite_values(
+        cls, left: _FinitePointsTo | None, right: _FinitePointsTo | None
+    ) -> _FinitePointsTo | None:
+        """Join only complete finite values; unknown on either path fails closed."""
+        if left is None or right is None:
+            return None
+        types = tuple(sorted(set(left.types) | set(right.types)))
+        if not types or len(types) > cls.MAX_POINTS_TO_TARGETS:
+            return None
+        left_fields = dict(left.fields)
+        right_fields = dict(right.fields)
+        fields: list[tuple[str, _FinitePointsTo]] = []
+        for name in sorted(left_fields.keys() & right_fields.keys()):
+            value = cls._join_finite_values(left_fields[name], right_fields[name])
+            if value is not None:
+                fields.append((name, value))
+        return _FinitePointsTo(types, tuple(fields))
+
+    @classmethod
+    def _join_finite_environments(
+        cls,
+        environments: list[dict[str, _FinitePointsTo]],
+    ) -> dict[str, _FinitePointsTo]:
+        if not environments:
+            return {}
+        common = set(environments[0])
+        for environment in environments[1:]:
+            common &= environment.keys()
+        result: dict[str, _FinitePointsTo] = {}
+        for name in sorted(common):
+            value: _FinitePointsTo | None = environments[0][name]
+            for environment in environments[1:]:
+                value = cls._join_finite_values(value, environment[name])
+            if value is not None:
+                result[name] = value
+        return result
+
+    def _exact_project_identity(self, fullname: str) -> tuple[str, str] | None:
+        """Split a canonical fullname at the longest exact built module prefix."""
+        if fullname not in self._exact_project_identity_cache:
+            modules = [
+                module for module in self._project_modules if fullname.startswith(f"{module}.")
+            ]
+            if modules:
+                longest = max(len(module) for module in modules)
+                selected = [module for module in modules if len(module) == longest]
+                identity = (
+                    (selected[0], fullname[len(selected[0]) + 1 :]) if len(selected) == 1 else None
+                )
+            else:
+                identity = None
+            self._exact_project_identity_cache[fullname] = identity
+        return self._exact_project_identity_cache[fullname]
+
+    def _exact_finite_project_type_info(self, fullname: str) -> Any | None:
+        """Resolve a class through exact module identities and explicit re-exports only."""
+        from mypy.nodes import TypeInfo  # noqa: PLC0415
+
+        visited: set[str] = set()
+        current = fullname
+        for _depth in range(self.max_depth + 1):
+            if current in visited:
+                return None
+            visited.add(current)
+            identity = self._exact_project_identity(current)
+            if identity is None or "." in identity[1]:
+                return None
+            module, name = identity
+            tree = self._trees.get(module)
+            if tree is None:
+                return None
+            symbol = tree.names.get(name)
+            if symbol is not None and isinstance(symbol.node, TypeInfo):
+                info = symbol.node
+                return info if info.fullname == current else None
+            reexport = self._import_map_for_tree(tree, module).get(name)
+            if reexport is None:
+                return None
+            current = reexport
+        return None
+
+    def _project_constructor_info(self, callee: Any, import_map: dict[str, str]) -> Any | None:
+        """Return one exact project class for a source-explicit constructor call."""
+        from mypy.nodes import NameExpr, TypeInfo  # noqa: PLC0415
+
+        if isinstance(callee, NameExpr) and isinstance(callee.node, TypeInfo):
+            info = callee.node
+            return info if info.module_name in self._project_modules else None
+        imported = self._explicit_import_fullname(callee, import_map)
+        return self._exact_finite_project_type_info(imported) if imported is not None else None
+
+    def _exact_finite_project_callable(  # noqa: PLR0911
+        self, fullname: str
+    ) -> tuple[str, InvocationKind] | None:
+        """Resolve a factory through exact project modules and explicit re-exports."""
+        visited: set[str] = set()
+        current = fullname
+        for _depth in range(self.max_depth + 1):
+            if current in visited:
+                return None
+            visited.add(current)
+            identity = self._exact_project_identity(current)
+            if identity is None or identity[1].count(".") > 1:
+                return None
+            module, name = identity
+            tree = self._trees.get(module)
+            if tree is None:
+                return None
+            if "." in name:
+                class_name, member_name = name.split(".", maxsplit=1)
+                info = self._exact_finite_project_type_info(f"{module}.{class_name}")
+                member = info.get(member_name) if info is not None else None
+                return self._callable_declaration(member.node) if member is not None else None
+            found = self._find_func_in_tree(tree, name, qualified_name=name)
+            if found is not None:
+                return self._callable_declaration(found[0])
+            reexport = self._import_map_for_tree(tree, module).get(name)
+            if reexport is None:
+                return None
+            current = reexport
+        return None
+
+    def _function_node_for_fullname(self, fullname: str) -> tuple[Any, str, str] | None:
+        """Resolve one exact project function to its typed node, path, and module."""
+        result = self._resolve_fullname_to_file(fullname)
+        if result is None:
+            return None
+        path, module = result
+        tree = self._trees.get(module)
+        if tree is None or not fullname.startswith(f"{module}."):
+            return None
+        qualified = fullname[len(module) + 1 :]
+        found = self._find_func_in_tree(
+            tree,
+            qualified.rsplit(".", maxsplit=1)[-1],
+            qualified_name=qualified,
+        )
+        return (found[0], path, module) if found is not None else None
+
+    @staticmethod
+    def _actual_function(node: Any) -> Any:
+        from mypy.nodes import Decorator  # noqa: PLC0415
+
+        return node.func if isinstance(node, Decorator) else node
+
+    def _bind_finite_arguments(
+        self,
+        function: Any,
+        call: Any,
+        caller_environment: dict[str, _FinitePointsTo],
+        caller_imports: dict[str, str],
+        stack: tuple[str, ...],
+        budget: list[int],
+        *,
+        receiver: _FinitePointsTo | None = None,
+    ) -> dict[str, _FinitePointsTo] | None:
+        """Bind explicit positional/keyword arguments without *args/**kwargs guessing."""
+        from mypy.nodes import ARG_NAMED, ARG_POS  # noqa: PLC0415
+
+        actual = self._actual_function(function)
+        arguments = list(getattr(actual, "arguments", ()))
+        environment: dict[str, _FinitePointsTo] = {}
+        if receiver is not None:
+            if not arguments:
+                return None
+            environment[arguments[0].variable.name] = receiver
+            arguments = arguments[1:]
+        positional = 0
+        by_name = {argument.variable.name: argument for argument in arguments}
+        for expression, kind, name in zip(call.args, call.arg_kinds, call.arg_names, strict=True):
+            if kind == ARG_POS and name is None:
+                if positional >= len(arguments):
+                    return None
+                parameter = arguments[positional].variable.name
+                positional += 1
+            elif kind == ARG_NAMED and name in by_name:
+                parameter = name
+            else:
+                return None
+            value = self._finite_expression_value(
+                expression,
+                caller_environment,
+                caller_imports,
+                stack,
+                budget,
+            )
+            if value is not None:
+                environment[parameter] = value
+        return environment
+
+    def _finite_global_value(  # noqa: PLR0911, PLR0912
+        self,
+        fullname: str,
+        _budget: list[int],
+    ) -> _FinitePointsTo | None:
+        """Summarize one exact module global from ordered source assignments."""
+        from mypy.nodes import (  # noqa: PLC0415
+            AssignmentStmt,
+            CallExpr,
+            ClassDef,
+            Decorator,
+            FuncDef,
+            Import,
+            ImportFrom,
+            NameExpr,
+            PassStmt,
+        )
+
+        if fullname in self._finite_global_value_cache:
+            return self._finite_global_value_cache[fullname]
+        if fullname in self._finite_global_in_progress:
+            return None
+        identity = self._exact_project_identity(fullname)
+        if identity is None or "." in identity[1]:
+            self._finite_global_value_cache[fullname] = None
+            return None
+        module, name = identity
+        tree = self._trees.get(module)
+        if tree is None:
+            self._finite_global_value_cache[fullname] = None
+            return None
+        self._finite_global_in_progress.add(fullname)
+        try:
+            environment: dict[str, _FinitePointsTo] = {}
+            summary_budget = [0]
+            import_map = self._import_map_for_tree(tree, module)
+            inert_statements = (ClassDef, Decorator, FuncDef, Import, ImportFrom, PassStmt)
+            for statement in tree.defs:
+                if isinstance(statement, inert_statements):
+                    continue
+                if not isinstance(statement, AssignmentStmt):
+                    self._finite_global_value_cache[fullname] = None
+                    return None
+                if not statement.lvalues or not all(
+                    isinstance(target, NameExpr) for target in statement.lvalues
+                ):
+                    self._finite_global_value_cache[fullname] = None
+                    return None
+                value = self._finite_expression_value(
+                    statement.rvalue,
+                    environment,
+                    import_map,
+                    (fullname,),
+                    summary_budget,
+                )
+                if value is None and isinstance(statement.rvalue, CallExpr):
+                    self._finite_global_value_cache[fullname] = None
+                    return None
+                for target in statement.lvalues:
+                    if not isinstance(target, NameExpr):
+                        continue
+                    if value is None:
+                        environment.pop(target.name, None)
+                    else:
+                        environment[target.name] = value
+            result = environment.get(name)
+            self._finite_global_value_cache[fullname] = result
+            return result
+        finally:
+            self._finite_global_in_progress.discard(fullname)
+
+    def _finite_expression_value(  # noqa: PLR0911
+        self,
+        expression: Any,
+        environment: dict[str, _FinitePointsTo],
+        import_map: dict[str, str],
+        stack: tuple[str, ...],
+        budget: list[int],
+    ) -> _FinitePointsTo | None:
+        """Evaluate the deliberately small, finite points-to expression language."""
+        from mypy.nodes import CallExpr, ConditionalExpr, MemberExpr, NameExpr  # noqa: PLC0415
+
+        if budget[0] >= self.MAX_FACTORY_STATES:
+            return None
+        budget[0] += 1
+        if isinstance(expression, NameExpr):
+            if expression.name in environment:
+                return environment[expression.name]
+            imported = self._explicit_import_fullname(expression, import_map)
+            raw_fullname = imported or getattr(expression, "fullname", "")
+            global_fullname = raw_fullname if isinstance(raw_fullname, str) else ""
+            return (
+                self._finite_global_value(global_fullname, budget)
+                if "." in global_fullname
+                else None
+            )
+        if isinstance(expression, MemberExpr):
+            imported = self._explicit_import_fullname(expression, import_map)
+            if imported is not None:
+                global_value = self._finite_global_value(imported, budget)
+                if global_value is not None:
+                    return global_value
+            receiver = self._finite_expression_value(
+                expression.expr, environment, import_map, stack, budget
+            )
+            return receiver.field(expression.name) if receiver is not None else None
+        if isinstance(expression, ConditionalExpr):
+            left = self._finite_expression_value(
+                expression.if_expr, dict(environment), import_map, stack, budget
+            )
+            right = self._finite_expression_value(
+                expression.else_expr, dict(environment), import_map, stack, budget
+            )
+            return self._join_finite_values(left, right)
+        if not isinstance(expression, CallExpr):
+            return None
+        info = self._project_constructor_info(expression.callee, import_map)
+        if info is not None:
+            return self._finite_constructor_value(
+                info, expression, environment, import_map, stack, budget
+            )
+        imported = self._explicit_import_fullname(expression.callee, import_map)
+        declaration = (
+            self._exact_finite_project_callable(imported) if imported is not None else None
+        )
+        if declaration is None:
+            direct = self._callable_declaration(getattr(expression.callee, "node", None))
+            declaration = (
+                direct
+                if direct is not None and self._exact_project_identity(direct[0]) is not None
+                else None
+            )
+        if declaration is None or declaration[1] != InvocationKind.FUNCTION:
+            return None
+        return self._finite_factory_return(
+            declaration[0], expression, environment, import_map, stack, budget
+        )
+
+    def _finite_constructor_value(
+        self,
+        info: Any,
+        call: Any,
+        environment: dict[str, _FinitePointsTo],
+        import_map: dict[str, str],
+        stack: tuple[str, ...],
+        budget: list[int],
+    ) -> _FinitePointsTo | None:
+        """Construct one exact object and bind finite constructor fields."""
+        fullname = getattr(info, "fullname", "")
+        if not fullname or fullname in stack:
+            return None
+        value = _FinitePointsTo((fullname,))
+        member = info.get("__init__")
+        function = getattr(member, "node", None) if member is not None else None
+        if function is None:
+            return value
+        bound = self._bind_finite_arguments(
+            function,
+            call,
+            environment,
+            import_map,
+            (*stack, fullname),
+            budget,
+            receiver=value,
+        )
+        if bound is None:
+            return value
+        actual = self._actual_function(function)
+        resolved = self._resolve_fullname_to_file(fullname)
+        if resolved is None or resolved[1] not in self._trees:
+            return value
+        module = resolved[1]
+        executed = self._execute_finite_block(
+            actual.body,
+            bound,
+            self._import_map_for_tree(self._trees[module], module),
+            (*stack, fullname),
+            budget,
+            collect_returns=False,
+        )
+        if executed is None:
+            return value
+        final_environment, _returns, _falls_through = executed
+        self_name = actual.arguments[0].variable.name if actual.arguments else "self"
+        return final_environment.get(self_name, value)
+
+    def _finite_factory_return(
+        self,
+        fullname: str,
+        call: Any,
+        caller_environment: dict[str, _FinitePointsTo],
+        caller_imports: dict[str, str],
+        stack: tuple[str, ...],
+        budget: list[int],
+    ) -> _FinitePointsTo | None:
+        """Summarize a project factory only when all normal returns are finite."""
+        if fullname in stack or len(stack) >= self.max_depth:
+            return None
+        resolved = self._function_node_for_fullname(fullname)
+        if resolved is None:
+            return None
+        function, _path, module = resolved
+        bound = self._bind_finite_arguments(
+            function,
+            call,
+            caller_environment,
+            caller_imports,
+            (*stack, fullname),
+            budget,
+        )
+        if bound is None:
+            return None
+        actual = self._actual_function(function)
+        executed = self._execute_finite_block(
+            actual.body,
+            bound,
+            self._import_map_for_tree(self._trees[module], module),
+            (*stack, fullname),
+            budget,
+            collect_returns=True,
+        )
+        if executed is None:
+            return None
+        _environment, returns, falls_through = executed
+        if falls_through or not returns or len(returns) > self.MAX_FACTORY_RETURNS:
+            return None
+        value: _FinitePointsTo | None = returns[0]
+        for returned in returns[1:]:
+            value = self._join_finite_values(value, returned)
+        return value
+
+    def _execute_finite_block(  # noqa: PLR0911, PLR0912
+        self,
+        block: Any,
+        environment: dict[str, _FinitePointsTo],
+        import_map: dict[str, str],
+        stack: tuple[str, ...],
+        budget: list[int],
+        *,
+        collect_returns: bool,
+    ) -> tuple[dict[str, _FinitePointsTo], list[_FinitePointsTo], bool] | None:
+        """Interpret assignments/branches with deterministic fail-closed joins."""
+        from mypy.nodes import (  # noqa: PLC0415
+            AssignmentStmt,
+            CallExpr,
+            IfStmt,
+            MemberExpr,
+            NameExpr,
+            PassStmt,
+            RaiseStmt,
+            ReturnStmt,
+        )
+
+        current = dict(environment)
+        returns: list[_FinitePointsTo] = []
+        falls_through = True
+        for statement in getattr(block, "body", ()):
+            if not falls_through:
+                break
+            if isinstance(statement, AssignmentStmt):
+                value = self._finite_expression_value(
+                    statement.rvalue, current, import_map, stack, budget
+                )
+                if value is None and isinstance(statement.rvalue, CallExpr):
+                    return None
+                for target in statement.lvalues:
+                    if isinstance(target, NameExpr):
+                        if value is None:
+                            current.pop(target.name, None)
+                        else:
+                            current[target.name] = value
+                    elif (
+                        not collect_returns
+                        and isinstance(target, MemberExpr)
+                        and isinstance(target.expr, NameExpr)
+                        and target.expr.name in current
+                    ):
+                        receiver = current[target.expr.name]
+                        current[target.expr.name] = receiver.with_field(target.name, value)
+                    else:
+                        return None
+                continue
+            if isinstance(statement, ReturnStmt):
+                if not collect_returns:
+                    falls_through = False
+                    continue
+                value = self._finite_expression_value(
+                    statement.expr, current, import_map, stack, budget
+                )
+                if value is None:
+                    return None
+                returns.append(value)
+                falls_through = False
+                continue
+            if isinstance(statement, RaiseStmt):
+                falls_through = False
+                continue
+            if isinstance(statement, IfStmt):
+                branch_results = []
+                for body in statement.body:
+                    result = self._execute_finite_block(
+                        body,
+                        dict(current),
+                        import_map,
+                        stack,
+                        budget,
+                        collect_returns=collect_returns,
+                    )
+                    if result is None:
+                        return None
+                    branch_results.append(result)
+                if statement.else_body is not None:
+                    result = self._execute_finite_block(
+                        statement.else_body,
+                        dict(current),
+                        import_map,
+                        stack,
+                        budget,
+                        collect_returns=collect_returns,
+                    )
+                    if result is None:
+                        return None
+                    branch_results.append(result)
+                else:
+                    branch_results.append((dict(current), [], True))
+                returns.extend(
+                    returned for _branch, values, _falls in branch_results for returned in values
+                )
+                continuing = [branch for branch, _values, falls in branch_results if falls]
+                falls_through = bool(continuing)
+                current = self._join_finite_environments(continuing) if continuing else current
+                continue
+            if isinstance(statement, PassStmt):
+                continue
+            return None
+        return current, returns, falls_through
+
+    def _finite_member_declaration(
+        self, receiver: _FinitePointsTo, member_name: str
+    ) -> tuple[str, InvocationKind] | None:
+        """Dispatch only when every finite concrete class selects one declaration."""
+        if not receiver.types or len(receiver.types) > self.MAX_POINTS_TO_TARGETS:
+            return None
+        declarations: set[tuple[str, InvocationKind]] = set()
+        for fullname in receiver.types:
+            info = self._exact_finite_project_type_info(fullname)
+            member = info.get(member_name) if info is not None else None
+            declaration = self._callable_declaration(member.node) if member is not None else None
+            if declaration is None:
+                return None
+            declarations.add(declaration)
+        return next(iter(declarations)) if len(declarations) == 1 else None
+
+    def _member_call_resolution(  # noqa: PLR0911, PLR0912, PLR0915
         self,
         callee: Any,
         import_map: dict[str, str],
@@ -1331,6 +1933,15 @@ class MypyAnalyzer:
         """Resolve one member call through finite nominal receiver evidence."""
         from mypy.nodes import CallExpr, NameExpr, TypeInfo, Var  # noqa: PLC0415
         from mypy.types import Instance, UnionType, get_proper_type  # noqa: PLC0415
+
+        if (
+            isinstance(callee.expr, CallExpr)
+            and isinstance(callee.expr.callee, NameExpr)
+            and callee.expr.callee.name == "super"
+        ):
+            declaration = self._callable_declaration(getattr(callee, "node", None))
+            if declaration is not None and self._resolve_fullname_to_file(declaration[0]):
+                return CallResolutionStatus.EXACT, *declaration, (), None
 
         imported_fullname = self._explicit_import_fullname(callee, import_map)
         if imported_fullname is not None:
@@ -1452,14 +2063,14 @@ class MypyAnalyzer:
             )
         return self._resolved_call_site_cache[cache_key]
 
-    def _resolved_call_site_uncached(
+    def _resolved_call_site_uncached(  # noqa: PLR0912, PLR0915
         self,
         call: Any,
         current_file: str,
         import_map: dict[str, str],
     ) -> ResolvedCallSite | None:
         """Resolve one physical project-source call for the analyzer-wide cache."""
-        from mypy.nodes import MemberExpr, NameExpr, TypeInfo, Var  # noqa: PLC0415
+        from mypy.nodes import MemberExpr, NameExpr, SuperExpr, TypeInfo, Var  # noqa: PLC0415
 
         try:
             Path(current_file).resolve().relative_to(self.source_root.resolve())
@@ -1512,6 +2123,23 @@ class MypyAnalyzer:
                 receiver_candidates,
                 reason_code,
             ) = self._member_call_resolution(callee, import_map)
+        elif isinstance(callee, SuperExpr) and callee.info is not None:
+            declarations = []
+            for info in callee.info.mro[1:]:
+                member = info.names.get(callee.name)
+                declaration = (
+                    self._callable_declaration(member.node) if member is not None else None
+                )
+                if declaration is not None:
+                    declarations.append(declaration)
+                    break
+            if len(declarations) == 1 and self._resolve_fullname_to_file(declarations[0][0]):
+                status = CallResolutionStatus.EXACT
+                canonical_symbol, invocation = declarations[0]
+                receiver_candidates = (callee.info.fullname,)
+                reason_code = None
+            else:
+                reason_code = "unresolved_super_dispatch"
         resolver_version = self._resolver_version
         try:
             return ResolvedCallSite(
@@ -1551,10 +2179,13 @@ class MypyAnalyzer:
         current_file: str,
         current_module: str,
         call_stack: list[CallFrame],
-        visited: dict[str, int],
+        visited: dict[tuple[str, bool, _FinitePointsTo | None], int],
         import_map: dict[str, str] | None = None,
         *,
         depth: int,
+        low_confidence_path: bool = False,
+        receiver_value: _FinitePointsTo | None = None,
+        finite_edge_budget: list[int] | None = None,
     ) -> None:
         """
         Trace all references in a mypy AST node.
@@ -1566,6 +2197,8 @@ class MypyAnalyzer:
         """
         if import_map is None:
             import_map = {}
+        if finite_edge_budget is None:
+            finite_edge_budget = [0]
 
         from mypy.nodes import (
             AssertStmt,
@@ -1605,17 +2238,35 @@ class MypyAnalyzer:
             YieldExpr,
             YieldFromExpr,
         )
-        from mypy.types import Instance
 
-        def resolve_and_trace(fullname: str, call_line: int) -> None:
-            """Resolve a fullname at the next call depth and trace into it."""
+        flow_environment: dict[str, _FinitePointsTo] = {}
+        function_node = self._actual_function(node)
+        if receiver_value is not None and getattr(function_node, "arguments", None):
+            self_name = function_node.arguments[0].variable.name
+            flow_environment[self_name] = receiver_value
+        finite_budget = [0]
+
+        def resolve_and_trace(  # noqa: PLR0912, PLR0915
+            fullname: str,
+            call_line: int,
+            *,
+            low_confidence_edge: bool = False,
+            target_receiver: _FinitePointsTo | None = None,
+        ) -> None:
+            """Resolve a fullname and preserve LOW provenance through descendants."""
             target_depth = depth + 1
             if target_depth > self.max_depth:
                 return
-            previous_depth = visited.get(fullname)
+            if low_confidence_edge:
+                if finite_edge_budget[0] >= self.MAX_POINTS_TO_EDGES:
+                    return
+                finite_edge_budget[0] += 1
+            target_low_confidence = low_confidence_path or low_confidence_edge
+            visit_key = (fullname, target_low_confidence, target_receiver)
+            previous_depth = visited.get(visit_key)
             should_recurse = previous_depth is None or target_depth < previous_depth
             if should_recurse:
-                visited[fullname] = target_depth
+                visited[visit_key] = target_depth
 
             # Report progress
             if self._line_progress_callback:
@@ -1657,7 +2308,13 @@ class MypyAnalyzer:
             if func_result:
                 target_func, qname = func_result
                 start, end = self._get_func_lines(target_func)
-                deps.add_symbol_reference(target_path, fullname, start, end)
+                deps.add_symbol_reference(
+                    target_path,
+                    fullname,
+                    start,
+                    end,
+                    low_confidence=target_low_confidence,
+                )
 
                 # Record the edge as well as target definition provenance. The
                 # caller location is required for later effect/alias analysis.
@@ -1681,6 +2338,9 @@ class MypyAnalyzer:
                         visited,
                         self._import_map_for_tree(target_tree, target_module),
                         depth=target_depth,
+                        low_confidence_path=target_low_confidence,
+                        receiver_value=target_receiver,
+                        finite_edge_budget=finite_edge_budget,
                     )
             else:
                 class_candidates = [
@@ -1691,7 +2351,13 @@ class MypyAnalyzer:
                 if len(class_candidates) == 1:
                     class_node = class_candidates[0]
                     class_line = class_node.line
-                    deps.add_symbol_reference(target_path, fullname, class_line, class_line)
+                    deps.add_symbol_reference(
+                        target_path,
+                        fullname,
+                        class_line,
+                        class_line,
+                        low_confidence=target_low_confidence,
+                    )
                     class_stack = [
                         *call_stack,
                         CallFrame(
@@ -1712,7 +2378,13 @@ class MypyAnalyzer:
                         initializer_node, _initializer_name = initializer
                         start, end = self._get_func_lines(initializer_node)
                         initializer_fullname = f"{fullname}.__init__"
-                        deps.add_symbol_reference(target_path, initializer_fullname, start, end)
+                        deps.add_symbol_reference(
+                            target_path,
+                            initializer_fullname,
+                            start,
+                            end,
+                            low_confidence=target_low_confidence,
+                        )
                         if should_recurse and target_depth < self.max_depth:
                             self._trace_references(
                                 initializer_node,
@@ -1723,76 +2395,55 @@ class MypyAnalyzer:
                                 visited,
                                 self._import_map_for_tree(target_tree, target_module),
                                 depth=target_depth,
+                                low_confidence_path=target_low_confidence,
+                                receiver_value=target_receiver,
+                                finite_edge_budget=finite_edge_budget,
                             )
                 # Ambiguous or unresolved symbols are not converted into
                 # fabricated module ranges; doing so creates unrelated impacts.
 
-        def handle_call_expr(call: CallExpr) -> None:  # noqa: PLR0912
-            """Handle a function/method call expression."""
+        def handle_call_expr(call: CallExpr) -> None:
+            """Trace exact calls, adding bounded finite receiver edges as LOW only."""
             call_site = self._resolved_call_site(call, current_file, import_map)
             if call_site is not None:
                 deps.add_resolved_call_site(call_site)
             callee = call.callee
+            traced = False
 
-            if isinstance(callee, NameExpr):
-                # Direct function call: func()
-                if callee.fullname:
-                    actual_fullname = callee.fullname
+            if isinstance(callee, MemberExpr) and (
+                call_site is None or call_site.status != CallResolutionStatus.EXACT
+            ):
+                finite_receiver = self._finite_expression_value(
+                    callee.expr,
+                    flow_environment,
+                    import_map,
+                    (),
+                    finite_budget,
+                )
+                finite_declaration = (
+                    self._finite_member_declaration(finite_receiver, callee.name)
+                    if finite_receiver is not None
+                    else None
+                )
+                if finite_declaration is not None:
+                    finite_fullname, _invocation = finite_declaration
+                    deps.add_reference(current_file, call.line, finite_fullname)
+                    resolve_and_trace(
+                        finite_fullname,
+                        call.line,
+                        low_confidence_edge=True,
+                        target_receiver=finite_receiver,
+                    )
+                    traced = True
 
-                    # Try to resolve using import map first
-                    if callee.name in import_map:
-                        actual_fullname = import_map[callee.name]
-                    # Try to get the actual definition location from the node
-                    elif hasattr(callee, "node") and callee.node:
-                        node = callee.node
-                        # Check if the node has a fullname (it's the actual definition)
-                        if hasattr(node, "fullname") and node.fullname:
-                            actual_fullname = node.fullname
-
-                    deps.add_reference(current_file, call.line, actual_fullname)
-                    resolve_and_trace(actual_fullname, call.line)
-
-            elif isinstance(callee, MemberExpr):
-                # Method call: obj.method()
-                if callee.fullname:
-                    # Mypy resolved the method name
-                    deps.add_reference(current_file, call.line, callee.fullname)
-
-                    # Try to get actual definition location
-                    actual_fullname = callee.fullname
-                    if hasattr(callee, "node") and callee.node:
-                        node = callee.node
-                        if hasattr(node, "fullname") and node.fullname:
-                            actual_fullname = node.fullname
-
-                    resolve_and_trace(actual_fullname, call.line)
-                else:
-                    # Try to resolve via type information
-                    receiver_type = self._get_type_from_node(callee.expr)
-                    if receiver_type and isinstance(receiver_type, Instance):
-                        # We have type info - construct the method fullname
-                        class_fullname = receiver_type.type.fullname
-                        method_fullname = f"{class_fullname}.{callee.name}"
-                        deps.add_reference(current_file, call.line, method_fullname)
-                        resolve_and_trace(method_fullname, call.line)
-                    # No type info - try to trace the receiver
-                    elif isinstance(callee.expr, NameExpr) and callee.expr.fullname:
-                        # Receiver is an imported module or class.
-                        receiver = import_map.get(callee.expr.name, callee.expr.fullname)
-                        combined = f"{receiver}.{callee.name}"
-                        deps.add_reference(current_file, call.line, combined)
-                        resolve_and_trace(combined, call.line)
-                    elif (
-                        isinstance(callee.expr, CallExpr)
-                        and isinstance(callee.expr.callee, NameExpr)
-                        and callee.expr.callee.fullname
-                    ):
-                        # Immediate construction: ImportedClass().method().
-                        constructor = callee.expr.callee
-                        receiver = import_map.get(constructor.name, constructor.fullname)
-                        combined = f"{receiver}.{callee.name}"
-                        deps.add_reference(current_file, call.line, combined)
-                        resolve_and_trace(combined, call.line)
+            if (
+                not traced
+                and call_site is not None
+                and call_site.status == CallResolutionStatus.EXACT
+                and call_site.canonical_symbol is not None
+            ):
+                deps.add_reference(current_file, call.line, call_site.canonical_symbol)
+                resolve_and_trace(call_site.canonical_symbol, call.line)
 
             # FastAPI dependency injection passes callables as values rather
             # than invoking them in the handler body. Treat the callable given
@@ -1805,13 +2456,15 @@ class MypyAnalyzer:
                         deps.add_reference(current_file, argument.line, dependency_fullname)
                         resolve_and_trace(dependency_fullname, argument.line)
 
-            # Walk callee and arguments
+            # Walk nested calls before invalidating mutable local object state.
             walk_node(callee)
             for arg in call.args:
                 walk_node(arg)
+            flow_environment.clear()
 
         def walk_node(n: Any) -> None:
-            """Recursively walk a mypy AST node."""
+            """Recursively walk a mypy AST node with a bounded local environment."""
+            nonlocal flow_environment
             if n is None:
                 return
 
@@ -1863,44 +2516,75 @@ class MypyAnalyzer:
                 walk_node(n.expr)
 
             elif isinstance(n, AssignmentStmt):
-                for lv in n.lvalues:
-                    walk_node(lv)
+                value = self._finite_expression_value(
+                    n.rvalue,
+                    flow_environment,
+                    import_map,
+                    (),
+                    finite_budget,
+                )
                 walk_node(n.rvalue)
+                for lv in n.lvalues:
+                    if isinstance(lv, NameExpr):
+                        if value is None:
+                            flow_environment.pop(lv.name, None)
+                        else:
+                            flow_environment[lv.name] = value
+                    else:
+                        # Arbitrary/reflection-driven member mutation invalidates all
+                        # finite heap evidence outside constructor summarization.
+                        flow_environment.clear()
+                    walk_node(lv)
 
             elif isinstance(n, ReturnStmt):
                 walk_node(n.expr)
 
             elif isinstance(n, IfStmt):
-                for expr in n.expr:
+                base_environment = dict(flow_environment)
+                branch_environments: list[dict[str, _FinitePointsTo]] = []
+                for expr, body in zip(n.expr, n.body, strict=True):
+                    flow_environment = dict(base_environment)
                     walk_node(expr)
-                for body in n.body:
                     walk_node(body)
+                    branch_environments.append(dict(flow_environment))
+                flow_environment = dict(base_environment)
                 if n.else_body:
                     walk_node(n.else_body)
+                    branch_environments.append(dict(flow_environment))
+                else:
+                    branch_environments.append(base_environment)
+                flow_environment = self._join_finite_environments(branch_environments)
 
             elif isinstance(n, WhileStmt) or isinstance(n, ForStmt):
                 walk_node(n.expr)
+                flow_environment.clear()
                 walk_node(n.body)
+                flow_environment.clear()
 
             elif isinstance(n, WithStmt):
                 for expr in n.expr:
                     walk_node(expr)
+                flow_environment.clear()
                 walk_node(n.body)
+                flow_environment.clear()
 
             elif isinstance(n, TryStmt):
+                flow_environment.clear()
                 walk_node(n.body)
-                # Walk exception handlers
                 for handler in n.handlers:
+                    flow_environment.clear()
                     walk_node(handler)
-                # Walk exception types
                 if hasattr(n, "types") and n.types:
                     for exc_type in n.types:
                         if exc_type:
                             walk_node(exc_type)
                 if n.else_body:
+                    flow_environment.clear()
                     walk_node(n.else_body)
                 if n.finally_body:
+                    flow_environment.clear()
                     walk_node(n.finally_body)
+                flow_environment.clear()
 
             elif isinstance(n, RaiseStmt) or isinstance(n, AssertStmt) or isinstance(n, AwaitExpr):
                 walk_node(n.expr)
@@ -1938,9 +2622,9 @@ class MypyAnalyzer:
                     walk_node(item)
 
             elif isinstance(n, DictExpr):
-                for key, value in n.items:
+                for key, expression_value in n.items:
                     walk_node(key)
-                    walk_node(value)
+                    walk_node(expression_value)
 
             elif isinstance(n, ListComprehension):
                 # ListComprehension has a generator attribute
@@ -2082,6 +2766,12 @@ class MypyAnalyzer:
             {
                 "schema": self.CACHE_SCHEMA_VERSION,
                 "max_depth": self.max_depth,
+                "finite_points_to": {
+                    "max_targets": self.MAX_POINTS_TO_TARGETS,
+                    "max_factory_returns": self.MAX_FACTORY_RETURNS,
+                    "max_factory_states": self.MAX_FACTORY_STATES,
+                    "max_edges": self.MAX_POINTS_TO_EDGES,
+                },
                 "mypy": mypy_version,
                 "python": list(sys.version_info[:3]),
                 "source_root": str(self.source_root.resolve()),
@@ -2107,6 +2797,7 @@ class MypyAnalyzer:
                         "symbol_name": ref.symbol_name,
                         "start_line": ref.start_line,
                         "end_line": ref.end_line,
+                        "low_confidence": ref.low_confidence,
                     }
                     for ref in deps.referenced_symbols
                 ],
@@ -2221,6 +2912,7 @@ class MypyAnalyzer:
                                 symbol_name=ref_data["symbol_name"],
                                 start_line=ref_data["start_line"],
                                 end_line=ref_data["end_line"],
+                                low_confidence=ref_data.get("low_confidence", False),
                             )
                         )
 
