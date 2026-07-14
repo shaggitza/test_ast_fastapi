@@ -758,7 +758,14 @@ class ChangeMapper:
                 set(display_lines),
                 all_call_stacks,
             )
-            confidence = effect_result.confidence if effect_result else ConfidenceLevel.MEDIUM
+            low_only_points_to = deps.references_lines_low_only(file_path, changed_lines)
+            confidence = (
+                ConfidenceLevel.LOW
+                if low_only_points_to
+                else effect_result.confidence
+                if effect_result
+                else ConfidenceLevel.MEDIUM
+            )
             effect_summary = (
                 f"; effect analysis: {effect_result.evidence[0].summary}" if effect_result else ""
             )
@@ -766,7 +773,8 @@ class ChangeMapper:
                 endpoint=endpoint,
                 confidence=confidence,
                 reason=(
-                    f"Type analysis shows dependency on {diff_file.path} "
+                    f"{'LOW finite points-to' if low_only_points_to else 'Type analysis'} "
+                    f"shows dependency on {diff_file.path} "
                     f"(lines {sorted(display_lines)[:5]}"
                     f"{'...' if len(display_lines) > 5 else ''}){effect_summary}"
                 ),
