@@ -45,8 +45,15 @@ unknown call may mutate, replace, or remove an otherwise statically proven
 registration. It is retained as a candidate but its confidence is capped at
 `LOW`, regardless of direct, mypy, or SCIP reachability. An independently
 established occurrence of the same physical endpoint dominates conditional
-discovery. Conditional inventory is an upper bound: unknown helpers may add
-routes that are not invented by the analyzer.
+discovery.
+
+Whole-inventory strength is separate from occurrence strength. An established
+inventory is exhaustive for the configured static subset; conditional means
+unknown work may add or remove routes; unavailable means extraction could not
+establish the selected root. Conditional-only route presence and absence from a
+conditional/unavailable side are staged as `inventory_unavailable`, never as
+propagation or discovery proof. Operational extraction failures carry an
+explicit unresolved diagnostic when source-backed limitations cannot exist.
 
 ## Matching order
 

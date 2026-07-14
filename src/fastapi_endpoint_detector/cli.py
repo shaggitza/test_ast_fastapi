@@ -402,14 +402,19 @@ def list_endpoints(
                 app_variable=app_var,
                 app_entry=app_entry,
             )
-            endpoints = extractor_obj.extract_endpoints()
+            inventory = extractor_obj.extract_inventory()
+            endpoints = inventory.endpoints
         else:
             # Use default runtime introspection
             extractor = FastAPIExtractor(app_path=app, app_variable=app_var)
             endpoints = extractor.extract_endpoints()
 
         formatter = get_formatter(output_format)
-        formatted_output = formatter.format_endpoints(endpoints)
+        formatted_output = (
+            formatter.format_inventory(inventory)
+            if secure_ast
+            else formatter.format_endpoints(endpoints)
+        )
 
         if output:
             output.write_text(formatted_output, encoding="utf-8")

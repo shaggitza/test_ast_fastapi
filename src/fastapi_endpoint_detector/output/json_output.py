@@ -5,7 +5,7 @@ JSON output formatter.
 import json
 from typing import Any
 
-from fastapi_endpoint_detector.models.endpoint import Endpoint
+from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointInventory
 from fastapi_endpoint_detector.models.report import AffectedEndpoint, AnalysisReport
 from fastapi_endpoint_detector.output.formatters import BaseFormatter, register_formatter
 
@@ -103,11 +103,23 @@ class JsonFormatter(BaseFormatter):
 
         return json.dumps(data, indent=self.indent, default=str)
 
+    def format_inventory(self, inventory: EndpointInventory) -> str:
+        """Format endpoints with whole-inventory strength metadata."""
+        data = {
+            "schema_version": 2,
+            "inventory_status": inventory.status.value,
+            "inventory_limitations": [
+                limitation.model_dump(mode="json") for limitation in inventory.limitations
+            ],
+            "total": len(inventory.endpoints),
+            "endpoints": [self._endpoint_to_dict(ep) for ep in inventory.endpoints],
+        }
+        return json.dumps(data, indent=self.indent, default=str)
+
     def format_endpoints(self, endpoints: list[Endpoint]) -> str:
-        """Format a list of endpoints as JSON."""
+        """Format a legacy endpoint list as JSON."""
         data = {
             "total": len(endpoints),
             "endpoints": [self._endpoint_to_dict(ep) for ep in endpoints],
         }
-
         return json.dumps(data, indent=self.indent, default=str)

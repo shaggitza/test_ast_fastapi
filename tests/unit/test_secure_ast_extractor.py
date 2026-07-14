@@ -6,7 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from fastapi_endpoint_detector.models.endpoint import EndpointDiscoveryStatus
+from fastapi_endpoint_detector.models.endpoint import (
+    EndpointDiscoveryStatus,
+    InventoryStatus,
+)
 from fastapi_endpoint_detector.parser.secure_ast_extractor import (
     SecureASTExtractor,
     SecureASTExtractorError,
@@ -101,8 +104,11 @@ def create_app():
         )
 
         assert SecureASTExtractor(tmp_path).extract_endpoints() == []
-        endpoints = SecureASTExtractor(tmp_path, app_entry="main:create_app").extract_endpoints()
+        inventory = SecureASTExtractor(tmp_path, app_entry="main:create_app").extract_inventory()
+        endpoints = inventory.endpoints
 
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert inventory.limitations
         assert [endpoint.identifier for endpoint in endpoints] == ["GET /api/known"]
         endpoint = endpoints[0]
         assert endpoint.discovery_status.value == "conditional"
@@ -153,7 +159,14 @@ def create_app():
 """
         )
 
-        assert SecureASTExtractor(tmp_path, app_entry="main:create_app").extract_endpoints() == []
+        extractor = SecureASTExtractor(tmp_path, app_entry="main:create_app")
+        inventory = extractor.extract_inventory()
+
+        assert inventory.endpoints == []
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert len(inventory.limitations) == 1
+        assert "unresolved call" in inventory.limitations[0].reason
+        assert extractor.extract_endpoints() == []
 
     def test_dynamic_app_state_marks_explicit_factory_conditional(self, tmp_path: Path) -> None:
         (tmp_path / "main.py").write_text(
@@ -213,6 +226,20 @@ def create_app():
     ) -> None:
         with pytest.raises(SecureASTExtractorError, match="MODULE:SYMBOL"):
             SecureASTExtractor(tmp_path, app_entry=entry)
+
+    def test_missing_selected_root_is_unavailable_not_established_empty(
+        self, tmp_path: Path
+    ) -> None:
+        app_file = tmp_path / "main.py"
+        app_file.write_text("value = 1\n")
+        extractor = SecureASTExtractor(app_file)
+
+        inventory = extractor.extract_inventory()
+
+        assert inventory.status == InventoryStatus.UNAVAILABLE
+        assert inventory.endpoints == []
+        assert inventory.limitations
+        assert extractor.extract_endpoints() == []
 
     def test_extract_simple_get_endpoint(self, tmp_path: Path) -> None:
         """Test extracting a simple GET endpoint."""

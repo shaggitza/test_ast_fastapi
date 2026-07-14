@@ -24,6 +24,14 @@ class EndpointMethod(str, Enum):
     WEBSOCKET = "WEBSOCKET"
 
 
+class InventoryStatus(str, Enum):
+    """Completeness of an execution-free route inventory."""
+
+    ESTABLISHED = "established"
+    CONDITIONAL = "conditional"
+    UNAVAILABLE = "unavailable"
+
+
 class EndpointDiscoveryStatus(str, Enum):
     """Strength of execution-free route discovery evidence."""
 
@@ -97,3 +105,28 @@ class Endpoint(BaseModel):
         """Unique identifier for this endpoint."""
         methods_str = ",".join(sorted(m.value for m in self.methods))
         return f"{methods_str} {self.path}"
+
+
+class EndpointInventory(BaseModel):
+    """Execution-free endpoints plus whole-inventory completeness evidence."""
+
+    endpoints: list[Endpoint] = Field(default_factory=list)
+    status: InventoryStatus = InventoryStatus.ESTABLISHED
+    limitations: tuple[EndpointDiscoveryCondition, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_strength(self) -> "EndpointInventory":
+        has_limitations = bool(self.limitations)
+        if (self.status == InventoryStatus.ESTABLISHED) == has_limitations:
+            raise ValueError(
+                "established inventory forbids limitations; conditional/unavailable require them"
+            )
+        if self.status == InventoryStatus.UNAVAILABLE and any(
+            endpoint.discovery_status != EndpointDiscoveryStatus.CONDITIONAL
+            for endpoint in self.endpoints
+        ):
+            raise ValueError("unavailable inventory may retain only conditional endpoints")
+        return self
+
+    class Config:
+        frozen = True

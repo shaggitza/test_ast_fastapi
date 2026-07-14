@@ -11,8 +11,10 @@ from fastapi_endpoint_detector.models.endpoint import (
     Endpoint,
     EndpointDiscoveryCondition,
     EndpointDiscoveryStatus,
+    EndpointInventory,
     EndpointMethod,
     HandlerInfo,
+    InventoryStatus,
 )
 from fastapi_endpoint_detector.models.report import (
     AffectedEndpoint,
@@ -33,6 +35,30 @@ from fastapi_endpoint_detector.output.json_output import JsonFormatter
 from fastapi_endpoint_detector.output.markdown_output import MarkdownFormatter
 from fastapi_endpoint_detector.output.text_output import TextFormatter
 from fastapi_endpoint_detector.output.yaml_output import YamlFormatter
+
+
+def test_inventory_strength_is_structured_and_visible() -> None:
+    limitation = EndpointDiscoveryCondition(
+        source_path=Path("/app/main.py"),
+        source_line=9,
+        reason="unknown plugin may register routes",
+    )
+    inventory = EndpointInventory(status=InventoryStatus.CONDITIONAL, limitations=(limitation,))
+
+    json_result = json.loads(JsonFormatter().format_inventory(inventory))
+    assert json_result["schema_version"] == 2
+    assert json_result["inventory_status"] == "conditional"
+    assert json_result["inventory_limitations"][0]["reason"] == limitation.reason
+    assert json_result["endpoints"] == []
+    for formatter in (
+        YamlFormatter(),
+        TextFormatter(),
+        MarkdownFormatter(),
+        HtmlFormatter(),
+    ):
+        rendered = formatter.format_inventory(inventory)
+        assert "conditional" in rendered
+        assert limitation.reason in rendered
 
 
 def test_conditional_discovery_is_structured_and_visible() -> None:

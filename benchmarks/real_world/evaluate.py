@@ -165,6 +165,8 @@ def _validate_census_entrypoint(item: object, side_name: str, record_key: tuple[
         file_name = occurrence.get("file")
         line = occurrence.get("line")
         end_line = occurrence.get("end_line")
+        discovery_status = occurrence.get("discovery_status", "established")
+        conditions = occurrence.get("discovery_conditions", [])
         if (
             not isinstance(file_name, str)
             or not file_name
@@ -179,25 +181,46 @@ def _validate_census_entrypoint(item: object, side_name: str, record_key: tuple[
             or not occurrence["module"]
             or not isinstance(occurrence.get("root"), str)
             or not occurrence["root"]
+            or discovery_status not in {"established", "conditional"}
+            or not isinstance(conditions, list)
+            or (discovery_status == "conditional") != bool(conditions)
         ):
             raise ValueError(f"route census has malformed occurrence for {record_key}")
+        for condition in conditions:
+            if not isinstance(condition, dict):
+                raise ValueError(f"route census has malformed occurrence for {record_key}")
+            source = condition.get("source")
+            source_line = condition.get("line")
+            reason = condition.get("reason")
+            if (
+                not isinstance(source, str)
+                or not source
+                or Path(source).is_absolute()
+                or ".." in Path(source).parts
+                or type(source_line) is not int
+                or source_line < 1
+                or not isinstance(reason, str)
+                or not reason.strip()
+            ):
+                raise ValueError(f"route census has malformed occurrence for {record_key}")
 
 
-def read_route_census(  # noqa: PLR0912
+def read_route_census(  # noqa: PLR0912, PLR0915
     path: Path,
     selected_truth_keys: set[tuple[str, int]],
     all_truth_keys: set[tuple[str, int]],
     scope: str,
 ) -> tuple[dict[tuple[str, int], dict[str, Any]], str]:
-    """Load a strict route-census v1 without feeding it into scoring."""
+    """Load route-census v1/v2 without feeding it into primary scoring."""
     content = path.read_bytes()
     records: dict[tuple[str, int], dict[str, Any]] = {}
     for line_number, line in enumerate(content.decode().splitlines(), start=1):
         if not line.strip():
             continue
         item = json.loads(line)
-        if not isinstance(item, dict) or item.get("schema_version") != 1:
-            raise ValueError(f"route census line {line_number} must use schema_version 1")
+        schema_version = item.get("schema_version") if isinstance(item, dict) else None
+        if not isinstance(item, dict) or schema_version not in {1, 2}:
+            raise ValueError(f"route census line {line_number} must use schema_version 1 or 2")
         record_key = key(item)
         if record_key in records:
             raise ValueError(f"duplicate route-census record: {record_key}")
@@ -219,12 +242,98 @@ def read_route_census(  # noqa: PLR0912
                 side_status not in {"completed", "partial", "unresolved"}
                 or not isinstance(entrypoint_items, list)
                 or not isinstance(unresolved, list)
+                or any(not isinstance(item, str) or not item.strip() for item in unresolved)
             ):
                 raise ValueError(f"route census has malformed {side_name} for {record_key}")
             for entrypoint_item in entrypoint_items:
                 _validate_census_entrypoint(entrypoint_item, side_name, record_key)
+            if schema_version == 2:
+                inventory_status = side.get("inventory_status")
+                limitations = side.get("inventory_limitations")
+                if inventory_status not in {"established", "conditional", "unavailable"}:
+                    raise ValueError(
+                        f"route census has invalid inventory strength for {record_key}"
+                    )
+                if not isinstance(limitations, list):
+                    raise ValueError(
+                        f"route census has invalid inventory limitations for {record_key}"
+                    )
+                expected_side_status = {
+                    "established": "completed",
+                    "conditional": "partial",
+                    "unavailable": "unresolved",
+                }[inventory_status]
+                if side_status != expected_side_status and not (
+                    inventory_status == "established" and side_status == "partial" and unresolved
+                ):
+                    raise ValueError(f"route census inventory/status mismatch for {record_key}")
+                if inventory_status == "established" and limitations:
+                    raise ValueError(
+                        f"route census established inventory has limitations for {record_key}"
+                    )
+                if inventory_status == "conditional" and not limitations:
+                    raise ValueError(
+                        f"route census conditional inventory lacks limitations for {record_key}"
+                    )
+                if inventory_status == "unavailable" and not limitations and not unresolved:
+                    raise ValueError(
+                        "route census unavailable inventory lacks limitations or "
+                        f"an operational error for {record_key}"
+                    )
+                if inventory_status == "unavailable" and any(
+                    occurrence.get("discovery_status", "established") == "established"
+                    for entrypoint_item in entrypoint_items
+                    for occurrence in entrypoint_item["occurrences"]
+                ):
+                    raise ValueError(
+                        "route census unavailable inventory has established "
+                        f"occurrences for {record_key}"
+                    )
+                for limitation in limitations:
+                    if not isinstance(limitation, dict):
+                        raise ValueError(
+                            f"route census has malformed inventory limitation for {record_key}"
+                        )
+                    source = limitation.get("source")
+                    source_line = limitation.get("line")
+                    reason = limitation.get("reason")
+                    if (
+                        not isinstance(source, str)
+                        or not source
+                        or Path(source).is_absolute()
+                        or ".." in Path(source).parts
+                        or type(source_line) is not int
+                        or source_line < 1
+                        or not isinstance(reason, str)
+                        or not reason.strip()
+                    ):
+                        raise ValueError(
+                            f"route census has malformed inventory limitation for {record_key}"
+                        )
+            else:
+                has_conditional = any(
+                    occurrence.get("discovery_status", "established") == "conditional"
+                    for entrypoint_item in entrypoint_items
+                    for occurrence in entrypoint_item["occurrences"]
+                )
+                inventory_status = (
+                    "conditional"
+                    if side_status == "completed" and has_conditional
+                    else "established"
+                    if side_status == "completed"
+                    else "unavailable"
+                )
+                limitations = []
+                side_status = {
+                    "established": "completed",
+                    "conditional": "partial",
+                    "unavailable": "unresolved",
+                }[inventory_status]
             filtered[side_name] = {
                 **side,
+                "status": side_status,
+                "inventory_status": inventory_status,
+                "inventory_limitations": limitations,
                 "entrypoints": filter_entrypoint_items(entrypoint_items, scope),
             }
         side_statuses = {filtered[side_name]["status"] for side_name in ("target", "baseline")}
@@ -234,13 +343,40 @@ def read_route_census(  # noqa: PLR0912
             derived_status = "unresolved"
         else:
             derived_status = "partial"
-        if status != derived_status or complete != (derived_status == "completed"):
+        if schema_version == 2 and (
+            status != derived_status or complete != (derived_status == "completed")
+        ):
             raise ValueError(f"route census complete/status mismatch for {record_key}")
+        filtered["status"] = derived_status
+        filtered["complete"] = derived_status == "completed"
         records[record_key] = filtered
     missing = selected_truth_keys - set(records)
     if missing:
         raise ValueError(f"route census is missing selected truth keys: {sorted(missing)}")
     return records, hashlib.sha256(content).hexdigest()
+
+
+def _inventory_items_by_strength(
+    record: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split route IDs by strongest physical occurrence across both snapshots."""
+    grouped: dict[str, dict[str, Any]] = {}
+    if record is not None:
+        for side_name in ("target", "baseline"):
+            for item in record[side_name]["entrypoints"]:
+                current = grouped.setdefault(item["id"], {**item, "occurrences": []})
+                current["occurrences"].extend(item["occurrences"])
+    established: list[dict[str, Any]] = []
+    conditional: list[dict[str, Any]] = []
+    for item in grouped.values():
+        if any(
+            occurrence.get("discovery_status", "established") == "established"
+            for occurrence in item["occurrences"]
+        ):
+            established.append(item)
+        else:
+            conditional.append(item)
+    return established, conditional
 
 
 def _stage_counts(
@@ -365,23 +501,20 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
         if census is not None:
             exact_observation_ids = (expected - predicted) & low_predicted
             exact_after_low = (expected - predicted) - exact_observation_ids
-            inventory_ids: set[str] = set()
-            if census_record is not None:
-                for side_name in ("target", "baseline"):
-                    inventory_ids.update(
-                        item["id"] for item in census_record[side_name]["entrypoints"]
-                    )
-            exact_propagation_ids = exact_after_low & inventory_ids
-            exact_after_inventory = exact_after_low - exact_propagation_ids
+            established_items, conditional_items = _inventory_items_by_strength(census_record)
+            established_ids = {item["id"] for item in established_items}
+            conditional_ids = {item["id"] for item in conditional_items}
+            exact_propagation_ids = exact_after_low & established_ids
+            exact_after_established = exact_after_low - exact_propagation_ids
+            exact_conditional_ids = exact_after_established & conditional_ids
+            exact_after_inventory = exact_after_established - exact_conditional_ids
+            inventory_complete = census_record is not None and census_record["complete"]
             exact_stage = _stage_counts(
                 len(exact_observation_ids),
                 len(exact_propagation_ids),
-                len(exact_after_inventory)
-                if census_record is not None and census_record["complete"]
-                else 0,
-                len(exact_after_inventory)
-                if census_record is None or not census_record["complete"]
-                else 0,
+                len(exact_after_inventory) if inventory_complete else 0,
+                len(exact_conditional_ids)
+                + (len(exact_after_inventory) if not inventory_complete else 0),
             )
             if sum(exact_stage.values()) != fn:
                 raise AssertionError(f"exact FN-stage partition failed for {record_key}")
@@ -444,25 +577,29 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
                 for index, claim in enumerate(normalized_low["expected_claims"])
                 if index not in normalized_low["_matched_expected"]
             ]
-            census_items: list[dict[str, Any]] = []
-            if census_record is not None:
-                for side_name in ("target", "baseline"):
-                    census_items.extend(census_record[side_name]["entrypoints"])
+            established_items, conditional_items = _inventory_items_by_strength(census_record)
             inventory_match = match_claims(
                 record_key[0],
                 normalized_after_low,
-                claims({"affected_entrypoints": census_items}),
+                claims({"affected_entrypoints": established_items}),
             )
-            normalized_remaining = inventory_match["fn"]
+            after_established = [
+                claim
+                for index, claim in enumerate(inventory_match["expected_claims"])
+                if index not in inventory_match["_matched_expected"]
+            ]
+            conditional_match = match_claims(
+                record_key[0],
+                after_established,
+                claims({"affected_entrypoints": conditional_items}),
+            )
+            normalized_remaining = conditional_match["fn"]
+            inventory_complete = census_record is not None and census_record["complete"]
             normalized_stage = _stage_counts(
                 normalized_low["tp"],
                 inventory_match["tp"],
-                normalized_remaining
-                if census_record is not None and census_record["complete"]
-                else 0,
-                normalized_remaining
-                if census_record is None or not census_record["complete"]
-                else 0,
+                normalized_remaining if inventory_complete else 0,
+                conditional_match["tp"] + (normalized_remaining if not inventory_complete else 0),
             )
             if sum(normalized_stage.values()) != normalized["fn"]:
                 raise AssertionError(f"normalized FN-stage partition failed for {record_key}")

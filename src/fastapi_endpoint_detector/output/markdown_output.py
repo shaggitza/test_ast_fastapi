@@ -4,7 +4,7 @@ Markdown output formatter.
 
 from pathlib import Path
 
-from fastapi_endpoint_detector.models.endpoint import Endpoint
+from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointInventory
 from fastapi_endpoint_detector.models.report import AnalysisReport, ConfidenceLevel
 from fastapi_endpoint_detector.output.formatters import BaseFormatter, register_formatter
 
@@ -186,6 +186,18 @@ class MarkdownFormatter(BaseFormatter):
                 lines.append(f"- {warning}")
             lines.append("")
 
+        return "\n".join(lines)
+
+    def format_inventory(self, inventory: EndpointInventory) -> str:
+        """Format endpoints with visible whole-inventory strength."""
+        lines = [f"**Inventory status:** `{inventory.status.value}`", ""]
+        for item in inventory.limitations:
+            lines.append(
+                f"- Limitation: `{item.source_path}:{item.source_line}` — {item.reason}"
+            )
+        if inventory.limitations:
+            lines.append("")
+        lines.append(self.format_endpoints(inventory.endpoints))
         return "\n".join(lines)
 
     def format_endpoints(self, endpoints: list[Endpoint]) -> str:
