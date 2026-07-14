@@ -435,9 +435,7 @@ def run():
 """
         )
 
-        inventory = SecureASTExtractor(
-            tmp_path, bootstrap_entry="main:run"
-        ).extract_inventory()
+        inventory = SecureASTExtractor(tmp_path, bootstrap_entry="main:run").extract_inventory()
         assert inventory.endpoints == []
         assert inventory.status == InventoryStatus.CONDITIONAL
         assert inventory.limitations
@@ -1795,13 +1793,19 @@ app = create_app()
         module_app.write_text(
             """from fastapi import FastAPI
 app = FastAPI()
+@app.get('/known')
+def known(): return None
 async def handler(websocket): pass
 app.add_api_websocket_route(dynamic_path, handler)
 app.add_websocket_route('/missing', unknown_handler)
 """
         )
         module_inventory = SecureASTExtractor(module_app).extract_inventory()
-        assert module_inventory.endpoints == []
+        assert [endpoint.identifier for endpoint in module_inventory.endpoints] == ["GET /known"]
+        assert all(
+            endpoint.discovery_status == EndpointDiscoveryStatus.ESTABLISHED
+            for endpoint in module_inventory.endpoints
+        )
         assert module_inventory.status == InventoryStatus.CONDITIONAL
         assert module_inventory.limitations
 
