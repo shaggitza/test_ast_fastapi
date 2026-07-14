@@ -1,0 +1,1013 @@
+{
+  "app_entry_config": {
+    "khoj-ai/khoj": "main:app",
+    "langflow-ai/langflow": "main:create_app"
+  },
+  "bootstrap_entry_config": {
+    "khoj-ai/khoj": "main:run"
+  },
+  "candidate": {
+    "command": "uv run --frozen fastapi-endpoint-detector analyze",
+    "config_hash": "0cd3c239ac7d",
+    "dirty": true,
+    "dirty_sha256": "c88d0dc01885f4b2fde1e1e12d2cfec27888dce85cd4f07b892bb789345f3ac9",
+    "git_sha": "c05dfef6f1b44287fe1226c3f6403c4e7219d8c5",
+    "id": "fastapi-endpoint-detector/0.1.0/c05dfef6f1b4+dirty.c88d0dc01885/0cd3c239ac7d",
+    "name": "fastapi-endpoint-detector",
+    "uv_lock_sha256": "8efb5b6ad171aaa25ca89f27b44b6d9243216619f616101d3e553a1919e19ae8",
+    "uv_version": "uv 0.9.18",
+    "version": "0.1.0"
+  },
+  "configuration": {
+    "allow_upstream_execution": false,
+    "cache": "/tmp/current-corpus-cache",
+    "dry_run": false,
+    "filters": {
+      "limit": null,
+      "prs": [],
+      "repositories": []
+    },
+    "manifest": "/home/shaggi/test_ast_fastapi/benchmarks/results/bootstrap-predictions-v1/scip/manifest.json",
+    "output": "/home/shaggi/test_ast_fastapi/benchmarks/results/bootstrap-predictions-v1/scip/predictions.jsonl",
+    "timeout_seconds": 900.0,
+    "use_scip": true
+  },
+  "corpus": {
+    "path": "/home/shaggi/test_ast_fastapi/benchmarks/real_world/corpus.json",
+    "sha256": "7c4ecfd562d2e01079a955e8214afd4e9e1a408f73ed392d4606eecbc649f062"
+  },
+  "created_at": "2026-07-14T13:55:45.483351+00:00",
+  "git": {
+    "candidate_sha": "c05dfef6f1b44287fe1226c3f6403c4e7219d8c5"
+  },
+  "platform": "Linux-6.6.114.1-microsoft-standard-WSL2-aarch64-with-glibc2.39",
+  "prediction_schema_version": 2,
+  "prs": [
+    {
+      "base_sha": "42f5c3d6f78415df90027b08a2b968fe7886965f",
+      "configured_app_entry": null,
+      "configured_app_root": "backend/open_webui",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "0f8846b7fc8c210945366defbd1ed941b039a691",
+      "pr": 26924,
+      "reason": "analyzer failed (1): stdout:\nError: Missing 'scip-query'. Install scip-query@0.16.0, \n@sourcegraph/scip-python@0.6.6, and SCIP CLI.\nstderr:\n/tmp/current-analyzer-yzk1hb9e/target/backend/open_webui/tools/knowledge_fs.py:36: SyntaxWarning: invalid escape sequence '\\|'\n  \"\"\"Detect if a pattern looks like regex (\\|, .*, .+, \\d, \\w, \\s, [...]).\"\"\"\n/tmp/current-analyzer-yzk1hb9e/target/backend/open_webui/tools/knowledge_fs.py:38: SyntaxWarning: invalid escape sequence '\\|'\n  '\\|' in pattern\n/tmp/current-analyzer-yzk1hb9e/target/backend/open_webui/tools/knowledge_fs.py:42: SyntaxWarning: invalid escape sequence '\\d'\n  or '\\d' in pattern\n/tmp/current-analyzer-yzk1hb9e/target/backend/open_webui/tools/knowledge_fs.py:43: SyntaxWarning: invalid escape sequence '\\w'\n  or '\\w' in pattern\n/tmp/current-analyzer-yzk1hb9e/target/backend/open_webui/tools/knowledge_fs.py:44: SyntaxWarning: invalid escape sequence '\\s'\n  or '\\s' in pattern\n/tmp/current-analyzer-yzk1hb9e/target/backend/open_webui/tools/knowledge_fs.py:50: SyntaxWarning: invalid escape sequence '\\|'\n  \"\"\"Normalize POSIX BRE patterns to Python regex (\\| \u2192 |).\"\"\"\n/tmp/current-analyzer-yzk1hb9e/target/backend/open_webui/tools/knowledge_fs.py:51: SyntaxWarning: invalid escape sequence '\\|'\n  return pattern.replace('\\\\|', '|').replace('\\|', '|')\nAborted!",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.014526564977131784,
+        "diff": 0.0036028629983775318,
+        "parent_resolution": 0.0024479340063408017,
+        "total": 2.57168754999293,
+        "worktree": 1.1493048159754835
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": null,
+      "configured_app_root": "backend/open_webui",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "42f5c3d6f78415df90027b08a2b968fe7886965f",
+      "pr": 26914,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.3443990610539913e-05
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": null,
+      "configured_app_root": "backend/open_webui",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "274729aa477826a041b4e1f044f085757b839baa",
+      "pr": 26913,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 2.453045453876257e-06
+      }
+    },
+    {
+      "base_sha": "0f8846b7fc8c210945366defbd1ed941b039a691",
+      "configured_app_entry": null,
+      "configured_app_root": "backend/open_webui",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "f4a6ea9300f130dc2f755d82d935f18160b8f5d2",
+      "pr": 26911,
+      "reason": "analyzer failed (1): stdout:\nError: Missing 'scip-query'. Install scip-query@0.16.0, \n@sourcegraph/scip-python@0.6.6, and SCIP CLI.\nstderr:\n/tmp/current-analyzer-_0x_xv1j/target/backend/open_webui/tools/knowledge_fs.py:36: SyntaxWarning: invalid escape sequence '\\|'\n  \"\"\"Detect if a pattern looks like regex (\\|, .*, .+, \\d, \\w, \\s, [...]).\"\"\"\n/tmp/current-analyzer-_0x_xv1j/target/backend/open_webui/tools/knowledge_fs.py:38: SyntaxWarning: invalid escape sequence '\\|'\n  '\\|' in pattern\n/tmp/current-analyzer-_0x_xv1j/target/backend/open_webui/tools/knowledge_fs.py:42: SyntaxWarning: invalid escape sequence '\\d'\n  or '\\d' in pattern\n/tmp/current-analyzer-_0x_xv1j/target/backend/open_webui/tools/knowledge_fs.py:43: SyntaxWarning: invalid escape sequence '\\w'\n  or '\\w' in pattern\n/tmp/current-analyzer-_0x_xv1j/target/backend/open_webui/tools/knowledge_fs.py:44: SyntaxWarning: invalid escape sequence '\\s'\n  or '\\s' in pattern\n/tmp/current-analyzer-_0x_xv1j/target/backend/open_webui/tools/knowledge_fs.py:50: SyntaxWarning: invalid escape sequence '\\|'\n  \"\"\"Normalize POSIX BRE patterns to Python regex (\\| \u2192 |).\"\"\"\n/tmp/current-analyzer-_0x_xv1j/target/backend/open_webui/tools/knowledge_fs.py:51: SyntaxWarning: invalid escape sequence '\\|'\n  return pattern.replace('\\\\|', '|').replace('\\|', '|')\nAborted!",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.015113107045181096,
+        "diff": 0.0035957449581474066,
+        "parent_resolution": 0.0019437249866314232,
+        "total": 2.5497844050405547,
+        "worktree": 1.0969086840050295
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": null,
+      "configured_app_root": "backend/open_webui",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "65a5fad7b97db99d490d81f4e0860282c3a4543c",
+      "pr": 26907,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.0628020390868187e-05
+      }
+    },
+    {
+      "base_sha": "274729aa477826a041b4e1f044f085757b839baa",
+      "configured_app_entry": null,
+      "configured_app_root": "backend/open_webui",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "f8c0d2fdd690ecbe0444617c91dba3be45d5681e",
+      "pr": 26906,
+      "reason": "analyzer failed (1): stdout:\nError: Missing 'scip-query'. Install scip-query@0.16.0, \n@sourcegraph/scip-python@0.6.6, and SCIP CLI.\nstderr:\n/tmp/current-analyzer-d3a2f2b4/target/backend/open_webui/tools/knowledge_fs.py:36: SyntaxWarning: invalid escape sequence '\\|'\n  \"\"\"Detect if a pattern looks like regex (\\|, .*, .+, \\d, \\w, \\s, [...]).\"\"\"\n/tmp/current-analyzer-d3a2f2b4/target/backend/open_webui/tools/knowledge_fs.py:38: SyntaxWarning: invalid escape sequence '\\|'\n  '\\|' in pattern\n/tmp/current-analyzer-d3a2f2b4/target/backend/open_webui/tools/knowledge_fs.py:42: SyntaxWarning: invalid escape sequence '\\d'\n  or '\\d' in pattern\n/tmp/current-analyzer-d3a2f2b4/target/backend/open_webui/tools/knowledge_fs.py:43: SyntaxWarning: invalid escape sequence '\\w'\n  or '\\w' in pattern\n/tmp/current-analyzer-d3a2f2b4/target/backend/open_webui/tools/knowledge_fs.py:44: SyntaxWarning: invalid escape sequence '\\s'\n  or '\\s' in pattern\n/tmp/current-analyzer-d3a2f2b4/target/backend/open_webui/tools/knowledge_fs.py:50: SyntaxWarning: invalid escape sequence '\\|'\n  \"\"\"Normalize POSIX BRE patterns to Python regex (\\| \u2192 |).\"\"\"\n/tmp/current-analyzer-d3a2f2b4/target/backend/open_webui/tools/knowledge_fs.py:51: SyntaxWarning: invalid escape sequence '\\|'\n  return pattern.replace('\\\\|', '|').replace('\\|', '|')\nAborted!",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.014641701010987163,
+        "diff": 0.00336792302550748,
+        "parent_resolution": 0.00204330898122862,
+        "total": 2.476251262007281,
+        "worktree": 1.0736220949911512
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": null,
+      "configured_app_root": "backend/open_webui",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "8c71897bc0df861032ace8baae0facdafb7d6195",
+      "pr": 26881,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.0135991033166647e-05
+      }
+    },
+    {
+      "base_sha": "b711935dd57dbc223ebbf410175a8bbe7e4efafb",
+      "configured_app_entry": null,
+      "configured_app_root": "backend/open_webui",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "ecd48e2f718220a6400ecf49eafd4867a38feb10",
+      "pr": 26642,
+      "reason": "analyzer failed (1): stdout:\nError: Missing 'scip-query'. Install scip-query@0.16.0, \n@sourcegraph/scip-python@0.6.6, and SCIP CLI.\nstderr:\n/tmp/current-analyzer-qahh5g3d/target/backend/open_webui/tools/knowledge_fs.py:36: SyntaxWarning: invalid escape sequence '\\|'\n  \"\"\"Detect if a pattern looks like regex (\\|, .*, .+, \\d, \\w, \\s, [...]).\"\"\"\n/tmp/current-analyzer-qahh5g3d/target/backend/open_webui/tools/knowledge_fs.py:38: SyntaxWarning: invalid escape sequence '\\|'\n  '\\|' in pattern\n/tmp/current-analyzer-qahh5g3d/target/backend/open_webui/tools/knowledge_fs.py:42: SyntaxWarning: invalid escape sequence '\\d'\n  or '\\d' in pattern\n/tmp/current-analyzer-qahh5g3d/target/backend/open_webui/tools/knowledge_fs.py:43: SyntaxWarning: invalid escape sequence '\\w'\n  or '\\w' in pattern\n/tmp/current-analyzer-qahh5g3d/target/backend/open_webui/tools/knowledge_fs.py:44: SyntaxWarning: invalid escape sequence '\\s'\n  or '\\s' in pattern\n/tmp/current-analyzer-qahh5g3d/target/backend/open_webui/tools/knowledge_fs.py:50: SyntaxWarning: invalid escape sequence '\\|'\n  \"\"\"Normalize POSIX BRE patterns to Python regex (\\| \u2192 |).\"\"\"\n/tmp/current-analyzer-qahh5g3d/target/backend/open_webui/tools/knowledge_fs.py:51: SyntaxWarning: invalid escape sequence '\\|'\n  return pattern.replace('\\\\|', '|').replace('\\|', '|')\nAborted!",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.013769777957350016,
+        "diff": 0.09723694802960381,
+        "parent_resolution": 0.0016934580053202808,
+        "total": 2.562718297005631,
+        "worktree": 1.0908360640169121
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": null,
+      "configured_app_root": "backend/open_webui",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "4b55e69640627304d291233dc40aaa5a6e15e272",
+      "pr": 26641,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.0924006346613169e-05
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": null,
+      "configured_app_root": "backend/open_webui",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "a78f0c030261954f9dd5bf0e2b7e1a4e7d294b26",
+      "pr": 26625,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 2.362008672207594e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": null,
+      "configured_app_root": "backend/open_webui",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "980786f574f4d21eb19fc1582fa2831acfe9d983",
+      "pr": 26463,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.968001015484333e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": null,
+      "configured_app_root": "backend/open_webui",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "2d7fc04bfbbd8747114500afeabdb690440d2054",
+      "pr": 26454,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.3974029570817947e-05
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": null,
+      "configured_app_root": "backend/open_webui",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "9ed7af823c088640ed7bc8758d431a6a4932b15e",
+      "pr": 26409,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 2.1649757400155067e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": null,
+      "configured_app_root": "backend/open_webui",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "1014c212a4b436c0b8da2f04df7833912d81ff1c",
+      "pr": 26406,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.6730045899748802e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": null,
+      "configured_app_root": "backend/open_webui",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "0e5540c2b295e38906be7ece4d3b104303d6c519",
+      "pr": 26405,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.968001015484333e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": null,
+      "configured_app_root": "backend/open_webui",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "651a02ed2f3f1f887d13ccd77dbd3495fd8ffe16",
+      "pr": 26391,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.968001015484333e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": null,
+      "configured_app_root": "backend/open_webui",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "b711935dd57dbc223ebbf410175a8bbe7e4efafb",
+      "pr": 26388,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 2.5579938665032387e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": null,
+      "configured_app_root": "backend/open_webui",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "6e3020b942482370e834e364ada5981c11a0785d",
+      "pr": 26386,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.7720158211886883e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": null,
+      "configured_app_root": "backend/open_webui",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "4d2e13cf2bcc451b33bb6374bea4d2163e6cc94c",
+      "pr": 26385,
+      "reason": "base parent is unresolved: expected exactly one parent outside the PR commit set, found 2 of 2 parents",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.013871436996851116,
+        "total": 0.015748234989587218
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": null,
+      "configured_app_root": "backend/open_webui",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "dc1bc41d2edc022dbae11db2159cedb5369c68cd",
+      "pr": 26384,
+      "reason": "non_python_change",
+      "repository": "open-webui/open-webui",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 6.7899818532168865e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": "main:create_app",
+      "configured_app_root": "src/backend/base/langflow",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "c578a4b07047a78aa3447eb5f512ec4328ee5114",
+      "pr": 14009,
+      "reason": "non_python_change",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 2.461019903421402e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": "main:create_app",
+      "configured_app_root": "src/backend/base/langflow",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "db5f3b08c96cf98cf6bee29b41cecdebc0476107",
+      "pr": 14004,
+      "reason": "non_python_change",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 2.9529910534620285e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": "main:create_app",
+      "configured_app_root": "src/backend/base/langflow",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "cd3f2b994e9f6eb55f2e674ae215fed6491b96c8",
+      "pr": 13996,
+      "reason": "non_python_change",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.7710262909531593e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": "main:create_app",
+      "configured_app_root": "src/backend/base/langflow",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "7ffd040bdeed991888a8b6a0edd2eb6cf50d931c",
+      "pr": 13995,
+      "reason": "non_python_change",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 2.5579938665032387e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": "main:create_app",
+      "configured_app_root": "src/backend/base/langflow",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "1ba8b827b64ce40a135202c65dda9e887adaa021",
+      "pr": 13992,
+      "reason": "non_python_change",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 2.262997440993786e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": "main:create_app",
+      "configured_app_root": "src/backend/base/langflow",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "bf818073edbcf3dd00a7cee36fcb9aa74fcc90a9",
+      "pr": 13987,
+      "reason": "non_python_change",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 4.231987986713648e-06
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": "main:create_app",
+      "configured_app_root": "src/backend/base/langflow",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "c98878b2c0bbc7bb8b070728b8e4f7985527b0fd",
+      "pr": 13985,
+      "reason": "base parent is unresolved: expected exactly one parent outside the PR commit set, found 2 of 2 parents",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.013208932999987155,
+        "total": 0.015060635982081294
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": "main:create_app",
+      "configured_app_root": "src/backend/base/langflow",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "91cb382895ea2410e3be0287de0788eaef45a679",
+      "pr": 13982,
+      "reason": "non_python_change",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 5.019013769924641e-06
+      }
+    },
+    {
+      "base_sha": "c4db860a792390a5fd9cf79556ac9ce026395a03",
+      "configured_app_entry": "main:create_app",
+      "configured_app_root": "src/backend/base/langflow",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "c17051ccdd25b760f9dc2b720b4b7f4a16b91bbd",
+      "pr": 13976,
+      "reason": "analyzer failed (1): stdout:\nError: Missing 'scip-query'. Install scip-query@0.16.0, \n@sourcegraph/scip-python@0.6.6, and SCIP CLI.\nstderr:\nAborted!",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.013512630015611649,
+        "diff": 0.006178529991302639,
+        "parent_resolution": 0.001828773005399853,
+        "total": 3.944529501022771,
+        "worktree": 2.569336369051598
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": "main:create_app",
+      "configured_app_root": "src/backend/base/langflow",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "60f3ab2112f8428483a3d49cd07242d19f3a7924",
+      "pr": 13975,
+      "reason": "non_python_change",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.1914991773664951e-05
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": "main:create_app",
+      "configured_app_root": "src/backend/base/langflow",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "b40e4aa02661dcc9d630e1e97a0af45d45e88ae4",
+      "pr": 13971,
+      "reason": "non_python_change",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 3.872031811624765e-06
+      }
+    },
+    {
+      "base_sha": "a91c3fdf7abdd149893ce7f9797256219b6b0d57",
+      "configured_app_entry": "main:create_app",
+      "configured_app_root": "src/backend/base/langflow",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "6bd0e056da0dcb41e08ef28a4aa2d33d5282da6e",
+      "pr": 13968,
+      "reason": "analyzer failed (1): stdout:\nError: Missing 'scip-query'. Install scip-query@0.16.0, \n@sourcegraph/scip-python@0.6.6, and SCIP CLI.\nstderr:\nAborted!",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.014625741983763874,
+        "diff": 0.03805693401955068,
+        "parent_resolution": 0.001465622044634074,
+        "total": 3.6991777190123685,
+        "worktree": 2.294304925017059
+      }
+    },
+    {
+      "base_sha": "2b4b628b0cd61d25910a3218e1134a062d573aa9",
+      "configured_app_entry": "main:create_app",
+      "configured_app_root": "src/backend/base/langflow",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "c4db860a792390a5fd9cf79556ac9ce026395a03",
+      "pr": 13966,
+      "reason": "analyzer failed (1): stdout:\nError: Missing 'scip-query'. Install scip-query@0.16.0, \n@sourcegraph/scip-python@0.6.6, and SCIP CLI.\nstderr:\nAborted!",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.016273065994028002,
+        "diff": 0.003338153997901827,
+        "parent_resolution": 0.0015895370161160827,
+        "total": 3.587146206991747,
+        "worktree": 2.2673728009685874
+      }
+    },
+    {
+      "base_sha": "b40e4aa02661dcc9d630e1e97a0af45d45e88ae4",
+      "configured_app_entry": "main:create_app",
+      "configured_app_root": "src/backend/base/langflow",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "a69a47ff1b5c99ce9c50edc4df45de4397151f17",
+      "pr": 13960,
+      "reason": "analyzer failed (1): stdout:\nError: Missing 'scip-query'. Install scip-query@0.16.0, \n@sourcegraph/scip-python@0.6.6, and SCIP CLI.\nstderr:\nAborted!",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.017054635973181576,
+        "diff": 0.08741187601117417,
+        "parent_resolution": 0.0015650949790142477,
+        "total": 3.4863212619675323,
+        "worktree": 2.0797012969851494
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": "main:create_app",
+      "configured_app_root": "src/backend/base/langflow",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "8136694a5c64f149aa5dd2c9eabf14437cbe4534",
+      "pr": 13959,
+      "reason": "non_python_change",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.1021969839930534e-05
+      }
+    },
+    {
+      "base_sha": "df8752a2d712f04f13f833b17ef8154dd042868d",
+      "configured_app_entry": "main:create_app",
+      "configured_app_root": "src/backend/base/langflow",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "106760a5fcca908c4f2921ea4016e68bfe2a62d6",
+      "pr": 13954,
+      "reason": "analyzer failed (1): stdout:\nError: Missing 'scip-query'. Install scip-query@0.16.0, \n@sourcegraph/scip-python@0.6.6, and SCIP CLI.\nstderr:\nAborted!",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.01678516500396654,
+        "diff": 0.010921639972366393,
+        "parent_resolution": 0.002008012030273676,
+        "total": 3.6320885290042497,
+        "worktree": 2.2798523849924095
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": "main:create_app",
+      "configured_app_root": "src/backend/base/langflow",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "0a0732717b0c46cdc38a29d0442d25349f7815b4",
+      "pr": 13953,
+      "reason": "non_python_change",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.5509023796766996e-05
+      }
+    },
+    {
+      "base_sha": "737c6b578f2511442d2c1e5ed8ae3ef6b21e6e4e",
+      "configured_app_entry": "main:create_app",
+      "configured_app_root": "src/backend/base/langflow",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "ab14dc0c21cb3e4bcc96cd35e84147f0a2279dda",
+      "pr": 13952,
+      "reason": "analyzer failed (1): stdout:\nError: Missing 'scip-query'. Install scip-query@0.16.0, \n@sourcegraph/scip-python@0.6.6, and SCIP CLI.\nstderr:\nAborted!",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.014781078964006156,
+        "diff": 0.004409470013342798,
+        "parent_resolution": 0.0015087930369190872,
+        "total": 3.5235338859492913,
+        "worktree": 2.17325371602783
+      }
+    },
+    {
+      "base_sha": "4f8ab3375e15f41ed29b09894ec17f4553160ae1",
+      "configured_app_entry": "main:create_app",
+      "configured_app_root": "src/backend/base/langflow",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "203a67c164c2cd73c82e4fed7b399c8247fad7b7",
+      "pr": 13950,
+      "reason": "analyzer failed (1): stdout:\nError: Missing 'scip-query'. Install scip-query@0.16.0, \n@sourcegraph/scip-python@0.6.6, and SCIP CLI.\nstderr:\nAborted!",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.01592521305428818,
+        "diff": 0.004352047049906105,
+        "parent_resolution": 0.0019439279567450285,
+        "total": 3.5557244780356996,
+        "worktree": 2.2301144010270946
+      }
+    },
+    {
+      "base_sha": "e6c63b8cf459ee2659c35acb1208182fd8c530d3",
+      "configured_app_entry": "main:create_app",
+      "configured_app_root": "src/backend/base/langflow",
+      "configured_bootstrap_entry": null,
+      "merge_sha": "4f8ab3375e15f41ed29b09894ec17f4553160ae1",
+      "pr": 13949,
+      "reason": "analyzer failed (1): stdout:\nError: Missing 'scip-query'. Install scip-query@0.16.0, \n@sourcegraph/scip-python@0.6.6, and SCIP CLI.\nstderr:\nAborted!",
+      "repository": "langflow-ai/langflow",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.014808235981035978,
+        "diff": 0.003787751018535346,
+        "parent_resolution": 0.0019606470013968647,
+        "total": 3.5224945659865625,
+        "worktree": 2.1853984009940177
+      }
+    },
+    {
+      "base_sha": "f285132ff6aee5660de9429d4482ad65937c64c2",
+      "configured_app_entry": "main:app",
+      "configured_app_root": "src/khoj",
+      "configured_bootstrap_entry": "main:run",
+      "merge_sha": "3c3d8ee5747cbdafd4249d72ba229ceba579cba4",
+      "pr": 1349,
+      "reason": "analyzer failed (1): stdout:\nError: Missing 'scip-query'. Install scip-query@0.16.0, \n@sourcegraph/scip-python@0.6.6, and SCIP CLI.\nstderr:\nAborted!",
+      "repository": "khoj-ai/khoj",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.01508152496535331,
+        "diff": 0.003465749032329768,
+        "parent_resolution": 0.0018392080091871321,
+        "total": 1.0764419579645619,
+        "worktree": 0.5288134529837407
+      }
+    },
+    {
+      "base_sha": "60608845a42b7d9bf6549ca9650c4d9c925e85fa",
+      "configured_app_entry": "main:app",
+      "configured_app_root": "src/khoj",
+      "configured_bootstrap_entry": "main:run",
+      "merge_sha": "0292d0f33418f364a419b99d08c1343e35d2b679",
+      "pr": 1348,
+      "reason": "analyzer failed (1): stdout:\nError: Missing 'scip-query'. Install scip-query@0.16.0, \n@sourcegraph/scip-python@0.6.6, and SCIP CLI.\nstderr:\nAborted!",
+      "repository": "khoj-ai/khoj",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.01602804398862645,
+        "diff": 0.003075646993238479,
+        "parent_resolution": 0.0019624189590103924,
+        "total": 1.0606928109773435,
+        "worktree": 0.5176368880202062
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": "main:app",
+      "configured_app_root": "src/khoj",
+      "configured_bootstrap_entry": "main:run",
+      "merge_sha": "f285132ff6aee5660de9429d4482ad65937c64c2",
+      "pr": 1319,
+      "reason": "non_python_change",
+      "repository": "khoj-ai/khoj",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.033296575769782e-05
+      }
+    },
+    {
+      "base_sha": "e1da98067c1e3eec584ff0381b6b4242e1644adc",
+      "configured_app_entry": "main:app",
+      "configured_app_root": "src/khoj",
+      "configured_bootstrap_entry": "main:run",
+      "merge_sha": "60608845a42b7d9bf6549ca9650c4d9c925e85fa",
+      "pr": 1312,
+      "reason": "analyzer failed (1): stdout:\nError: Missing 'scip-query'. Install scip-query@0.16.0, \n@sourcegraph/scip-python@0.6.6, and SCIP CLI.\nstderr:\nAborted!",
+      "repository": "khoj-ai/khoj",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.014818274008575827,
+        "diff": 0.0033661570050753653,
+        "parent_resolution": 0.001992040954064578,
+        "total": 1.0426649519940838,
+        "worktree": 0.510508959996514
+      }
+    },
+    {
+      "base_sha": "7475a781bc151bd97240f7c0ff667ce01d6f6378",
+      "configured_app_entry": "main:app",
+      "configured_app_root": "src/khoj",
+      "configured_bootstrap_entry": "main:run",
+      "merge_sha": "8b8504edb8be2cde7ef16f5be476864be0810093",
+      "pr": 1296,
+      "reason": "analyzer failed (1): stdout:\nError: Missing 'scip-query'. Install scip-query@0.16.0, \n@sourcegraph/scip-python@0.6.6, and SCIP CLI.\nstderr:\nAborted!",
+      "repository": "khoj-ai/khoj",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.016435662982985377,
+        "diff": 0.003444787987973541,
+        "parent_resolution": 0.0022815660340711474,
+        "total": 1.0532402249518782,
+        "worktree": 0.5119758790242486
+      }
+    },
+    {
+      "base_sha": "e8631261400e0a04c5063e91e498b549976ffc53",
+      "configured_app_entry": "main:app",
+      "configured_app_root": "src/khoj",
+      "configured_bootstrap_entry": "main:run",
+      "merge_sha": "530443a4f6ccd5281cefe8bbb82ab146fddf952b",
+      "pr": 1292,
+      "reason": "analyzer failed (1): stdout:\nError: Missing 'scip-query'. Install scip-query@0.16.0, \n@sourcegraph/scip-python@0.6.6, and SCIP CLI.\nstderr:\nAborted!",
+      "repository": "khoj-ai/khoj",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.014220820041373372,
+        "diff": 0.003260698984377086,
+        "parent_resolution": 0.0021458580158650875,
+        "total": 1.073452395037748,
+        "worktree": 0.5237321369932033
+      }
+    },
+    {
+      "base_sha": "530443a4f6ccd5281cefe8bbb82ab146fddf952b",
+      "configured_app_entry": "main:app",
+      "configured_app_root": "src/khoj",
+      "configured_bootstrap_entry": "main:run",
+      "merge_sha": "0e169159f8fbaba58d32a60ba2e236fb7225f536",
+      "pr": 1284,
+      "reason": "analyzer failed (1): stdout:\nError: Missing 'scip-query'. Install scip-query@0.16.0, \n@sourcegraph/scip-python@0.6.6, and SCIP CLI.\nstderr:\nAborted!",
+      "repository": "khoj-ai/khoj",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.014322913018986583,
+        "diff": 0.0036505410098470747,
+        "parent_resolution": 0.002047690039034933,
+        "total": 1.0603695549652912,
+        "worktree": 0.5137829530285671
+      }
+    },
+    {
+      "base_sha": "678549c6b06c9db90aa9156db3bc740f432505b5",
+      "configured_app_entry": "main:app",
+      "configured_app_root": "src/khoj",
+      "configured_bootstrap_entry": "main:run",
+      "merge_sha": "e8631261400e0a04c5063e91e498b549976ffc53",
+      "pr": 1277,
+      "reason": "analyzer failed (1): stdout:\nError: Missing 'scip-query'. Install scip-query@0.16.0, \n@sourcegraph/scip-python@0.6.6, and SCIP CLI.\nstderr:\nAborted!",
+      "repository": "khoj-ai/khoj",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.014381780987605453,
+        "diff": 0.0031863439944572747,
+        "parent_resolution": 0.0017891849856823683,
+        "total": 1.0447336659999564,
+        "worktree": 0.5174458049586974
+      }
+    },
+    {
+      "base_sha": "0e9878c070993697ed546e46871428dfb40d4c77",
+      "configured_app_entry": "main:app",
+      "configured_app_root": "src/khoj",
+      "configured_bootstrap_entry": "main:run",
+      "merge_sha": "6735d33af2ee0e8d6ccacd4b27f56dcb9816ff14",
+      "pr": 1271,
+      "reason": "analyzer failed (1): stdout:\nError: Missing 'scip-query'. Install scip-query@0.16.0, \n@sourcegraph/scip-python@0.6.6, and SCIP CLI.\nstderr:\nAborted!",
+      "repository": "khoj-ai/khoj",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.014347731019370258,
+        "diff": 0.002904906985349953,
+        "parent_resolution": 0.0018777359509840608,
+        "total": 1.0513937479699962,
+        "worktree": 0.5155279620084912
+      }
+    },
+    {
+      "base_sha": "6735d33af2ee0e8d6ccacd4b27f56dcb9816ff14",
+      "configured_app_entry": "main:app",
+      "configured_app_root": "src/khoj",
+      "configured_bootstrap_entry": "main:run",
+      "merge_sha": "678549c6b06c9db90aa9156db3bc740f432505b5",
+      "pr": 1269,
+      "reason": "analyzer failed (1): stdout:\nError: Missing 'scip-query'. Install scip-query@0.16.0, \n@sourcegraph/scip-python@0.6.6, and SCIP CLI.\nstderr:\nAborted!",
+      "repository": "khoj-ai/khoj",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.01528595300624147,
+        "diff": 0.003320461022667587,
+        "parent_resolution": 0.0020248580258339643,
+        "total": 1.057757203001529,
+        "worktree": 0.5184915389982052
+      }
+    },
+    {
+      "base_sha": "17be2d4800c4573c586d99501064955321dc030d",
+      "configured_app_entry": "main:app",
+      "configured_app_root": "src/khoj",
+      "configured_bootstrap_entry": "main:run",
+      "merge_sha": "2c829678071f4d8cbf6bec88d390bcfa68b4f973",
+      "pr": 1265,
+      "reason": "analyzer failed (1): stdout:\nError: Missing 'scip-query'. Install scip-query@0.16.0, \n@sourcegraph/scip-python@0.6.6, and SCIP CLI.\nstderr:\nAborted!",
+      "repository": "khoj-ai/khoj",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.013642500038258731,
+        "diff": 0.00399769697105512,
+        "parent_resolution": 0.0028347219922579825,
+        "total": 1.0485046250396408,
+        "worktree": 0.5154462599894032
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": "main:app",
+      "configured_app_root": "src/khoj",
+      "configured_bootstrap_entry": "main:run",
+      "merge_sha": "0e9878c070993697ed546e46871428dfb40d4c77",
+      "pr": 1263,
+      "reason": "non_python_change",
+      "repository": "khoj-ai/khoj",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.161498948931694e-05
+      }
+    },
+    {
+      "base_sha": "b0cd8dc8fd8047e67d47d1b825a46264ad4b8b62",
+      "configured_app_entry": "main:app",
+      "configured_app_root": "src/khoj",
+      "configured_bootstrap_entry": "main:run",
+      "merge_sha": "5a51f17a71f122af7333893e93c745f1d658d6ee",
+      "pr": 1238,
+      "reason": "analyzer failed (1): stdout:\nError: Missing 'scip-query'. Install scip-query@0.16.0, \n@sourcegraph/scip-python@0.6.6, and SCIP CLI.\nstderr:\nAborted!",
+      "repository": "khoj-ai/khoj",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.015287541958969086,
+        "diff": 0.0036968020140193403,
+        "parent_resolution": 0.0024422979913651943,
+        "total": 1.0562805269728415,
+        "worktree": 0.5161094989744015
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": "main:app",
+      "configured_app_root": "src/khoj",
+      "configured_bootstrap_entry": "main:run",
+      "merge_sha": "f413ce7354c3981f1e22c9d784f4197ac253a41a",
+      "pr": 1235,
+      "reason": "non_python_change",
+      "repository": "khoj-ai/khoj",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.0126037523150444e-05
+      }
+    },
+    {
+      "base_sha": "2ac735909218817319b93965eecacd72b829fe2d",
+      "configured_app_entry": "main:app",
+      "configured_app_root": "src/khoj",
+      "configured_bootstrap_entry": "main:run",
+      "merge_sha": "349618961884cd0c2b080f402f51c3a8d638c718",
+      "pr": 1229,
+      "reason": "analyzer failed (1): stdout:\nError: Missing 'scip-query'. Install scip-query@0.16.0, \n@sourcegraph/scip-python@0.6.6, and SCIP CLI.\nstderr:\nAborted!",
+      "repository": "khoj-ai/khoj",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.014514805981889367,
+        "diff": 0.010591661965008825,
+        "parent_resolution": 0.0018047709600068629,
+        "total": 1.101312829006929,
+        "worktree": 0.5221202410175465
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": "main:app",
+      "configured_app_root": "src/khoj",
+      "configured_bootstrap_entry": "main:run",
+      "merge_sha": "1fd6e16cff416da413da9e5b469dd5ade42bd556",
+      "pr": 1221,
+      "reason": "non_python_change",
+      "repository": "khoj-ai/khoj",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 1.6978010535240173e-05
+      }
+    },
+    {
+      "base_sha": null,
+      "configured_app_entry": "main:app",
+      "configured_app_root": "src/khoj",
+      "configured_bootstrap_entry": "main:run",
+      "merge_sha": "573c6a32e1a2b722893df6e745838976201caa56",
+      "pr": 1216,
+      "reason": "non_python_change",
+      "repository": "khoj-ai/khoj",
+      "status": "unresolved",
+      "timing_seconds": {
+        "total": 2.4120090529322624e-06
+      }
+    },
+    {
+      "base_sha": "9096f628d03584a6c306343cd593d4c4d043d600",
+      "configured_app_entry": "main:app",
+      "configured_app_root": "src/khoj",
+      "configured_bootstrap_entry": "main:run",
+      "merge_sha": "c6670e815a4bf864d3227c932a5617943c19800f",
+      "pr": 1212,
+      "reason": "analyzer failed (1): stdout:\nError: Missing 'scip-query'. Install scip-query@0.16.0, \n@sourcegraph/scip-python@0.6.6, and SCIP CLI.\nstderr:\nAborted!",
+      "repository": "khoj-ai/khoj",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.014321830007247627,
+        "diff": 0.01173580897739157,
+        "parent_resolution": 0.001811996044125408,
+        "total": 1.0398587000090629,
+        "worktree": 0.47689594799885526
+      }
+    },
+    {
+      "base_sha": "f5d12b7546b1a502cbb4b1dd5a56da01370832ef",
+      "configured_app_entry": "main:app",
+      "configured_app_root": "src/khoj",
+      "configured_bootstrap_entry": "main:run",
+      "merge_sha": "b82d4fe68fa249cb9c87cd15c4a5314eede38678",
+      "pr": 1211,
+      "reason": "analyzer failed (1): stdout:\nError: Missing 'scip-query'. Install scip-query@0.16.0, \n@sourcegraph/scip-python@0.6.6, and SCIP CLI.\nstderr:\nAborted!",
+      "repository": "khoj-ai/khoj",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.015546743001323193,
+        "diff": 0.0028010749956592917,
+        "parent_resolution": 0.0019785280455835164,
+        "total": 1.0666603040299378,
+        "worktree": 0.48655312502523884
+      }
+    },
+    {
+      "base_sha": "99ed796c00d3b6f278065cf54c9d0aee7b4ec240",
+      "configured_app_entry": "main:app",
+      "configured_app_root": "src/khoj",
+      "configured_bootstrap_entry": "main:run",
+      "merge_sha": "de7668daec5a1e140bce1dba3ee84187ed93bf30",
+      "pr": 1207,
+      "reason": "analyzer failed (1): stdout:\nError: Missing 'scip-query'. Install scip-query@0.16.0, \n@sourcegraph/scip-python@0.6.6, and SCIP CLI.\nstderr:\nAborted!",
+      "repository": "khoj-ai/khoj",
+      "status": "unresolved",
+      "timing_seconds": {
+        "cache_fetch": 0.014746276952791959,
+        "diff": 0.009748467011377215,
+        "parent_resolution": 0.0020127620082348585,
+        "total": 1.0505016149836592,
+        "worktree": 0.4834198200260289
+      }
+    }
+  ],
+  "python": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+  "root_config": {
+    "default": ".",
+    "repositories": {
+      "khoj-ai/khoj": "src/khoj",
+      "langflow-ai/langflow": "src/backend/base/langflow",
+      "open-webui/open-webui": "backend/open_webui"
+    }
+  },
+  "schema_version": 2,
+  "selection_count": 60,
+  "timing": {
+    "finished_at": "2026-07-14T13:55:45.484732+00:00",
+    "started_at": "2026-07-14T13:54:49.031485+00:00",
+    "total_seconds": 55.028464292001445
+  }
+}
