@@ -8,9 +8,12 @@ sensible defaults for all configuration options.
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
-from fastapi_endpoint_detector.models.effect_contract import load_effect_contracts
+from fastapi_endpoint_detector.models.effect_contract import (
+    LoadedEffectContracts,
+    load_effect_contracts,
+)
 from fastapi_endpoint_detector.strict_data import load_yaml_unique
 
 
@@ -109,10 +112,21 @@ class Config(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    _effect_contract_snapshot: LoadedEffectContracts | None = PrivateAttr(default=None)
+
     parser: ParserConfig = Field(default_factory=ParserConfig)
     analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
     integrations: IntegrationConfig = Field(default_factory=IntegrationConfig)
+
+    def load_effect_contract_snapshot(self) -> LoadedEffectContracts | None:
+        """Load configured contract bytes once for validation and later analysis."""
+        path = self.analysis.effect_contracts
+        if path is None:
+            return None
+        if self._effect_contract_snapshot is None:
+            self._effect_contract_snapshot = load_effect_contracts(path)
+        return self._effect_contract_snapshot
 
 
 def load_config(config_path: Path | None = None) -> Config:
@@ -143,7 +157,6 @@ def load_config(config_path: Path | None = None) -> Config:
             if not contracts_path.is_absolute():
                 contracts_path = config_path.resolve().parent / contracts_path
             contracts_path = contracts_path.resolve()
-            load_effect_contracts(contracts_path)
             config = config.model_copy(
                 update={
                     "analysis": config.analysis.model_copy(
@@ -151,6 +164,7 @@ def load_config(config_path: Path | None = None) -> Config:
                     )
                 }
             )
+            config.load_effect_contract_snapshot()
         return config
     except yaml.YAMLError as e:
         raise ValueError(f"Invalid YAML in configuration file: {e}") from e

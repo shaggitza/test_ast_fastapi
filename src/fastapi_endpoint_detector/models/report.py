@@ -4,13 +4,29 @@ Report data models.
 Models representing analysis reports and results.
 """
 
+import hashlib
+import json
 import re
 from datetime import datetime
 from enum import Enum
+from pathlib import PurePosixPath
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from fastapi_endpoint_detector.models.effect_contract import EffectContract
+from fastapi_endpoint_detector.models.effect_contract_audit import EffectContractAudit
 from fastapi_endpoint_detector.models.endpoint import Endpoint
+
+
+def _contract_hash(contract: EffectContract) -> str:
+    payload = json.dumps(
+        contract.model_dump(mode="json", exclude_none=True),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(payload).hexdigest()}"
 
 
 class ConfidenceLevel(str, Enum):
@@ -28,6 +44,7 @@ class EvidenceProducer(str, Enum):
     MYPY = "mypy"
     SCIP = "scip"
     DATA_FLOW = "data_flow"
+    EFFECT_CONTRACT = "effect_contract"
 
 
 class EvidenceStatus(str, Enum):
@@ -128,6 +145,35 @@ class EffectEvidence(BaseModel):
         frozen = True
 
 
+class ContractEffectEvidence(BaseModel):
+    """Declared contract semantics at an exact endpoint-reachable call occurrence."""
+
+    schema_version: Literal[1] = 1
+    producer: Literal[EvidenceProducer.EFFECT_CONTRACT] = EvidenceProducer.EFFECT_CONTRACT
+    status: Literal["declared_reachable"] = "declared_reachable"
+    contract: EffectContract
+    contract_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    config_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    preset_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    raw_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    audit_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    occurrence_corpus_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    contract_source_path: str
+    occurrence_id: str
+    endpoint_audit_id: str
+    call_location: CodeReference
+    resolver: str
+    resolver_version: str
+    matcher: str
+    package_applicability: Literal["not_evaluated"] = "not_evaluated"
+    resource_identity_status: Literal["unavailable"] = "unavailable"
+    change_to_call_flow: Literal["not_established"] = "not_established"
+    limitations: tuple[str, ...] = ()
+
+    class Config:
+        frozen = True
+
+
 class CallStackFrame(BaseModel):
     """A single frame in a call stack trace."""
 
@@ -200,6 +246,12 @@ class AffectedEndpoint(BaseModel):
     effect_evidence: list[EffectEvidence] = Field(
         default_factory=list,
         description="Structured reachability, effect, and data-observation evidence.",
+    )
+    contract_evidence: tuple[ContractEffectEvidence, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Exact declared call semantics, separate from changed-code causality and observation."
+        ),
     )
 
     class Config:
@@ -327,12 +379,113 @@ class AnalysisReport(BaseModel):
         default_factory=list,
         description="Any warnings from the analysis",
     )
+    effect_contract_audit: EffectContractAudit | None = Field(
+        default=None,
+        description="Complete exact contract audit when configured.",
+    )
 
     @model_validator(mode="after")
     def populate_candidates_from_legacy_results(self) -> "AnalysisReport":
         """Keep manually constructed legacy reports internally consistent."""
         if not self.candidate_endpoints and self.affected_endpoints:
             self.candidate_endpoints = list(self.affected_endpoints)
+        return self
+
+    @model_validator(mode="after")
+    def validate_contract_evidence(self) -> "AnalysisReport":
+        if any(affected not in self.candidate_endpoints for affected in self.affected_endpoints):
+            raise ValueError("affected endpoint must equal an enriched candidate record")
+        evidence_items = [
+            (candidate, evidence)
+            for candidate in self.candidate_endpoints
+            for evidence in candidate.contract_evidence
+        ]
+        if not evidence_items:
+            return self
+        audit = self.effect_contract_audit
+        if audit is None:
+            raise ValueError("contract evidence requires an attached effect contract audit")
+        occurrence_by_id = {item.id: item for item in audit.occurrences}
+        coverage_by_id = {item.contract_id: item for item in audit.contract_coverage}
+        for candidate, evidence in evidence_items:
+            occurrence = occurrence_by_id.get(evidence.occurrence_id)
+            coverage = coverage_by_id.get(evidence.contract.id)
+            if occurrence is None or occurrence.contract_id != evidence.contract.id:
+                raise ValueError("contract evidence occurrence is absent from the audit")
+            if (
+                coverage is None
+                or evidence.contract_hash != coverage.contract_hash
+                or evidence.contract.symbol != coverage.symbol
+                or evidence.contract.invocation != coverage.invocation
+                or _contract_hash(evidence.contract) != evidence.contract_hash
+            ):
+                raise ValueError("contract evidence is inconsistent with audit coverage")
+            endpoint_record = next(
+                (
+                    endpoint
+                    for endpoint in occurrence.endpoints
+                    if endpoint.id == evidence.endpoint_audit_id
+                ),
+                None,
+            )
+            if endpoint_record is None:
+                raise ValueError("contract evidence endpoint is absent from audit occurrence")
+            endpoint = candidate.endpoint
+            handler_path = PurePosixPath(str(endpoint.handler.file_path).replace("\\", "/"))
+            expected_handler_path = PurePosixPath(endpoint_record.handler_file)
+            handler_matches = handler_path == expected_handler_path or (
+                len(handler_path.parts) >= len(expected_handler_path.parts)
+                and handler_path.parts[-len(expected_handler_path.parts) :]
+                == expected_handler_path.parts
+            )
+            if (
+                tuple(sorted(method.value for method in endpoint.methods))
+                != endpoint_record.methods
+                or endpoint.path != endpoint_record.path
+                or endpoint.handler.module != endpoint_record.handler_module
+                or endpoint.handler.name != endpoint_record.handler_name
+                or endpoint.handler.line_number != endpoint_record.handler_line
+                or not handler_matches
+                or endpoint.discovery_status.value != endpoint_record.discovery_status
+                or tuple(
+                    (
+                        condition.source_line,
+                        condition.reason,
+                    )
+                    for condition in endpoint.discovery_conditions
+                )
+                != tuple(
+                    (condition.line, condition.reason) for condition in endpoint_record.conditions
+                )
+            ):
+                raise ValueError("contract evidence is attached to a different endpoint")
+            if (
+                evidence.call_location.file_path != occurrence.file_path
+                or evidence.call_location.line_number != occurrence.line
+                or evidence.call_location.end_line_number != occurrence.end_line
+                or evidence.call_location.symbol != occurrence.canonical_symbol
+                or evidence.resolver != occurrence.resolver
+                or evidence.resolver_version != occurrence.resolver_version
+            ):
+                raise ValueError("contract evidence call occurrence is inconsistent with audit")
+            provenance = audit.provenance
+            if (
+                evidence.config_hash != provenance.config_hash
+                or evidence.preset_hash != provenance.preset_hash
+                or evidence.raw_hash != provenance.raw_hash
+                or evidence.audit_hash != provenance.audit_hash
+                or evidence.occurrence_corpus_hash != provenance.occurrence_corpus_hash
+                or evidence.contract_source_path != provenance.contract_source_path
+                or evidence.matcher != provenance.matcher
+            ):
+                raise ValueError("contract evidence provenance is inconsistent with audit")
+        for candidate in self.candidate_endpoints:
+            keys = [
+                (item.occurrence_id, item.contract.id, item.endpoint_audit_id)
+                for item in candidate.contract_evidence
+            ]
+            if len(keys) != len(set(keys)):
+                raise ValueError("candidate contains duplicate contract evidence")
         return self
 
     @property

@@ -78,6 +78,13 @@ class TextFormatter(BaseFormatter):
             console.print(f"  Reachable Candidates: {len(report.candidate_endpoints)}")
         if report.analysis_duration_ms:
             console.print(f"  Analysis Time: {report.analysis_duration_ms:.2f}ms")
+        if report.effect_contract_audit is not None:
+            audit = report.effect_contract_audit
+            console.print(
+                "  Effect Contract Audit: "
+                f"{audit.summary.matched_calls} matched calls / "
+                f"{audit.summary.physical_occurrences} physical calls"
+            )
         console.print()
 
         # Affected endpoints
@@ -120,6 +127,14 @@ class TextFormatter(BaseFormatter):
                             f"      Effect: [{evidence.status.value} / "
                             f"{evidence.disposition.value}] {evidence.summary}"
                         )
+                    for contract_evidence in ae.contract_evidence:
+                        console.print(
+                            "      Declared contract: "
+                            f"{contract_evidence.contract.id} "
+                            f"({contract_evidence.contract.operation.value}/"
+                            f"{contract_evidence.contract.channel.value}); "
+                            "change-to-call flow not established"
+                        )
 
                     # Show traceback-style call stack if available
                     if ae.call_stacks:
@@ -159,6 +174,11 @@ class TextFormatter(BaseFormatter):
                     )
                 for evidence in candidate.effect_evidence:
                     console.print(f"    {evidence.disposition.value}: {evidence.summary}")
+                for contract_evidence in candidate.contract_evidence:
+                    console.print(
+                        f"    declared contract {contract_evidence.contract.id}: "
+                        "change-to-call flow not established"
+                    )
             console.print()
 
         # Orphan changes

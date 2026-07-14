@@ -92,7 +92,7 @@ contracts:
         assert payload["config_hash"].startswith("sha256:")
         assert payload["contract_hashes"]["publish"].startswith("sha256:")
 
-    def test_analyze_rejects_contracts_until_typed_matching_exists(
+    def test_analyze_contract_evidence_requires_secure_ast(
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
         contracts = tmp_path / "effects.yaml"
@@ -132,7 +132,7 @@ contracts:
         )
 
         assert result.exit_code != 0
-        assert "validation-only" in result.output
+        assert "requires --secure-ast" in result.output
 
     def test_invalid_contract_config_is_rendered_as_cli_error(
         self, runner: CliRunner, tmp_path: Path

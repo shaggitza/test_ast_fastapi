@@ -7,7 +7,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper, ChangeMapperError
+from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
 from fastapi_endpoint_detector.config import AnalysisConfig, Config, load_config
 from fastapi_endpoint_detector.models.effect_contract import (
     CallResolutionStatus,
@@ -297,12 +297,12 @@ def test_config_rejects_unknown_nested_keys(tmp_path: Path) -> None:
         load_config(config_path)
 
 
-def test_programmatic_analysis_rejects_unimplemented_contract_matching(tmp_path: Path) -> None:
+def test_programmatic_analysis_rejects_missing_contract_document(tmp_path: Path) -> None:
     app = tmp_path / "app.py"
     app.write_text("value = 1\n", encoding="utf-8")
     config = Config(analysis=AnalysisConfig(effect_contracts=tmp_path / "effects.yaml"))
 
-    with pytest.raises(ChangeMapperError, match="validation-only"):
+    with pytest.raises(EffectContractError, match="file not found"):
         ChangeMapper(app_path=app, config=config, secure_ast=True)
 
 
