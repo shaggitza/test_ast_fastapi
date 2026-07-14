@@ -46,6 +46,173 @@ def list_users():
         assert users_endpoint is not None
         assert "GET" in [m.value for m in users_endpoint.methods]
 
+    def test_extracts_exhaustive_conditional_fastapi_binding(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            """from fastapi import FastAPI
+if debug:
+    app = FastAPI(debug=True)
+elif staging:
+    app = FastAPI(title="staging")
+else:
+    app = FastAPI()
+
+@app.get("/conditional")
+def conditional():
+    return {}
+"""
+        )
+
+        endpoints = SecureASTExtractor(app_file).extract_endpoints()
+
+        assert [endpoint.identifier for endpoint in endpoints] == ["GET /conditional"]
+
+    def test_conditional_binding_is_metamorphic_over_app_name(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            """from fastapi import FastAPI
+if enabled:
+    service = FastAPI()
+else:
+    service: object = FastAPI()
+
+@service.post("/renamed")
+def renamed():
+    return {}
+"""
+        )
+
+        endpoints = SecureASTExtractor(app_file, app_variable="service").extract_endpoints()
+
+        assert [endpoint.identifier for endpoint in endpoints] == ["POST /renamed"]
+
+    @pytest.mark.parametrize(
+        "conditional",
+        [
+            "if flag:\n    app = FastAPI()",
+            "if flag:\n    app = FastAPI()\nelse:\n    app = object()",
+            "if flag:\n    app = FastAPI()\nelse:\n    app = APIRouter()",
+            "if flag:\n    app = FastAPI()\nelse:\n    router = FastAPI()",
+            "if flag:\n    app = FastAPI()\n    configure(app)\nelse:\n    app = FastAPI()",
+            "if flag:\n    app = other\nelse:\n    app = other",
+            "if (selected := flag):\n    app = FastAPI()\nelse:\n    app = FastAPI()",
+            (
+                "if flag:\n"
+                "    if nested:\n"
+                "        app = FastAPI()\n"
+                "    else:\n"
+                "        app = FastAPI()\n"
+                "else:\n"
+                "    app = FastAPI()"
+            ),
+        ],
+    )
+    def test_rejects_unsupported_conditional_app_bindings(
+        self, tmp_path: Path, conditional: str
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            f"""from fastapi import APIRouter, FastAPI
+other = FastAPI()
+{conditional}
+@app.get("/unsafe")
+def unsafe():
+    return {{}}
+"""
+        )
+
+        assert SecureASTExtractor(app_file).extract_endpoints() == []
+
+    def test_unsupported_conditional_reassignment_invalidates_stale_app(
+        self, tmp_path: Path
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            """from fastapi import FastAPI
+app = FastAPI()
+@app.get("/before")
+def before():
+    return {}
+
+if flag:
+    app = FastAPI()
+
+@app.get("/after")
+def after():
+    return {}
+"""
+        )
+
+        assert SecureASTExtractor(app_file).extract_endpoints() == []
+
+    def test_supported_conditional_rebinding_preserves_source_cutoff(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            """from fastapi import FastAPI
+app = FastAPI()
+@app.get("/old")
+def old():
+    return {}
+
+if flag:
+    app = FastAPI()
+else:
+    app = FastAPI()
+
+@app.get("/new")
+def new():
+    return {}
+"""
+        )
+
+        endpoints = SecureASTExtractor(app_file).extract_endpoints()
+
+        assert [endpoint.identifier for endpoint in endpoints] == ["GET /new"]
+
+    def test_unrelated_conditional_binding_does_not_invalidate_app(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            """from fastapi import FastAPI
+app = FastAPI()
+if flag:
+    value = 1
+else:
+    value = 2
+@app.get("/safe")
+def safe():
+    return {}
+"""
+        )
+
+        endpoints = SecureASTExtractor(app_file).extract_endpoints()
+
+        assert [endpoint.identifier for endpoint in endpoints] == ["GET /safe"]
+
+    def test_nested_conditional_scopes_do_not_invalidate_module_bindings(
+        self, tmp_path: Path
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            """from fastapi import FastAPI
+app = FastAPI()
+if flag:
+    def helper():
+        app = object()
+        FastAPI = object
+        return app
+    values = [app for app in ()]
+else:
+    values = []
+@app.get("/safe")
+def safe():
+    return {}
+"""
+        )
+
+        endpoints = SecureASTExtractor(app_file).extract_endpoints()
+
+        assert [endpoint.identifier for endpoint in endpoints] == ["GET /safe"]
+
     @pytest.mark.parametrize("method", ["get", "post", "put", "patch", "delete"])
     def test_extract_different_http_methods(self, tmp_path: Path, method: str) -> None:
         """Test extracting different HTTP methods."""

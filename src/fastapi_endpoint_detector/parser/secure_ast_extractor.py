@@ -315,6 +315,23 @@ class SecureASTExtractor:
             elif isinstance(node, ast.ClassDef):
                 module.assignments.setdefault(node.name, []).append(node.lineno)
                 module.functions.pop(node.name, None)
+            elif isinstance(node, ast.If):
+                binding_line = node.end_lineno or node.lineno
+                conditional_name = self._exhaustive_conditional_app_binding(node, module)
+                bound_names = _conditional_bound_names(node)
+                if conditional_name is not None:
+                    bound_names.discard(conditional_name)
+                    self._invalidate_binding(module, conditional_name, binding_line)
+                    item = _Object(
+                        key=(module.name, f"{conditional_name}@{_node_token(node)}"),
+                        variable=conditional_name,
+                        kind="app",
+                        prefix="",
+                        line=binding_line,
+                    )
+                    module.objects.setdefault(conditional_name, []).append(item)
+                for name in bound_names:
+                    self._invalidate_binding(module, name, binding_line)
             elif isinstance(node, ast.Delete):
                 for target in node.targets:
                     for name in _bound_names(target):
@@ -359,6 +376,42 @@ class SecureASTExtractor:
                 # recognition after this statement must follow the rebound name.
                 module.fastapi_names.discard(assigned_name)
                 module.router_names.discard(assigned_name)
+
+    @staticmethod
+    def _invalidate_binding(module: _Module, name: str, line: int) -> None:
+        module.assignments.setdefault(name, []).append(line)
+        module.functions.pop(name, None)
+        module.strings.setdefault(name, []).append((line, None))
+        module.fastapi_names.discard(name)
+        module.router_names.discard(name)
+
+    def _exhaustive_conditional_app_binding(self, node: ast.If, module: _Module) -> str | None:
+        """Return one app name bound by every assignment-only if/elif/else leaf."""
+        branches: list[list[ast.stmt]] = []
+        current = node
+        while True:
+            if any(isinstance(item, ast.NamedExpr) for item in ast.walk(current.test)):
+                return None
+            branches.append(current.body)
+            if len(current.orelse) == 1 and isinstance(current.orelse[0], ast.If):
+                current = current.orelse[0]
+                continue
+            if not current.orelse:
+                return None
+            branches.append(current.orelse)
+            break
+        assigned_names: list[str] = []
+        for branch in branches:
+            if len(branch) != 1 or not isinstance(branch[0], (ast.Assign, ast.AnnAssign)):
+                return None
+            statement = branch[0]
+            assigned_name = _assignment_name(statement)
+            if assigned_name is None or statement.value is None:
+                return None
+            if self._constructor_kind(statement.value, module, statement.lineno) != "app":
+                return None
+            assigned_names.append(assigned_name)
+        return assigned_names[0] if len(set(assigned_names)) == 1 else None
 
     def _latest_assignment(self, module: _Module, name: str, line: int) -> int | None:
         eligible = [item for item in module.assignments.get(name, []) if item <= line]
@@ -1311,6 +1364,78 @@ def _function_bindings(
             visitor.names.add(statement.name)
         else:
             visitor.visit(statement)
+    return visitor.names
+
+
+def _conditional_bound_names(node: ast.If) -> set[str]:
+    """Return module-scope names a top-level conditional may bind or delete."""
+
+    class BindingVisitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.names: set[str] = set()
+
+        def visit_Name(self, child: ast.Name) -> None:
+            if isinstance(child.ctx, (ast.Store, ast.Del)):
+                self.names.add(child.id)
+
+        def visit_FunctionDef(self, child: ast.FunctionDef) -> None:
+            self.names.add(child.name)
+
+        def visit_AsyncFunctionDef(self, child: ast.AsyncFunctionDef) -> None:
+            self.names.add(child.name)
+
+        def visit_ClassDef(self, child: ast.ClassDef) -> None:
+            self.names.add(child.name)
+
+        def visit_Lambda(self, _child: ast.Lambda) -> None:
+            return
+
+        def _visit_comprehension(self, child: ast.AST) -> None:
+            # Comprehension targets have their own scope. Named expressions in
+            # their value/filter expressions may still bind the containing scope.
+            for descendant in ast.walk(child):
+                if isinstance(descendant, ast.NamedExpr):
+                    self.visit(descendant.target)
+
+        def visit_ListComp(self, child: ast.ListComp) -> None:
+            self._visit_comprehension(child)
+
+        def visit_SetComp(self, child: ast.SetComp) -> None:
+            self._visit_comprehension(child)
+
+        def visit_DictComp(self, child: ast.DictComp) -> None:
+            self._visit_comprehension(child)
+
+        def visit_GeneratorExp(self, child: ast.GeneratorExp) -> None:
+            self._visit_comprehension(child)
+
+        def visit_Import(self, child: ast.Import) -> None:
+            self.names.update(alias.asname or alias.name.split(".")[0] for alias in child.names)
+
+        def visit_ImportFrom(self, child: ast.ImportFrom) -> None:
+            self.names.update(alias.asname or alias.name.split(".")[0] for alias in child.names)
+
+        def visit_ExceptHandler(self, child: ast.ExceptHandler) -> None:
+            if child.name:
+                self.names.add(child.name)
+            self.generic_visit(child)
+
+        def visit_MatchAs(self, child: ast.MatchAs) -> None:
+            if child.name:
+                self.names.add(child.name)
+            self.generic_visit(child)
+
+        def visit_MatchStar(self, child: ast.MatchStar) -> None:
+            if child.name:
+                self.names.add(child.name)
+
+        def visit_MatchMapping(self, child: ast.MatchMapping) -> None:
+            if child.rest:
+                self.names.add(child.rest)
+            self.generic_visit(child)
+
+    visitor = BindingVisitor()
+    visitor.visit(node)
     return visitor.names
 
 
