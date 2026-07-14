@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 import click
+import yaml
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -23,6 +24,7 @@ from rich.progress import (
 
 from fastapi_endpoint_detector import __version__
 from fastapi_endpoint_detector.config import Config, load_config
+from fastapi_endpoint_detector.models.effect_contract import load_effect_contracts
 
 console = Console()
 
@@ -39,7 +41,10 @@ console = Console()
 def cli(ctx: click.Context, config: Path | None) -> None:
     """FastAPI Endpoint Change Detector - Identify affected endpoints from code changes."""
     ctx.ensure_object(dict)
-    ctx.obj["config"] = load_config(config) if config else Config()
+    try:
+        ctx.obj["config"] = load_config(config) if config else Config()
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 @cli.command()
@@ -148,6 +153,12 @@ def analyze(
     config: Config = ctx.obj["config"]
 
     # Validate mutually exclusive options
+    if config.analysis.effect_contracts is not None:
+        console.print(
+            "[red]Error:[/red] effect contracts are validation-only until exact typed "
+            "call matching is enabled"
+        )
+        raise click.Abort()
     if vm and secure_ast:
         console.print("[red]Error:[/red] --vm and --secure-ast cannot be used together")
         raise click.Abort()
@@ -299,6 +310,61 @@ def analyze(
 
             console.print(traceback.format_exc())
         raise click.Abort()
+
+
+@cli.command("validate-effect-contracts")
+@click.option(
+    "--contracts",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    required=True,
+    help="Strict YAML, JSON, or TOML effect-contract document.",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["text", "json", "yaml"]),
+    default="text",
+    help="Validation output format (default: text).",
+)
+def validate_effect_contracts(contracts: Path, output_format: str) -> None:
+    """Validate and hash data-only effect contracts without analyzing code."""
+    try:
+        loaded = load_effect_contracts(contracts)
+        data = {
+            "schema_version": loaded.document.schema_version,
+            "source_path": str(loaded.source_path),
+            "raw_hash": loaded.raw_hash,
+            "config_hash": loaded.config_hash,
+            "preset_hash": loaded.preset_hash,
+            "contract_hashes": loaded.contract_hashes,
+            "preset": loaded.document.preset.model_dump(mode="json", exclude_none=True),
+            "contracts": [
+                contract.model_dump(mode="json", exclude_none=True)
+                for contract in sorted(loaded.document.contracts, key=lambda item: item.id)
+            ],
+            "matching_status": "not_evaluated",
+            "matching_limitation": (
+                "This command validates semantics and provenance only; exact typed call "
+                "matching is not enabled yet."
+            ),
+        }
+        if output_format == "json":
+            rendered = json.dumps(data, indent=2)
+        elif output_format == "yaml":
+            rendered = yaml.safe_dump(data, sort_keys=False)
+        else:
+            rendered = (
+                "Effect contracts valid\n"
+                f"Schema: {data['schema_version']}\n"
+                f"Preset: {loaded.document.preset.id}@{loaded.document.preset.version}\n"
+                f"Contracts: {len(loaded.document.contracts)}\n"
+                f"Config hash: {loaded.config_hash}\n"
+                f"Preset hash: {loaded.preset_hash}\n"
+                "Matching: not evaluated (typed call matching is not enabled yet)\n"
+            )
+        click.echo(rendered)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 @cli.command("list")

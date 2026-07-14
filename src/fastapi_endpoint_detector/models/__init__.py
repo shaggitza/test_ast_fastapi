@@ -16,6 +16,14 @@ from fastapi_endpoint_detector.models.diff import (
     DiffHunk,
     FileChange,
 )
+from fastapi_endpoint_detector.models.effect_contract import (
+    EffectContract,
+    EffectContractDocument,
+    EffectContractError,
+    LoadedEffectContracts,
+    ResolvedCallSite,
+    load_effect_contracts,
+)
 from fastapi_endpoint_detector.models.endpoint import (
     Endpoint,
     EndpointDiscoveryCondition,
@@ -57,6 +65,13 @@ __all__ = [  # noqa: RUF022 - grouped by public model domain
     "DiffHunk",
     "FileChange",
     "ChangeType",
+    # Effect contract models
+    "EffectContract",
+    "EffectContractDocument",
+    "EffectContractError",
+    "LoadedEffectContracts",
+    "ResolvedCallSite",
+    "load_effect_contracts",
     # Report models
     "AffectedEndpoint",
     "AnalysisReport",

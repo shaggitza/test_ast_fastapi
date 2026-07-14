@@ -23,6 +23,8 @@ This tool is designed for CI/CD pipelines to enable:
 - 🎯 **Endpoint Mapping**: Map changes back to specific FastAPI route handlers
 - 🧭 **Effect Evidence**: Separate call reachability from returned, persisted, outbound,
   logged, internal, and unresolved data effects ([details](docs/effect-evidence.md))
+- 📜 **Effect Contracts**: Strict data-only declarations for exact state and I/O symbols,
+  with canonical provenance hashes ([schema](docs/effect-contracts.md))
 - 💾 **Caching**: Cache analysis results for faster subsequent runs
 - 📋 **Multiple Output Formats**: JSON, YAML, Markdown, HTML, or human-readable text reports
 - 🎨 **Rich Progress Display**: Visual progress bars with real-time analysis feedback

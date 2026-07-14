@@ -45,6 +45,12 @@ class TestCLI:
         assert "--app-entry" in result.output
         assert "--bootstrap-entry" in result.output
 
+    def test_validate_effect_contracts_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["validate-effect-contracts", "--help"])
+        assert result.exit_code == 0
+        assert "--contracts" in result.output
+        assert "--format" in result.output
+
     def test_list_help(self, runner: CliRunner) -> None:
         """Test the list command help."""
         result = runner.invoke(cli, ["list", "--help"])
@@ -54,6 +60,102 @@ class TestCLI:
         assert "--secure-ast" in result.output
         assert "--app-entry" in result.output
         assert "--bootstrap-entry" in result.output
+
+    def test_validate_effect_contracts_json(self, runner: CliRunner, tmp_path: Path) -> None:
+        contracts = tmp_path / "effects.yaml"
+        contracts.write_text(
+            """schema_version: 1
+preset:
+  id: test-effects
+  version: 1.0.0
+  provenance:
+    kind: user
+    source: effects.yaml
+contracts:
+  - id: publish
+    symbol: company.events.publish
+    invocation: function
+    operation: publish
+    channel: message_bus
+""",
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(
+            cli,
+            ["validate-effect-contracts", "--contracts", str(contracts), "--format", "json"],
+        )
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["matching_status"] == "not_evaluated"
+        assert payload["config_hash"].startswith("sha256:")
+        assert payload["contract_hashes"]["publish"].startswith("sha256:")
+
+    def test_analyze_rejects_contracts_until_typed_matching_exists(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        contracts = tmp_path / "effects.yaml"
+        contracts.write_text(
+            """schema_version: 1
+preset:
+  id: test-effects
+  version: 1.0.0
+  provenance: {kind: user, source: effects.yaml}
+contracts:
+  - id: publish
+    symbol: company.events.publish
+    invocation: function
+    operation: publish
+    channel: message_bus
+""",
+            encoding="utf-8",
+        )
+        config = tmp_path / "detector.yaml"
+        config.write_text("analysis:\n  effect_contracts: effects.yaml\n", encoding="utf-8")
+        app = tmp_path / "app.py"
+        app.write_text("value = 1\n")
+        diff = tmp_path / "change.diff"
+        diff.write_text("dummy\n")
+
+        result = runner.invoke(
+            cli,
+            [
+                "--config",
+                str(config),
+                "analyze",
+                "--app",
+                str(app),
+                "--diff",
+                str(diff),
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "validation-only" in result.output
+
+    def test_invalid_contract_config_is_rendered_as_cli_error(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        contracts = tmp_path / "effects.yaml"
+        contracts.write_text("schema_version: true\n", encoding="utf-8")
+        config = tmp_path / "detector.yaml"
+        config.write_text("analysis:\n  effect_contracts: effects.yaml\n", encoding="utf-8")
+
+        result = runner.invoke(
+            cli,
+            [
+                "--config",
+                str(config),
+                "validate-effect-contracts",
+                "--contracts",
+                str(contracts),
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "Error:" in result.output
+        assert "effect contract validation failed" in result.output
 
     def test_bootstrap_entry_requires_secure_ast(self, runner: CliRunner, tmp_path: Path) -> None:
         app_file = tmp_path / "app.py"
