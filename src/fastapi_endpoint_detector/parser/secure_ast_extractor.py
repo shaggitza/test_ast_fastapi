@@ -110,6 +110,9 @@ class _Module:
     object_limitations: dict[ObjectKey, list[EndpointDiscoveryCondition]] = field(
         default_factory=dict
     )
+    inventory_only_limitations: dict[ObjectKey, list[EndpointDiscoveryCondition]] = field(
+        default_factory=dict
+    )
 
 
 class SecureASTExtractor:
@@ -357,10 +360,15 @@ class SecureASTExtractor:
             edges_by_parent.setdefault(edge.parent, []).append(edge)
 
         object_limitations: dict[ObjectKey, tuple[EndpointDiscoveryCondition, ...]] = {}
+        inventory_only_limitations: dict[ObjectKey, tuple[EndpointDiscoveryCondition, ...]] = {}
         for candidate in modules.values():
             for key, conditions in candidate.object_limitations.items():
                 object_limitations[key] = _merge_discovery_conditions(
                     object_limitations.get(key, ()), tuple(conditions)
+                )
+            for key, conditions in candidate.inventory_only_limitations.items():
+                inventory_only_limitations[key] = _merge_discovery_conditions(
+                    inventory_only_limitations.get(key, ()), tuple(conditions)
                 )
         found: list[Endpoint] = []
         inventory_limitations: tuple[EndpointDiscoveryCondition, ...] = ()
@@ -383,7 +391,9 @@ class SecureASTExtractor:
                 object_limitations.get(owner, ()),
             )
             inventory_limitations = _merge_discovery_conditions(
-                inventory_limitations, object_conditions
+                inventory_limitations,
+                object_conditions,
+                inventory_only_limitations.get(owner, ()),
             )
             for route in routes_by_owner.get(owner, []):
                 if cutoff is not None and route.line > cutoff:
@@ -2052,13 +2062,18 @@ class SecureASTExtractor:
         owner: _Object,
         node: ast.AST,
         reason: str,
+        *,
+        inventory_only: bool = False,
     ) -> None:
         condition = EndpointDiscoveryCondition(
             source_path=module.path,
             source_line=getattr(node, "lineno", 1),
             reason=reason,
         )
-        limitations = module.object_limitations.setdefault(owner.key, [])
+        destination = (
+            module.inventory_only_limitations if inventory_only else module.object_limitations
+        )
+        limitations = destination.setdefault(owner.key, [])
         if condition not in limitations:
             limitations.append(condition)
 
@@ -2104,6 +2119,7 @@ class SecureASTExtractor:
                         imperative_owner,
                         node,
                         "imperative registration mutates an imported route object",
+                        inventory_only=True,
                     )
                     continue
                 path_expr = call.args[0] if call.args else _keyword_expr(call, "path")
@@ -2120,6 +2136,7 @@ class SecureASTExtractor:
                         imperative_owner,
                         node,
                         "imperative route path or handler could not be resolved",
+                        inventory_only=True,
                     )
                     continue
                 if call.func.attr == "add_api_route":
@@ -2135,6 +2152,7 @@ class SecureASTExtractor:
                         imperative_owner,
                         node,
                         "imperative route methods could not be resolved",
+                        inventory_only=True,
                     )
                     continue
                 if methods:
@@ -2195,6 +2213,7 @@ class SecureASTExtractor:
                     parent,
                     node,
                     "composition mutates an imported route object",
+                    inventory_only=True,
                 )
                 continue
             if call.func.attr == "include_router":
@@ -2206,6 +2225,7 @@ class SecureASTExtractor:
                         parent,
                         node,
                         "included router could not be resolved",
+                        inventory_only=True,
                     )
                     continue
                 prefix = self._keyword_string(call, "prefix", module, node.lineno) or ""
@@ -2231,6 +2251,7 @@ class SecureASTExtractor:
                         parent,
                         node,
                         "mounted path or application could not be resolved",
+                        inventory_only=True,
                     )
                     continue
                 edges.append(
