@@ -22,6 +22,27 @@ Third-party source and patches are fetched on demand and are not vendored.
 Re-running the collector creates a new corpus; it must not silently replace the
 frozen benchmark used in a published comparison.
 
+## Execution-free route census
+
+`build_route_census.py` inventories configured FastAPI routes in both the merge
+snapshot and its resolved baseline parent. It always invokes `list
+--secure-ast`; analyzed application code is never imported or executed, and
+there is no runtime or VM fallback.
+
+```bash
+python benchmarks/real_world/build_route_census.py \
+  --cache /tmp/current-corpus-cache \
+  --app-root open-webui/open-webui=backend/open_webui \
+  --app-root langflow-ai/langflow=src/backend/base/langflow \
+  --app-root khoj-ai/khoj=src/khoj \
+  --output /tmp/route-census.jsonl \
+  --manifest /tmp/route-census-manifest.json
+```
+
+Pass the result to `evaluate.py --route-census` to partition primary FN after
+HIGH/MEDIUM and LOW matching. The census is diagnostic only: it never changes
+truth, predictions, confidence, TP/FP/FN, or candidate-ceiling metrics.
+
 ## Ground-truth protocol
 
 Reviews may be committed incrementally. A review file is incomplete until it has one validated record for every corpus PR; partial files must never be passed off as a benchmark score.
