@@ -1427,6 +1427,205 @@ def create_app():
             endpoint.identifier for endpoint in SecureASTExtractor(caller).extract_endpoints()
         ] == ["GET /cross-module"]
 
+    def test_include_is_copy_but_mount_is_live(self, tmp_path: Path) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import APIRouter, FastAPI
+app = FastAPI()
+router = APIRouter()
+child = FastAPI()
+def before(): return None
+def after(): return None
+router.add_api_route('/before', before)
+app.include_router(router, prefix='/first')
+router.add_api_route('/after', after)
+app.include_router(router, prefix='/second')
+child.add_api_route('/before', before)
+app.mount('/live', child)
+child.add_api_route('/after', after)
+"""
+        )
+
+        identifiers = [
+            endpoint.identifier for endpoint in SecureASTExtractor(main).extract_endpoints()
+        ]
+
+        assert identifiers == [
+            "GET /first/before",
+            "GET /live/after",
+            "GET /live/before",
+            "GET /second/after",
+            "GET /second/before",
+        ]
+
+    def test_same_line_composition_preserves_source_order_and_occurrences(
+        self, tmp_path: Path
+    ) -> None:
+        main = tmp_path / "main.py"
+        router_line = (
+            "router.add_api_route('/one', one); "
+            "app.include_router(router, prefix='/first'); "
+            "router.add_api_route('/two', two); "
+            "app.include_router(router, prefix='/second')"
+        )
+        mount_line = (
+            "child.add_api_route('/one', one); "
+            "app.mount('/live', child); "
+            "child.add_api_route('/two', two); "
+            "app.mount('/live', child)"
+        )
+        main.write_text(
+            f"""from fastapi import APIRouter, FastAPI
+app = FastAPI()
+router = APIRouter()
+child = FastAPI()
+def one(): return None
+def two(): return None
+{router_line}
+{mount_line}
+"""
+        )
+
+        identifiers = [
+            endpoint.identifier for endpoint in SecureASTExtractor(main).extract_endpoints()
+        ]
+
+        assert identifiers.count("GET /live/one") == 2
+        assert identifiers.count("GET /live/two") == 2
+        assert "GET /first/one" in identifiers
+        assert "GET /first/two" not in identifiers
+        assert "GET /second/one" in identifiers
+        assert "GET /second/two" in identifiers
+
+    def test_factory_call_same_line_preserves_include_cutoff(self, tmp_path: Path) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import APIRouter, FastAPI
+router = APIRouter()
+def before(): return None
+def after(): return None
+def create_app():
+    app = FastAPI()
+    app.include_router(router)
+    return app
+router.add_api_route('/before', before); app = create_app(); router.add_api_route('/after', after)
+"""
+        )
+
+        assert [
+            endpoint.identifier for endpoint in SecureASTExtractor(main).extract_endpoints()
+        ] == ["GET /before"]
+
+    def test_mount_retains_child_identity_across_name_rebinding(self, tmp_path: Path) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+app = FastAPI()
+def old(): return None
+def new(): return None
+child = FastAPI()
+child.add_api_route('/old', old)
+app.mount('/mounted', child)
+child = FastAPI()
+child.add_api_route('/new', new)
+"""
+        )
+
+        assert [
+            endpoint.identifier for endpoint in SecureASTExtractor(main).extract_endpoints()
+        ] == ["GET /mounted/old"]
+
+    def test_imperative_websocket_registration_module_and_factory_parity(
+        self, tmp_path: Path
+    ) -> None:
+        module_app = tmp_path / "module_app.py"
+        module_app.write_text(
+            """from fastapi import FastAPI
+app = FastAPI()
+async def first(websocket): pass
+async def second(websocket): pass
+app.add_api_websocket_route('/api', first)
+app.add_websocket_route(path='/plain', endpoint=second)
+"""
+        )
+        factory_app = tmp_path / "factory_app.py"
+        factory_app.write_text(
+            """from fastapi import FastAPI
+def create_app():
+    app = FastAPI()
+    async def first(websocket): pass
+    async def second(websocket): pass
+    app.add_api_websocket_route('/api', first)
+    app.add_websocket_route(path='/plain', endpoint=second)
+    return app
+app = create_app()
+"""
+        )
+
+        expected = ["WEBSOCKET /api", "WEBSOCKET /plain"]
+        assert [
+            endpoint.identifier for endpoint in SecureASTExtractor(module_app).extract_endpoints()
+        ] == expected
+        assert [
+            endpoint.identifier for endpoint in SecureASTExtractor(factory_app).extract_endpoints()
+        ] == expected
+
+    def test_imperative_websocket_dynamic_values_fail_closed_or_conditional(
+        self, tmp_path: Path
+    ) -> None:
+        module_app = tmp_path / "module_app.py"
+        module_app.write_text(
+            """from fastapi import FastAPI
+app = FastAPI()
+async def handler(websocket): pass
+app.add_api_websocket_route(dynamic_path, handler)
+app.add_websocket_route('/missing', unknown_handler)
+"""
+        )
+        module_inventory = SecureASTExtractor(module_app).extract_inventory()
+        assert module_inventory.endpoints == []
+        assert module_inventory.status == InventoryStatus.CONDITIONAL
+        assert module_inventory.limitations
+
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+def create_app():
+    app = FastAPI()
+    async def handler(websocket): pass
+    app.add_api_websocket_route(dynamic_path, handler)
+    app.add_websocket_route('/missing', unknown_handler)
+    return app
+"""
+        )
+
+        assert SecureASTExtractor(main).extract_endpoints() == []
+        inventory = SecureASTExtractor(main, app_entry="main:create_app").extract_inventory()
+        assert inventory.endpoints == []
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert inventory.limitations
+
+    def test_factory_mount_observes_routes_added_after_mount(self, tmp_path: Path) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+def create_app():
+    app = FastAPI()
+    child = FastAPI()
+    def before(): return None
+    def after(): return None
+    child.add_api_route('/before', before)
+    app.mount('/live', child)
+    child.add_api_route('/after', after)
+    return app
+app = create_app()
+"""
+        )
+
+        assert [
+            endpoint.identifier for endpoint in SecureASTExtractor(main).extract_endpoints()
+        ] == ["GET /live/after", "GET /live/before"]
+
     def test_resolves_transitive_absolute_router_reexports(self, tmp_path: Path) -> None:
         (tmp_path / "routes.py").write_text(
             """from fastapi import APIRouter
