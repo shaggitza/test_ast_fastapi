@@ -42,6 +42,15 @@ This pass does not remove reachability evidence. Candidates below the legacy
 confidence threshold remain in `AnalysisReport.candidate_endpoints` and in the
 JSON/YAML `candidate_endpoints` array.
 
+## SCIP reachability
+
+A direct changed endpoint definition (`depth == 0`) is HIGH. Every transitive
+SCIP reverse-reference path is retained as LOW reachability evidence until an
+independent effect/data-flow producer establishes endpoint-visible behavior.
+Function-shaped seeds are not promoted merely because their call graph is more
+precise than a module/value seed: precise call reachability is still not data
+observation.
+
 ## Safety limits
 
 - Analysis is execution-free and uses Python AST plus mypy-resolved call edges.
