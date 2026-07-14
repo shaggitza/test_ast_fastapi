@@ -339,6 +339,16 @@ class _FinitePointsTo:
 
 
 @dataclass(frozen=True)
+class _DeferredGenerator:
+    """One exact generator call whose body has not executed yet."""
+
+    fullname: str
+    receiver: _FinitePointsTo | None
+    environment: tuple[tuple[str, _FinitePointsTo], ...]
+    is_async: bool
+
+
+@dataclass(frozen=True)
 class _ExecutorSummary:
     """Exact callback and forwarding semantics for one executor wrapper."""
 
@@ -356,12 +366,15 @@ class MypyAnalyzer:
     and extract precise file/line information for all references.
     """
 
-    CACHE_SCHEMA_VERSION = 11
+    CACHE_SCHEMA_VERSION = 12
     MAX_POINTS_TO_TARGETS = 8
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
     MAX_POINTS_TO_EDGES = 4096
-    EXECUTION_SUMMARY_VERSION = 2
+    EXECUTION_SUMMARY_VERSION = 3
+    GENERATOR_CONSUMERS: ClassVar[dict[str, tuple[int, str, bool | None]]] = {
+        "starlette.responses.StreamingResponse": (0, "content", None),
+    }
     EXECUTOR_SUMMARIES: ClassVar[dict[str, _ExecutorSummary]] = {
         "asyncio.threads.to_thread": _ExecutorSummary(0, False, True),
         "anyio.to_thread.run_sync": _ExecutorSummary(
@@ -936,6 +949,8 @@ class MypyAnalyzer:
             if depth > self.max_depth or (previous is not None and previous <= depth):
                 continue
             depths[fullname] = depth
+            if self._generator_fullname_kind(fullname) is not None:
+                continue
             resolved = self._resolve_fullname_to_file(fullname)
             if resolved is None or depth >= self.max_depth:
                 continue
@@ -1081,6 +1096,10 @@ class MypyAnalyzer:
         for dependency_fullname, dependency_depth in sorted(
             self._python_dependency_closure(endpoint).items()
         ):
+            if self._generator_fullname_kind(dependency_fullname) is not None:
+                # Typed-parameter closure is reachability-only and cannot prove
+                # that a deferred generator object is consumed.
+                continue
             resolved = self._resolve_fullname_to_file(dependency_fullname)
             if resolved is None:
                 continue
@@ -1561,6 +1580,7 @@ class MypyAnalyzer:
         budget: list[int],
         *,
         receiver: _FinitePointsTo | None = None,
+        skip_implicit_receiver: bool = False,
     ) -> dict[str, _FinitePointsTo] | None:
         """Bind a narrow valid call shape without *args/**kwargs guessing."""
         from mypy.nodes import (  # noqa: PLC0415
@@ -1575,10 +1595,11 @@ class MypyAnalyzer:
         actual = self._actual_function(function)
         arguments = list(getattr(actual, "arguments", ()))
         environment: dict[str, _FinitePointsTo] = {}
-        if receiver is not None:
+        if receiver is not None or skip_implicit_receiver:
             if not arguments:
                 return None
-            environment[arguments[0].variable.name] = receiver
+            if receiver is not None:
+                environment[arguments[0].variable.name] = receiver
             arguments = arguments[1:]
         if any(argument.kind in (ARG_STAR, ARG_STAR2) for argument in arguments):
             return None
@@ -1981,6 +2002,45 @@ class MypyAnalyzer:
             declarations.add(declaration)
         return next(iter(declarations)) if len(declarations) == 1 else None
 
+    @staticmethod
+    def _exact_call_argument(
+        call: Any,
+        positional_index: int,
+        keyword_name: str,
+    ) -> Any | None:
+        """Select one exact explicit call argument without expanding stars."""
+        from mypy.nodes import ARG_NAMED, ARG_POS  # noqa: PLC0415
+
+        for expression, kind, name in zip(
+            call.args,
+            call.arg_kinds,
+            call.arg_names,
+            strict=True,
+        ):
+            if kind == ARG_NAMED and name == keyword_name:
+                return expression
+        positional = [
+            expression
+            for expression, kind, name in zip(
+                call.args,
+                call.arg_kinds,
+                call.arg_names,
+                strict=True,
+            )
+            if kind == ARG_POS and name is None
+        ]
+        return positional[positional_index] if positional_index < len(positional) else None
+
+    @staticmethod
+    def _valid_builtin_generator_consumer(call: Any) -> bool:
+        """Accept only valid explicit `next`/`anext` positional call shapes."""
+        from mypy.nodes import ARG_POS  # noqa: PLC0415
+
+        return 1 <= len(call.args) <= 2 and all(
+            kind == ARG_POS and name is None
+            for kind, name in zip(call.arg_kinds, call.arg_names, strict=True)
+        )
+
     def _executor_callback_binding(
         self,
         call: Any,
@@ -2104,6 +2164,96 @@ class MypyAnalyzer:
             receiver=callback_receiver,
         )
         return bound
+
+    def _generator_fullname_kind(self, fullname: str) -> bool | None:
+        """Return async/sync kind for one exact project generator declaration."""
+        canonical = self._canonical_project_fullname(fullname) or fullname
+        resolved = self._function_node_for_fullname(canonical)
+        if resolved is None:
+            return None
+        actual = self._actual_function(resolved[0])
+        if bool(getattr(actual, "is_async_generator", False)):
+            return True
+        if bool(getattr(actual, "is_generator", False)):
+            return False
+        return None
+
+    def _generator_function_kind(
+        self,
+        call_site: ResolvedCallSite | None,
+    ) -> bool | None:
+        """Return async/sync kind for one exact project generator call."""
+        if (
+            call_site is None
+            or call_site.status != CallResolutionStatus.EXACT
+            or call_site.canonical_symbol is None
+        ):
+            return None
+        return self._generator_fullname_kind(call_site.canonical_symbol)
+
+    def _deferred_generator_call(
+        self,
+        call: Any,
+        call_site: ResolvedCallSite | None,
+        environment: dict[str, _FinitePointsTo],
+        import_map: dict[str, str],
+        budget: list[int],
+    ) -> _DeferredGenerator | None:
+        """Capture one exact valid generator call without executing its body."""
+        from mypy.nodes import MemberExpr  # noqa: PLC0415
+
+        if (
+            call_site is None
+            or call_site.status != CallResolutionStatus.EXACT
+            or call_site.canonical_symbol is None
+        ):
+            return None
+        is_async = self._generator_function_kind(call_site)
+        if is_async is None:
+            return None
+        resolved = self._function_node_for_fullname(call_site.canonical_symbol)
+        if resolved is None:
+            return None
+        function, _path, _module = resolved
+        declaration = self._callable_declaration(function)
+        if declaration is None:
+            return None
+        _fullname, invocation = declaration
+        implicit_receiver = invocation in (
+            InvocationKind.INSTANCE_METHOD,
+            InvocationKind.CLASS_METHOD,
+        )
+        receiver = (
+            self._finite_expression_value(
+                call.callee.expr,
+                environment,
+                import_map,
+                (),
+                budget,
+            )
+            if implicit_receiver and isinstance(call.callee, MemberExpr)
+            else None
+        )
+        if implicit_receiver and receiver is None:
+            return None
+        bound = self._bind_finite_arguments(
+            function,
+            call,
+            environment,
+            import_map,
+            (call_site.canonical_symbol,),
+            budget,
+            receiver=receiver,
+            skip_implicit_receiver=implicit_receiver,
+        )
+        if bound is None:
+            return None
+        return _DeferredGenerator(
+            fullname=call_site.canonical_symbol,
+            receiver=receiver,
+            environment=tuple(sorted(bound.items())),
+            is_async=is_async,
+        )
 
     def _member_call_resolution(  # noqa: PLR0911, PLR0912, PLR0915
         self,
@@ -2441,6 +2591,8 @@ class MypyAnalyzer:
             flow_environment[self_name] = receiver_value
         finite_budget = [0]
         awaited_call_ids: set[int] = set()
+        consumed_generator_call_kinds: dict[int, bool | None] = {}
+        deferred_environment: dict[str, _DeferredGenerator] = {}
 
         def resolve_and_trace(  # noqa: PLR0912, PLR0915
             fullname: str,
@@ -2609,6 +2761,39 @@ class MypyAnalyzer:
                 # Ambiguous or unresolved symbols are not converted into
                 # fabricated module ranges; doing so creates unrelated impacts.
 
+        def consume_deferred_generator(
+            generator: _DeferredGenerator,
+            line: int,
+        ) -> None:
+            """Execute one exact deferred generator body at a proven consumer."""
+            deps.add_reference(current_file, line, generator.fullname)
+            resolve_and_trace(
+                generator.fullname,
+                line,
+                low_confidence_edge=True,
+                target_receiver=generator.receiver,
+                target_environment=dict(generator.environment),
+                edge_kind=(
+                    "consumed_async_generator" if generator.is_async else "consumed_generator"
+                ),
+            )
+
+        def consume_generator_expression(
+            expression: Any,
+            line: int,
+            *,
+            require_async: bool | None,
+        ) -> None:
+            """Mark a direct generator call or consume one protocol-matched alias."""
+            if isinstance(expression, CallExpr):
+                consumed_generator_call_kinds[id(expression)] = require_async
+            elif isinstance(expression, NameExpr):
+                generator = deferred_environment.get(expression.name)
+                if generator is not None and (
+                    require_async is None or generator.is_async == require_async
+                ):
+                    consume_deferred_generator(generator, line)
+
         def handle_call_expr(call: CallExpr) -> None:
             """Trace exact calls, adding bounded finite receiver edges as LOW only."""
             call_site = self._resolved_call_site(call, current_file, import_map)
@@ -2616,6 +2801,53 @@ class MypyAnalyzer:
                 deps.add_resolved_call_site(call_site)
             callee = call.callee
             traced = False
+
+            canonical_symbol = (call_site.canonical_symbol if call_site is not None else None) or ""
+            generator_consumer = self.GENERATOR_CONSUMERS.get(canonical_symbol)
+            if generator_consumer is not None:
+                positional_index, keyword_name, require_async = generator_consumer
+                consumed_expression = self._exact_call_argument(
+                    call,
+                    positional_index,
+                    keyword_name,
+                )
+                if consumed_expression is not None:
+                    consume_generator_expression(
+                        consumed_expression,
+                        call.line,
+                        require_async=require_async,
+                    )
+
+            builtin_consumer = {
+                "builtins.anext": True,
+                "builtins.next": False,
+            }.get(canonical_symbol)
+            if builtin_consumer is not None and self._valid_builtin_generator_consumer(call):
+                consume_generator_expression(
+                    call.args[0],
+                    call.line,
+                    require_async=builtin_consumer,
+                )
+
+            generator_kind = self._generator_function_kind(call_site)
+            if generator_kind is not None:
+                generator = self._deferred_generator_call(
+                    call,
+                    call_site,
+                    flow_environment,
+                    import_map,
+                    finite_budget,
+                )
+                if generator is not None and id(call) in consumed_generator_call_kinds:
+                    consumed_kind = consumed_generator_call_kinds[id(call)]
+                    if consumed_kind is None or generator.is_async == consumed_kind:
+                        consume_deferred_generator(generator, call.line)
+                walk_node(callee)
+                for argument in call.args:
+                    walk_node(argument)
+                flow_environment.clear()
+                deferred_environment.clear()
+                return
 
             wrapper_symbol = (
                 call_site.canonical_symbol
@@ -2710,10 +2942,11 @@ class MypyAnalyzer:
             for arg in call.args:
                 walk_node(arg)
             flow_environment.clear()
+            deferred_environment.clear()
 
         def walk_node(n: Any) -> None:
             """Recursively walk a mypy AST node with a bounded local environment."""
-            nonlocal flow_environment
+            nonlocal deferred_environment, flow_environment
             if n is None:
                 return
 
@@ -2772,6 +3005,21 @@ class MypyAnalyzer:
                     (),
                     finite_budget,
                 )
+                deferred_value = (
+                    self._deferred_generator_call(
+                        n.rvalue,
+                        self._resolved_call_site(n.rvalue, current_file, import_map),
+                        flow_environment,
+                        import_map,
+                        finite_budget,
+                    )
+                    if isinstance(n.rvalue, CallExpr)
+                    else (
+                        deferred_environment.get(n.rvalue.name)
+                        if isinstance(n.rvalue, NameExpr)
+                        else None
+                    )
+                )
                 walk_node(n.rvalue)
                 for lv in n.lvalues:
                     if isinstance(lv, NameExpr):
@@ -2779,10 +3027,15 @@ class MypyAnalyzer:
                             flow_environment.pop(lv.name, None)
                         else:
                             flow_environment[lv.name] = value
+                        if deferred_value is None:
+                            deferred_environment.pop(lv.name, None)
+                        else:
+                            deferred_environment[lv.name] = deferred_value
                     else:
                         # Arbitrary/reflection-driven member mutation invalidates all
                         # finite heap evidence outside constructor summarization.
                         flow_environment.clear()
+                        deferred_environment.clear()
                     walk_node(lv)
 
             elif isinstance(n, ReturnStmt):
@@ -2790,38 +3043,72 @@ class MypyAnalyzer:
 
             elif isinstance(n, IfStmt):
                 base_environment = dict(flow_environment)
+                base_deferred = dict(deferred_environment)
                 branch_environments: list[dict[str, _FinitePointsTo]] = []
+                branch_deferred: list[dict[str, _DeferredGenerator]] = []
                 for expr, body in zip(n.expr, n.body, strict=True):
                     flow_environment = dict(base_environment)
+                    deferred_environment = dict(base_deferred)
                     walk_node(expr)
                     walk_node(body)
                     branch_environments.append(dict(flow_environment))
+                    branch_deferred.append(dict(deferred_environment))
                 flow_environment = dict(base_environment)
+                deferred_environment = dict(base_deferred)
                 if n.else_body:
                     walk_node(n.else_body)
                     branch_environments.append(dict(flow_environment))
+                    branch_deferred.append(dict(deferred_environment))
                 else:
                     branch_environments.append(base_environment)
+                    branch_deferred.append(base_deferred)
                 flow_environment = self._join_finite_environments(branch_environments)
+                common_deferred = set.intersection(*(set(branch) for branch in branch_deferred))
+                deferred_environment = {
+                    name: branch_deferred[0][name]
+                    for name in common_deferred
+                    if all(
+                        branch[name] == branch_deferred[0][name] for branch in branch_deferred[1:]
+                    )
+                }
 
-            elif isinstance(n, WhileStmt) or isinstance(n, ForStmt):
+            elif isinstance(n, WhileStmt):
                 walk_node(n.expr)
                 flow_environment.clear()
+                deferred_environment.clear()
                 walk_node(n.body)
                 flow_environment.clear()
+                deferred_environment.clear()
+
+            elif isinstance(n, ForStmt):
+                consume_generator_expression(
+                    n.expr,
+                    n.line,
+                    require_async=bool(n.is_async),
+                )
+                walk_node(n.expr)
+                flow_environment.clear()
+                deferred_environment.clear()
+                walk_node(n.body)
+                flow_environment.clear()
+                deferred_environment.clear()
 
             elif isinstance(n, WithStmt):
                 for expr in n.expr:
                     walk_node(expr)
                 flow_environment.clear()
+                deferred_environment.clear()
                 walk_node(n.body)
                 flow_environment.clear()
+                deferred_environment.clear()
 
             elif isinstance(n, TryStmt):
                 flow_environment.clear()
+                deferred_environment.clear()
                 walk_node(n.body)
                 for handler in n.handlers:
                     flow_environment.clear()
+                    deferred_environment.clear()
                     walk_node(handler)
                 if hasattr(n, "types") and n.types:
                     for exc_type in n.types:
@@ -2829,11 +3116,14 @@ class MypyAnalyzer:
                             walk_node(exc_type)
                 if n.else_body:
                     flow_environment.clear()
+                    deferred_environment.clear()
                     walk_node(n.else_body)
                 if n.finally_body:
                     flow_environment.clear()
+                    deferred_environment.clear()
                     walk_node(n.finally_body)
                 flow_environment.clear()
+                deferred_environment.clear()
 
             elif isinstance(n, AwaitExpr):
                 if isinstance(n.expr, CallExpr):
@@ -2880,33 +3170,42 @@ class MypyAnalyzer:
                     walk_node(key)
                     walk_node(expression_value)
 
-            elif isinstance(n, ListComprehension):
-                # ListComprehension has a generator attribute
-                if hasattr(n, "generator"):
-                    walk_node(n.generator)
+            elif isinstance(n, (ListComprehension, SetComprehension)):
+                generator = n.generator
+                for sequence, is_async in zip(
+                    generator.sequences,
+                    generator.is_async,
+                    strict=True,
+                ):
+                    consume_generator_expression(
+                        sequence,
+                        sequence.line,
+                        require_async=bool(is_async),
+                    )
+                    walk_node(sequence)
+                for conditions in generator.condlists:
+                    for condition in conditions:
+                        walk_node(condition)
+                walk_node(generator.left_expr)
 
-            elif isinstance(n, (SetComprehension, DictionaryComprehension)):
-                # These might also have generator attribute
-                if hasattr(n, "generator"):
-                    walk_node(n.generator)
+            elif isinstance(n, DictionaryComprehension):
+                for sequence, is_async in zip(n.sequences, n.is_async, strict=True):
+                    consume_generator_expression(
+                        sequence,
+                        sequence.line,
+                        require_async=bool(is_async),
+                    )
+                    walk_node(sequence)
+                for conditions in n.condlists:
+                    for condition in conditions:
+                        walk_node(condition)
+                walk_node(n.key)
+                walk_node(n.value)
 
             elif isinstance(n, GeneratorExpr):
-                # Walk the generator/element expression
-                if hasattr(n, "left_expr"):
-                    walk_node(n.left_expr)
-                # Walk generator clauses (for x in sequence if condition)
-                if hasattr(n, "sequences"):
-                    for seq in n.sequences:
-                        walk_node(seq)
-                if hasattr(n, "condlists"):
-                    for conds in n.condlists:
-                        for cond in conds:
-                            walk_node(cond)
-                # For dict comprehensions, also walk key and value
-                if hasattr(n, "key"):
-                    walk_node(n.key)
-                if hasattr(n, "value"):
-                    walk_node(n.value)
+                # Creating a generator expression evaluates only its outer iterable.
+                if n.sequences:
+                    walk_node(n.sequences[0])
 
             elif isinstance(n, LambdaExpr):
                 # Walk lambda arguments (for default values)
@@ -2917,7 +3216,11 @@ class MypyAnalyzer:
                 # Walk lambda body
                 walk_node(n.body)
 
-            elif isinstance(n, (YieldExpr, YieldFromExpr)):
+            elif isinstance(n, YieldFromExpr):
+                consume_generator_expression(n.expr, n.line, require_async=False)
+                walk_node(n.expr)
+
+            elif isinstance(n, YieldExpr):
                 walk_node(n.expr)
 
             elif isinstance(n, (ImportFrom, Import)):
@@ -3026,6 +3329,12 @@ class MypyAnalyzer:
                     "max_factory_states": self.MAX_FACTORY_STATES,
                     "max_edges": self.MAX_POINTS_TO_EDGES,
                     "execution_summary_version": self.EXECUTION_SUMMARY_VERSION,
+                    "generator_consumers": {
+                        symbol: [position, keyword, require_async]
+                        for symbol, (position, keyword, require_async) in sorted(
+                            self.GENERATOR_CONSUMERS.items()
+                        )
+                    },
                     "executor_summaries": {
                         symbol: {
                             "callback_index": summary.callback_index,
