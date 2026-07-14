@@ -547,6 +547,14 @@ class HtmlFormatter(BaseFormatter):
                 f'<span class="summary-label">Analysis Time:</span> {report.analysis_duration_ms:.2f}ms'
                 f"</div>"
             )
+        if report.effect_contract_audit is not None:
+            audit = report.effect_contract_audit
+            content_lines.append(
+                '<div class="summary-item"><span class="summary-label">'
+                "Effect Contract Audit:</span> "
+                f"{audit.summary.matched_calls} matched calls / "
+                f"{audit.summary.physical_occurrences} physical calls</div>"
+            )
         content_lines.append("</div>")
 
         # Affected endpoints
@@ -612,6 +620,13 @@ class HtmlFormatter(BaseFormatter):
                             f'{html.escape(evidence.disposition.value)}] '
                             f'{html.escape(evidence.summary)}'
                             '</div>'
+                        )
+                    for contract_evidence in ae.contract_evidence:
+                        content_lines.append(
+                            '<div class="info-item"><span class="label">'
+                            "Declared contract:</span> "
+                            f"{html.escape(contract_evidence.contract.id)} "
+                            "(change-to-call flow not established)</div>"
                         )
 
                     if ep.discovery_conditions:
@@ -724,6 +739,13 @@ class HtmlFormatter(BaseFormatter):
                         f'[{html.escape(evidence.status.value)} / '
                         f'{html.escape(evidence.disposition.value)}] '
                         f'{html.escape(evidence.summary)}</div>'
+                    )
+                for contract_evidence in candidate.contract_evidence:
+                    content_lines.append(
+                        '<div class="info-item"><span class="label">'
+                        "Declared contract:</span> "
+                        f"{html.escape(contract_evidence.contract.id)} "
+                        "(change-to-call flow not established)</div>"
                     )
                 content_lines.append("</div>")
 

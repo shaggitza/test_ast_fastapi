@@ -54,6 +54,10 @@ class YamlFormatter(BaseFormatter):
                 evidence.model_dump(mode="json", exclude_none=True)
                 for evidence in affected.effect_evidence
             ],
+            "contract_evidence": [
+                evidence.model_dump(mode="json", exclude_none=True)
+                for evidence in affected.contract_evidence
+            ],
         }
 
     def format(self, report: AnalysisReport) -> str:
@@ -91,6 +95,11 @@ class YamlFormatter(BaseFormatter):
             ],
             "errors": report.errors,
             "warnings": report.warnings,
+            "effect_contract_audit": (
+                report.effect_contract_audit.model_dump(mode="json", exclude_none=True)
+                if report.effect_contract_audit is not None
+                else None
+            ),
         }
 
         return yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)

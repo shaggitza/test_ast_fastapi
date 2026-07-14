@@ -7,14 +7,21 @@ dependency analysis to determine which endpoints are affected by code changes.
 Uses mypy for type-aware, precise dependency tracking.
 """
 
+from __future__ import annotations
+
 import heapq
 import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from fastapi_endpoint_detector.analyzer.effect_analyzer import EffectAnalyzer
+from fastapi_endpoint_detector.analyzer.effect_contract_auditor import (
+    audit_effect_contracts,
+    build_audit_endpoint,
+)
 from fastapi_endpoint_detector.analyzer.endpoint_registry import EndpointRegistry
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.analyzer.scip_analyzer import (
@@ -24,10 +31,10 @@ from fastapi_endpoint_detector.analyzer.scip_analyzer import (
     SCIPReachedDefinition,
 )
 from fastapi_endpoint_detector.config import Config
-from fastapi_endpoint_detector.models.diff import DiffFile
 from fastapi_endpoint_detector.models.endpoint import (
     Endpoint,
     EndpointDiscoveryStatus,
+    EndpointInventory,
 )
 from fastapi_endpoint_detector.models.report import (
     AffectedEndpoint,
@@ -36,6 +43,7 @@ from fastapi_endpoint_detector.models.report import (
     ChangeEffectKind,
     CodeReference,
     ConfidenceLevel,
+    ContractEffectEvidence,
     EffectDisposition,
     EffectEvidence,
     EvidenceProducer,
@@ -46,6 +54,14 @@ from fastapi_endpoint_detector.models.report import (
 from fastapi_endpoint_detector.parser.diff_parser import DiffParser
 from fastapi_endpoint_detector.parser.fastapi_extractor import FastAPIExtractor
 from fastapi_endpoint_detector.parser.secure_ast_extractor import SecureASTExtractor
+
+if TYPE_CHECKING:
+    from fastapi_endpoint_detector.models.diff import DiffFile
+    from fastapi_endpoint_detector.models.effect_contract import LoadedEffectContracts
+    from fastapi_endpoint_detector.models.effect_contract_audit import (
+        EffectContractAudit,
+        EffectContractAuditOccurrence,
+    )
 
 # Progress callback type: (current, total, description) -> None
 ProgressCallback = Callable[[int, int, str], None]
@@ -96,7 +112,7 @@ class _AffectedAccumulator:
     effect_evidence: list[EffectEvidence] = field(default_factory=list)
 
     @classmethod
-    def from_candidate(cls, candidate: AffectedEndpoint) -> "_AffectedAccumulator":
+    def from_candidate(cls, candidate: AffectedEndpoint) -> _AffectedAccumulator:
         accumulator = cls(
             endpoint=candidate.endpoint,
             confidence=candidate.confidence,
@@ -400,10 +416,16 @@ class ChangeMapper:
         """
         self.app_path = app_path.resolve()
         self.config = config or Config()
-        if self.config.analysis.effect_contracts is not None:
-            raise ChangeMapperError(
-                "effect contracts are validation-only until exact typed call matching is enabled"
-            )
+        self._effect_contracts: LoadedEffectContracts | None = (
+            self.config.load_effect_contract_snapshot()
+        )
+        if self._effect_contracts is not None:
+            if not secure_ast:
+                raise ChangeMapperError("effect contract evidence requires secure_ast=True")
+            if use_scip:
+                raise ChangeMapperError("effect contract evidence requires the mypy backend")
+            if baseline_app_path is not None:
+                raise ChangeMapperError("effect contract evidence is target-only")
         self.app_variable = app_variable
         self.app_entry = app_entry
         self.bootstrap_entry = bootstrap_entry
@@ -431,6 +453,8 @@ class ChangeMapper:
         # These are lazily initialized
         self._extractor: FastAPIExtractor | SecureASTExtractor | None = None
         self._registry: EndpointRegistry | None = None
+        self._inventory: EndpointInventory | None = None
+        self._effect_contract_audit: EffectContractAudit | None = None
         self._mypy_analyzer: MypyAnalyzer | None = None
         self._effect_analyzer = EffectAnalyzer(target_project_root)
         self._scip_analyzer: SCIPAnalyzer | None = None
@@ -460,9 +484,21 @@ class ChangeMapper:
         """Get the endpoint registry, populating if needed."""
         if self._registry is None:
             self._registry = EndpointRegistry()
-            endpoints = self.extractor.extract_endpoints()
+            if isinstance(self.extractor, SecureASTExtractor):
+                self._inventory = self.extractor.extract_inventory()
+                endpoints = self._inventory.endpoints
+            else:
+                endpoints = self.extractor.extract_endpoints()
             self._registry.register_many(endpoints)
         return self._registry
+
+    @property
+    def inventory(self) -> EndpointInventory:
+        """Return the exact execution-free inventory used to populate the registry."""
+        _registry = self.registry
+        if self._inventory is None:
+            raise ChangeMapperError("endpoint inventory is unavailable outside secure AST mode")
+        return self._inventory
 
     @property
     def scip_analyzer(self) -> SCIPAnalyzer:
@@ -503,7 +539,7 @@ class ChangeMapper:
         return self._baseline_scip_analyzer
 
     @property
-    def mypy_analyzer(self) -> "MypyAnalyzer":
+    def mypy_analyzer(self) -> MypyAnalyzer:
         """Get the mypy analyzer, initializing if needed (does NOT pre-analyze)."""
         if self._mypy_analyzer is None:
             package_path = self.app_path.parent if self.app_path.is_file() else self.app_path
@@ -1007,6 +1043,97 @@ class ChangeMapper:
         ]
         return [item.materialize() for item in affected.values()], orphan_changes
 
+    def _build_effect_contract_audit(self) -> EffectContractAudit | None:
+        """Audit configured contracts over the exact pre-analyzed target inventory."""
+        if self._effect_contracts is None:
+            return None
+        rows = []
+        for endpoint in self.inventory.endpoints:
+            dependencies = self.mypy_analyzer.get_endpoint_dependencies(endpoint)
+            if dependencies is None:
+                raise ChangeMapperError(
+                    "effect contract audit requires complete typed endpoint analysis"
+                )
+            rows.append((endpoint, dependencies.get_resolved_call_sites()))
+        effective_depth = (
+            self.config.parser.max_depth if self.config.analysis.track_transitive else 1
+        )
+        source_root = self.app_path.parent if self.app_path.is_file() else self.app_path
+        return audit_effect_contracts(
+            self._effect_contracts,
+            source_root=source_root,
+            inventory=self.inventory,
+            endpoint_call_sites=rows,
+            track_transitive=self.config.analysis.track_transitive,
+            max_depth=effective_depth,
+            cache_enabled=self.use_cache,
+            resolver_versions=(f"mypy@{self.mypy_analyzer.resolver_version}",),
+        )
+
+    def _attach_contract_evidence(
+        self,
+        candidates: list[AffectedEndpoint],
+        audit: EffectContractAudit | None,
+    ) -> list[AffectedEndpoint]:
+        """Decorate existing candidates without changing reachability or confidence."""
+        if audit is None or self._effect_contracts is None:
+            return candidates
+        source_root = self.app_path.parent if self.app_path.is_file() else self.app_path
+        contract_by_id = {
+            contract.id: contract for contract in self._effect_contracts.document.contracts
+        }
+        matched_by_endpoint: dict[str, list[EffectContractAuditOccurrence]] = {}
+        for occurrence in audit.occurrences:
+            if occurrence.contract_id is None:
+                continue
+            for endpoint in occurrence.endpoints:
+                matched_by_endpoint.setdefault(endpoint.id, []).append(occurrence)
+        enriched: list[AffectedEndpoint] = []
+        for candidate in candidates:
+            endpoint_id = build_audit_endpoint(candidate.endpoint, source_root).id
+            evidence: list[ContractEffectEvidence] = []
+            for occurrence in matched_by_endpoint.get(endpoint_id, []):
+                contract_id = occurrence.contract_id
+                if contract_id is None:
+                    continue
+                contract = contract_by_id[contract_id]
+                evidence.append(
+                    ContractEffectEvidence(
+                        contract=contract,
+                        contract_hash=self._effect_contracts.contract_hashes[contract_id],
+                        config_hash=audit.provenance.config_hash,
+                        preset_hash=audit.provenance.preset_hash,
+                        raw_hash=audit.provenance.raw_hash,
+                        audit_hash=audit.provenance.audit_hash,
+                        occurrence_corpus_hash=audit.provenance.occurrence_corpus_hash,
+                        contract_source_path=audit.provenance.contract_source_path,
+                        occurrence_id=occurrence.id,
+                        endpoint_audit_id=endpoint_id,
+                        call_location=CodeReference(
+                            file_path=occurrence.file_path,
+                            line_number=occurrence.line,
+                            end_line_number=occurrence.end_line,
+                            symbol=occurrence.canonical_symbol,
+                        ),
+                        resolver=occurrence.resolver,
+                        resolver_version=occurrence.resolver_version,
+                        matcher=audit.provenance.matcher,
+                        limitations=(
+                            "The contract declares call semantics; changed-code to call flow "
+                            "is not established.",
+                            "Resource and value selectors are not resolved in this phase.",
+                            "Contract evidence does not change candidate reachability "
+                            "or confidence.",
+                        ),
+                    )
+                )
+            enriched.append(
+                candidate.model_copy(
+                    update={"contract_evidence": tuple(evidence)},
+                )
+            )
+        return enriched
+
     def analyze_diff(  # noqa: PLR0915
         self,
         diff_source: Path | str,
@@ -1080,6 +1207,7 @@ class ChangeMapper:
         # Pre-analyze endpoints with mypy
         report_progress(10, 100, f"Analyzing {total_endpoints} endpoints (mypy)...")
         self._preanalyze_mypy(progress_callback)
+        self._effect_contract_audit = self._build_effect_contract_audit()
 
         # Analyze each Python file
         report_progress(70, 100, f"Checking {len(python_files)} changed files...")
@@ -1122,6 +1250,10 @@ class ChangeMapper:
         report_progress(95, 100, "Filtering results...")
         threshold = self.config.analysis.confidence_threshold
         materialized = [item.materialize() for item in all_affected.values()]
+        materialized = self._attach_contract_evidence(
+            materialized,
+            self._effect_contract_audit,
+        )
         filtered_affected = [
             item for item in materialized if _CONFIDENCE_SCORE[item.confidence] >= threshold
         ]
@@ -1147,6 +1279,7 @@ class ChangeMapper:
             analysis_duration_ms=duration_ms,
             errors=errors,
             warnings=warnings,
+            effect_contract_audit=self._effect_contract_audit,
         )
 
     def _preanalyze_mypy(

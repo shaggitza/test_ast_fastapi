@@ -153,11 +153,14 @@ def analyze(
     config: Config = ctx.obj["config"]
 
     # Validate mutually exclusive options
-    if config.analysis.effect_contracts is not None:
-        console.print(
-            "[red]Error:[/red] effect contracts are validation-only until exact typed "
-            "call matching is enabled"
-        )
+    if config.analysis.effect_contracts is not None and vm:
+        console.print("[red]Error:[/red] effect contract evidence is unavailable with --vm")
+        raise click.Abort()
+    if config.analysis.effect_contracts is not None and scip:
+        console.print("[red]Error:[/red] effect contract evidence requires the mypy backend")
+        raise click.Abort()
+    if config.analysis.effect_contracts is not None and not secure_ast:
+        console.print("[red]Error:[/red] effect contract evidence requires --secure-ast")
         raise click.Abort()
     if vm and secure_ast:
         console.print("[red]Error:[/red] --vm and --secure-ast cannot be used together")
@@ -448,7 +451,13 @@ def audit_effect_contracts_command(  # noqa: PLR0912
         )
 
     try:
-        loaded = load_effect_contracts(contract_path)
+        loaded = (
+            config.load_effect_contract_snapshot()
+            if configured is not None
+            else load_effect_contracts(contract_path)
+        )
+        if loaded is None:
+            raise RuntimeError("configured effect contracts were not loaded")
         extractor = SecureASTExtractor(
             app_path=app.resolve(),
             app_variable=app_var,

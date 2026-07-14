@@ -51,6 +51,12 @@ class MarkdownFormatter(BaseFormatter):
         )
         if report.analysis_duration_ms:
             lines.append(f"- **Analysis Time:** {report.analysis_duration_ms:.2f}ms")
+        if report.effect_contract_audit is not None:
+            audit = report.effect_contract_audit
+            lines.append(
+                f"- **Effect Contract Audit:** {audit.summary.matched_calls} matched calls / "
+                f"{audit.summary.physical_occurrences} physical calls"
+            )
         lines.append("")
 
         # Affected endpoints
@@ -91,6 +97,13 @@ class MarkdownFormatter(BaseFormatter):
                         lines.append(
                             f"- **Effect ({evidence.status.value}/{evidence.disposition.value}):** "
                             f"{evidence.summary}"
+                        )
+                    for contract_evidence in ae.contract_evidence:
+                        lines.append(
+                            f"- **Declared contract `{contract_evidence.contract.id}`:** "
+                            f"{contract_evidence.contract.operation.value}/"
+                            f"{contract_evidence.contract.channel.value}; "
+                            "change-to-call flow not established"
                         )
 
                     if ae.dependency_chain and len(ae.dependency_chain) > 1:
@@ -143,6 +156,11 @@ class MarkdownFormatter(BaseFormatter):
                     )
                 for evidence in candidate.effect_evidence:
                     lines.append(f"  - {evidence.disposition.value}: {evidence.summary}")
+                for contract_evidence in candidate.contract_evidence:
+                    lines.append(
+                        f"  - Declared contract `{contract_evidence.contract.id}`: "
+                        "change-to-call flow not established"
+                    )
             lines.append("")
 
         # Orphan changes

@@ -2,7 +2,7 @@
 
 Effect contracts describe the semantics of exact Python callables that read or mutate external state. They are data-only: the detector never imports a contract module or executes a plugin.
 
-The current release provides validation, provenance, canonical hashes, source-backed typed call capture, and a separate dry-run audit. Contract matches do not create effect evidence, add endpoint candidates, or change confidence. Ordinary diff analysis still fails explicitly when `analysis.effect_contracts` is configured until the later evidence-integration phase.
+The current release provides validation, provenance, canonical hashes, source-backed typed call capture, a separate dry-run audit, and conservative evidence decoration. Contract matches never add endpoint candidates or change confidence. Configured diff analysis requires execution-free `--secure-ast` discovery and the mypy backend.
 
 Validate a document with:
 
@@ -106,7 +106,19 @@ analysis:
   effect_contracts: .effect-contracts.yaml
 ```
 
-The path is resolved relative to that YAML file and validated immediately. `audit-effect-contracts` uses this configured path when `--contracts` is omitted and rejects dual sources. Ordinary `analyze` still rejects the setting because dry-run matches are not effect evidence. A later phase may append configured evidence only to already reachable endpoints without adding candidates or changing confidence.
+The path is resolved relative to that YAML file, loaded once, and retained as the exact validated snapshot used by matching. `audit-effect-contracts` uses this configured path when `--contracts` is omitted and rejects dual sources.
+
+Configured impact analysis is explicit and execution-free:
+
+```bash
+fastapi-endpoint-detector --config .endpoint-detector.yaml analyze \
+  --app ./src \
+  --diff change.diff \
+  --secure-ast \
+  --format json
+```
+
+Only already reachable candidates receive `contract_evidence`. This evidence preserves the full declaration and all raw/config/preset/contract/audit/corpus hashes, but remains `declared_reachable`: it does not claim changed-code-to-call causality, downstream observation, resolved resource identity, or durable persistence. The candidate reason, confidence, dependency chains, call stacks, threshold membership, and orphan accounting remain unchanged.
 
 ## Safety boundaries
 
@@ -116,7 +128,9 @@ The path is resolved relative to that YAML file and validated immediately. `audi
 - Resource identity remains separate from effect certainty.
 - Contracts declare semantics, not endpoint blast radius.
 - Ambiguous receivers and dynamic imports remain unresolved.
-- Dry-run matches are reported separately and never promote or filter candidates.
+- Dry-run matches and configured contract evidence never promote or filter candidates.
+- Declared operations and channels are not projected into behavioral effect fields without causal data flow.
+- Resource/value selectors remain unavailable and never create cross-endpoint fanout.
 - Project source paths are relative and deterministic across checkout relocation; contract files outside the app root use a content-addressed `content://sha256/...` source label.
 - Conflicting resolver records for one physical span fail closed.
 - External library internals are excluded; external calls remain auditable at their project source occurrence.

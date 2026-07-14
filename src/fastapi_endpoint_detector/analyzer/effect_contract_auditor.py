@@ -70,7 +70,7 @@ def _limitation(
     )
 
 
-def _endpoint(endpoint: Endpoint, source_root: Path) -> AuditEndpoint:
+def build_audit_endpoint(endpoint: Endpoint, source_root: Path) -> AuditEndpoint:
     conditions = tuple(
         sorted(
             (_limitation(item, source_root) for item in endpoint.discovery_conditions),
@@ -179,7 +179,7 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
         )
     inventory_records: dict[str, AuditEndpoint] = {}
     for endpoint in inventory.endpoints:
-        record = _endpoint(endpoint, root)
+        record = build_audit_endpoint(endpoint, root)
         if record.id in inventory_records:
             raise EffectContractAuditError(
                 f"duplicate stable endpoint identity in inventory: {record.id}"
@@ -187,7 +187,7 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
         inventory_records[record.id] = record
 
     for endpoint, sites in endpoint_rows:
-        endpoint_record = _endpoint(endpoint, root)
+        endpoint_record = build_audit_endpoint(endpoint, root)
         for site in sites:
             relative = _relative_path(site.file_path, root)
             key = (relative, site.line, site.column, site.end_line, site.end_column)
