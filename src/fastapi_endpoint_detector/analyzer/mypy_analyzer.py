@@ -23,6 +23,11 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from fastapi_endpoint_detector.models.effect_contract import (
+    CallResolutionStatus,
+    InvocationKind,
+    ResolvedCallSite,
+)
 from fastapi_endpoint_detector.models.endpoint import Endpoint
 
 # Type alias for line-level progress callback (file_path, line_number, symbol_name)
@@ -124,12 +129,20 @@ class EndpointDependencies:
     """List of symbol references with their file paths and line ranges."""
     call_stacks: dict[str, list[list[CallFrame]]] = field(default_factory=dict)
     """Mapping of file path -> list of call stacks showing all paths from handler to that file."""
+    resolved_call_sites: list[ResolvedCallSite] = field(default_factory=list)
+    """Source-backed call occurrences reached from this endpoint."""
     source_root: str = ""
     project_files: set[str] | frozenset[str] = field(default_factory=set)
     _path_index: _ProjectPathIndex | None = field(default=None, repr=False, compare=False)
     _canonical_key_indexes: dict[str, dict[str, frozenset[str]]] = field(
         default_factory=dict, init=False, repr=False, compare=False
     )
+    _resolved_call_site_set: set[ResolvedCallSite] = field(
+        default_factory=set, init=False, repr=False, compare=False
+    )
+
+    def __post_init__(self) -> None:
+        self._resolved_call_site_set.update(self.resolved_call_sites)
 
     def add_reference(self, file_path: str, line: int, symbol_name: str = "") -> None:
         """Add a line reference to dependencies."""
@@ -158,6 +171,14 @@ class EndpointDependencies:
             stacks.append(stack)
             self._canonical_key_indexes.pop("call_stacks", None)
 
+    def add_resolved_call_site(self, call_site: ResolvedCallSite) -> None:
+        """Add one physical call occurrence without duplicating traversal paths."""
+        if call_site in self._resolved_call_site_set:
+            return
+        self._resolved_call_site_set.add(call_site)
+        self.resolved_call_sites.append(call_site)
+        self._canonical_key_indexes.pop("resolved_call_sites", None)
+
     def _matching_paths(
         self,
         file_path: str,
@@ -178,6 +199,7 @@ class EndpointDependencies:
                         *self.referenced_files,
                         *(ref.file_path for ref in self.referenced_symbols),
                         *self.call_stacks,
+                        *(site.file_path for site in self.resolved_call_sites),
                     }
                 )
                 index = _ProjectPathIndex(self.source_root, inventory)
@@ -224,6 +246,37 @@ class EndpointDependencies:
             else set()
         )
 
+    def get_resolved_call_sites(
+        self,
+        file_path: str | None = None,
+        *,
+        status: CallResolutionStatus | None = None,
+    ) -> list[ResolvedCallSite]:
+        """Return deterministic call occurrences with fail-closed path filtering."""
+        selected = self.resolved_call_sites
+        if file_path is not None:
+            matches = self._matching_paths(
+                file_path,
+                (site.file_path for site in selected),
+                "resolved_call_sites",
+            )
+            selected = [site for site in selected if site.file_path in matches]
+        if status is not None:
+            selected = [site for site in selected if site.status == status]
+        return sorted(
+            selected,
+            key=lambda site: (
+                site.file_path,
+                site.line,
+                site.column,
+                site.end_line or site.line,
+                site.end_column if site.end_column is not None else site.column,
+                site.source_spelling,
+                site.status.value,
+                site.canonical_symbol or "",
+            ),
+        )
+
     def get_call_stack(self, file_path: str) -> list[list[CallFrame]]:
         """Get all unique call stacks for one unambiguously resolved file."""
         matches = self._matching_paths(file_path, self.call_stacks, "call_stacks")
@@ -244,7 +297,7 @@ class MypyAnalyzer:
     and extract precise file/line information for all references.
     """
 
-    CACHE_SCHEMA_VERSION = 6
+    CACHE_SCHEMA_VERSION = 7
 
     def __init__(self, app_path: Path, *, max_depth: int = 10) -> None:
         """Initialize the mypy analyzer."""
@@ -259,6 +312,10 @@ class MypyAnalyzer:
         self._line_progress_callback: LineProgressCallback | None = None
         self._shared_path_index: _ProjectPathIndex | None = None
         self._modules_by_canonical_path: dict[str, tuple[str, ...]] = {}
+        try:
+            self._resolver_version = version("mypy")
+        except PackageNotFoundError:
+            self._resolver_version = "missing"
 
         # Mypy build results - stored to prevent GC
         self._build_result: Any = None
@@ -269,9 +326,13 @@ class MypyAnalyzer:
         self._global_value_cache: dict[str, SymbolReference | None] = {}
         self._python_dependency_cache: dict[tuple[str, int, str], set[str]] = {}
         self._python_ast_cache: dict[str, ast.Module | None] = {}
+        self._python_call_span_cache: dict[str, dict[tuple[int, int], tuple[int, int]]] = {}
+        self._source_bytes_cache: dict[str, tuple[bytes, ...] | None] = {}
+        self._resolved_call_site_cache: dict[int, ResolvedCallSite | None] = {}
         self._built_source_fingerprint: str | None = None
         self._expected_source_fingerprint: str | None = None
         self._fullname_resolution_cache: dict[str, tuple[str, str] | None] = {}
+        self._canonical_project_fullname_cache: dict[str, str | None] = {}
         self._function_lookup_cache: dict[
             tuple[int, str, str | None, int | None], tuple[Any, str] | None
         ] = {}
@@ -400,9 +461,13 @@ class MypyAnalyzer:
         self._global_value_cache.clear()
         self._python_dependency_cache.clear()
         self._python_ast_cache.clear()
+        self._python_call_span_cache.clear()
+        self._source_bytes_cache.clear()
+        self._resolved_call_site_cache.clear()
         self._modules_by_canonical_path.clear()
         self._shared_path_index = None
         self._fullname_resolution_cache.clear()
+        self._canonical_project_fullname_cache.clear()
         self._function_lookup_cache.clear()
         self._built_source_fingerprint = None
         self._endpoint_deps.clear()
@@ -984,6 +1049,492 @@ class MypyAnalyzer:
         self._endpoint_deps[self._endpoint_key(endpoint)] = deps
         return deps
 
+    def _call_source_identity(
+        self,
+        current_file: str,
+        callee: Any,
+    ) -> tuple[int, int, int | None, int | None, str] | None:
+        """Return mypy's UTF-8 byte span and the exact source spelling."""
+        line_value = getattr(callee, "line", 0)
+        column_value = getattr(callee, "column", -1)
+        end_line_raw = getattr(callee, "end_line", 0)
+        end_column_raw = getattr(callee, "end_column", -1)
+        line = int(line_value) if isinstance(line_value, int) else 0
+        column = int(column_value) if isinstance(column_value, int) else -1
+        end_line_value = int(end_line_raw) if isinstance(end_line_raw, int) else 0
+        end_column_value = int(end_column_raw) if isinstance(end_column_raw, int) else -1
+        if line < 1 or column < 0:
+            return None
+        end_line = end_line_value if end_line_value >= line and end_column_value >= 0 else None
+        end_column = end_column_value if end_line is not None else None
+        canonical = str(Path(current_file).resolve())
+        if end_line is None:
+            if canonical not in self._python_ast_cache:
+                try:
+                    self._python_ast_cache[canonical] = ast.parse(
+                        Path(canonical).read_text(encoding="utf-8"), filename=canonical
+                    )
+                except (OSError, SyntaxError, UnicodeError):
+                    self._python_ast_cache[canonical] = None
+            tree = self._python_ast_cache[canonical]
+            if canonical not in self._python_call_span_cache:
+                spans: dict[tuple[int, int], tuple[int, int]] = {}
+                if tree is not None:
+                    for candidate in ast.walk(tree):
+                        function = candidate.func if isinstance(candidate, ast.Call) else None
+                        if (
+                            function is not None
+                            and function.end_lineno is not None
+                            and function.end_col_offset is not None
+                        ):
+                            spans[(function.lineno, function.col_offset)] = (
+                                function.end_lineno,
+                                function.end_col_offset,
+                            )
+                self._python_call_span_cache[canonical] = spans
+            fallback_span = self._python_call_span_cache[canonical].get((line, column))
+            if fallback_span is not None:
+                end_line, end_column = fallback_span
+        if end_line is None or end_column is None:
+            return None
+        if canonical not in self._source_bytes_cache:
+            try:
+                self._source_bytes_cache[canonical] = tuple(
+                    Path(canonical).read_bytes().splitlines(keepends=True)
+                )
+            except OSError:
+                self._source_bytes_cache[canonical] = None
+        lines = self._source_bytes_cache[canonical]
+        spelling = ""
+        if lines is not None and end_line is not None and end_line <= len(lines):
+            if end_line == line:
+                raw = lines[line - 1][column:end_column]
+            else:
+                raw = b"".join(
+                    (
+                        lines[line - 1][column:],
+                        *lines[line : end_line - 1],
+                        lines[end_line - 1][:end_column],
+                    )
+                )
+            try:
+                spelling = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                spelling = ""
+        if not spelling.strip():
+            return None
+        return line, column, end_line, end_column, spelling
+
+    @staticmethod
+    def _callable_declaration(  # noqa: PLR0911
+        node: Any,
+    ) -> tuple[str, InvocationKind] | None:
+        """Return exact declaration identity only for callable definition nodes."""
+        from mypy.nodes import (  # noqa: PLC0415
+            Decorator,
+            FuncDef,
+            OverloadedFuncDef,
+            TypeInfo,
+        )
+
+        if isinstance(node, TypeInfo):
+            return (node.fullname, InvocationKind.CONSTRUCTOR) if node.fullname else None
+        if isinstance(node, Decorator):
+            fullname = node.var.fullname or node.func.fullname
+            if not fullname:
+                return None
+            if node.var.is_staticmethod:
+                return fullname, InvocationKind.FUNCTION
+            if node.var.is_classmethod:
+                return fullname, InvocationKind.CLASS_METHOD
+            return (
+                fullname,
+                (
+                    InvocationKind.INSTANCE_METHOD
+                    if getattr(node.func.info, "fullname", None)
+                    else InvocationKind.FUNCTION
+                ),
+            )
+        if isinstance(node, OverloadedFuncDef):
+            declarations = {
+                declaration
+                for item in node.items
+                if (declaration := MypyAnalyzer._callable_declaration(item)) is not None
+            }
+            return next(iter(declarations)) if len(declarations) == 1 else None
+        if isinstance(node, FuncDef):
+            fullname = getattr(node, "fullname", "")
+            if not fullname:
+                return None
+            info = getattr(node, "info", None)
+            return (
+                fullname,
+                (
+                    InvocationKind.INSTANCE_METHOD
+                    if getattr(info, "fullname", None)
+                    else InvocationKind.FUNCTION
+                ),
+            )
+        return None
+
+    def _canonical_project_fullname(self, fullname: str) -> str | None:
+        """Map an import spelling to one unique built project module identity."""
+        if fullname not in self._canonical_project_fullname_cache:
+            self._canonical_project_fullname_cache[fullname] = (
+                self._canonical_project_fullname_uncached(fullname)
+            )
+        return self._canonical_project_fullname_cache[fullname]
+
+    def _canonical_project_fullname_uncached(self, fullname: str) -> str | None:
+        """Compute one unique project identity for an import spelling."""
+        resolved = self._resolve_fullname_to_file(fullname)
+        if resolved is not None:
+            _path, module = resolved
+            if fullname == module or fullname.startswith(f"{module}."):
+                return fullname
+        parts = fullname.split(".")
+        candidates: set[str] = set()
+        for split_at in range(1, len(parts) + 1):
+            imported_module = ".".join(parts[:split_at])
+            remainder = ".".join(parts[split_at:])
+            for module in self._module_to_path:
+                if module != imported_module and not module.endswith(f".{imported_module}"):
+                    continue
+                candidate = f"{module}.{remainder}" if remainder else module
+                if self._resolve_fullname_to_file(candidate) is not None:
+                    candidates.add(candidate)
+        return next(iter(candidates)) if len(candidates) == 1 else None
+
+    def _project_type_info(self, fullname: str) -> Any | None:
+        """Resolve one exact project class through bounded explicit re-exports."""
+        from mypy.nodes import TypeInfo  # noqa: PLC0415
+
+        visited: set[str] = set()
+        current = self._canonical_project_fullname(fullname)
+        if current is None:
+            return None
+        for _depth in range(self.max_depth + 1):
+            if current in visited:
+                return None
+            visited.add(current)
+            result = self._resolve_fullname_to_file(current)
+            if result is None:
+                return None
+            _path, module = result
+            tree = self._trees.get(module)
+            if tree is None or not current.startswith(f"{module}."):
+                return None
+            qualified = current[len(module) + 1 :]
+            if "." in qualified:
+                return None
+            symbol = tree.names.get(qualified)
+            if symbol is not None and isinstance(symbol.node, TypeInfo):
+                return symbol.node
+            reexport = self._import_map_for_tree(tree, module).get(qualified)
+            if reexport is None:
+                return None
+            current = reexport
+        return None
+
+    def _project_callable_declaration(self, fullname: str) -> tuple[str, InvocationKind] | None:
+        """Resolve an exact project callable through bounded explicit re-exports."""
+        from mypy.nodes import TypeInfo  # noqa: PLC0415
+
+        visited: set[str] = set()
+        current = self._canonical_project_fullname(fullname)
+        if current is None:
+            return None
+        for _depth in range(self.max_depth + 1):
+            if current in visited:
+                return None
+            visited.add(current)
+            result = self._resolve_fullname_to_file(current)
+            if result is None:
+                return None
+            _path, module = result
+            tree = self._trees.get(module)
+            if tree is None or not current.startswith(f"{module}."):
+                return None
+            qualified = current[len(module) + 1 :]
+            if "." in qualified:
+                return None
+            found = self._find_func_in_tree(
+                tree,
+                qualified,
+                qualified_name=qualified,
+            )
+            if found is not None:
+                return self._callable_declaration(found[0])
+            symbol = tree.names.get(qualified)
+            if symbol is not None and isinstance(symbol.node, TypeInfo):
+                return self._callable_declaration(symbol.node)
+            reexport = self._import_map_for_tree(tree, module).get(qualified)
+            if reexport is None:
+                return None
+            current = reexport
+        return None
+
+    @staticmethod
+    def _explicit_import_fullname(expression: Any, import_map: dict[str, str]) -> str | None:
+        """Resolve only source-explicit, unshadowed import attribute chains."""
+        from mypy.nodes import MemberExpr, MypyFile, NameExpr, TypeInfo, Var  # noqa: PLC0415
+
+        if isinstance(expression, NameExpr):
+            imported = import_map.get(expression.name)
+            if imported is None:
+                return None
+            node = expression.node
+            if isinstance(node, Var):
+                return imported if node.line < 0 and "." in (expression.fullname or "") else None
+            return imported if isinstance(node, (MypyFile, TypeInfo)) else None
+        if isinstance(expression, MemberExpr):
+            receiver = MypyAnalyzer._explicit_import_fullname(expression.expr, import_map)
+            return f"{receiver}.{expression.name}" if receiver is not None else None
+        return None
+
+    def _project_member_declaration(self, fullname: str) -> tuple[str, InvocationKind] | None:
+        """Resolve a method through an exact source-proven project class export."""
+        canonical = self._canonical_project_fullname(fullname)
+        if canonical is None:
+            return None
+        fullname = canonical
+        result = self._resolve_fullname_to_file(fullname)
+        if result is None:
+            return None
+        _path, module = result
+        if not fullname.startswith(f"{module}."):
+            return None
+        qualified = fullname[len(module) + 1 :]
+        if qualified.count(".") != 1:
+            return None
+        class_name, member_name = qualified.split(".")
+        info = self._project_type_info(f"{module}.{class_name}")
+        member = info.get(member_name) if info is not None else None
+        return self._callable_declaration(member.node) if member is not None else None
+
+    def _member_call_resolution(  # noqa: PLR0912
+        self,
+        callee: Any,
+        import_map: dict[str, str],
+    ) -> tuple[
+        CallResolutionStatus,
+        str | None,
+        InvocationKind | None,
+        tuple[str, ...],
+        str | None,
+    ]:
+        """Resolve one member call through finite nominal receiver evidence."""
+        from mypy.nodes import CallExpr, NameExpr, TypeInfo, Var  # noqa: PLC0415
+        from mypy.types import Instance, UnionType, get_proper_type  # noqa: PLC0415
+
+        imported_fullname = self._explicit_import_fullname(callee, import_map)
+        if imported_fullname is not None:
+            declaration = self._project_callable_declaration(
+                imported_fullname
+            ) or self._project_member_declaration(imported_fullname)
+            if declaration is not None:
+                resolved_symbol, invocation = declaration
+                return CallResolutionStatus.EXACT, resolved_symbol, invocation, (), None
+
+        receiver_infos: list[TypeInfo] = []
+        incomplete = False
+        if isinstance(callee.expr, NameExpr):
+            imported = (
+                import_map.get(callee.expr.name, "")
+                if isinstance(callee.expr.node, Var)
+                and callee.expr.node.line < 0
+                and "." in (callee.expr.fullname or "")
+                else ""
+            )
+            direct_info = (
+                callee.expr.node
+                if isinstance(callee.expr.node, TypeInfo)
+                else self._project_type_info(imported)
+            )
+            if direct_info is not None:
+                receiver_infos.append(direct_info)
+        elif isinstance(callee.expr, CallExpr):
+            constructor = callee.expr.callee
+            imported = self._explicit_import_fullname(constructor, import_map) or ""
+            if isinstance(constructor, NameExpr) and not imported:
+                imported = (
+                    import_map.get(constructor.name, "")
+                    if isinstance(constructor.node, Var)
+                    and constructor.node.line < 0
+                    and "." in (constructor.fullname or "")
+                    else ""
+                )
+            constructed = self._project_type_info(imported)
+            if constructed is not None:
+                receiver_infos.append(constructed)
+        if not receiver_infos:
+            receiver_type = self._get_type_from_node(callee.expr)
+            if (
+                receiver_type is None
+                and isinstance(callee.expr, NameExpr)
+                and isinstance(callee.expr.node, Var)
+            ):
+                receiver_type = callee.expr.node.type
+            receiver = get_proper_type(receiver_type)
+            receiver_items = receiver.items if isinstance(receiver, UnionType) else (receiver,)
+            for item in receiver_items:
+                proper = get_proper_type(item)
+                if isinstance(proper, Instance):
+                    receiver_infos.append(proper.type)
+                else:
+                    incomplete = True
+
+        if receiver_infos:
+            candidates = tuple(sorted({item.fullname for item in receiver_infos if item.fullname}))
+            resolutions: set[tuple[str, InvocationKind]] = set()
+            for info in receiver_infos:
+                member = info.get(callee.name)
+                declaration = (
+                    self._callable_declaration(member.node) if member is not None else None
+                )
+                if declaration is None:
+                    incomplete = True
+                else:
+                    resolutions.add(declaration)
+            if len(resolutions) == 1 and not incomplete:
+                resolved_symbol, invocation = next(iter(resolutions))
+                return (
+                    CallResolutionStatus.EXACT,
+                    resolved_symbol,
+                    invocation,
+                    candidates,
+                    None,
+                )
+            if len(receiver_infos) > 1 or len(resolutions) > 1:
+                return (
+                    CallResolutionStatus.AMBIGUOUS,
+                    None,
+                    None,
+                    candidates,
+                    "ambiguous_receiver",
+                )
+            return (
+                CallResolutionStatus.UNRESOLVED,
+                None,
+                None,
+                candidates,
+                "unresolved_member",
+            )
+
+        direct = self._callable_declaration(getattr(callee, "node", None))
+        if direct is not None:
+            resolved_symbol, invocation = direct
+            return CallResolutionStatus.EXACT, resolved_symbol, invocation, (), None
+        return (
+            CallResolutionStatus.UNRESOLVED,
+            None,
+            None,
+            (),
+            "dynamic_receiver",
+        )
+
+    def _resolved_call_site(
+        self,
+        call: Any,
+        current_file: str,
+        import_map: dict[str, str],
+    ) -> ResolvedCallSite | None:
+        """Classify one mypy call expression without guessing symbol identity."""
+        cache_key = id(call)
+        if cache_key not in self._resolved_call_site_cache:
+            self._resolved_call_site_cache[cache_key] = self._resolved_call_site_uncached(
+                call, current_file, import_map
+            )
+        return self._resolved_call_site_cache[cache_key]
+
+    def _resolved_call_site_uncached(
+        self,
+        call: Any,
+        current_file: str,
+        import_map: dict[str, str],
+    ) -> ResolvedCallSite | None:
+        """Resolve one physical mypy call node for the analyzer-wide occurrence cache."""
+        from mypy.nodes import MemberExpr, NameExpr, TypeInfo, Var  # noqa: PLC0415
+
+        identity = self._call_source_identity(current_file, call.callee)
+        if identity is None:
+            return None
+        line, column, end_line, end_column, spelling = identity
+        status = CallResolutionStatus.UNRESOLVED
+        canonical_symbol: str | None = None
+        invocation: InvocationKind | None = None
+        receiver_candidates: tuple[str, ...] = ()
+        reason_code: str | None = "unsupported_callee_expression"
+        callee = call.callee
+        if isinstance(callee, NameExpr):
+            if isinstance(callee.node, TypeInfo):
+                status = CallResolutionStatus.EXACT
+                canonical_symbol = callee.node.fullname
+                invocation = InvocationKind.CONSTRUCTOR
+                reason_code = None
+            elif isinstance(callee.node, Var):
+                imported = (
+                    import_map.get(callee.name)
+                    if callee.node.line < 0 and "." in (callee.fullname or "")
+                    else None
+                )
+                declaration = (
+                    self._project_callable_declaration(imported) if imported is not None else None
+                )
+                if declaration is not None:
+                    status = CallResolutionStatus.EXACT
+                    canonical_symbol, invocation = declaration
+                    reason_code = None
+                else:
+                    reason_code = "dynamic_callable"
+            else:
+                declaration = self._callable_declaration(callee.node)
+                if declaration is not None:
+                    status = CallResolutionStatus.EXACT
+                    canonical_symbol, invocation = declaration
+                    reason_code = None
+                else:
+                    reason_code = "dynamic_callable"
+        elif isinstance(callee, MemberExpr):
+            (
+                status,
+                canonical_symbol,
+                invocation,
+                receiver_candidates,
+                reason_code,
+            ) = self._member_call_resolution(callee, import_map)
+        resolver_version = self._resolver_version
+        try:
+            return ResolvedCallSite(
+                file_path=str(Path(current_file).resolve()),
+                line=line,
+                column=column,
+                end_line=end_line,
+                end_column=end_column,
+                source_spelling=spelling,
+                canonical_symbol=canonical_symbol,
+                invocation=invocation,
+                status=status,
+                resolver="mypy",
+                resolver_version=resolver_version,
+                receiver_candidates=receiver_candidates,
+                reason_code=reason_code,
+            )
+        except ValueError:
+            return ResolvedCallSite(
+                file_path=str(Path(current_file).resolve()),
+                line=line,
+                column=column,
+                end_line=end_line,
+                end_column=end_column,
+                source_spelling=spelling,
+                status=CallResolutionStatus.UNRESOLVED,
+                resolver="mypy",
+                resolver_version=resolver_version,
+                receiver_candidates=receiver_candidates,
+                reason_code="invalid_symbol_identity",
+            )
+
     def _trace_references(
         self,
         node: Any,
@@ -1167,8 +1718,11 @@ class MypyAnalyzer:
                 # Ambiguous or unresolved symbols are not converted into
                 # fabricated module ranges; doing so creates unrelated impacts.
 
-        def handle_call_expr(call: CallExpr) -> None:
+        def handle_call_expr(call: CallExpr) -> None:  # noqa: PLR0912
             """Handle a function/method call expression."""
+            call_site = self._resolved_call_site(call, current_file, import_map)
+            if call_site is not None:
+                deps.add_resolved_call_site(call_site)
             callee = call.callee
 
             if isinstance(callee, NameExpr):
@@ -1514,10 +2068,7 @@ class MypyAnalyzer:
                 sources[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
             except (OSError, ValueError):
                 continue
-        try:
-            mypy_version = version("mypy")
-        except PackageNotFoundError:
-            mypy_version = "missing"
+        mypy_version = self._resolver_version
         payload = json.dumps(
             {
                 "schema": self.CACHE_SCHEMA_VERSION,
@@ -1549,6 +2100,10 @@ class MypyAnalyzer:
                         "end_line": ref.end_line,
                     }
                     for ref in deps.referenced_symbols
+                ],
+                "resolved_call_sites": [
+                    site.model_dump(mode="json", exclude_none=True)
+                    for site in deps.get_resolved_call_sites()
                 ],
                 "call_stacks": {
                     f: [
@@ -1640,6 +2195,14 @@ class MypyAnalyzer:
                         for stack_data in stacks_data
                     ]
 
+                call_sites_data = deps_data.get("resolved_call_sites")
+                if not isinstance(call_sites_data, list):
+                    self._endpoint_deps.clear()
+                    return False
+                resolved_call_sites = [
+                    ResolvedCallSite.model_validate(item) for item in call_sites_data
+                ]
+
                 symbol_refs: list[SymbolReference] = []
                 for ref_data in deps_data.get("referenced_symbols", []):
                     if isinstance(ref_data, dict):
@@ -1665,6 +2228,7 @@ class MypyAnalyzer:
                     },
                     referenced_symbols=symbol_refs,
                     call_stacks=call_stacks,
+                    resolved_call_sites=resolved_call_sites,
                     source_root=str(self.source_root),
                     project_files=path_index.project_files,
                     _path_index=path_index,
@@ -1695,3 +2259,18 @@ class MypyAnalyzer:
         """Get dependencies for a handler-aware endpoint key."""
         key = self._endpoint_key(endpoint) if isinstance(endpoint, Endpoint) else endpoint
         return self._endpoint_deps.get(key)
+
+    def get_resolved_call_sites(
+        self,
+        endpoint: Endpoint | str,
+        *,
+        file_path: str | None = None,
+        status: CallResolutionStatus | None = None,
+    ) -> list[ResolvedCallSite]:
+        """Get typed call occurrences for one endpoint analysis."""
+        dependencies = self.get_endpoint_dependencies(endpoint)
+        return (
+            dependencies.get_resolved_call_sites(file_path, status=status)
+            if dependencies is not None
+            else []
+        )
