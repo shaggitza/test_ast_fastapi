@@ -7,6 +7,7 @@ dependency analysis to determine which endpoints are affected by code changes.
 Uses mypy for type-aware, precise dependency tracking.
 """
 
+import heapq
 import os
 import time
 from collections.abc import Callable
@@ -157,6 +158,141 @@ def _scip_confidence(seed: SCIPDefinition, depth: int) -> ConfidenceLevel:
     # observed by the endpoint. Keep every transitive route as a candidate, but
     # require independent effect/data-flow corroboration before promotion.
     return ConfidenceLevel.LOW
+
+
+@dataclass(frozen=True)
+class _ExpandedSCIPDefinition:
+    definition: SCIPDefinition
+    depth: int
+    dependency_chain: tuple[str, ...]
+
+
+def _scip_definition_key(definition: SCIPDefinition) -> tuple[str, str, str, int, int]:
+    return (
+        definition.symbol,
+        definition.short_name,
+        definition.file_path.as_posix(),
+        definition.start_line,
+        definition.end_line,
+    )
+
+
+def _expanded_scip_affected(  # noqa: PLR0912, PLR0915
+    analyzer: SCIPAnalyzer,
+    seed: SCIPDefinition,
+    max_depth: int,
+    warnings: list[str] | None = None,
+) -> tuple[_ExpandedSCIPDefinition, ...]:
+    """Close native SCIP reachability over explicit override-to-base bridges."""
+    initial = analyzer.affected(seed, max_depth=max_depth)
+    best_depth_by_symbol: dict[str, int] = {}
+    definition_by_symbol: dict[str, SCIPDefinition] = {}
+    chain_by_symbol: dict[str, tuple[str, ...]] = {}
+    worklist: list[tuple[int, str, tuple[str, ...]]] = []
+
+    def record(definition: SCIPDefinition, depth: int, chain: tuple[str, ...]) -> None:
+        symbol = definition.symbol
+        previous_depth = best_depth_by_symbol.get(symbol)
+        previous_definition = definition_by_symbol.get(symbol)
+        previous_chain = chain_by_symbol.get(symbol)
+        improves = previous_depth is None or depth < previous_depth
+        if (
+            depth == previous_depth
+            and previous_definition is not None
+            and previous_chain is not None
+        ):
+            improves = (chain, _scip_definition_key(definition)) < (
+                previous_chain,
+                _scip_definition_key(previous_definition),
+            )
+        if not improves:
+            return
+        best_depth_by_symbol[symbol] = depth
+        definition_by_symbol[symbol] = definition
+        chain_by_symbol[symbol] = chain
+        heapq.heappush(worklist, (depth, symbol, chain))
+
+    for reached in initial:
+        native_chain: tuple[str, ...] = (seed.symbol,)
+        if reached.definition.symbol != seed.symbol:
+            native_chain = (*native_chain, reached.definition.symbol)
+        record(reached.definition, reached.depth, native_chain)
+
+    base_resolver = getattr(analyzer, "base_method_definitions", None)
+    if not callable(base_resolver):
+        return tuple(
+            _ExpandedSCIPDefinition(
+                definition_by_symbol[symbol],
+                best_depth_by_symbol[symbol],
+                chain_by_symbol[symbol],
+            )
+            for symbol in sorted(
+                best_depth_by_symbol,
+                key=lambda item: (best_depth_by_symbol[item], item),
+            )
+        )
+
+    affected_cache: dict[
+        tuple[str, int], tuple[SCIPReachedDefinition, ...] | SCIPAnalyzerError
+    ] = {}
+    while worklist:
+        depth, symbol, current_chain = heapq.heappop(worklist)
+        if depth != best_depth_by_symbol[symbol] or current_chain != chain_by_symbol[symbol]:
+            continue
+        if depth >= max_depth:
+            continue
+        definition = definition_by_symbol[symbol]
+        try:
+            bases = base_resolver(definition)
+        except SCIPAnalyzerError as error:
+            if warnings is not None:
+                warnings.append(
+                    f"SCIP override bridge from {definition.short_name} failed: {error}"
+                )
+            continue
+        unique_bases: dict[str, SCIPDefinition] = {}
+        for candidate in bases:
+            existing = unique_bases.get(candidate.symbol)
+            if existing is None or _scip_definition_key(candidate) < _scip_definition_key(existing):
+                unique_bases[candidate.symbol] = candidate
+        for base in sorted(unique_bases.values(), key=_scip_definition_key):
+            remaining = max_depth - depth - 1
+            cache_key = (base.symbol, remaining)
+            base_affected = affected_cache.get(cache_key)
+            if base_affected is None:
+                try:
+                    base_affected = analyzer.affected(base, max_depth=remaining)
+                except SCIPAnalyzerError as error:
+                    base_affected = error
+                    if warnings is not None:
+                        warnings.append(
+                            f"SCIP override bridge from {definition.short_name} "
+                            f"to {base.short_name} failed: {error}"
+                        )
+                affected_cache[cache_key] = base_affected
+            if isinstance(base_affected, SCIPAnalyzerError):
+                continue
+            bridge_chain = (*current_chain, base.symbol)
+            for reached in base_affected:
+                adjusted_depth = depth + 1 + reached.depth
+                if adjusted_depth > max_depth:
+                    continue
+                adjusted_chain: tuple[str, ...] = bridge_chain
+                if reached.definition.symbol != base.symbol:
+                    adjusted_chain = (*adjusted_chain, reached.definition.symbol)
+                record(reached.definition, adjusted_depth, adjusted_chain)
+
+    return tuple(
+        _ExpandedSCIPDefinition(
+            definition_by_symbol[symbol],
+            best_depth_by_symbol[symbol],
+            chain_by_symbol[symbol],
+        )
+        for symbol in sorted(
+            best_depth_by_symbol,
+            key=lambda item: (best_depth_by_symbol[item], item),
+        )
+    )
 
 
 def _normalized_diff_path(path: Path | str) -> str:
@@ -703,31 +839,12 @@ class ChangeMapper:
                         existing[1].add(line)
             processed: set[int] = set()
 
-            def expanded_affected(seed: SCIPDefinition) -> list[SCIPReachedDefinition]:
-                initial = analyzer.affected(seed, max_depth=max_depth)
-                reached_by_symbol = {item.definition.symbol: item for item in initial}
-                base_resolver = getattr(analyzer, "base_method_definitions", None)
-                if not callable(base_resolver):
-                    return list(reached_by_symbol.values())
-                for reached in list(initial):
-                    if reached.depth >= max_depth:
-                        continue
-                    for base in base_resolver(reached.definition):
-                        remaining = max_depth - reached.depth - 1
-                        for base_reached in analyzer.affected(base, max_depth=remaining):
-                            adjusted = SCIPReachedDefinition(
-                                base_reached.definition,
-                                reached.depth + 1 + base_reached.depth,
-                            )
-                            existing = reached_by_symbol.get(adjusted.definition.symbol)
-                            if existing is None or adjusted.depth < existing.depth:
-                                reached_by_symbol[adjusted.definition.symbol] = adjusted
-                return list(reached_by_symbol.values())
-
             for seed, seed_lines in seeds.values():
                 reached_endpoint = False
                 try:
-                    reached_definitions = expanded_affected(seed)
+                    reached_definitions = _expanded_scip_affected(
+                        analyzer, seed, max_depth, warnings
+                    )
                 except SCIPAnalyzerError as error:
                     warnings.append(
                         f"SCIP skipped unresolved {side} seed {seed.short_name}: {error}"
@@ -755,7 +872,7 @@ class ChangeMapper:
                                     f"SCIP {side} reverse impact from {seed.short_name} "
                                     f"to {definition.short_name} at depth {reached.depth}"
                                 ),
-                                dependency_chain=[seed.symbol, definition.symbol],
+                                dependency_chain=list(reached.dependency_chain),
                                 changed_files=[str(file_path)],
                                 effect_evidence=[
                                     EffectEvidence(

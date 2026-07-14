@@ -4,11 +4,19 @@ from pathlib import Path
 
 import pytest
 
-from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper, ChangeMapperError
+from fastapi_endpoint_detector.analyzer.change_mapper import (
+    ChangeMapper,
+    ChangeMapperError,
+    _expanded_scip_affected,
+)
 from fastapi_endpoint_detector.analyzer.scip_analyzer import (
     SCIPAnalyzerError,
     SCIPDefinition,
     SCIPReachedDefinition,
+)
+from fastapi_endpoint_detector.models.report import (
+    ConfidenceLevel,
+    EvidenceStatus,
 )
 from fastapi_endpoint_detector.parser.diff_parser import DiffParser
 
@@ -17,7 +25,7 @@ class OverrideEdgeAnalyzer:
     def ensure_index(self, *, force: bool = False) -> None:
         assert force
 
-    def definitions_at(self, file_path: Path, lines: set[int]):
+    def definitions_at(self, _file_path: Path, _lines: set[int]):
         return (SCIPDefinition("impl", "impl:Impl:run()", Path("impl.py"), 4, 5),)
 
     def base_method_definitions(self, definition: SCIPDefinition):
@@ -26,6 +34,7 @@ class OverrideEdgeAnalyzer:
         return ()
 
     def affected(self, seed: SCIPDefinition, *, max_depth: int | None = None):
+        del max_depth
         if seed.symbol == "base":
             return (
                 SCIPReachedDefinition(seed, 0),
@@ -37,18 +46,63 @@ class OverrideEdgeAnalyzer:
         return (SCIPReachedDefinition(seed, 0),)
 
 
+def definition(symbol: str, *, file_path: str = "graph.py") -> SCIPDefinition:
+    return SCIPDefinition(symbol, f"graph:{symbol}()", Path(file_path), 1, 2)
+
+
+class FixedPointAnalyzer:
+    def __init__(
+        self,
+        *,
+        native: dict[str, tuple[SCIPReachedDefinition, ...]],
+        bases: dict[str, tuple[SCIPDefinition, ...]],
+        failing_bases: set[str] | None = None,
+    ) -> None:
+        self.native = native
+        self.bases = bases
+        self.failing_bases = failing_bases or set()
+        self.affected_calls: list[tuple[str, int | None]] = []
+        self.bridge_calls: list[str] = []
+
+    def affected(self, seed: SCIPDefinition, *, max_depth: int | None = None):
+        self.affected_calls.append((seed.symbol, max_depth))
+        if seed.symbol in self.failing_bases:
+            raise SCIPAnalyzerError(f"failed {seed.symbol}")
+        return tuple(
+            reached
+            for reached in self.native.get(seed.symbol, (SCIPReachedDefinition(seed, 0),))
+            if max_depth is None or reached.depth <= max_depth
+        )
+
+    def base_method_definitions(self, reached: SCIPDefinition):
+        self.bridge_calls.append(reached.symbol)
+        return self.bases.get(reached.symbol, ())
+
+
+class SuccessiveBridgeMapperAnalyzer(FixedPointAnalyzer):
+    def ensure_index(self, *, force: bool = False) -> None:
+        assert force
+
+    def definitions_at(self, file_path: Path, lines: set[int]):
+        assert file_path == Path("first.py")
+        assert lines == {1}
+        return (definition("FirstImpl", file_path="first.py"),)
+
+
 class PartiallyFailingAnalyzer:
     def ensure_index(self, *, force: bool = False) -> None:
         assert force
 
     def definitions_at(self, file_path: Path, lines: set[int]):
         assert file_path == Path("services.py")
+        assert lines == {1}
         return (
             SCIPDefinition("bad", "services:__all__", Path("services.py"), 1, 1),
             SCIPDefinition("good", "services:changed()", Path("services.py"), 1, 1),
         )
 
     def affected(self, seed: SCIPDefinition, *, max_depth: int | None = None):
+        del max_depth
         if seed.symbol == "bad":
             raise SCIPAnalyzerError("ambiguous export")
         return (
@@ -149,6 +203,191 @@ def test_scip_expands_proven_override_to_base_method_callers(tmp_path: Path) -> 
     affected, _orphans = mapper._analyze_with_scip([diff_file], [], None)
 
     assert [item.endpoint.identifier for item in affected] == ["GET /items"]
+    assert affected[0].confidence is ConfidenceLevel.LOW
+    assert "depth 2" in affected[0].reason
+    assert affected[0].dependency_chain == ["impl", "base", "handler"]
+    assert affected[0].effect_evidence[0].status is EvidenceStatus.REACHABILITY_ONLY
+
+
+def test_fixed_point_reaches_route_after_successive_bridges(tmp_path: Path) -> None:
+    first = definition("FirstImpl", file_path="first.py")
+    first_base = definition("FirstBase")
+    second = definition("SecondImpl")
+    second_base = definition("SecondBase")
+    handler = SCIPDefinition("handler", "main:handler()", Path("main.py"), 5, 6)
+    analyzer = SuccessiveBridgeMapperAnalyzer(
+        native={
+            first.symbol: (SCIPReachedDefinition(first, 0),),
+            first_base.symbol: (
+                SCIPReachedDefinition(first_base, 0),
+                SCIPReachedDefinition(second, 1),
+            ),
+            second_base.symbol: (
+                SCIPReachedDefinition(second_base, 0),
+                SCIPReachedDefinition(handler, 1),
+            ),
+        },
+        bases={first.symbol: (first_base,), second.symbol: (second_base,)},
+    )
+    (tmp_path / "first.py").write_text("def changed():\n    return 1\n")
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n\n"
+        "@app.get('/result')\ndef handler():\n    return 1\n"
+    )
+    diff_file = DiffParser.parse_string(
+        "diff --git a/first.py b/first.py\n--- a/first.py\n+++ b/first.py\n"
+        "@@ -0,0 +1 @@\n+def changed(): pass\n"
+    )[0]
+    mapper = ChangeMapper(tmp_path, use_cache=False, secure_ast=True, use_scip=True)
+    mapper._scip_analyzer = analyzer  # type: ignore[assignment]
+
+    affected, _orphans = mapper._analyze_with_scip([diff_file], [], None)
+
+    assert [item.endpoint.identifier for item in affected] == ["GET /result"]
+    assert affected[0].confidence is ConfidenceLevel.LOW
+    assert "depth 4" in affected[0].reason
+    assert affected[0].dependency_chain == [
+        "FirstImpl",
+        "FirstBase",
+        "SecondImpl",
+        "SecondBase",
+        "handler",
+    ]
+
+
+def test_fixed_point_preserves_initial_results_and_selects_minimum_depth() -> None:
+    seed = definition("seed")
+    native = definition("native")
+    handler = definition("handler")
+    base = definition("base")
+    analyzer = FixedPointAnalyzer(
+        native={
+            seed.symbol: (
+                SCIPReachedDefinition(seed, 0),
+                SCIPReachedDefinition(native, 2),
+                SCIPReachedDefinition(handler, 5),
+            ),
+            base.symbol: (
+                SCIPReachedDefinition(base, 0),
+                SCIPReachedDefinition(handler, 1),
+            ),
+        },
+        bases={seed.symbol: (base,)},
+    )
+
+    reached = _expanded_scip_affected(analyzer, seed, 10)  # type: ignore[arg-type]
+
+    assert [(item.definition.symbol, item.depth) for item in reached] == [
+        ("seed", 0),
+        ("base", 1),
+        ("handler", 2),
+        ("native", 2),
+    ]
+
+
+def test_fixed_point_cycle_terminates_without_requerying() -> None:
+    first = definition("FirstImpl")
+    base = definition("Base")
+    analyzer = FixedPointAnalyzer(
+        native={
+            first.symbol: (SCIPReachedDefinition(first, 0),),
+            base.symbol: (SCIPReachedDefinition(base, 0),),
+        },
+        bases={first.symbol: (base,), base.symbol: (first,)},
+    )
+
+    reached = _expanded_scip_affected(analyzer, first, 20)  # type: ignore[arg-type]
+
+    assert [(item.definition.symbol, item.depth) for item in reached] == [
+        ("FirstImpl", 0),
+        ("Base", 1),
+    ]
+    assert analyzer.affected_calls == [("FirstImpl", 20), ("Base", 19), ("FirstImpl", 18)]
+
+
+def test_fixed_point_honors_exact_depth_budget() -> None:
+    first = definition("FirstImpl")
+    first_base = definition("FirstBase")
+    second = definition("SecondImpl")
+    second_base = definition("SecondBase")
+    handler = definition("handler")
+
+    def run(max_depth: int) -> set[str]:
+        analyzer = FixedPointAnalyzer(
+            native={
+                first.symbol: (SCIPReachedDefinition(first, 0),),
+                first_base.symbol: (
+                    SCIPReachedDefinition(first_base, 0),
+                    SCIPReachedDefinition(second, 1),
+                ),
+                second_base.symbol: (
+                    SCIPReachedDefinition(second_base, 0),
+                    SCIPReachedDefinition(handler, 1),
+                ),
+            },
+            bases={first.symbol: (first_base,), second.symbol: (second_base,)},
+        )
+        return {
+            item.definition.symbol
+            for item in _expanded_scip_affected(  # type: ignore[arg-type]
+                analyzer, first, max_depth
+            )
+        }
+
+    assert "handler" not in run(3)
+    assert "handler" in run(4)
+
+
+def test_fixed_point_collapses_duplicate_symbols_deterministically() -> None:
+    seed = definition("seed")
+    duplicate_late = SCIPDefinition("same", "z:same()", Path("z.py"), 4, 5)
+    duplicate_early = SCIPDefinition("same", "a:same()", Path("a.py"), 1, 2)
+    analyzer = FixedPointAnalyzer(
+        native={
+            seed.symbol: (
+                SCIPReachedDefinition(duplicate_late, 3),
+                SCIPReachedDefinition(seed, 0),
+                SCIPReachedDefinition(duplicate_late, 3),
+                SCIPReachedDefinition(duplicate_early, 1),
+            )
+        },
+        bases={},
+    )
+
+    reached = _expanded_scip_affected(analyzer, seed, 5)  # type: ignore[arg-type]
+
+    duplicate_results = [item for item in reached if item.definition.symbol == "same"]
+    assert len(duplicate_results) == 1
+    assert duplicate_results[0].definition == duplicate_early
+    assert duplicate_results[0].depth == 1
+
+
+def test_fixed_point_bridge_failure_preserves_proven_results() -> None:
+    seed = definition("seed")
+    native = definition("native")
+    failing_base = definition("failing_base")
+    analyzer = FixedPointAnalyzer(
+        native={
+            seed.symbol: (
+                SCIPReachedDefinition(seed, 0),
+                SCIPReachedDefinition(native, 1),
+            )
+        },
+        bases={seed.symbol: (failing_base,)},
+        failing_bases={failing_base.symbol},
+    )
+    warnings: list[str] = []
+
+    reached = _expanded_scip_affected(  # type: ignore[arg-type]
+        analyzer, seed, 5, warnings
+    )
+
+    assert [(item.definition.symbol, item.depth) for item in reached] == [
+        ("seed", 0),
+        ("native", 1),
+    ]
+    assert len(warnings) == 1
+    assert "failed failing_base" in warnings[0]
 
 
 def test_scip_seed_failure_does_not_discard_other_seed_results(tmp_path: Path) -> None:

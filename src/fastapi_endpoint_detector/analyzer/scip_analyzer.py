@@ -253,7 +253,9 @@ class SCIPAnalyzer:
             self._module_paths = paths
         return self._module_paths
 
-    def base_method_definitions(self, definition: SCIPDefinition) -> tuple[SCIPDefinition, ...]:
+    def base_method_definitions(  # noqa: PLR0912
+        self, definition: SCIPDefinition
+    ) -> tuple[SCIPDefinition, ...]:
         """Resolve explicitly inherited base methods for one concrete method."""
         cached = self._base_method_cache.get(definition.symbol)
         if cached is not None:
@@ -270,14 +272,17 @@ class SCIPAnalyzer:
         except (OSError, SyntaxError, UnicodeError):
             self._base_method_cache[definition.symbol] = ()
             return ()
-        imports: dict[str, tuple[str, str]] = {}
+        imports: dict[str, tuple[str, str] | None] = {}
         for statement in tree.body:
             if isinstance(statement, ast.ImportFrom) and statement.module:
                 for import_alias in statement.names:
-                    imports[import_alias.asname or import_alias.name] = (
-                        statement.module,
-                        import_alias.name,
-                    )
+                    local_name = import_alias.asname or import_alias.name
+                    imported = (statement.module, import_alias.name)
+                    existing = imports.get(local_name)
+                    if local_name in imports and existing != imported:
+                        imports[local_name] = None
+                    else:
+                        imports[local_name] = imported
         classes = [
             node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name
         ]
@@ -291,6 +296,8 @@ class SCIPAnalyzer:
                 continue
             import_info = imports.get(base.id)
             base_path: Path | None
+            if base.id in imports and import_info is None:
+                continue
             if import_info is None:
                 base_path = definition.file_path
                 base_name = base.id

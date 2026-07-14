@@ -120,6 +120,59 @@ def test_resolves_explicit_inherited_base_method(tmp_path: Path) -> None:
     assert related == (base,)
 
 
+@pytest.mark.parametrize(
+    ("source", "extra_files"),
+    [
+        (
+            "class Unrelated:\n"
+            "    def run(self):\n"
+            "        return 0\n\n"
+            "class Impl:\n"
+            "    def run(self):\n"
+            "        return 1\n",
+            {},
+        ),
+        (
+            "from first import Base\n"
+            "from second import Base\n\n"
+            "class Impl(Base):\n"
+            "    def run(self):\n"
+            "        return 1\n",
+            {
+                "first.py": "class Base:\n    def run(self): ...\n",
+                "second.py": "class Base:\n    def run(self): ...\n",
+            },
+        ),
+        (
+            "def base_factory():\n"
+            "    return object\n\n"
+            "class Impl(base_factory()):\n"
+            "    def run(self):\n"
+            "        return 1\n",
+            {},
+        ),
+        (
+            "from missing_package import Base\n\n"
+            "class Impl(Base):\n"
+            "    def run(self):\n"
+            "        return 1\n",
+            {},
+        ),
+    ],
+    ids=["unrelated-same-name", "ambiguous-import", "computed-base", "unresolved-import"],
+)
+def test_base_method_resolution_fails_closed(
+    tmp_path: Path, source: str, extra_files: dict[str, str]
+) -> None:
+    (tmp_path / "impl.py").write_text(source)
+    for name, content in extra_files.items():
+        (tmp_path / name).write_text(content)
+    analyzer = SCIPAnalyzer(tmp_path)
+    concrete = SCIPDefinition("impl-symbol", "impl:Impl:run()", Path("impl.py"), 5, 6)
+
+    assert analyzer.base_method_definitions(concrete) == ()
+
+
 def test_affected_rejects_wrong_or_ambiguous_seed_resolution(tmp_path: Path) -> None:
     analyzer = SCIPAnalyzer(tmp_path)
     seed = SCIPDefinition("exact", "module:changed()", Path("module.py"), 1, 2)
