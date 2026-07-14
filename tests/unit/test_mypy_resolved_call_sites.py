@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import (
     EndpointDependencies,
@@ -17,9 +17,6 @@ from fastapi_endpoint_detector.models.endpoint import (
     EndpointMethod,
     HandlerInfo,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _endpoint(path: Path, *, line: int, name: str = "handler") -> Endpoint:
@@ -326,6 +323,25 @@ def test_dynamic_callable_and_receiver_remain_unresolved(tmp_path: Path) -> None
     assert callback.canonical_symbol is None and send.canonical_symbol is None
 
 
+def test_external_library_internals_are_not_recorded_as_project_call_sites(
+    tmp_path: Path,
+) -> None:
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n\n"
+        "@app.get('/')\n"
+        "def handler() -> int:\n"
+        "    return 1\n",
+        encoding="utf-8",
+    )
+
+    sites = MypyAnalyzer(tmp_path).analyze_endpoint(_endpoint(main, line=6)).resolved_call_sites
+
+    assert sites
+    assert all(Path(site.file_path).resolve().is_relative_to(tmp_path) for site in sites)
+
+
 def test_synthetic_mypy_calls_without_source_spans_are_not_recorded(tmp_path: Path) -> None:
     main = tmp_path / "main.py"
     main.write_text(
@@ -420,7 +436,7 @@ def test_resolved_call_sites_round_trip_through_cache(tmp_path: Path) -> None:
     analyzer._save_cache()
 
     payload = json.loads(cache.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 7
+    assert payload["schema_version"] == 8
     assert payload["endpoints"][analyzer._endpoint_key(endpoint)]["resolved_call_sites"]
 
     loaded = MypyAnalyzer(tmp_path)

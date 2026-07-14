@@ -344,8 +344,8 @@ def validate_effect_contracts(contracts: Path, output_format: str) -> None:
             ],
             "matching_status": "not_evaluated",
             "matching_limitation": (
-                "This command validates semantics and provenance only; exact typed call "
-                "matching is not enabled yet."
+                "This command validates semantics and provenance only; use "
+                "audit-effect-contracts to evaluate endpoint-reachable typed calls."
             ),
         }
         if output_format == "json":
@@ -360,9 +360,173 @@ def validate_effect_contracts(contracts: Path, output_format: str) -> None:
                 f"Contracts: {len(loaded.document.contracts)}\n"
                 f"Config hash: {loaded.config_hash}\n"
                 f"Preset hash: {loaded.preset_hash}\n"
-                "Matching: not evaluated (typed call matching is not enabled yet)\n"
+                "Matching: not evaluated (use audit-effect-contracts)\n"
             )
         click.echo(rendered)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@cli.command("audit-effect-contracts")
+@click.option(
+    "--app",
+    "-a",
+    type=click.Path(exists=True, path_type=Path),
+    required=True,
+    help="Application directory or entry point; endpoint discovery is execution-free.",
+)
+@click.option(
+    "--contracts",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Contract document; conflicts with analysis.effect_contracts in --config.",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["text", "json", "yaml"]),
+    default="text",
+    help="Audit output format (default: text).",
+)
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(path_type=Path),
+    help="Output file path. If omitted, print to stdout.",
+)
+@click.option(
+    "--app-var",
+    type=str,
+    default="app",
+    help="Name of the FastAPI app variable (default: app).",
+)
+@click.option(
+    "--app-entry",
+    type=str,
+    help="Exact secure-AST entry MODULE:SYMBOL.",
+)
+@click.option(
+    "--bootstrap-entry",
+    type=str,
+    help="Exact secure-AST bootstrap MODULE:FUNCTION.",
+)
+@click.option("--no-cache", is_flag=True, help="Disable mypy analysis caching.")
+@click.option("--clear-cache", is_flag=True, help="Clear mypy analysis cache first.")
+@click.pass_context
+def audit_effect_contracts_command(  # noqa: PLR0912
+    ctx: click.Context,
+    app: Path,
+    contracts: Path | None,
+    output_format: str,
+    output: Path | None,
+    app_var: str,
+    app_entry: str | None,
+    bootstrap_entry: str | None,
+    no_cache: bool,
+    clear_cache: bool,
+) -> None:
+    """Dry-run exact contracts against endpoint-reachable typed calls."""
+    from fastapi_endpoint_detector.analyzer.effect_contract_auditor import (  # noqa: PLC0415
+        audit_effect_contracts,
+    )
+    from fastapi_endpoint_detector.analyzer.mypy_analyzer import (  # noqa: PLC0415
+        MypyAnalyzer,
+    )
+    from fastapi_endpoint_detector.parser.secure_ast_extractor import (  # noqa: PLC0415
+        SecureASTExtractor,
+    )
+
+    config: Config = ctx.obj["config"]
+    configured = config.analysis.effect_contracts
+    if contracts is not None and configured is not None:
+        raise click.ClickException(
+            "--contracts conflicts with analysis.effect_contracts from --config"
+        )
+    contract_path = contracts.resolve() if contracts is not None else configured
+    if contract_path is None:
+        raise click.ClickException(
+            "effect contracts are required via --contracts or analysis.effect_contracts"
+        )
+
+    try:
+        loaded = load_effect_contracts(contract_path)
+        extractor = SecureASTExtractor(
+            app_path=app.resolve(),
+            app_variable=app_var,
+            app_entry=app_entry,
+            bootstrap_entry=bootstrap_entry,
+        )
+        inventory = extractor.extract_inventory()
+        source_root = app.resolve().parent if app.is_file() else app.resolve()
+        effective_depth = config.parser.max_depth if config.analysis.track_transitive else 1
+        analyzer = MypyAnalyzer(source_root, max_depth=effective_depth)
+        if clear_cache:
+            analyzer.clear_cache()
+        analyzer.analyze_endpoints(inventory.endpoints, use_cache=not no_cache)
+        rows = []
+        for endpoint in inventory.endpoints:
+            dependencies = analyzer.get_endpoint_dependencies(endpoint)
+            if dependencies is None:
+                raise RuntimeError(
+                    "typed call analysis did not produce a complete endpoint result for "
+                    f"{endpoint.identifier} ({endpoint.handler.name})"
+                )
+            rows.append((endpoint, dependencies.get_resolved_call_sites()))
+        audit = audit_effect_contracts(
+            loaded,
+            source_root=source_root,
+            inventory=inventory,
+            endpoint_call_sites=rows,
+            track_transitive=config.analysis.track_transitive,
+            max_depth=effective_depth,
+            cache_enabled=not no_cache,
+            resolver_versions=(f"mypy@{analyzer.resolver_version}",),
+        )
+        data = audit.model_dump(mode="json", exclude_none=True)
+        if output_format == "json":
+            rendered = json.dumps(data, indent=2)
+        elif output_format == "yaml":
+            rendered = yaml.safe_dump(data, sort_keys=False)
+        else:
+            summary = audit.summary
+            lines = [
+                "Effect contract audit complete",
+                "Scope: endpoint-reachable calls (not whole-project usage)",
+                f"Inventory: {audit.scope.inventory_status}",
+                f"Endpoints: {audit.scope.endpoints}",
+                f"Contracts: {summary.contracts} "
+                f"({summary.matched_contracts} matched, "
+                f"{summary.unmatched_contracts} unmatched)",
+                f"Physical calls: {summary.physical_occurrences} "
+                f"({summary.matched_calls} matched, "
+                f"{summary.unmatched_calls} unmatched, "
+                f"{summary.ambiguous_calls} ambiguous, "
+                f"{summary.unresolved_calls} unresolved)",
+                f"Config hash: {audit.provenance.config_hash}",
+                f"Corpus hash: {audit.provenance.occurrence_corpus_hash}",
+                "Package applicability: not evaluated",
+                "Matches do not alter endpoint candidates or confidence.",
+            ]
+            for occurrence in audit.occurrences:
+                target = occurrence.canonical_symbol or occurrence.reason_code or "unknown"
+                lines.append(
+                    f"[{occurrence.audit_status.value}] {occurrence.file_path}:"
+                    f"{occurrence.line}:{occurrence.column} "
+                    f"{occurrence.source_spelling} -> {target}"
+                )
+                for audit_endpoint in occurrence.endpoints:
+                    lines.append(
+                        "  endpoint "
+                        f"{','.join(audit_endpoint.methods)} {audit_endpoint.path} "
+                        f"({audit_endpoint.handler_module}.{audit_endpoint.handler_name})"
+                    )
+            rendered = "\n".join(lines) + "\n"
+        if output is not None:
+            output.write_text(rendered, encoding="utf-8")
+            console.print(f"[green]Results written to:[/green] {output}")
+        else:
+            click.echo(rendered, nl=False)
+    except click.ClickException:
+        raise
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
 

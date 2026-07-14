@@ -24,6 +24,18 @@ from fastapi_endpoint_detector.models.effect_contract import (
     ResolvedCallSite,
     load_effect_contracts,
 )
+from fastapi_endpoint_detector.models.effect_contract_audit import (
+    AuditCallStatus,
+    AuditEndpoint,
+    AuditLimitation,
+    EffectContractAudit,
+    EffectContractAuditError,
+    EffectContractAuditOccurrence,
+    EffectContractAuditProvenance,
+    EffectContractAuditScope,
+    EffectContractAuditSummary,
+    EffectContractCoverage,
+)
 from fastapi_endpoint_detector.models.endpoint import (
     Endpoint,
     EndpointDiscoveryCondition,
@@ -72,6 +84,17 @@ __all__ = [  # noqa: RUF022 - grouped by public model domain
     "LoadedEffectContracts",
     "ResolvedCallSite",
     "load_effect_contracts",
+    # Effect contract audit models
+    "AuditCallStatus",
+    "AuditEndpoint",
+    "AuditLimitation",
+    "EffectContractAudit",
+    "EffectContractAuditError",
+    "EffectContractAuditOccurrence",
+    "EffectContractAuditProvenance",
+    "EffectContractAuditScope",
+    "EffectContractAuditSummary",
+    "EffectContractCoverage",
     # Report models
     "AffectedEndpoint",
     "AnalysisReport",
