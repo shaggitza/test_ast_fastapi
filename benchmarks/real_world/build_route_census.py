@@ -121,6 +121,47 @@ def normalize_inventory(  # noqa: PLR0912, PLR0915
         if not isinstance(name, str) or not isinstance(module, str):
             unresolved.append(f"endpoint[{index}]: invalid handler identity")
             continue
+        discovery_status = raw.get("discovery_status", "established")
+        discovery_conditions = raw.get("discovery_conditions", [])
+        if discovery_status not in {"established", "conditional"}:
+            unresolved.append(f"endpoint[{index}]: invalid discovery status")
+            continue
+        if not isinstance(discovery_conditions, list) or (
+            discovery_status == "conditional" and not discovery_conditions
+        ):
+            unresolved.append(f"endpoint[{index}]: invalid discovery conditions")
+            continue
+        if discovery_status == "established" and discovery_conditions:
+            unresolved.append(f"endpoint[{index}]: established route has discovery conditions")
+            continue
+        normalized_conditions: list[dict[str, Any]] = []
+        condition_error = False
+        for condition_index, condition in enumerate(discovery_conditions):
+            if not isinstance(condition, dict):
+                unresolved.append(
+                    f"endpoint[{index}].discovery_conditions[{condition_index}]: expected object"
+                )
+                condition_error = True
+                continue
+            source, source_error = _relative_source(worktree, condition.get("source_path"))
+            source_line = condition.get("source_line")
+            reason = condition.get("reason")
+            if (
+                source_error is not None
+                or type(source_line) is not int
+                or source_line < 1
+                or not isinstance(reason, str)
+                or not reason
+            ):
+                unresolved.append(
+                    f"endpoint[{index}].discovery_conditions[{condition_index}]: invalid condition"
+                )
+                condition_error = True
+                continue
+            normalized_conditions.append({"source": source, "line": source_line, "reason": reason})
+        if condition_error:
+            continue
+        normalized_conditions.sort(key=lambda item: (item["source"], item["line"], item["reason"]))
         occurrence = {
             "file": relative_file,
             "line": line,
@@ -128,6 +169,8 @@ def normalize_inventory(  # noqa: PLR0912, PLR0915
             "handler": name,
             "module": module,
             "root": configured_root,
+            "discovery_status": discovery_status,
+            "discovery_conditions": normalized_conditions,
         }
         for method in methods:
             if not isinstance(method, str) or not method.strip():

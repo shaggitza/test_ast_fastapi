@@ -60,6 +60,33 @@ def test_normalize_inventory_keeps_websocket_and_rejects_escape(tmp_path: Path) 
     assert "escapes or is absent" in unresolved[0]
 
 
+def test_normalize_inventory_preserves_conditional_discovery(tmp_path: Path) -> None:
+    source = tmp_path / "app.py"
+    source.write_text("def route(): ...\n")
+    route = endpoint(source, methods=["GET"])
+    route.update(
+        {
+            "discovery_status": "conditional",
+            "discovery_conditions": [
+                {
+                    "source_path": str(source),
+                    "source_line": 1,
+                    "reason": "unknown helper may mutate app",
+                }
+            ],
+        }
+    )
+
+    items, unresolved = census.normalize_inventory({"endpoints": [route]}, tmp_path, ".")
+
+    occurrence = items[0]["occurrences"][0]
+    assert occurrence["discovery_status"] == "conditional"
+    assert occurrence["discovery_conditions"] == [
+        {"source": "app.py", "line": 1, "reason": "unknown helper may mutate app"}
+    ]
+    assert unresolved == []
+
+
 def test_normalize_inventory_rejects_symlink_escape(tmp_path: Path) -> None:
     outside = tmp_path.parent / "outside-symlink-census.py"
     outside.write_text("def outside(): ...\n")

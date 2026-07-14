@@ -80,6 +80,13 @@ class MarkdownFormatter(BaseFormatter):
                         f"- **Location:** `{ep.handler.file_path}:{ep.handler.line_number}`"
                     )
                     lines.append(f"- **Reason:** {ae.reason}")
+                    if ep.discovery_conditions:
+                        lines.append("- **Discovery:** `CONDITIONAL`")
+                        for condition in ep.discovery_conditions:
+                            lines.append(
+                                f"  - `{condition.source_path}:{condition.source_line}`: "
+                                f"{condition.reason}"
+                            )
                     for evidence in ae.effect_evidence:
                         lines.append(
                             f"- **Effect ({evidence.status.value}/{evidence.disposition.value}):** "
@@ -120,9 +127,20 @@ class MarkdownFormatter(BaseFormatter):
             lines.append("")
             for candidate in additional:
                 methods = ", ".join(method.value for method in candidate.endpoint.methods)
-                lines.append(
-                    f"- **{methods} `{candidate.endpoint.path}`** ({candidate.confidence.value})"
+                discovery = (
+                    " — **CONDITIONAL DISCOVERY**"
+                    if candidate.endpoint.discovery_conditions
+                    else ""
                 )
+                lines.append(
+                    f"- **{methods} `{candidate.endpoint.path}`** "
+                    f"({candidate.confidence.value}){discovery}"
+                )
+                for condition in candidate.endpoint.discovery_conditions:
+                    lines.append(
+                        f"  - Discovery condition: `{condition.source_path}:"
+                        f"{condition.source_line}` — {condition.reason}"
+                    )
                 for evidence in candidate.effect_evidence:
                     lines.append(f"  - {evidence.disposition.value}: {evidence.summary}")
             lines.append("")
@@ -182,15 +200,16 @@ class MarkdownFormatter(BaseFormatter):
         lines.append("")
 
         # Create table
-        lines.append("| Method(s) | Path | Handler | File | Line |")
-        lines.append("|-----------|------|---------|------|------|")
+        lines.append("| Method(s) | Path | Handler | File | Line | Discovery |")
+        lines.append("|-----------|------|---------|------|------|-----------|")
 
         for ep in endpoints:
             methods = ", ".join(m.value for m in ep.methods)
             file_name = ep.handler.file_path.name
             lines.append(
                 f"| {methods} | `{ep.path}` | `{ep.handler.name}` | "
-                f"`{file_name}` | {ep.handler.line_number} |"
+                f"`{file_name}` | {ep.handler.line_number} | "
+                f"{ep.discovery_status.value} |"
             )
 
         lines.append("")

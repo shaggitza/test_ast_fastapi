@@ -105,6 +105,13 @@ class TextFormatter(BaseFormatter):
                         f"      Handler: {ep.handler.name} ({ep.handler.file_path}:{ep.handler.line_number})"
                     )
                     console.print(f"      Reason: {ae.reason}")
+                    if ep.discovery_conditions:
+                        console.print("      Discovery: CONDITIONAL")
+                        for condition in ep.discovery_conditions:
+                            console.print(
+                                f"        {condition.source_path}:{condition.source_line}: "
+                                f"{condition.reason}"
+                            )
                     if ae.dependency_chain and len(ae.dependency_chain) > 1:
                         chain = " → ".join(ae.dependency_chain)
                         console.print(f"      Chain: {chain}")
@@ -138,9 +145,18 @@ class TextFormatter(BaseFormatter):
             )
             for candidate in additional:
                 methods = ",".join(method.value for method in candidate.endpoint.methods)
-                console.print(
-                    f"  {methods} {candidate.endpoint.path} ({candidate.confidence.value})"
+                discovery = (
+                    " [CONDITIONAL DISCOVERY]" if candidate.endpoint.discovery_conditions else ""
                 )
+                console.print(
+                    f"  {methods} {candidate.endpoint.path} "
+                    f"({candidate.confidence.value}){discovery}"
+                )
+                for condition in candidate.endpoint.discovery_conditions:
+                    console.print(
+                        f"    {condition.source_path}:{condition.source_line}: {condition.reason}",
+                        markup=False,
+                    )
                 for evidence in candidate.effect_evidence:
                     console.print(f"    {evidence.disposition.value}: {evidence.summary}")
             console.print()
@@ -199,6 +215,7 @@ class TextFormatter(BaseFormatter):
         table.add_column("Handler", style="yellow")
         table.add_column("File", style="dim")
         table.add_column("Line", justify="right")
+        table.add_column("Discovery")
 
         for ep in endpoints:
             methods = ",".join(m.value for m in ep.methods)
@@ -209,6 +226,7 @@ class TextFormatter(BaseFormatter):
                 ep.handler.name,
                 file_name,
                 str(ep.handler.line_number),
+                ep.discovery_status.value,
             )
 
         console.print(table)

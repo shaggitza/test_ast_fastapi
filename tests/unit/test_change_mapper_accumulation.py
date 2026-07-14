@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
 from fastapi_endpoint_detector.analyzer.change_mapper import (
@@ -10,12 +11,14 @@ from fastapi_endpoint_detector.analyzer.change_mapper import (
     _endpoint_result_key,
     _merge_affected,
     _normalized_diff_path,
-    _scip_confidence,
     _OrphanAccumulator,
+    _scip_confidence,
 )
 from fastapi_endpoint_detector.analyzer.scip_analyzer import SCIPDefinition
 from fastapi_endpoint_detector.models.endpoint import (
     Endpoint,
+    EndpointDiscoveryCondition,
+    EndpointDiscoveryStatus,
     EndpointMethod,
     HandlerInfo,
 )
@@ -88,6 +91,75 @@ def test_merges_confidence_files_chains_and_stacks_before_threshold(tmp_path: Pa
     assert result.changed_files == ["a.py", "b.py"]
     assert len(result.call_stacks) == 2
     assert _CONFIDENCE_SCORE[result.confidence] >= 1.0
+
+
+def test_endpoint_discovery_provenance_requires_consistent_status(tmp_path: Path) -> None:
+    established = _endpoint(tmp_path / "main.py")
+    condition = EndpointDiscoveryCondition(
+        source_path=tmp_path / "main.py", source_line=9, reason="unknown helper"
+    )
+
+    with pytest.raises(ValueError, match="conditional discovery requires conditions"):
+        Endpoint.model_validate({**established.model_dump(), "discovery_status": "conditional"})
+    with pytest.raises(ValueError, match="conditional discovery requires conditions"):
+        Endpoint.model_validate({**established.model_dump(), "discovery_conditions": [condition]})
+    with pytest.raises(ValueError, match="must not be blank"):
+        EndpointDiscoveryCondition(source_path=tmp_path / "main.py", source_line=9, reason="  ")
+
+
+def test_conditional_discovery_caps_confidence_at_low(tmp_path: Path) -> None:
+    endpoint = _endpoint(tmp_path / "main.py").model_copy(
+        update={
+            "discovery_status": EndpointDiscoveryStatus.CONDITIONAL,
+            "discovery_conditions": (
+                EndpointDiscoveryCondition(
+                    source_path=tmp_path / "main.py",
+                    source_line=9,
+                    reason="unknown helper may mutate app",
+                ),
+            ),
+        }
+    )
+    accumulated = {}
+
+    _merge_affected(
+        accumulated,
+        _candidate(endpoint, ConfidenceLevel.HIGH, ["direct"], "change.py", 1),
+    )
+
+    result = next(iter(accumulated.values())).materialize()
+    assert result.confidence == ConfidenceLevel.LOW
+    assert result.endpoint.discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+
+
+def test_established_discovery_dominates_conditional_in_both_orders(tmp_path: Path) -> None:
+    established = _endpoint(tmp_path / "main.py")
+    conditional = established.model_copy(
+        update={
+            "discovery_status": EndpointDiscoveryStatus.CONDITIONAL,
+            "discovery_conditions": (
+                EndpointDiscoveryCondition(
+                    source_path=tmp_path / "main.py",
+                    source_line=9,
+                    reason="unknown helper may mutate app",
+                ),
+            ),
+        }
+    )
+
+    for first, second in [(conditional, established), (established, conditional)]:
+        accumulated = {}
+        _merge_affected(
+            accumulated,
+            _candidate(first, ConfidenceLevel.HIGH, ["first"], "a.py", 1),
+        )
+        _merge_affected(
+            accumulated,
+            _candidate(second, ConfidenceLevel.HIGH, ["second"], "b.py", 2),
+        )
+        result = next(iter(accumulated.values())).materialize()
+        assert result.endpoint.discovery_status == EndpointDiscoveryStatus.ESTABLISHED
+        assert result.confidence == ConfidenceLevel.HIGH
 
 
 def test_result_identity_keeps_same_public_route_with_distinct_handlers(tmp_path: Path) -> None:

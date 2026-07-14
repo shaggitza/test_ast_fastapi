@@ -614,6 +614,18 @@ class HtmlFormatter(BaseFormatter):
                             '</div>'
                         )
 
+                    if ep.discovery_conditions:
+                        content_lines.append(
+                            '<div class="info-item"><span class="label">Discovery:</span> '
+                            "<strong>CONDITIONAL</strong></div>"
+                        )
+                        for condition in ep.discovery_conditions:
+                            content_lines.append(
+                                '<div class="info-item">'
+                                f"{html.escape(str(condition.source_path))}:"
+                                f"{condition.source_line}: {html.escape(condition.reason)}</div>"
+                            )
+
                     # Dependency chain
                     if ae.dependency_chain and len(ae.dependency_chain) > 1:
                         chain_html = " → ".join(
@@ -695,6 +707,17 @@ class HtmlFormatter(BaseFormatter):
                     f'<div class="info-item"><span class="label">Confidence:</span> '
                     f'{html.escape(candidate.confidence.value)}</div>'
                 )
+                if endpoint.discovery_conditions:
+                    content_lines.append(
+                        '<div class="info-item"><span class="label">Discovery:</span> '
+                        "<strong>CONDITIONAL</strong></div>"
+                    )
+                    for condition in endpoint.discovery_conditions:
+                        content_lines.append(
+                            '<div class="info-item">'
+                            f"{html.escape(str(condition.source_path))}:"
+                            f"{condition.source_line}: {html.escape(condition.reason)}</div>"
+                        )
                 for evidence in candidate.effect_evidence:
                     content_lines.append(
                         '<div class="info-item"><span class="label">Effect:</span> '
@@ -775,6 +798,7 @@ class HtmlFormatter(BaseFormatter):
             content_lines.append("<th>Path</th>")
             content_lines.append("<th>Handler</th>")
             content_lines.append("<th>Location</th>")
+            content_lines.append("<th>Discovery</th>")
             content_lines.append("</tr>")
             content_lines.append("</thead>")
             content_lines.append("<tbody>")
@@ -802,6 +826,9 @@ class HtmlFormatter(BaseFormatter):
                     ep.handler.line_number,
                 )
                 content_lines.append(f"<td>{location_ref}</td>")
+                content_lines.append(
+                    f"<td>{html.escape(ep.discovery_status.value)}</td>"
+                )
 
                 content_lines.append("</tr>")
 

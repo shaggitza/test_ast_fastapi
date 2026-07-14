@@ -40,6 +40,10 @@ class JsonFormatter(BaseFormatter):
             "name": endpoint.name,
             "tags": endpoint.tags,
             "dependencies": endpoint.dependencies,
+            "discovery_status": endpoint.discovery_status.value,
+            "discovery_conditions": [
+                condition.model_dump(mode="json") for condition in endpoint.discovery_conditions
+            ],
         }
 
     def _affected_to_dict(self, affected: AffectedEndpoint) -> dict[str, Any]:

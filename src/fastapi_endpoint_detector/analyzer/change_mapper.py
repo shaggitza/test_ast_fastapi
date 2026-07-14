@@ -25,7 +25,10 @@ from fastapi_endpoint_detector.analyzer.scip_analyzer import (
 )
 from fastapi_endpoint_detector.config import Config
 from fastapi_endpoint_detector.models.diff import DiffFile
-from fastapi_endpoint_detector.models.endpoint import Endpoint
+from fastapi_endpoint_detector.models.endpoint import (
+    Endpoint,
+    EndpointDiscoveryStatus,
+)
 from fastapi_endpoint_detector.models.report import (
     AffectedEndpoint,
     AnalysisReport,
@@ -104,6 +107,31 @@ class _AffectedAccumulator:
         return accumulator
 
     def merge(self, candidate: AffectedEndpoint) -> None:
+        if (
+            self.endpoint.discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+            and candidate.endpoint.discovery_status == EndpointDiscoveryStatus.ESTABLISHED
+        ):
+            self.endpoint = candidate.endpoint
+        elif (
+            self.endpoint.discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+            and candidate.endpoint.discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+        ):
+            conditions = {
+                (
+                    str(condition.source_path),
+                    condition.source_line,
+                    condition.reason,
+                ): condition
+                for condition in (
+                    *self.endpoint.discovery_conditions,
+                    *candidate.endpoint.discovery_conditions,
+                )
+            }
+            self.endpoint = self.endpoint.model_copy(
+                update={
+                    "discovery_conditions": tuple(conditions[key] for key in sorted(conditions))
+                }
+            )
         if _CONFIDENCE_SCORE[candidate.confidence] > _CONFIDENCE_SCORE[self.confidence]:
             self.confidence = candidate.confidence
             self.reason = candidate.reason
@@ -141,6 +169,11 @@ def _merge_affected(
     accumulated: dict[tuple[str, str, int, str, str], _AffectedAccumulator],
     candidate: AffectedEndpoint,
 ) -> None:
+    if (
+        candidate.endpoint.discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+        and candidate.confidence != ConfidenceLevel.LOW
+    ):
+        candidate = candidate.model_copy(update={"confidence": ConfidenceLevel.LOW})
     key = _endpoint_result_key(candidate.endpoint)
     existing = accumulated.get(key)
     if existing is None:
