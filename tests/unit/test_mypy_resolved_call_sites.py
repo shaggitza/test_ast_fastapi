@@ -436,7 +436,7 @@ def test_resolved_call_sites_round_trip_through_cache(tmp_path: Path) -> None:
     analyzer._save_cache()
 
     payload = json.loads(cache.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 10
+    assert payload["schema_version"] == MypyAnalyzer.CACHE_SCHEMA_VERSION
     assert payload["endpoints"][analyzer._endpoint_key(endpoint)]["resolved_call_sites"]
 
     loaded = MypyAnalyzer(tmp_path)
