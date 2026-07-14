@@ -55,6 +55,7 @@ class RunConfig:
     app_roots: dict[str, str]
     candidate_root: Path = PROJECT_ROOT
     app_entries: dict[str, str] = dataclass_field(default_factory=dict)
+    bootstrap_entries: dict[str, str] = dataclass_field(default_factory=dict)
 
 
 def utc_now() -> str:
@@ -438,6 +439,7 @@ def invoke_analyzer(
     secure_ast: bool,
     use_scip: bool,
     app_entry: str | None = None,
+    bootstrap_entry: str | None = None,
     baseline_app_root: Path | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], float]:
     """Invoke the frozen candidate in secure or explicitly unsafe mode."""
@@ -461,6 +463,10 @@ def invoke_analyzer(
         if not secure_ast:
             raise RunnerError("app entry requires secure AST analysis")
         args.extend(["--app-entry", app_entry])
+    if bootstrap_entry is not None:
+        if not secure_ast:
+            raise RunnerError("bootstrap entry requires secure AST analysis")
+        args.extend(["--bootstrap-entry", bootstrap_entry])
     if use_scip:
         args.append("--scip")
         if baseline_app_root is not None:
@@ -540,11 +546,13 @@ def process_entry(  # noqa: PLR0915
     base_sha: str | None = None
     configured_root = config.app_roots.get(repository, config.default_app_root)
     configured_entry = config.app_entries.get(repository)
+    configured_bootstrap = config.bootstrap_entries.get(repository)
     manifest_record: dict[str, Any] = {
         "repository": repository,
         "pr": pr,
         "configured_app_root": configured_root,
         "configured_app_entry": configured_entry,
+        "configured_bootstrap_entry": configured_bootstrap,
         "merge_sha": None,
         "base_sha": None,
         "status": "unresolved",
@@ -620,6 +628,7 @@ def process_entry(  # noqa: PLR0915
                     secure_ast=not config.allow_upstream_execution,
                     use_scip=config.use_scip,
                     app_entry=configured_entry,
+                    bootstrap_entry=configured_bootstrap,
                     baseline_app_root=baseline_app_root,
                 )
                 timings["analyzer"] = analyzer_seconds
@@ -677,13 +686,13 @@ def parse_app_roots(values: Sequence[str]) -> dict[str, str]:
     return roots
 
 
-def parse_app_entries(values: Sequence[str]) -> dict[str, str]:
+def parse_app_entries(values: Sequence[str], option_name: str = "--app-entry") -> dict[str, str]:
     entries: dict[str, str] = {}
     for value in values:
         repository, separator, entry = value.partition("=")
         if not separator or not entry:
             raise argparse.ArgumentTypeError(
-                f"invalid --app-entry {value!r}; expected REPOSITORY=MODULE:SYMBOL"
+                f"invalid {option_name} {value!r}; expected REPOSITORY=MODULE:SYMBOL"
             )
         validate_repository(repository)
         parts = entry.split(":")
@@ -693,10 +702,10 @@ def parse_app_entries(values: Sequence[str]) -> dict[str, str]:
             or not parts[1].isidentifier()
         ):
             raise argparse.ArgumentTypeError(
-                f"invalid --app-entry {value!r}; expected REPOSITORY=MODULE:SYMBOL"
+                f"invalid {option_name} {value!r}; expected REPOSITORY=MODULE:SYMBOL"
             )
         if repository in entries:
-            raise argparse.ArgumentTypeError(f"duplicate --app-entry for {repository}")
+            raise argparse.ArgumentTypeError(f"duplicate {option_name} for {repository}")
         entries[repository] = entry
     return entries
 
@@ -737,6 +746,7 @@ def candidate_metadata(
     allow_upstream_execution: bool,
     use_scip: bool,
     app_entries: dict[str, str] | None = None,
+    bootstrap_entries: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     try:
         version = importlib.metadata.version("fastapi-endpoint-detector")
@@ -783,6 +793,7 @@ def candidate_metadata(
             "use_scip": use_scip,
             "root_config": {"default": default_root, "repositories": roots},
             "app_entry_config": dict(sorted((app_entries or {}).items())),
+            "bootstrap_entry_config": dict(sorted((bootstrap_entries or {}).items())),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -833,6 +844,13 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="REPOSITORY=MODULE:SYMBOL",
         help="exact secure-AST app object/factory entry (repeatable)",
     )
+    parser.add_argument(
+        "--bootstrap-entry",
+        action="append",
+        default=[],
+        metavar="REPOSITORY=MODULE:FUNCTION",
+        help="exact secure-AST bootstrap function entry (repeatable)",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--scip",
@@ -867,8 +885,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise RunnerError("--corpus, --output, and --manifest must be distinct paths")
         app_roots = parse_app_roots(args.app_root)
         app_entries = parse_app_entries(args.app_entry)
-        if args.allow_upstream_execution and app_entries:
-            raise RunnerError("--app-entry cannot be used with --allow-upstream-execution")
+        bootstrap_entries = parse_app_entries(args.bootstrap_entry, "--bootstrap-entry")
+        if args.allow_upstream_execution and (app_entries or bootstrap_entries):
+            raise RunnerError(
+                "secure entry configuration cannot be used with --allow-upstream-execution"
+            )
         corpus_bytes = args.corpus.read_bytes()
         corpus = json.loads(corpus_bytes)
         if not isinstance(corpus, dict):
@@ -888,6 +909,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         default_app_root=args.default_app_root,
         app_roots=app_roots,
         app_entries=app_entries,
+        bootstrap_entries=bootstrap_entries,
     )
     candidate = candidate_metadata(
         config.candidate_root,
@@ -896,6 +918,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.allow_upstream_execution,
         args.scip,
         app_entries,
+        bootstrap_entries,
     )
     started_wall = utc_now()
     started = time.monotonic()
@@ -928,6 +951,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "repositories": dict(sorted(app_roots.items())),
         },
         "app_entry_config": dict(sorted(app_entries.items())),
+        "bootstrap_entry_config": dict(sorted(bootstrap_entries.items())),
         "configuration": {
             "cache": str(config.cache),
             "output": str(config.output),

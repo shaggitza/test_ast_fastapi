@@ -132,14 +132,17 @@ class SecureASTExtractor:
         app_path: Path,
         app_variable: str = "app",
         app_entry: str | None = None,
+        bootstrap_entry: str | None = None,
     ) -> None:
         self.app_path = app_path.resolve()
         self.app_variable = app_variable
         self.app_entry = app_entry
-        self._app_entry_parts = self._parse_app_entry(app_entry)
+        self.bootstrap_entry = bootstrap_entry
+        self._app_entry_parts = self._parse_entry(app_entry, "--app-entry")
+        self._bootstrap_entry_parts = self._parse_entry(bootstrap_entry, "--bootstrap-entry")
 
     @staticmethod
-    def _parse_app_entry(value: str | None) -> tuple[str, str] | None:
+    def _parse_entry(value: str | None, option: str) -> tuple[str, str] | None:
         if value is None:
             return None
         parts = value.split(":")
@@ -150,7 +153,7 @@ class SecureASTExtractor:
             or any(not part.isidentifier() for part in parts[0].split("."))
             or not parts[1].isidentifier()
         ):
-            raise SecureASTExtractorError("app_entry must use an exact project-local MODULE:SYMBOL")
+            raise SecureASTExtractorError(f"{option} must use an exact project-local MODULE:SYMBOL")
         return parts[0], parts[1]
 
     def extract_endpoints(self) -> list[Endpoint]:
@@ -309,6 +312,41 @@ class SecureASTExtractor:
             return EndpointInventory(
                 status=InventoryStatus.UNAVAILABLE,
                 limitations=(limitation,),
+            )
+
+        if self._bootstrap_entry_parts is not None:
+            if len(set(roots)) != 1:
+                raise SecureASTExtractorError(
+                    "bootstrap_entry requires one uniquely selected app root"
+                )
+            bootstrap_module_name, bootstrap_symbol = self._bootstrap_entry_parts
+            bootstrap_module = modules.get(bootstrap_module_name)
+            if bootstrap_module is None:
+                raise SecureASTExtractorError(
+                    f"bootstrap entry module {bootstrap_module_name!r} is not project-local"
+                )
+            history = bootstrap_module.function_history.get(bootstrap_symbol, [])
+            bootstrap_function = self._function_at(bootstrap_module, bootstrap_symbol, 2**31 - 1)
+            if len(history) != 1 or bootstrap_function is None:
+                raise SecureASTExtractorError(
+                    f"bootstrap entry {self.bootstrap_entry!r} is absent, ambiguous, or rebound"
+                )
+            if (
+                isinstance(bootstrap_function, ast.AsyncFunctionDef)
+                or bootstrap_function.decorator_list
+            ):
+                raise SecureASTExtractorError("bootstrap entry must be synchronous and undecorated")
+            selected_root = objects[roots[0]]
+            if selected_root.kind != "app":
+                raise SecureASTExtractorError("bootstrap_entry requires a FastAPI app root")
+            self._apply_bootstrap_registration(
+                bootstrap_module,
+                bootstrap_function,
+                selected_root,
+                aliases,
+                modules,
+                routes,
+                edges,
             )
 
         routes_by_owner: dict[ObjectKey, list[_Route]] = {}
@@ -1423,6 +1461,590 @@ class SecureASTExtractor:
             )
             emitted_objects = [root if item.key == root.key else item for item in emitted_objects]
         return _FactoryGraph(root, emitted_objects, routes, edges)
+
+    def _apply_bootstrap_registration(  # noqa: PLR0915
+        self,
+        module: _Module,
+        function: ast.FunctionDef | ast.AsyncFunctionDef,
+        root: _Object,
+        aliases: dict[str, str],
+        modules: dict[str, _Module],
+        routes: list[_Route],
+        edges: list[_Edge],
+    ) -> None:
+        """Interpret one explicitly attested, bounded registration call slice."""
+        budget = [max(32, min(512, len(modules) * 8))]
+        operation_order = [_line_end_order(2**31 - 2)]
+
+        def next_order() -> int:
+            operation_order[0] += 1
+            return operation_order[0]
+
+        def limit(current_module: _Module, owner: _Object, node: ast.AST, reason: str) -> None:
+            self._record_object_limitation(current_module, owner, node, reason)
+
+        def apply(  # noqa: PLR0912, PLR0915
+            current_module: _Module,
+            current: ast.FunctionDef | ast.AsyncFunctionDef,
+            object_env: dict[str, _Object],
+            string_env: dict[str, str],
+            stack: frozenset[tuple[str, str, int]],
+        ) -> None:
+            identity = (current_module.name, current.name, current.lineno)
+            if (
+                budget[0] <= 0
+                or identity in stack
+                or isinstance(current, ast.AsyncFunctionDef)
+                or current.decorator_list
+                or current.args.vararg is not None
+                or current.args.kwarg is not None
+                or any(isinstance(item, (ast.Yield, ast.YieldFrom)) for item in ast.walk(current))
+            ):
+                for owner in set(object_env.values()):
+                    limit(
+                        current_module,
+                        owner,
+                        current,
+                        "bootstrap helper is unsupported or recursive",
+                    )
+                return
+            budget[0] -= 1
+            local_objects = dict(object_env)
+            local_strings = dict(string_env)
+            local_modules: dict[str, _Module] = {}
+            local_functions: dict[str, tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef]] = {}
+            local_handlers: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+            global_names: set[str] = set()
+            bound_names = {
+                parameter.arg
+                for parameter in [
+                    *current.args.posonlyargs,
+                    *current.args.args,
+                    *current.args.kwonlyargs,
+                ]
+            }
+            for imported_name in current_module.import_bindings:
+                if imported_name in bound_names:
+                    continue
+                binding = self._import_binding_at(current_module, imported_name, 2**31 - 1)
+                if binding is not None and binding.symbol is None:
+                    imported = modules.get(aliases.get(binding.module, binding.module))
+                    if imported is not None:
+                        local_modules[imported_name] = imported
+
+            def object_for(expression: ast.expr | None, line: int) -> _Object | None:
+                if isinstance(expression, ast.Name):
+                    if expression.id in local_objects:
+                        return local_objects[expression.id]
+                    if expression.id in bound_names:
+                        return None
+                    return self._resolve_object(expression, current_module, aliases, modules, line)
+                if isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name):
+                    imported = local_modules.get(expression.value.id)
+                    if imported is not None:
+                        return self._resolve_exported_object(
+                            imported,
+                            expression.attr,
+                            2**31 - 1,
+                            aliases,
+                            modules,
+                            frozenset(),
+                            min(len(modules) + 1, 64),
+                        )
+                return self._resolve_object(expression, current_module, aliases, modules, line)
+
+            def literal(expression: ast.expr | None, line: int) -> str | None:
+                if isinstance(expression, ast.Name) and expression.id in local_strings:
+                    return local_strings[expression.id]
+                if isinstance(expression, ast.Name) and expression.id in bound_names:
+                    return None
+                if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add):
+                    left = literal(expression.left, line)
+                    right = literal(expression.right, line)
+                    return left + right if left is not None and right is not None else None
+                return self._literal_string(expression, current_module, line)
+
+            def handler_for(expression: ast.expr | None, line: int) -> HandlerInfo | None:
+                if isinstance(expression, ast.Name) and expression.id in local_handlers:
+                    handler = local_handlers[expression.id]
+                    return (
+                        None if handler.decorator_list else self._handler(current_module, handler)
+                    )
+                return self._resolve_handler(expression, current_module, aliases, modules, line)
+
+            def touches_tracked(node: ast.AST) -> bool:
+                tracked = set(local_objects)
+                return any(
+                    isinstance(item, ast.Name) and item.id in tracked for item in ast.walk(node)
+                )
+
+            for statement in current.body:
+                if isinstance(statement, (ast.Global, ast.Nonlocal)):
+                    global_names.update(statement.names)
+                    continue
+                if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    local_objects.pop(statement.name, None)
+                    local_strings.pop(statement.name, None)
+                    local_modules.pop(statement.name, None)
+                    bound_names.add(statement.name)
+                    local_handlers[statement.name] = statement
+                    local_functions[statement.name] = (current_module, statement)
+                    continue
+                if isinstance(statement, ast.ImportFrom):
+                    target_name = self._absolute_import(current_module, statement)
+                    for imported_alias in statement.names:
+                        if imported_alias.name == "*":
+                            for owner in set(local_objects.values()):
+                                limit(current_module, owner, statement, "wildcard bootstrap import")
+                            continue
+                        local = imported_alias.asname or imported_alias.name
+                        bound_names.add(local)
+                        submodule_name = aliases.get(f"{target_name}.{imported_alias.name}")
+                        if submodule_name in modules:
+                            local_modules[local] = modules[submodule_name]
+                            continue
+                        imported_module = modules.get(aliases.get(target_name, target_name))
+                        if imported_module is None:
+                            continue
+                        exported = self._resolve_exported_object(
+                            imported_module,
+                            imported_alias.name,
+                            2**31 - 1,
+                            aliases,
+                            modules,
+                            frozenset(),
+                            min(len(modules) + 1, 64),
+                        )
+                        if exported is not None:
+                            local_objects[local] = exported
+                            continue
+                        imported_function = self._function_at(
+                            imported_module, imported_alias.name, 2**31 - 1
+                        )
+                        if imported_function is not None:
+                            local_functions[local] = (
+                                imported_module,
+                                imported_function,
+                            )
+                    continue
+                if isinstance(statement, ast.Import):
+                    for imported_alias in statement.names:
+                        local = imported_alias.asname or imported_alias.name.split(".")[0]
+                        bound_names.add(local)
+                        target_name = aliases.get(imported_alias.name, imported_alias.name)
+                        imported_module = modules.get(target_name)
+                        if imported_module is not None:
+                            local_modules[local] = imported_module
+                        local_functions.pop(local, None)
+                        local_objects.pop(local, None)
+                    continue
+                if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                    name = _assignment_name(statement)
+                    value = statement.value
+                    if name is None or value is None:
+                        if touches_tracked(statement):
+                            for owner in set(local_objects.values()):
+                                limit(
+                                    current_module,
+                                    owner,
+                                    statement,
+                                    "unsupported bootstrap assignment",
+                                )
+                        continue
+                    bound_names.add(name)
+                    local_functions.pop(name, None)
+                    local_modules.pop(name, None)
+                    local_handlers.pop(name, None)
+                    aliased = object_for(value, statement.lineno)
+                    if aliased is not None:
+                        if name in global_names:
+                            limit(
+                                current_module,
+                                aliased,
+                                statement,
+                                "bootstrap object escapes through global assignment",
+                            )
+                        local_objects[name] = aliased
+                        local_strings.pop(name, None)
+                    else:
+                        escaped = [
+                            owner
+                            for tracked_name, owner in local_objects.items()
+                            if any(
+                                isinstance(item, ast.Name) and item.id == tracked_name
+                                for item in ast.walk(value)
+                            )
+                        ]
+                        for owner in set(escaped):
+                            limit(
+                                current_module,
+                                owner,
+                                statement,
+                                "bootstrap object escapes through assignment",
+                            )
+                        local_objects.pop(name, None)
+                        value_string = literal(value, statement.lineno)
+                        if value_string is not None:
+                            local_strings[name] = value_string
+                    continue
+                if isinstance(statement, ast.Return):
+                    if statement.value is not None and touches_tracked(statement.value):
+                        for owner in set(local_objects.values()):
+                            limit(
+                                current_module,
+                                owner,
+                                statement,
+                                "bootstrap object escapes through return",
+                            )
+                    break
+                if not (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call)):
+                    if touches_tracked(statement):
+                        for owner in set(local_objects.values()):
+                            limit(
+                                current_module,
+                                owner,
+                                statement,
+                                "unsupported bootstrap control flow",
+                            )
+                    continue
+                call = statement.value
+                line = statement.lineno
+                parent = (
+                    object_for(call.func.value, line)
+                    if isinstance(call.func, ast.Attribute)
+                    else None
+                )
+                operation = call.func.attr if isinstance(call.func, ast.Attribute) else ""
+                registration_operations = {
+                    "include_router",
+                    "mount",
+                    "add_api_route",
+                    "add_api_websocket_route",
+                    "add_websocket_route",
+                }
+                if parent is None and operation in registration_operations:
+                    limit(
+                        current_module,
+                        root,
+                        statement,
+                        "bootstrap registration receiver is unresolved",
+                    )
+                    continue
+                if parent is not None and operation in registration_operations:
+                    if any(isinstance(argument, ast.Starred) for argument in call.args) or any(
+                        keyword.arg is None for keyword in call.keywords
+                    ):
+                        limit(
+                            current_module,
+                            parent,
+                            statement,
+                            "starred bootstrap registration arguments are unsupported",
+                        )
+                        continue
+                    positional_names = {
+                        "include_router": ("router",),
+                        "mount": ("path", "app"),
+                        "add_api_route": ("path", "endpoint"),
+                        "add_api_websocket_route": ("path", "endpoint"),
+                        "add_websocket_route": ("path", "endpoint"),
+                    }[operation]
+                    keyword_names = [keyword.arg for keyword in call.keywords]
+                    duplicate_binding = any(
+                        name in keyword_names for name in positional_names[: len(call.args)]
+                    ) or len(keyword_names) != len(set(keyword_names))
+                    if len(call.args) > len(positional_names) or duplicate_binding:
+                        limit(
+                            current_module,
+                            parent,
+                            statement,
+                            "bootstrap registration arguments are ambiguous",
+                        )
+                        continue
+                    order = next_order()
+                    if operation == "include_router":
+                        child_expr = call.args[0] if call.args else _keyword_expr(call, "router")
+                        child = object_for(child_expr, line)
+                        prefix_expr = _keyword_expr(call, "prefix")
+                        prefix = "" if prefix_expr is None else literal(prefix_expr, line)
+                        if prefix is None:
+                            limit(
+                                current_module,
+                                parent,
+                                statement,
+                                "bootstrap router prefix is unresolved",
+                            )
+                        elif child is None or child.kind != "router":
+                            limit(
+                                current_module, parent, statement, "bootstrap router is unresolved"
+                            )
+                        else:
+                            edges.append(
+                                _Edge(
+                                    parent.key,
+                                    child.key,
+                                    prefix,
+                                    order,
+                                    order,
+                                    "copy",
+                                )
+                            )
+                    elif operation == "mount":
+                        path_expr = call.args[0] if call.args else _keyword_expr(call, "path")
+                        child_expr = (
+                            call.args[1] if len(call.args) > 1 else _keyword_expr(call, "app")
+                        )
+                        path = literal(path_expr, line)
+                        child = object_for(child_expr, line)
+                        if path is None or child is None or child.kind != "app":
+                            limit(
+                                current_module, parent, statement, "bootstrap mount is unresolved"
+                            )
+                        else:
+                            edges.append(
+                                _Edge(
+                                    parent.key,
+                                    child.key,
+                                    path,
+                                    order,
+                                    None,
+                                    "live",
+                                )
+                            )
+                    else:
+                        path_expr = call.args[0] if call.args else _keyword_expr(call, "path")
+                        handler_expr = (
+                            call.args[1] if len(call.args) > 1 else _keyword_expr(call, "endpoint")
+                        )
+                        path = literal(path_expr, line)
+                        handler = handler_for(handler_expr, line)
+                        methods: tuple[str, ...] = ("WEBSOCKET",)
+                        if operation == "add_api_route":
+                            methods_expr = _keyword_expr(call, "methods")
+                            methods = (
+                                _literal_methods(methods_expr)
+                                if methods_expr is not None
+                                else ("GET",)
+                            )
+                        if path is None or handler is None or not methods:
+                            limit(
+                                current_module, parent, statement, "bootstrap route is unresolved"
+                            )
+                        else:
+                            routes.append(_Route(parent.key, path, methods, handler, order))
+                    continue
+
+                helper_target: tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef] | None = None
+                if isinstance(call.func, ast.Name):
+                    helper_target = local_functions.get(call.func.id)
+                    if helper_target is None and call.func.id in bound_names:
+                        helper_target = None
+                    elif helper_target is None:
+                        local_function = self._function_at(current_module, call.func.id, line)
+                        if local_function is not None:
+                            helper_target = (current_module, local_function)
+                    if helper_target is None and call.func.id not in bound_names:
+                        helper_target = self._factory_target(
+                            call, current_module, aliases, modules, line
+                        )
+                elif isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name):
+                    imported_module = local_modules.get(call.func.value.id)
+                    if imported_module is not None:
+                        imported_function = self._function_at(
+                            imported_module, call.func.attr, 2**31 - 1
+                        )
+                        if imported_function is not None:
+                            helper_target = (imported_module, imported_function)
+                if helper_target is not None:
+                    target_module, target_function = helper_target
+                    parameters = [
+                        *target_function.args.posonlyargs,
+                        *target_function.args.args,
+                        *target_function.args.kwonlyargs,
+                    ]
+                    if target_function.args.vararg or target_function.args.kwarg:
+                        for owner in set(local_objects.values()):
+                            limit(current_module, owner, statement, "variadic bootstrap helper")
+                        continue
+                    positional_parameters = [
+                        *target_function.args.posonlyargs,
+                        *target_function.args.args,
+                    ]
+                    actuals: dict[str, ast.expr] = {
+                        parameter.arg: argument
+                        for parameter, argument in zip(
+                            positional_parameters, call.args, strict=False
+                        )
+                    }
+                    invalid_arguments = len(call.args) > len(positional_parameters) or any(
+                        isinstance(argument, ast.Starred) for argument in call.args
+                    )
+                    positional_only = {
+                        parameter.arg for parameter in target_function.args.posonlyargs
+                    }
+                    known_parameters = {parameter.arg for parameter in parameters}
+                    for keyword in call.keywords:
+                        if (
+                            keyword.arg is None
+                            or keyword.arg not in known_parameters
+                            or keyword.arg in positional_only
+                            or keyword.arg in actuals
+                        ):
+                            invalid_arguments = True
+                        else:
+                            actuals[keyword.arg] = keyword.value
+                    required_count = len(positional_parameters) - len(target_function.args.defaults)
+                    required_parameters = {
+                        parameter.arg for parameter in positional_parameters[:required_count]
+                    }
+                    required_parameters.update(
+                        parameter.arg
+                        for parameter, default in zip(
+                            target_function.args.kwonlyargs,
+                            target_function.args.kw_defaults,
+                            strict=True,
+                        )
+                        if default is None
+                    )
+                    if invalid_arguments or any(
+                        parameter not in actuals for parameter in required_parameters
+                    ):
+                        for owner in set(local_objects.values()):
+                            limit(
+                                current_module,
+                                owner,
+                                statement,
+                                "bootstrap helper arguments are ambiguous",
+                            )
+                        continue
+                    nested_objects: dict[str, _Object] = {}
+                    nested_strings: dict[str, str] = {}
+                    positional_defaults = (
+                        {
+                            parameter.arg: default
+                            for parameter, default in zip(
+                                positional_parameters[-len(target_function.args.defaults) :],
+                                target_function.args.defaults,
+                                strict=True,
+                            )
+                        }
+                        if target_function.args.defaults
+                        else {}
+                    )
+                    keyword_defaults = {
+                        parameter.arg: default
+                        for parameter, default in zip(
+                            target_function.args.kwonlyargs,
+                            target_function.args.kw_defaults,
+                            strict=True,
+                        )
+                        if default is not None
+                    }
+                    for parameter in parameters:
+                        expression = actuals.get(parameter.arg)
+                        uses_default = expression is None
+                        if expression is None:
+                            expression = positional_defaults.get(
+                                parameter.arg, keyword_defaults.get(parameter.arg)
+                            )
+                        if expression is None:
+                            continue
+                        actual_object = (
+                            self._resolve_object(
+                                expression,
+                                target_module,
+                                aliases,
+                                modules,
+                                target_function.lineno,
+                            )
+                            if uses_default
+                            else object_for(expression, line)
+                        )
+                        if actual_object is not None:
+                            nested_objects[parameter.arg] = actual_object
+                        actual_string = (
+                            self._literal_string(expression, target_module, target_function.lineno)
+                            if uses_default
+                            else literal(expression, line)
+                        )
+                        if actual_string is not None:
+                            nested_strings[parameter.arg] = actual_string
+                    if not nested_objects:
+                        for owner in set(local_objects.values()):
+                            limit(
+                                current_module,
+                                owner,
+                                statement,
+                                "helper without tracked object flow may mutate route globals",
+                            )
+                        continue
+                    apply(
+                        target_module,
+                        target_function,
+                        nested_objects,
+                        nested_strings,
+                        stack | {identity},
+                    )
+                    continue
+                if touches_tracked(call):
+                    for owner in set(local_objects.values()):
+                        limit(
+                            current_module, owner, statement, "unresolved bootstrap object escape"
+                        )
+
+        positional = [*function.args.posonlyargs, *function.args.args]
+        required = len(positional) - len(function.args.defaults)
+        required_keywords = any(default is None for default in function.args.kw_defaults)
+        if function.args.vararg or function.args.kwarg or required or required_keywords:
+            raise SecureASTExtractorError(
+                "bootstrap entry must be safely callable without arguments"
+            )
+        initial_objects: dict[str, _Object] = {}
+        visible_names = {
+            *module.objects,
+            *module.import_bindings,
+        }
+        for name in visible_names:
+            visible = self._resolve_object(
+                ast.Name(id=name, ctx=ast.Load()),
+                module,
+                aliases,
+                modules,
+                2**31 - 1,
+            )
+            if visible is not None and visible.key == root.key:
+                initial_objects[name] = root
+        initial_strings: dict[str, str] = {}
+        parameters = [*function.args.posonlyargs, *function.args.args]
+        for parameter in [*parameters, *function.args.kwonlyargs]:
+            initial_objects.pop(parameter.arg, None)
+        default_pairs = (
+            list(
+                zip(
+                    parameters[-len(function.args.defaults) :],
+                    function.args.defaults,
+                    strict=True,
+                )
+            )
+            if function.args.defaults
+            else []
+        )
+        default_pairs.extend(
+            (parameter, default)
+            for parameter, default in zip(
+                function.args.kwonlyargs, function.args.kw_defaults, strict=True
+            )
+            if default is not None
+        )
+        for parameter, default in default_pairs:
+            default_object = self._resolve_object(
+                default, module, aliases, modules, function.lineno
+            )
+            if default_object is not None:
+                initial_objects[parameter.arg] = default_object
+            value = self._literal_string(default, module, function.lineno)
+            if value is not None:
+                initial_strings[parameter.arg] = value
+        apply(module, function, initial_objects, initial_strings, frozenset())
 
     @staticmethod
     def _record_object_limitation(

@@ -107,6 +107,8 @@ fastapi-endpoint-detector analyze [OPTIONS]
 | `--scip` | | No | Use SCIP reverse-impact analysis instead of mypy |
 | `--baseline-app` | | No | Explicit baseline snapshot for removed SCIP lines (requires `--scip`) |
 | `--secure-ast` | | No | Discover endpoints without importing application code |
+| `--app-entry` | | No | Exact secure-AST `MODULE:SYMBOL` app object or factory |
+| `--bootstrap-entry` | | No | Exact secure-AST `MODULE:FUNCTION` registration bootstrap |
 | `--config` | `-c` | No | Path to configuration file |
 
 `--scip` requires pinned external tools on `PATH`: `scip-query` 0.16.0,
@@ -127,7 +129,12 @@ indexed from the explicit `--baseline-app` snapshot. If a diff removes Python
 lines and no baseline is supplied, analysis fails explicitly rather than
 inventing old source. Baseline discovery is always execution-free; target
 discovery is execution-free when `--secure-ast` is supplied (as in the official
-benchmark). Dynamic/control-flow route registration remains conservatively unresolved.
+benchmark). `--app-entry` and `--bootstrap-entry` require `--secure-ast` and
+never execute application code. Bootstrap interpretation is explicitly seeded,
+bounded to project-local straight-line helpers, and records unsupported object
+escape, mutation, control flow, or dynamic registration as conditional evidence;
+no bootstrap/helper names are guessed. Dynamic behavior remains conservatively
+unresolved.
 
 ### `list` - List Endpoints
 

@@ -43,6 +43,7 @@ class TestCLI:
         assert "--scip" in result.output
         assert "--baseline-app" in result.output
         assert "--app-entry" in result.output
+        assert "--bootstrap-entry" in result.output
 
     def test_list_help(self, runner: CliRunner) -> None:
         """Test the list command help."""
@@ -52,6 +53,19 @@ class TestCLI:
         assert "--vm" in result.output
         assert "--secure-ast" in result.output
         assert "--app-entry" in result.output
+        assert "--bootstrap-entry" in result.output
+
+    def test_bootstrap_entry_requires_secure_ast(self, runner: CliRunner, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text("from fastapi import FastAPI\napp = FastAPI()\n")
+
+        result = runner.invoke(
+            cli,
+            ["list", "--app", str(app_file), "--bootstrap-entry", "app:run"],
+        )
+
+        assert result.exit_code != 0
+        assert "--bootstrap-entry requires --secure-ast" in result.output
 
     def test_app_entry_requires_secure_ast(self, runner: CliRunner, tmp_path: Path) -> None:
         app_file = tmp_path / "app.py"
