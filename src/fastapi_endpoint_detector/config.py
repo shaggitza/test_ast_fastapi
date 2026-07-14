@@ -8,11 +8,16 @@ sensible defaults for all configuration options.
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+from fastapi_endpoint_detector.models.effect_contract import load_effect_contracts
+from fastapi_endpoint_detector.strict_data import load_yaml_unique
 
 
 class ParserConfig(BaseModel):
     """Configuration for the code parser."""
+
+    model_config = ConfigDict(extra="forbid")
 
     include_patterns: list[str] = Field(
         default=["**/*.py"],
@@ -36,6 +41,8 @@ class ParserConfig(BaseModel):
 class AnalysisConfig(BaseModel):
     """Configuration for the analysis engine."""
 
+    model_config = ConfigDict(extra="forbid")
+
     track_transitive: bool = Field(
         default=True,
         description="Track transitive (indirect) dependencies.",
@@ -53,10 +60,16 @@ class AnalysisConfig(BaseModel):
         default=False,
         description="Include test endpoints in analysis.",
     )
+    effect_contracts: Path | None = Field(
+        default=None,
+        description="Path to a strict versioned effect-contract document.",
+    )
 
 
 class OutputConfig(BaseModel):
     """Configuration for output formatting."""
+
+    model_config = ConfigDict(extra="forbid")
 
     show_confidence: bool = Field(
         default=True,
@@ -79,6 +92,8 @@ class OutputConfig(BaseModel):
 class IntegrationConfig(BaseModel):
     """Configuration for external tool integrations."""
 
+    model_config = ConfigDict(extra="forbid")
+
     use_mypy: bool = Field(
         default=True,
         description="Use mypy for type-aware analysis.",
@@ -92,15 +107,12 @@ class IntegrationConfig(BaseModel):
 class Config(BaseModel):
     """Root configuration model for FastAPI Endpoint Change Detector."""
 
+    model_config = ConfigDict(extra="forbid")
+
     parser: ParserConfig = Field(default_factory=ParserConfig)
     analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
     integrations: IntegrationConfig = Field(default_factory=IntegrationConfig)
-
-    class Config:
-        """Pydantic model configuration."""
-
-        extra = "forbid"
 
 
 def load_config(config_path: Path | None = None) -> Config:
@@ -124,9 +136,22 @@ def load_config(config_path: Path | None = None) -> Config:
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
 
     try:
-        with open(config_path, encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-        return Config(**data)
+        data = load_yaml_unique(config_path.read_text(encoding="utf-8")) or {}
+        config = Config(**data)
+        contracts_path = config.analysis.effect_contracts
+        if contracts_path is not None:
+            if not contracts_path.is_absolute():
+                contracts_path = config_path.resolve().parent / contracts_path
+            contracts_path = contracts_path.resolve()
+            load_effect_contracts(contracts_path)
+            config = config.model_copy(
+                update={
+                    "analysis": config.analysis.model_copy(
+                        update={"effect_contracts": contracts_path}
+                    )
+                }
+            )
+        return config
     except yaml.YAMLError as e:
         raise ValueError(f"Invalid YAML in configuration file: {e}") from e
     except Exception as e:

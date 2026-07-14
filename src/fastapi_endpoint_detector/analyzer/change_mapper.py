@@ -400,6 +400,10 @@ class ChangeMapper:
         """
         self.app_path = app_path.resolve()
         self.config = config or Config()
+        if self.config.analysis.effect_contracts is not None:
+            raise ChangeMapperError(
+                "effect contracts are validation-only until exact typed call matching is enabled"
+            )
         self.app_variable = app_variable
         self.app_entry = app_entry
         self.bootstrap_entry = bootstrap_entry

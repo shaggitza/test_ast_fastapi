@@ -1,0 +1,45 @@
+schema_version: 1
+preset:
+  id: example-application-effects
+  version: 1.0.0
+  provenance:
+    kind: user
+    source: examples/effect_contracts.yaml
+contracts:
+  - id: redis-set
+    symbol: redis.client.Redis.set
+    invocation: instance_method
+    operation: write
+    channel: redis
+    resource:
+      kind: argument
+      index: 0
+    value:
+      kind: argument
+      index: 1
+    package:
+      distribution: redis
+      version: ">=5,<6"
+
+  - id: mongo-insert
+    symbol: motor.motor_asyncio.AsyncIOMotorCollection.insert_one
+    invocation: instance_method
+    operation: write
+    channel: mongodb
+    resource:
+      kind: receiver
+    value:
+      kind: argument
+      index: 0
+    behavior:
+      async_mode: async
+      timing: await
+
+  - id: audit-publish
+    symbol: company.audit.publish
+    invocation: function
+    operation: publish
+    channel: message_bus
+    resource:
+      kind: argument
+      index: 0
