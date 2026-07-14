@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import (
+    CallFrame,
     EndpointDependencies,
     MypyAnalyzer,
 )
@@ -57,6 +58,150 @@ def test_adjacent_new_definition_does_not_inherit_previous_function_evidence(
     assert mapper._check_mypy_dependency(endpoint, diff_file, [2], []) is not None
 
 
+def test_shared_project_path_index_is_enumerated_and_resolved_once(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "pkg" / "service.py"
+    source.parent.mkdir()
+    source.write_text("value = 1\n")
+    original_rglob = Path.rglob
+    enumerations = 0
+
+    def counted_rglob(path: Path, pattern: str):
+        nonlocal enumerations
+        enumerations += 1
+        return original_rglob(path, pattern)
+
+    monkeypatch.setattr(Path, "rglob", counted_rglob)
+    analyzer = MypyAnalyzer(tmp_path)
+    index = analyzer._project_path_index()
+    dependencies = []
+    for number in range(250):
+        deps = EndpointDependencies(
+            endpoint_id=f"GET /{number}",
+            methods=["GET"],
+            path=f"/{number}",
+            source_root=str(tmp_path),
+            project_files=index.project_files,
+            _path_index=index,
+        )
+        deps.add_reference(str(source), 1)
+        deps.add_symbol_reference(str(source), "pkg.service", 1, 1)
+        deps.call_stacks[str(source)] = [[CallFrame(str(source), 1, "service")]]
+        dependencies.append(deps)
+
+    for deps in dependencies:
+        assert deps.references_lines("pkg/service.py", {1}) == {1}
+        assert deps.references_lines("pkg/service.py", {1}) == {1}
+        assert deps.references_symbol_at_line("pkg/service.py", 1) is not None
+        assert deps.get_call_stack("pkg/service.py")
+
+    assert enumerations == 1
+    assert len(index._query_cache) == 1
+    assert all(deps._path_index is index for deps in dependencies)
+    assert all(
+        set(deps._canonical_key_indexes)
+        == {"referenced_files", "referenced_symbols", "call_stacks"}
+        for deps in dependencies
+    )
+    assert all(
+        all(len(category) == 1 for category in deps._canonical_key_indexes.values())
+        for deps in dependencies
+    )
+
+
+def test_dependency_category_keys_are_scanned_only_once(tmp_path: Path) -> None:
+    source = tmp_path / "service.py"
+    source.write_text("value = 1\n")
+    iterations = 0
+
+    class CountingDict(dict[str, set[int]]):
+        def __iter__(self):
+            nonlocal iterations
+            iterations += 1
+            return super().__iter__()
+
+    deps = EndpointDependencies(
+        endpoint_id="GET /",
+        methods=["GET"],
+        path="/",
+        source_root=str(tmp_path),
+        project_files={str(source)},
+        referenced_files=CountingDict({str(source): {1}}),
+    )
+
+    assert deps.references_lines("service.py", {1}) == {1}
+    first_iterations = iterations
+    assert deps.references_lines("service.py", {1}) == {1}
+    assert iterations == first_iterations
+
+
+def test_project_path_index_reuses_built_module_inventory(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "pkg" / "service.py"
+    source.parent.mkdir()
+    source.write_text("value = 1\n")
+    analyzer = MypyAnalyzer(tmp_path)
+    analyzer._module_to_path = {"pkg.service": str(source)}
+
+    monkeypatch.setattr(
+        Path,
+        "rglob",
+        lambda *_args, **_kwargs: pytest.fail("built inventory must avoid rglob"),
+    )
+
+    assert analyzer._project_path_index().project_files == frozenset({str(source.resolve())})
+
+
+def test_shared_query_cache_is_bounded(tmp_path: Path) -> None:
+    source = tmp_path / "service.py"
+    source.write_text("value = 1\n")
+    index = MypyAnalyzer(tmp_path)._project_path_index()
+
+    for number in range(1100):
+        index.resolve(f"missing-{number}.py")
+
+    assert len(index._query_cache) == index._MAX_QUERY_CACHE
+    assert "missing-0.py" not in index._query_cache
+    assert "missing-1099.py" in index._query_cache
+
+
+def test_normal_analysis_reuses_build_inventory_and_handler_reverse_index(
+    tmp_path: Path, monkeypatch
+) -> None:
+    main = tmp_path / "main.py"
+    main.write_text("def handler() -> int:\n    return 1\n")
+    endpoint = Endpoint(
+        path="/",
+        methods=[EndpointMethod.GET],
+        handler=HandlerInfo(name="handler", module="main", file_path=main, line_number=1),
+    )
+    original_rglob = Path.rglob
+    enumerations = 0
+
+    def counted_rglob(path: Path, pattern: str):
+        nonlocal enumerations
+        enumerations += 1
+        return original_rglob(path, pattern)
+
+    monkeypatch.setattr(Path, "rglob", counted_rglob)
+    analyzer = MypyAnalyzer(tmp_path)
+    deps = analyzer.analyze_endpoint(endpoint)
+
+    assert deps.references_symbol_at_line("main.py", 1) is not None
+    assert enumerations == 1
+    assert any(
+        module.endswith(".main") or module == "main"
+        for module in analyzer._modules_by_canonical_path[str(main.resolve())]
+    )
+
+    class NoItems(dict[str, str]):
+        def items(self):
+            pytest.fail("handler resolution must not scan module paths")
+
+    analyzer._module_to_path = NoItems(analyzer._module_to_path)
+    assert analyzer.analyze_endpoint(endpoint).references_symbol_at_line("main.py", 1)
+
+
 def test_duplicate_basenames_fail_closed_but_unique_suffix_resolves(tmp_path: Path) -> None:
     first = tmp_path / "pkg_a" / "models" / "user.py"
     second = tmp_path / "pkg_b" / "models" / "user.py"
@@ -78,6 +223,9 @@ def test_duplicate_basenames_fail_closed_but_unique_suffix_resolves(tmp_path: Pa
     assert deps.references_lines("user.py", {1}) == set()
     assert deps.references_file("pkg_a/models/user.py")
     assert deps.references_lines("pkg_a\\models\\user.py", {1}) == {1}
+    assert deps.references_lines(str(first.resolve()), {1}) == {1}
+    assert not deps.references_file("missing.py")
+    assert deps.references_lines("missing.py", {1}) == set()
 
 
 def test_effective_mypy_depth_matches_configuration(tmp_path: Path) -> None:
@@ -288,10 +436,29 @@ def test_cache_rejects_source_edits_depth_changes_legacy_and_malformed(
     )
     analyzer._save_cache()
 
-    assert MypyAnalyzer(tmp_path, max_depth=2)._cache_fingerprint() == analyzer._cache_fingerprint()
+    initial_fingerprint = analyzer._cache_fingerprint()
+    assert MypyAnalyzer(tmp_path, max_depth=2)._cache_fingerprint() == initial_fingerprint
+
+    added = tmp_path / "added.py"
+    added.write_text("added = True\n")
+    assert analyzer._cache_fingerprint() != initial_fingerprint
+    added.unlink()
+    assert analyzer._cache_fingerprint() == initial_fingerprint
+
+    outside = tmp_path.parent / "outside-mypy-fingerprint.py"
+    outside.write_text("outside = True\n")
+    symlink = tmp_path / "escape.py"
+    symlink.symlink_to(outside)
+    assert analyzer._cache_fingerprint() == initial_fingerprint
+    symlink.unlink()
+    outside.unlink()
     same = MypyAnalyzer(tmp_path, max_depth=2)
     same.set_cache_path(cache)
     assert same._load_cache()
+    loaded = same.get_endpoint_dependencies("GET /")
+    assert loaded is not None
+    assert loaded._path_index is same._project_path_index()
+    assert loaded.project_files is loaded._path_index.project_files
 
     source.write_text("value = 2\n")
     edited = MypyAnalyzer(tmp_path, max_depth=2)

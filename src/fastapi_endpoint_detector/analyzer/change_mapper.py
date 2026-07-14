@@ -593,13 +593,7 @@ class ChangeMapper:
         if not deps:
             return None
 
-        # Check if the endpoint references the changed file at all
         file_path = str(diff_file.path)
-
-        if not deps.references_file(file_path):
-            return None
-
-        # Check for line-level intersection
         changed_lines = set(added_lines) | set(removed_lines)
 
         # Dependency ranges already cover complete callable definitions. Expanding
