@@ -1,0 +1,1079 @@
+{
+  "schema_version": 2,
+  "created_at": "2026-07-14T10:15:08.996023+00:00",
+  "candidate": {
+    "id": "fastapi-endpoint-detector/0.1.0/a83c415d6156/692787377d08",
+    "name": "fastapi-endpoint-detector",
+    "version": "0.1.0",
+    "git_sha": "a83c415d6156349548acf7be152b9492035f7ce3",
+    "config_hash": "692787377d08",
+    "dirty": false,
+    "dirty_sha256": null,
+    "uv_lock_sha256": "8efb5b6ad171aaa25ca89f27b44b6d9243216619f616101d3e553a1919e19ae8",
+    "uv_version": "uv 0.9.18",
+    "command": "uv run --frozen fastapi-endpoint-detector list --secure-ast --format json"
+  },
+  "corpus": {
+    "path": "/home/shaggi/test_ast_fastapi/benchmarks/real_world/corpus.json",
+    "sha256": "7c4ecfd562d2e01079a955e8214afd4e9e1a408f73ed392d4606eecbc649f062"
+  },
+  "root_config": {
+    "default": ".",
+    "repositories": {
+      "khoj-ai/khoj": "src/khoj",
+      "langflow-ai/langflow": "src/backend/base/langflow",
+      "open-webui/open-webui": "backend/open_webui"
+    }
+  },
+  "app_entry_config": {
+    "langflow-ai/langflow": "main:create_app"
+  },
+  "command_contract": [
+    "uv",
+    "run",
+    "--frozen",
+    "fastapi-endpoint-detector",
+    "list",
+    "--app",
+    "<snapshot-root>",
+    "--format",
+    "json",
+    "--secure-ast",
+    "--app-entry",
+    "<optional-module:symbol>",
+    "--output",
+    "<temporary-file>"
+  ],
+  "selection_count": 60,
+  "status_counts": {
+    "completed": 20,
+    "partial": 38,
+    "unresolved": 2
+  },
+  "prs": [
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26924,
+      "merge_sha": "0f8846b7fc8c210945366defbd1ed941b039a691",
+      "base_sha": "42f5c3d6f78415df90027b08a2b968fe7886965f",
+      "configured_app_entry": null,
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 488,
+      "baseline_entrypoints": 488,
+      "timing_seconds": {
+        "target": 1.1901413070154376,
+        "baseline": 1.1857756520039402,
+        "total": 4.062214664008934
+      }
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26914,
+      "merge_sha": "42f5c3d6f78415df90027b08a2b968fe7886965f",
+      "base_sha": "b854389951ac5440f825091e63bf270a05e5f7ac",
+      "configured_app_entry": null,
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 488,
+      "baseline_entrypoints": 488,
+      "timing_seconds": {
+        "target": 1.1703017050167546,
+        "baseline": 1.179307798971422,
+        "total": 3.749143353954423
+      }
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26913,
+      "merge_sha": "274729aa477826a041b4e1f044f085757b839baa",
+      "base_sha": "65a5fad7b97db99d490d81f4e0860282c3a4543c",
+      "configured_app_entry": null,
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 488,
+      "baseline_entrypoints": 488,
+      "timing_seconds": {
+        "target": 1.1820927480002865,
+        "baseline": 1.176370812987443,
+        "total": 3.7301255270140246
+      }
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26911,
+      "merge_sha": "f4a6ea9300f130dc2f755d82d935f18160b8f5d2",
+      "base_sha": "0f8846b7fc8c210945366defbd1ed941b039a691",
+      "configured_app_entry": null,
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 488,
+      "baseline_entrypoints": 488,
+      "timing_seconds": {
+        "target": 1.1531127639464103,
+        "baseline": 1.1611940799630247,
+        "total": 3.6726273590466008
+      }
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26907,
+      "merge_sha": "65a5fad7b97db99d490d81f4e0860282c3a4543c",
+      "base_sha": "f4a6ea9300f130dc2f755d82d935f18160b8f5d2",
+      "configured_app_entry": null,
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 488,
+      "baseline_entrypoints": 488,
+      "timing_seconds": {
+        "target": 1.1845739310374483,
+        "baseline": 1.192927450989373,
+        "total": 3.728728459973354
+      }
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26906,
+      "merge_sha": "f8c0d2fdd690ecbe0444617c91dba3be45d5681e",
+      "base_sha": "274729aa477826a041b4e1f044f085757b839baa",
+      "configured_app_entry": null,
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 488,
+      "baseline_entrypoints": 488,
+      "timing_seconds": {
+        "target": 1.1730391490273178,
+        "baseline": 1.1823872909881175,
+        "total": 3.743802093958948
+      }
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26881,
+      "merge_sha": "8c71897bc0df861032ace8baae0facdafb7d6195",
+      "base_sha": "f8c0d2fdd690ecbe0444617c91dba3be45d5681e",
+      "configured_app_entry": null,
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 488,
+      "baseline_entrypoints": 488,
+      "timing_seconds": {
+        "target": 1.1573277059942484,
+        "baseline": 1.197413184971083,
+        "total": 3.7062746710143983
+      }
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26642,
+      "merge_sha": "ecd48e2f718220a6400ecf49eafd4867a38feb10",
+      "base_sha": "b711935dd57dbc223ebbf410175a8bbe7e4efafb",
+      "configured_app_entry": null,
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 488,
+      "baseline_entrypoints": 488,
+      "timing_seconds": {
+        "target": 1.2117048759828322,
+        "baseline": 1.2428731769905426,
+        "total": 3.8646010819938965
+      }
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26641,
+      "merge_sha": "4b55e69640627304d291233dc40aaa5a6e15e272",
+      "base_sha": "90eca2ac257fdbc8ce72a32d5b4a6cbe76da1eba",
+      "configured_app_entry": null,
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 488,
+      "baseline_entrypoints": 488,
+      "timing_seconds": {
+        "target": 1.2286271400516853,
+        "baseline": 1.207362095999997,
+        "total": 3.8365648289909586
+      }
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26625,
+      "merge_sha": "a78f0c030261954f9dd5bf0e2b7e1a4e7d294b26",
+      "base_sha": "2d7fc04bfbbd8747114500afeabdb690440d2054",
+      "configured_app_entry": null,
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 488,
+      "baseline_entrypoints": 488,
+      "timing_seconds": {
+        "target": 1.1931003449717537,
+        "baseline": 1.1687831949675456,
+        "total": 3.74856247700518
+      }
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26463,
+      "merge_sha": "980786f574f4d21eb19fc1582fa2831acfe9d983",
+      "base_sha": "a78f0c030261954f9dd5bf0e2b7e1a4e7d294b26",
+      "configured_app_entry": null,
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 488,
+      "baseline_entrypoints": 488,
+      "timing_seconds": {
+        "target": 1.1954252010327764,
+        "baseline": 1.1920473230420612,
+        "total": 3.769382722035516
+      }
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26454,
+      "merge_sha": "2d7fc04bfbbd8747114500afeabdb690440d2054",
+      "base_sha": "9866a02863c12c466100aed832f0006225759493",
+      "configured_app_entry": null,
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 488,
+      "baseline_entrypoints": 488,
+      "timing_seconds": {
+        "target": 1.1850589769892395,
+        "baseline": 1.1946938350447454,
+        "total": 3.755115701002069
+      }
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26409,
+      "merge_sha": "9ed7af823c088640ed7bc8758d431a6a4932b15e",
+      "base_sha": "980786f574f4d21eb19fc1582fa2831acfe9d983",
+      "configured_app_entry": null,
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 488,
+      "baseline_entrypoints": 488,
+      "timing_seconds": {
+        "target": 1.1473458029795438,
+        "baseline": 1.1546859880327247,
+        "total": 3.660437982995063
+      }
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26406,
+      "merge_sha": "1014c212a4b436c0b8da2f04df7833912d81ff1c",
+      "base_sha": "4067e357b2ff9e2fb59866d24656e832908fb6fe",
+      "configured_app_entry": null,
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 488,
+      "baseline_entrypoints": 488,
+      "timing_seconds": {
+        "target": 1.1532903939951211,
+        "baseline": 1.1369070469518192,
+        "total": 3.6383563550189137
+      }
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26405,
+      "merge_sha": "0e5540c2b295e38906be7ece4d3b104303d6c519",
+      "base_sha": "73c0be8389ad6680af55d6f9a0e2dbfc347540dd",
+      "configured_app_entry": null,
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 488,
+      "baseline_entrypoints": 488,
+      "timing_seconds": {
+        "target": 1.1400270980084315,
+        "baseline": 1.1830516920308582,
+        "total": 3.664409937977325
+      }
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26391,
+      "merge_sha": "651a02ed2f3f1f887d13ccd77dbd3495fd8ffe16",
+      "base_sha": "86231e44386815c8616867566e7f179f3d83c14e",
+      "configured_app_entry": null,
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 488,
+      "baseline_entrypoints": 488,
+      "timing_seconds": {
+        "target": 1.1358782289898954,
+        "baseline": 1.1519989289809018,
+        "total": 3.62282602902269
+      }
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26388,
+      "merge_sha": "b711935dd57dbc223ebbf410175a8bbe7e4efafb",
+      "base_sha": "4d2e13cf2bcc451b33bb6374bea4d2163e6cc94c",
+      "configured_app_entry": null,
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 488,
+      "baseline_entrypoints": 488,
+      "timing_seconds": {
+        "target": 1.181463555956725,
+        "baseline": 1.1866055540158413,
+        "total": 3.740152654994745
+      }
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26386,
+      "merge_sha": "6e3020b942482370e834e364ada5981c11a0785d",
+      "base_sha": "832fc3af84aa4ffb2318f522c4867baea4844fe2",
+      "configured_app_entry": null,
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 488,
+      "baseline_entrypoints": 488,
+      "timing_seconds": {
+        "target": 1.1887507600476965,
+        "baseline": 1.1581812930526212,
+        "total": 3.738098233996425
+      }
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26385,
+      "merge_sha": "4d2e13cf2bcc451b33bb6374bea4d2163e6cc94c",
+      "base_sha": null,
+      "configured_app_entry": null,
+      "status": "unresolved",
+      "target_status": "unresolved",
+      "baseline_status": "unresolved",
+      "target_entrypoints": 0,
+      "baseline_entrypoints": 0,
+      "timing_seconds": {
+        "target": 0.0,
+        "baseline": 0.0,
+        "total": 0.016294125991407782
+      }
+    },
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26384,
+      "merge_sha": "dc1bc41d2edc022dbae11db2159cedb5369c68cd",
+      "base_sha": "655afbe90b36b40ea6f406fff15e4a1e528961c4",
+      "configured_app_entry": null,
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 487,
+      "baseline_entrypoints": 487,
+      "timing_seconds": {
+        "target": 1.1469988269964233,
+        "baseline": 1.1610682159662247,
+        "total": 3.669780786964111
+      }
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 14009,
+      "merge_sha": "c578a4b07047a78aa3447eb5f512ec4328ee5114",
+      "base_sha": "d846b2b9500a137b6ed05ea80c4f4d6e10eaa26b",
+      "configured_app_entry": "main:create_app",
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 244,
+      "baseline_entrypoints": 244,
+      "timing_seconds": {
+        "target": 0.9862773630302399,
+        "baseline": 1.0196311909821816,
+        "total": 5.11324296699604
+      }
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 14004,
+      "merge_sha": "db5f3b08c96cf98cf6bee29b41cecdebc0476107",
+      "base_sha": "0a0732717b0c46cdc38a29d0442d25349f7815b4",
+      "configured_app_entry": "main:create_app",
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 244,
+      "baseline_entrypoints": 244,
+      "timing_seconds": {
+        "target": 0.9510496380389668,
+        "baseline": 0.9785638540051877,
+        "total": 4.772056229994632
+      }
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13996,
+      "merge_sha": "cd3f2b994e9f6eb55f2e674ae215fed6491b96c8",
+      "base_sha": "7ffd040bdeed991888a8b6a0edd2eb6cf50d931c",
+      "configured_app_entry": "main:create_app",
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 244,
+      "baseline_entrypoints": 244,
+      "timing_seconds": {
+        "target": 0.9992535019991919,
+        "baseline": 1.007861161022447,
+        "total": 4.925858018978033
+      }
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13995,
+      "merge_sha": "7ffd040bdeed991888a8b6a0edd2eb6cf50d931c",
+      "base_sha": "1ba8b827b64ce40a135202c65dda9e887adaa021",
+      "configured_app_entry": "main:create_app",
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 244,
+      "baseline_entrypoints": 244,
+      "timing_seconds": {
+        "target": 0.9469642540207133,
+        "baseline": 0.9500660360208713,
+        "total": 4.798557047965005
+      }
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13992,
+      "merge_sha": "1ba8b827b64ce40a135202c65dda9e887adaa021",
+      "base_sha": "6ea7dc02f258cc582ed69b8ebe9ac4c8b6dd54bf",
+      "configured_app_entry": "main:create_app",
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 244,
+      "baseline_entrypoints": 244,
+      "timing_seconds": {
+        "target": 0.9598756179912016,
+        "baseline": 0.9935107380151749,
+        "total": 4.859231940994505
+      }
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13987,
+      "merge_sha": "bf818073edbcf3dd00a7cee36fcb9aa74fcc90a9",
+      "base_sha": "575a0d7f7d37946f6f526506f89cef41c7dc54df",
+      "configured_app_entry": "main:create_app",
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 244,
+      "baseline_entrypoints": 244,
+      "timing_seconds": {
+        "target": 0.9706955320434645,
+        "baseline": 0.9698576200171374,
+        "total": 4.871498647960834
+      }
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13985,
+      "merge_sha": "c98878b2c0bbc7bb8b070728b8e4f7985527b0fd",
+      "base_sha": null,
+      "configured_app_entry": "main:create_app",
+      "status": "unresolved",
+      "target_status": "unresolved",
+      "baseline_status": "unresolved",
+      "target_entrypoints": 0,
+      "baseline_entrypoints": 0,
+      "timing_seconds": {
+        "target": 0.0,
+        "baseline": 0.0,
+        "total": 0.016713502001948655
+      }
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13982,
+      "merge_sha": "91cb382895ea2410e3be0287de0788eaef45a679",
+      "base_sha": "55ac1215e485da2d6190ff3e1512af66bffc6388",
+      "configured_app_entry": "main:create_app",
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 245,
+      "baseline_entrypoints": 245,
+      "timing_seconds": {
+        "target": 0.9591299220337532,
+        "baseline": 0.9609831750276498,
+        "total": 4.8151605279999785
+      }
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13976,
+      "merge_sha": "c17051ccdd25b760f9dc2b720b4b7f4a16b91bbd",
+      "base_sha": "c4db860a792390a5fd9cf79556ac9ce026395a03",
+      "configured_app_entry": "main:create_app",
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 244,
+      "baseline_entrypoints": 244,
+      "timing_seconds": {
+        "target": 0.9626683800015599,
+        "baseline": 0.9481419799849391,
+        "total": 4.777628200012259
+      }
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13975,
+      "merge_sha": "60f3ab2112f8428483a3d49cd07242d19f3a7924",
+      "base_sha": "6bd0e056da0dcb41e08ef28a4aa2d33d5282da6e",
+      "configured_app_entry": "main:create_app",
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 245,
+      "baseline_entrypoints": 245,
+      "timing_seconds": {
+        "target": 0.9448482189909555,
+        "baseline": 0.952514743024949,
+        "total": 4.747313853993546
+      }
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13971,
+      "merge_sha": "b40e4aa02661dcc9d630e1e97a0af45d45e88ae4",
+      "base_sha": "3965c3be972224663311f60784edf056839fd62e",
+      "configured_app_entry": "main:create_app",
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 243,
+      "baseline_entrypoints": 243,
+      "timing_seconds": {
+        "target": 0.9361003879457712,
+        "baseline": 0.9327741569723003,
+        "total": 4.654075056954753
+      }
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13968,
+      "merge_sha": "6bd0e056da0dcb41e08ef28a4aa2d33d5282da6e",
+      "base_sha": "a91c3fdf7abdd149893ce7f9797256219b6b0d57",
+      "configured_app_entry": "main:create_app",
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 245,
+      "baseline_entrypoints": 245,
+      "timing_seconds": {
+        "target": 0.945801284047775,
+        "baseline": 0.9392412339802831,
+        "total": 4.725456336978823
+      }
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13966,
+      "merge_sha": "c4db860a792390a5fd9cf79556ac9ce026395a03",
+      "base_sha": "2b4b628b0cd61d25910a3218e1134a062d573aa9",
+      "configured_app_entry": "main:create_app",
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 244,
+      "baseline_entrypoints": 244,
+      "timing_seconds": {
+        "target": 0.9826996480114758,
+        "baseline": 0.9856951509718783,
+        "total": 4.8730754790012725
+      }
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13960,
+      "merge_sha": "a69a47ff1b5c99ce9c50edc4df45de4397151f17",
+      "base_sha": "b40e4aa02661dcc9d630e1e97a0af45d45e88ae4",
+      "configured_app_entry": "main:create_app",
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 243,
+      "baseline_entrypoints": 243,
+      "timing_seconds": {
+        "target": 0.9866739939898252,
+        "baseline": 0.9687521770247258,
+        "total": 4.821328584046569
+      }
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13959,
+      "merge_sha": "8136694a5c64f149aa5dd2c9eabf14437cbe4534",
+      "base_sha": "106760a5fcca908c4f2921ea4016e68bfe2a62d6",
+      "configured_app_entry": "main:create_app",
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 245,
+      "baseline_entrypoints": 245,
+      "timing_seconds": {
+        "target": 0.997750032984186,
+        "baseline": 1.0088497339747846,
+        "total": 4.9105308600119315
+      }
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13954,
+      "merge_sha": "106760a5fcca908c4f2921ea4016e68bfe2a62d6",
+      "base_sha": "df8752a2d712f04f13f833b17ef8154dd042868d",
+      "configured_app_entry": "main:create_app",
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 245,
+      "baseline_entrypoints": 245,
+      "timing_seconds": {
+        "target": 0.9802492969902232,
+        "baseline": 0.9816542130429298,
+        "total": 4.918518970021978
+      }
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13953,
+      "merge_sha": "0a0732717b0c46cdc38a29d0442d25349f7815b4",
+      "base_sha": "cd3f2b994e9f6eb55f2e674ae215fed6491b96c8",
+      "configured_app_entry": "main:create_app",
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 244,
+      "baseline_entrypoints": 244,
+      "timing_seconds": {
+        "target": 0.9854108639992774,
+        "baseline": 0.9879611320211552,
+        "total": 4.8821319389971904
+      }
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13952,
+      "merge_sha": "ab14dc0c21cb3e4bcc96cd35e84147f0a2279dda",
+      "base_sha": "737c6b578f2511442d2c1e5ed8ae3ef6b21e6e4e",
+      "configured_app_entry": "main:create_app",
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 250,
+      "baseline_entrypoints": 250,
+      "timing_seconds": {
+        "target": 1.0546082030050457,
+        "baseline": 1.111811213020701,
+        "total": 5.1134443990304135
+      }
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13950,
+      "merge_sha": "203a67c164c2cd73c82e4fed7b399c8247fad7b7",
+      "base_sha": "4f8ab3375e15f41ed29b09894ec17f4553160ae1",
+      "configured_app_entry": "main:create_app",
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 250,
+      "baseline_entrypoints": 249,
+      "timing_seconds": {
+        "target": 1.012774485978298,
+        "baseline": 1.0208707390120253,
+        "total": 5.0016290210187435
+      }
+    },
+    {
+      "repository": "langflow-ai/langflow",
+      "pr": 13949,
+      "merge_sha": "4f8ab3375e15f41ed29b09894ec17f4553160ae1",
+      "base_sha": "e6c63b8cf459ee2659c35acb1208182fd8c530d3",
+      "configured_app_entry": "main:create_app",
+      "status": "partial",
+      "target_status": "partial",
+      "baseline_status": "partial",
+      "target_entrypoints": 249,
+      "baseline_entrypoints": 249,
+      "timing_seconds": {
+        "target": 1.022357910987921,
+        "baseline": 1.0398523359908722,
+        "total": 5.034854058991186
+      }
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1349,
+      "merge_sha": "3c3d8ee5747cbdafd4249d72ba229ceba579cba4",
+      "base_sha": "f285132ff6aee5660de9429d4482ad65937c64c2",
+      "configured_app_entry": null,
+      "status": "completed",
+      "target_status": "completed",
+      "baseline_status": "completed",
+      "target_entrypoints": 0,
+      "baseline_entrypoints": 0,
+      "timing_seconds": {
+        "target": 0.40736329404171556,
+        "baseline": 0.4086462300037965,
+        "total": 1.825507104047574
+      }
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1348,
+      "merge_sha": "0292d0f33418f364a419b99d08c1343e35d2b679",
+      "base_sha": "60608845a42b7d9bf6549ca9650c4d9c925e85fa",
+      "configured_app_entry": null,
+      "status": "completed",
+      "target_status": "completed",
+      "baseline_status": "completed",
+      "target_entrypoints": 0,
+      "baseline_entrypoints": 0,
+      "timing_seconds": {
+        "target": 0.4237690130248666,
+        "baseline": 0.40545917698182166,
+        "total": 1.4605607200064696
+      }
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1319,
+      "merge_sha": "f285132ff6aee5660de9429d4482ad65937c64c2",
+      "base_sha": "0292d0f33418f364a419b99d08c1343e35d2b679",
+      "configured_app_entry": null,
+      "status": "completed",
+      "target_status": "completed",
+      "baseline_status": "completed",
+      "target_entrypoints": 0,
+      "baseline_entrypoints": 0,
+      "timing_seconds": {
+        "target": 0.40739139198558405,
+        "baseline": 0.4107658970169723,
+        "total": 1.4460194050334394
+      }
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1312,
+      "merge_sha": "60608845a42b7d9bf6549ca9650c4d9c925e85fa",
+      "base_sha": "e1da98067c1e3eec584ff0381b6b4242e1644adc",
+      "configured_app_entry": null,
+      "status": "completed",
+      "target_status": "completed",
+      "baseline_status": "completed",
+      "target_entrypoints": 0,
+      "baseline_entrypoints": 0,
+      "timing_seconds": {
+        "target": 0.4058324609650299,
+        "baseline": 0.4094934110180475,
+        "total": 1.441898082033731
+      }
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1296,
+      "merge_sha": "8b8504edb8be2cde7ef16f5be476864be0810093",
+      "base_sha": "7475a781bc151bd97240f7c0ff667ce01d6f6378",
+      "configured_app_entry": null,
+      "status": "completed",
+      "target_status": "completed",
+      "baseline_status": "completed",
+      "target_entrypoints": 0,
+      "baseline_entrypoints": 0,
+      "timing_seconds": {
+        "target": 0.4179588289698586,
+        "baseline": 0.4022540510050021,
+        "total": 1.4688352149678394
+      }
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1292,
+      "merge_sha": "530443a4f6ccd5281cefe8bbb82ab146fddf952b",
+      "base_sha": "e8631261400e0a04c5063e91e498b549976ffc53",
+      "configured_app_entry": null,
+      "status": "completed",
+      "target_status": "completed",
+      "baseline_status": "completed",
+      "target_entrypoints": 0,
+      "baseline_entrypoints": 0,
+      "timing_seconds": {
+        "target": 0.4123955310205929,
+        "baseline": 0.4016017409740016,
+        "total": 1.4515264119836502
+      }
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1284,
+      "merge_sha": "0e169159f8fbaba58d32a60ba2e236fb7225f536",
+      "base_sha": "530443a4f6ccd5281cefe8bbb82ab146fddf952b",
+      "configured_app_entry": null,
+      "status": "completed",
+      "target_status": "completed",
+      "baseline_status": "completed",
+      "target_entrypoints": 0,
+      "baseline_entrypoints": 0,
+      "timing_seconds": {
+        "target": 0.40900938102276996,
+        "baseline": 0.40793442795984447,
+        "total": 1.4385506460093893
+      }
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1277,
+      "merge_sha": "e8631261400e0a04c5063e91e498b549976ffc53",
+      "base_sha": "678549c6b06c9db90aa9156db3bc740f432505b5",
+      "configured_app_entry": null,
+      "status": "completed",
+      "target_status": "completed",
+      "baseline_status": "completed",
+      "target_entrypoints": 0,
+      "baseline_entrypoints": 0,
+      "timing_seconds": {
+        "target": 0.4269996789516881,
+        "baseline": 0.4180390000110492,
+        "total": 1.4725033970316872
+      }
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1271,
+      "merge_sha": "6735d33af2ee0e8d6ccacd4b27f56dcb9816ff14",
+      "base_sha": "0e9878c070993697ed546e46871428dfb40d4c77",
+      "configured_app_entry": null,
+      "status": "completed",
+      "target_status": "completed",
+      "baseline_status": "completed",
+      "target_entrypoints": 0,
+      "baseline_entrypoints": 0,
+      "timing_seconds": {
+        "target": 0.4024868200067431,
+        "baseline": 0.42949909501476213,
+        "total": 1.4526033459696919
+      }
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1269,
+      "merge_sha": "678549c6b06c9db90aa9156db3bc740f432505b5",
+      "base_sha": "6735d33af2ee0e8d6ccacd4b27f56dcb9816ff14",
+      "configured_app_entry": null,
+      "status": "completed",
+      "target_status": "completed",
+      "baseline_status": "completed",
+      "target_entrypoints": 0,
+      "baseline_entrypoints": 0,
+      "timing_seconds": {
+        "target": 0.41759696998633444,
+        "baseline": 0.40226986998459324,
+        "total": 1.4470892690005712
+      }
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1265,
+      "merge_sha": "2c829678071f4d8cbf6bec88d390bcfa68b4f973",
+      "base_sha": "17be2d4800c4573c586d99501064955321dc030d",
+      "configured_app_entry": null,
+      "status": "completed",
+      "target_status": "completed",
+      "baseline_status": "completed",
+      "target_entrypoints": 0,
+      "baseline_entrypoints": 0,
+      "timing_seconds": {
+        "target": 0.3994617649586871,
+        "baseline": 0.41457461594836786,
+        "total": 1.426808217947837
+      }
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1263,
+      "merge_sha": "0e9878c070993697ed546e46871428dfb40d4c77",
+      "base_sha": "2c829678071f4d8cbf6bec88d390bcfa68b4f973",
+      "configured_app_entry": null,
+      "status": "completed",
+      "target_status": "completed",
+      "baseline_status": "completed",
+      "target_entrypoints": 0,
+      "baseline_entrypoints": 0,
+      "timing_seconds": {
+        "target": 0.40592856297735125,
+        "baseline": 0.4037279470358044,
+        "total": 1.4245185760082677
+      }
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1238,
+      "merge_sha": "5a51f17a71f122af7333893e93c745f1d658d6ee",
+      "base_sha": "b0cd8dc8fd8047e67d47d1b825a46264ad4b8b62",
+      "configured_app_entry": null,
+      "status": "completed",
+      "target_status": "completed",
+      "baseline_status": "completed",
+      "target_entrypoints": 0,
+      "baseline_entrypoints": 0,
+      "timing_seconds": {
+        "target": 0.3994143269956112,
+        "baseline": 0.43371226300951093,
+        "total": 1.4612054419703782
+      }
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1235,
+      "merge_sha": "f413ce7354c3981f1e22c9d784f4197ac253a41a",
+      "base_sha": "9b9cdc756f5d8bc9b312e03ba948a513a7072915",
+      "configured_app_entry": null,
+      "status": "completed",
+      "target_status": "completed",
+      "baseline_status": "completed",
+      "target_entrypoints": 0,
+      "baseline_entrypoints": 0,
+      "timing_seconds": {
+        "target": 0.45005849900189787,
+        "baseline": 0.43614288000389934,
+        "total": 1.530266322020907
+      }
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1229,
+      "merge_sha": "349618961884cd0c2b080f402f51c3a8d638c718",
+      "base_sha": "2ac735909218817319b93965eecacd72b829fe2d",
+      "configured_app_entry": null,
+      "status": "completed",
+      "target_status": "completed",
+      "baseline_status": "completed",
+      "target_entrypoints": 0,
+      "baseline_entrypoints": 0,
+      "timing_seconds": {
+        "target": 0.4573667689692229,
+        "baseline": 0.4086942470166832,
+        "total": 1.4995692959637381
+      }
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1221,
+      "merge_sha": "1fd6e16cff416da413da9e5b469dd5ade42bd556",
+      "base_sha": "d6c2d1fa49cb585259480b993c521b3542aa5ae9",
+      "configured_app_entry": null,
+      "status": "completed",
+      "target_status": "completed",
+      "baseline_status": "completed",
+      "target_entrypoints": 0,
+      "baseline_entrypoints": 0,
+      "timing_seconds": {
+        "target": 0.4283652679878287,
+        "baseline": 0.40999970998382196,
+        "total": 1.4759022219805047
+      }
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1216,
+      "merge_sha": "573c6a32e1a2b722893df6e745838976201caa56",
+      "base_sha": "fa143d45b953714c9f599872b778706c21fd1012",
+      "configured_app_entry": null,
+      "status": "completed",
+      "target_status": "completed",
+      "baseline_status": "completed",
+      "target_entrypoints": 0,
+      "baseline_entrypoints": 0,
+      "timing_seconds": {
+        "target": 0.40976108697941527,
+        "baseline": 0.42217269499087706,
+        "total": 1.4748701190110296
+      }
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1212,
+      "merge_sha": "c6670e815a4bf864d3227c932a5617943c19800f",
+      "base_sha": "9096f628d03584a6c306343cd593d4c4d043d600",
+      "configured_app_entry": null,
+      "status": "completed",
+      "target_status": "completed",
+      "baseline_status": "completed",
+      "target_entrypoints": 0,
+      "baseline_entrypoints": 0,
+      "timing_seconds": {
+        "target": 0.40776780497981235,
+        "baseline": 0.44072838098509237,
+        "total": 1.501510975009296
+      }
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1211,
+      "merge_sha": "b82d4fe68fa249cb9c87cd15c4a5314eede38678",
+      "base_sha": "f5d12b7546b1a502cbb4b1dd5a56da01370832ef",
+      "configured_app_entry": null,
+      "status": "completed",
+      "target_status": "completed",
+      "baseline_status": "completed",
+      "target_entrypoints": 0,
+      "baseline_entrypoints": 0,
+      "timing_seconds": {
+        "target": 0.43688505998579785,
+        "baseline": 0.4267929769703187,
+        "total": 1.5164537410018966
+      }
+    },
+    {
+      "repository": "khoj-ai/khoj",
+      "pr": 1207,
+      "merge_sha": "de7668daec5a1e140bce1dba3ee84187ed93bf30",
+      "base_sha": "99ed796c00d3b6f278065cf54c9d0aee7b4ec240",
+      "configured_app_entry": null,
+      "status": "completed",
+      "target_status": "completed",
+      "baseline_status": "completed",
+      "target_entrypoints": 0,
+      "baseline_entrypoints": 0,
+      "timing_seconds": {
+        "target": 0.41835673700552434,
+        "baseline": 0.43576093000592664,
+        "total": 1.5136009919806384
+      }
+    }
+  ],
+  "timing_seconds": {
+    "total": 193.59098493895726
+  },
+  "output_sha256": "287b7895ce9eb000cdcc88da03afc9f84da2703904052aa3485d7aa1021ed290"
+}
