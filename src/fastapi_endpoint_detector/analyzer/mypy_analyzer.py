@@ -21,6 +21,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from typing import Any, ClassVar
 
 from fastapi_endpoint_detector.models.effect_contract import (
@@ -337,6 +338,16 @@ class _FinitePointsTo:
         return _FinitePointsTo(self.types, tuple(sorted(fields.items())))
 
 
+@dataclass(frozen=True)
+class _ExecutorSummary:
+    """Exact callback and forwarding semantics for one executor wrapper."""
+
+    callback_index: int
+    allow_callback_keyword: bool
+    forwards_keyword_arguments: bool
+    control_keywords: frozenset[str] = frozenset()
+
+
 class MypyAnalyzer:
     """
     Analyze endpoint dependencies using mypy's type system.
@@ -345,16 +356,21 @@ class MypyAnalyzer:
     and extract precise file/line information for all references.
     """
 
-    CACHE_SCHEMA_VERSION = 10
+    CACHE_SCHEMA_VERSION = 11
     MAX_POINTS_TO_TARGETS = 8
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
     MAX_POINTS_TO_EDGES = 4096
-    EXECUTION_SUMMARY_VERSION = 1
-    EXECUTOR_SUMMARIES: ClassVar[dict[str, tuple[int, bool]]] = {
-        "asyncio.threads.to_thread": (0, False),
-        "anyio.to_thread.run_sync": (0, True),
-        "starlette.concurrency.run_in_threadpool": (0, True),
+    EXECUTION_SUMMARY_VERSION = 2
+    EXECUTOR_SUMMARIES: ClassVar[dict[str, _ExecutorSummary]] = {
+        "asyncio.threads.to_thread": _ExecutorSummary(0, False, True),
+        "anyio.to_thread.run_sync": _ExecutorSummary(
+            0,
+            True,
+            False,
+            frozenset({"abandon_on_cancel", "cancellable", "limiter"}),
+        ),
+        "starlette.concurrency.run_in_threadpool": _ExecutorSummary(0, True, True),
     }
 
     def __init__(self, app_path: Path, *, max_depth: int = 10) -> None:
@@ -1051,7 +1067,15 @@ class MypyAnalyzer:
         import_map = self._import_map_for_tree(tree, handler_module)
 
         # Trace all references in the function body.
-        visited: dict[tuple[str, bool, _FinitePointsTo | None], int] = {}
+        visited: dict[
+            tuple[
+                str,
+                bool,
+                _FinitePointsTo | None,
+                tuple[tuple[str, _FinitePointsTo], ...],
+            ],
+            int,
+        ] = {}
         call_stack = [CallFrame(handler_path, start, handler.name)]
 
         for dependency_fullname, dependency_depth in sorted(
@@ -1084,7 +1108,7 @@ class MypyAnalyzer:
                 dependency_start,
                 dependency_end,
             )
-            visited[(dependency_fullname, False, None)] = dependency_depth
+            visited[(dependency_fullname, False, None, ())] = dependency_depth
             if dependency_depth < self.max_depth:
                 self._trace_references(
                     dependency_node,
@@ -1538,8 +1562,15 @@ class MypyAnalyzer:
         *,
         receiver: _FinitePointsTo | None = None,
     ) -> dict[str, _FinitePointsTo] | None:
-        """Bind explicit positional/keyword arguments without *args/**kwargs guessing."""
-        from mypy.nodes import ARG_NAMED, ARG_POS  # noqa: PLC0415
+        """Bind a narrow valid call shape without *args/**kwargs guessing."""
+        from mypy.nodes import (  # noqa: PLC0415
+            ARG_NAMED,
+            ARG_NAMED_OPT,
+            ARG_OPT,
+            ARG_POS,
+            ARG_STAR,
+            ARG_STAR2,
+        )
 
         actual = self._actual_function(function)
         arguments = list(getattr(actual, "arguments", ()))
@@ -1549,18 +1580,30 @@ class MypyAnalyzer:
                 return None
             environment[arguments[0].variable.name] = receiver
             arguments = arguments[1:]
+        if any(argument.kind in (ARG_STAR, ARG_STAR2) for argument in arguments):
+            return None
+
+        positional_arguments = [
+            argument for argument in arguments if argument.kind in (ARG_POS, ARG_OPT)
+        ]
+        by_name = {
+            argument.variable.name: argument for argument in arguments if not argument.pos_only
+        }
+        assigned: set[str] = set()
         positional = 0
-        by_name = {argument.variable.name: argument for argument in arguments}
         for expression, kind, name in zip(call.args, call.arg_kinds, call.arg_names, strict=True):
             if kind == ARG_POS and name is None:
-                if positional >= len(arguments):
+                if positional >= len(positional_arguments):
                     return None
-                parameter = arguments[positional].variable.name
+                parameter = positional_arguments[positional].variable.name
                 positional += 1
             elif kind == ARG_NAMED and name in by_name:
                 parameter = name
             else:
                 return None
+            if parameter in assigned:
+                return None
+            assigned.add(parameter)
             value = self._finite_expression_value(
                 expression,
                 caller_environment,
@@ -1570,6 +1613,19 @@ class MypyAnalyzer:
             )
             if value is not None:
                 environment[parameter] = value
+
+        required = {
+            argument.variable.name
+            for argument in arguments
+            if argument.kind in (ARG_POS, ARG_NAMED)
+        }
+        if required - assigned:
+            return None
+        if any(
+            argument.kind not in (ARG_POS, ARG_OPT, ARG_NAMED, ARG_NAMED_OPT)
+            for argument in arguments
+        ):
+            return None
         return environment
 
     def _finite_global_value(  # noqa: PLR0911, PLR0912
@@ -1925,22 +1981,54 @@ class MypyAnalyzer:
             declarations.add(declaration)
         return next(iter(declarations)) if len(declarations) == 1 else None
 
-    def _executor_callback_expression(self, call: Any, wrapper_symbol: str) -> Any | None:
-        """Bind the callback slot by formal name without confusing control kwargs."""
+    def _executor_callback_binding(
+        self,
+        call: Any,
+        wrapper_symbol: str,
+    ) -> tuple[Any, Any] | None:
+        """Extract one callback plus its explicitly forwarded args and kwargs."""
         from mypy.nodes import ARG_NAMED, ARG_POS  # noqa: PLC0415
 
-        callback_index, allow_keyword = self.EXECUTOR_SUMMARIES[wrapper_symbol]
-        for expression, kind, name in zip(call.args, call.arg_kinds, call.arg_names, strict=True):
-            if allow_keyword and kind == ARG_NAMED and name == "func":
-                return expression
-        positional = [
-            expression
-            for expression, kind, name in zip(
-                call.args, call.arg_kinds, call.arg_names, strict=True
+        summary = self.EXECUTOR_SUMMARIES[wrapper_symbol]
+        arguments = list(zip(call.args, call.arg_kinds, call.arg_names, strict=True))
+        callback_offset: int | None = None
+        if summary.allow_callback_keyword:
+            callback_offset = next(
+                (
+                    offset
+                    for offset, (_expression, kind, name) in enumerate(arguments)
+                    if kind == ARG_NAMED and name == "func"
+                ),
+                None,
             )
-            if kind == ARG_POS and name is None
-        ]
-        return positional[callback_index] if callback_index < len(positional) else None
+        if callback_offset is None:
+            positional_offsets = [
+                offset
+                for offset, (_expression, kind, name) in enumerate(arguments)
+                if kind == ARG_POS and name is None
+            ]
+            if summary.callback_index >= len(positional_offsets):
+                return None
+            callback_offset = positional_offsets[summary.callback_index]
+
+        callback_expression = arguments[callback_offset][0]
+        forwarded = []
+        for offset, argument in enumerate(arguments):
+            if offset == callback_offset:
+                continue
+            _expression, kind, name = argument
+            if kind == ARG_NAMED:
+                if name in summary.control_keywords:
+                    continue
+                if not summary.forwards_keyword_arguments:
+                    continue
+            forwarded.append(argument)
+        forwarded_call = SimpleNamespace(
+            args=[argument[0] for argument in forwarded],
+            arg_kinds=[argument[1] for argument in forwarded],
+            arg_names=[argument[2] for argument in forwarded],
+        )
+        return callback_expression, forwarded_call
 
     def _synchronous_callback_body(self, fullname: str) -> bool:
         """Reject callbacks whose invocation only creates deferred execution."""
@@ -1991,6 +2079,31 @@ class MypyAnalyzer:
         if declaration is None or not self._synchronous_callback_body(declaration[0]):
             return None
         return declaration, None
+
+    def _executor_callback_environment(
+        self,
+        callback_fullname: str,
+        callback_receiver: _FinitePointsTo | None,
+        forwarded_call: Any,
+        caller_environment: dict[str, _FinitePointsTo],
+        caller_imports: dict[str, str],
+        budget: list[int],
+    ) -> dict[str, _FinitePointsTo] | None:
+        """Bind only a valid explicit callback call; unknown values stay absent."""
+        resolved = self._function_node_for_fullname(callback_fullname)
+        if resolved is None:
+            return None
+        function, _path, _module = resolved
+        bound = self._bind_finite_arguments(
+            function,
+            forwarded_call,
+            caller_environment,
+            caller_imports,
+            (callback_fullname,),
+            budget,
+            receiver=callback_receiver,
+        )
+        return bound
 
     def _member_call_resolution(  # noqa: PLR0911, PLR0912, PLR0915
         self,
@@ -2252,12 +2365,21 @@ class MypyAnalyzer:
         current_file: str,
         current_module: str,
         call_stack: list[CallFrame],
-        visited: dict[tuple[str, bool, _FinitePointsTo | None], int],
+        visited: dict[
+            tuple[
+                str,
+                bool,
+                _FinitePointsTo | None,
+                tuple[tuple[str, _FinitePointsTo], ...],
+            ],
+            int,
+        ],
         import_map: dict[str, str] | None = None,
         *,
         depth: int,
         low_confidence_path: bool = False,
         receiver_value: _FinitePointsTo | None = None,
+        initial_environment: dict[str, _FinitePointsTo] | None = None,
         finite_edge_budget: list[int] | None = None,
     ) -> None:
         """
@@ -2312,7 +2434,7 @@ class MypyAnalyzer:
             YieldFromExpr,
         )
 
-        flow_environment: dict[str, _FinitePointsTo] = {}
+        flow_environment: dict[str, _FinitePointsTo] = dict(initial_environment or {})
         function_node = self._actual_function(node)
         if receiver_value is not None and getattr(function_node, "arguments", None):
             self_name = function_node.arguments[0].variable.name
@@ -2326,6 +2448,7 @@ class MypyAnalyzer:
             *,
             low_confidence_edge: bool = False,
             target_receiver: _FinitePointsTo | None = None,
+            target_environment: dict[str, _FinitePointsTo] | None = None,
             edge_kind: str | None = None,
         ) -> None:
             """Resolve a fullname and preserve LOW provenance through descendants."""
@@ -2337,7 +2460,13 @@ class MypyAnalyzer:
                     return
                 finite_edge_budget[0] += 1
             target_low_confidence = low_confidence_path or low_confidence_edge
-            visit_key = (fullname, target_low_confidence, target_receiver)
+            environment_key = tuple(sorted((target_environment or {}).items()))
+            visit_key = (
+                fullname,
+                target_low_confidence,
+                target_receiver,
+                environment_key,
+            )
             previous_depth = visited.get(visit_key)
             should_recurse = previous_depth is None or target_depth < previous_depth
             if should_recurse:
@@ -2416,6 +2545,7 @@ class MypyAnalyzer:
                         depth=target_depth,
                         low_confidence_path=target_low_confidence,
                         receiver_value=target_receiver,
+                        initial_environment=target_environment,
                         finite_edge_budget=finite_edge_budget,
                     )
             else:
@@ -2473,6 +2603,7 @@ class MypyAnalyzer:
                                 depth=target_depth,
                                 low_confidence_path=target_low_confidence,
                                 receiver_value=target_receiver,
+                                initial_environment=target_environment,
                                 finite_edge_budget=finite_edge_budget,
                             )
                 # Ambiguous or unresolved symbols are not converted into
@@ -2491,12 +2622,13 @@ class MypyAnalyzer:
                 if call_site is not None and call_site.status == CallResolutionStatus.EXACT
                 else None
             )
-            callback_expression = (
-                self._executor_callback_expression(call, wrapper_symbol)
+            callback_binding = (
+                self._executor_callback_binding(call, wrapper_symbol)
                 if wrapper_symbol in self.EXECUTOR_SUMMARIES and id(call) in awaited_call_ids
                 else None
             )
-            if callback_expression is not None:
+            if callback_binding is not None:
+                callback_expression, forwarded_call = callback_binding
                 callback = self._exact_executor_callback(
                     callback_expression,
                     flow_environment,
@@ -2505,15 +2637,27 @@ class MypyAnalyzer:
                 )
                 if callback is not None:
                     declaration, callback_receiver = callback
-                    callback_fullname, _callback_invocation = declaration
-                    deps.add_reference(current_file, call.line, callback_fullname)
-                    resolve_and_trace(
+                    callback_fullname, callback_invocation = declaration
+                    if callback_invocation == InvocationKind.FUNCTION:
+                        callback_receiver = None
+                    callback_environment = self._executor_callback_environment(
                         callback_fullname,
-                        call.line,
-                        low_confidence_edge=True,
-                        target_receiver=callback_receiver,
-                        edge_kind=f"executor_callback:{wrapper_symbol}",
+                        callback_receiver,
+                        forwarded_call,
+                        flow_environment,
+                        import_map,
+                        finite_budget,
                     )
+                    if callback_environment is not None:
+                        deps.add_reference(current_file, call.line, callback_fullname)
+                        resolve_and_trace(
+                            callback_fullname,
+                            call.line,
+                            low_confidence_edge=True,
+                            target_receiver=callback_receiver,
+                            target_environment=callback_environment,
+                            edge_kind=f"executor_callback:{wrapper_symbol}",
+                        )
 
             if isinstance(callee, MemberExpr) and (
                 call_site is None or call_site.status != CallResolutionStatus.EXACT
@@ -2882,7 +3026,15 @@ class MypyAnalyzer:
                     "max_factory_states": self.MAX_FACTORY_STATES,
                     "max_edges": self.MAX_POINTS_TO_EDGES,
                     "execution_summary_version": self.EXECUTION_SUMMARY_VERSION,
-                    "executor_summaries": self.EXECUTOR_SUMMARIES,
+                    "executor_summaries": {
+                        symbol: {
+                            "callback_index": summary.callback_index,
+                            "allow_callback_keyword": summary.allow_callback_keyword,
+                            "forwards_keyword_arguments": summary.forwards_keyword_arguments,
+                            "control_keywords": sorted(summary.control_keywords),
+                        }
+                        for symbol, summary in sorted(self.EXECUTOR_SUMMARIES.items())
+                    },
                 },
                 "mypy": mypy_version,
                 "python": list(sys.version_info[:3]),
