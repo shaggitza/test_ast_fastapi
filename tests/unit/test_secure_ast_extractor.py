@@ -1427,6 +1427,171 @@ def create_app():
             endpoint.identifier for endpoint in SecureASTExtractor(caller).extract_endpoints()
         ] == ["GET /cross-module"]
 
+    def test_resolves_transitive_absolute_router_reexports(self, tmp_path: Path) -> None:
+        (tmp_path / "routes.py").write_text(
+            """from fastapi import APIRouter
+origin = APIRouter()
+@origin.get('/items')
+def items(): return []
+"""
+        )
+        (tmp_path / "exports.py").write_text("from routes import origin as middle\n")
+        (tmp_path / "public.py").write_text("from exports import middle as surface\n")
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+from public import surface as renamed
+application = FastAPI()
+application.include_router(renamed, prefix='/api')
+"""
+        )
+
+        endpoints = SecureASTExtractor(main, app_variable="application").extract_endpoints()
+
+        assert [endpoint.identifier for endpoint in endpoints] == ["GET /api/items"]
+
+    def test_resolves_relative_reexport_through_module_attribute(self, tmp_path: Path) -> None:
+        package = tmp_path / "pkg"
+        (package / "v1").mkdir(parents=True)
+        (package / "__init__.py").write_text("")
+        (package / "routes.py").write_text(
+            """from fastapi import APIRouter
+source = APIRouter()
+@source.post('/submit')
+def submit(): return None
+"""
+        )
+        (package / "v1" / "__init__.py").write_text("from ..routes import source as intermediate\n")
+        (package / "api.py").write_text("from .v1 import intermediate as published\n")
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+from pkg import api as renamed_module
+root = FastAPI()
+root.include_router(renamed_module.published, prefix='/v1')
+"""
+        )
+
+        endpoints = SecureASTExtractor(main, app_variable="root").extract_endpoints()
+
+        assert [endpoint.identifier for endpoint in endpoints] == ["POST /v1/submit"]
+
+    @pytest.mark.parametrize(
+        "public_source",
+        [
+            "from other import exported\n",
+            "from other import exported\ndel exported\n",
+            "from other import exported\nexported = object()\n",
+            "from routes import *\n",
+            "from routes import first as exported, second as exported\n",
+        ],
+    )
+    def test_transitive_reexports_fail_closed_on_unproven_bindings(
+        self, tmp_path: Path, public_source: str
+    ) -> None:
+        (tmp_path / "routes.py").write_text(
+            """from fastapi import APIRouter
+first = APIRouter()
+second = APIRouter()
+@first.get('/false')
+def false(): return None
+"""
+        )
+        (tmp_path / "other.py").write_text("from public import exported\n")
+        (tmp_path / "public.py").write_text(public_source)
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+from public import exported
+app = FastAPI()
+app.include_router(exported)
+"""
+        )
+
+        assert SecureASTExtractor(main).extract_endpoints() == []
+
+    @pytest.mark.parametrize(
+        "rebind",
+        ["exported = exported = object()", "for exported in [object()]:\n    pass"],
+    )
+    def test_transitive_reexport_does_not_survive_compound_rebinding(
+        self, tmp_path: Path, rebind: str
+    ) -> None:
+        (tmp_path / "routes.py").write_text(
+            "from fastapi import APIRouter\nrouter = APIRouter()\n"
+            "@router.get('/false')\ndef false(): return None\n"
+        )
+        (tmp_path / "public.py").write_text(f"from routes import router as exported\n{rebind}\n")
+        main = tmp_path / "main.py"
+        main.write_text(
+            "from fastapi import FastAPI\nfrom public import exported\n"
+            "app = FastAPI()\napp.include_router(exported)\n"
+        )
+
+        assert SecureASTExtractor(main).extract_endpoints() == []
+
+    def test_package_export_dominates_same_named_submodule(self, tmp_path: Path) -> None:
+        package = tmp_path / "pkg"
+        package.mkdir()
+        (package / "real.py").write_text(
+            "from fastapi import APIRouter\nrouter = APIRouter()\n"
+            "@router.get('/real')\ndef real(): return None\n"
+        )
+        (package / "api.py").write_text(
+            "from fastapi import APIRouter\napi = APIRouter()\n"
+            "@api.get('/false')\ndef false(): return None\n"
+        )
+        (package / "__init__.py").write_text("from .real import router as api\n")
+        main = tmp_path / "main.py"
+        main.write_text(
+            "from fastapi import FastAPI\nfrom pkg import api\n"
+            "app = FastAPI()\napp.include_router(api)\n"
+        )
+
+        assert [
+            endpoint.identifier for endpoint in SecureASTExtractor(main).extract_endpoints()
+        ] == ["GET /real"]
+
+    @pytest.mark.parametrize(
+        "package_source",
+        ["from .exports import *\n", "if flag:\n    from .exports import api\n"],
+    )
+    def test_package_submodule_resolution_fails_on_possible_dynamic_export(
+        self, tmp_path: Path, package_source: str
+    ) -> None:
+        package = tmp_path / "pkg"
+        package.mkdir()
+        (package / "exports.py").write_text(
+            "from fastapi import APIRouter\napi = APIRouter()\n"
+            "@api.get('/real')\ndef real(): return None\n"
+        )
+        (package / "api.py").write_text(
+            "from fastapi import APIRouter\nrouter = APIRouter()\n"
+            "@router.get('/false')\ndef false(): return None\n"
+        )
+        (package / "__init__.py").write_text(package_source)
+        main = tmp_path / "main.py"
+        main.write_text(
+            "from fastapi import FastAPI\nfrom pkg import api\n"
+            "app = FastAPI()\napp.include_router(api.router)\n"
+        )
+
+        assert SecureASTExtractor(main).extract_endpoints() == []
+
+    def test_transitive_reexport_kind_mismatch_fails_closed(self, tmp_path: Path) -> None:
+        (tmp_path / "child.py").write_text("from fastapi import FastAPI\nchild = FastAPI()\n")
+        (tmp_path / "public.py").write_text("from child import child as exported\n")
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+from public import exported
+app = FastAPI()
+app.include_router(exported)
+"""
+        )
+
+        assert SecureASTExtractor(main).extract_endpoints() == []
+
     def test_ignores_unproven_route_receivers_and_dynamic_paths(self, tmp_path: Path) -> None:
         """Do not interpret arbitrary methods or unresolved paths as FastAPI routes."""
         app_file = tmp_path / "app.py"
