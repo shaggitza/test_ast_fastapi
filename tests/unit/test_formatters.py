@@ -9,6 +9,8 @@ import pytest
 
 from fastapi_endpoint_detector.models.endpoint import (
     Endpoint,
+    EndpointDiscoveryCondition,
+    EndpointDiscoveryStatus,
     EndpointMethod,
     HandlerInfo,
 )
@@ -29,6 +31,49 @@ from fastapi_endpoint_detector.output.formatters import get_formatter
 from fastapi_endpoint_detector.output.html_output import HtmlFormatter
 from fastapi_endpoint_detector.output.json_output import JsonFormatter
 from fastapi_endpoint_detector.output.markdown_output import MarkdownFormatter
+from fastapi_endpoint_detector.output.text_output import TextFormatter
+from fastapi_endpoint_detector.output.yaml_output import YamlFormatter
+
+
+def test_conditional_discovery_is_structured_and_visible() -> None:
+    endpoint = Endpoint(
+        path="/items",
+        methods=[EndpointMethod.GET],
+        handler=HandlerInfo(
+            name="route", module="main", file_path=Path("/app/main.py"), line_number=3
+        ),
+        discovery_status=EndpointDiscoveryStatus.CONDITIONAL,
+        discovery_conditions=(
+            EndpointDiscoveryCondition(
+                source_path=Path("/app/main.py"),
+                source_line=9,
+                reason="unknown helper may mutate app",
+            ),
+        ),
+    )
+    candidate = AffectedEndpoint(
+        endpoint=endpoint,
+        confidence=ConfidenceLevel.LOW,
+        reason="conditional route",
+    )
+    report = AnalysisReport(
+        app_path="/app",
+        diff_source="change.diff",
+        total_endpoints=1,
+        candidate_endpoints=[candidate],
+    )
+
+    for formatted in (JsonFormatter().format(report), YamlFormatter().format(report)):
+        assert "discovery_status" in formatted
+        assert "conditional" in formatted
+        assert "unknown helper may mutate app" in formatted
+    for formatted in (
+        TextFormatter().format(report),
+        MarkdownFormatter().format(report),
+        HtmlFormatter().format(report),
+    ):
+        assert "CONDITIONAL" in formatted
+        assert "unknown helper may mutate app" in formatted
 
 
 def test_json_preserves_candidates_and_structured_effect_evidence() -> None:

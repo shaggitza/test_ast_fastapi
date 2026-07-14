@@ -11,7 +11,13 @@ from typing import TYPE_CHECKING, ClassVar, Literal
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, HandlerInfo
+from fastapi_endpoint_detector.models.endpoint import (
+    Endpoint,
+    EndpointDiscoveryCondition,
+    EndpointDiscoveryStatus,
+    EndpointMethod,
+    HandlerInfo,
+)
 
 
 class SecureASTExtractorError(Exception):
@@ -29,6 +35,7 @@ class _Object:
     kind: ObjectKind
     prefix: str
     line: int
+    discovery_conditions: tuple[EndpointDiscoveryCondition, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -38,6 +45,7 @@ class _Route:
     methods: tuple[str, ...]
     handler: HandlerInfo
     line: int
+    discovery_conditions: tuple[EndpointDiscoveryCondition, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -190,7 +198,16 @@ class SecureASTExtractor:
         for _iteration in range(len(modules) + 1):
             before = sum(len(module.factory_objects) for module in modules.values())
             for module in modules.values():
-                self._collect_factory_graphs(module, aliases, modules)
+                self._collect_factory_graphs(
+                    module,
+                    aliases,
+                    modules,
+                    explicit_binding=(
+                        (explicit_module.name, explicit_variable)
+                        if explicit_module is not None and explicit_variable is not None
+                        else None
+                    ),
+                )
             after = sum(len(module.factory_objects) for module in modules.values())
             if after == before:
                 break
@@ -268,11 +285,15 @@ class SecureASTExtractor:
             inherited: str,
             cutoff: int | None,
             stack: frozenset[ObjectKey],
+            inherited_conditions: tuple[EndpointDiscoveryCondition, ...],
         ) -> None:
             if owner in stack:
                 return
             item = objects[owner]
             prefix = _join_paths(inherited, item.prefix)
+            object_conditions = _merge_discovery_conditions(
+                inherited_conditions, item.discovery_conditions
+            )
             for route in routes_by_owner.get(owner, []):
                 if cutoff is not None and route.line > cutoff:
                     continue
@@ -281,6 +302,14 @@ class SecureASTExtractor:
                         path=_join_paths(prefix, route.path),
                         methods=[EndpointMethod(method) for method in route.methods],
                         handler=route.handler,
+                        discovery_status=(
+                            EndpointDiscoveryStatus.CONDITIONAL
+                            if object_conditions or route.discovery_conditions
+                            else EndpointDiscoveryStatus.ESTABLISHED
+                        ),
+                        discovery_conditions=_merge_discovery_conditions(
+                            object_conditions, route.discovery_conditions
+                        ),
                     )
                 )
             for edge in edges_by_parent.get(owner, []):
@@ -291,10 +320,11 @@ class SecureASTExtractor:
                     _join_paths(prefix, edge.prefix),
                     edge.child_cutoff,
                     stack | {owner},
+                    object_conditions,
                 )
 
         for root in sorted(set(roots)):
-            visit(root, "", None, frozenset())
+            visit(root, "", None, frozenset(), ())
         return sorted(
             found,
             key=lambda endpoint: (
@@ -595,6 +625,8 @@ class SecureASTExtractor:
         module: _Module,
         aliases: dict[str, str],
         modules: dict[str, _Module],
+        *,
+        explicit_binding: tuple[str, str] | None,
     ) -> None:
         for call in module.factory_calls:
             call_token = _node_token(call.call)
@@ -623,6 +655,7 @@ class SecureASTExtractor:
                 stack=frozenset(),
                 call=call.call,
                 argument_resolver=resolve_call_argument,
+                allow_conditional=explicit_binding == (module.name, call.variable),
             )
             if graph is None:
                 continue
@@ -633,6 +666,7 @@ class SecureASTExtractor:
                 graph.root.kind,
                 graph.root.prefix,
                 call.line,
+                graph.root.discovery_conditions,
             )
             history.append(root)
             history.sort(key=lambda item: item.line)
@@ -718,6 +752,7 @@ class SecureASTExtractor:
         stack: frozenset[str],
         call: ast.Call,
         argument_resolver: Callable[[ast.expr], str | None] | None = None,
+        allow_conditional: bool = False,
     ) -> _FactoryGraph | None:
         function_identity = f"{module.name}.{function.name}@{_node_token(function)}"
         if (
@@ -770,6 +805,7 @@ class SecureASTExtractor:
         emitted_objects: list[_Object] = []
         routes: list[_Route] = []
         edges: list[_Edge] = []
+        factory_conditions: list[EndpointDiscoveryCondition] = []
         module_object_keys = {
             item.key
             for candidate_module in modules.values()
@@ -815,10 +851,18 @@ class SecureASTExtractor:
                 item.kind,
                 item.prefix,
                 call_line,
+                item.discovery_conditions,
             )
             emitted_objects.append(snapshot)
             routes.extend(
-                _Route(snapshot_key, route.path, route.methods, route.handler, call_line)
+                _Route(
+                    snapshot_key,
+                    route.path,
+                    route.methods,
+                    route.handler,
+                    call_line,
+                    route.discovery_conditions,
+                )
                 for route in list(routes)
                 if route.owner == item.key
             )
@@ -842,6 +886,46 @@ class SecureASTExtractor:
                 if expression.id in local_bindings:
                     return None
             return self._resolve_handler(expression, module, aliases, modules, call_line)
+
+        def conditionalize(statement: ast.AST, reason: str) -> None:
+            condition = EndpointDiscoveryCondition(
+                source_path=module.path,
+                source_line=getattr(statement, "lineno", function.lineno),
+                reason=reason,
+            )
+            if condition not in factory_conditions:
+                factory_conditions.append(condition)
+
+        def modeled_state_assignment(statement: ast.Assign | ast.AnnAssign) -> bool:
+            targets = (
+                [statement.target] if isinstance(statement, ast.AnnAssign) else statement.targets
+            )
+            if len(targets) != 1:
+                return False
+            target = targets[0]
+            return (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Attribute)
+                and target.value.attr == "state"
+                and isinstance(target.value.value, ast.Name)
+                and target.value.value.id in local_objects
+            )
+
+        def unresolved_call_touches_modeled(call_node: ast.Call) -> bool:
+            modeled = set(local_objects)
+            if isinstance(call_node.func, ast.Attribute) and any(
+                isinstance(descendant, ast.Name) and descendant.id in modeled
+                for descendant in ast.walk(call_node.func.value)
+            ):
+                return True
+            return any(
+                isinstance(descendant, ast.Name) and descendant.id in modeled
+                for argument in [
+                    *call_node.args,
+                    *(keyword.value for keyword in call_node.keywords),
+                ]
+                for descendant in ast.walk(argument)
+            )
 
         def touches_modeled_binding(node: ast.AST) -> bool:
             modeled = set(local_objects)
@@ -919,6 +1003,15 @@ class SecureASTExtractor:
             if isinstance(statement, (ast.Assign, ast.AnnAssign)):
                 assigned = _assignment_name(statement)
                 value = statement.value
+                if modeled_state_assignment(statement):
+                    if not allow_conditional:
+                        return None
+                    if value is not None and not isinstance(value, ast.Constant):
+                        conditionalize(
+                            statement,
+                            "unresolved app.state value may have dynamic initialization semantics",
+                        )
+                    continue
                 if assigned is None or value is None:
                     if touches_modeled_binding(statement):
                         return None
@@ -1003,6 +1096,7 @@ class SecureASTExtractor:
                         stack=stack | {function_identity},
                         call=value,
                         argument_resolver=resolve_nested_argument,
+                        allow_conditional=allow_conditional,
                     )
                     if nested is not None:
                         local_objects[assigned] = nested.root
@@ -1050,6 +1144,20 @@ class SecureASTExtractor:
                     if methods:
                         routes.append(_Route(owner.key, path, methods, handler, call_line))
                 continue
+            if (
+                isinstance(statement, ast.Expr)
+                and isinstance(statement.value, ast.Call)
+                and not isinstance(statement.value.func, ast.Attribute)
+            ):
+                if allow_conditional and unresolved_call_touches_modeled(statement.value):
+                    conditionalize(
+                        statement,
+                        "unresolved call may mutate or escape the explicitly selected app",
+                    )
+                    continue
+                if touches_modeled_binding(statement):
+                    return None
+                continue
             if not (
                 isinstance(statement, ast.Expr)
                 and isinstance(statement.value, ast.Call)
@@ -1066,6 +1174,12 @@ class SecureASTExtractor:
                 continue
             parent = object_for(call_function.value)
             if parent is None:
+                if allow_conditional and unresolved_call_touches_modeled(call):
+                    conditionalize(
+                        statement,
+                        "unresolved call may mutate or escape the explicitly selected app",
+                    )
+                    continue
                 if touches_modeled_binding(statement):
                     return None
                 continue
@@ -1073,7 +1187,13 @@ class SecureASTExtractor:
                 child_expr = call.args[0] if call.args else _keyword_expr(call, "router")
                 child = object_for(child_expr)
                 if child is None or child.kind != "router":
-                    return None
+                    if not allow_conditional:
+                        return None
+                    conditionalize(
+                        statement,
+                        "unresolved router registration may mutate the explicitly selected app",
+                    )
+                    continue
                 prefix = literal(_keyword_expr(call, "prefix"), statement.lineno) or ""
                 cutoff = (
                     call_line
@@ -1092,7 +1212,13 @@ class SecureASTExtractor:
                 path = literal(path_expr, statement.lineno)
                 child = object_for(child_expr)
                 if path is None or child is None or child.kind != "app":
-                    return None
+                    if not allow_conditional:
+                        return None
+                    conditionalize(
+                        statement,
+                        "unresolved mount may mutate the explicitly selected app",
+                    )
+                    continue
                 cutoff = (
                     call_line
                     if child.key in module_object_keys and child.key[0] == module.name
@@ -1114,21 +1240,42 @@ class SecureASTExtractor:
                 methods_expr = _keyword_expr(call, "methods")
                 methods = _literal_methods(methods_expr) if methods_expr is not None else ("GET",)
                 if path is None or imperative_handler is None or not methods:
-                    return None
+                    if not allow_conditional:
+                        return None
+                    conditionalize(
+                        statement,
+                        "unresolved imperative route may mutate the explicitly selected app",
+                    )
+                    continue
                 routes.append(_Route(parent.key, path, methods, imperative_handler, call_line))
             elif call_function.attr not in {
                 "add_exception_handler",
                 "add_event_handler",
                 "add_middleware",
             }:
-                return None
+                if not allow_conditional:
+                    return None
+                conditionalize(
+                    statement,
+                    "unresolved call may mutate the explicitly selected app",
+                )
 
         root = local_objects.get(returned_name)
         if root is None:
             return None
+        combined_conditions = _merge_discovery_conditions(
+            root.discovery_conditions, tuple(factory_conditions)
+        )
         if root.key != desired_key:
             old_key = root.key
-            root = _Object(desired_key, desired_variable, root.kind, root.prefix, call_line)
+            root = _Object(
+                desired_key,
+                desired_variable,
+                root.kind,
+                root.prefix,
+                call_line,
+                combined_conditions,
+            )
             emitted_objects = [item for item in emitted_objects if item.key != old_key]
             routes = [
                 _Route(
@@ -1137,6 +1284,7 @@ class SecureASTExtractor:
                     route.methods,
                     route.handler,
                     route.line,
+                    route.discovery_conditions,
                 )
                 for route in routes
             ]
@@ -1150,6 +1298,16 @@ class SecureASTExtractor:
                 )
                 for edge in edges
             ]
+        elif combined_conditions != root.discovery_conditions:
+            root = _Object(
+                root.key,
+                root.variable,
+                root.kind,
+                root.prefix,
+                root.line,
+                combined_conditions,
+            )
+            emitted_objects = [root if item.key == root.key else item for item in emitted_objects]
         return _FactoryGraph(root, emitted_objects, routes, edges)
 
     def _collect_routes(
@@ -1520,6 +1678,18 @@ def _bound_names(target: ast.AST) -> set[str]:
     if isinstance(target, (ast.Tuple, ast.List)):
         return {name for item in target.elts for name in _bound_names(item)}
     return set()
+
+
+def _merge_discovery_conditions(
+    *groups: tuple[EndpointDiscoveryCondition, ...],
+) -> tuple[EndpointDiscoveryCondition, ...]:
+    """Merge immutable provenance deterministically without duplicates."""
+    unique = {
+        (str(condition.source_path), condition.source_line, condition.reason): condition
+        for group in groups
+        for condition in group
+    }
+    return tuple(unique[key] for key in sorted(unique))
 
 
 def _node_token(node: ast.AST) -> str:

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from fastapi_endpoint_detector.models.endpoint import EndpointDiscoveryStatus
 from fastapi_endpoint_detector.parser.secure_ast_extractor import (
     SecureASTExtractor,
     SecureASTExtractorError,
@@ -80,6 +81,114 @@ app = create_app()
         endpoints = SecureASTExtractor(tmp_path, app_entry="main:app").extract_endpoints()
 
         assert [endpoint.identifier for endpoint in endpoints] == ["GET /factory-object"]
+
+    def test_explicit_factory_retains_known_routes_with_conditional_provenance(
+        self, tmp_path: Path
+    ) -> None:
+        app_file = tmp_path / "main.py"
+        app_file.write_text(
+            """from fastapi import FastAPI, APIRouter
+router = APIRouter()
+@router.get('/known')
+def known(): return {}
+def load_plugins(app): pass
+def create_app():
+    app = FastAPI()
+    app.include_router(router, prefix='/api')
+    load_plugins(app)
+    return app
+"""
+        )
+
+        assert SecureASTExtractor(tmp_path).extract_endpoints() == []
+        endpoints = SecureASTExtractor(tmp_path, app_entry="main:create_app").extract_endpoints()
+
+        assert [endpoint.identifier for endpoint in endpoints] == ["GET /api/known"]
+        endpoint = endpoints[0]
+        assert endpoint.discovery_status.value == "conditional"
+        assert len(endpoint.discovery_conditions) == 1
+        assert endpoint.discovery_conditions[0].source_path == app_file
+        assert endpoint.discovery_conditions[0].source_line == 9
+        assert "unresolved call" in endpoint.discovery_conditions[0].reason
+
+    def test_nested_imported_router_factory_propagates_conditions(self, tmp_path: Path) -> None:
+        (tmp_path / "routes.py").write_text(
+            """from fastapi import APIRouter
+def plugin(router): pass
+def build_router():
+    router = APIRouter()
+    @router.get('/known')
+    def known(): return {}
+    plugin(router)
+    return router
+"""
+        )
+        (tmp_path / "main.py").write_text(
+            """from fastapi import FastAPI
+from routes import build_router
+def create_app():
+    app = FastAPI()
+    router = build_router()
+    app.include_router(router, prefix='/api')
+    return app
+"""
+        )
+
+        endpoint = SecureASTExtractor(tmp_path, app_entry="main:create_app").extract_endpoints()[0]
+
+        assert endpoint.identifier == "GET /api/known"
+        assert endpoint.discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+        assert endpoint.discovery_conditions[0].source_path.name == "routes.py"
+
+    def test_explicit_factory_does_not_invent_routes_from_unresolved_plugin(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "main.py").write_text(
+            """from fastapi import FastAPI
+def load_plugins(app): pass
+def create_app():
+    app = FastAPI()
+    load_plugins(app)
+    return app
+"""
+        )
+
+        assert SecureASTExtractor(tmp_path, app_entry="main:create_app").extract_endpoints() == []
+
+    def test_dynamic_app_state_marks_explicit_factory_conditional(self, tmp_path: Path) -> None:
+        (tmp_path / "main.py").write_text(
+            """from fastapi import FastAPI
+def build_state(): return object()
+def create_app():
+    app = FastAPI()
+    app.state.service = build_state()
+    @app.get('/known')
+    def known(): return {}
+    return app
+"""
+        )
+
+        endpoint = SecureASTExtractor(tmp_path, app_entry="main:create_app").extract_endpoints()[0]
+
+        assert endpoint.discovery_status.value == "conditional"
+        assert "app.state" in endpoint.discovery_conditions[0].reason
+
+    def test_arbitrary_app_attribute_assignment_remains_a_hard_failure(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "main.py").write_text(
+            """from fastapi import FastAPI
+def create_app():
+    app = FastAPI()
+    app.routes = []
+    @app.get('/not-proven')
+    def route(): return {}
+    return app
+"""
+        )
+
+        with pytest.raises(SecureASTExtractorError, match="cannot be summarized safely"):
+            SecureASTExtractor(tmp_path, app_entry="main:create_app").extract_endpoints()
 
     @pytest.mark.parametrize(
         "source",

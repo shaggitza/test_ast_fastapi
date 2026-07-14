@@ -18,6 +18,8 @@ from fastapi_endpoint_detector.models.diff import (
 )
 from fastapi_endpoint_detector.models.endpoint import (
     Endpoint,
+    EndpointDiscoveryCondition,
+    EndpointDiscoveryStatus,
     EndpointMethod,
     HandlerInfo,
 )
@@ -38,6 +40,8 @@ from fastapi_endpoint_detector.models.report import (
 __all__ = [  # noqa: RUF022 - grouped by public model domain
     # Endpoint models
     "Endpoint",
+    "EndpointDiscoveryCondition",
+    "EndpointDiscoveryStatus",
     "EndpointMethod",
     "HandlerInfo",
     # Dependency models

@@ -37,6 +37,17 @@ The candidate ceiling reports the hypothetical union of selected and LOW
 predictions, but it is never the headline score. This prevents emitting the
 entire route inventory as LOW from improving primary results.
 
+## Discovery provenance policy v2
+
+Execution-free route discovery distinguishes `established` routes from
+`conditional` routes. A conditional route has source-backed evidence that an
+unknown call may mutate, replace, or remove an otherwise statically proven
+registration. It is retained as a candidate but its confidence is capped at
+`LOW`, regardless of direct, mypy, or SCIP reachability. An independently
+established occurrence of the same physical endpoint dominates conditional
+discovery. Conditional inventory is an upper bound: unknown helpers may add
+routes that are not invented by the analyzer.
+
 ## Matching order
 
 1. Collapse duplicate/canonical/explicit-alias candidate atoms, retaining the

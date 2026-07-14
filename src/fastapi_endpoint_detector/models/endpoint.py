@@ -7,7 +7,7 @@ Models representing FastAPI endpoints and their handler functions.
 from enum import Enum
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class EndpointMethod(str, Enum):
@@ -22,6 +22,31 @@ class EndpointMethod(str, Enum):
     HEAD = "HEAD"
     TRACE = "TRACE"
     WEBSOCKET = "WEBSOCKET"
+
+
+class EndpointDiscoveryStatus(str, Enum):
+    """Strength of execution-free route discovery evidence."""
+
+    ESTABLISHED = "established"
+    CONDITIONAL = "conditional"
+
+
+class EndpointDiscoveryCondition(BaseModel):
+    """Source-backed limitation on a conditionally discovered route."""
+
+    source_path: Path
+    source_line: int = Field(ge=1)
+    reason: str = Field(min_length=1)
+
+    @field_validator("reason")
+    @classmethod
+    def reason_must_be_substantive(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("discovery condition reason must not be blank")
+        return value
+
+    class Config:
+        frozen = True
 
 
 class HandlerInfo(BaseModel):
@@ -52,6 +77,17 @@ class Endpoint(BaseModel):
         default_factory=list,
         description="FastAPI Depends() dependencies (function names)",
     )
+    discovery_status: EndpointDiscoveryStatus = EndpointDiscoveryStatus.ESTABLISHED
+    discovery_conditions: tuple[EndpointDiscoveryCondition, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_discovery_provenance(self) -> "Endpoint":
+        conditional = self.discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+        if conditional != bool(self.discovery_conditions):
+            raise ValueError(
+                "conditional discovery requires conditions and established discovery forbids them"
+            )
+        return self
 
     class Config:
         frozen = True
