@@ -47,6 +47,26 @@ _CONFIDENCE_RANK = {
 }
 
 
+def supports_endpoint_visible_effect(evidence: EffectEvidence) -> bool:
+    """Return whether structured evidence may promote SCIP reachability."""
+    if evidence.producer is not EvidenceProducer.DATA_FLOW:
+        return False
+    if evidence.status not in {EvidenceStatus.ESTABLISHED, EvidenceStatus.CONDITIONAL}:
+        return False
+    if evidence.observation_location is None:
+        return False
+    if evidence.disposition is not EffectDisposition.OBSERVABLE_BEHAVIOR:
+        return False
+    allowed = {
+        (DataObservationKind.RETURNED, ImpactChannel.HTTP_RESPONSE),
+        (DataObservationKind.BRANCH, ImpactChannel.CONTROL_FLOW),
+        (DataObservationKind.PERSISTED, ImpactChannel.PERSISTENT_STATE),
+        (DataObservationKind.SENT_OUTBOUND, ImpactChannel.OUTBOUND_REQUEST),
+        (DataObservationKind.EMITTED, ImpactChannel.EVENT_OR_MESSAGE),
+    }
+    return any((observation, evidence.channel) in allowed for observation in evidence.observations)
+
+
 class EffectAnalyzer:
     """Recognize narrow effect deltas without executing application code."""
 

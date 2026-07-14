@@ -392,13 +392,25 @@ class SCIPAnalyzer:
         ]
         if len(enclosing_functions) != 1:
             return None
+        references = [
+            node
+            for node in ast.walk(tree)
+            if (
+                (isinstance(node, ast.Name) and node.id == callee_name)
+                or (isinstance(node, ast.Attribute) and node.attr == callee_name)
+            )
+            and node.end_lineno is not None
+            and node.lineno <= line <= node.end_lineno
+        ]
+        if len(references) != 1:
+            return None
+        reference = references[0]
         calls = [
             node
             for node in ast.walk(tree)
             if isinstance(node, ast.Call)
-            and node.func.end_lineno is not None
-            and node.func.lineno <= line <= node.func.end_lineno
             and self._call_terminal_name(node) == callee_name
+            and any(child is reference for child in ast.walk(node.func))
         ]
         if len(calls) != 1:
             return None

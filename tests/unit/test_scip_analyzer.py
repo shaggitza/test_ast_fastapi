@@ -295,11 +295,14 @@ def test_reverse_call_edges_rejects_reference_lines_without_callee_call(
 ) -> None:
     (tmp_path / "callee.py").write_text("def target(): ...\n")
     (tmp_path / "caller.py").write_text(
-        "def caller():\n    consume(target)\n    alias = target; other()\n"
+        "def caller():\n"
+        "    consume(target)\n"
+        "    alias = target; other()\n"
+        "    alias = target; other.target()\n"
     )
     analyzer = SCIPAnalyzer(tmp_path)
     callee = SCIPDefinition("target", "callee:target()", Path("callee.py"), 1, 1)
-    caller = SCIPDefinition("caller", "caller:caller()", Path("caller.py"), 1, 3)
+    caller = SCIPDefinition("caller", "caller:caller()", Path("caller.py"), 1, 4)
     payload = {
         "matched": True,
         "resolved": {
@@ -312,6 +315,7 @@ def test_reverse_call_edges_rejects_reference_lines_without_callee_call(
         "references": [
             {"relativePath": "caller.py", "line": 1},
             {"relativePath": "caller.py", "line": 2},
+            {"relativePath": "caller.py", "line": 3},
         ],
     }
     with (
