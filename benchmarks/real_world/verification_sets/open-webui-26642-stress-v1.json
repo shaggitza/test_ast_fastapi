@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "open-webui-26642-stress-v1",
+  "base_scope": "fastapi-adapter-v1",
+  "selection": "include",
+  "description": "Separate scale/stress holdout for the Open WebUI 0.10.2 release aggregation.",
+  "included": [
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26642,
+      "disposition": "stress-holdout",
+      "reason": "Report separately from cross-PR verification because this one PR contributes 106 of 177 normalized FastAPI atoms."
+    }
+  ]
+}

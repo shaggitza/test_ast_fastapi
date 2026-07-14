@@ -4,6 +4,7 @@ import json
 import sys
 from typing import TYPE_CHECKING
 
+import pytest
 from benchmarks.real_world import evaluate
 
 if TYPE_CHECKING:
@@ -314,3 +315,108 @@ def test_prediction_coverage_excludes_not_evaluable_truth(
     result = json.loads(capsys.readouterr().out)
     assert result["adjudicated_prs"] == 1
     assert result["prediction_coverage"] == 1.0
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        {
+            "schema_version": 1,
+            "id": "",
+            "base_scope": "all-surfaces",
+            "excluded": [{"repository": "owner/repo", "pr": 1}],
+        },
+        {
+            "schema_version": 1,
+            "id": "test",
+            "base_scope": "all-surfaces",
+            "excluded": [
+                {"repository": "owner/repo", "pr": 1},
+                {"repository": "owner/repo", "pr": 1},
+            ],
+        },
+    ],
+)
+def test_verification_set_rejects_malformed_or_duplicate_entries(
+    tmp_path: Path, manifest: dict
+) -> None:
+    path = tmp_path / "verification.json"
+    path.write_text(json.dumps(manifest))
+
+    with pytest.raises(ValueError):
+        evaluate.read_verification_selection(path)
+
+
+def test_verification_set_excludes_pr_without_deleting_truth(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    truth = tmp_path / "truth.jsonl"
+    predictions = tmp_path / "predictions.jsonl"
+    verification = tmp_path / "verification.json"
+    truth.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "repository": "owner/repo",
+                        "pr": pr,
+                        "status": "adjudicated",
+                        "affected_entrypoints": [{"id": f"HTTP GET /{pr}", "kind": "http"}],
+                    }
+                )
+                for pr in (1, 2)
+            ]
+        )
+        + "\n"
+    )
+    predictions.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "repository": "owner/repo",
+                        "pr": pr,
+                        "affected_entrypoints": [{"id": f"HTTP GET /{pr}", "kind": "http"}],
+                    }
+                )
+                for pr in (1, 2)
+            ]
+        )
+        + "\n"
+    )
+    verification.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "id": "verification-v1",
+                "base_scope": "all-surfaces",
+                "selection": "exclude",
+                "excluded": [{"repository": "owner/repo", "pr": 2}],
+            }
+        )
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "evaluate.py",
+            "--ground-truth",
+            str(truth),
+            "--predictions",
+            str(predictions),
+            "--verification-set",
+            str(verification),
+        ],
+    )
+
+    evaluate.main()
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["adjudicated_prs"] == 1
+    assert result["micro"]["tp"] == 1
+    assert result["verification_set"]["id"] == "verification-v1"
+    assert result["verification_set"]["path"] == str(verification)
+    assert result["verification_set"]["selection"] == "exclude"
+    assert result["verification_set"]["selected_keys"] == [{"repository": "owner/repo", "pr": 2}]
+    assert result["verification_set"]["matched_prs"] == 1
+    assert len(result["verification_set"]["sha256"]) == 64

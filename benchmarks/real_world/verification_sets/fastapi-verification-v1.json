@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "id": "fastapi-verification-v1",
+  "base_scope": "fastapi-adapter-v1",
+  "selection": "exclude",
+  "description": "Primary cross-PR verification set. Large release-aggregation PRs are held out as stress cases so one PR cannot dominate recall or confidence calibration.",
+  "corpus_prs": 60,
+  "included_prs": 59,
+  "truth_positive_prs": 25,
+  "normalized_truth_atoms": 71,
+  "excluded": [
+    {
+      "repository": "open-webui/open-webui",
+      "pr": 26642,
+      "disposition": "stress-holdout",
+      "reason": "The release aggregation contributes 106 of 177 normalized FastAPI atoms and dominates both recall and LOW-volume calibration. Preserve and report it separately as a scale/stress case, but exclude it from the primary verification score."
+    }
+  ]
+}
