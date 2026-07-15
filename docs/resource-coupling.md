@@ -28,10 +28,11 @@ limits:
   max_edges: 1000
 ```
 
-Group IDs and contract IDs must be sorted and unique. A group must contain only
-`write`, `update`, `delete`, or `append` producers and `read` consumers on one
-channel. Unknown contract IDs, mixed channels, unsupported directions, malformed
-limits, and incomplete effect audits fail closed.
+Group IDs and contract IDs must be sorted and unique. Closed operation matrices
+allow `write`/`update`/`delete`/`append -> read` state edges or
+`publish -> consume` message edges on one channel. State/message directions may
+not be mixed in one group. Unknown contract IDs, mixed channels, unsupported
+directions, malformed limits, and incomplete effect audits fail closed.
 
 `resource_space` qualifies otherwise identical keys across databases, clusters,
 tenants, buckets, or environments. Its plaintext is never emitted; reports use a
@@ -84,5 +85,5 @@ Graph edges mean only that exact endpoint-reachable declared calls may access th
 same qualified finite identity. Even candidate mode establishes only that the
 producer call syntax changed; it does not establish runtime execution or
 ordering, persistence, transaction commit, downstream observation, or impact.
-Publish/consume, receiver origins, composite resources, removed writers,
-package applicability attestation, and scale/precision gates remain deferred.
+Receiver origins, composite resources, removed producers, package applicability
+attestation, and scale/precision gates remain deferred.

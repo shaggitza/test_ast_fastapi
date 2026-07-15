@@ -19,6 +19,7 @@ from fastapi_endpoint_detector.models.resource_coupling import (
     ResourceCouplingGraph,
     ResourceCouplingGroupEvidence,
     semantic_hash,
+    valid_coupling_operation_direction,
 )
 
 if TYPE_CHECKING:
@@ -37,8 +38,9 @@ _PRODUCER_OPERATIONS = {
     EffectOperation.UPDATE,
     EffectOperation.DELETE,
     EffectOperation.APPEND,
+    EffectOperation.PUBLISH,
 }
-_CONSUMER_OPERATIONS = {EffectOperation.READ}
+_CONSUMER_OPERATIONS = {EffectOperation.READ, EffectOperation.CONSUME}
 
 
 def _group_evidence(
@@ -96,6 +98,8 @@ def build_resource_coupling_graph(  # noqa: PLR0912, PLR0915
     for configured_group in loaded.document.groups:
         producers: list[tuple[EffectContract, EffectContractAuditOccurrence]] = []
         consumers: list[tuple[EffectContract, EffectContractAuditOccurrence]] = []
+        producer_operations: set[EffectOperation] = set()
+        consumer_operations: set[EffectOperation] = set()
         channels = set()
         for contract_id in configured_group.producer_contract_ids:
             contract = contract_by_id.get(contract_id)
@@ -118,6 +122,7 @@ def build_resource_coupling_graph(  # noqa: PLR0912, PLR0915
                     "unevaluated package applicability"
                 )
             channels.add(contract.channel)
+            producer_operations.add(contract.operation)
             producers.extend((contract, item) for item in occurrences.get(contract_id, ()))
         for contract_id in configured_group.consumer_contract_ids:
             contract = contract_by_id.get(contract_id)
@@ -140,10 +145,19 @@ def build_resource_coupling_graph(  # noqa: PLR0912, PLR0915
                     "unevaluated package applicability"
                 )
             channels.add(contract.channel)
+            consumer_operations.add(contract.operation)
             consumers.extend((contract, item) for item in occurrences.get(contract_id, ()))
         if len(channels) != 1:
             raise ResourceCouplingError(
                 f"coupling group {configured_group.id!r} must use exactly one channel"
+            )
+        if any(
+            not valid_coupling_operation_direction(producer, consumer)
+            for producer in producer_operations
+            for consumer in consumer_operations
+        ):
+            raise ResourceCouplingError(
+                f"coupling group {configured_group.id!r} mixes unsupported operation directions"
             )
         channel = next(iter(channels))
         group = _group_evidence(configured_group, channel)

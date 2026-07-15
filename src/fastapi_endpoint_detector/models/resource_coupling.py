@@ -43,6 +43,22 @@ def semantic_hash(payload: object) -> str:
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
+def valid_coupling_operation_direction(
+    producer: EffectOperation,
+    consumer: EffectOperation,
+) -> bool:
+    """Return whether a closed producer/consumer semantic pair is supported."""
+    state_producers = {
+        EffectOperation.WRITE,
+        EffectOperation.UPDATE,
+        EffectOperation.DELETE,
+        EffectOperation.APPEND,
+    }
+    return (producer in state_producers and consumer == EffectOperation.READ) or (
+        producer == EffectOperation.PUBLISH and consumer == EffectOperation.CONSUME
+    )
+
+
 class ResourceCouplingGroup(_StrictModel):
     """Operator-qualified resource space and closed producer/consumer contract sets."""
 
@@ -261,14 +277,10 @@ class ResourceCouplingGraph(_StrictModel):
         ):
             raise ValueError("coupling edge differs from its group evidence")
         if any(
-            edge.producer_operation
-            not in {
-                EffectOperation.WRITE,
-                EffectOperation.UPDATE,
-                EffectOperation.DELETE,
-                EffectOperation.APPEND,
-            }
-            or edge.consumer_operation != EffectOperation.READ
+            not valid_coupling_operation_direction(
+                edge.producer_operation,
+                edge.consumer_operation,
+            )
             for edge in self.edges
         ):
             raise ValueError("coupling edge uses an unsupported operation direction")
