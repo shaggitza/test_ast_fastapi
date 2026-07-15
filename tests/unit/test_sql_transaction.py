@@ -5,13 +5,18 @@ from pydantic import ValidationError
 
 from fastapi_endpoint_detector.models.sql_transaction import (
     SQLTransactionEndpointEvidence,
+    SQLTransactionOrderedPath,
     SQLTransactionOutcome,
+    SQLTransactionPathReport,
+    build_sql_transaction_ordered_path,
+    build_sql_transaction_path_report,
     build_sql_transaction_report,
 )
 
 _HASH_A = f"sha256:{'a' * 64}"
 _HASH_B = f"sha256:{'b' * 64}"
 _HASH_C = f"sha256:{'c' * 64}"
+_HASH_D = f"sha256:{'d' * 64}"
 
 
 def test_outcome_is_derived_from_reachable_boundaries() -> None:
@@ -53,3 +58,36 @@ def test_roles_and_outcomes_fail_closed() -> None:
             outcome=SQLTransactionOutcome.COMMIT_REACHABLE,
             limitations=("ordering unavailable",),
         )
+
+
+def test_ordered_paths_are_content_addressed_and_bounded() -> None:
+    path = build_sql_transaction_ordered_path(
+        endpoint_id=_HASH_A,
+        file_path="main.py",
+        function_name="handler",
+        receiver_hash=_HASH_B,
+        begin_occurrence_id=_HASH_C,
+        stage_occurrence_id=_HASH_B,
+        boundary_occurrence_id=_HASH_D,
+        boundary="commit",
+        limitations=("lexical ordering only",),
+    )
+    report = build_sql_transaction_path_report(
+        _HASH_A,
+        _HASH_B,
+        (path,),
+        (),
+        max_pairs=4,
+    )
+
+    assert report.summary.ordered_commits == 1
+    assert report.max_pairs == 4
+    payload = report.model_dump(mode="json")
+    payload["ordered_paths"][0]["function_name"] = "forged"
+    with pytest.raises(ValidationError, match="path id"):
+        SQLTransactionPathReport.model_validate(payload)
+
+    path_payload = path.model_dump(mode="json")
+    path_payload["stage_occurrence_id"] = _HASH_D
+    with pytest.raises(ValidationError):
+        SQLTransactionOrderedPath.model_validate(path_payload)

@@ -34,6 +34,9 @@ from fastapi_endpoint_detector.analyzer.scip_analyzer import (
 from fastapi_endpoint_detector.analyzer.sql_transaction import (
     build_sql_transaction_diagnostics,
 )
+from fastapi_endpoint_detector.analyzer.sql_transaction_paths import (
+    build_sql_transaction_path_diagnostics,
+)
 from fastapi_endpoint_detector.config import Config
 from fastapi_endpoint_detector.models.endpoint import (
     Endpoint,
@@ -79,7 +82,10 @@ if TYPE_CHECKING:
         LoadedResourceCoupling,
         ResourceCouplingGraph,
     )
-    from fastapi_endpoint_detector.models.sql_transaction import SQLTransactionReport
+    from fastapi_endpoint_detector.models.sql_transaction import (
+        SQLTransactionPathReport,
+        SQLTransactionReport,
+    )
     from fastapi_endpoint_detector.models.surface_contract import LoadedSurfaceContracts
 
 # Progress callback type: (current, total, description) -> None
@@ -467,6 +473,7 @@ class ChangeMapper:
             raise ChangeMapperError("baseline_app_path is valid only with use_scip=True")
         self.baseline_app_path = baseline_app_path.resolve() if baseline_app_path else None
         target_project_root = self.app_path.parent if self.app_path.is_file() else self.app_path
+        self.target_project_root = target_project_root
         baseline_project_root = (
             self.baseline_app_path.parent
             if self.baseline_app_path is not None and self.baseline_app_path.is_file()
@@ -484,6 +491,7 @@ class ChangeMapper:
         self._effect_contract_audit: EffectContractAudit | None = None
         self._resource_coupling_graph: ResourceCouplingGraph | None = None
         self._sql_transaction_report: SQLTransactionReport | None = None
+        self._sql_transaction_path_report: SQLTransactionPathReport | None = None
         self._mypy_analyzer: MypyAnalyzer | None = None
         self._effect_analyzer = EffectAnalyzer(target_project_root)
         self._scip_analyzer: SCIPAnalyzer | None = None
@@ -1394,6 +1402,13 @@ class ChangeMapper:
                 self._effect_contracts,
                 self._effect_contract_audit,
             )
+            if self.config.analysis.sql_transaction_ordered_paths:
+                self._sql_transaction_path_report = build_sql_transaction_path_diagnostics(
+                    self.target_project_root,
+                    self._effect_contract_audit,
+                    self._sql_transaction_report,
+                    max_pairs=self.config.analysis.sql_transaction_path_max_pairs,
+                )
         if self._resource_coupling is not None:
             if self._effect_contracts is None or self._effect_contract_audit is None:
                 raise ChangeMapperError("resource coupling requires a complete effect audit")
@@ -1477,6 +1492,7 @@ class ChangeMapper:
             effect_contract_audit=self._effect_contract_audit,
             resource_coupling_graph=self._resource_coupling_graph,
             sql_transaction_report=self._sql_transaction_report,
+            sql_transaction_path_report=self._sql_transaction_path_report,
         )
         self.mypy_analyzer.release_typed_snapshot()
         return report

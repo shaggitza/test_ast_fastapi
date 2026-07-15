@@ -96,6 +96,16 @@ class AnalysisConfig(BaseModel):
         default=False,
         description="Emit conservative report-only SQL staging/transaction diagnostics.",
     )
+    sql_transaction_ordered_paths: bool = Field(
+        default=False,
+        description="Emit bounded same-scope lexical SQL stage-to-boundary diagnostics.",
+    )
+    sql_transaction_path_max_pairs: int = Field(
+        default=1024,
+        ge=1,
+        le=10_000,
+        description="Atomic pair limit for ordered SQL transaction path analysis.",
+    )
     resource_coupling: Path | None = Field(
         default=None,
         description="Path to strict report-only finite resource coupling configuration.",
@@ -120,6 +130,8 @@ class AnalysisConfig(BaseModel):
             raise ValueError(
                 "sql_transaction_diagnostics requires effect_contracts or effect_preset"
             )
+        if self.sql_transaction_ordered_paths and not self.sql_transaction_diagnostics:
+            raise ValueError("sql_transaction_ordered_paths requires sql_transaction_diagnostics")
         if self.resource_coupling is not None and not has_effect_source:
             raise ValueError("resource_coupling requires effect_contracts or effect_preset")
         if self.surface_contracts is not None and self.surface_preset is not None:

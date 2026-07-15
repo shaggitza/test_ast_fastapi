@@ -25,7 +25,10 @@ from fastapi_endpoint_detector.models.resource_coupling import (
     ResourceCouplingCandidateEvidence,
     ResourceCouplingGraph,
 )
-from fastapi_endpoint_detector.models.sql_transaction import SQLTransactionReport
+from fastapi_endpoint_detector.models.sql_transaction import (
+    SQLTransactionPathReport,
+    SQLTransactionReport,
+)
 
 
 def _contract_hash(contract: EffectContract) -> str:
@@ -416,6 +419,10 @@ class AnalysisReport(BaseModel):
         default=None,
         description="Report-only endpoint-reachable SQL staging and boundary evidence.",
     )
+    sql_transaction_path_report: SQLTransactionPathReport | None = Field(
+        default=None,
+        description="Bounded source-backed same-scope SQL ordering diagnostics.",
+    )
 
     @model_validator(mode="after")
     def populate_candidates_from_legacy_results(self) -> "AnalysisReport":
@@ -452,6 +459,78 @@ class AnalysisReport(BaseModel):
                     or not any(item.id == evidence.endpoint_id for item in occurrence.endpoints)
                 ):
                     raise ValueError("SQL transaction occurrence is absent from its endpoint audit")
+        return self
+
+    @model_validator(mode="after")
+    def validate_sql_transaction_path_report(self) -> "AnalysisReport":
+        path_report = self.sql_transaction_path_report
+        if path_report is None:
+            return self
+        transaction_report = self.sql_transaction_report
+        audit = self.effect_contract_audit
+        if (
+            transaction_report is None
+            or audit is None
+            or path_report.transaction_report_hash != transaction_report.report_hash
+            or path_report.effect_audit_hash != audit.provenance.audit_hash
+        ):
+            raise ValueError("SQL transaction paths require their exact reports")
+        occurrence_by_id = {item.id: item for item in audit.occurrences}
+        evidence_by_endpoint = {
+            item.endpoint_id: item for item in transaction_report.endpoint_evidence
+        }
+        expected_pairs = {
+            (evidence.endpoint_id, stage_id, boundary_id)
+            for evidence in transaction_report.endpoint_evidence
+            for stage_id in evidence.stage_occurrence_ids
+            for boundary_id in (
+                *evidence.commit_occurrence_ids,
+                *evidence.rollback_occurrence_ids,
+            )
+        }
+        path_pairs: list[tuple[str, str, str]] = []
+        for path in path_report.ordered_paths:
+            evidence = evidence_by_endpoint.get(path.endpoint_id)
+            if evidence is None:
+                raise ValueError("SQL ordered path references unknown endpoint evidence")
+            expected_boundaries = (
+                evidence.commit_occurrence_ids
+                if path.boundary == "commit"
+                else evidence.rollback_occurrence_ids
+            )
+            if (
+                path.stage_occurrence_id not in evidence.stage_occurrence_ids
+                or path.boundary_occurrence_id not in expected_boundaries
+                or (
+                    path.begin_occurrence_id is not None
+                    and path.begin_occurrence_id not in evidence.begin_occurrence_ids
+                )
+            ):
+                raise ValueError("SQL ordered path roles contradict transaction evidence")
+            occurrence_ids = [path.stage_occurrence_id, path.boundary_occurrence_id]
+            if path.begin_occurrence_id is not None:
+                occurrence_ids.append(path.begin_occurrence_id)
+            if any(
+                occurrence_by_id.get(item) is None
+                or occurrence_by_id[item].file_path != path.file_path
+                or not any(
+                    endpoint.id == path.endpoint_id for endpoint in occurrence_by_id[item].endpoints
+                )
+                for item in occurrence_ids
+            ):
+                raise ValueError("SQL ordered path is absent from its source audit")
+            path_pairs.append(
+                (path.endpoint_id, path.stage_occurrence_id, path.boundary_occurrence_id)
+            )
+        diagnostic_pairs = [
+            (item.endpoint_id, item.stage_occurrence_id, item.boundary_occurrence_id)
+            for item in path_report.diagnostics
+        ]
+        all_pairs = [*path_pairs, *diagnostic_pairs]
+        if len(all_pairs) != len(set(all_pairs)) or set(all_pairs) != expected_pairs:
+            raise ValueError("SQL transaction paths must account for every bounded pair once")
+        if len(expected_pairs) > path_report.max_pairs:
+            raise ValueError("SQL transaction path report exceeds its atomic pair limit")
         return self
 
     @model_validator(mode="after")

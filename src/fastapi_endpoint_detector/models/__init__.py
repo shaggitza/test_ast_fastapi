@@ -76,7 +76,12 @@ from fastapi_endpoint_detector.models.resource_coupling import (
 )
 from fastapi_endpoint_detector.models.sql_transaction import (
     SQLTransactionEndpointEvidence,
+    SQLTransactionOrderedPath,
     SQLTransactionOutcome,
+    SQLTransactionPathDiagnostic,
+    SQLTransactionPathError,
+    SQLTransactionPathReport,
+    SQLTransactionPathSummary,
     SQLTransactionReport,
     SQLTransactionSummary,
 )
@@ -133,7 +138,12 @@ __all__ = [  # noqa: RUF022 - grouped by public model domain
     "load_resource_coupling",
     # SQL transaction evidence
     "SQLTransactionEndpointEvidence",
+    "SQLTransactionOrderedPath",
     "SQLTransactionOutcome",
+    "SQLTransactionPathDiagnostic",
+    "SQLTransactionPathError",
+    "SQLTransactionPathReport",
+    "SQLTransactionPathSummary",
     "SQLTransactionReport",
     "SQLTransactionSummary",
     # Custom surface contract models

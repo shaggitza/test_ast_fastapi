@@ -76,6 +76,14 @@ class MarkdownFormatter(BaseFormatter):
                 f"{transaction.summary.outcome_unresolved} unresolved outcomes; "
                 "diagnostic only, persistence not established"
             )
+        if report.sql_transaction_path_report is not None:
+            paths = report.sql_transaction_path_report
+            lines.append(
+                "- **SQL Ordered Paths:** "
+                f"{paths.summary.ordered_paths} proven / "
+                f"{paths.summary.unresolved_pairs} unresolved pairs; "
+                "lexical only, persistence not established"
+            )
         lines.append("")
 
         # Affected endpoints

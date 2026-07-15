@@ -577,6 +577,15 @@ class HtmlFormatter(BaseFormatter):
                 f"{transaction.summary.outcome_unresolved} unresolved outcomes; "
                 "diagnostic only, persistence not established</div>"
             )
+        if report.sql_transaction_path_report is not None:
+            paths = report.sql_transaction_path_report
+            content_lines.append(
+                '<div class="summary-item"><span class="summary-label">'
+                "SQL Ordered Paths:</span> "
+                f"{paths.summary.ordered_paths} proven / "
+                f"{paths.summary.unresolved_pairs} unresolved pairs; "
+                "lexical only, persistence not established</div>"
+            )
         content_lines.append("</div>")
 
         # Affected endpoints
