@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "adapter": "workers-v1",
+  "purpose": "Pinned task, scheduler, and CLI cases prioritized for issue #103",
+  "entries": [
+    {
+      "repository": "yura2787/auto_monitor",
+      "pr": 4,
+      "url": "https://github.com/yura2787/auto_monitor/pull/4",
+      "parent_sha": "c223cc8dc7ed18444e51b079a3b7ec22725d305f",
+      "merge_sha": "71b2ab812a535c7956f219f0ae7be03d9742ec2c",
+      "root": ".",
+      "shape": "module-level exact Celery app.task decorators with explicit public names",
+      "expected_inventory": "established"
+    },
+    {
+      "repository": "kenil-sarang-itp/codebase-brain",
+      "pr": 8,
+      "url": "https://github.com/kenil-sarang-itp/codebase-brain/pull/8",
+      "parent_sha": "4aa39af1a84be87e4260d27c73834767d8fffd15",
+      "merge_sha": "ae8e0072fded16cb78981b6be2153fb08491c85a",
+      "root": "backend",
+      "shape": "RQ enqueue-by-string worker functions with runtime queue factory",
+      "expected_inventory": "conditional_or_unavailable"
+    },
+    {
+      "repository": "fitz-s/zeus",
+      "pr": 324,
+      "url": "https://github.com/fitz-s/zeus/pull/324",
+      "parent_sha": "e4dcaf56eaa2b46f4372c0d61260e2aa2fc19ece",
+      "merge_sha": "2428e95ae95fb29dd09023598d41210bd064fb61",
+      "root": "src",
+      "shape": "APScheduler add_job cron registration with explicit stable job id",
+      "expected_inventory": "conditional_or_unavailable"
+    },
+    {
+      "repository": "JeffCarpenter/github-to-sqlite",
+      "pr": 16,
+      "url": "https://github.com/JeffCarpenter/github-to-sqlite/pull/16",
+      "parent_sha": "1f95607713d5c4239079b8e30baeddae1df9f746",
+      "merge_sha": "8950394798e68764cd2e5c3dcf655c2cbdc79e83",
+      "root": ".",
+      "shape": "module-level Typer commands with default and explicit command names",
+      "expected_inventory": "established"
+    }
+  ]
+}

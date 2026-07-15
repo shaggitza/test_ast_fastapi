@@ -6,10 +6,15 @@ Models representing FastAPI endpoints and their handler functions.
 
 from enum import Enum
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from fastapi_endpoint_detector.models.surface_contract import CallbackMode, SurfaceMatchKind
+from fastapi_endpoint_detector.models.surface_contract import (
+    CallbackMode,
+    SurfaceExecutionMode,
+    SurfaceMatchKind,
+)
 
 
 class EndpointMethod(str, Enum):
@@ -79,11 +84,12 @@ class HandlerInfo(BaseModel):
 class SurfaceRegistrationEvidence(BaseModel):
     """Data-only registration and contract provenance for a custom surface."""
 
-    schema_version: int = 1
+    schema_version: Literal[1, 2] = 1
     surface_kind: str = Field(pattern=r"^[a-z][a-z0-9_.-]*$", max_length=64)
     surface_id: str = Field(min_length=1, max_length=512)
     resource: str = Field(min_length=1, max_length=256)
     callback_mode: CallbackMode
+    execution_mode: SurfaceExecutionMode = SurfaceExecutionMode.DIRECT
     contract_id: str
     match_kind: SurfaceMatchKind
     registration_symbol: str

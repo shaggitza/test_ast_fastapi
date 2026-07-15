@@ -1,0 +1,407 @@
+{
+  "schema_version": 1,
+  "collected_at": "2026-07-15",
+  "method": "GitHub exact code search; candidate evidence only, not adjudicated support",
+  "entries": [
+    {
+      "repository": "RoboSats/robosats",
+      "commit_sha": "1642529937194f1f9de6325694ad958f5523e4f6",
+      "path": "api/tasks.py",
+      "adapter_candidate": "celery",
+      "query": "\"@shared_task\" language:python",
+      "evidence_url": "https://github.com/RoboSats/robosats/blob/1642529937194f1f9de6325694ad958f5523e4f6/api/tasks.py"
+    },
+    {
+      "repository": "TheEnbyperor/zuegli",
+      "commit_sha": "f7bdbfe996370f0d0cf40a456688ac0db4063fdf",
+      "path": "main/avv.py",
+      "adapter_candidate": "celery",
+      "query": "\"@shared_task\" language:python",
+      "evidence_url": "https://github.com/TheEnbyperor/zuegli/blob/f7bdbfe996370f0d0cf40a456688ac0db4063fdf/main/avv.py"
+    },
+    {
+      "repository": "areebbeigh/codeinterview-sandbox",
+      "commit_sha": "d1c356fecdb4cb85f0c8ba9057859a8f30106b7d",
+      "path": "run.py",
+      "adapter_candidate": "celery",
+      "query": "\"@shared_task\" language:python",
+      "evidence_url": "https://github.com/areebbeigh/codeinterview-sandbox/blob/d1c356fecdb4cb85f0c8ba9057859a8f30106b7d/run.py"
+    },
+    {
+      "repository": "Atharv-Chaudhari/Project-Covid",
+      "commit_sha": "0dbe90d743a615ebd34209ab195687b72a4f1732",
+      "path": "app/task.py",
+      "adapter_candidate": "celery",
+      "query": "\"@shared_task\" language:python",
+      "evidence_url": "https://github.com/Atharv-Chaudhari/Project-Covid/blob/0dbe90d743a615ebd34209ab195687b72a4f1732/app/task.py"
+    },
+    {
+      "repository": "abhigyankrishna01/Watchtower",
+      "commit_sha": "aff6345534349998b1af52940c3ac9ca9b8432fd",
+      "path": "alerts.py",
+      "adapter_candidate": "celery",
+      "query": "\"@shared_task\" language:python",
+      "evidence_url": "https://github.com/abhigyankrishna01/Watchtower/blob/aff6345534349998b1af52940c3ac9ca9b8432fd/alerts.py"
+    },
+    {
+      "repository": "PrabhatTheCoder/Report-Generator-Microservice",
+      "commit_sha": "74a26bef60ec37b90716df8a2d143b0c99b8d3f3",
+      "path": "app/utils.py",
+      "adapter_candidate": "celery",
+      "query": "\"@shared_task\" language:python",
+      "evidence_url": "https://github.com/PrabhatTheCoder/Report-Generator-Microservice/blob/74a26bef60ec37b90716df8a2d143b0c99b8d3f3/app/utils.py"
+    },
+    {
+      "repository": "Shash-03/Code_41_mini",
+      "commit_sha": "a8256686a1dfd4c05fd24b8c0669f98e2cbe2de5",
+      "path": "2457.py",
+      "adapter_candidate": "celery",
+      "query": "\"@shared_task\" language:python",
+      "evidence_url": "https://github.com/Shash-03/Code_41_mini/blob/a8256686a1dfd4c05fd24b8c0669f98e2cbe2de5/2457.py"
+    },
+    {
+      "repository": "ironman123/influencer-management-app",
+      "commit_sha": "8bca23499ba2ee2923694c2701bf7991c156d38e",
+      "path": "worker.py",
+      "adapter_candidate": "celery",
+      "query": "\"@shared_task\" language:python",
+      "evidence_url": "https://github.com/ironman123/influencer-management-app/blob/8bca23499ba2ee2923694c2701bf7991c156d38e/worker.py"
+    },
+    {
+      "repository": "marcossesh/Desafio-vaga",
+      "commit_sha": "8fd59a7326238432ea98fbec36c895b702a70004",
+      "path": "django4.py",
+      "adapter_candidate": "celery",
+      "query": "\"@shared_task\" language:python",
+      "evidence_url": "https://github.com/marcossesh/Desafio-vaga/blob/8fd59a7326238432ea98fbec36c895b702a70004/django4.py"
+    },
+    {
+      "repository": "ASoulCnki/ASoulCnki",
+      "commit_sha": "e7f3890eaa394986e47443fbdf9008f8e4cda84d",
+      "path": "tasks.py",
+      "adapter_candidate": "celery",
+      "query": "\"@celery_app.task\" language:python",
+      "evidence_url": "https://github.com/ASoulCnki/ASoulCnki/blob/e7f3890eaa394986e47443fbdf9008f8e4cda84d/tasks.py"
+    },
+    {
+      "repository": "thanhhau097/ml_project_template",
+      "commit_sha": "9c6815e110f0a632094cab5a79f80b327405a60c",
+      "path": "api/app.py",
+      "adapter_candidate": "celery",
+      "query": "\"@celery_app.task\" language:python",
+      "evidence_url": "https://github.com/thanhhau097/ml_project_template/blob/9c6815e110f0a632094cab5a79f80b327405a60c/api/app.py"
+    },
+    {
+      "repository": "kobotoolbox/kpi",
+      "commit_sha": "25af1a8d4df84305999474529faa913980627c59",
+      "path": "kpi/tasks.py",
+      "adapter_candidate": "celery",
+      "query": "\"@celery_app.task\" language:python",
+      "evidence_url": "https://github.com/kobotoolbox/kpi/blob/25af1a8d4df84305999474529faa913980627c59/kpi/tasks.py"
+    },
+    {
+      "repository": "systemime/Vbox",
+      "commit_sha": "e902dbd34a9fe830e36af7bc201e57ecab660cde",
+      "path": "tools/logs.py",
+      "adapter_candidate": "celery",
+      "query": "\"@celery_app.task\" language:python",
+      "evidence_url": "https://github.com/systemime/Vbox/blob/e902dbd34a9fe830e36af7bc201e57ecab660cde/tools/logs.py"
+    },
+    {
+      "repository": "seokjohn/celery_multiprocess_gpu",
+      "commit_sha": "d5d919a9824c2e23484e0d3ed4370e331e0c3a26",
+      "path": "app/task.py",
+      "adapter_candidate": "celery",
+      "query": "\"@celery_app.task\" language:python",
+      "evidence_url": "https://github.com/seokjohn/celery_multiprocess_gpu/blob/d5d919a9824c2e23484e0d3ed4370e331e0c3a26/app/task.py"
+    },
+    {
+      "repository": "ksgr5566/AutoTuneNLP",
+      "commit_sha": "82a4f60f4942b6d4329b60cc4a5991b381adcfbd",
+      "path": "worker.py",
+      "adapter_candidate": "celery",
+      "query": "\"@celery_app.task\" language:python",
+      "evidence_url": "https://github.com/ksgr5566/AutoTuneNLP/blob/82a4f60f4942b6d4329b60cc4a5991b381adcfbd/worker.py"
+    },
+    {
+      "repository": "rembertdesigns/gemma3n-disaster-assistant",
+      "commit_sha": "06016feddd1c165defab3aa1724c50460b3b6f2b",
+      "path": "celery_app.py",
+      "adapter_candidate": "celery",
+      "query": "\"@celery_app.task\" language:python",
+      "evidence_url": "https://github.com/rembertdesigns/gemma3n-disaster-assistant/blob/06016feddd1c165defab3aa1724c50460b3b6f2b/celery_app.py"
+    },
+    {
+      "repository": "cherry0021/solbetero",
+      "commit_sha": "99769054b21525cfd783420ad3df9ede11ee88be",
+      "path": "src/main.py",
+      "adapter_candidate": "celery",
+      "query": "\"@celery_app.task\" language:python",
+      "evidence_url": "https://github.com/cherry0021/solbetero/blob/99769054b21525cfd783420ad3df9ede11ee88be/src/main.py"
+    },
+    {
+      "repository": "ANJALI606-707/notificationService1",
+      "commit_sha": "f172a198c234f74cda0261f3a1030bd16000ea3f",
+      "path": "pr1.py",
+      "adapter_candidate": "celery",
+      "query": "\"@celery_app.task\" language:python",
+      "evidence_url": "https://github.com/ANJALI606-707/notificationService1/blob/f172a198c234f74cda0261f3a1030bd16000ea3f/pr1.py"
+    },
+    {
+      "repository": "cloud-custodian/cloud-custodian",
+      "commit_sha": "71a8827cd659bbf382d289b15c950439c552394c",
+      "path": "tools/c7n_salactus/c7n_salactus/rqworker.py",
+      "adapter_candidate": "rq",
+      "query": "\"from rq import job\" language:python",
+      "evidence_url": "https://github.com/cloud-custodian/cloud-custodian/blob/71a8827cd659bbf382d289b15c950439c552394c/tools/c7n_salactus/c7n_salactus/rqworker.py"
+    },
+    {
+      "repository": "allegro/ralph",
+      "commit_sha": "bcf65b994ef29fb3fc2e10b660e6288723d5209e",
+      "path": "src/ralph/lib/external_services/base.py",
+      "adapter_candidate": "rq",
+      "query": "\"from rq import job\" language:python",
+      "evidence_url": "https://github.com/allegro/ralph/blob/bcf65b994ef29fb3fc2e10b660e6288723d5209e/src/ralph/lib/external_services/base.py"
+    },
+    {
+      "repository": "cvat-ai/cvat",
+      "commit_sha": "dfe523b4209b8f2552fec02aeef8353e0ffc32e1",
+      "path": "cvat/apps/engine/handlers.py",
+      "adapter_candidate": "rq",
+      "query": "\"from rq import job\" language:python",
+      "evidence_url": "https://github.com/cvat-ai/cvat/blob/dfe523b4209b8f2552fec02aeef8353e0ffc32e1/cvat/apps/engine/handlers.py"
+    },
+    {
+      "repository": "OWASP/OpenCRE",
+      "commit_sha": "6b6a5ac0302edb4d250938f8c7dc9b1537f33d35",
+      "path": "application/web/web_main.py",
+      "adapter_candidate": "rq",
+      "query": "\"from rq import job\" language:python",
+      "evidence_url": "https://github.com/OWASP/OpenCRE/blob/6b6a5ac0302edb4d250938f8c7dc9b1537f33d35/application/web/web_main.py"
+    },
+    {
+      "repository": "ansible/pinakes",
+      "commit_sha": "122fc3184b0c6b6745de220bbd42e632531ec93b",
+      "path": "pinakes/main/common/views.py",
+      "adapter_candidate": "rq",
+      "query": "\"from rq import job\" language:python",
+      "evidence_url": "https://github.com/ansible/pinakes/blob/122fc3184b0c6b6745de220bbd42e632531ec93b/pinakes/main/common/views.py"
+    },
+    {
+      "repository": "kmatarese/glide",
+      "commit_sha": "f5892bbc5bf04daec4fe865303013bd3f2921931",
+      "path": "glide/extensions/rq.py",
+      "adapter_candidate": "rq",
+      "query": "\"from rq import job\" language:python",
+      "evidence_url": "https://github.com/kmatarese/glide/blob/f5892bbc5bf04daec4fe865303013bd3f2921931/glide/extensions/rq.py"
+    },
+    {
+      "repository": "dojo-modeling/dojo",
+      "commit_sha": "a60c6ce385c76f391ab276664d435c8b556911c5",
+      "path": "api/src/data.py",
+      "adapter_candidate": "rq",
+      "query": "\"from rq import job\" language:python",
+      "evidence_url": "https://github.com/dojo-modeling/dojo/blob/a60c6ce385c76f391ab276664d435c8b556911c5/api/src/data.py"
+    },
+    {
+      "repository": "python-arq/arq",
+      "commit_sha": "5ee4b48cf6faf4dc181f1ccb76dfb1bc1fedf9bf",
+      "path": "docs/examples/cron.py",
+      "adapter_candidate": "arq",
+      "query": "\"class WorkerSettings\" language:python",
+      "evidence_url": "https://github.com/python-arq/arq/blob/5ee4b48cf6faf4dc181f1ccb76dfb1bc1fedf9bf/docs/examples/cron.py"
+    },
+    {
+      "repository": "dongweiming/lyanna",
+      "commit_sha": "45943a68a92cd908685671751f2c2bb5289946dd",
+      "path": "tasks.py",
+      "adapter_candidate": "arq",
+      "query": "\"class WorkerSettings\" language:python",
+      "evidence_url": "https://github.com/dongweiming/lyanna/blob/45943a68a92cd908685671751f2c2bb5289946dd/tasks.py"
+    },
+    {
+      "repository": "FraunhoferMEVIS/MedicalMultitaskModeling",
+      "commit_sha": "7ba4fe68c63149832c15f61c32917d4e8593a030",
+      "path": "mmm/api/WorkerSettings.py",
+      "adapter_candidate": "arq",
+      "query": "\"class WorkerSettings\" language:python",
+      "evidence_url": "https://github.com/FraunhoferMEVIS/MedicalMultitaskModeling/blob/7ba4fe68c63149832c15f61c32917d4e8593a030/mmm/api/WorkerSettings.py"
+    },
+    {
+      "repository": "ngoctan270905/bot-server",
+      "commit_sha": "07f19c60f183dfabc1efcde16c179525c5723568",
+      "path": "app/core/worker.py",
+      "adapter_candidate": "arq",
+      "query": "\"class WorkerSettings\" language:python",
+      "evidence_url": "https://github.com/ngoctan270905/bot-server/blob/07f19c60f183dfabc1efcde16c179525c5723568/app/core/worker.py"
+    },
+    {
+      "repository": "smuzair7/LedgerMind",
+      "commit_sha": "c2776290fa4c45ec5523fa0db821408fee96366d",
+      "path": "backend/app/jobs/arq_worker.py",
+      "adapter_candidate": "arq",
+      "query": "\"class WorkerSettings\" language:python",
+      "evidence_url": "https://github.com/smuzair7/LedgerMind/blob/c2776290fa4c45ec5523fa0db821408fee96366d/backend/app/jobs/arq_worker.py"
+    },
+    {
+      "repository": "yahyaabohashemstu/codeClone",
+      "commit_sha": "ad242d4f4b3074f19a451383f3063dfba3790635",
+      "path": "enterprise_worker.py",
+      "adapter_candidate": "arq",
+      "query": "\"class WorkerSettings\" language:python",
+      "evidence_url": "https://github.com/yahyaabohashemstu/codeClone/blob/ad242d4f4b3074f19a451383f3063dfba3790635/enterprise_worker.py"
+    },
+    {
+      "repository": "adi-suresh01/rewind",
+      "commit_sha": "f7a815a9689fd02f5f6eaa4ca5eb17c3439f897d",
+      "path": "app/workers/arq_app.py",
+      "adapter_candidate": "arq",
+      "query": "\"class WorkerSettings\" language:python",
+      "evidence_url": "https://github.com/adi-suresh01/rewind/blob/f7a815a9689fd02f5f6eaa4ca5eb17c3439f897d/app/workers/arq_app.py"
+    },
+    {
+      "repository": "hmmnxkl/LLM-Based-Intelligent-Public-Opinion-Analytics-Assistant",
+      "commit_sha": "1bb31ec7c9cc8c22c68bdb03252ce74196b069df",
+      "path": "app.py",
+      "adapter_candidate": "apscheduler",
+      "query": "\"scheduler.add_job(\" language:python",
+      "evidence_url": "https://github.com/hmmnxkl/LLM-Based-Intelligent-Public-Opinion-Analytics-Assistant/blob/1bb31ec7c9cc8c22c68bdb03252ce74196b069df/app.py"
+    },
+    {
+      "repository": "Baiyuetribe/kamiFaka",
+      "commit_sha": "43152a4a695b1ddd81627d1944bcad9b4f28d823",
+      "path": "dev.py",
+      "adapter_candidate": "apscheduler",
+      "query": "\"scheduler.add_job(\" language:python",
+      "evidence_url": "https://github.com/Baiyuetribe/kamiFaka/blob/43152a4a695b1ddd81627d1944bcad9b4f28d823/dev.py"
+    },
+    {
+      "repository": "xsolinsx/BotForReported",
+      "commit_sha": "b26e041e53266b47f40beebe022a4a3e47bea7a7",
+      "path": "bot.py",
+      "adapter_candidate": "apscheduler",
+      "query": "\"scheduler.add_job(\" language:python",
+      "evidence_url": "https://github.com/xsolinsx/BotForReported/blob/b26e041e53266b47f40beebe022a4a3e47bea7a7/bot.py"
+    },
+    {
+      "repository": "zhongyehai/test-platform-api",
+      "commit_sha": "ffd13d5726c0e2591d843a26fe3e958fe43a0646",
+      "path": "job.py",
+      "adapter_candidate": "apscheduler",
+      "query": "\"scheduler.add_job(\" language:python",
+      "evidence_url": "https://github.com/zhongyehai/test-platform-api/blob/ffd13d5726c0e2591d843a26fe3e958fe43a0646/job.py"
+    },
+    {
+      "repository": "DairaDoo/Restaurant-Reservation-Backend",
+      "commit_sha": "bb191f6c626f4b44f83e3ebfc9b80ff74188db12",
+      "path": "run.py",
+      "adapter_candidate": "apscheduler",
+      "query": "\"scheduler.add_job(\" language:python",
+      "evidence_url": "https://github.com/DairaDoo/Restaurant-Reservation-Backend/blob/bb191f6c626f4b44f83e3ebfc9b80ff74188db12/run.py"
+    },
+    {
+      "repository": "assassingyk/reminder",
+      "commit_sha": "c61832bbcc5ffdbe43707229c530f3fc77c448da",
+      "path": "rmd.py",
+      "adapter_candidate": "apscheduler",
+      "query": "\"scheduler.add_job(\" language:python",
+      "evidence_url": "https://github.com/assassingyk/reminder/blob/c61832bbcc5ffdbe43707229c530f3fc77c448da/rmd.py"
+    },
+    {
+      "repository": "Dhruv0306/SymphonyProject1",
+      "commit_sha": "f696c77b64d72dad89e4003a11901fe678e3451d",
+      "path": "App.py",
+      "adapter_candidate": "apscheduler",
+      "query": "\"scheduler.add_job(\" language:python",
+      "evidence_url": "https://github.com/Dhruv0306/SymphonyProject1/blob/f696c77b64d72dad89e4003a11901fe678e3451d/App.py"
+    },
+    {
+      "repository": "Because66666/minecraft_bot_for_because",
+      "commit_sha": "952a4c13f9b06025d217f7509133fcf61d3c5a63",
+      "path": "mc.py",
+      "adapter_candidate": "apscheduler",
+      "query": "\"scheduler.add_job(\" language:python",
+      "evidence_url": "https://github.com/Because66666/minecraft_bot_for_because/blob/952a4c13f9b06025d217f7509133fcf61d3c5a63/mc.py"
+    },
+    {
+      "repository": "babysor/MockingBird",
+      "commit_sha": "28dc5e14f12d7c754612af2fde8e78a4b03f8616",
+      "path": "web.py",
+      "adapter_candidate": "typer",
+      "query": "\"typer.Typer(\" language:python",
+      "evidence_url": "https://github.com/babysor/MockingBird/blob/28dc5e14f12d7c754612af2fde8e78a4b03f8616/web.py"
+    },
+    {
+      "repository": "wy-z/container-vm",
+      "commit_sha": "07d40217758b4ab800237b2c8b8ac737aba51234",
+      "path": "main.py",
+      "adapter_candidate": "typer",
+      "query": "\"typer.Typer(\" language:python",
+      "evidence_url": "https://github.com/wy-z/container-vm/blob/07d40217758b4ab800237b2c8b8ac737aba51234/main.py"
+    },
+    {
+      "repository": "parsa-epfl/qflex",
+      "commit_sha": "993508f6824d595f83c8c6817196de6e84a3c26d",
+      "path": "dep",
+      "adapter_candidate": "typer",
+      "query": "\"typer.Typer(\" language:python",
+      "evidence_url": "https://github.com/parsa-epfl/qflex/blob/993508f6824d595f83c8c6817196de6e84a3c26d/dep"
+    },
+    {
+      "repository": "rvp-group/Splat-LOAM",
+      "commit_sha": "d82680d5959651e70fc94bb1a64b5044f146571a",
+      "path": "run.py",
+      "adapter_candidate": "typer",
+      "query": "\"typer.Typer(\" language:python",
+      "evidence_url": "https://github.com/rvp-group/Splat-LOAM/blob/d82680d5959651e70fc94bb1a64b5044f146571a/run.py"
+    },
+    {
+      "repository": "dilawar/Scripts",
+      "commit_sha": "1085bef31a34cf6055e2214eb066c066b0fc1239",
+      "path": "ftp.py",
+      "adapter_candidate": "typer",
+      "query": "\"typer.Typer(\" language:python",
+      "evidence_url": "https://github.com/dilawar/Scripts/blob/1085bef31a34cf6055e2214eb066c066b0fc1239/ftp.py"
+    },
+    {
+      "repository": "tasnem-tech/dbwatch",
+      "commit_sha": "c90eaf7713c4f06a42c9d3d8f23a02e723b6741f",
+      "path": "cli.py",
+      "adapter_candidate": "typer",
+      "query": "\"typer.Typer(\" language:python",
+      "evidence_url": "https://github.com/tasnem-tech/dbwatch/blob/c90eaf7713c4f06a42c9d3d8f23a02e723b6741f/cli.py"
+    },
+    {
+      "repository": "BlockchainCommons/spotbit",
+      "commit_sha": "65bca1b5d5bbe2b808a2c5a555dbee5ee4940459",
+      "path": "app.py",
+      "adapter_candidate": "typer",
+      "query": "\"typer.Typer(\" language:python",
+      "evidence_url": "https://github.com/BlockchainCommons/spotbit/blob/65bca1b5d5bbe2b808a2c5a555dbee5ee4940459/app.py"
+    },
+    {
+      "repository": "Shaunwei/RealChar",
+      "commit_sha": "bd452d7ab164098d251935276c870ddfc14a9046",
+      "path": "cli.py",
+      "adapter_candidate": "click",
+      "query": "\"@click.command\" language:python",
+      "evidence_url": "https://github.com/Shaunwei/RealChar/blob/bd452d7ab164098d251935276c870ddfc14a9046/cli.py"
+    },
+    {
+      "repository": "windowsair/wireless-esp8266-dap",
+      "commit_sha": "4c56d0d4e853e9785b4e6cbbb55d3da20d278e13",
+      "path": "idf.py",
+      "adapter_candidate": "click",
+      "query": "\"@click.command\" language:python",
+      "evidence_url": "https://github.com/windowsair/wireless-esp8266-dap/blob/4c56d0d4e853e9785b4e6cbbb55d3da20d278e13/idf.py"
+    },
+    {
+      "repository": "BalliAsghar/PlexURLGen",
+      "commit_sha": "397daba081304b293e9ac6acd6294aa7e0989cb2",
+      "path": "plex",
+      "adapter_candidate": "click",
+      "query": "\"@click.command\" language:python",
+      "evidence_url": "https://github.com/BalliAsghar/PlexURLGen/blob/397daba081304b293e9ac6acd6294aa7e0989cb2/plex"
+    }
+  ]
+}

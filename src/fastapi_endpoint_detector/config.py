@@ -77,7 +77,7 @@ class AnalysisConfig(BaseModel):
         default=None,
         description="Path to strict data-only custom-surface contracts.",
     )
-    surface_preset: Literal["event-listeners-v1", "mcp-v1"] | None = Field(
+    surface_preset: Literal["event-listeners-v1", "mcp-v1", "workers-v1"] | None = Field(
         default=None,
         description="Named package-owned custom-surface adapter preset.",
     )

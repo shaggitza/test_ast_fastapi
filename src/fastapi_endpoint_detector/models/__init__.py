@@ -62,10 +62,12 @@ from fastapi_endpoint_detector.models.report import (
 )
 from fastapi_endpoint_detector.models.surface_contract import (
     CallbackMode,
+    HandlerNameNormalization,
     LoadedSurfaceContracts,
     SurfaceContract,
     SurfaceContractDocument,
     SurfaceContractError,
+    SurfaceExecutionMode,
     load_surface_contracts,
     load_surface_preset,
 )
@@ -98,10 +100,12 @@ __all__ = [  # noqa: RUF022 - grouped by public model domain
     "load_effect_contracts",
     # Custom surface contract models
     "CallbackMode",
+    "HandlerNameNormalization",
     "LoadedSurfaceContracts",
     "SurfaceContract",
     "SurfaceContractDocument",
     "SurfaceContractError",
+    "SurfaceExecutionMode",
     "load_surface_contracts",
     "load_surface_preset",
     # Effect contract audit models

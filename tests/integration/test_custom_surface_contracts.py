@@ -252,6 +252,51 @@ def test_bundled_mcp_preset_reaches_changed_tool_handler(tmp_path: Path) -> None
     assert endpoint.handler.name == "search"
 
 
+def test_bundled_workers_preset_reaches_changed_celery_task(tmp_path: Path) -> None:
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "main.py").write_text(
+        "from celery import Celery\n"
+        "celery = Celery('tasks')\n\n"
+        "@celery.task(name='billing.charge')\n"
+        "def charge() -> int:\n"
+        "    return 2\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / ".endpoint-detector.yaml"
+    config_path.write_text(
+        "analysis:\n  surface_preset: workers-v1\n",
+        encoding="utf-8",
+    )
+    diff = tmp_path / "change.diff"
+    diff.write_text(
+        "diff --git a/main.py b/main.py\n"
+        "--- a/main.py\n"
+        "+++ b/main.py\n"
+        "@@ -4,3 +4,3 @@\n"
+        " @celery.task(name='billing.charge')\n"
+        " def charge() -> int:\n"
+        "-    return 1\n"
+        "+    return 2\n",
+        encoding="utf-8",
+    )
+
+    report = ChangeMapper(
+        app_path=app,
+        config=load_config(config_path),
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+
+    assert [candidate.endpoint.identifier for candidate in report.candidate_endpoints] == [
+        "TASK.CELERY task:billing.charge"
+    ]
+    surface = report.candidate_endpoints[0].endpoint.surface
+    assert surface is not None
+    assert surface.execution_mode.value == "process_worker"
+    assert surface.callback_mode.value == "sync"
+
+
 def test_conditional_aio_pika_consumer_is_capped_low(tmp_path: Path) -> None:
     app = tmp_path / "app"
     app.mkdir()

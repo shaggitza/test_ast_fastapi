@@ -206,7 +206,7 @@ analysis:
   confidence_threshold: 0.5
   effect_contracts: effects.yaml       # optional, config-relative
   surface_contracts: surfaces.yaml     # optional, requires --secure-ast
-  # surface_preset: event-listeners-v1 # alternative: mcp-v1
+  # surface_preset: event-listeners-v1 # alternatives: mcp-v1, workers-v1
 output:
   show_confidence: true
   show_dependency_chain: false

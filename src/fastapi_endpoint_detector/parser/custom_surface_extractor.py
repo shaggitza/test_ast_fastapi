@@ -24,6 +24,7 @@ from fastapi_endpoint_detector.models.endpoint import (
 )
 from fastapi_endpoint_detector.models.surface_contract import (
     CallbackMode,
+    HandlerNameNormalization,
     HandlerSelectorKind,
     LoadedSurfaceContracts,
     ResourceSelectorKind,
@@ -144,6 +145,7 @@ class CustomSurfaceExtractor:
         self._limitations: list[EndpointDiscoveryCondition] = []
         self._seen: set[tuple[str, int, int, str, str, str]] = set()
         self._module_states: dict[str, dict[str, _Binding | None]] = {}
+        self._building_states = False
         self._declared_receiver_types = {
             contract.registration.receiver_type
             for contract in contracts.document.contracts
@@ -153,10 +155,28 @@ class CustomSurfaceExtractor:
     def extract_inventory(self) -> EndpointInventory:
         """Return all finite registrations and inventory-strength evidence."""
         self._load_modules()
+        self._building_states = True
+        try:
+            for module in self._modules.values():
+                state: dict[str, _Binding | None] = {}
+                self._process_statements(
+                    module,
+                    module.tree.body,
+                    state,
+                    (),
+                    process_functions=False,
+                )
+                self._module_states[module.name] = state
+        finally:
+            self._building_states = False
         for module in self._modules.values():
-            state: dict[str, _Binding | None] = {}
-            self._process_statements(module, module.tree.body, state, (), process_functions=False)
-            self._module_states[module.name] = state
+            self._process_statements(
+                module,
+                module.tree.body,
+                {},
+                (),
+                process_functions=False,
+            )
         self._process_bootstrap()
         collapsed: dict[tuple[str, str, int], Endpoint] = {}
         for endpoint in self._endpoints:
@@ -447,6 +467,8 @@ class CustomSurfaceExtractor:
         *,
         decorated_handler: ast.FunctionDef | ast.AsyncFunctionDef | None,
     ) -> None:
+        if self._building_states:
+            return
         resolved = self._resolve_call(call.func, state)
         if resolved is None:
             callable_name = (
@@ -553,10 +575,12 @@ class CustomSurfaceExtractor:
                     continue
                 self._seen.add(key)
                 evidence = SurfaceRegistrationEvidence(
+                    schema_version=self.contracts.document.schema_version,
                     surface_kind=contract.surface.kind,
                     surface_id=surface_id,
                     resource=resource,
                     callback_mode=contract.callback_mode,
+                    execution_mode=contract.execution_mode,
                     contract_id=contract.id,
                     match_kind=contract.registration.match_kind,
                     registration_symbol=symbol,
@@ -622,6 +646,7 @@ class CustomSurfaceExtractor:
         binding = state.get(expression.value.id)
         if binding is None:
             return None
+        binding = self._follow_project_binding(binding)
         if binding.kind == "module":
             return f"{binding.identity}.{expression.attr}", InvocationKind.FUNCTION, None
         if binding.kind == "receiver":
@@ -637,6 +662,36 @@ class CustomSurfaceExtractor:
                 binding.identity,
             )
         return None
+
+    def _follow_project_binding(self, binding: _Binding) -> _Binding:
+        """Follow exact project module-global aliases without factory guessing."""
+        current = binding
+        seen: set[tuple[str, str]] = set()
+        for _depth in range(16):
+            key = (current.kind, current.identity)
+            if key in seen or current.kind != "symbol":
+                return current
+            seen.add(key)
+            candidates = [
+                module
+                for module in self._module_states
+                if current.identity.startswith(f"{module}.")
+            ]
+            if not candidates:
+                return current
+            longest = max(len(module) for module in candidates)
+            selected = [module for module in candidates if len(module) == longest]
+            if len(selected) != 1:
+                return current
+            module_name = selected[0]
+            exported_name = current.identity[len(module_name) + 1 :]
+            if "." in exported_name:
+                return current
+            replacement = self._module_states[module_name].get(exported_name)
+            if replacement is None:
+                return current
+            current = replacement
+        return current
 
     def _binding_from_expression(
         self, expression: ast.expr | None, state: dict[str, _Binding | None]
@@ -699,7 +754,7 @@ class CustomSurfaceExtractor:
         selector = contract.surface.resource
         values: tuple[str, ...]
         if selector.kind == ResourceSelectorKind.HANDLER_NAME:
-            values = (handler.name,)
+            values = (cls._handler_resource(handler.name, selector.handler_name_normalization),)
         elif selector.kind == ResourceSelectorKind.LITERAL:
             if selector.value is None:
                 return None
@@ -717,7 +772,12 @@ class CustomSurfaceExtractor:
                 None,
             )
             if expression is None:
-                values = (handler.name,)
+                values = (
+                    cls._handler_resource(
+                        handler.name,
+                        selector.handler_name_normalization,
+                    ),
+                )
             else:
                 resolved = cls._literal_resources(expression)
                 if resolved is None:
@@ -760,6 +820,12 @@ class CustomSurfaceExtractor:
         ):
             return None
         return normalized
+
+    @staticmethod
+    def _handler_resource(name: str, normalization: HandlerNameNormalization) -> str:
+        return (
+            name.replace("_", "-") if normalization == HandlerNameNormalization.KEBAB_CASE else name
+        )
 
     @classmethod
     def _literal_resources(cls, expression: ast.expr | None) -> tuple[str, ...] | None:

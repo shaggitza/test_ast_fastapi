@@ -121,6 +121,18 @@ def test_surface_contract_rejects_unsafe_shapes(mutation) -> None:
         SurfaceContractDocument.model_validate(payload)
 
 
+def test_execution_mode_requires_schema_v2() -> None:
+    payload = _document()
+    payload["contracts"][0]["execution_mode"] = "process_worker"  # type: ignore[index]
+
+    with pytest.raises(ValidationError, match="schema_version 2"):
+        SurfaceContractDocument.model_validate(payload)
+
+    payload["schema_version"] = 2
+    document = SurfaceContractDocument.model_validate(payload)
+    assert document.contracts[0].execution_mode.value == "process_worker"
+
+
 def test_surface_contract_rejects_duplicate_yaml_keys(tmp_path: Path) -> None:
     path = tmp_path / "duplicate.yaml"
     path.write_text("schema_version: 1\nschema_version: 1\n", encoding="utf-8")
