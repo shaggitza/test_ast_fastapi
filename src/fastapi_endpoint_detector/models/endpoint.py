@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from fastapi_endpoint_detector.models.surface_contract import (
     CallbackMode,
+    CallbackRangeMode,
     SurfaceExecutionMode,
     SurfaceMatchKind,
 )
@@ -84,11 +85,12 @@ class HandlerInfo(BaseModel):
 class SurfaceRegistrationEvidence(BaseModel):
     """Data-only registration and contract provenance for a custom surface."""
 
-    schema_version: Literal[1, 2] = 1
+    schema_version: Literal[1, 2, 3] = 1
     surface_kind: str = Field(pattern=r"^[a-z][a-z0-9_.-]*$", max_length=64)
     surface_id: str = Field(min_length=1, max_length=512)
     resource: str = Field(min_length=1, max_length=256)
     callback_mode: CallbackMode
+    callback_range: CallbackRangeMode = CallbackRangeMode.FULL
     execution_mode: SurfaceExecutionMode = SurfaceExecutionMode.DIRECT
     contract_id: str
     match_kind: SurfaceMatchKind

@@ -104,8 +104,10 @@ analysis:
   surface_preset: framework-v1
 ```
 
-The preset is execution-free and uses exact receiver identities. It does not
-model lifespan context-manager phases or class-based middleware. BackgroundTasks
+The preset is execution-free and uses exact receiver identities. Schema-v3
+constructor contracts split exact `FastAPI(lifespan=...)` async generators into
+pre-yield startup and post-yield shutdown ranges. It does not model class-based
+middleware. BackgroundTasks
 and dependency providers are handled by typed execution summaries rather than
 surface registration contracts. See [framework semantics](framework-semantics.md).
 
@@ -139,25 +141,28 @@ function naming conventions. Those shapes remain unavailable unless their
 registration is explicitly represented in source or configured with a custom
 contract.
 
-## Schema v1 and v2
+## Schema v1, v2, and v3
 
-Each document has `schema_version: 1` or `2`, preset identity/provenance, and one
-or more contracts. Version 1 preserves direct execution as its only boundary;
-version 2 adds explicit `execution_mode`. Non-direct execution declarations in a
-version 1 document are rejected. Unknown fields, duplicate keys, duplicate contract IDs,
+Each document has `schema_version: 1`, `2`, or `3`, preset identity/provenance,
+and one or more contracts. Version 1 preserves direct execution as its only
+boundary; version 2 adds explicit `execution_mode`; version 3 adds constructor
+registrations, optional keyword handlers, and yield-relative callback ranges.
+Earlier schemas reject these additions. Unknown fields, duplicate keys, duplicate contract IDs,
 duplicate matcher/handler selectors, non-integer schema versions, and files over
 1 MiB are rejected.
 
 A contract declares:
 
 - `registration.symbol`: a fully qualified callable identity pattern;
-- `registration.invocation`: `function`, `instance_method`, or `class_method`;
+- `registration.invocation`: `function`, `instance_method`, `class_method`, or v3 `constructor`;
 - `registration.receiver_type`: mandatory exact type for method registrations;
 - `handler`: `decorated_function`, positional `argument`, or named `keyword`;
 - `surface.kind`: a stable lower-case surface class;
 - `surface.id_template`: exactly one `{resource}` placeholder;
 - `surface.resource`: a literal string argument/keyword, all positional arguments from a bounded index, handler name, or fixed literal;
 - `callback_mode`: `either`, `sync`, `async`, `generator`, or `async_generator`;
+- `callback_range` (v3): `full`, `before_yield`, or `after_yield`;
+- `handler_optional` (v3): skip a constructor contract when its named callback keyword is absent;
 - `execution_mode` (v2): `direct`, `event_loop`, `threadpool`, `process_worker`, `scheduler`, `cli_dispatch`, or `framework`;
 - optional external `conditions`, which make discovery conditional.
 

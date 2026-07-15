@@ -19,6 +19,54 @@ def _extract(tmp_path: Path) -> EndpointInventory:
     ).extract_inventory()
 
 
+def test_fastapi_lifespan_splits_exact_pre_and_post_yield_ranges(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from contextlib import asynccontextmanager\n"
+        "from fastapi import FastAPI\n\n"
+        "@asynccontextmanager\n"
+        "async def lifespan(app: FastAPI):\n"
+        "    await initialize()\n"
+        "    yield\n"
+        "    await finalize()\n\n"
+        "app = FastAPI(lifespan=lifespan)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == [
+        "FRAMEWORK.LIFECYCLE lifespan:shutdown",
+        "FRAMEWORK.LIFECYCLE lifespan:startup",
+    ]
+    shutdown, startup = inventory.endpoints
+    assert (startup.handler.line_number, startup.handler.end_line_number) == (5, 7)
+    assert (shutdown.handler.line_number, shutdown.handler.end_line_number) == (7, 8)
+    assert startup.surface is not None
+    assert startup.surface.callback_range.value == "before_yield"
+    assert shutdown.surface is not None
+    assert shutdown.surface.callback_range.value == "after_yield"
+
+
+def test_lifespan_with_conditional_yield_fails_closed(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from contextlib import asynccontextmanager\n"
+        "from fastapi import FastAPI\n\n"
+        "@asynccontextmanager\n"
+        "async def lifespan(app: FastAPI):\n"
+        "    if enabled():\n"
+        "        yield\n\n"
+        "app = FastAPI(lifespan=lifespan)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.endpoints == []
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any("unconditional top-level yield" in item.reason for item in inventory.limitations)
+
+
 def test_fastapi_decorator_lifecycle_callbacks_are_distinct(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text(
         "from fastapi import FastAPI\n\n"
