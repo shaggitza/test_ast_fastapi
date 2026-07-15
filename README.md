@@ -116,9 +116,14 @@ fastapi-endpoint-detector analyze [OPTIONS]
 | `--scip` | | No | Use SCIP reverse-impact analysis instead of mypy |
 | `--baseline-app` | | No | Explicit baseline snapshot for removed SCIP lines (requires `--scip`) |
 | `--secure-ast` | | No | Discover endpoints without importing application code |
+| `--vm` | | No | Run an explicit isolated runtime comparator ([policy](docs/runtime-sandbox.md)) |
 | `--app-entry` | | No | Exact secure-AST `MODULE:SYMBOL` app object or factory |
 | `--bootstrap-entry` | | No | Exact secure-AST `MODULE:FUNCTION` registration bootstrap |
 | `--config` | `-c` | No | Path to configuration file |
+
+`--vm` requires a prebuilt immutable image digest and a configured gVisor/Kata
+runtime. It never builds an image or imports application code on the host; see
+the [runtime sandbox policy](docs/runtime-sandbox.md).
 
 `--scip` requires pinned external tools on `PATH`: `scip-query` 0.16.0,
 `@sourcegraph/scip-python` 0.6.6, and SCIP CLI. Install Node tooling outside the

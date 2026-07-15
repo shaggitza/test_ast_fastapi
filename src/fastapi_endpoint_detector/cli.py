@@ -117,7 +117,7 @@ def cli(ctx: click.Context, config: Path | None) -> None:
 @click.option(
     "--vm",
     is_flag=True,
-    help="Execute analysis in isolated Docker container for untrusted code.",
+    help="Run the explicit gVisor/Kata-isolated runtime comparator.",
 )
 @click.option(
     "--secure-ast",
@@ -190,7 +190,7 @@ def analyze(
             console.print(f"[blue]App entry:[/blue] {app_entry}")
 
         if vm:
-            console.print("[blue]Execution mode:[/blue] VM (Docker container)")
+            console.print("[blue]Execution mode:[/blue] isolated runtime comparator")
         elif secure_ast:
             console.print("[blue]Execution mode:[/blue] Secure AST (no imports)")
         console.print(f"[blue]Dependency analysis:[/blue] {'SCIP' if scip else 'mypy'}")
@@ -207,13 +207,7 @@ def analyze(
 
             executor = VMExecutor()
 
-            # Check if Docker image exists, build if needed
-            if not executor.check_image_exists():
-                console.print("[yellow]Docker image not found. Building image...[/yellow]")
-                executor.build_image()
-                console.print("[green]Docker image built successfully[/green]")
-
-            # Run analysis in VM
+            # Runtime execution requires a prebuilt immutable repository digest.
             result = executor.analyze_in_vm(
                 app_path=app,
                 diff_path=diff,
@@ -646,7 +640,7 @@ def audit_effect_contracts_command(  # noqa: PLR0912
 @click.option(
     "--vm",
     is_flag=True,
-    help="Execute analysis in isolated Docker container for untrusted code.",
+    help="Run the explicit gVisor/Kata-isolated runtime comparator.",
 )
 @click.option(
     "--secure-ast",
@@ -692,13 +686,7 @@ def list_endpoints(
 
             executor = VMExecutor()
 
-            # Check if Docker image exists, build if needed
-            if not executor.check_image_exists():
-                console.print("[yellow]Docker image not found. Building image...[/yellow]")
-                executor.build_image()
-                console.print("[green]Docker image built successfully[/green]")
-
-            # Run analysis in VM
+            # Runtime execution requires a prebuilt immutable repository digest.
             result = executor.analyze_in_vm(
                 app_path=app,
                 app_variable=app_var,

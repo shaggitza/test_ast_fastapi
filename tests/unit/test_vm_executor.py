@@ -1,300 +1,294 @@
-"""
-Unit tests for VMExecutor.
-"""
+"""Fail-closed policy tests for the isolated runtime comparator."""
 
-import subprocess
+import json
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
 
-from fastapi_endpoint_detector.executor.vm_executor import VMExecutor, VMExecutorError
-
-
-class TestVMExecutor:
-    """Tests for VMExecutor class."""
-
-    def test_init_default_params(self) -> None:
-        """Test executor initialization with default parameters."""
-        executor = VMExecutor()
-
-        assert executor.memory_limit == "512m"
-        assert executor.cpu_quota == 50000
-        assert executor.timeout == 60
-        assert executor.network_disabled is True
-
-    def test_init_custom_params(self) -> None:
-        """Test executor initialization with custom parameters."""
-        executor = VMExecutor(
-            memory_limit="1g",
-            cpu_quota=100000,
-            timeout=120,
-            network_disabled=False,
-        )
-
-        assert executor.memory_limit == "1g"
-        assert executor.cpu_quota == 100000
-        assert executor.timeout == 120
-        assert executor.network_disabled is False
-
-    @patch('subprocess.run')
-    def test_check_image_exists_true(self, mock_run: Mock) -> None:
-        """Test checking if Docker image exists (success case)."""
-        mock_run.return_value = Mock(returncode=0)
-
-        executor = VMExecutor()
-        result = executor.check_image_exists()
-
-        assert result is True
-        mock_run.assert_called_once()
-        assert "docker" in mock_run.call_args[0][0]
-        assert "image" in mock_run.call_args[0][0]
-        assert "inspect" in mock_run.call_args[0][0]
-
-    @patch('subprocess.run')
-    def test_check_image_exists_false(self, mock_run: Mock) -> None:
-        """Test checking if Docker image exists (not found)."""
-        mock_run.return_value = Mock(returncode=1)
-
-        executor = VMExecutor()
-        result = executor.check_image_exists()
-
-        assert result is False
-
-    @patch('subprocess.run')
-    def test_check_image_exists_timeout(self, mock_run: Mock) -> None:
-        """Test checking if Docker image exists (timeout)."""
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="docker", timeout=10)
-
-        executor = VMExecutor()
-        result = executor.check_image_exists()
-
-        assert result is False
-
-    @patch('subprocess.run')
-    def test_build_image_success(self, mock_run: Mock, tmp_path: Path) -> None:
-        """Test building Docker image successfully."""
-        dockerfile = tmp_path / "Dockerfile"
-        dockerfile.write_text("FROM python:3.10")
-
-        mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
-
-        executor = VMExecutor()
-        executor.build_image(dockerfile_path=dockerfile)
-
-        mock_run.assert_called_once()
-        call_args = mock_run.call_args[0][0]
-        assert "docker" in call_args
-        assert "build" in call_args
-        assert "-t" in call_args
-
-    @patch('subprocess.run')
-    def test_build_image_failure(self, mock_run: Mock, tmp_path: Path) -> None:
-        """Test building Docker image failure."""
-        dockerfile = tmp_path / "Dockerfile"
-        dockerfile.write_text("FROM python:3.10")
-
-        mock_run.side_effect = subprocess.CalledProcessError(
-            returncode=1,
-            cmd="docker build",
-            stderr="Build failed"
-        )
-
-        executor = VMExecutor()
-
-        with pytest.raises(VMExecutorError) as exc_info:
-            executor.build_image(dockerfile_path=dockerfile)
-
-        assert "Failed to build Docker image" in str(exc_info.value)
-
-    @patch('subprocess.run')
-    def test_build_image_timeout(self, mock_run: Mock, tmp_path: Path) -> None:
-        """Test building Docker image timeout."""
-        dockerfile = tmp_path / "Dockerfile"
-        dockerfile.write_text("FROM python:3.10")
-
-        mock_run.side_effect = subprocess.TimeoutExpired(
-            cmd="docker build",
-            timeout=300
-        )
-
-        executor = VMExecutor()
-
-        with pytest.raises(VMExecutorError) as exc_info:
-            executor.build_image(dockerfile_path=dockerfile)
-
-        assert "timed out" in str(exc_info.value)
-
-    def test_build_image_missing_dockerfile(self, tmp_path: Path) -> None:
-        """Test building Docker image with missing Dockerfile."""
-        dockerfile = tmp_path / "nonexistent" / "Dockerfile"
-
-        executor = VMExecutor()
-
-        with pytest.raises(VMExecutorError) as exc_info:
-            executor.build_image(dockerfile_path=dockerfile)
-
-        assert "not found" in str(exc_info.value)
-
-    @patch('subprocess.run')
-    def test_analyze_in_vm_no_image(self, mock_run: Mock, tmp_path: Path) -> None:
-        """Test analyzing in VM without Docker image."""
-        mock_run.return_value = Mock(returncode=1)  # Image doesn't exist
-
-        app_file = tmp_path / "app.py"
-        app_file.write_text("# test")
-
-        executor = VMExecutor()
-
-        with pytest.raises(VMExecutorError) as exc_info:
-            executor.analyze_in_vm(app_path=app_file)
-
-        assert "not found" in str(exc_info.value)
-
-    @patch('subprocess.run')
-    def test_analyze_in_vm_success(self, mock_run: Mock, tmp_path: Path) -> None:
-        """Test successful analysis in VM."""
-        app_file = tmp_path / "app.py"
-        app_file.write_text("# test")
-
-        # Mock image exists check
-        def run_side_effect(*args, **kwargs):
-            cmd = args[0]
-            if "inspect" in cmd:
-                return Mock(returncode=0)
-            else:
-                # Docker run command
-                return Mock(
-                    returncode=0,
-                    stdout='{"endpoints": []}',
-                    stderr=""
-                )
-
-        mock_run.side_effect = run_side_effect
-
-        executor = VMExecutor()
-        result = executor.analyze_in_vm(
-            app_path=app_file,
-            output_format="json"
-        )
-
-        assert isinstance(result, dict)
-        assert "endpoints" in result
-
-    @patch('subprocess.run')
-    def test_analyze_in_vm_with_diff(self, mock_run: Mock, tmp_path: Path) -> None:
-        """Test analysis in VM with diff file."""
-        app_file = tmp_path / "app.py"
-        app_file.write_text("# test")
-        diff_file = tmp_path / "test.diff"
-        diff_file.write_text("diff content")
-
-        # Mock image exists and run
-        def run_side_effect(*args, **kwargs):
-            cmd = args[0]
-            if "inspect" in cmd:
-                return Mock(returncode=0)
-            else:
-                return Mock(
-                    returncode=0,
-                    stdout='{"results": []}',
-                    stderr=""
-                )
-
-        mock_run.side_effect = run_side_effect
-
-        executor = VMExecutor()
-        result = executor.analyze_in_vm(
-            app_path=app_file,
-            diff_path=diff_file,
-            output_format="json"
-        )
-
-        assert isinstance(result, dict)
-
-        # Check that docker run was called with volume mounts
-        docker_run_call = next(call for call in mock_run.call_args_list if "run" in str(call))
-        call_args = docker_run_call[0][0]
-        # The app and diff need distinct container mount points even when they
-        # are located in the same host directory.
-        mounts = [call_args[index + 1] for index, arg in enumerate(call_args) if arg == "-v"]
-        assert f"{tmp_path}:/code:ro" in mounts
-        assert f"{tmp_path}:/diff:ro" in mounts
-
-    @patch('subprocess.run')
-    def test_analyze_in_vm_security_options(self, mock_run: Mock, tmp_path: Path) -> None:
-        """Test that VM uses proper security options."""
-        app_file = tmp_path / "app.py"
-        app_file.write_text("# test")
-
-        def run_side_effect(*args, **kwargs):
-            cmd = args[0]
-            if "inspect" in cmd:
-                return Mock(returncode=0)
-            else:
-                return Mock(returncode=0, stdout='{}', stderr="")
-
-        mock_run.side_effect = run_side_effect
-
-        executor = VMExecutor(network_disabled=True)
-        executor.analyze_in_vm(app_path=app_file, output_format="json")
-
-        # Get the docker run call
-        docker_run_call = next(call for call in mock_run.call_args_list if "run" in str(call))
-        call_args = docker_run_call[0][0]
-
-        # Check security options
-        assert "--network=none" in call_args
-        assert "--read-only" in call_args
-        assert "--cap-drop" in call_args
-        assert "ALL" in call_args
-        assert "--security-opt" in call_args
-        assert "no-new-privileges" in call_args
-
-    @patch('subprocess.run')
-    def test_analyze_in_vm_timeout(self, mock_run: Mock, tmp_path: Path) -> None:
-        """Test VM analysis timeout."""
-        app_file = tmp_path / "app.py"
-        app_file.write_text("# test")
-
-        def run_side_effect(*args, **kwargs):
-            cmd = args[0]
-            if "inspect" in cmd:
-                return Mock(returncode=0)
-            else:
-                raise subprocess.TimeoutExpired(cmd="docker run", timeout=60)
-
-        mock_run.side_effect = run_side_effect
-
-        executor = VMExecutor(timeout=60)
-
-        with pytest.raises(VMExecutorError) as exc_info:
-            executor.analyze_in_vm(app_path=app_file)
-
-        assert "timed out" in str(exc_info.value)
-
-    @patch('subprocess.run')
-    def test_analyze_in_vm_container_error(self, mock_run: Mock, tmp_path: Path) -> None:
-        """Test VM analysis container execution error."""
-        app_file = tmp_path / "app.py"
-        app_file.write_text("# test")
-
-        def run_side_effect(*args, **kwargs):
-            cmd = args[0]
-            if "inspect" in cmd:
-                return Mock(returncode=0)
-            else:
-                raise subprocess.CalledProcessError(
-                    returncode=1,
-                    cmd="docker run",
-                    stderr="Container failed"
-                )
-
-        mock_run.side_effect = run_side_effect
-
-        executor = VMExecutor()
-
-        with pytest.raises(VMExecutorError) as exc_info:
-            executor.analyze_in_vm(app_path=app_file)
-
-        assert "Container execution failed" in str(exc_info.value)
+from fastapi_endpoint_detector.executor.vm_executor import (
+    SandboxPolicy,
+    VMExecutor,
+    VMExecutorError,
+)
+
+_DIGEST = "registry.example/detector@sha256:" + "a" * 64
+
+
+def _executor(tmp_path: Path, **kwargs: object) -> VMExecutor:
+    profile = tmp_path / "seccomp.json"
+    profile.write_text('{"defaultAction":"SCMP_ACT_ERRNO"}', encoding="utf-8")
+    return VMExecutor(
+        image=_DIGEST,
+        seccomp_profile=profile,
+        dependency_lock_hash="sha256:" + "b" * 64,
+        sbom_hash="sha256:" + "c" * 64,
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+
+def test_policy_rejects_default_runtime_and_network() -> None:
+    with pytest.raises(ValueError, match="gVisor/Kata"):
+        SandboxPolicy(runtime="runc")
+    with pytest.raises(ValueError, match="network"):
+        VMExecutor(network_disabled=False)
+
+
+def test_default_policy_is_bounded() -> None:
+    executor = VMExecutor()
+
+    assert executor.memory_limit == "512m"
+    assert executor.cpu_quota == 50_000
+    assert executor.timeout == 60
+    assert executor.network_disabled is True
+    assert executor.policy.pids_limit == 128
+    assert executor.policy.output_limit_bytes == 4 * 1024 * 1024
+
+
+@patch("subprocess.run")
+def test_mutable_image_resolves_to_one_repository_digest(mock_run: Mock) -> None:
+    mock_run.return_value = Mock(returncode=0, stdout=json.dumps([_DIGEST]), stderr="")
+    executor = VMExecutor(image="registry.example/detector:comparison")
+
+    assert executor.check_image_exists() is True
+    assert executor._resolve_image() == _DIGEST
+    assert mock_run.call_count == 1
+
+
+@patch("subprocess.run")
+def test_ambiguous_or_missing_image_digest_fails_closed(mock_run: Mock) -> None:
+    mock_run.return_value = Mock(
+        returncode=0,
+        stdout=json.dumps([_DIGEST, "other.example/detector@sha256:" + "b" * 64]),
+        stderr="",
+    )
+
+    assert VMExecutor(image="detector:tag").check_image_exists() is False
+
+
+@patch("subprocess.run")
+def test_build_image_uses_argv_and_disables_base_pull(
+    mock_run: Mock,
+    tmp_path: Path,
+) -> None:
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text("FROM scratch\n", encoding="utf-8")
+    mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
+
+    VMExecutor().build_image(dockerfile)
+
+    command = mock_run.call_args.args[0]
+    assert command[:3] == ["docker", "build", "--pull=false"]
+    assert isinstance(command, list)
+
+
+def test_container_command_has_complete_hardening_and_narrow_mounts(tmp_path: Path) -> None:
+    app = tmp_path / "app"
+    app.mkdir()
+    diff = tmp_path / "change.diff"
+    diff.write_text("", encoding="utf-8")
+    executor = _executor(tmp_path)
+    executor._resolved_image = _DIGEST
+    cidfile = tmp_path / "cid"
+
+    command = executor._container_command(
+        app,
+        diff,
+        "app",
+        "json",
+        cidfile,
+        "comparison-id",
+    )
+
+    assert command[0:2] == ["docker", "run"]
+    for pair in (
+        ("--runtime", "runsc"),
+        ("--network", "none"),
+        ("--user", "65532:65532"),
+        ("--cap-drop", "ALL"),
+        ("--pids-limit", "128"),
+        ("--memory", "512m"),
+        ("--memory-swap", "512m"),
+    ):
+        index = command.index(pair[0])
+        assert command[index + 1] == pair[1]
+    assert "--read-only" in command
+    assert "no-new-privileges=true" in command
+    assert any(item.startswith("seccomp=") for item in command)
+    assert "/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777" in command
+    mounts = [command[index + 1] for index, item in enumerate(command) if item == "--mount"]
+    assert mounts == [
+        f"type=bind,src={app},dst=/workspace/app,readonly,bind-nonrecursive",
+        f"type=bind,src={diff},dst=/workspace/change.diff,readonly,bind-nonrecursive",
+    ]
+    assert _DIGEST in command
+    assert "--device" not in command
+    assert "--privileged" not in command
+    assert "--env" not in command
+    entrypoint = command.index("--entrypoint")
+    assert command[entrypoint + 1] == "/usr/bin/env"
+    image = command.index(_DIGEST)
+    assert command[image + 1] == "-i"
+    assert "fastapi-endpoint-detector" in command[image + 2 :]
+
+
+def test_runtime_launch_requires_lock_and_sbom_attestations(tmp_path: Path) -> None:
+    profile = tmp_path / "seccomp.json"
+    profile.write_text('{"defaultAction":"SCMP_ACT_ERRNO"}', encoding="utf-8")
+    app = tmp_path / "app"
+    app.mkdir()
+    executor = VMExecutor(
+        image=_DIGEST,
+        seccomp_profile=profile,
+    )
+    executor._resolved_image = _DIGEST
+
+    with pytest.raises(VMExecutorError, match="dependency lock"):
+        executor._container_command(app, None, "app", "json", tmp_path / "cid", "name")
+
+
+def test_list_and_analyze_preserve_equivalent_app_configuration(tmp_path: Path) -> None:
+    app = tmp_path / "application.py"
+    app.write_text("application = None\n", encoding="utf-8")
+    diff = tmp_path / "change.diff"
+    diff.write_text("", encoding="utf-8")
+    executor = _executor(tmp_path)
+    executor._resolved_image = _DIGEST
+
+    listed = executor._container_command(
+        app, None, "application", "json", tmp_path / "list.cid", "list-name"
+    )
+    analyzed = executor._container_command(
+        app, diff, "application", "json", tmp_path / "analyze.cid", "analyze-name"
+    )
+
+    for command in (listed, analyzed):
+        app_index = command.index("--app")
+        variable_index = command.index("--app-var")
+        assert command[app_index + 1] == "/workspace/application.py"
+        assert command[variable_index + 1] == "application"
+    assert "list" in listed
+    assert "analyze" in analyzed
+
+
+def test_policy_provenance_attests_digest_seccomp_and_environment(tmp_path: Path) -> None:
+    executor = _executor(tmp_path)
+    executor._resolved_image = _DIGEST
+
+    provenance = executor.policy_provenance()
+
+    assert provenance["image"] == _DIGEST
+    assert provenance["seccomp_sha256"].startswith("sha256:")
+    assert provenance["policy_sha256"].startswith("sha256:")
+    assert provenance["dependency_lock_hash"] == "sha256:" + "b" * 64
+    assert provenance["sbom_hash"] == "sha256:" + "c" * 64
+    assert set(provenance["environment"]) == set(VMExecutor.CLEAN_ENV)
+
+
+def test_analyze_uses_bounded_executor_and_parses_json(tmp_path: Path) -> None:
+    app = tmp_path / "app.py"
+    app.write_text("app = None\n", encoding="utf-8")
+    executor = _executor(tmp_path)
+    executor._resolved_image = _DIGEST
+
+    with patch.object(
+        executor,
+        "_execute_bounded",
+        return_value=('{"endpoints": []}', ""),
+    ) as execute:
+        result = executor.analyze_in_vm(app)
+
+    assert result == {"endpoints": []}
+    command = execute.call_args.args[0]
+    assert command[-7:] == [
+        "list",
+        "--app",
+        "/workspace/app.py",
+        "--format",
+        "json",
+        "--app-var",
+        "app",
+    ]
+
+
+def test_invalid_json_and_endpoint_payload_fail_closed(tmp_path: Path) -> None:
+    app = tmp_path / "app.py"
+    app.write_text("app = None\n", encoding="utf-8")
+    executor = _executor(tmp_path)
+    executor._resolved_image = _DIGEST
+
+    with (
+        patch.object(executor, "_execute_bounded", return_value=("not-json", "")),
+        pytest.raises(VMExecutorError, match="bounded JSON"),
+    ):
+        executor.analyze_in_vm(app)
+    with (
+        patch.object(executor, "analyze_in_vm", return_value={"endpoints": [{}]}),
+        pytest.raises(VMExecutorError, match="invalid endpoint"),
+    ):
+        executor.list_endpoints_in_vm(app)
+
+
+@patch("subprocess.run")
+def test_cleanup_prefers_cid_and_always_kills_then_removes(
+    mock_run: Mock,
+    tmp_path: Path,
+) -> None:
+    cidfile = tmp_path / "cid"
+    cidfile.write_text("abc123\n", encoding="utf-8")
+
+    mock_run.side_effect = [
+        Mock(returncode=0),
+        Mock(returncode=0),
+        Mock(returncode=1),
+    ]
+
+    VMExecutor._cleanup_container(cidfile, "fallback-name")
+
+    commands = [call.args[0] for call in mock_run.call_args_list]
+    assert commands == [
+        ["docker", "kill", "abc123"],
+        ["docker", "rm", "--force", "abc123"],
+        ["docker", "container", "inspect", "abc123"],
+    ]
+
+
+@patch("subprocess.run")
+def test_cleanup_verification_fails_if_container_remains(
+    mock_run: Mock,
+    tmp_path: Path,
+) -> None:
+    mock_run.side_effect = [
+        Mock(returncode=0),
+        Mock(returncode=0),
+        Mock(returncode=0),
+    ]
+
+    with pytest.raises(VMExecutorError, match="still exists"):
+        VMExecutor._cleanup_container(tmp_path / "missing-cid", "container-name")
+
+
+@patch("subprocess.Popen")
+@patch.object(VMExecutor, "_cleanup_container")
+def test_launch_failure_is_structured(
+    cleanup: Mock,
+    popen: Mock,
+    tmp_path: Path,
+) -> None:
+    popen.side_effect = OSError("missing")
+    executor = _executor(tmp_path)
+
+    with pytest.raises(VMExecutorError, match="failed to launch Docker"):
+        executor._execute_bounded(["docker", "run"], tmp_path / "cid", "name")
+
+    cleanup.assert_not_called()
+
+
+def test_seccomp_profile_is_packaged_and_deny_by_default() -> None:
+    executor = VMExecutor()
+    payload = json.loads(executor.seccomp_profile.read_text(encoding="utf-8"))
+
+    assert payload["defaultAction"] == "SCMP_ACT_ERRNO"
+    assert payload["syscalls"][0]["action"] == "SCMP_ACT_ALLOW"
+    assert "mount" not in payload["syscalls"][0]["names"]
+    assert "ptrace" not in payload["syscalls"][0]["names"]
