@@ -366,14 +366,18 @@ class MypyAnalyzer:
     and extract precise file/line information for all references.
     """
 
-    CACHE_SCHEMA_VERSION = 12
+    CACHE_SCHEMA_VERSION = 13
     MAX_POINTS_TO_TARGETS = 8
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
     MAX_POINTS_TO_EDGES = 4096
-    EXECUTION_SUMMARY_VERSION = 3
+    EXECUTION_SUMMARY_VERSION = 4
     GENERATOR_CONSUMERS: ClassVar[dict[str, tuple[int, str, bool | None]]] = {
         "starlette.responses.StreamingResponse": (0, "content", None),
+    }
+    BACKGROUND_CALLBACK_SUMMARIES: ClassVar[dict[str, _ExecutorSummary]] = {
+        "fastapi.background.BackgroundTasks.add_task": _ExecutorSummary(0, True, True),
+        "starlette.background.BackgroundTasks.add_task": _ExecutorSummary(0, True, True),
     }
     EXECUTOR_SUMMARIES: ClassVar[dict[str, _ExecutorSummary]] = {
         "asyncio.threads.to_thread": _ExecutorSummary(0, False, True),
@@ -881,14 +885,19 @@ class MypyAnalyzer:
             for node in ast.walk(expression):
                 if not isinstance(node, ast.Call):
                     continue
-                name = (
-                    node.func.id
-                    if isinstance(node.func, ast.Name)
-                    else node.func.attr
-                    if isinstance(node.func, ast.Attribute)
-                    else ""
-                )
-                if name not in {"Depends", "Security"} or not node.args:
+                registration = callable_fullname(node.func)
+                if (
+                    registration
+                    not in {
+                        "fastapi.Depends",
+                        "fastapi.Security",
+                        "fastapi.param_functions.Depends",
+                        "fastapi.param_functions.Security",
+                        "fastapi.params.Depends",
+                        "fastapi.params.Security",
+                    }
+                    or not node.args
+                ):
                     continue
                 fullname = callable_fullname(node.args[0])
                 if fullname is not None:
@@ -2041,15 +2050,14 @@ class MypyAnalyzer:
             for kind, name in zip(call.arg_kinds, call.arg_names, strict=True)
         )
 
-    def _executor_callback_binding(
+    def _callback_binding(
         self,
         call: Any,
-        wrapper_symbol: str,
+        summary: _ExecutorSummary,
     ) -> tuple[Any, Any] | None:
         """Extract one callback plus its explicitly forwarded args and kwargs."""
         from mypy.nodes import ARG_NAMED, ARG_POS  # noqa: PLC0415
 
-        summary = self.EXECUTOR_SUMMARIES[wrapper_symbol]
         arguments = list(zip(call.args, call.arg_kinds, call.arg_names, strict=True))
         callback_offset: int | None = None
         if summary.allow_callback_keyword:
@@ -2090,16 +2098,18 @@ class MypyAnalyzer:
         )
         return callback_expression, forwarded_call
 
-    def _synchronous_callback_body(self, fullname: str) -> bool:
-        """Reject callbacks whose invocation only creates deferred execution."""
+    def _callback_body_executes(self, fullname: str, *, allow_async: bool) -> bool:
+        """Reject callbacks whose invocation creates a deferred generator object."""
         resolved = self._function_node_for_fullname(fullname)
         if resolved is None:
             return False
         function = self._actual_function(resolved[0])
-        return not any(
+        if any(
             bool(getattr(function, attribute, False))
-            for attribute in ("is_coroutine", "is_generator", "is_async_generator")
-        )
+            for attribute in ("is_generator", "is_async_generator")
+        ):
+            return False
+        return allow_async or not bool(getattr(function, "is_coroutine", False))
 
     def _exact_executor_callback(
         self,
@@ -2107,6 +2117,8 @@ class MypyAnalyzer:
         environment: dict[str, _FinitePointsTo],
         import_map: dict[str, str],
         budget: list[int],
+        *,
+        allow_async: bool = False,
     ) -> tuple[tuple[str, InvocationKind], _FinitePointsTo | None] | None:
         """Resolve one source-proven project callback without callable fanout."""
         from mypy.nodes import MemberExpr  # noqa: PLC0415
@@ -2122,7 +2134,8 @@ class MypyAnalyzer:
             )
             return (
                 (declaration, receiver)
-                if declaration is not None and self._synchronous_callback_body(declaration[0])
+                if declaration is not None
+                and self._callback_body_executes(declaration[0], allow_async=allow_async)
                 else None
             )
         imported = self._explicit_import_fullname(expression, import_map)
@@ -2136,7 +2149,9 @@ class MypyAnalyzer:
                 if direct is not None and self._exact_project_identity(direct[0]) is not None
                 else None
             )
-        if declaration is None or not self._synchronous_callback_body(declaration[0]):
+        if declaration is None or not self._callback_body_executes(
+            declaration[0], allow_async=allow_async
+        ):
             return None
         return declaration, None
 
@@ -2854,9 +2869,28 @@ class MypyAnalyzer:
                 if call_site is not None and call_site.status == CallResolutionStatus.EXACT
                 else None
             )
+            callback_summary: _ExecutorSummary | None = None
+            callback_edge_kind: str | None = None
+            allow_async_callback = False
+            if wrapper_symbol in self.EXECUTOR_SUMMARIES:
+                traced = True
+                if id(call) in awaited_call_ids:
+                    callback_summary = self.EXECUTOR_SUMMARIES[wrapper_symbol]
+                    callback_edge_kind = f"executor_callback:{wrapper_symbol}"
+            elif wrapper_symbol in self.BACKGROUND_CALLBACK_SUMMARIES:
+                traced = True
+                callback_summary = self.BACKGROUND_CALLBACK_SUMMARIES[wrapper_symbol]
+                callback_edge_kind = f"background_task_callback:{wrapper_symbol}"
+                allow_async_callback = True
+            elif wrapper_symbol in {
+                "fastapi.param_functions.Depends",
+                "fastapi.param_functions.Security",
+            }:
+                traced = True
+
             callback_binding = (
-                self._executor_callback_binding(call, wrapper_symbol)
-                if wrapper_symbol in self.EXECUTOR_SUMMARIES and id(call) in awaited_call_ids
+                self._callback_binding(call, callback_summary)
+                if callback_summary is not None
                 else None
             )
             if callback_binding is not None:
@@ -2866,6 +2900,7 @@ class MypyAnalyzer:
                     flow_environment,
                     import_map,
                     finite_budget,
+                    allow_async=allow_async_callback,
                 )
                 if callback is not None:
                     declaration, callback_receiver = callback
@@ -2888,7 +2923,7 @@ class MypyAnalyzer:
                             low_confidence_edge=True,
                             target_receiver=callback_receiver,
                             target_environment=callback_environment,
-                            edge_kind=f"executor_callback:{wrapper_symbol}",
+                            edge_kind=callback_edge_kind,
                         )
 
             if isinstance(callee, MemberExpr) and (
@@ -2930,12 +2965,23 @@ class MypyAnalyzer:
             # than invoking them in the handler body. Treat the callable given
             # to Depends() as an executable dependency, while keeping ordinary
             # NameExpr arguments isolated to avoid broad over-tracing.
-            if isinstance(callee, NameExpr) and callee.name == "Depends":
-                for argument in call.args:
-                    if isinstance(argument, NameExpr) and argument.fullname:
-                        dependency_fullname = import_map.get(argument.name, argument.fullname)
-                        deps.add_reference(current_file, argument.line, dependency_fullname)
-                        resolve_and_trace(dependency_fullname, argument.line)
+            if (
+                wrapper_symbol
+                in {
+                    "fastapi.param_functions.Depends",
+                    "fastapi.param_functions.Security",
+                }
+                and call.args
+            ):
+                argument = call.args[0]
+                if isinstance(argument, NameExpr) and argument.fullname:
+                    dependency_fullname = import_map.get(argument.name, argument.fullname)
+                    deps.add_reference(current_file, argument.line, dependency_fullname)
+                    resolve_and_trace(
+                        dependency_fullname,
+                        argument.line,
+                        edge_kind=f"fastapi_dependency:{wrapper_symbol}",
+                    )
 
             # Walk nested calls before invalidating mutable local object state.
             walk_node(callee)
@@ -3334,6 +3380,15 @@ class MypyAnalyzer:
                         for symbol, (position, keyword, require_async) in sorted(
                             self.GENERATOR_CONSUMERS.items()
                         )
+                    },
+                    "background_callback_summaries": {
+                        symbol: {
+                            "callback_index": summary.callback_index,
+                            "allow_callback_keyword": summary.allow_callback_keyword,
+                            "forwards_keyword_arguments": summary.forwards_keyword_arguments,
+                            "control_keywords": sorted(summary.control_keywords),
+                        }
+                        for symbol, summary in sorted(self.BACKGROUND_CALLBACK_SUMMARIES.items())
                     },
                     "executor_summaries": {
                         symbol: {

@@ -30,6 +30,8 @@ This tool is designed for CI/CD pipelines to enable:
   with canonical provenance hashes ([schema](docs/effect-contracts.md))
 - 🛰️ **Custom Surfaces**: Declarative execution-free entrypoints for message listeners,
   tools, tasks, schedulers, CLIs, and reactors ([schema](docs/custom-surfaces.md))
+- 🔁 **Framework Semantics**: Exact lifecycle, middleware, background-task, and dependency
+  callback boundaries without external-library fanout ([details](docs/framework-semantics.md))
 - 💾 **Caching**: Cache analysis results for faster subsequent runs
 - 📋 **Multiple Output Formats**: JSON, YAML, Markdown, HTML, or human-readable text reports
 - 🎨 **Rich Progress Display**: Visual progress bars with real-time analysis feedback
@@ -206,7 +208,7 @@ analysis:
   confidence_threshold: 0.5
   effect_contracts: effects.yaml       # optional, config-relative
   surface_contracts: surfaces.yaml     # optional, requires --secure-ast
-  # surface_preset: event-listeners-v1 # alternatives: mcp-v1, workers-v1
+  # surface_preset: event-listeners-v1 # alternatives: mcp-v1, workers-v1, framework-v1
 output:
   show_confidence: true
   show_dependency_chain: false
