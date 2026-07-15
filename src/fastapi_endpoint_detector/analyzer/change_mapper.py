@@ -31,6 +31,9 @@ from fastapi_endpoint_detector.analyzer.scip_analyzer import (
     SCIPDefinition,
     SCIPReachedDefinition,
 )
+from fastapi_endpoint_detector.analyzer.sql_transaction import (
+    build_sql_transaction_diagnostics,
+)
 from fastapi_endpoint_detector.config import Config
 from fastapi_endpoint_detector.models.endpoint import (
     Endpoint,
@@ -76,6 +79,7 @@ if TYPE_CHECKING:
         LoadedResourceCoupling,
         ResourceCouplingGraph,
     )
+    from fastapi_endpoint_detector.models.sql_transaction import SQLTransactionReport
     from fastapi_endpoint_detector.models.surface_contract import LoadedSurfaceContracts
 
 # Progress callback type: (current, total, description) -> None
@@ -479,6 +483,7 @@ class ChangeMapper:
         self._inventory: EndpointInventory | None = None
         self._effect_contract_audit: EffectContractAudit | None = None
         self._resource_coupling_graph: ResourceCouplingGraph | None = None
+        self._sql_transaction_report: SQLTransactionReport | None = None
         self._mypy_analyzer: MypyAnalyzer | None = None
         self._effect_analyzer = EffectAnalyzer(target_project_root)
         self._scip_analyzer: SCIPAnalyzer | None = None
@@ -1380,6 +1385,15 @@ class ChangeMapper:
         report_progress(10, 100, f"Analyzing {total_endpoints} endpoints (mypy)...")
         self._preanalyze_mypy(progress_callback)
         self._effect_contract_audit = self._build_effect_contract_audit()
+        if self.config.analysis.sql_transaction_diagnostics:
+            if self._effect_contracts is None or self._effect_contract_audit is None:
+                raise ChangeMapperError(
+                    "SQL transaction diagnostics require a complete effect audit"
+                )
+            self._sql_transaction_report = build_sql_transaction_diagnostics(
+                self._effect_contracts,
+                self._effect_contract_audit,
+            )
         if self._resource_coupling is not None:
             if self._effect_contracts is None or self._effect_contract_audit is None:
                 raise ChangeMapperError("resource coupling requires a complete effect audit")
@@ -1462,6 +1476,7 @@ class ChangeMapper:
             warnings=warnings,
             effect_contract_audit=self._effect_contract_audit,
             resource_coupling_graph=self._resource_coupling_graph,
+            sql_transaction_report=self._sql_transaction_report,
         )
         self.mypy_analyzer.release_typed_snapshot()
         return report

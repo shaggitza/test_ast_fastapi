@@ -112,6 +112,11 @@ class YamlFormatter(BaseFormatter):
                 if report.resource_coupling_graph is not None
                 else None
             ),
+            "sql_transaction_report": (
+                report.sql_transaction_report.model_dump(mode="json", exclude_none=True)
+                if report.sql_transaction_report is not None
+                else None
+            ),
         }
 
         return yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)

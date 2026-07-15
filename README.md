@@ -33,6 +33,9 @@ This tool is designed for CI/CD pipelines to enable:
 - 🔗 **Resource Coupling**: Opt-in namespace-qualified writer/reader graphs over finite
   hashed identities, with report-only default and exact-callsite LOW candidate mode
   ([safety model](docs/resource-coupling.md))
+- 🗄️ **SQL Transactions**: Distinguish staged ORM work, flush, reachable commit/rollback,
+  and unresolved outcomes without claiming durable persistence
+  ([semantics](docs/sql-transactions.md))
 - 🛰️ **Custom Surfaces**: Declarative execution-free entrypoints for message listeners,
   tools, tasks, schedulers, CLIs, and reactors ([schema](docs/custom-surfaces.md))
 - 🔁 **Framework Semantics**: Exact lifecycle, middleware, background-task, and dependency

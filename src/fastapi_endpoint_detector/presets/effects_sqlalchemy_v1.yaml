@@ -1,0 +1,135 @@
+schema_version: 1
+preset:
+  id: sqlalchemy-transaction-effects
+  version: 1.0.0
+  provenance:
+    kind: preset
+    source: fastapi-endpoint-detector/effects_sqlalchemy_v1.yaml
+    revision: "1"
+contracts:
+  - id: sqlalchemy-session-add
+    symbol: sqlalchemy.orm.session.Session.add
+    invocation: instance_method
+    operation: stage
+    channel: sql
+    behavior: {async_mode: sync, timing: staged}
+    package: {distribution: sqlalchemy, version: ">=2,<3"}
+  - id: sqlalchemy-session-add-all
+    symbol: sqlalchemy.orm.session.Session.add_all
+    invocation: instance_method
+    operation: stage
+    channel: sql
+    behavior: {async_mode: sync, timing: staged}
+    package: {distribution: sqlalchemy, version: ">=2,<3"}
+  - id: sqlalchemy-session-delete
+    symbol: sqlalchemy.orm.session.Session.delete
+    invocation: instance_method
+    operation: stage
+    channel: sql
+    behavior: {async_mode: sync, timing: staged}
+    package: {distribution: sqlalchemy, version: ">=2,<3"}
+  - id: sqlalchemy-session-merge
+    symbol: sqlalchemy.orm.session.Session.merge
+    invocation: instance_method
+    operation: stage
+    channel: sql
+    behavior: {async_mode: sync, timing: staged}
+    package: {distribution: sqlalchemy, version: ">=2,<3"}
+  - id: sqlalchemy-session-flush
+    symbol: sqlalchemy.orm.session.Session.flush
+    invocation: instance_method
+    operation: flush
+    channel: sql
+    behavior: {async_mode: sync, timing: staged}
+    package: {distribution: sqlalchemy, version: ">=2,<3"}
+  - id: sqlalchemy-session-begin
+    symbol: sqlalchemy.orm.session.Session.begin
+    invocation: instance_method
+    operation: begin
+    channel: sql
+    behavior: {async_mode: sync, timing: context_enter}
+    package: {distribution: sqlalchemy, version: ">=2,<3"}
+  - id: sqlalchemy-session-begin-nested
+    symbol: sqlalchemy.orm.session.Session.begin_nested
+    invocation: instance_method
+    operation: begin
+    channel: sql
+    behavior: {async_mode: sync, timing: context_enter}
+    package: {distribution: sqlalchemy, version: ">=2,<3"}
+  - id: sqlalchemy-session-commit
+    symbol: sqlalchemy.orm.session.Session.commit
+    invocation: instance_method
+    operation: commit
+    channel: sql
+    behavior: {async_mode: sync, timing: immediate}
+    package: {distribution: sqlalchemy, version: ">=2,<3"}
+  - id: sqlalchemy-session-rollback
+    symbol: sqlalchemy.orm.session.Session.rollback
+    invocation: instance_method
+    operation: rollback
+    channel: sql
+    behavior: {async_mode: sync, timing: immediate}
+    package: {distribution: sqlalchemy, version: ">=2,<3"}
+  - id: sqlalchemy-async-session-add
+    symbol: sqlalchemy.ext.asyncio.session.AsyncSession.add
+    invocation: instance_method
+    operation: stage
+    channel: sql
+    behavior: {async_mode: sync, timing: staged}
+    package: {distribution: sqlalchemy, version: ">=2,<3"}
+  - id: sqlalchemy-async-session-add-all
+    symbol: sqlalchemy.ext.asyncio.session.AsyncSession.add_all
+    invocation: instance_method
+    operation: stage
+    channel: sql
+    behavior: {async_mode: sync, timing: staged}
+    package: {distribution: sqlalchemy, version: ">=2,<3"}
+  - id: sqlalchemy-async-session-delete
+    symbol: sqlalchemy.ext.asyncio.session.AsyncSession.delete
+    invocation: instance_method
+    operation: stage
+    channel: sql
+    behavior: {async_mode: async, timing: await}
+    package: {distribution: sqlalchemy, version: ">=2,<3"}
+  - id: sqlalchemy-async-session-merge
+    symbol: sqlalchemy.ext.asyncio.session.AsyncSession.merge
+    invocation: instance_method
+    operation: stage
+    channel: sql
+    behavior: {async_mode: async, timing: await}
+    package: {distribution: sqlalchemy, version: ">=2,<3"}
+  - id: sqlalchemy-async-session-flush
+    symbol: sqlalchemy.ext.asyncio.session.AsyncSession.flush
+    invocation: instance_method
+    operation: flush
+    channel: sql
+    behavior: {async_mode: async, timing: await}
+    package: {distribution: sqlalchemy, version: ">=2,<3"}
+  - id: sqlalchemy-async-session-begin
+    symbol: sqlalchemy.ext.asyncio.session.AsyncSession.begin
+    invocation: instance_method
+    operation: begin
+    channel: sql
+    behavior: {async_mode: sync, timing: context_enter}
+    package: {distribution: sqlalchemy, version: ">=2,<3"}
+  - id: sqlalchemy-async-session-begin-nested
+    symbol: sqlalchemy.ext.asyncio.session.AsyncSession.begin_nested
+    invocation: instance_method
+    operation: begin
+    channel: sql
+    behavior: {async_mode: sync, timing: context_enter}
+    package: {distribution: sqlalchemy, version: ">=2,<3"}
+  - id: sqlalchemy-async-session-commit
+    symbol: sqlalchemy.ext.asyncio.session.AsyncSession.commit
+    invocation: instance_method
+    operation: commit
+    channel: sql
+    behavior: {async_mode: async, timing: await}
+    package: {distribution: sqlalchemy, version: ">=2,<3"}
+  - id: sqlalchemy-async-session-rollback
+    symbol: sqlalchemy.ext.asyncio.session.AsyncSession.rollback
+    invocation: instance_method
+    operation: rollback
+    channel: sql
+    behavior: {async_mode: async, timing: await}
+    package: {distribution: sqlalchemy, version: ">=2,<3"}
