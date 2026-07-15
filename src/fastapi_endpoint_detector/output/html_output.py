@@ -613,7 +613,9 @@ class HtmlFormatter(BaseFormatter):
                             f"{html.escape(surface.contract_id)} "
                             f"({html.escape(surface.match_kind.value)}) at "
                             f"{html.escape(str(surface.registration_file))}:"
-                            f"{surface.registration_line}; config "
+                            f"{surface.registration_line}; callback "
+                            f"{html.escape(surface.callback_mode.value)}; execution "
+                            f"{html.escape(surface.execution_mode.value)}; config "
                             f"<code>{html.escape(surface.config_hash)}</code></div>"
                         )
 
@@ -742,7 +744,9 @@ class HtmlFormatter(BaseFormatter):
                         f"{html.escape(surface.contract_id)} "
                         f"({html.escape(surface.match_kind.value)}) at "
                         f"{html.escape(str(surface.registration_file))}:"
-                        f"{surface.registration_line}; config "
+                        f"{surface.registration_line}; callback "
+                        f"{html.escape(surface.callback_mode.value)}; execution "
+                        f"{html.escape(surface.execution_mode.value)}; config "
                         f"<code>{html.escape(surface.config_hash)}</code></div>"
                     )
                 if endpoint.discovery_conditions:
@@ -898,7 +902,9 @@ class HtmlFormatter(BaseFormatter):
                     "<td>"
                     + (
                         f"{html.escape(ep.surface.contract_id)} "
-                        f"({html.escape(ep.surface.match_kind.value)}) "
+                        f"({html.escape(ep.surface.match_kind.value)}; "
+                        f"{html.escape(ep.surface.callback_mode.value)}/"
+                        f"{html.escape(ep.surface.execution_mode.value)}) "
                         f"<code>{html.escape(ep.surface.config_hash)}</code>"
                         if ep.surface is not None
                         else ""

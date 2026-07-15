@@ -94,10 +94,42 @@ The preset follows FastMCP's documented
 [`resource`](https://gofastmcp.com/servers/resources), and
 [`prompt`](https://gofastmcp.com/servers/prompts) APIs.
 
-## Schema v1
+## Worker and CLI preset
 
-Each document has `schema_version: 1`, preset identity/provenance, and one or
-more contracts. Unknown fields, duplicate keys, duplicate contract IDs,
+Select `workers-v1` for exact Celery, RQ, Arq, APScheduler, Click, Typer,
+argparse, Dramatiq, and Celery worker-lifecycle surfaces:
+
+```yaml
+analysis:
+  surface_preset: workers-v1
+```
+
+Each contract declares both `callback_mode` and `execution_mode`. Execution
+modes distinguish process workers, event-loop workers, schedulers, CLI dispatch,
+thread pools, framework callbacks, and direct invocation. They describe the
+registration boundary only and never imply effect observation or persistence.
+
+Public IDs come only from literal registration arguments/keywords or the exact
+physical handler name where the framework documents that default. Click and
+Typer handler defaults use their documented underscore-to-hyphen normalization.
+Celery task names and APScheduler job IDs must be explicit. RQ's default queue is
+deliberately not guessed: bare `@job` is unresolved unless a user supplies a
+custom contract with an explicit resource. Argparse callback handlers
+are conditional because `set_defaults(func=...)` does not source-prove the
+public subcommand name.
+
+The preset does not infer string-path RQ enqueue targets, Celery autodiscovery,
+Arq `WorkerSettings` class registries, entry-point plugins, cron files, or CLI
+function naming conventions. Those shapes remain unavailable unless their
+registration is explicitly represented in source or configured with a custom
+contract.
+
+## Schema v1 and v2
+
+Each document has `schema_version: 1` or `2`, preset identity/provenance, and one
+or more contracts. Version 1 preserves direct execution as its only boundary;
+version 2 adds explicit `execution_mode`. Non-direct execution declarations in a
+version 1 document are rejected. Unknown fields, duplicate keys, duplicate contract IDs,
 duplicate matcher/handler selectors, non-integer schema versions, and files over
 1 MiB are rejected.
 
@@ -111,6 +143,7 @@ A contract declares:
 - `surface.id_template`: exactly one `{resource}` placeholder;
 - `surface.resource`: a literal string argument/keyword, all positional arguments from a bounded index, handler name, or fixed literal;
 - `callback_mode`: `either`, `sync`, `async`, `generator`, or `async_generator`;
+- `execution_mode` (v2): `direct`, `event_loop`, `threadpool`, `process_worker`, `scheduler`, `cli_dispatch`, or `framework`;
 - optional external `conditions`, which make discovery conditional.
 
 For example:

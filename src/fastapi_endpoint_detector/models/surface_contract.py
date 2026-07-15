@@ -34,6 +34,7 @@ BUNDLED_SURFACE_PRESETS = {
     / "presets"
     / "event_listeners_v1.yaml",
     "mcp-v1": Path(__file__).resolve().parent.parent / "presets" / "mcp_v1.yaml",
+    "workers-v1": Path(__file__).resolve().parent.parent / "presets" / "workers_v1.yaml",
 }
 
 
@@ -60,6 +61,13 @@ class HandlerSelectorKind(str, Enum):
     KEYWORD = "keyword"
 
 
+class HandlerNameNormalization(str, Enum):
+    """Documented transformation from a Python handler to a public ID."""
+
+    EXACT = "exact"
+    KEBAB_CASE = "kebab_case"
+
+
 class ResourceSelectorKind(str, Enum):
     """How one or more finite surface resource identities are selected."""
 
@@ -70,6 +78,18 @@ class ResourceSelectorKind(str, Enum):
     KEYWORD_OR_HANDLER_NAME = "keyword_or_handler_name"
     HANDLER_NAME = "handler_name"
     LITERAL = "literal"
+
+
+class SurfaceExecutionMode(str, Enum):
+    """Declared framework boundary that invokes the registered callback."""
+
+    DIRECT = "direct"
+    EVENT_LOOP = "event_loop"
+    THREADPOOL = "threadpool"
+    PROCESS_WORKER = "process_worker"
+    SCHEDULER = "scheduler"
+    CLI_DISPATCH = "cli_dispatch"
+    FRAMEWORK = "framework"
 
 
 class CallbackMode(str, Enum):
@@ -169,6 +189,7 @@ class ResourceSelector(_StrictModel):
     index: StrictInt | None = Field(default=None, ge=0)
     name: str | None = Field(default=None, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
     value: str | None = Field(default=None, min_length=1, max_length=256)
+    handler_name_normalization: HandlerNameNormalization = HandlerNameNormalization.EXACT
 
     @model_validator(mode="after")
     def validate_shape(self) -> ResourceSelector:
@@ -190,6 +211,11 @@ class ResourceSelector(_StrictModel):
             valid = self.index is None and self.name is None and self.value is None
         if not valid:
             raise ValueError("resource selector fields do not match its kind")
+        if self.handler_name_normalization != HandlerNameNormalization.EXACT and self.kind not in {
+            ResourceSelectorKind.HANDLER_NAME,
+            ResourceSelectorKind.KEYWORD_OR_HANDLER_NAME,
+        }:
+            raise ValueError("handler name normalization requires a handler-name selector")
         return self
 
 
@@ -218,6 +244,7 @@ class SurfaceContract(_StrictModel):
     handler: HandlerSelector
     surface: SurfaceIdentity
     callback_mode: CallbackMode = CallbackMode.EITHER
+    execution_mode: SurfaceExecutionMode = SurfaceExecutionMode.DIRECT
     conditions: tuple[str, ...] = ()
     provenance: ContractProvenance | None = None
 
@@ -243,7 +270,7 @@ class SurfaceContract(_StrictModel):
 class SurfaceContractDocument(_StrictModel):
     """Versioned deterministic custom-surface contract set."""
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 1
     preset: PresetMetadata
     contracts: tuple[SurfaceContract, ...] = Field(min_length=1)
 
@@ -251,11 +278,20 @@ class SurfaceContractDocument(_StrictModel):
     @classmethod
     def validate_schema_version_type(cls, value: object) -> object:
         if type(value) is not int:
-            raise ValueError("schema_version must be the integer 1")
+            raise ValueError("schema_version must be the integer 1 or 2")
         return value
 
     @model_validator(mode="after")
     def validate_unique_contracts(self) -> SurfaceContractDocument:
+        if self.schema_version == 1 and any(
+            contract.execution_mode != SurfaceExecutionMode.DIRECT
+            or contract.surface.resource.handler_name_normalization
+            != HandlerNameNormalization.EXACT
+            for contract in self.contracts
+        ):
+            raise ValueError(
+                "non-direct execution and handler normalization require schema_version 2"
+            )
         ids: set[str] = set()
         keys: set[tuple[str, InvocationKind, HandlerSelectorKind, int | None, str | None]] = set()
         wildcards: list[SurfaceContract] = []

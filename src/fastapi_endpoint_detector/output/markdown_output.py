@@ -90,7 +90,9 @@ class MarkdownFormatter(BaseFormatter):
                             f"- **Surface contract:** `{ep.surface.contract_id}` "
                             f"({ep.surface.match_kind.value}) at "
                             f"`{ep.surface.registration_file}:{ep.surface.registration_line}`; "
-                            f"config `{ep.surface.config_hash}`"
+                            f"callback `{ep.surface.callback_mode.value}`; execution "
+                            f"`{ep.surface.execution_mode.value}`; config "
+                            f"`{ep.surface.config_hash}`"
                         )
                     lines.append(f"- **Reason:** {ae.reason}")
                     if ep.discovery_conditions:
@@ -162,7 +164,8 @@ class MarkdownFormatter(BaseFormatter):
                         f"  - Surface contract `{surface.contract_id}` "
                         f"({surface.match_kind.value}) at "
                         f"`{surface.registration_file}:{surface.registration_line}`; "
-                        f"config `{surface.config_hash}`"
+                        f"callback `{surface.callback_mode.value}`; execution "
+                        f"`{surface.execution_mode.value}`; config `{surface.config_hash}`"
                     )
                 for condition in candidate.endpoint.discovery_conditions:
                     lines.append(
@@ -250,7 +253,8 @@ class MarkdownFormatter(BaseFormatter):
             methods = ", ".join(m.value for m in ep.methods)
             file_name = ep.handler.file_path.name
             surface = (
-                f"`{ep.surface.contract_id}` ({ep.surface.match_kind.value})"
+                f"`{ep.surface.contract_id}` ({ep.surface.match_kind.value}; "
+                f"{ep.surface.callback_mode.value}/{ep.surface.execution_mode.value})"
                 if ep.surface is not None
                 else ""
             )

@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 preset:
   id: event-listeners
   version: "1"
@@ -21,6 +21,7 @@ contracts:
         kind: argument
         index: 0
     callback_mode: async
+    execution_mode: framework
 
   - id: faststream-kafka-subscriber
     registration:
@@ -36,6 +37,7 @@ contracts:
         kind: arguments
         index: 0
     callback_mode: async
+    execution_mode: framework
 
   - id: aio-pika-queue-consumer
     registration:
@@ -51,5 +53,6 @@ contracts:
       resource:
         kind: handler_name
     callback_mode: async
+    execution_mode: event_loop
     conditions:
       - queue identity is receiver-bound and unavailable to schema v1
