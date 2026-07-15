@@ -25,6 +25,7 @@ from rich.progress import (
 from fastapi_endpoint_detector import __version__
 from fastapi_endpoint_detector.config import Config, load_config
 from fastapi_endpoint_detector.models.effect_contract import load_effect_contracts
+from fastapi_endpoint_detector.models.surface_contract import load_surface_contracts
 
 console = Console()
 
@@ -153,6 +154,9 @@ def analyze(
     config: Config = ctx.obj["config"]
 
     # Validate mutually exclusive options
+    if config.analysis.surface_contracts is not None and not secure_ast:
+        console.print("[red]Error:[/red] custom surface contracts require --secure-ast")
+        raise click.Abort()
     if config.analysis.effect_contracts is not None and vm:
         console.print("[red]Error:[/red] effect contract evidence is unavailable with --vm")
         raise click.Abort()
@@ -370,6 +374,54 @@ def validate_effect_contracts(contracts: Path, output_format: str) -> None:
         raise click.ClickException(str(exc)) from exc
 
 
+@cli.command("validate-surface-contracts")
+@click.option(
+    "--contracts",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    required=True,
+    help="Strict YAML, JSON, or TOML custom-surface contract document.",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["text", "json", "yaml"]),
+    default="text",
+)
+def validate_surface_contracts(contracts: Path, output_format: str) -> None:
+    """Validate and hash custom-surface contracts without importing project code."""
+    try:
+        loaded = load_surface_contracts(contracts)
+        data = {
+            "schema_version": loaded.document.schema_version,
+            "source_path": str(loaded.source_path),
+            "raw_hash": loaded.raw_hash,
+            "config_hash": loaded.config_hash,
+            "preset_hash": loaded.preset_hash,
+            "contract_hashes": loaded.contract_hashes,
+            "preset": loaded.document.preset.model_dump(mode="json", exclude_none=True),
+            "contracts": [
+                item.model_dump(mode="json", exclude_none=True)
+                for item in sorted(loaded.document.contracts, key=lambda item: item.id)
+            ],
+        }
+        if output_format == "json":
+            rendered = json.dumps(data, indent=2)
+        elif output_format == "yaml":
+            rendered = yaml.safe_dump(data, sort_keys=False)
+        else:
+            rendered = (
+                "Surface contracts valid\n"
+                f"Schema: {loaded.document.schema_version}\n"
+                f"Preset: {loaded.document.preset.id}@{loaded.document.preset.version}\n"
+                f"Contracts: {len(loaded.document.contracts)}\n"
+                f"Config hash: {loaded.config_hash}\n"
+                f"Preset hash: {loaded.preset_hash}\n"
+            )
+        click.echo(rendered)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
 @cli.command("audit-effect-contracts")
 @click.option(
     "--app",
@@ -465,6 +517,19 @@ def audit_effect_contracts_command(  # noqa: PLR0912
             bootstrap_entry=bootstrap_entry,
         )
         inventory = extractor.extract_inventory()
+        loaded_surfaces = config.load_surface_contract_snapshot()
+        if loaded_surfaces is not None:
+            from fastapi_endpoint_detector.parser.custom_surface_extractor import (  # noqa: PLC0415
+                CustomSurfaceExtractor,
+                merge_surface_inventory,
+            )
+
+            custom = CustomSurfaceExtractor(
+                app,
+                loaded_surfaces,
+                bootstrap_entry=bootstrap_entry,
+            ).extract_inventory()
+            inventory = merge_surface_inventory(inventory, custom)
         source_root = app.resolve().parent if app.is_file() else app.resolve()
         effective_depth = config.parser.max_depth if config.analysis.track_transitive else 1
         analyzer = MypyAnalyzer(source_root, max_depth=effective_depth)
@@ -604,7 +669,12 @@ def list_endpoints(
     from fastapi_endpoint_detector.output.formatters import get_formatter
     from fastapi_endpoint_detector.parser.fastapi_extractor import FastAPIExtractor
 
+    config: Config = ctx.obj["config"]
+
     # Validate mutually exclusive options
+    if config.analysis.surface_contracts is not None and not secure_ast:
+        console.print("[red]Error:[/red] custom surface contracts require --secure-ast")
+        raise click.Abort()
     if vm and secure_ast:
         console.print("[red]Error:[/red] --vm and --secure-ast cannot be used together")
         raise click.Abort()
@@ -662,6 +732,19 @@ def list_endpoints(
                 bootstrap_entry=bootstrap_entry,
             )
             inventory = extractor_obj.extract_inventory()
+            loaded_surfaces = config.load_surface_contract_snapshot()
+            if loaded_surfaces is not None:
+                from fastapi_endpoint_detector.parser.custom_surface_extractor import (  # noqa: PLC0415
+                    CustomSurfaceExtractor,
+                    merge_surface_inventory,
+                )
+
+                custom = CustomSurfaceExtractor(
+                    app,
+                    loaded_surfaces,
+                    bootstrap_entry=bootstrap_entry,
+                ).extract_inventory()
+                inventory = merge_surface_inventory(inventory, custom)
             endpoints = inventory.endpoints
         else:
             # Use default runtime introspection
