@@ -52,6 +52,11 @@ from fastapi_endpoint_detector.models.report import (
     ImpactChannel,
     OrphanChange,
 )
+from fastapi_endpoint_detector.models.resource_coupling import (
+    ResourceCouplingCandidateEvidence,
+    ResourceCouplingEdge,
+    ResourceCouplingError,
+)
 from fastapi_endpoint_detector.parser.custom_surface_extractor import (
     CustomSurfaceExtractor,
     merge_surface_inventory,
@@ -1185,6 +1190,122 @@ class ChangeMapper:
             )
         return enriched
 
+    def _expand_resource_coupling_candidates(
+        self,
+        candidates: list[AffectedEndpoint],
+        diff_files: list[DiffFile],
+    ) -> list[AffectedEndpoint]:
+        """Add atomic LOW-only targets from exact added producer callsites."""
+        graph = self._resource_coupling_graph
+        configured = self._resource_coupling
+        audit = self._effect_contract_audit
+        if (
+            graph is None
+            or configured is None
+            or audit is None
+            or graph.mode != "changed_callsite_candidates"
+        ):
+            return candidates
+        source_root = self.app_path.parent if self.app_path.is_file() else self.app_path
+        added_by_path: dict[str, set[int]] = {}
+        for diff_file in diff_files:
+            added_lines, _removed_lines = DiffParser.get_changed_line_numbers(diff_file)
+            if not added_lines:
+                continue
+            path = diff_file.path
+            if path.is_absolute():
+                try:
+                    path = path.resolve().relative_to(source_root.resolve())
+                except ValueError:
+                    continue
+            added_by_path.setdefault(_normalized_diff_path(path), set()).update(added_lines)
+
+        occurrence_by_id = {item.id: item for item in audit.occurrences}
+        direct_endpoint_ids = {
+            build_audit_endpoint(candidate.endpoint, source_root).id for candidate in candidates
+        }
+        endpoint_by_id = {
+            build_audit_endpoint(endpoint, source_root).id: endpoint
+            for endpoint in self.inventory.endpoints
+        }
+        eligible: list[tuple[ResourceCouplingEdge, ResourceCouplingCandidateEvidence]] = []
+        for edge in graph.edges:
+            if edge.producer_endpoint_id not in direct_endpoint_ids:
+                continue
+            occurrence = occurrence_by_id.get(edge.producer_occurrence_id)
+            if occurrence is None:
+                continue
+            changed = added_by_path.get(_normalized_diff_path(occurrence.file_path), set())
+            end_line = occurrence.end_line or occurrence.line
+            overlapping = sorted(line for line in changed if occurrence.line <= line <= end_line)
+            if not overlapping or edge.consumer_endpoint_id not in endpoint_by_id:
+                continue
+            evidence = ResourceCouplingCandidateEvidence(
+                edge_id=edge.id,
+                graph_hash=graph.graph_hash,
+                producer_occurrence_id=edge.producer_occurrence_id,
+                producer_endpoint_id=edge.producer_endpoint_id,
+                consumer_endpoint_id=edge.consumer_endpoint_id,
+                changed_file=occurrence.file_path,
+                changed_line=overlapping[0],
+                resource_value_hash=edge.resource_value_hash,
+                strength=edge.strength,
+                limitations=(
+                    "The exact producer callsite was added, but runtime execution, ordering, "
+                    "persistence, and downstream observation are not established.",
+                    "This potential cross-request edge is LOW-only and non-recursive.",
+                ),
+            )
+            eligible.append((edge, evidence))
+
+        new_target_ids = {
+            evidence.consumer_endpoint_id
+            for _edge, evidence in eligible
+            if evidence.consumer_endpoint_id not in direct_endpoint_ids
+        }
+        if len(new_target_ids) > configured.document.limits.max_new_candidates:
+            raise ResourceCouplingError(
+                "resource coupling candidate limit exceeded; expansion aborted atomically"
+            )
+        evidence_by_target: dict[str, dict[str, ResourceCouplingCandidateEvidence]] = {}
+        for edge, evidence in eligible:
+            evidence_by_target.setdefault(edge.consumer_endpoint_id, {})[edge.id] = evidence
+
+        enriched: list[AffectedEndpoint] = []
+        seen_target_ids: set[str] = set()
+        for candidate in candidates:
+            target_id = build_audit_endpoint(candidate.endpoint, source_root).id
+            seen_target_ids.add(target_id)
+            additions = evidence_by_target.get(target_id, {})
+            if not additions:
+                enriched.append(candidate)
+                continue
+            merged = {item.edge_id: item for item in candidate.resource_coupling_evidence}
+            merged.update(additions)
+            enriched.append(
+                candidate.model_copy(
+                    update={
+                        "resource_coupling_evidence": tuple(merged[item] for item in sorted(merged))
+                    }
+                )
+            )
+        for target_id in sorted(new_target_ids - seen_target_ids):
+            endpoint = endpoint_by_id[target_id]
+            target_evidence = evidence_by_target[target_id]
+            changed_files = sorted({item.changed_file for item in target_evidence.values()})
+            enriched.append(
+                AffectedEndpoint(
+                    endpoint=endpoint,
+                    confidence=ConfidenceLevel.LOW,
+                    reason="Potential cross-request finite resource coupling",
+                    changed_files=changed_files,
+                    resource_coupling_evidence=tuple(
+                        target_evidence[item] for item in sorted(target_evidence)
+                    ),
+                )
+            )
+        return enriched
+
     def analyze_diff(  # noqa: PLR0915
         self,
         diff_source: Path | str,
@@ -1309,6 +1430,7 @@ class ChangeMapper:
         report_progress(95, 100, "Filtering results...")
         threshold = self.config.analysis.confidence_threshold
         materialized = [item.materialize() for item in all_affected.values()]
+        materialized = self._expand_resource_coupling_candidates(materialized, python_files)
         materialized = self._attach_contract_evidence(
             materialized,
             self._effect_contract_audit,

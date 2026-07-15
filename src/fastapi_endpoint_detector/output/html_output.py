@@ -557,11 +557,16 @@ class HtmlFormatter(BaseFormatter):
             )
         if report.resource_coupling_graph is not None:
             graph = report.resource_coupling_graph
+            policy = (
+                "report-only; does not change candidates"
+                if graph.mode == "report_only"
+                else "exact-callsite LOW candidate mode"
+            )
             content_lines.append(
                 '<div class="summary-item"><span class="summary-label">'
                 "Resource Coupling:</span> "
-                f"{len(graph.edges)} report-only edges / "
-                f"{len(graph.diagnostics)} diagnostics; does not change candidates</div>"
+                f"{len(graph.edges)} edges / {len(graph.diagnostics)} diagnostics; "
+                f"{policy}</div>"
             )
         content_lines.append("</div>")
 
@@ -649,6 +654,12 @@ class HtmlFormatter(BaseFormatter):
                             "Declared contract:</span> "
                             f"{html.escape(contract_evidence.contract.id)} "
                             "(change-to-call flow not established)</div>"
+                        )
+                    for coupling in ae.resource_coupling_evidence:
+                        content_lines.append(
+                            '<div class="info-item"><span class="label">'
+                            "Potential cross-request coupling:</span> exact added producer "
+                            f"callsite; {html.escape(coupling.strength.value)}; LOW-only</div>"
                         )
 
                     if ep.discovery_conditions:
@@ -781,6 +792,12 @@ class HtmlFormatter(BaseFormatter):
                         "Declared contract:</span> "
                         f"{html.escape(contract_evidence.contract.id)} "
                         "(change-to-call flow not established)</div>"
+                    )
+                for coupling in candidate.resource_coupling_evidence:
+                    content_lines.append(
+                        '<div class="info-item"><span class="label">'
+                        "Potential cross-request coupling:</span> exact added producer "
+                        f"callsite; {html.escape(coupling.strength.value)}; LOW-only</div>"
                     )
                 content_lines.append("</div>")
 

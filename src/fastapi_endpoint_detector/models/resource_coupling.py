@@ -69,32 +69,40 @@ class ResourceCouplingLimits(_StrictModel):
 
     max_endpoint_links_per_resource: StrictInt = Field(default=32, ge=1, le=128)
     max_edges: StrictInt = Field(default=1000, ge=1, le=10_000)
+    max_new_candidates: StrictInt = Field(default=100, ge=1, le=1000)
 
 
 class ResourceCouplingDocument(_StrictModel):
-    """Versioned report-only coupling configuration."""
+    """Versioned coupling configuration with an explicit candidate policy."""
 
-    schema_version: Literal[1] = 1
-    mode: Literal["report_only"] = "report_only"
+    schema_version: Literal[1, 2] = 1
+    mode: Literal["report_only", "changed_callsite_candidates"] = "report_only"
     groups: tuple[ResourceCouplingGroup, ...] = Field(min_length=1, max_length=64)
     limits: ResourceCouplingLimits = Field(default_factory=ResourceCouplingLimits)
 
     @field_validator("schema_version", mode="before")
     @classmethod
     def validate_schema_version_type(cls, value: object) -> object:
-        if type(value) is not int:
-            raise ValueError("schema_version must be the integer 1")
+        if type(value) is not int or value not in {1, 2}:
+            raise ValueError("schema_version must be the integer 1 or 2")
         return value
 
     @model_validator(mode="after")
     def validate_groups(self) -> ResourceCouplingDocument:
+        if self.schema_version == 1 and self.mode != "report_only":
+            raise ValueError("schema version 1 supports report_only mode only")
+        if self.schema_version == 1 and "max_new_candidates" in self.limits.model_fields_set:
+            raise ValueError("schema version 1 forbids max_new_candidates")
         ids = [group.id for group in self.groups]
         if ids != sorted(set(ids)):
             raise ValueError("coupling groups must have sorted unique ids")
         return self
 
     def normalized_payload(self) -> dict[str, Any]:
-        return self.model_dump(mode="json")
+        payload = self.model_dump(mode="json")
+        if self.schema_version == 1:
+            payload["limits"].pop("max_new_candidates", None)
+        return payload
 
 
 class LoadedResourceCoupling(_StrictModel):
@@ -187,12 +195,36 @@ class ResourceCouplingDiagnostic(_StrictModel):
         return self
 
 
-class ResourceCouplingGraph(_StrictModel):
-    """Deterministic report-only graph; it never changes endpoint candidates."""
+class ResourceCouplingCandidateEvidence(_StrictModel):
+    """LOW-only evidence anchored to an added producer callsite and one graph edge."""
 
     schema_version: Literal[1] = 1
-    mode: Literal["report_only"] = "report_only"
-    status: Literal["diagnostic_only"] = "diagnostic_only"
+    status: Literal["potential_cross_request"] = "potential_cross_request"
+    causal_basis: Literal["exact_added_producer_callsite"] = "exact_added_producer_callsite"
+    edge_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    graph_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    producer_occurrence_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    producer_endpoint_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    consumer_endpoint_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    changed_file: str = Field(min_length=1)
+    changed_line: StrictInt = Field(ge=1)
+    resource_value_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    strength: CouplingStrength
+    limitations: tuple[str, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_limitations(self) -> ResourceCouplingCandidateEvidence:
+        if any(not item.strip() for item in self.limitations):
+            raise ValueError("coupling evidence limitations must not be blank")
+        return self
+
+
+class ResourceCouplingGraph(_StrictModel):
+    """Deterministic finite resource graph with an explicit candidate policy."""
+
+    schema_version: Literal[1, 2] = 1
+    mode: Literal["report_only", "changed_callsite_candidates"] = "report_only"
+    status: Literal["diagnostic_only", "candidate_eligible"] = "diagnostic_only"
     raw_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     config_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     effect_audit_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
@@ -206,6 +238,10 @@ class ResourceCouplingGraph(_StrictModel):
 
     @model_validator(mode="after")
     def validate_graph(self) -> ResourceCouplingGraph:
+        if self.schema_version == 1 and self.mode != "report_only":
+            raise ValueError("coupling graph schema version 1 is report-only")
+        if (self.mode == "report_only") != (self.status == "diagnostic_only"):
+            raise ValueError("coupling graph mode and status are inconsistent")
         group_ids = [group.id for group in self.groups]
         if group_ids != sorted(set(group_ids)):
             raise ValueError("coupling graph groups must be sorted and unique")

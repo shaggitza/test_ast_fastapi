@@ -59,9 +59,14 @@ class MarkdownFormatter(BaseFormatter):
             )
         if report.resource_coupling_graph is not None:
             graph = report.resource_coupling_graph
+            policy = (
+                "report-only; does not change candidates"
+                if graph.mode == "report_only"
+                else "exact-callsite LOW candidate mode"
+            )
             lines.append(
-                f"- **Resource Coupling:** {len(graph.edges)} report-only edges / "
-                f"{len(graph.diagnostics)} diagnostics; does not change candidates"
+                f"- **Resource Coupling:** {len(graph.edges)} edges / "
+                f"{len(graph.diagnostics)} diagnostics; {policy}"
             )
         lines.append("")
 
@@ -119,6 +124,11 @@ class MarkdownFormatter(BaseFormatter):
                             f"{contract_evidence.contract.operation.value}/"
                             f"{contract_evidence.contract.channel.value}; "
                             "change-to-call flow not established"
+                        )
+                    for coupling in ae.resource_coupling_evidence:
+                        lines.append(
+                            "- **Potential cross-request coupling:** exact added producer "
+                            f"callsite; {coupling.strength.value}; LOW-only"
                         )
 
                     if ae.dependency_chain and len(ae.dependency_chain) > 1:
@@ -184,6 +194,11 @@ class MarkdownFormatter(BaseFormatter):
                     lines.append(
                         f"  - Declared contract `{contract_evidence.contract.id}`: "
                         "change-to-call flow not established"
+                    )
+                for coupling in candidate.resource_coupling_evidence:
+                    lines.append(
+                        "  - Potential cross-request coupling: exact added producer "
+                        f"callsite; {coupling.strength.value}; LOW-only"
                     )
             lines.append("")
 

@@ -67,6 +67,7 @@ from fastapi_endpoint_detector.models.report import (
 from fastapi_endpoint_detector.models.resource_coupling import (
     CouplingStrength,
     LoadedResourceCoupling,
+    ResourceCouplingCandidateEvidence,
     ResourceCouplingDocument,
     ResourceCouplingEdge,
     ResourceCouplingError,
@@ -118,6 +119,7 @@ __all__ = [  # noqa: RUF022 - grouped by public model domain
     # Resource coupling models
     "CouplingStrength",
     "LoadedResourceCoupling",
+    "ResourceCouplingCandidateEvidence",
     "ResourceCouplingDocument",
     "ResourceCouplingEdge",
     "ResourceCouplingError",
