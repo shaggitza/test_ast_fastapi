@@ -61,6 +61,39 @@ APIs and aio-pika's callback-based
 [`Queue.consume`](https://docs.aio-pika.com/apidoc.html#aio_pika.queue.Queue.consume)
 API.
 
+## MCP preset
+
+Select `mcp-v1` to discover FastMCP tools, resources, and prompts:
+
+```yaml
+analysis:
+  surface_preset: mcp-v1
+```
+
+The preset supports both `fastmcp.FastMCP` and the official Python SDK's
+`mcp.server.fastmcp.FastMCP` exact identities. It recognizes called and bare
+`tool`, `resource`, and `prompt` decorators, plus imperative `add_tool` and
+`add_prompt` registration of one project-local function.
+
+Tools and prompts use an explicit literal `name=` when present and otherwise use
+the physical handler name. An explicit dynamic name fails closed instead of
+falling back. Resources preserve the exact literal URI or URI template from the
+positional `uri` argument or `uri=` keyword. Surface kinds remain distinct:
+`mcp.tool`, `mcp.resource`, and `mcp.prompt`.
+
+Sync and async handlers are both valid because FastMCP executes sync components
+in its thread pool and async components on the event loop. Context/dependency
+parameters do not change callback identity. Duplicate exposed IDs retain every
+physical handler as conditional evidence rather than silently applying
+FastMCP's runtime replacement policy. Dynamic plugin registries, bound-method
+objects, component instances passed to `add_resource`, and runtime enable/disable
+mutation remain unresolved.
+
+The preset follows FastMCP's documented
+[`tool`](https://gofastmcp.com/servers/tools),
+[`resource`](https://gofastmcp.com/servers/resources), and
+[`prompt`](https://gofastmcp.com/servers/prompts) APIs.
+
 ## Schema v1
 
 Each document has `schema_version: 1`, preset identity/provenance, and one or

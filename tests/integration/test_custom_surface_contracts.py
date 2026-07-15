@@ -207,6 +207,51 @@ def test_bundled_event_listener_preset_reaches_changed_handler(tmp_path: Path) -
     assert surface.resource == "orders"
 
 
+def test_bundled_mcp_preset_reaches_changed_tool_handler(tmp_path: Path) -> None:
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "main.py").write_text(
+        "from fastmcp import Context, FastMCP\n"
+        "mcp = FastMCP('server')\n\n"
+        "@mcp.tool(name='catalog.search')\n"
+        "async def search(query: str, ctx: Context) -> str:\n"
+        "    return query.upper()\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / ".endpoint-detector.yaml"
+    config_path.write_text(
+        "analysis:\n  surface_preset: mcp-v1\n",
+        encoding="utf-8",
+    )
+    diff = tmp_path / "change.diff"
+    diff.write_text(
+        "diff --git a/main.py b/main.py\n"
+        "--- a/main.py\n"
+        "+++ b/main.py\n"
+        "@@ -4,3 +4,3 @@\n"
+        " @mcp.tool(name='catalog.search')\n"
+        " async def search(query: str, ctx: Context) -> str:\n"
+        "-    return query\n"
+        "+    return query.upper()\n",
+        encoding="utf-8",
+    )
+
+    report = ChangeMapper(
+        app_path=app,
+        config=load_config(config_path),
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+
+    assert [candidate.endpoint.identifier for candidate in report.candidate_endpoints] == [
+        "MCP.TOOL tool:catalog.search"
+    ]
+    endpoint = report.candidate_endpoints[0].endpoint
+    assert endpoint.surface is not None
+    assert endpoint.surface.contract_id == "fastmcp-tool-decorator"
+    assert endpoint.handler.name == "search"
+
+
 def test_conditional_aio_pika_consumer_is_capped_low(tmp_path: Path) -> None:
     app = tmp_path / "app"
     app.mkdir()

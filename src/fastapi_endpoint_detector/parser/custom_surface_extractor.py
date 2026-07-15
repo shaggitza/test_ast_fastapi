@@ -318,10 +318,11 @@ class CustomSurfaceExtractor:
                 continue
             if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 for decorator in statement.decorator_list:
-                    if isinstance(decorator, ast.Call):
+                    registration = self._decorator_call(decorator)
+                    if registration is not None:
                         self._inspect_registration(
                             module,
-                            decorator,
+                            registration,
                             state,
                             inherited_conditions,
                             decorated_handler=statement,
@@ -424,6 +425,18 @@ class CustomSurfaceExtractor:
                 )
             if mutation.calls or mutation.has_named_expression:
                 state.clear()
+
+    @staticmethod
+    def _decorator_call(decorator: ast.expr) -> ast.Call | None:
+        """Normalize bare and called decorators without evaluating expressions."""
+        if isinstance(decorator, ast.Call):
+            return decorator
+        if isinstance(decorator, (ast.Name, ast.Attribute)):
+            return ast.copy_location(
+                ast.Call(func=decorator, args=[], keywords=[]),
+                decorator,
+            )
+        return None
 
     def _inspect_registration(  # noqa: PLR0912
         self,
@@ -676,7 +689,7 @@ class CustomSurfaceExtractor:
         )
 
     @classmethod
-    def _resources(
+    def _resources(  # noqa: PLR0912
         cls,
         contract: SurfaceContract,
         call: ast.Call,
@@ -698,17 +711,38 @@ class CustomSurfaceExtractor:
             if not groups or any(group is None for group in groups):
                 return None
             values = tuple(value for group in groups for value in group or ())
+        elif selector.kind == ResourceSelectorKind.KEYWORD_OR_HANDLER_NAME:
+            expression = next(
+                (item.value for item in call.keywords if item.arg == selector.name),
+                None,
+            )
+            if expression is None:
+                values = (handler.name,)
+            else:
+                resolved = cls._literal_resources(expression)
+                if resolved is None:
+                    return None
+                values = resolved
         else:
-            expression: ast.expr | None
             if selector.kind == ResourceSelectorKind.ARGUMENT:
                 index = selector.index or 0
-                expression = call.args[index] if index < len(call.args) else None
+                selected_expression = call.args[index] if index < len(call.args) else None
+            elif selector.kind == ResourceSelectorKind.ARGUMENT_OR_KEYWORD:
+                index = selector.index or 0
+                selected_expression = (
+                    call.args[index]
+                    if index < len(call.args)
+                    else next(
+                        (item.value for item in call.keywords if item.arg == selector.name),
+                        None,
+                    )
+                )
             else:
-                expression = next(
+                selected_expression = next(
                     (item.value for item in call.keywords if item.arg == selector.name),
                     None,
                 )
-            resolved = cls._literal_resources(expression)
+            resolved = cls._literal_resources(selected_expression)
             if resolved is None:
                 return None
             values = resolved
