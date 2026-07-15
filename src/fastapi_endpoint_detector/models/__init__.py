@@ -74,6 +74,12 @@ from fastapi_endpoint_detector.models.resource_coupling import (
     ResourceCouplingGraph,
     load_resource_coupling,
 )
+from fastapi_endpoint_detector.models.sql_transaction import (
+    SQLTransactionEndpointEvidence,
+    SQLTransactionOutcome,
+    SQLTransactionReport,
+    SQLTransactionSummary,
+)
 from fastapi_endpoint_detector.models.surface_contract import (
     CallbackMode,
     HandlerNameNormalization,
@@ -125,6 +131,11 @@ __all__ = [  # noqa: RUF022 - grouped by public model domain
     "ResourceCouplingError",
     "ResourceCouplingGraph",
     "load_resource_coupling",
+    # SQL transaction evidence
+    "SQLTransactionEndpointEvidence",
+    "SQLTransactionOutcome",
+    "SQLTransactionReport",
+    "SQLTransactionSummary",
     # Custom surface contract models
     "CallbackMode",
     "HandlerNameNormalization",

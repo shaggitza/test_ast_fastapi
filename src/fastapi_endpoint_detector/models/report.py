@@ -25,6 +25,7 @@ from fastapi_endpoint_detector.models.resource_coupling import (
     ResourceCouplingCandidateEvidence,
     ResourceCouplingGraph,
 )
+from fastapi_endpoint_detector.models.sql_transaction import SQLTransactionReport
 
 
 def _contract_hash(contract: EffectContract) -> str:
@@ -409,7 +410,11 @@ class AnalysisReport(BaseModel):
     )
     resource_coupling_graph: ResourceCouplingGraph | None = Field(
         default=None,
-        description="Report-only finite cross-endpoint resource graph.",
+        description="Finite cross-endpoint resource graph and optional LOW evidence.",
+    )
+    sql_transaction_report: SQLTransactionReport | None = Field(
+        default=None,
+        description="Report-only endpoint-reachable SQL staging and boundary evidence.",
     )
 
     @model_validator(mode="after")
@@ -417,6 +422,36 @@ class AnalysisReport(BaseModel):
         """Keep manually constructed legacy reports internally consistent."""
         if not self.candidate_endpoints and self.affected_endpoints:
             self.candidate_endpoints = list(self.affected_endpoints)
+        return self
+
+    @model_validator(mode="after")
+    def validate_sql_transaction_report(self) -> "AnalysisReport":
+        transaction_report = self.sql_transaction_report
+        if transaction_report is None:
+            return self
+        audit = self.effect_contract_audit
+        if audit is None or transaction_report.effect_audit_hash != audit.provenance.audit_hash:
+            raise ValueError("SQL transaction report requires its exact effect audit")
+        occurrence_by_id = {item.id: item for item in audit.occurrences}
+        endpoint_ids = {item.id for item in audit.scope.endpoint_inventory}
+        for evidence in transaction_report.endpoint_evidence:
+            if evidence.endpoint_id not in endpoint_ids:
+                raise ValueError("SQL transaction evidence references an unknown endpoint")
+            occurrence_ids = (
+                *evidence.stage_occurrence_ids,
+                *evidence.flush_occurrence_ids,
+                *evidence.begin_occurrence_ids,
+                *evidence.commit_occurrence_ids,
+                *evidence.rollback_occurrence_ids,
+            )
+            for occurrence_id in occurrence_ids:
+                occurrence = occurrence_by_id.get(occurrence_id)
+                if (
+                    occurrence is None
+                    or occurrence.contract_id is None
+                    or not any(item.id == evidence.endpoint_id for item in occurrence.endpoints)
+                ):
+                    raise ValueError("SQL transaction occurrence is absent from its endpoint audit")
         return self
 
     @model_validator(mode="after")

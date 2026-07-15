@@ -24,6 +24,7 @@ _EXPECTED_PRESET_HASHES = {
     "mongodb-v1": "sha256:7e0f41e452ac61b7340f02215963e8aa765333988b67d441b7aece9dfa53191c",
     "object-storage-v1": "sha256:53a918b63f7813f54a23b502c68dfea40246d2a8a465275fb221bce018420996",
     "redis-v1": "sha256:ce681490563300ce01dec68cd42af26c5fe8e06c7d5d45ae652dfce73c531ca2",
+    "sqlalchemy-v1": "sha256:139fe41076b28730e8d24395ba684f421e8698bcf4d14a037e40064c9a69bf9e",
 }
 
 _EXPECTED_CONTRACT_IDS = {
@@ -52,6 +53,26 @@ _EXPECTED_CONTRACT_IDS = {
         "typed-s3-put-object",
     },
     "redis-v1": {"redis-delete", "redis-get", "redis-publish", "redis-set"},
+    "sqlalchemy-v1": {
+        "sqlalchemy-async-session-add",
+        "sqlalchemy-async-session-add-all",
+        "sqlalchemy-async-session-begin",
+        "sqlalchemy-async-session-begin-nested",
+        "sqlalchemy-async-session-commit",
+        "sqlalchemy-async-session-delete",
+        "sqlalchemy-async-session-flush",
+        "sqlalchemy-async-session-merge",
+        "sqlalchemy-async-session-rollback",
+        "sqlalchemy-session-add",
+        "sqlalchemy-session-add-all",
+        "sqlalchemy-session-begin",
+        "sqlalchemy-session-begin-nested",
+        "sqlalchemy-session-commit",
+        "sqlalchemy-session-delete",
+        "sqlalchemy-session-flush",
+        "sqlalchemy-session-merge",
+        "sqlalchemy-session-rollback",
+    },
 }
 
 

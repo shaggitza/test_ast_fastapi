@@ -120,6 +120,11 @@ class JsonFormatter(BaseFormatter):
                 if report.resource_coupling_graph is not None
                 else None
             ),
+            "sql_transaction_report": (
+                report.sql_transaction_report.model_dump(mode="json", exclude_none=True)
+                if report.sql_transaction_report is not None
+                else None
+            ),
         }
 
         return json.dumps(data, indent=self.indent, default=str)

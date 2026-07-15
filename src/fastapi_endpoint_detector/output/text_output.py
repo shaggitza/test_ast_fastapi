@@ -96,6 +96,14 @@ class TextFormatter(BaseFormatter):
                 "  Resource Coupling: "
                 f"{len(graph.edges)} edges / {len(graph.diagnostics)} diagnostics ({policy})"
             )
+        if report.sql_transaction_report is not None:
+            transaction = report.sql_transaction_report
+            console.print(
+                "  SQL Transactions: "
+                f"{transaction.summary.endpoints_with_staging} staged endpoints / "
+                f"{transaction.summary.outcome_unresolved} unresolved outcomes "
+                "(diagnostic only; persistence not established)"
+            )
         console.print()
 
         # Affected endpoints

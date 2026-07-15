@@ -85,7 +85,7 @@ Supported operations:
 
 - `read`, `write`, `update`, `delete`, `append`
 - `publish`, `request`, `execute`
-- `stage`, `commit`, `rollback`
+- `stage`, `flush`, `begin`, `commit`, `rollback`
 
 Selectors are deliberately bounded:
 
@@ -103,13 +103,14 @@ differ from the analyzed snapshot.
 
 ## Package-owned presets
 
-Five conservative, independently versioned exact-symbol presets are bundled:
+Six conservative, independently versioned exact-symbol presets are bundled:
 
 - `redis-v1`
 - `mongodb-v1`
 - `filesystem-v1`
 - `http-clients-v1`
 - `object-storage-v1`
+- `sqlalchemy-v1`
 
 Validate one without copying package data:
 

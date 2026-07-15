@@ -568,6 +568,15 @@ class HtmlFormatter(BaseFormatter):
                 f"{len(graph.edges)} edges / {len(graph.diagnostics)} diagnostics; "
                 f"{policy}</div>"
             )
+        if report.sql_transaction_report is not None:
+            transaction = report.sql_transaction_report
+            content_lines.append(
+                '<div class="summary-item"><span class="summary-label">'
+                "SQL Transactions:</span> "
+                f"{transaction.summary.endpoints_with_staging} staged endpoints / "
+                f"{transaction.summary.outcome_unresolved} unresolved outcomes; "
+                "diagnostic only, persistence not established</div>"
+            )
         content_lines.append("</div>")
 
         # Affected endpoints

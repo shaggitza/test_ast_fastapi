@@ -85,11 +85,16 @@ class AnalysisConfig(BaseModel):
             "mongodb-v1",
             "object-storage-v1",
             "redis-v1",
+            "sqlalchemy-v1",
         ]
         | None
     ) = Field(
         default=None,
         description="Named package-owned exact effect-contract preset.",
+    )
+    sql_transaction_diagnostics: bool = Field(
+        default=False,
+        description="Emit conservative report-only SQL staging/transaction diagnostics.",
     )
     resource_coupling: Path | None = Field(
         default=None,
@@ -110,9 +115,12 @@ class AnalysisConfig(BaseModel):
     def validate_contract_sources(self) -> "AnalysisConfig":
         if self.effect_contracts is not None and self.effect_preset is not None:
             raise ValueError("effect_contracts and effect_preset are mutually exclusive")
-        if self.resource_coupling is not None and not (
-            self.effect_contracts is not None or self.effect_preset is not None
-        ):
+        has_effect_source = self.effect_contracts is not None or self.effect_preset is not None
+        if self.sql_transaction_diagnostics and not has_effect_source:
+            raise ValueError(
+                "sql_transaction_diagnostics requires effect_contracts or effect_preset"
+            )
+        if self.resource_coupling is not None and not has_effect_source:
             raise ValueError("resource_coupling requires effect_contracts or effect_preset")
         if self.surface_contracts is not None and self.surface_preset is not None:
             raise ValueError("surface_contracts and surface_preset are mutually exclusive")
