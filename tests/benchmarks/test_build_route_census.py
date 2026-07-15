@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from typing import TYPE_CHECKING
 
 import pytest
@@ -202,7 +203,7 @@ def test_invoke_secure_list_uses_argv_and_output_file(tmp_path: Path, monkeypatc
     assert "--secure-ast" in seen
     assert seen[seen.index("--app-entry") + 1] == "main:create_app"
     assert "--vm" not in seen
-    assert seen[:5] == ["uv", "run", "--frozen", "fastapi-endpoint-detector", "list"]
+    assert seen[:4] == [sys.executable, "-m", "fastapi_endpoint_detector", "list"]
     assert items[0]["id"] == "HTTP GET /items"
     assert unresolved == []
     assert status == "established"

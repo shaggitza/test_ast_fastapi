@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -15,6 +16,7 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_MIN_AVAILABLE_MEMORY_MIB = 2_048
 _DEFAULT_MIN_FREE_DISK_MIB = 5_120
+_DEFAULT_TIMEOUT_SECONDS = 900
 
 
 def _available_memory_mib() -> int | None:
@@ -37,6 +39,10 @@ def _test_files(paths: list[Path]) -> list[Path]:
     for supplied in paths:
         path = supplied if supplied.is_absolute() else (_REPO_ROOT / supplied)
         path = path.resolve()
+        try:
+            path.relative_to(_REPO_ROOT)
+        except ValueError as exc:
+            raise ValueError(f"test path escapes repository root: {supplied}") from exc
         if path.is_file():
             if path.name.startswith("test_") and path.suffix == ".py":
                 discovered.add(path)
@@ -71,12 +77,33 @@ def _relative(path: Path) -> str:
         return str(path)
 
 
+def _stop_process_group(process: subprocess.Popen[bytes]) -> None:
+    """Terminate a timed-out pytest process and descendants without touching other jobs."""
+    if process.poll() is not None:
+        return
+    if os.name == "posix":
+        os.killpg(process.pid, signal.SIGTERM)
+    else:  # pragma: no cover - exercised only on Windows
+        process.terminate()
+    try:
+        process.wait(timeout=5)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    if os.name == "posix":
+        os.killpg(process.pid, signal.SIGKILL)
+    else:  # pragma: no cover - exercised only on Windows
+        process.kill()
+    process.wait()
+
+
 def run(
     files: list[Path],
     *,
     pytest_args: list[str],
     min_memory_mib: int,
     min_disk_mib: int,
+    timeout_seconds: int,
 ) -> int:
     """Run each test file in a fresh process and stop at the first failure."""
     if not files:
@@ -101,16 +128,29 @@ def run(
                 str(base_temp),
                 *pytest_args,
             ]
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 command,
                 cwd=_REPO_ROOT,
                 env=environment,
-                check=False,
+                start_new_session=True,
             )
-            _clean_local_caches()
-            if completed.returncode != 0:
+            try:
+                return_code = process.wait(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired:
+                _stop_process_group(process)
+                print(
+                    f"TIMEOUT after {timeout_seconds}s: {relative}",
+                    file=sys.stderr,
+                )
+                return_code = 124
+            except BaseException:
+                _stop_process_group(process)
+                raise
+            finally:
+                _clean_local_caches()
+            if return_code != 0:
                 print(f"FAILED: {relative}", file=sys.stderr)
-                return completed.returncode
+                return return_code
     elapsed = time.monotonic() - started
     print(f"Passed {len(files)} isolated test files in {elapsed:.1f}s")
     return 0
@@ -141,9 +181,17 @@ def main() -> int:
         type=int,
         default=_DEFAULT_MIN_FREE_DISK_MIB,
     )
+    parser.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=_DEFAULT_TIMEOUT_SECONDS,
+        help="maximum wall time for each isolated test file (default: 900)",
+    )
     arguments = parser.parse_args()
     if arguments.min_available_memory_mib < 0 or arguments.min_free_disk_mib < 0:
         parser.error("resource safety floors must be non-negative")
+    if arguments.timeout_seconds < 1:
+        parser.error("timeout must be at least one second")
     try:
         files = _test_files(arguments.paths)
         return run(
@@ -151,6 +199,7 @@ def main() -> int:
             pytest_args=arguments.pytest_arg,
             min_memory_mib=arguments.min_available_memory_mib,
             min_disk_mib=arguments.min_free_disk_mib,
+            timeout_seconds=arguments.timeout_seconds,
         )
     except (RuntimeError, ValueError) as exc:
         print(f"Resource-bounded test run aborted: {exc}", file=sys.stderr)

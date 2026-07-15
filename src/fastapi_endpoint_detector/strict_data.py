@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import yaml
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class DuplicateKeyError(ValueError):
@@ -24,17 +27,16 @@ def _construct_unique_mapping(
 ) -> dict[object, object]:
     loader.flatten_mapping(node)
     result: dict[object, object] = {}
+    construct = cast("Callable[..., object]", loader.construct_object)
     for key_node, value_node in node.value:
-        key = loader.construct_object(key_node, deep=deep)  # type: ignore[no-untyped-call]
+        key = construct(key_node, deep=deep)
         try:
             duplicate = key in result
         except TypeError as exc:
             raise DuplicateKeyError("mapping keys must be hashable scalars") from exc
         if duplicate:
             raise DuplicateKeyError(f"duplicate mapping key: {key!r}")
-        result[key] = loader.construct_object(  # type: ignore[no-untyped-call]
-            value_node, deep=deep
-        )
+        result[key] = construct(value_node, deep=deep)
     return result
 
 

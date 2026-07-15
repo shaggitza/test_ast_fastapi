@@ -3,6 +3,7 @@ Base formatter and formatter registry.
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -52,7 +53,9 @@ class BaseFormatter(ABC):
 _FORMATTERS: dict[str, type[BaseFormatter]] = {}
 
 
-def register_formatter(name: str) -> callable:
+def register_formatter(
+    name: str,
+) -> Callable[[type[BaseFormatter]], type[BaseFormatter]]:
     """
     Decorator to register a formatter.
 
@@ -62,9 +65,11 @@ def register_formatter(name: str) -> callable:
     Returns:
         Decorator function.
     """
+
     def decorator(cls: type[BaseFormatter]) -> type[BaseFormatter]:
         _FORMATTERS[name] = cls
         return cls
+
     return decorator
 
 
@@ -82,7 +87,7 @@ def get_formatter(name: str) -> BaseFormatter:
         ValueError: If the formatter name is not recognized.
     """
     # Import formatters to ensure they're registered
-    from fastapi_endpoint_detector.output import (  # noqa: F401
+    from fastapi_endpoint_detector.output import (  # noqa: F401, PLC0415
         html_output,
         json_output,
         markdown_output,

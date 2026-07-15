@@ -1,11 +1,16 @@
 """Tests for multiple call stacks feature in mypy analyzer."""
-import tempfile
+
 from pathlib import Path
 
 import pytest
 
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, HandlerInfo
+from fastapi_endpoint_detector.models.report import (
+    AffectedEndpoint,
+    CallStackFrame,
+    ConfidenceLevel,
+)
 
 
 class TestMultipleCallStacks:
@@ -87,18 +92,21 @@ def handler():
         call_stacks_b = deps.get_call_stack(service_b_file)
 
         # Each should have at least one call stack
-        assert len(call_stacks_a) >= 1, f"Should have call stack to service_a.py"
-        assert len(call_stacks_b) >= 1, f"Should have call stack to service_b.py"
+        assert len(call_stacks_a) >= 1, "Should have call stack to service_a.py"
+        assert len(call_stacks_b) >= 1, "Should have call stack to service_b.py"
 
-        print(f"\n✓ Found call stacks:")
+        print("\n✓ Found call stacks:")
         print(f"  service_a.py: {len(call_stacks_a)} path(s)")
         print(f"  service_b.py: {len(call_stacks_b)} path(s)")
 
         # Verify the stacks are different
         if len(call_stacks_a) > 0:
-            print(f"\n  Path to service_a.py:")
+            print("\n  Path to service_a.py:")
             for frame in call_stacks_a[0]:
-                print(f"    - {frame.function_name} ({Path(frame.file_path).name}:{frame.line_number})")
+                print(
+                    f"    - {frame.function_name} "
+                    f"({Path(frame.file_path).name}:{frame.line_number})"
+                )
 
 
 class TestCallStackOriginMarking:
@@ -184,8 +192,6 @@ def endpoint_handler():
 
     def test_affected_endpoint_has_marked_call_stack(self, test_project: Path) -> None:
         """Test that AffectedEndpoint formats tracebacks with clear origin markers."""
-        from fastapi_endpoint_detector.models.report import AffectedEndpoint, CallStackFrame, ConfidenceLevel
-
         handler = HandlerInfo(
             name="endpoint_handler",
             module="main",
@@ -235,7 +241,7 @@ def endpoint_handler():
         assert "GET /api/users" in traceback, "Traceback should show endpoint path"
         assert "Handler: endpoint_handler" in traceback, "Traceback should show handler name"
 
-        print(f"\n✓ Formatted traceback:")
+        print("\n✓ Formatted traceback:")
         print(traceback)
 
 
@@ -244,9 +250,6 @@ class TestMultiplePathsFormatting:
 
     def test_multiple_paths_in_traceback(self) -> None:
         """Test that multiple paths are clearly labeled in traceback output."""
-        from fastapi_endpoint_detector.models.report import AffectedEndpoint, CallStackFrame, ConfidenceLevel
-        from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, HandlerInfo
-
         handler = HandlerInfo(
             name="handler",
             module="main",
@@ -321,7 +324,9 @@ class TestMultiplePathsFormatting:
 
         # Verify endpoint marker appears in both paths
         endpoint_marker_count = traceback.count("[ENDPOINT]")
-        assert endpoint_marker_count >= 2, f"Should have endpoint marker in each path, got {endpoint_marker_count}"
+        assert endpoint_marker_count >= 2, (
+            f"Should have endpoint marker in each path, got {endpoint_marker_count}"
+        )
 
-        print(f"\n✓ Formatted traceback with multiple paths:")
+        print("\n✓ Formatted traceback with multiple paths:")
         print(traceback)

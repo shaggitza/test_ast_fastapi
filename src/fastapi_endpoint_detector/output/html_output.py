@@ -57,11 +57,7 @@ class HtmlFormatter(BaseFormatter):
         return self._get_code_context_range(file_path, line_number, line_number, context)
 
     def _get_code_context_range(
-        self,
-        file_path: str,
-        start_line: int,
-        end_line: int,
-        context: int = 3
+        self, file_path: str, start_line: int, end_line: int, context: int = 3
     ) -> str:
         """
         Get code context around a line range, highlighting all lines in the range.
@@ -120,17 +116,13 @@ class HtmlFormatter(BaseFormatter):
         if not code_context or not code_context.startswith("[lines "):
             return None
 
-        match = re.match(r'\[lines (\d+)-(\d+)\]', code_context)
+        match = re.match(r"\[lines (\d+)-(\d+)\]", code_context)
         if match:
             return (int(match.group(1)), int(match.group(2)))
         return None
 
     def _format_frame_label(
-        self,
-        file_path: str,
-        start_line: int,
-        end_line: int | None,
-        function_name: str
+        self, file_path: str, start_line: int, end_line: int | None, function_name: str
     ) -> str:
         """
         Format a call stack frame label.
@@ -532,13 +524,13 @@ class HtmlFormatter(BaseFormatter):
         content_lines.append(
             f'<div class="summary-item">'
             f'<span class="summary-label">Reachable Candidates:</span> '
-            f'{report.candidate_count}'
+            f"{report.candidate_count}"
             f"</div>"
         )
         content_lines.append(
             f'<div class="summary-item">'
             f'<span class="summary-label">Orphan Changes:</span> '
-            f'{report.total_orphan_lines} lines in {report.orphan_count} files'
+            f"{report.total_orphan_lines} lines in {report.orphan_count} files"
             f"</div>"
         )
         if report.analysis_duration_ms:
@@ -661,10 +653,10 @@ class HtmlFormatter(BaseFormatter):
                         content_lines.append(
                             '<div class="info-item">'
                             '<span class="label">Effect:</span> '
-                            f'[{html.escape(evidence.status.value)} / '
-                            f'{html.escape(evidence.disposition.value)}] '
-                            f'{html.escape(evidence.summary)}'
-                            '</div>'
+                            f"[{html.escape(evidence.status.value)} / "
+                            f"{html.escape(evidence.disposition.value)}] "
+                            f"{html.escape(evidence.summary)}"
+                            "</div>"
                         )
                     for contract_evidence in ae.contract_evidence:
                         content_lines.append(
@@ -711,7 +703,9 @@ class HtmlFormatter(BaseFormatter):
                         for stack_idx, call_stack in enumerate(ae.call_stacks, 1):
                             # Header for multiple paths
                             if len(ae.call_stacks) > 1:
-                                content_lines.append(f"<div class='stack-path'><em>Path {stack_idx} of {len(ae.call_stacks)}:</em></div>")
+                                content_lines.append(
+                                    f"<div class='stack-path'><em>Path {stack_idx} of {len(ae.call_stacks)}:</em></div>"
+                                )
 
                             for frame in call_stack:
                                 # Extract line range from code_context if present
@@ -728,7 +722,7 @@ class HtmlFormatter(BaseFormatter):
                                     frame.file_path,
                                     start_line,
                                     end_line if end_line > start_line else None,
-                                    frame.function_name
+                                    frame.function_name,
                                 )
 
                                 frame_ref = self._format_code_ref(
@@ -771,7 +765,7 @@ class HtmlFormatter(BaseFormatter):
                 )
                 content_lines.append(
                     f'<div class="info-item"><span class="label">Confidence:</span> '
-                    f'{html.escape(candidate.confidence.value)}</div>'
+                    f"{html.escape(candidate.confidence.value)}</div>"
                 )
                 if endpoint.surface is not None:
                     surface = endpoint.surface
@@ -800,9 +794,9 @@ class HtmlFormatter(BaseFormatter):
                 for evidence in candidate.effect_evidence:
                     content_lines.append(
                         '<div class="info-item"><span class="label">Effect:</span> '
-                        f'[{html.escape(evidence.status.value)} / '
-                        f'{html.escape(evidence.disposition.value)}] '
-                        f'{html.escape(evidence.summary)}</div>'
+                        f"[{html.escape(evidence.status.value)} / "
+                        f"{html.escape(evidence.disposition.value)}] "
+                        f"{html.escape(evidence.summary)}</div>"
                     )
                 for contract_evidence in candidate.contract_evidence:
                     content_lines.append(
@@ -824,28 +818,42 @@ class HtmlFormatter(BaseFormatter):
             content_lines.append('<div class="warning-box">')
             content_lines.append("<h3>⚠️ Orphan Code Changes</h3>")
             content_lines.append(
-                f'<p><em>Changes not related to any endpoint '
-                f'({report.total_orphan_lines} lines in {report.orphan_count} files)</em></p>'
+                f"<p><em>Changes not related to any endpoint "
+                f"({report.total_orphan_lines} lines in {report.orphan_count} files)</em></p>"
             )
-            
+
             for oc in report.orphan_changes:
                 file_name = Path(oc.file_path).name
-                content_lines.append('<div style="margin: 15px 0; padding: 10px; background: #fff; border-radius: 5px;">')
-                content_lines.append(f'<div style="font-weight: bold; margin-bottom: 5px;">📄 {html.escape(file_name)}</div>')
-                content_lines.append(f'<div style="font-size: 0.9em; color: #666;"><code>{html.escape(oc.file_path)}</code></div>')
-                content_lines.append(f'<div style="margin-top: 8px; font-family: monospace; font-size: 0.9em;">{html.escape(oc.format_lines())}</div>')
-                content_lines.append(f'<div style="margin-top: 5px; font-size: 0.85em; color: #777; font-style: italic;">{html.escape(oc.reason)}</div>')
-                content_lines.append('</div>')
-            
-            content_lines.append('<div style="margin-top: 15px; padding: 10px; background: #f0f0f0; border-radius: 5px; font-size: 0.9em;">')
-            content_lines.append('<strong>💡 Tip:</strong> Orphan changes may indicate:')
+                content_lines.append(
+                    '<div style="margin: 15px 0; padding: 10px; background: #fff; border-radius: 5px;">'
+                )
+                content_lines.append(
+                    f'<div style="font-weight: bold; margin-bottom: 5px;">📄 {html.escape(file_name)}</div>'
+                )
+                content_lines.append(
+                    f'<div style="font-size: 0.9em; color: #666;"><code>{html.escape(oc.file_path)}</code></div>'
+                )
+                content_lines.append(
+                    f'<div style="margin-top: 8px; font-family: monospace; font-size: 0.9em;">{html.escape(oc.format_lines())}</div>'
+                )
+                content_lines.append(
+                    f'<div style="margin-top: 5px; font-size: 0.85em; color: #777; font-style: italic;">{html.escape(oc.reason)}</div>'
+                )
+                content_lines.append("</div>")
+
+            content_lines.append(
+                '<div style="margin-top: 15px; padding: 10px; background: #f0f0f0; border-radius: 5px; font-size: 0.9em;">'
+            )
+            content_lines.append("<strong>💡 Tip:</strong> Orphan changes may indicate:")
             content_lines.append('<ul style="margin: 5px 0 0 20px;">')
-            content_lines.append('<li>Unused or dead code</li>')
-            content_lines.append('<li>Code with incorrect types preventing dependency analysis</li>')
-            content_lines.append('<li>Utility code not called by any endpoint</li>')
-            content_lines.append('<li>Code outside the analyzed application scope</li>')
-            content_lines.append('</ul>')
-            content_lines.append('</div>')
+            content_lines.append("<li>Unused or dead code</li>")
+            content_lines.append(
+                "<li>Code with incorrect types preventing dependency analysis</li>"
+            )
+            content_lines.append("<li>Utility code not called by any endpoint</li>")
+            content_lines.append("<li>Code outside the analyzed application scope</li>")
+            content_lines.append("</ul>")
+            content_lines.append("</div>")
             content_lines.append("</div>")
 
         # Errors
@@ -938,9 +946,7 @@ class HtmlFormatter(BaseFormatter):
                     ep.handler.line_number,
                 )
                 content_lines.append(f"<td>{location_ref}</td>")
-                content_lines.append(
-                    f"<td>{html.escape(ep.discovery_status.value)}</td>"
-                )
+                content_lines.append(f"<td>{html.escape(ep.discovery_status.value)}</td>")
                 content_lines.append(
                     "<td>"
                     + (

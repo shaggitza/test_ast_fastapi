@@ -5,6 +5,7 @@ Unit tests for the Pydantic models.
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from fastapi_endpoint_detector.models.diff import (
     ChangeType,
@@ -49,7 +50,7 @@ class TestHandlerInfo:
             line_number=10,
         )
 
-        with pytest.raises(Exception):  # ValidationError for frozen models
+        with pytest.raises(ValidationError):
             handler.name = "new_name"
 
 

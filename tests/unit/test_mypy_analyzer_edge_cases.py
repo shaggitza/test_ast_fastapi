@@ -185,9 +185,7 @@ def handler():
         # Should trace get_items in the for-loop expression
         # The for-loop target itself may not need tracing, but the expression does
         main_file = str(loop_project / "main.py")
-        assert deps.references_file(main_file), (
-            "For-loop expression should be traced"
-        )
+        assert deps.references_file(main_file), "For-loop expression should be traced"
 
 
 class TestComprehensionReferences:
@@ -308,9 +306,7 @@ def handler():
 
         # Should trace the exceptions module
         exceptions_file = str(exception_project / "exceptions.py")
-        assert deps.references_file(exceptions_file), (
-            "Custom exception types should be traced"
-        )
+        assert deps.references_file(exceptions_file), "Custom exception types should be traced"
 
 
 class TestFunctionSignatureAnnotations:
@@ -447,9 +443,7 @@ def handler():
 
         # The main file should always be traced
         main_file = str(dynamic_import_project / "main.py")
-        assert deps.references_file(main_file), (
-            "Main file should always be traced"
-        )
+        assert deps.references_file(main_file), "Main file should always be traced"
 
         # Due to mypy's limitations with function-scoped imports, we may or may not
         # trace the imported modules. This is expected behavior.
