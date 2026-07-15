@@ -34,7 +34,7 @@ This tool is designed for CI/CD pipelines to enable:
   hashed identities, with report-only default and exact-callsite LOW candidate mode
   ([safety model](docs/resource-coupling.md))
 - 🗄️ **SQL Transactions**: Distinguish staged ORM work, flush, reachable commit/rollback,
-  and unresolved outcomes without claiming durable persistence
+  and bounded same-scope lexical ordering without claiming durable persistence
   ([semantics](docs/sql-transactions.md))
 - 🛰️ **Custom Surfaces**: Declarative execution-free entrypoints for message listeners,
   tools, tasks, schedulers, CLIs, and reactors ([schema](docs/custom-surfaces.md))

@@ -28,6 +28,34 @@ change confidence or thresholds, manufacture call stacks, or establish
 changed-code causality. Exact symbol/invocation matching, established endpoint
 inventory, secure AST discovery, and mypy call resolution remain mandatory.
 
+## Bounded ordered-path diagnostics
+
+A second explicit option adds strictly lexical stage-to-boundary evidence:
+
+```yaml
+analysis:
+  effect_preset: sqlalchemy-v1
+  sql_transaction_diagnostics: true
+  sql_transaction_ordered_paths: true
+  sql_transaction_path_max_pairs: 1024
+```
+
+An ordered path requires exact audited stage and commit/rollback occurrences in
+the same source file, direct function body, and lexical order. Both calls must
+use the same finite `Name`/`Attribute` receiver expression, with no intervening
+assignment to that expression or one of its lexical ancestors. A nearest prior
+same-receiver `begin` may be attached. Calls under branches, loops, `try`,
+`with`, comprehensions, lambdas, nested scopes, dynamic receivers, mismatched
+receivers, reversed boundaries, and reassigned receivers remain explicit
+unresolved diagnostics.
+
+The pair cap is checked atomically before source analysis. Exceeding it fails
+explicitly without a partial report. Receiver hashes expose no source value and
+prove spelling stability only—not alias, session, connection, or runtime
+transaction identity. Ordered commit retains the `not_established` persistence
+status because exceptions, runtime execution, commit success, and database
+durability are outside this evidence.
+
 ## Conservative limits
 
 Version 1 intentionally does not infer branch ordering, exception paths,
