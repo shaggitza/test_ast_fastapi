@@ -133,6 +133,27 @@ def test_execution_mode_requires_schema_v2() -> None:
     assert document.contracts[0].execution_mode.value == "process_worker"
 
 
+def test_constructor_and_yield_ranges_require_schema_v3() -> None:
+    payload = _document()
+    contract = payload["contracts"][0]  # type: ignore[index]
+    contract["registration"] = {
+        "symbol": "framework.App",
+        "invocation": "constructor",
+    }
+    contract["handler"] = {"kind": "keyword", "name": "lifespan"}
+    contract["handler_optional"] = True
+    contract["callback_mode"] = "async_generator"
+    contract["callback_range"] = "before_yield"
+    contract["surface"]["resource"] = {"kind": "literal", "value": "startup"}
+
+    with pytest.raises(ValidationError, match="schema_version 3"):
+        SurfaceContractDocument.model_validate(payload)
+
+    payload["schema_version"] = 3
+    document = SurfaceContractDocument.model_validate(payload)
+    assert document.contracts[0].callback_range.value == "before_yield"
+
+
 def test_surface_contract_rejects_duplicate_yaml_keys(tmp_path: Path) -> None:
     path = tmp_path / "duplicate.yaml"
     path.write_text("schema_version: 1\nschema_version: 1\n", encoding="utf-8")

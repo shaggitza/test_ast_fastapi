@@ -4,7 +4,7 @@ Framework contracts model callback execution explicitly instead of recursively
 using FastAPI, Starlette, or AnyIO implementation internals as application
 reachability evidence.
 
-## Phase 1
+## Lifecycle and callback phases
 
 Select execution-free lifecycle and middleware surfaces with:
 
@@ -20,7 +20,14 @@ The versioned preset recognizes only exact source-proven receivers and handlers:
 - `FastAPI.middleware("http")`.
 
 Startup and shutdown registrations have distinct `event:startup` and
-`event:shutdown` IDs. Middleware registrations retain every physical handler;
+`event:shutdown` IDs. Exact `FastAPI(lifespan=...)` async-generator callbacks
+also produce distinct `lifespan:startup` and `lifespan:shutdown` surfaces. A
+single unconditional top-level `yield` is required. The analyzer traces only
+statements before that yield for startup and only statements after it for
+shutdown, including transitive typed calls. Conditional, nested, absent, or
+multiple yields fail closed with inventory limitations.
+
+Middleware registrations retain every physical handler;
 multiple handlers for the same protocol remain conditional rather than being
 collapsed. Same-named methods on other receiver types never match.
 
@@ -42,12 +49,10 @@ no framework summary.
 
 ## Current limits
 
-FastAPI/Starlette lifespan context managers require phase-sensitive ranges:
-statements before `yield` execute at startup and statements after `yield` execute
-at shutdown. They remain deferred until the analyzer can preserve those ranges
-through both direct changes and transitive mypy traversal. Startup-time route
-mutation, class-based middleware, arbitrary callback registries, and runtime
-plugin loading also remain unresolved.
+Starlette constructor lifespan callbacks, imported callback factories, aliases,
+context-manager class implementations, and exception paths around `yield` remain
+unresolved. Startup-time route mutation, class-based middleware, arbitrary
+callback registries, and runtime plugin loading also remain unresolved.
 
 The static framework preset is optional because custom-surface configuration
 currently has one provenance root. Composing several package presets without

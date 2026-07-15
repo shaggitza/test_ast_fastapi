@@ -1,12 +1,40 @@
-schema_version: 2
+schema_version: 3
 preset:
   id: framework-callbacks
-  version: "1"
+  version: "2"
   provenance:
     kind: preset
     source: fastapi-endpoint-detector
-    revision: "1"
+    revision: "2"
 contracts:
+  - id: fastapi-lifespan-startup
+    registration:
+      symbol: fastapi.FastAPI
+      invocation: constructor
+    handler: {kind: keyword, name: lifespan}
+    handler_optional: true
+    surface:
+      kind: framework.lifecycle
+      id_template: "lifespan:{resource}"
+      resource: {kind: literal, value: startup}
+    callback_mode: async_generator
+    callback_range: before_yield
+    execution_mode: framework
+
+  - id: fastapi-lifespan-shutdown
+    registration:
+      symbol: fastapi.FastAPI
+      invocation: constructor
+    handler: {kind: keyword, name: lifespan}
+    handler_optional: true
+    surface:
+      kind: framework.lifecycle
+      id_template: "lifespan:{resource}"
+      resource: {kind: literal, value: shutdown}
+    callback_mode: async_generator
+    callback_range: after_yield
+    execution_mode: framework
+
   - id: fastapi-on-event
     registration:
       symbol: fastapi.FastAPI.on_event

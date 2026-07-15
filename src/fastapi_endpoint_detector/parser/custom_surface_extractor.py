@@ -24,6 +24,7 @@ from fastapi_endpoint_detector.models.endpoint import (
 )
 from fastapi_endpoint_detector.models.surface_contract import (
     CallbackMode,
+    CallbackRangeMode,
     HandlerNameNormalization,
     HandlerSelectorKind,
     LoadedSurfaceContracts,
@@ -99,6 +100,7 @@ class _YieldVisitor(ast.NodeVisitor):
     def __init__(self, root: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         self.root = root
         self.found = False
+        self.count = 0
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         if node is self.root:
@@ -113,9 +115,11 @@ class _YieldVisitor(ast.NodeVisitor):
 
     def visit_Yield(self, _node: ast.Yield) -> None:
         self.found = True
+        self.count += 1
 
     def visit_YieldFrom(self, _node: ast.YieldFrom) -> None:
         self.found = True
+        self.count += 1
 
 
 class CustomSurfaceExtractorError(ValueError):
@@ -515,6 +519,8 @@ class CustomSurfaceExtractor:
                     )
                 if handler_expression is not None:
                     handler_result = self._resolve_handler(handler_expression, state)
+                elif contract.handler_optional:
+                    continue
             if handler_result is None or not self._callback_matches(
                 contract.callback_mode, handler_result[1]
             ):
@@ -530,6 +536,19 @@ class CustomSurfaceExtractor:
                 )
                 continue
             handler_module, function = handler_result
+            handler_range = self._handler_range(contract.callback_range, function)
+            if handler_range is None:
+                self._limitations.append(
+                    EndpointDiscoveryCondition(
+                        source_path=handler_module.path,
+                        source_line=function.lineno,
+                        reason=(
+                            f"custom surface contract {contract.id!r} requires one "
+                            "unconditional top-level yield"
+                        ),
+                    )
+                )
+                continue
             resources = self._resources(contract, call, function)
             if resources is None:
                 self._limitations.append(
@@ -580,6 +599,7 @@ class CustomSurfaceExtractor:
                     surface_id=surface_id,
                     resource=resource,
                     callback_mode=contract.callback_mode,
+                    callback_range=contract.callback_range,
                     execution_mode=contract.execution_mode,
                     contract_id=contract.id,
                     match_kind=contract.registration.match_kind,
@@ -604,8 +624,8 @@ class CustomSurfaceExtractor:
                             name=function.name,
                             module=handler_module.name,
                             file_path=handler_module.path,
-                            line_number=function.lineno,
-                            end_line_number=function.end_lineno,
+                            line_number=handler_range[0],
+                            end_line_number=handler_range[1],
                         ),
                         discovery_status=(
                             EndpointDiscoveryStatus.CONDITIONAL
@@ -640,7 +660,17 @@ class CustomSurfaceExtractor:
             binding = state.get(expression.id)
             if binding is None or binding.kind == "module":
                 return None
-            return binding.identity, InvocationKind.FUNCTION, None
+            constructor_symbols = {
+                contract.registration.symbol
+                for contract in self.contracts.document.contracts
+                if contract.registration.invocation == InvocationKind.CONSTRUCTOR
+            }
+            invocation = (
+                InvocationKind.CONSTRUCTOR
+                if binding.identity in constructor_symbols
+                else InvocationKind.FUNCTION
+            )
+            return binding.identity, invocation, None
         if not isinstance(expression, ast.Attribute) or not isinstance(expression.value, ast.Name):
             return None
         binding = state.get(expression.value.id)
@@ -706,7 +736,7 @@ class CustomSurfaceExtractor:
             resolved = self._resolve_call(expression.func, state)
             if (
                 resolved is not None
-                and resolved[1] == InvocationKind.FUNCTION
+                and resolved[1] in {InvocationKind.FUNCTION, InvocationKind.CONSTRUCTOR}
                 and resolved[0] in self._declared_receiver_types
             ):
                 return _Binding("receiver", resolved[0])
@@ -742,6 +772,28 @@ class CustomSurfaceExtractor:
             or (mode == CallbackMode.GENERATOR and not is_async and has_yield)
             or (mode == CallbackMode.ASYNC_GENERATOR and is_async and has_yield)
         )
+
+    @staticmethod
+    def _handler_range(
+        mode: CallbackRangeMode,
+        function: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> tuple[int, int] | None:
+        if mode == CallbackRangeMode.FULL:
+            return function.lineno, function.end_lineno or function.lineno
+        direct_yields = [
+            statement
+            for statement in function.body
+            if isinstance(statement, ast.Expr)
+            and isinstance(statement.value, (ast.Yield, ast.YieldFrom))
+        ]
+        visitor = _YieldVisitor(function)
+        visitor.visit(function)
+        if len(direct_yields) != 1 or visitor.count != 1:
+            return None
+        boundary = direct_yields[0]
+        if mode == CallbackRangeMode.BEFORE_YIELD:
+            return function.lineno, boundary.end_lineno or boundary.lineno
+        return boundary.lineno, function.end_lineno or boundary.lineno
 
     @classmethod
     def _resources(  # noqa: PLR0912

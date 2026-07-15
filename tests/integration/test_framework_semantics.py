@@ -7,6 +7,47 @@ from fastapi_endpoint_detector.config import AnalysisConfig, Config
 from fastapi_endpoint_detector.models.report import ConfidenceLevel
 
 
+def test_lifespan_transitive_calls_remain_phase_sensitive(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from contextlib import asynccontextmanager\n"
+        "from fastapi import FastAPI\n\n"
+        "async def initialize() -> int:\n"
+        "    return 2\n\n"
+        "async def finalize() -> int:\n"
+        "    return 1\n\n"
+        "@asynccontextmanager\n"
+        "async def lifespan(app: FastAPI):\n"
+        "    await initialize()\n"
+        "    yield\n"
+        "    await finalize()\n\n"
+        "app = FastAPI(lifespan=lifespan)\n",
+        encoding="utf-8",
+    )
+    diff = tmp_path / "change.diff"
+    diff.write_text(
+        "diff --git a/main.py b/main.py\n"
+        "--- a/main.py\n"
+        "+++ b/main.py\n"
+        "@@ -4,2 +4,2 @@\n"
+        " async def initialize() -> int:\n"
+        "-    return 1\n"
+        "+    return 2\n",
+        encoding="utf-8",
+    )
+
+    report = ChangeMapper(
+        app_path=tmp_path,
+        config=Config(analysis=AnalysisConfig(surface_preset="framework-v1")),
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+
+    assert [candidate.endpoint.identifier for candidate in report.candidate_endpoints] == [
+        "FRAMEWORK.LIFECYCLE lifespan:startup"
+    ]
+    assert report.candidate_endpoints[0].confidence == ConfidenceLevel.MEDIUM
+
+
 def test_changed_startup_handler_is_a_framework_lifecycle_candidate(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text(
         "from fastapi import FastAPI\n\n"

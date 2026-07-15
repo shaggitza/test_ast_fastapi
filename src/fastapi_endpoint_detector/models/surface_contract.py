@@ -103,6 +103,14 @@ class CallbackMode(str, Enum):
     ASYNC_GENERATOR = "async_generator"
 
 
+class CallbackRangeMode(str, Enum):
+    """Bounded portion of a callback body executed by a framework phase."""
+
+    FULL = "full"
+    BEFORE_YIELD = "before_yield"
+    AFTER_YIELD = "after_yield"
+
+
 class RegistrationMatcher(_StrictModel):
     """Exact or segment-bounded registration callable identity."""
 
@@ -138,8 +146,6 @@ class RegistrationMatcher(_StrictModel):
 
     @model_validator(mode="after")
     def validate_receiver(self) -> RegistrationMatcher:
-        if self.invocation == InvocationKind.CONSTRUCTOR:
-            raise ValueError("constructor registration matching is unsupported in schema v1")
         is_method = self.invocation in {
             InvocationKind.INSTANCE_METHOD,
             InvocationKind.CLASS_METHOD,
@@ -243,8 +249,10 @@ class SurfaceContract(_StrictModel):
     id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
     registration: RegistrationMatcher
     handler: HandlerSelector
+    handler_optional: bool = False
     surface: SurfaceIdentity
     callback_mode: CallbackMode = CallbackMode.EITHER
+    callback_range: CallbackRangeMode = CallbackRangeMode.FULL
     execution_mode: SurfaceExecutionMode = SurfaceExecutionMode.DIRECT
     conditions: tuple[str, ...] = ()
     provenance: ContractProvenance | None = None
@@ -260,18 +268,25 @@ class SurfaceContract(_StrictModel):
 
     @model_validator(mode="after")
     def validate_decorator_shape(self) -> SurfaceContract:
+        if self.handler_optional and self.handler.kind != HandlerSelectorKind.KEYWORD:
+            raise ValueError("optional handlers require a keyword selector")
         if (
             self.handler.kind == HandlerSelectorKind.DECORATED_FUNCTION
             and self.registration.invocation == InvocationKind.CONSTRUCTOR
         ):
             raise ValueError("constructor registrations cannot decorate handlers")
+        if self.callback_range != CallbackRangeMode.FULL and self.callback_mode not in {
+            CallbackMode.GENERATOR,
+            CallbackMode.ASYNC_GENERATOR,
+        }:
+            raise ValueError("yield-relative callback ranges require a generator callback")
         return self
 
 
 class SurfaceContractDocument(_StrictModel):
     """Versioned deterministic custom-surface contract set."""
 
-    schema_version: Literal[1, 2] = 1
+    schema_version: Literal[1, 2, 3] = 1
     preset: PresetMetadata
     contracts: tuple[SurfaceContract, ...] = Field(min_length=1)
 
@@ -279,7 +294,7 @@ class SurfaceContractDocument(_StrictModel):
     @classmethod
     def validate_schema_version_type(cls, value: object) -> object:
         if type(value) is not int:
-            raise ValueError("schema_version must be the integer 1 or 2")
+            raise ValueError("schema_version must be the integer 1, 2, or 3")
         return value
 
     @model_validator(mode="after")
@@ -293,8 +308,26 @@ class SurfaceContractDocument(_StrictModel):
             raise ValueError(
                 "non-direct execution and handler normalization require schema_version 2"
             )
+        if self.schema_version < 3 and any(
+            contract.registration.invocation == InvocationKind.CONSTRUCTOR
+            or contract.callback_range != CallbackRangeMode.FULL
+            or contract.handler_optional
+            for contract in self.contracts
+        ):
+            raise ValueError(
+                "constructor registrations and callback ranges require schema_version 3"
+            )
         ids: set[str] = set()
-        keys: set[tuple[str, InvocationKind, HandlerSelectorKind, int | None, str | None]] = set()
+        keys: set[
+            tuple[
+                str,
+                InvocationKind,
+                HandlerSelectorKind,
+                int | None,
+                str | None,
+                CallbackRangeMode,
+            ]
+        ] = set()
         wildcards: list[SurfaceContract] = []
         for contract in self.contracts:
             if contract.id in ids:
@@ -306,6 +339,7 @@ class SurfaceContractDocument(_StrictModel):
                 contract.handler.kind,
                 contract.handler.index,
                 contract.handler.name,
+                contract.callback_range,
             )
             if key in keys:
                 raise ValueError("duplicate registration and handler selector contract")

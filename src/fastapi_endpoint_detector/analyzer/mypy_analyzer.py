@@ -34,6 +34,7 @@ from fastapi_endpoint_detector.models.effect_contract import (
     ResolvedCallSite,
 )
 from fastapi_endpoint_detector.models.endpoint import Endpoint
+from fastapi_endpoint_detector.models.surface_contract import CallbackRangeMode
 
 # Type alias for line-level progress callback (file_path, line_number, symbol_name)
 LineProgressCallback = Callable[[str, int, str], None]
@@ -370,7 +371,7 @@ class MypyAnalyzer:
     and extract precise file/line information for all references.
     """
 
-    CACHE_SCHEMA_VERSION = 14
+    CACHE_SCHEMA_VERSION = 15
     MAX_POINTS_TO_TARGETS = 8
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
@@ -1092,7 +1093,17 @@ class MypyAnalyzer:
 
         actual_func = func_node.func if isinstance(func_node, DecoratorNode) else func_node
 
-        start, end = self._get_func_lines(actual_func)
+        function_start, function_end = self._get_func_lines(actual_func)
+        callback_range = (
+            endpoint.surface.callback_range
+            if endpoint.surface is not None
+            else CallbackRangeMode.FULL
+        )
+        if callback_range == CallbackRangeMode.FULL:
+            start, end = function_start, function_end
+        else:
+            start = handler.line_number
+            end = handler.end_line_number or start
         deps.add_symbol_reference(handler_path, handler.name, start, end)
 
         import_map = self._import_map_for_tree(tree, handler_module)
@@ -1163,16 +1174,26 @@ class MypyAnalyzer:
                     depth=dependency_depth,
                 )
 
-        self._trace_references(
-            func_node,
-            deps,
-            handler_path,
-            handler_module,
-            call_stack,
-            visited,
-            import_map,
-            depth=0,
-        )
+        trace_roots: list[Any]
+        if callback_range == CallbackRangeMode.FULL:
+            trace_roots = [func_node]
+        else:
+            body = list(getattr(getattr(actual_func, "body", None), "body", ()))
+            if callback_range == CallbackRangeMode.BEFORE_YIELD:
+                trace_roots = [node for node in body if 0 < node.line < end]
+            else:
+                trace_roots = [node for node in body if node.line > start]
+        for trace_root in trace_roots:
+            self._trace_references(
+                trace_root,
+                deps,
+                handler_path,
+                handler_module,
+                call_stack,
+                visited,
+                import_map,
+                depth=0,
+            )
 
         self._endpoint_deps[self._endpoint_key(endpoint)] = deps
         return deps
@@ -3389,6 +3410,10 @@ class MypyAnalyzer:
                     walk_node(argument.initializer)
         if hasattr(function_node, "body") and function_node.body:
             walk_node(function_node.body)
+        elif not isinstance(function_node, FuncDef):
+            # Phase-sensitive framework callbacks pass exact body statements
+            # instead of a whole function so pre/post-yield traversal cannot mix.
+            walk_node(function_node)
 
     def analyze_endpoints(
         self,
