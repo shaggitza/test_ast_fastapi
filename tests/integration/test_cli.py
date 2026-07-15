@@ -351,7 +351,7 @@ class TestVMMode:
         """Test that VM option appears in help."""
         result = runner.invoke(cli, ["list", "--help"])
         assert "--vm" in result.output
-        assert "Docker container" in result.output
+        assert "gVisor/Kata-isolated" in result.output
 
     @pytest.mark.skip(reason="Requires Docker to be installed and running")
     def test_vm_list_basic(self, runner: CliRunner, tmp_path: Path) -> None:
