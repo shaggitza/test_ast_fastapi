@@ -21,6 +21,7 @@ import tempfile
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
+from importlib.util import find_spec
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Any, ClassVar
@@ -455,13 +456,10 @@ class MypyAnalyzer:
         self._line_progress_callback = callback
 
     def _check_mypy_available(self) -> bool:
-        """Check if mypy is available."""
+        """Check whether the two mypy APIs used by this analyzer are importable."""
         try:
-            from mypy.build import build
-            from mypy.nodes import MypyFile
-
-            return True
-        except ImportError:
+            return find_spec("mypy.build") is not None and find_spec("mypy.nodes") is not None
+        except (ImportError, ModuleNotFoundError, ValueError):
             return False
 
     def _get_source_root(self) -> Path:
@@ -1256,11 +1254,11 @@ class MypyAnalyzer:
         return line, column, end_line, end_column, spelling
 
     @staticmethod
-    def _callable_declaration(  # noqa: PLR0911
+    def _callable_declaration(
         node: Any,
     ) -> tuple[str, InvocationKind] | None:
         """Return exact declaration identity only for callable definition nodes."""
-        from mypy.nodes import (  # noqa: PLC0415
+        from mypy.nodes import (
             Decorator,
             FuncDef,
             OverloadedFuncDef,
@@ -1337,7 +1335,7 @@ class MypyAnalyzer:
 
     def _project_type_info(self, fullname: str) -> Any | None:
         """Resolve one exact project class through bounded explicit re-exports."""
-        from mypy.nodes import TypeInfo  # noqa: PLC0415
+        from mypy.nodes import TypeInfo
 
         visited: set[str] = set()
         current = self._canonical_project_fullname(fullname)
@@ -1368,7 +1366,7 @@ class MypyAnalyzer:
 
     def _project_callable_declaration(self, fullname: str) -> tuple[str, InvocationKind] | None:
         """Resolve an exact project callable through bounded explicit re-exports."""
-        from mypy.nodes import TypeInfo  # noqa: PLC0415
+        from mypy.nodes import TypeInfo
 
         visited: set[str] = set()
         current = self._canonical_project_fullname(fullname)
@@ -1407,7 +1405,7 @@ class MypyAnalyzer:
     @staticmethod
     def _explicit_import_fullname(expression: Any, import_map: dict[str, str]) -> str | None:
         """Resolve only source-explicit, unshadowed import attribute chains."""
-        from mypy.nodes import MemberExpr, MypyFile, NameExpr, TypeInfo, Var  # noqa: PLC0415
+        from mypy.nodes import MemberExpr, MypyFile, NameExpr, TypeInfo, Var
 
         if isinstance(expression, NameExpr):
             imported = import_map.get(expression.name)
@@ -1499,7 +1497,7 @@ class MypyAnalyzer:
 
     def _exact_finite_project_type_info(self, fullname: str) -> Any | None:
         """Resolve a class through exact module identities and explicit re-exports only."""
-        from mypy.nodes import TypeInfo  # noqa: PLC0415
+        from mypy.nodes import TypeInfo
 
         visited: set[str] = set()
         current = fullname
@@ -1526,7 +1524,7 @@ class MypyAnalyzer:
 
     def _project_constructor_info(self, callee: Any, import_map: dict[str, str]) -> Any | None:
         """Return one exact project class for a source-explicit constructor call."""
-        from mypy.nodes import NameExpr, TypeInfo  # noqa: PLC0415
+        from mypy.nodes import NameExpr, TypeInfo
 
         if isinstance(callee, NameExpr) and isinstance(callee.node, TypeInfo):
             info = callee.node
@@ -1534,9 +1532,7 @@ class MypyAnalyzer:
         imported = self._explicit_import_fullname(callee, import_map)
         return self._exact_finite_project_type_info(imported) if imported is not None else None
 
-    def _exact_finite_project_callable(  # noqa: PLR0911
-        self, fullname: str
-    ) -> tuple[str, InvocationKind] | None:
+    def _exact_finite_project_callable(self, fullname: str) -> tuple[str, InvocationKind] | None:
         """Resolve a factory through exact project modules and explicit re-exports."""
         visited: set[str] = set()
         current = fullname
@@ -1584,7 +1580,7 @@ class MypyAnalyzer:
 
     @staticmethod
     def _actual_function(node: Any) -> Any:
-        from mypy.nodes import Decorator  # noqa: PLC0415
+        from mypy.nodes import Decorator
 
         return node.func if isinstance(node, Decorator) else node
 
@@ -1601,7 +1597,7 @@ class MypyAnalyzer:
         skip_implicit_receiver: bool = False,
     ) -> dict[str, _FinitePointsTo] | None:
         """Bind a narrow valid call shape without *args/**kwargs guessing."""
-        from mypy.nodes import (  # noqa: PLC0415
+        from mypy.nodes import (
             ARG_NAMED,
             ARG_NAMED_OPT,
             ARG_OPT,
@@ -1667,13 +1663,13 @@ class MypyAnalyzer:
             return None
         return environment
 
-    def _finite_global_value(  # noqa: PLR0911, PLR0912
+    def _finite_global_value(
         self,
         fullname: str,
         _budget: list[int],
     ) -> _FinitePointsTo | None:
         """Summarize one exact module global from ordered source assignments."""
-        from mypy.nodes import (  # noqa: PLC0415
+        from mypy.nodes import (
             AssignmentStmt,
             CallExpr,
             ClassDef,
@@ -1738,7 +1734,7 @@ class MypyAnalyzer:
         finally:
             self._finite_global_in_progress.discard(fullname)
 
-    def _finite_expression_value(  # noqa: PLR0911
+    def _finite_expression_value(
         self,
         expression: Any,
         environment: dict[str, _FinitePointsTo],
@@ -1747,7 +1743,7 @@ class MypyAnalyzer:
         budget: list[int],
     ) -> _FinitePointsTo | None:
         """Evaluate the deliberately small, finite points-to expression language."""
-        from mypy.nodes import CallExpr, ConditionalExpr, MemberExpr, NameExpr  # noqa: PLC0415
+        from mypy.nodes import CallExpr, ConditionalExpr, MemberExpr, NameExpr
 
         if budget[0] >= self.MAX_FACTORY_STATES:
             return None
@@ -1898,7 +1894,7 @@ class MypyAnalyzer:
             value = self._join_finite_values(value, returned)
         return value
 
-    def _execute_finite_block(  # noqa: PLR0911, PLR0912
+    def _execute_finite_block(
         self,
         block: Any,
         environment: dict[str, _FinitePointsTo],
@@ -1909,7 +1905,7 @@ class MypyAnalyzer:
         collect_returns: bool,
     ) -> tuple[dict[str, _FinitePointsTo], list[_FinitePointsTo], bool] | None:
         """Interpret assignments/branches with deterministic fail-closed joins."""
-        from mypy.nodes import (  # noqa: PLC0415
+        from mypy.nodes import (
             AssignmentStmt,
             CallExpr,
             IfStmt,
@@ -2027,7 +2023,7 @@ class MypyAnalyzer:
         keyword_name: str,
     ) -> Any | None:
         """Select one exact explicit call argument without expanding stars."""
-        from mypy.nodes import ARG_NAMED, ARG_POS  # noqa: PLC0415
+        from mypy.nodes import ARG_NAMED, ARG_POS
 
         for expression, kind, name in zip(
             call.args,
@@ -2052,7 +2048,7 @@ class MypyAnalyzer:
     @staticmethod
     def _valid_builtin_generator_consumer(call: Any) -> bool:
         """Accept only valid explicit `next`/`anext` positional call shapes."""
-        from mypy.nodes import ARG_POS  # noqa: PLC0415
+        from mypy.nodes import ARG_POS
 
         return 1 <= len(call.args) <= 2 and all(
             kind == ARG_POS and name is None
@@ -2065,7 +2061,7 @@ class MypyAnalyzer:
         summary: _ExecutorSummary,
     ) -> tuple[Any, Any] | None:
         """Extract one callback plus its explicitly forwarded args and kwargs."""
-        from mypy.nodes import ARG_NAMED, ARG_POS  # noqa: PLC0415
+        from mypy.nodes import ARG_NAMED, ARG_POS
 
         arguments = list(zip(call.args, call.arg_kinds, call.arg_names, strict=True))
         callback_offset: int | None = None
@@ -2130,7 +2126,7 @@ class MypyAnalyzer:
         allow_async: bool = False,
     ) -> tuple[tuple[str, InvocationKind], _FinitePointsTo | None] | None:
         """Resolve one source-proven project callback without callable fanout."""
-        from mypy.nodes import MemberExpr  # noqa: PLC0415
+        from mypy.nodes import MemberExpr
 
         if isinstance(expression, MemberExpr):
             receiver = self._finite_expression_value(
@@ -2224,7 +2220,7 @@ class MypyAnalyzer:
         budget: list[int],
     ) -> _DeferredGenerator | None:
         """Capture one exact valid generator call without executing its body."""
-        from mypy.nodes import MemberExpr  # noqa: PLC0415
+        from mypy.nodes import MemberExpr
 
         if (
             call_site is None
@@ -2279,7 +2275,7 @@ class MypyAnalyzer:
             is_async=is_async,
         )
 
-    def _member_call_resolution(  # noqa: PLR0911, PLR0912, PLR0915
+    def _member_call_resolution(
         self,
         callee: Any,
         import_map: dict[str, str],
@@ -2291,8 +2287,8 @@ class MypyAnalyzer:
         str | None,
     ]:
         """Resolve one member call through finite nominal receiver evidence."""
-        from mypy.nodes import CallExpr, NameExpr, TypeInfo, Var  # noqa: PLC0415
-        from mypy.types import Instance, UnionType, get_proper_type  # noqa: PLC0415
+        from mypy.nodes import CallExpr, NameExpr, TypeInfo, Var
+        from mypy.types import Instance, UnionType, get_proper_type
 
         if (
             isinstance(callee.expr, CallExpr)
@@ -2424,11 +2420,11 @@ class MypyAnalyzer:
         return self._resolved_call_site_cache[cache_key]
 
     @staticmethod
-    def _finite_string_values(  # noqa: PLR0911
+    def _finite_string_values(
         expression: Any,
     ) -> tuple[str, ...] | None:
         """Resolve a bounded literal string set without evaluating application code."""
-        from mypy.nodes import ConditionalExpr, NameExpr, OpExpr, StrExpr, Var  # noqa: PLC0415
+        from mypy.nodes import ConditionalExpr, NameExpr, OpExpr, StrExpr, Var
 
         if isinstance(expression, StrExpr):
             return (expression.value,)
@@ -2454,7 +2450,7 @@ class MypyAnalyzer:
     @classmethod
     def _call_argument_evidence(cls, call: Any) -> tuple[CallArgumentEvidence, ...]:
         """Capture positional/keyword literal identities with strict finite bounds."""
-        from mypy.nodes import ARG_NAMED, ARG_POS  # noqa: PLC0415
+        from mypy.nodes import ARG_NAMED, ARG_POS
 
         evidence: list[CallArgumentEvidence] = []
         positional_index = 0
@@ -2495,14 +2491,14 @@ class MypyAnalyzer:
                 positional_index += 1
         return tuple(evidence)
 
-    def _resolved_call_site_uncached(  # noqa: PLR0912, PLR0915
+    def _resolved_call_site_uncached(
         self,
         call: Any,
         current_file: str,
         import_map: dict[str, str],
     ) -> ResolvedCallSite | None:
         """Resolve one physical project-source call for the analyzer-wide cache."""
-        from mypy.nodes import MemberExpr, NameExpr, SuperExpr, TypeInfo, Var  # noqa: PLC0415
+        from mypy.nodes import MemberExpr, NameExpr, SuperExpr, TypeInfo, Var
 
         try:
             Path(current_file).resolve().relative_to(self.source_root.resolve())
@@ -2692,7 +2688,7 @@ class MypyAnalyzer:
         consumed_generator_call_kinds: dict[int, bool | None] = {}
         deferred_environment: dict[str, _DeferredGenerator] = {}
 
-        def resolve_and_trace(  # noqa: PLR0912, PLR0915
+        def resolve_and_trace(
             fullname: str,
             call_line: int,
             *,

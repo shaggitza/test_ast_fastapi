@@ -279,9 +279,10 @@ low-disk conditions can destabilize a development host:
 ```
 
 Additional pytest arguments can be repeated with `--pytest-arg`. The runner uses
-argv-only subprocesses, private temporary directories, and removes only local
-mypy/pytest caches between files. It never prunes Docker images, volumes, or
-shared system data.
+argv-only subprocesses, private temporary directories, a 15-minute per-file timeout,
+and removes only local mypy/pytest caches between files. It rejects paths outside the
+repository and terminates only a timed-out test's private process group. It never
+prunes Docker images, volumes, or shared system data.
 
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 

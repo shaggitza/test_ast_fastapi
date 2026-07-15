@@ -275,7 +275,7 @@ def analyze(
         ) as progress:
             task = progress.add_task("Initializing...", total=100, line_info="")
 
-            def update_progress(current: int, total: int, description: str) -> None:
+            def update_progress(current: int, _total: int, description: str) -> None:
                 progress.update(
                     task,
                     completed=current,
@@ -316,7 +316,7 @@ def analyze(
             import traceback
 
             console.print(traceback.format_exc())
-        raise click.Abort()
+        raise click.Abort() from e
 
 
 @cli.command("validate-effect-contracts")
@@ -486,7 +486,7 @@ def validate_surface_contracts(contracts: Path, output_format: str) -> None:
 @click.option("--no-cache", is_flag=True, help="Disable mypy analysis caching.")
 @click.option("--clear-cache", is_flag=True, help="Clear mypy analysis cache first.")
 @click.pass_context
-def audit_effect_contracts_command(  # noqa: PLR0912
+def audit_effect_contracts_command(
     ctx: click.Context,
     app: Path,
     contracts: Path | None,
@@ -500,13 +500,13 @@ def audit_effect_contracts_command(  # noqa: PLR0912
     clear_cache: bool,
 ) -> None:
     """Dry-run exact contracts against endpoint-reachable typed calls."""
-    from fastapi_endpoint_detector.analyzer.effect_contract_auditor import (  # noqa: PLC0415
+    from fastapi_endpoint_detector.analyzer.effect_contract_auditor import (
         audit_effect_contracts,
     )
-    from fastapi_endpoint_detector.analyzer.mypy_analyzer import (  # noqa: PLC0415
+    from fastapi_endpoint_detector.analyzer.mypy_analyzer import (
         MypyAnalyzer,
     )
-    from fastapi_endpoint_detector.parser.secure_ast_extractor import (  # noqa: PLC0415
+    from fastapi_endpoint_detector.parser.secure_ast_extractor import (
         SecureASTExtractor,
     )
 
@@ -540,7 +540,7 @@ def audit_effect_contracts_command(  # noqa: PLR0912
         inventory = extractor.extract_inventory()
         loaded_surfaces = config.load_surface_contract_snapshot()
         if loaded_surfaces is not None:
-            from fastapi_endpoint_detector.parser.custom_surface_extractor import (  # noqa: PLC0415
+            from fastapi_endpoint_detector.parser.custom_surface_extractor import (
                 CustomSurfaceExtractor,
                 merge_surface_inventory,
             )
@@ -721,10 +721,7 @@ def list_endpoints(
             )
 
             # Output results
-            if output_format == "json":
-                formatted_output = json.dumps(result, indent=2)
-            else:
-                formatted_output = result
+            formatted_output = json.dumps(result, indent=2) if output_format == "json" else result
 
             if output:
                 output.write_text(formatted_output, encoding="utf-8")
@@ -749,7 +746,7 @@ def list_endpoints(
             inventory = extractor_obj.extract_inventory()
             loaded_surfaces = config.load_surface_contract_snapshot()
             if loaded_surfaces is not None:
-                from fastapi_endpoint_detector.parser.custom_surface_extractor import (  # noqa: PLC0415
+                from fastapi_endpoint_detector.parser.custom_surface_extractor import (
                     CustomSurfaceExtractor,
                     merge_surface_inventory,
                 )
@@ -783,7 +780,7 @@ def list_endpoints(
 
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise click.Abort()
+        raise click.Abort() from e
 
 
 def main() -> None:

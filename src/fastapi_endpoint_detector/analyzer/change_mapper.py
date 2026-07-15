@@ -250,7 +250,7 @@ def _scip_definition_key(definition: SCIPDefinition) -> tuple[str, str, str, int
     )
 
 
-def _expanded_scip_affected(  # noqa: PLR0912, PLR0915
+def _expanded_scip_affected(
     analyzer: SCIPAnalyzer,
     seed: SCIPDefinition,
     max_depth: int,
@@ -662,7 +662,7 @@ class ChangeMapper:
 
         return None
 
-    def _check_mypy_dependency(  # noqa: PLR0912, PLR0915
+    def _check_mypy_dependency(
         self,
         endpoint: Endpoint,
         diff_file: DiffFile,
@@ -926,7 +926,7 @@ class ChangeMapper:
             processed_removed_lines,
         )
 
-    def _analyze_with_scip(  # noqa: PLR0915
+    def _analyze_with_scip(
         self,
         python_files: list[DiffFile],
         warnings: list[str],
@@ -1319,7 +1319,7 @@ class ChangeMapper:
             )
         return enriched
 
-    def analyze_diff(  # noqa: PLR0915
+    def analyze_diff(
         self,
         diff_source: Path | str,
         progress_callback: ProgressCallback | None = None,

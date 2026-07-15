@@ -26,7 +26,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install ruff mypy
+          pip install -e ".[dev]"
 
       - name: Run Ruff linter
         run: ruff check src/ tests/
@@ -58,11 +58,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
-      - name: Run tests
-        run: pytest tests/ -v --cov=src/fastapi_endpoint_detector --cov-report=xml
+      - name: Run tests in resource-bounded processes
+        run: |
+          rm -f .coverage .coverage.*
+          python scripts/run_tests_bounded.py tests \
+            --pytest-arg=--cov=src/fastapi_endpoint_detector \
+            --pytest-arg=--cov-append \
+            --pytest-arg=--cov-report= \
+            --pytest-arg=--cov-fail-under=0
+          python -m coverage report --fail-under=80
+          python -m coverage xml --fail-under=0
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v5
         with:
           files: coverage.xml
           fail_ci_if_error: false
@@ -86,6 +94,25 @@ jobs:
 
       - name: Build package
         run: python -m build
+
+      - name: Verify typed wheel contents
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          wheel = next(Path("dist").glob("*.whl"))
+          with ZipFile(wheel) as archive:
+              names = set(archive.namelist())
+          required = {
+              "fastapi_endpoint_detector/py.typed",
+              "fastapi_endpoint_detector/presets/effects_sqlalchemy_v1.yaml",
+              "fastapi_endpoint_detector/presets/framework_v1.yaml",
+          }
+          missing = required - names
+          if missing:
+              raise SystemExit(f"wheel is missing required files: {sorted(missing)}")
+          PY
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

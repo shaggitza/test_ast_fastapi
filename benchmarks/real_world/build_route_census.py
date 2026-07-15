@@ -275,10 +275,9 @@ def invoke_secure_list(
 ) -> tuple[list[dict[str, Any]], list[str], str, list[dict[str, Any]], float]:
     """Invoke only the execution-free secure list command."""
     args = [
-        "uv",
-        "run",
-        "--frozen",
-        "fastapi-endpoint-detector",
+        sys.executable,
+        "-m",
+        "fastapi_endpoint_detector",
         "list",
         "--app",
         str(app_root),

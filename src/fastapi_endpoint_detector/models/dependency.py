@@ -13,10 +13,10 @@ from pydantic import BaseModel, Field
 class DependencyType(str, Enum):
     """Types of dependencies between code elements."""
 
-    IMPORT = "import"           # Module import
-    FUNCTION_CALL = "call"      # Function call
-    CLASS_USAGE = "class"       # Class instantiation/usage
-    FASTAPI_DEPENDS = "depends" # FastAPI Depends() injection
+    IMPORT = "import"  # Module import
+    FUNCTION_CALL = "call"  # Function call
+    CLASS_USAGE = "class"  # Class instantiation/usage
+    FASTAPI_DEPENDS = "depends"  # FastAPI Depends() injection
 
 
 class ModuleInfo(BaseModel):

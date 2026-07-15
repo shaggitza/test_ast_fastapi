@@ -22,9 +22,7 @@ from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, 
 class TestMypyAnalyzerBasic:
     """Basic tests for MypyAnalyzer."""
 
-    def test_resolves_top_level_import_from_application_directory(
-        self, tmp_path: Path
-    ) -> None:
+    def test_resolves_top_level_import_from_application_directory(self, tmp_path: Path) -> None:
         """Resolve imports whose mypy fullname omits the directory name."""
         (tmp_path / "services.py").write_text(
             "def calculate_total(price: float, quantity: int) -> float:\n"
@@ -51,15 +49,11 @@ class TestMypyAnalyzerBasic:
 
         dependencies = MypyAnalyzer(main_path).analyze_endpoint(endpoint)
 
-        service_reference = dependencies.references_symbol_at_line(
-            str(tmp_path / "services.py"), 1
-        )
+        service_reference = dependencies.references_symbol_at_line(str(tmp_path / "services.py"), 1)
         assert service_reference is not None
         assert service_reference.symbol_name.endswith("services.calculate_total")
 
-    def test_traces_decorated_handler_body_and_fastapi_depends(
-        self, tmp_path: Path
-    ) -> None:
+    def test_traces_decorated_handler_body_and_fastapi_depends(self, tmp_path: Path) -> None:
         """Trace both decorated handlers and Depends callback chains."""
         service_path = tmp_path / "services.py"
         service_path.write_text(
@@ -125,6 +119,7 @@ class TestMypyAnalyzerBasic:
         analyzer = MypyAnalyzer(tmp_path)
 
         callback_called = {"value": False}
+
         def callback(file_path: str, line_num: int, symbol: str) -> None:
             callback_called["value"] = True
 
@@ -294,13 +289,13 @@ def handler():
             handler=handler,
         )
 
-        deps = analyzer.analyze_endpoint(endpoint)
+        analyzer.analyze_endpoint(endpoint)
 
         # The callback should have been called at least once
         assert len(progress_calls) > 0
 
         # All calls should have valid line numbers
-        for file_path, line_num, symbol in progress_calls:
+        for _file_path, line_num, symbol in progress_calls:
             assert line_num > 0
             assert symbol != ""
 
@@ -327,7 +322,7 @@ def handler():
             handler=handler,
         )
 
-        deps = analyzer.analyze_endpoint(endpoint)
+        analyzer.analyze_endpoint(endpoint)
 
         # Should have seen the UserService and list_users symbols
         assert "UserService" in symbols_seen or "list_users" in symbols_seen
@@ -383,7 +378,7 @@ def handler():
             handler=handler,
         )
 
-        deps = analyzer.analyze_endpoint(endpoint)
+        analyzer.analyze_endpoint(endpoint)
 
         # Should have tracked calls on multiple lines (lines 5, 6, 7)
         # At least some of the multiple calls should be seen

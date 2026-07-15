@@ -188,10 +188,7 @@ class EndpointRegistry:
         Returns:
             List of endpoints using that dependency.
         """
-        return [
-            e for e in self._endpoints
-            if dependency_name in e.dependencies
-        ]
+        return [e for e in self._endpoints if dependency_name in e.dependencies]
 
     def __len__(self) -> int:
         """Return the number of registered endpoints."""

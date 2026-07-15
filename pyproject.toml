@@ -38,6 +38,7 @@ classifiers = [
 
 dependencies = [
     "click>=8.1.0",
+    "fastapi>=0.100.0",
     "pydantic>=2.0.0",
     "rich>=13.0.0",
     "pyyaml>=6.0",
@@ -119,6 +120,21 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
+"src/fastapi_endpoint_detector/analyzer/change_mapper.py" = ["PLR0912", "PLR0915"]
+"src/fastapi_endpoint_detector/analyzer/mypy_analyzer.py" = [
+    "ARG002",
+    "PLC0415",
+    "PLR0911",
+    "PLR0912",
+    "PLR0915",
+    "RUF059",
+    "SIM102",
+    "SIM105",
+]
+"src/fastapi_endpoint_detector/cli.py" = ["PLC0415", "PLR0912", "PLR0915"]
+"src/fastapi_endpoint_detector/output/html_output.py" = ["E501", "PLR0912", "PLR0915"]
+"src/fastapi_endpoint_detector/output/markdown_output.py" = ["E501", "PLR0912", "PLR0915"]
+"src/fastapi_endpoint_detector/output/text_output.py" = ["E501", "PLR0912", "PLR0915"]
 "tests/**/*.py" = [
     "ARG001",   # Unused function argument (fixtures)
     "PLR2004",  # Magic values in tests are fine
