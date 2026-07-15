@@ -57,6 +57,12 @@ class MarkdownFormatter(BaseFormatter):
                 f"- **Effect Contract Audit:** {audit.summary.matched_calls} matched calls / "
                 f"{audit.summary.physical_occurrences} physical calls"
             )
+        if report.resource_coupling_graph is not None:
+            graph = report.resource_coupling_graph
+            lines.append(
+                f"- **Resource Coupling:** {len(graph.edges)} report-only edges / "
+                f"{len(graph.diagnostics)} diagnostics; does not change candidates"
+            )
         lines.append("")
 
         # Affected endpoints

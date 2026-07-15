@@ -111,6 +111,11 @@ class JsonFormatter(BaseFormatter):
                 if report.effect_contract_audit is not None
                 else None
             ),
+            "resource_coupling_graph": (
+                report.resource_coupling_graph.model_dump(mode="json", exclude_none=True)
+                if report.resource_coupling_graph is not None
+                else None
+            ),
         }
 
         return json.dumps(data, indent=self.indent, default=str)

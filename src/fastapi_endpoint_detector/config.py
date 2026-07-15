@@ -16,6 +16,10 @@ from fastapi_endpoint_detector.models.effect_contract import (
     load_effect_contracts,
     load_effect_preset,
 )
+from fastapi_endpoint_detector.models.resource_coupling import (
+    LoadedResourceCoupling,
+    load_resource_coupling,
+)
 from fastapi_endpoint_detector.models.surface_contract import (
     LoadedSurfaceContracts,
     load_surface_contracts,
@@ -87,6 +91,10 @@ class AnalysisConfig(BaseModel):
         default=None,
         description="Named package-owned exact effect-contract preset.",
     )
+    resource_coupling: Path | None = Field(
+        default=None,
+        description="Path to strict report-only finite resource coupling configuration.",
+    )
     surface_contracts: Path | None = Field(
         default=None,
         description="Path to strict data-only custom-surface contracts.",
@@ -102,6 +110,10 @@ class AnalysisConfig(BaseModel):
     def validate_contract_sources(self) -> "AnalysisConfig":
         if self.effect_contracts is not None and self.effect_preset is not None:
             raise ValueError("effect_contracts and effect_preset are mutually exclusive")
+        if self.resource_coupling is not None and not (
+            self.effect_contracts is not None or self.effect_preset is not None
+        ):
+            raise ValueError("resource_coupling requires effect_contracts or effect_preset")
         if self.surface_contracts is not None and self.surface_preset is not None:
             raise ValueError("surface_contracts and surface_preset are mutually exclusive")
         return self
@@ -151,6 +163,7 @@ class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     _effect_contract_snapshot: LoadedEffectContracts | None = PrivateAttr(default=None)
+    _resource_coupling_snapshot: LoadedResourceCoupling | None = PrivateAttr(default=None)
     _surface_contract_snapshot: LoadedSurfaceContracts | None = PrivateAttr(default=None)
 
     parser: ParserConfig = Field(default_factory=ParserConfig)
@@ -171,6 +184,15 @@ class Config(BaseModel):
                 else load_surface_preset(preset or "")
             )
         return self._surface_contract_snapshot
+
+    def load_resource_coupling_snapshot(self) -> LoadedResourceCoupling | None:
+        """Load report-only coupling configuration once to prevent analysis-time drift."""
+        path = self.analysis.resource_coupling
+        if path is None:
+            return None
+        if self._resource_coupling_snapshot is None:
+            self._resource_coupling_snapshot = load_resource_coupling(path)
+        return self._resource_coupling_snapshot
 
     def load_effect_contract_snapshot(self) -> LoadedEffectContracts | None:
         """Load configured contract bytes once for validation and later analysis."""
@@ -211,10 +233,12 @@ def load_config(config_path: Path | None = None) -> Config:
         data = load_yaml_unique(config_path.read_text(encoding="utf-8")) or {}
         config = Config(**data)
         effect_path = config.analysis.effect_contracts
+        resource_coupling_path = config.analysis.resource_coupling
         surface_path = config.analysis.surface_contracts
         updates: dict[str, Path] = {}
         for field_name, configured_path in (
             ("effect_contracts", effect_path),
+            ("resource_coupling", resource_coupling_path),
             ("surface_contracts", surface_path),
         ):
             if configured_path is None:
@@ -228,6 +252,7 @@ def load_config(config_path: Path | None = None) -> Config:
                 update={"analysis": config.analysis.model_copy(update=updates)}
             )
         config.load_effect_contract_snapshot()
+        config.load_resource_coupling_snapshot()
         config.load_surface_contract_snapshot()
         return config
     except yaml.YAMLError as e:

@@ -85,6 +85,13 @@ class TextFormatter(BaseFormatter):
                 f"{audit.summary.matched_calls} matched calls / "
                 f"{audit.summary.physical_occurrences} physical calls"
             )
+        if report.resource_coupling_graph is not None:
+            graph = report.resource_coupling_graph
+            console.print(
+                "  Resource Coupling: "
+                f"{len(graph.edges)} report-only edges / "
+                f"{len(graph.diagnostics)} diagnostics (does not change candidates)"
+            )
         console.print()
 
         # Affected endpoints

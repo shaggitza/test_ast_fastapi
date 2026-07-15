@@ -64,6 +64,15 @@ from fastapi_endpoint_detector.models.report import (
     EvidenceStatus,
     ImpactChannel,
 )
+from fastapi_endpoint_detector.models.resource_coupling import (
+    CouplingStrength,
+    LoadedResourceCoupling,
+    ResourceCouplingDocument,
+    ResourceCouplingEdge,
+    ResourceCouplingError,
+    ResourceCouplingGraph,
+    load_resource_coupling,
+)
 from fastapi_endpoint_detector.models.surface_contract import (
     CallbackMode,
     HandlerNameNormalization,
@@ -106,6 +115,14 @@ __all__ = [  # noqa: RUF022 - grouped by public model domain
     "ResourceIdentityEvidence",
     "load_effect_contracts",
     "load_effect_preset",
+    # Resource coupling models
+    "CouplingStrength",
+    "LoadedResourceCoupling",
+    "ResourceCouplingDocument",
+    "ResourceCouplingEdge",
+    "ResourceCouplingError",
+    "ResourceCouplingGraph",
+    "load_resource_coupling",
     # Custom surface contract models
     "CallbackMode",
     "HandlerNameNormalization",

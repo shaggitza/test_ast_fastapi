@@ -30,6 +30,8 @@ This tool is designed for CI/CD pipelines to enable:
   filesystem, HTTP-client, and typed S3 presets for exact state and I/O symbols, with
   canonical provenance hashes and bounded hashed resource identities
   ([schema and presets](docs/effect-contracts.md))
+- 🔗 **Resource Coupling**: Opt-in namespace-qualified report-only writer/reader graphs
+  over finite hashed identities ([safety model](docs/resource-coupling.md))
 - 🛰️ **Custom Surfaces**: Declarative execution-free entrypoints for message listeners,
   tools, tasks, schedulers, CLIs, and reactors ([schema](docs/custom-surfaces.md))
 - 🔁 **Framework Semantics**: Exact lifecycle, middleware, background-task, and dependency

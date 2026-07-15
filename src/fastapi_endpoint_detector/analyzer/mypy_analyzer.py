@@ -12,6 +12,7 @@ using mypy's internal data structures to track file/line references.
 from __future__ import annotations
 
 import ast
+import gc
 import hashlib
 import json
 import os
@@ -552,7 +553,7 @@ class MypyAnalyzer:
         finally:
             sys.path = original_path
 
-    def _reset_build_state(self) -> None:
+    def _reset_build_state(self, *, clear_endpoint_dependencies: bool = True) -> None:
         """Discard one stale typed snapshot before an explicit bulk rebuild."""
         self._build_result = None
         self._trees.clear()
@@ -574,7 +575,13 @@ class MypyAnalyzer:
         self._canonical_project_fullname_cache.clear()
         self._function_lookup_cache.clear()
         self._built_source_fingerprint = None
-        self._endpoint_deps.clear()
+        if clear_endpoint_dependencies:
+            self._endpoint_deps.clear()
+
+    def release_typed_snapshot(self) -> None:
+        """Release heavy mypy AST/type graphs while retaining materialized endpoint results."""
+        self._reset_build_state(clear_endpoint_dependencies=False)
+        gc.collect()
 
     def _find_func_in_tree(
         self,
