@@ -1,0 +1,55 @@
+schema_version: 1
+preset:
+  id: event-listeners
+  version: "1"
+  provenance:
+    kind: preset
+    source: fastapi-endpoint-detector
+    revision: "1"
+contracts:
+  - id: faststream-rabbit-subscriber
+    registration:
+      symbol: faststream.rabbit.RabbitBroker.subscriber
+      invocation: instance_method
+      receiver_type: faststream.rabbit.RabbitBroker
+    handler:
+      kind: decorated_function
+    surface:
+      kind: rabbitmq
+      id_template: "queue:{resource}"
+      resource:
+        kind: argument
+        index: 0
+    callback_mode: async
+
+  - id: faststream-kafka-subscriber
+    registration:
+      symbol: faststream.kafka.KafkaBroker.subscriber
+      invocation: instance_method
+      receiver_type: faststream.kafka.KafkaBroker
+    handler:
+      kind: decorated_function
+    surface:
+      kind: kafka
+      id_template: "topic:{resource}"
+      resource:
+        kind: arguments
+        index: 0
+    callback_mode: async
+
+  - id: aio-pika-queue-consumer
+    registration:
+      symbol: aio_pika.queue.Queue.consume
+      invocation: instance_method
+      receiver_type: aio_pika.queue.Queue
+    handler:
+      kind: argument
+      index: 0
+    surface:
+      kind: rabbitmq
+      id_template: "handler:{resource}"
+      resource:
+        kind: handler_name
+    callback_mode: async
+    conditions:
+      - queue identity is receiver-bound and unavailable to schema v1
