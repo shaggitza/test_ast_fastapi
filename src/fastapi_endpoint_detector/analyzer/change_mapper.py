@@ -51,6 +51,10 @@ from fastapi_endpoint_detector.models.report import (
     ImpactChannel,
     OrphanChange,
 )
+from fastapi_endpoint_detector.parser.custom_surface_extractor import (
+    CustomSurfaceExtractor,
+    merge_surface_inventory,
+)
 from fastapi_endpoint_detector.parser.diff_parser import DiffParser
 from fastapi_endpoint_detector.parser.fastapi_extractor import FastAPIExtractor
 from fastapi_endpoint_detector.parser.secure_ast_extractor import SecureASTExtractor
@@ -62,6 +66,7 @@ if TYPE_CHECKING:
         EffectContractAudit,
         EffectContractAuditOccurrence,
     )
+    from fastapi_endpoint_detector.models.surface_contract import LoadedSurfaceContracts
 
 # Progress callback type: (current, total, description) -> None
 ProgressCallback = Callable[[int, int, str], None]
@@ -419,6 +424,11 @@ class ChangeMapper:
         self._effect_contracts: LoadedEffectContracts | None = (
             self.config.load_effect_contract_snapshot()
         )
+        self._surface_contracts: LoadedSurfaceContracts | None = (
+            self.config.load_surface_contract_snapshot()
+        )
+        if self._surface_contracts is not None and not secure_ast:
+            raise ChangeMapperError("custom surface contracts require secure_ast=True")
         if self._effect_contracts is not None:
             if not secure_ast:
                 raise ChangeMapperError("effect contract evidence requires secure_ast=True")
@@ -485,12 +495,28 @@ class ChangeMapper:
         if self._registry is None:
             self._registry = EndpointRegistry()
             if isinstance(self.extractor, SecureASTExtractor):
-                self._inventory = self.extractor.extract_inventory()
+                native_inventory = self.extractor.extract_inventory()
+                self._inventory = self._merge_surface_inventory(self.app_path, native_inventory)
                 endpoints = self._inventory.endpoints
             else:
                 endpoints = self.extractor.extract_endpoints()
             self._registry.register_many(endpoints)
         return self._registry
+
+    def _merge_surface_inventory(
+        self,
+        app_path: Path,
+        native: EndpointInventory,
+    ) -> EndpointInventory:
+        """Merge custom surfaces before registry population and preserve limitations."""
+        if self._surface_contracts is None:
+            return native
+        custom = CustomSurfaceExtractor(
+            app_path,
+            self._surface_contracts,
+            bootstrap_entry=self.bootstrap_entry,
+        ).extract_inventory()
+        return merge_surface_inventory(native, custom)
 
     @property
     def inventory(self) -> EndpointInventory:
@@ -521,7 +547,9 @@ class ChangeMapper:
                 bootstrap_entry=self.bootstrap_entry,
             )
             self._baseline_registry = EndpointRegistry()
-            self._baseline_registry.register_many(extractor.extract_endpoints())
+            native = extractor.extract_inventory()
+            combined = self._merge_surface_inventory(self.baseline_app_path, native)
+            self._baseline_registry.register_many(combined.endpoints)
         return self._baseline_registry
 
     @property

@@ -44,6 +44,7 @@ from fastapi_endpoint_detector.models.endpoint import (
     EndpointMethod,
     HandlerInfo,
     InventoryStatus,
+    SurfaceRegistrationEvidence,
 )
 from fastapi_endpoint_detector.models.report import (
     AffectedEndpoint,
@@ -59,6 +60,14 @@ from fastapi_endpoint_detector.models.report import (
     EvidenceStatus,
     ImpactChannel,
 )
+from fastapi_endpoint_detector.models.surface_contract import (
+    CallbackMode,
+    LoadedSurfaceContracts,
+    SurfaceContract,
+    SurfaceContractDocument,
+    SurfaceContractError,
+    load_surface_contracts,
+)
 
 __all__ = [  # noqa: RUF022 - grouped by public model domain
     # Endpoint models
@@ -69,6 +78,7 @@ __all__ = [  # noqa: RUF022 - grouped by public model domain
     "EndpointMethod",
     "HandlerInfo",
     "InventoryStatus",
+    "SurfaceRegistrationEvidence",
     # Dependency models
     "Dependency",
     "DependencyType",
@@ -85,6 +95,13 @@ __all__ = [  # noqa: RUF022 - grouped by public model domain
     "LoadedEffectContracts",
     "ResolvedCallSite",
     "load_effect_contracts",
+    # Custom surface contract models
+    "CallbackMode",
+    "LoadedSurfaceContracts",
+    "SurfaceContract",
+    "SurfaceContractDocument",
+    "SurfaceContractError",
+    "load_surface_contracts",
     # Effect contract audit models
     "AuditCallStatus",
     "AuditEndpoint",

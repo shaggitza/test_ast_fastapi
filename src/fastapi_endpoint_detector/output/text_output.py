@@ -111,6 +111,13 @@ class TextFormatter(BaseFormatter):
                     console.print(
                         f"      Handler: {ep.handler.name} ({ep.handler.file_path}:{ep.handler.line_number})"
                     )
+                    if ep.surface is not None:
+                        console.print(
+                            f"      Surface contract: {ep.surface.contract_id} "
+                            f"({ep.surface.match_kind.value}) at "
+                            f"{ep.surface.registration_file}:{ep.surface.registration_line}; "
+                            f"config {ep.surface.config_hash}"
+                        )
                     console.print(f"      Reason: {ae.reason}")
                     if ep.discovery_conditions:
                         console.print("      Discovery: CONDITIONAL")
@@ -167,6 +174,14 @@ class TextFormatter(BaseFormatter):
                     f"  {methods} {candidate.endpoint.path} "
                     f"({candidate.confidence.value}){discovery}"
                 )
+                if candidate.endpoint.surface is not None:
+                    surface = candidate.endpoint.surface
+                    console.print(
+                        f"    surface contract {surface.contract_id} "
+                        f"({surface.match_kind.value}) at "
+                        f"{surface.registration_file}:{surface.registration_line}; "
+                        f"config {surface.config_hash}"
+                    )
                 for condition in candidate.endpoint.discovery_conditions:
                     console.print(
                         f"    {condition.source_path}:{condition.source_line}: {condition.reason}",
@@ -245,6 +260,7 @@ class TextFormatter(BaseFormatter):
         table.add_column("File", style="dim")
         table.add_column("Line", justify="right")
         table.add_column("Discovery")
+        table.add_column("Surface contract")
 
         for ep in endpoints:
             methods = ",".join(m.value for m in ep.methods)
@@ -256,6 +272,12 @@ class TextFormatter(BaseFormatter):
                 file_name,
                 str(ep.handler.line_number),
                 ep.discovery_status.value,
+                (
+                    f"{ep.surface.contract_id} ({ep.surface.match_kind.value}) "
+                    f"{ep.surface.config_hash}"
+                    if ep.surface is not None
+                    else ""
+                ),
             )
 
         console.print(table)

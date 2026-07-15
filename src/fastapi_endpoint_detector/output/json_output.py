@@ -44,6 +44,9 @@ class JsonFormatter(BaseFormatter):
             "discovery_conditions": [
                 condition.model_dump(mode="json") for condition in endpoint.discovery_conditions
             ],
+            "surface": (
+                endpoint.surface.model_dump(mode="json") if endpoint.surface is not None else None
+            ),
         }
 
     def _affected_to_dict(self, affected: AffectedEndpoint) -> dict[str, Any]:

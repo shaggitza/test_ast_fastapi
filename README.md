@@ -28,6 +28,8 @@ This tool is designed for CI/CD pipelines to enable:
   logged, internal, and unresolved data effects ([details](docs/effect-evidence.md))
 - 📜 **Effect Contracts**: Strict data-only declarations for exact state and I/O symbols,
   with canonical provenance hashes ([schema](docs/effect-contracts.md))
+- 🛰️ **Custom Surfaces**: Declarative execution-free entrypoints for message listeners,
+  tools, tasks, schedulers, CLIs, and reactors ([schema](docs/custom-surfaces.md))
 - 💾 **Caching**: Cache analysis results for faster subsequent runs
 - 📋 **Multiple Output Formats**: JSON, YAML, Markdown, HTML, or human-readable text reports
 - 🎨 **Rich Progress Display**: Visual progress bars with real-time analysis feedback
@@ -196,19 +198,19 @@ Create a `.endpoint-detector.yaml` file in your project root:
 
 ```yaml
 # .endpoint-detector.yaml
-app_patterns:
-  - "app = FastAPI"
-  - "application = FastAPI"
-
-ignore_paths:
-  - "tests/"
-  - "migrations/"
-
-confidence_threshold: medium  # low, medium, high
-
+parser:
+  include_patterns: ["**/*.py"]
+  exclude_patterns: ["**/tests/**", "**/migrations/**"]
+  max_depth: 10
+analysis:
+  confidence_threshold: 0.5
+  effect_contracts: effects.yaml       # optional, config-relative
+  surface_contracts: surfaces.yaml     # optional, requires --secure-ast
 output:
-  format: json
-  include_unaffected: false
+  show_confidence: true
+  show_dependency_chain: false
+integrations:
+  use_mypy: true
 ```
 
 ## Use Cases

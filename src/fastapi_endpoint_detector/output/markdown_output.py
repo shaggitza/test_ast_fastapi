@@ -85,6 +85,13 @@ class MarkdownFormatter(BaseFormatter):
                     lines.append(
                         f"- **Location:** `{ep.handler.file_path}:{ep.handler.line_number}`"
                     )
+                    if ep.surface is not None:
+                        lines.append(
+                            f"- **Surface contract:** `{ep.surface.contract_id}` "
+                            f"({ep.surface.match_kind.value}) at "
+                            f"`{ep.surface.registration_file}:{ep.surface.registration_line}`; "
+                            f"config `{ep.surface.config_hash}`"
+                        )
                     lines.append(f"- **Reason:** {ae.reason}")
                     if ep.discovery_conditions:
                         lines.append("- **Discovery:** `CONDITIONAL`")
@@ -149,6 +156,14 @@ class MarkdownFormatter(BaseFormatter):
                     f"- **{methods} `{candidate.endpoint.path}`** "
                     f"({candidate.confidence.value}){discovery}"
                 )
+                if candidate.endpoint.surface is not None:
+                    surface = candidate.endpoint.surface
+                    lines.append(
+                        f"  - Surface contract `{surface.contract_id}` "
+                        f"({surface.match_kind.value}) at "
+                        f"`{surface.registration_file}:{surface.registration_line}`; "
+                        f"config `{surface.config_hash}`"
+                    )
                 for condition in candidate.endpoint.discovery_conditions:
                     lines.append(
                         f"  - Discovery condition: `{condition.source_path}:"
@@ -210,9 +225,7 @@ class MarkdownFormatter(BaseFormatter):
         """Format endpoints with visible whole-inventory strength."""
         lines = [f"**Inventory status:** `{inventory.status.value}`", ""]
         for item in inventory.limitations:
-            lines.append(
-                f"- Limitation: `{item.source_path}:{item.source_line}` — {item.reason}"
-            )
+            lines.append(f"- Limitation: `{item.source_path}:{item.source_line}` — {item.reason}")
         if inventory.limitations:
             lines.append("")
         lines.append(self.format_endpoints(inventory.endpoints))
@@ -230,16 +243,21 @@ class MarkdownFormatter(BaseFormatter):
         lines.append("")
 
         # Create table
-        lines.append("| Method(s) | Path | Handler | File | Line | Discovery |")
-        lines.append("|-----------|------|---------|------|------|-----------|")
+        lines.append("| Method(s) | Path | Handler | File | Line | Discovery | Surface contract |")
+        lines.append("|-----------|------|---------|------|------|-----------|------------------|")
 
         for ep in endpoints:
             methods = ", ".join(m.value for m in ep.methods)
             file_name = ep.handler.file_path.name
+            surface = (
+                f"`{ep.surface.contract_id}` ({ep.surface.match_kind.value})"
+                if ep.surface is not None
+                else ""
+            )
             lines.append(
                 f"| {methods} | `{ep.path}` | `{ep.handler.name}` | "
                 f"`{file_name}` | {ep.handler.line_number} | "
-                f"{ep.discovery_status.value} |"
+                f"{ep.discovery_status.value} | {surface} |"
             )
 
         lines.append("")

@@ -1,0 +1,39 @@
+schema_version: 1
+preset:
+  id: generic-reactors
+  version: "1"
+  provenance:
+    kind: user
+    source: examples/surface_contracts.yaml
+contracts:
+  - id: rabbitmq-subscriber
+    registration:
+      symbol: my_messaging.RabbitBroker.subscriber
+      invocation: instance_method
+      receiver_type: my_messaging.RabbitBroker
+    handler:
+      kind: decorated_function
+    surface:
+      kind: rabbitmq
+      id_template: "queue:{resource}"
+      resource:
+        kind: argument
+        index: 0
+    callback_mode: async
+
+  - id: scheduled-task
+    registration:
+      symbol: my_scheduler.register
+      invocation: function
+    handler:
+      kind: keyword
+      name: callback
+    surface:
+      kind: scheduler
+      id_template: "task:{resource}"
+      resource:
+        kind: keyword
+        name: name
+    callback_mode: either
+    conditions:
+      - scheduler process is running
