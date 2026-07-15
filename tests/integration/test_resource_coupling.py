@@ -15,6 +15,7 @@ from fastapi_endpoint_detector.models.report import AnalysisReport
 from fastapi_endpoint_detector.models.resource_coupling import (
     ResourceCouplingError,
     load_resource_coupling,
+    semantic_hash,
 )
 from fastapi_endpoint_detector.output.formatters import get_formatter
 
@@ -22,7 +23,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _project(root: Path) -> tuple[Path, Path, Path]:
+def _project(
+    root: Path,
+    *,
+    mode: str = "report_only",
+    changed_callsite: bool = False,
+) -> tuple[Path, Path, Path]:
     (root / "main.py").write_text(
         "from fastapi import FastAPI\n\n"
         "app = FastAPI()\n\n"
@@ -70,11 +76,14 @@ def _project(root: Path) -> tuple[Path, Path, Path]:
         encoding="utf-8",
     )
     coupling = root / "coupling.yaml"
+    limits = {"max_endpoint_links_per_resource": 8, "max_edges": 16}
+    if mode == "changed_callsite_candidates":
+        limits["max_new_candidates"] = 4
     coupling.write_text(
         yaml.safe_dump(
             {
-                "schema_version": 1,
-                "mode": "report_only",
+                "schema_version": 1 if mode == "report_only" else 2,
+                "mode": mode,
                 "groups": [
                     {
                         "id": "orders-state",
@@ -83,20 +92,22 @@ def _project(root: Path) -> tuple[Path, Path, Path]:
                         "consumer_contract_ids": ["read-state"],
                     }
                 ],
-                "limits": {"max_endpoint_links_per_resource": 8, "max_edges": 16},
+                "limits": limits,
             },
             sort_keys=False,
         ),
         encoding="utf-8",
     )
     diff = root / "change.diff"
-    diff.write_text(
-        "diff --git a/main.py b/main.py\n"
-        "--- a/main.py\n"
-        "+++ b/main.py\n"
-        "@@ -5,1 +5,1 @@\n"
+    changed_hunk = (
+        "@@ -10,1 +10,1 @@\n-    write_state('orders:0')\n+    write_state('orders:1')\n"
+        if changed_callsite
+        else "@@ -5,1 +5,1 @@\n"
         "-def write_state(key: str) -> None: pass\n"
-        "+def write_state(key: str) -> None: return None\n",
+        "+def write_state(key: str) -> None: return None\n"
+    )
+    diff.write_text(
+        "diff --git a/main.py b/main.py\n--- a/main.py\n+++ b/main.py\n" + changed_hunk,
         encoding="utf-8",
     )
     return contracts, coupling, diff
@@ -133,6 +144,10 @@ def test_report_only_graph_is_exact_and_never_changes_candidates(tmp_path: Path)
         mapper.mypy_analyzer.get_endpoint_dependencies(endpoint) is not None
         for endpoint in mapper.inventory.endpoints
     )
+    loaded_coupling = load_resource_coupling(coupling)
+    normalized = loaded_coupling.document.normalized_payload()
+    assert "max_new_candidates" not in normalized["limits"]
+    assert loaded_coupling.config_hash == semantic_hash(normalized)
     assert _candidate_projection(configured) == _candidate_projection(baseline)
     assert configured.affected_endpoints == baseline.affected_endpoints
     assert configured.orphan_changes == baseline.orphan_changes
@@ -148,6 +163,97 @@ def test_report_only_graph_is_exact_and_never_changes_candidates(tmp_path: Path)
     serialized = json.dumps(configured.model_dump(mode="json"))
     assert "orders:1" not in serialized
     assert "orders-test-namespace" not in serialized
+
+
+def test_exact_added_writer_callsite_adds_one_low_nonrecursive_reader(
+    tmp_path: Path,
+) -> None:
+    contracts, coupling, diff = _project(
+        tmp_path,
+        mode="changed_callsite_candidates",
+        changed_callsite=True,
+    )
+    report = ChangeMapper(
+        app_path=tmp_path,
+        config=Config(
+            analysis=AnalysisConfig(
+                effect_contracts=contracts,
+                resource_coupling=coupling,
+            )
+        ),
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+
+    assert report.resource_coupling_graph is not None
+    assert report.resource_coupling_graph.status == "candidate_eligible"
+    candidates = {item.endpoint.path: item for item in report.candidate_endpoints}
+    assert set(candidates) == {"/write", "/read"}
+    assert candidates["/read"].confidence.value == "low"
+    assert candidates["/read"].reason == "Potential cross-request finite resource coupling"
+    evidence = candidates["/read"].resource_coupling_evidence
+    assert len(evidence) == 1
+    assert evidence[0].causal_basis == "exact_added_producer_callsite"
+    assert evidence[0].changed_file == "main.py"
+    assert evidence[0].changed_line == 10
+    assert [item.endpoint.path for item in report.affected_endpoints] == ["/write"]
+    json_report = json.loads(get_formatter("json").format(report))
+    json_reader = next(
+        item for item in json_report["candidate_endpoints"] if item["endpoint"]["path"] == "/read"
+    )
+    assert json_reader["resource_coupling_evidence"][0]["status"] == ("potential_cross_request")
+    for output_format in ("text", "markdown", "html"):
+        assert (
+            "potential cross-request coupling"
+            in get_formatter(output_format).format(report).lower()
+        )
+
+
+def test_low_threshold_presents_candidate_without_changing_graph(tmp_path: Path) -> None:
+    contracts, coupling, diff = _project(
+        tmp_path,
+        mode="changed_callsite_candidates",
+        changed_callsite=True,
+    )
+    report = ChangeMapper(
+        app_path=tmp_path,
+        config=Config(
+            analysis=AnalysisConfig(
+                effect_contracts=contracts,
+                resource_coupling=coupling,
+                confidence_threshold=0.3,
+            )
+        ),
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+
+    assert {item.endpoint.path for item in report.affected_endpoints} == {"/write", "/read"}
+    assert report.resource_coupling_graph is not None
+    assert len(report.resource_coupling_graph.edges) == 1
+
+
+def test_unrelated_writer_implementation_change_never_seeds_candidate(
+    tmp_path: Path,
+) -> None:
+    contracts, coupling, diff = _project(
+        tmp_path,
+        mode="changed_callsite_candidates",
+    )
+    report = ChangeMapper(
+        app_path=tmp_path,
+        config=Config(
+            analysis=AnalysisConfig(
+                effect_contracts=contracts,
+                resource_coupling=coupling,
+            )
+        ),
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+
+    assert [item.endpoint.path for item in report.candidate_endpoints] == ["/write"]
+    assert report.candidate_endpoints[0].resource_coupling_evidence == ()
 
 
 def test_disjoint_or_dynamic_resources_never_fan_out(tmp_path: Path) -> None:
@@ -207,6 +313,66 @@ def test_hot_resource_component_is_omitted_atomically(tmp_path: Path) -> None:
     assert report.resource_coupling_graph.diagnostics[0].omitted_edges == 2
 
 
+def test_candidate_overflow_aborts_atomically(tmp_path: Path) -> None:
+    contracts, coupling, diff = _project(
+        tmp_path,
+        mode="changed_callsite_candidates",
+        changed_callsite=True,
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        main.read_text(encoding="utf-8") + "\n@app.get('/read-again')\n"
+        "def reader_again() -> str:\n"
+        "    return read_state('orders:1')\n",
+        encoding="utf-8",
+    )
+    document = yaml.safe_load(coupling.read_text(encoding="utf-8"))
+    document["limits"]["max_new_candidates"] = 1
+    coupling.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ResourceCouplingError, match="aborted atomically"):
+        ChangeMapper(
+            app_path=tmp_path,
+            config=Config(
+                analysis=AnalysisConfig(
+                    effect_contracts=contracts,
+                    resource_coupling=coupling,
+                )
+            ),
+            secure_ast=True,
+            use_cache=False,
+        ).analyze_diff(diff)
+
+
+def test_candidate_mode_rejects_unevaluated_package_applicability(
+    tmp_path: Path,
+) -> None:
+    contracts, coupling, diff = _project(
+        tmp_path,
+        mode="changed_callsite_candidates",
+        changed_callsite=True,
+    )
+    document = yaml.safe_load(contracts.read_text(encoding="utf-8"))
+    document["contracts"][1]["package"] = {
+        "distribution": "example-state",
+        "version": ">=1,<2",
+    }
+    contracts.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ResourceCouplingError, match="package applicability"):
+        ChangeMapper(
+            app_path=tmp_path,
+            config=Config(
+                analysis=AnalysisConfig(
+                    effect_contracts=contracts,
+                    resource_coupling=coupling,
+                )
+            ),
+            secure_ast=True,
+            use_cache=False,
+        ).analyze_diff(diff)
+
+
 def test_unknown_contract_and_operation_fail_closed(tmp_path: Path) -> None:
     contracts, coupling, diff = _project(tmp_path)
     document = yaml.safe_load(coupling.read_text(encoding="utf-8"))
@@ -241,6 +407,54 @@ def test_config_requires_effect_source_and_strict_sorted_groups(tmp_path: Path) 
     )
     with pytest.raises(ResourceCouplingError, match="sorted unique"):
         load_resource_coupling(path)
+
+    candidate_root = tmp_path / "candidate"
+    candidate_root.mkdir()
+    _contracts, candidate_path, _diff = _project(
+        candidate_root,
+        mode="changed_callsite_candidates",
+        changed_callsite=True,
+    )
+    candidate_document = yaml.safe_load(candidate_path.read_text(encoding="utf-8"))
+    candidate_document["schema_version"] = 1
+    candidate_path.write_text(
+        yaml.safe_dump(candidate_document, sort_keys=False),
+        encoding="utf-8",
+    )
+    with pytest.raises(ResourceCouplingError, match="version 1"):
+        load_resource_coupling(candidate_path)
+
+
+def test_candidate_evidence_tampering_is_rejected(tmp_path: Path) -> None:
+    contracts, coupling, diff = _project(
+        tmp_path,
+        mode="changed_callsite_candidates",
+        changed_callsite=True,
+    )
+    report = ChangeMapper(
+        app_path=tmp_path,
+        config=Config(
+            analysis=AnalysisConfig(
+                effect_contracts=contracts,
+                resource_coupling=coupling,
+            )
+        ),
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+    payload = report.model_dump(mode="json")
+    reader = next(
+        item for item in payload["candidate_endpoints"] if item["endpoint"]["path"] == "/read"
+    )
+    reader["resource_coupling_evidence"][0]["changed_line"] = 1
+
+    with pytest.raises(ValidationError, match="differs from graph edge"):
+        AnalysisReport.model_validate(payload)
+
+    missing_graph = report.model_dump(mode="json")
+    missing_graph["resource_coupling_graph"] = None
+    with pytest.raises(ValidationError, match="requires its graph"):
+        AnalysisReport.model_validate(missing_graph)
 
 
 def test_graph_tampering_is_rejected_and_all_formats_disclose_report_only(

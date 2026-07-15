@@ -69,6 +69,10 @@ class JsonFormatter(BaseFormatter):
                 evidence.model_dump(mode="json", exclude_none=True)
                 for evidence in affected.contract_evidence
             ],
+            "resource_coupling_evidence": [
+                evidence.model_dump(mode="json", exclude_none=True)
+                for evidence in affected.resource_coupling_evidence
+            ],
         }
 
     def format(self, report: AnalysisReport) -> str:

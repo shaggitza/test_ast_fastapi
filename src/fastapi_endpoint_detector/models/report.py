@@ -21,7 +21,10 @@ from fastapi_endpoint_detector.models.effect_contract import (
 )
 from fastapi_endpoint_detector.models.effect_contract_audit import EffectContractAudit
 from fastapi_endpoint_detector.models.endpoint import Endpoint
-from fastapi_endpoint_detector.models.resource_coupling import ResourceCouplingGraph
+from fastapi_endpoint_detector.models.resource_coupling import (
+    ResourceCouplingCandidateEvidence,
+    ResourceCouplingGraph,
+)
 
 
 def _contract_hash(contract: EffectContract) -> str:
@@ -270,6 +273,10 @@ class AffectedEndpoint(BaseModel):
             "Exact declared call semantics, separate from changed-code causality and observation."
         ),
     )
+    resource_coupling_evidence: tuple[ResourceCouplingCandidateEvidence, ...] = Field(
+        default_factory=tuple,
+        description="LOW-only potential cross-request resource coupling evidence.",
+    )
 
     class Config:
         frozen = True
@@ -413,15 +420,24 @@ class AnalysisReport(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_resource_coupling_graph(self) -> "AnalysisReport":
+    def validate_resource_coupling_graph(self) -> "AnalysisReport":  # noqa: PLR0912
         graph = self.resource_coupling_graph
+        candidate_evidence = [
+            evidence
+            for candidate in self.candidate_endpoints
+            for evidence in candidate.resource_coupling_evidence
+        ]
         if graph is None:
+            if candidate_evidence:
+                raise ValueError("resource coupling candidate evidence requires its graph")
             return self
         audit = self.effect_contract_audit
         if audit is None or graph.effect_audit_hash != audit.provenance.audit_hash:
             raise ValueError("resource coupling graph requires its exact effect audit")
         occurrence_by_id = {item.id: item for item in audit.occurrences}
         group_by_id = {item.id: item for item in graph.groups}
+        edge_by_id = {edge.id: edge for edge in graph.edges}
+        endpoint_by_id = {item.id: item for item in audit.scope.endpoint_inventory}
         for edge in graph.edges:
             producer = occurrence_by_id.get(edge.producer_occurrence_id)
             consumer = occurrence_by_id.get(edge.consumer_occurrence_id)
@@ -453,6 +469,50 @@ class AnalysisReport(BaseModel):
                 or edge.resource_value_hash not in consumer.resource_identity.value_hashes
             ):
                 raise ValueError("resource coupling edge has no exact finite resource overlap")
+        evidence_keys: set[tuple[str, str]] = set()
+        for candidate in self.candidate_endpoints:
+            for evidence in candidate.resource_coupling_evidence:
+                evidence_edge = edge_by_id.get(evidence.edge_id)
+                target = endpoint_by_id.get(evidence.consumer_endpoint_id)
+                producer = occurrence_by_id.get(evidence.producer_occurrence_id)
+                if evidence_edge is None or target is None or producer is None:
+                    raise ValueError("coupling candidate evidence is absent from its graph/audit")
+                if (
+                    graph.mode != "changed_callsite_candidates"
+                    or evidence.graph_hash != graph.graph_hash
+                    or evidence.producer_occurrence_id != evidence_edge.producer_occurrence_id
+                    or evidence.producer_endpoint_id != evidence_edge.producer_endpoint_id
+                    or evidence.consumer_endpoint_id != evidence_edge.consumer_endpoint_id
+                    or evidence.resource_value_hash != evidence_edge.resource_value_hash
+                    or evidence.strength != evidence_edge.strength
+                    or evidence.changed_file != producer.file_path
+                    or not (
+                        producer.line
+                        <= evidence.changed_line
+                        <= (producer.end_line or producer.line)
+                    )
+                ):
+                    raise ValueError("coupling candidate evidence differs from graph edge")
+                endpoint = candidate.endpoint
+                handler_path = PurePosixPath(str(endpoint.handler.file_path).replace("\\", "/"))
+                target_path = PurePosixPath(target.handler_file)
+                handler_matches = handler_path == target_path or (
+                    len(handler_path.parts) >= len(target_path.parts)
+                    and handler_path.parts[-len(target_path.parts) :] == target_path.parts
+                )
+                if (
+                    endpoint.path != target.path
+                    or tuple(sorted(item.value for item in endpoint.methods)) != target.methods
+                    or endpoint.handler.module != target.handler_module
+                    or endpoint.handler.name != target.handler_name
+                    or endpoint.handler.line_number != target.handler_line
+                    or not handler_matches
+                ):
+                    raise ValueError("coupling evidence is attached to a different target")
+                key = (evidence.edge_id, evidence.consumer_endpoint_id)
+                if key in evidence_keys:
+                    raise ValueError("duplicate resource coupling candidate evidence")
+                evidence_keys.add(key)
         return self
 
     @model_validator(mode="after")

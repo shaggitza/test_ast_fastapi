@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from fastapi_endpoint_detector.models.effect_contract import (
     EffectChannel,
@@ -109,6 +109,14 @@ def build_resource_coupling_graph(  # noqa: PLR0912, PLR0915
                     f"coupling producer {contract_id!r} has unsupported operation "
                     f"{contract.operation.value!r}"
                 )
+            if (
+                loaded.document.mode == "changed_callsite_candidates"
+                and contract.package is not None
+            ):
+                raise ResourceCouplingError(
+                    "candidate-producing coupling requires producer contracts without "
+                    "unevaluated package applicability"
+                )
             channels.add(contract.channel)
             producers.extend((contract, item) for item in occurrences.get(contract_id, ()))
         for contract_id in configured_group.consumer_contract_ids:
@@ -122,6 +130,14 @@ def build_resource_coupling_graph(  # noqa: PLR0912, PLR0915
                 raise ResourceCouplingError(
                     f"coupling consumer {contract_id!r} has unsupported operation "
                     f"{contract.operation.value!r}"
+                )
+            if (
+                loaded.document.mode == "changed_callsite_candidates"
+                and contract.package is not None
+            ):
+                raise ResourceCouplingError(
+                    "candidate-producing coupling requires consumer contracts without "
+                    "unevaluated package applicability"
                 )
             channels.add(contract.channel)
             consumers.extend((contract, item) for item in occurrences.get(contract_id, ()))
@@ -250,10 +266,15 @@ def build_resource_coupling_graph(  # noqa: PLR0912, PLR0915
             ),
         )
     )
+    mode = loaded.document.mode
+    status: Literal["diagnostic_only", "candidate_eligible"] = (
+        "diagnostic_only" if mode == "report_only" else "candidate_eligible"
+    )
+    schema_version = loaded.document.schema_version
     constructed = ResourceCouplingGraph.model_construct(
-        schema_version=1,
-        mode="report_only",
-        status="diagnostic_only",
+        schema_version=schema_version,
+        mode=mode,
+        status=status,
         raw_hash=loaded.raw_hash,
         config_hash=loaded.config_hash,
         effect_audit_hash=audit.provenance.audit_hash,
@@ -263,6 +284,9 @@ def build_resource_coupling_graph(  # noqa: PLR0912, PLR0915
         graph_hash=f"sha256:{'0' * 64}",
     )
     return ResourceCouplingGraph(
+        schema_version=schema_version,
+        mode=mode,
+        status=status,
         raw_hash=loaded.raw_hash,
         config_hash=loaded.config_hash,
         effect_audit_hash=audit.provenance.audit_hash,

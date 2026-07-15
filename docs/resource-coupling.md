@@ -1,9 +1,11 @@
 # Report-only finite resource coupling
 
-Resource coupling is an explicit, execution-free diagnostic layered on an exact
-effect-contract audit. Version 1 builds a potential cross-request graph and
-**never changes endpoint candidates, confidence, reasons, dependency chains,
-call stacks, thresholds, or orphan accounting**.
+Resource coupling is an explicit, execution-free layer over an exact
+effect-contract audit. Version 1 defaults to `report_only`, which builds a
+potential cross-request graph and **never changes endpoint candidates,
+confidence, reasons, dependency chains, call stacks, thresholds, or orphan
+accounting**. A separately explicit `changed_callsite_candidates` mode may add
+bounded LOW-only targets under the stricter gates below.
 
 Configure an effect source and a separate namespace-qualified coupling document:
 
@@ -56,11 +58,31 @@ component is omitted with `resource_fanout_limit_exceeded`. If the global edge
 limit is exceeded, all edges are omitted with `global_edge_limit_exceeded`.
 There is no order-dependent “first N” behavior.
 
+## LOW-only changed-callsite candidates
+
+Use `schema_version: 2` and set `mode: changed_callsite_candidates` only for
+user/internal contracts without
+package applicability metadata. Preset contracts remain ineligible until target
+package versions can be attested. A reader is added only when:
+
+- its graph edge is otherwise exact and eligible;
+- the producer endpoint was independently present in the pre-coupling candidate set;
+- an added target-side diff line overlaps the exact producer call occurrence;
+- the bounded global candidate limit is not exceeded.
+
+New readers are LOW, carry dedicated `potential_cross_request` evidence, and
+usually remain outside `affected_endpoints` at the default threshold. Existing
+candidates keep their stronger confidence and primary evidence. Expansion uses
+the frozen pre-coupling seed set, so it cannot recursively cascade. Removed
+writers, changes elsewhere in a writer implementation, package-constrained
+contracts, and dynamic resources add nothing. Candidate overflow aborts the
+whole expansion rather than returning an order-dependent prefix.
+
 ## Current boundary
 
 Graph edges mean only that exact endpoint-reachable declared calls may access the
-same qualified finite identity. They do not establish changed-code-to-writer
-causality, runtime execution or ordering, persistence, transaction commit,
-downstream observation, or impact. Candidate-producing coupling remains disabled
-until changed-callsite causality, target package applicability, composite
-resources, consume semantics, receiver origins, and scale/precision gates exist.
+same qualified finite identity. Even candidate mode establishes only that the
+producer call syntax changed; it does not establish runtime execution or
+ordering, persistence, transaction commit, downstream observation, or impact.
+Publish/consume, receiver origins, composite resources, removed writers,
+package applicability attestation, and scale/precision gates remain deferred.

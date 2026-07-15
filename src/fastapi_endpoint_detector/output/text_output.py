@@ -87,10 +87,14 @@ class TextFormatter(BaseFormatter):
             )
         if report.resource_coupling_graph is not None:
             graph = report.resource_coupling_graph
+            policy = (
+                "report-only; does not change candidates"
+                if graph.mode == "report_only"
+                else "exact-callsite LOW candidate mode"
+            )
             console.print(
                 "  Resource Coupling: "
-                f"{len(graph.edges)} report-only edges / "
-                f"{len(graph.diagnostics)} diagnostics (does not change candidates)"
+                f"{len(graph.edges)} edges / {len(graph.diagnostics)} diagnostics ({policy})"
             )
         console.print()
 
@@ -150,6 +154,11 @@ class TextFormatter(BaseFormatter):
                             f"{contract_evidence.contract.channel.value}); "
                             "change-to-call flow not established"
                         )
+                    for coupling in ae.resource_coupling_evidence:
+                        console.print(
+                            "      Potential cross-request coupling: exact added producer "
+                            f"callsite; {coupling.strength.value}; LOW-only"
+                        )
 
                     # Show traceback-style call stack if available
                     if ae.call_stacks:
@@ -202,6 +211,11 @@ class TextFormatter(BaseFormatter):
                     console.print(
                         f"    declared contract {contract_evidence.contract.id}: "
                         "change-to-call flow not established"
+                    )
+                for coupling in candidate.resource_coupling_evidence:
+                    console.print(
+                        "    potential cross-request coupling: exact added producer "
+                        f"callsite; {coupling.strength.value}; LOW-only"
                     )
             console.print()
 
