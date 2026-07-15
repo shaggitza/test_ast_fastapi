@@ -270,6 +270,19 @@ This project is under active development. Current status:
 
 ## Contributing
 
+Mypy retains large semantic graphs during analysis-heavy tests. Run the suite in
+isolated per-file processes to keep peak RAM bounded and stop before low-memory or
+low-disk conditions can destabilize a development host:
+
+```bash
+.venv/bin/python scripts/run_tests_bounded.py
+```
+
+Additional pytest arguments can be repeated with `--pytest-arg`. The runner uses
+argv-only subprocesses, private temporary directories, and removes only local
+mypy/pytest caches between files. It never prunes Docker images, volumes, or
+shared system data.
+
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## License
