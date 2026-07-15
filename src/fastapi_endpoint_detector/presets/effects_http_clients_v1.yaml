@@ -1,0 +1,46 @@
+schema_version: 1
+preset:
+  id: python-http-client-effects
+  version: 1.0.0
+  provenance:
+    kind: preset
+    source: fastapi-endpoint-detector/effects_http_clients_v1.yaml
+    revision: "1"
+contracts:
+  - id: requests-session-get
+    symbol: requests.sessions.Session.get
+    invocation: instance_method
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    package: {distribution: requests, version: ">=2.31,<3"}
+  - id: requests-session-post
+    symbol: requests.sessions.Session.post
+    invocation: instance_method
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    package: {distribution: requests, version: ">=2.31,<3"}
+  - id: httpx-client-get
+    symbol: httpx._client.Client.get
+    invocation: instance_method
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    package: {distribution: httpx, version: ">=0.27,<1"}
+  - id: httpx-async-client-get
+    symbol: httpx._client.AsyncClient.get
+    invocation: instance_method
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    behavior: {async_mode: async, timing: await}
+    package: {distribution: httpx, version: ">=0.27,<1"}
+  - id: aiohttp-session-get
+    symbol: aiohttp.client.ClientSession.get
+    invocation: instance_method
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    behavior: {async_mode: async, timing: context_enter}
+    package: {distribution: aiohttp, version: ">=3.9,<4"}

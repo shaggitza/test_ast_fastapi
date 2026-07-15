@@ -23,6 +23,7 @@ from fastapi_endpoint_detector.models.effect_contract import (
     LoadedEffectContracts,
     ResolvedCallSite,
     load_effect_contracts,
+    load_effect_preset,
 )
 from fastapi_endpoint_detector.models.effect_contract_audit import (
     AuditCallStatus,
@@ -98,6 +99,7 @@ __all__ = [  # noqa: RUF022 - grouped by public model domain
     "LoadedEffectContracts",
     "ResolvedCallSite",
     "load_effect_contracts",
+    "load_effect_preset",
     # Custom surface contract models
     "CallbackMode",
     "HandlerNameNormalization",

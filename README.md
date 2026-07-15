@@ -26,8 +26,9 @@ This tool is designed for CI/CD pipelines to enable:
 - 🎯 **Endpoint Mapping**: Map changes back to specific FastAPI route handlers
 - 🧭 **Effect Evidence**: Separate call reachability from returned, persisted, outbound,
   logged, internal, and unresolved data effects ([details](docs/effect-evidence.md))
-- 📜 **Effect Contracts**: Strict data-only declarations for exact state and I/O symbols,
-  with canonical provenance hashes ([schema](docs/effect-contracts.md))
+- 📜 **Effect Contracts**: Strict data-only declarations and versioned Redis, MongoDB,
+  filesystem, HTTP-client, and typed S3 presets for exact state and I/O symbols, with
+  canonical provenance hashes ([schema and presets](docs/effect-contracts.md))
 - 🛰️ **Custom Surfaces**: Declarative execution-free entrypoints for message listeners,
   tools, tasks, schedulers, CLIs, and reactors ([schema](docs/custom-surfaces.md))
 - 🔁 **Framework Semantics**: Exact lifecycle, middleware, background-task, and dependency

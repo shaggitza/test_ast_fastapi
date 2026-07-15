@@ -7,7 +7,7 @@ import json
 import keyword
 import sys
 from enum import Enum
-from pathlib import Path  # noqa: TC003 - Pydantic consumes paths at runtime
+from pathlib import Path
 from typing import Any, Literal
 
 if sys.version_info >= (3, 11):
@@ -23,6 +23,16 @@ from fastapi_endpoint_detector.strict_data import (
     load_json_unique,
     load_yaml_unique,
 )
+
+BUNDLED_EFFECT_PRESETS = {
+    "filesystem-v1": Path(__file__).parent.parent / "presets" / "effects_filesystem_v1.yaml",
+    "http-clients-v1": Path(__file__).parent.parent / "presets" / "effects_http_clients_v1.yaml",
+    "mongodb-v1": Path(__file__).parent.parent / "presets" / "effects_mongodb_v1.yaml",
+    "object-storage-v1": (
+        Path(__file__).parent.parent / "presets" / "effects_object_storage_v1.yaml"
+    ),
+    "redis-v1": Path(__file__).parent.parent / "presets" / "effects_redis_v1.yaml",
+}
 
 
 class EffectContractError(ValueError):
@@ -127,9 +137,20 @@ class PresetMetadata(_StrictModel):
 class PackageApplicability(_StrictModel):
     """Target-environment applicability metadata; v1 does not enforce it."""
 
-    distribution: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-    version: str = Field(min_length=1)
+    distribution: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+    )
+    version: str | None = Field(default=None, min_length=1)
     python: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> PackageApplicability:
+        if (self.distribution is None) != (self.version is None):
+            raise ValueError("distribution and version must be provided together")
+        if self.distribution is None and self.python is None:
+            raise ValueError("package applicability requires a distribution or Python range")
+        return self
 
 
 class EffectSelector(_StrictModel):
@@ -394,6 +415,17 @@ def load_effect_contracts(path: Path) -> LoadedEffectContracts:
         contract_hashes=document.contract_hashes,
         document=document,
     )
+
+
+def load_effect_preset(name: str) -> LoadedEffectContracts:
+    """Load one immutable package-owned effect preset by its versioned name."""
+    path = BUNDLED_EFFECT_PRESETS.get(name)
+    if path is None:
+        available = ", ".join(sorted(BUNDLED_EFFECT_PRESETS))
+        raise EffectContractError(
+            f"unknown effect preset: {name!r}; available presets: {available}"
+        )
+    return load_effect_contracts(path)
 
 
 def _semantic_hash(payload: object) -> str:
