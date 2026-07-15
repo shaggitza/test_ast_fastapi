@@ -1,0 +1,15 @@
+{
+  "determinism_verified": true,
+  "diagnostics": 0,
+  "edges": 5000,
+  "elapsed_seconds": 0.308722,
+  "fixture": "finite-resource-coupling-scale-v1",
+  "graph_hash": "sha256:8b940879821d359d92f97ab8bd19880c340a0f677d0c379da98b469265aba2e7",
+  "max_rss_kib": 84348,
+  "occurrences": 10000,
+  "operation_directions": [
+    "publish->consume",
+    "write->read"
+  ],
+  "schema_version": 1
+}

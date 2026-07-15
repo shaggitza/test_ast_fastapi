@@ -84,7 +84,7 @@ Supported invocation kinds:
 Supported operations:
 
 - `read`, `write`, `update`, `delete`, `append`
-- `publish`, `request`, `execute`
+- `publish`, `consume`, `request`, `execute`
 - `stage`, `flush`, `begin`, `commit`, `rollback`
 
 Selectors are deliberately bounded:

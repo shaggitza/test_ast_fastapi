@@ -63,6 +63,7 @@ class EffectOperation(str, Enum):
     DELETE = "delete"
     APPEND = "append"
     PUBLISH = "publish"
+    CONSUME = "consume"
     REQUEST = "request"
     EXECUTE = "execute"
     STAGE = "stage"

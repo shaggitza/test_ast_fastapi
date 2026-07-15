@@ -483,3 +483,135 @@ def test_graph_tampering_is_rejected_and_all_formats_disclose_report_only(
         assert "does not change candidates" in rendered
     assert json.loads(get_formatter("json").format(report))["resource_coupling_graph"]
     assert yaml.safe_load(get_formatter("yaml").format(report))["resource_coupling_graph"]
+
+
+def _message_project(root: Path) -> tuple[Path, Path, Path]:
+    (root / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n\n"
+        "def publish(topic: str) -> None: pass\n"
+        "def consume(topic: str) -> None: pass\n\n"
+        "@app.post('/publish')\n"
+        "def publisher() -> None:\n"
+        "    publish('orders.created')\n\n"
+        "@app.post('/consume')\n"
+        "def consumer() -> None:\n"
+        "    consume('orders.created')\n",
+        encoding="utf-8",
+    )
+    contracts = root / "message-effects.yaml"
+    contracts.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "preset": {
+                    "id": "message-coupling-test",
+                    "version": "1.0.0",
+                    "provenance": {"kind": "user", "source": "message-effects.yaml"},
+                },
+                "contracts": [
+                    {
+                        "id": "consume-topic",
+                        "symbol": f"{root.name}.main.consume",
+                        "invocation": "function",
+                        "operation": "consume",
+                        "channel": "message_bus",
+                        "resource": {"kind": "argument", "index": 0},
+                    },
+                    {
+                        "id": "publish-topic",
+                        "symbol": f"{root.name}.main.publish",
+                        "invocation": "function",
+                        "operation": "publish",
+                        "channel": "message_bus",
+                        "resource": {"kind": "argument", "index": 0},
+                    },
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    coupling = root / "message-coupling.yaml"
+    coupling.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 2,
+                "mode": "changed_callsite_candidates",
+                "groups": [
+                    {
+                        "id": "orders-events",
+                        "resource_space": "orders-message-test",
+                        "producer_contract_ids": ["publish-topic"],
+                        "consumer_contract_ids": ["consume-topic"],
+                    }
+                ],
+                "limits": {
+                    "max_endpoint_links_per_resource": 8,
+                    "max_edges": 16,
+                    "max_new_candidates": 4,
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    diff = root / "message.diff"
+    diff.write_text(
+        "diff --git a/main.py b/main.py\n"
+        "--- a/main.py\n"
+        "+++ b/main.py\n"
+        "@@ -10,1 +10,1 @@\n"
+        "-    publish('orders.pending')\n"
+        "+    publish('orders.created')\n",
+        encoding="utf-8",
+    )
+    return contracts, coupling, diff
+
+
+def test_exact_publish_consume_edges_and_candidates(tmp_path: Path) -> None:
+    contracts, coupling, diff = _message_project(tmp_path)
+    report = ChangeMapper(
+        app_path=tmp_path,
+        config=Config(
+            analysis=AnalysisConfig(
+                effect_contracts=contracts,
+                resource_coupling=coupling,
+            )
+        ),
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+
+    graph = report.resource_coupling_graph
+    assert graph is not None
+    assert len(graph.edges) == 1
+    edge = graph.edges[0]
+    assert edge.channel.value == "message_bus"
+    assert edge.producer_operation.value == "publish"
+    assert edge.consumer_operation.value == "consume"
+    candidates = {item.endpoint.path: item for item in report.candidate_endpoints}
+    assert set(candidates) == {"/publish", "/consume"}
+    assert candidates["/consume"].confidence.value == "low"
+    assert len(candidates["/consume"].resource_coupling_evidence) == 1
+    assert [item.endpoint.path for item in report.affected_endpoints] == ["/publish"]
+
+
+def test_state_message_operation_mixing_fails_closed(tmp_path: Path) -> None:
+    contracts, coupling, diff = _project(tmp_path)
+    document = yaml.safe_load(contracts.read_text(encoding="utf-8"))
+    document["contracts"][0]["operation"] = "consume"
+    contracts.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ResourceCouplingError, match="unsupported operation directions"):
+        ChangeMapper(
+            app_path=tmp_path,
+            config=Config(
+                analysis=AnalysisConfig(
+                    effect_contracts=contracts,
+                    resource_coupling=coupling,
+                )
+            ),
+            secure_ast=True,
+            use_cache=False,
+        ).analyze_diff(diff)
