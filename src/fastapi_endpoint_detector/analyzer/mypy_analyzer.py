@@ -25,7 +25,9 @@ from types import SimpleNamespace
 from typing import Any, ClassVar
 
 from fastapi_endpoint_detector.models.effect_contract import (
+    CallArgumentEvidence,
     CallResolutionStatus,
+    FiniteValueStatus,
     InvocationKind,
     ResolvedCallSite,
 )
@@ -366,7 +368,7 @@ class MypyAnalyzer:
     and extract precise file/line information for all references.
     """
 
-    CACHE_SCHEMA_VERSION = 13
+    CACHE_SCHEMA_VERSION = 14
     MAX_POINTS_TO_TARGETS = 8
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
@@ -2414,6 +2416,78 @@ class MypyAnalyzer:
             )
         return self._resolved_call_site_cache[cache_key]
 
+    @staticmethod
+    def _finite_string_values(  # noqa: PLR0911
+        expression: Any,
+    ) -> tuple[str, ...] | None:
+        """Resolve a bounded literal string set without evaluating application code."""
+        from mypy.nodes import ConditionalExpr, NameExpr, OpExpr, StrExpr, Var  # noqa: PLC0415
+
+        if isinstance(expression, StrExpr):
+            return (expression.value,)
+        if isinstance(expression, NameExpr) and isinstance(expression.node, Var):
+            value = expression.node.final_value
+            return (value,) if isinstance(value, str) else None
+        if isinstance(expression, ConditionalExpr):
+            left = MypyAnalyzer._finite_string_values(expression.if_expr)
+            right = MypyAnalyzer._finite_string_values(expression.else_expr)
+            if left is None or right is None:
+                return None
+            values = tuple(sorted({*left, *right}))
+            return values if len(values) <= 8 else None
+        if isinstance(expression, OpExpr) and expression.op == "+":
+            left = MypyAnalyzer._finite_string_values(expression.left)
+            right = MypyAnalyzer._finite_string_values(expression.right)
+            if left is None or right is None:
+                return None
+            values = tuple(sorted({prefix + suffix for prefix in left for suffix in right}))
+            return values if len(values) <= 8 else None
+        return None
+
+    @classmethod
+    def _call_argument_evidence(cls, call: Any) -> tuple[CallArgumentEvidence, ...]:
+        """Capture positional/keyword literal identities with strict finite bounds."""
+        from mypy.nodes import ARG_NAMED, ARG_POS  # noqa: PLC0415
+
+        evidence: list[CallArgumentEvidence] = []
+        positional_index = 0
+        for source_index, (expression, kind, name) in enumerate(
+            zip(call.args, call.arg_kinds, call.arg_names, strict=True)
+        ):
+            if kind not in {ARG_POS, ARG_NAMED}:
+                continue
+            values = cls._finite_string_values(expression)
+            hashes = (
+                tuple(
+                    sorted(
+                        f"sha256:{hashlib.sha256(value.encode('utf-8')).hexdigest()}"
+                        for value in values
+                    )
+                )
+                if values is not None
+                else ()
+            )
+            status = (
+                FiniteValueStatus.EXACT
+                if len(hashes) == 1
+                else FiniteValueStatus.FINITE
+                if hashes
+                else FiniteValueStatus.UNAVAILABLE
+            )
+            evidence.append(
+                CallArgumentEvidence(
+                    source_index=source_index,
+                    positional_index=positional_index if kind == ARG_POS else None,
+                    keyword=name if kind == ARG_NAMED else None,
+                    status=status,
+                    value_hashes=hashes,
+                    reason_code="dynamic_argument" if not hashes else None,
+                )
+            )
+            if kind == ARG_POS:
+                positional_index += 1
+        return tuple(evidence)
+
     def _resolved_call_site_uncached(  # noqa: PLR0912, PLR0915
         self,
         call: Any,
@@ -2507,6 +2581,7 @@ class MypyAnalyzer:
                 resolver_version=resolver_version,
                 receiver_candidates=receiver_candidates,
                 reason_code=reason_code,
+                arguments=self._call_argument_evidence(call),
             )
         except ValueError:
             return ResolvedCallSite(
@@ -2521,6 +2596,7 @@ class MypyAnalyzer:
                 resolver_version=resolver_version,
                 receiver_candidates=receiver_candidates,
                 reason_code="invalid_symbol_identity",
+                arguments=self._call_argument_evidence(call),
             )
 
     def _trace_references(

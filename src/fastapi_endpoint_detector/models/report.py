@@ -14,7 +14,11 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from fastapi_endpoint_detector.models.effect_contract import EffectContract
+from fastapi_endpoint_detector.models.effect_contract import (
+    EffectContract,
+    FiniteValueStatus,
+    ResourceIdentityEvidence,
+)
 from fastapi_endpoint_detector.models.effect_contract_audit import EffectContractAudit
 from fastapi_endpoint_detector.models.endpoint import Endpoint
 
@@ -166,9 +170,21 @@ class ContractEffectEvidence(BaseModel):
     resolver_version: str
     matcher: str
     package_applicability: Literal["not_evaluated"] = "not_evaluated"
-    resource_identity_status: Literal["unavailable"] = "unavailable"
+    resource_identity_status: FiniteValueStatus = FiniteValueStatus.UNAVAILABLE
+    resource_identity: ResourceIdentityEvidence = Field(
+        default_factory=lambda: ResourceIdentityEvidence(
+            status=FiniteValueStatus.UNAVAILABLE,
+            reason_code="resource_analysis_unavailable",
+        )
+    )
     change_to_call_flow: Literal["not_established"] = "not_established"
     limitations: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_resource_identity(self) -> "ContractEffectEvidence":
+        if self.resource_identity_status != self.resource_identity.status:
+            raise ValueError("resource identity status and evidence are inconsistent")
+        return self
 
     class Config:
         frozen = True

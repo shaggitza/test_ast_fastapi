@@ -13,8 +13,10 @@ from fastapi_endpoint_detector.models.effect_contract import (
     CallResolutionStatus,
     EffectContractDocument,
     EffectContractError,
+    FiniteValueStatus,
     InvocationKind,
     ResolvedCallSite,
+    ResourceIdentityEvidence,
     load_effect_contracts,
 )
 
@@ -233,6 +235,22 @@ def test_serialized_duplicate_keys_are_rejected(tmp_path: Path) -> None:
     )
     with pytest.raises(EffectContractError, match="duplicate mapping key"):
         load_effect_contracts(json_path)
+
+
+def test_resource_identity_requires_canonical_finite_hashes() -> None:
+    digest = "sha256:" + "a" * 64
+    exact = ResourceIdentityEvidence(
+        status=FiniteValueStatus.EXACT,
+        value_hashes=(digest,),
+    )
+
+    assert exact.schema_version == 1
+    with pytest.raises(ValidationError, match="status does not match"):
+        ResourceIdentityEvidence(status=FiniteValueStatus.FINITE, value_hashes=(digest,))
+    with pytest.raises(ValidationError, match="SHA-256"):
+        ResourceIdentityEvidence(status=FiniteValueStatus.EXACT, value_hashes=("orders",))
+    with pytest.raises(ValidationError, match="require a reason"):
+        ResourceIdentityEvidence(status=FiniteValueStatus.UNAVAILABLE)
 
 
 def test_resolved_call_site_requires_exact_identity_and_columns() -> None:

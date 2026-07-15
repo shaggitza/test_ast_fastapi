@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import TYPE_CHECKING
 
@@ -14,7 +15,7 @@ if TYPE_CHECKING:
 
 def _project(root: Path) -> tuple[Path, Path]:
     (root / "helpers.py").write_text(
-        "def emit() -> int:\n    return 1\n",
+        "def emit(resource: str) -> int:\n    return 1\n",
         encoding="utf-8",
     )
     (root / "main.py").write_text(
@@ -23,7 +24,7 @@ def _project(root: Path) -> tuple[Path, Path]:
         "app = FastAPI()\n\n"
         "@app.get('/')\n"
         "def handler() -> int:\n"
-        "    return emit()\n",
+        "    return emit('orders')\n",
         encoding="utf-8",
     )
     contracts = root / "effects.yaml"
@@ -43,6 +44,7 @@ def _project(root: Path) -> tuple[Path, Path]:
                         "invocation": "function",
                         "operation": "publish",
                         "channel": "message_bus",
+                        "resource": {"kind": "argument", "index": 0},
                     }
                 ],
             },
@@ -110,6 +112,12 @@ def test_filesystem_preset_matches_exact_sink_through_wrapper(tmp_path: Path) ->
     assert [(item["canonical_symbol"], item["contract_id"]) for item in matches] == [
         ("pathlib.Path.write_text", "pathlib-write-text")
     ]
+    assert matches[0]["resource_identity"] == {
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": [],
+        "reason_code": "receiver_origin_unavailable",
+    }
 
 
 def test_audit_effect_contracts_json_is_separate_from_impact_results(tmp_path: Path) -> None:
@@ -139,6 +147,13 @@ def test_audit_effect_contracts_json_is_separate_from_impact_results(tmp_path: P
     matched = [item for item in data["occurrences"] if item.get("contract_id") == "emit"]
     assert len(matched) == 1
     assert matched[0]["endpoints"][0]["path"] == "/"
+    expected_hash = f"sha256:{hashlib.sha256(b'orders').hexdigest()}"
+    assert matched[0]["resource_identity"] == {
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [expected_hash],
+    }
+    assert "orders" not in result.output
     assert "candidate_endpoints" not in data
     assert "confidence" not in result.output
     assert "effect_evidence" not in result.output

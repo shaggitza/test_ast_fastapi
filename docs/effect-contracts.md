@@ -127,7 +127,8 @@ analysis:
 `effect_preset` and `effect_contracts` are mutually exclusive. Presets preserve the
 same exact `(canonical symbol, invocation)` matcher and evidence-only behavior as
 user documents. Version ranges are audited support metadata, not runtime package
-checks. Selector declarations are not resource-identity evidence in schema v1.
+checks. Only direct positional/keyword finite strings currently produce hashed
+resource-identity evidence; receiver-based preset selectors remain unavailable.
 Dynamic boto3 clients without `mypy-boto3-s3`, generic HTTP `request`/`send`,
 mode-dependent `open()`, deferred cursors, Redis pipelines, and bare method names
 are intentionally absent.
@@ -158,7 +159,7 @@ fastapi-endpoint-detector --config .endpoint-detector.yaml analyze \
   --format json
 ```
 
-Only already reachable candidates receive `contract_evidence`. This evidence preserves the full declaration and all raw/config/preset/contract/audit/corpus hashes, but remains `declared_reachable`: it does not claim changed-code-to-call causality, downstream observation, resolved resource identity, or durable persistence. The candidate reason, confidence, dependency chains, call stacks, threshold membership, and orphan accounting remain unchanged.
+Only already reachable candidates receive `contract_evidence`. This evidence preserves the full declaration and all raw/config/preset/contract/audit/corpus hashes, but remains `declared_reachable`: it does not claim changed-code-to-call causality, downstream observation, cross-request coupling, or durable persistence. The candidate reason, confidence, dependency chains, call stacks, threshold membership, and orphan accounting remain unchanged.
 
 ## Safety boundaries
 
@@ -170,7 +171,12 @@ Only already reachable candidates receive `contract_evidence`. This evidence pre
 - Ambiguous receivers and dynamic imports remain unresolved.
 - Dry-run matches and configured contract evidence never promote or filter candidates.
 - Declared operations and channels are not projected into behavioral effect fields without causal data flow.
-- Resource/value selectors remain unavailable and never create cross-endpoint fanout.
+- Positional and keyword resource selectors can preserve exact or bounded finite string
+  identities as SHA-256 values; source literals are never emitted. These unsalted hashes
+  reveal equality and do not protect guessable low-entropy values. Dynamic arguments,
+  receiver origins, selector paths, `*args`, and `**kwargs` remain unavailable.
+- Finite resource identities are evidence only and never create cross-endpoint fanout in
+  this phase.
 - Project source paths are relative and deterministic across checkout relocation; contract files outside the app root use a content-addressed `content://sha256/...` source label.
 - Conflicting resolver records for one physical span fail closed.
 - External library internals are excluded; external calls remain auditable at their project source occurrence.

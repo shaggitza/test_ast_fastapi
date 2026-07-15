@@ -9,8 +9,12 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi_endpoint_detector.models.effect_contract import (
     CallResolutionStatus,
+    EffectContract,
+    FiniteValueStatus,
     LoadedEffectContracts,
     ResolvedCallSite,
+    ResourceIdentityEvidence,
+    SelectorKind,
 )
 from fastapi_endpoint_detector.models.effect_contract_audit import (
     AuditCallStatus,
@@ -117,7 +121,51 @@ def _call_payload(site: ResolvedCallSite, relative_path: str) -> dict[str, Any]:
         "resolver_version": site.resolver_version,
         "receiver_candidates": sorted(set(site.receiver_candidates)),
         "reason_code": site.reason_code,
+        "arguments": [item.model_dump(mode="json") for item in site.arguments],
     }
+
+
+def _resource_identity(
+    contract: EffectContract,
+    site_payload: dict[str, Any],
+) -> ResourceIdentityEvidence:
+    selector = contract.resource
+    if selector.path:
+        return ResourceIdentityEvidence(
+            status=FiniteValueStatus.UNAVAILABLE,
+            reason_code="selector_path_unavailable",
+        )
+    if selector.kind == SelectorKind.NONE:
+        return ResourceIdentityEvidence(
+            status=FiniteValueStatus.UNAVAILABLE,
+            reason_code="resource_selector_absent",
+        )
+    if selector.kind == SelectorKind.RECEIVER:
+        return ResourceIdentityEvidence(
+            status=FiniteValueStatus.UNAVAILABLE,
+            reason_code="receiver_origin_unavailable",
+        )
+    selected = None
+    for argument in site_payload["arguments"]:
+        if (
+            selector.kind == SelectorKind.ARGUMENT
+            and argument["positional_index"] == selector.index
+        ):
+            selected = argument
+            break
+        if selector.kind == SelectorKind.KEYWORD and argument["keyword"] == selector.name:
+            selected = argument
+            break
+    if selected is None:
+        return ResourceIdentityEvidence(
+            status=FiniteValueStatus.UNAVAILABLE,
+            reason_code="selected_argument_absent",
+        )
+    return ResourceIdentityEvidence(
+        status=FiniteValueStatus(selected["status"]),
+        value_hashes=tuple(selected["value_hashes"]),
+        reason_code=selected.get("reason_code"),
+    )
 
 
 def audit_effect_contracts(  # noqa: PLR0912, PLR0915
@@ -255,6 +303,9 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
             resolver_version=payload["resolver_version"],
             receiver_candidates=tuple(payload["receiver_candidates"]),
             reason_code=payload["reason_code"],
+            resource_identity=(
+                _resource_identity(contract, payload) if contract is not None else None
+            ),
             contract_id=contract.id if contract is not None else None,
             contract_hash=(loaded.contract_hashes[contract.id] if contract is not None else None),
             endpoints=endpoint_tuple,
@@ -262,7 +313,7 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
         occurrences.append(occurrence)
         corpus_payload.append(
             {
-                **payload,
+                **{key: value for key, value in payload.items() if key != "arguments"},
                 "id": call_id,
                 "endpoint_ids": [endpoint.id for endpoint in endpoint_tuple],
             }
@@ -367,6 +418,11 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
                     "audit_status": item.audit_status.value,
                     "contract_id": item.contract_id,
                     "contract_hash": item.contract_hash,
+                    "resource_identity": (
+                        item.resource_identity.model_dump(mode="json")
+                        if item.resource_identity is not None
+                        else None
+                    ),
                 }
                 for item in occurrences
             ],

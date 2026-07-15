@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from fastapi_endpoint_detector.models.effect_contract import (
     CallResolutionStatus,
     InvocationKind,
+    ResourceIdentityEvidence,
 )
 
 
@@ -102,6 +103,7 @@ class EffectContractAuditOccurrence(_StrictAuditModel):
     resolver_version: str = Field(min_length=1)
     receiver_candidates: tuple[str, ...] = ()
     reason_code: str | None = None
+    resource_identity: ResourceIdentityEvidence | None = None
     contract_id: str | None = None
     contract_hash: str | None = None
     endpoints: tuple[AuditEndpoint, ...] = Field(min_length=1)
@@ -385,6 +387,11 @@ class EffectContractAudit(_StrictAuditModel):
                     "audit_status": item.audit_status.value,
                     "contract_id": item.contract_id,
                     "contract_hash": item.contract_hash,
+                    "resource_identity": (
+                        item.resource_identity.model_dump(mode="json")
+                        if item.resource_identity is not None
+                        else None
+                    ),
                 }
                 for item in self.occurrences
             ],
