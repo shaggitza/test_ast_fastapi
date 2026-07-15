@@ -53,6 +53,65 @@ def _project(root: Path) -> tuple[Path, Path]:
     return root / "main.py", contracts
 
 
+def test_validate_effect_preset_and_reject_dual_cli_sources(tmp_path: Path) -> None:
+    _app, contracts = _project(tmp_path)
+    runner = CliRunner()
+
+    valid = runner.invoke(
+        cli,
+        ["validate-effect-contracts", "--preset", "redis-v1", "--format", "json"],
+    )
+    conflict = runner.invoke(
+        cli,
+        [
+            "validate-effect-contracts",
+            "--preset",
+            "redis-v1",
+            "--contracts",
+            str(contracts),
+        ],
+    )
+
+    assert valid.exit_code == 0, valid.output
+    assert json.loads(valid.output)["preset"]["id"] == "redis-py-effects"
+    assert conflict.exit_code != 0
+    assert "exactly one" in conflict.output
+
+
+def test_filesystem_preset_matches_exact_sink_through_wrapper(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from pathlib import Path\n"
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n\n"
+        "def store() -> None:\n"
+        "    Path('result.txt').write_text('value')\n\n"
+        "@app.get('/')\n"
+        "def handler() -> None:\n"
+        "    store()\n",
+        encoding="utf-8",
+    )
+    result = CliRunner().invoke(
+        cli,
+        [
+            "audit-effect-contracts",
+            "--app",
+            str(tmp_path),
+            "--preset",
+            "filesystem-v1",
+            "--format",
+            "json",
+            "--no-cache",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    matches = [item for item in data["occurrences"] if item["audit_status"] == "matched"]
+    assert [(item["canonical_symbol"], item["contract_id"]) for item in matches] == [
+        ("pathlib.Path.write_text", "pathlib-write-text")
+    ]
+
+
 def test_audit_effect_contracts_json_is_separate_from_impact_results(tmp_path: Path) -> None:
     _app, contracts = _project(tmp_path)
     runner = CliRunner()
@@ -126,6 +185,34 @@ def test_audit_uses_config_relative_contracts_and_rejects_dual_sources(
     assert json.loads(configured.output)["summary"]["matched_calls"] == 1
     assert conflict.exit_code != 0
     assert "conflicts" in conflict.output
+
+
+def test_audit_loads_configured_effect_preset(tmp_path: Path) -> None:
+    _project(tmp_path)
+    config = tmp_path / "detector.yaml"
+    config.write_text(
+        "analysis:\n  effect_preset: filesystem-v1\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "--config",
+            str(config),
+            "audit-effect-contracts",
+            "--app",
+            str(tmp_path),
+            "--format",
+            "json",
+            "--no-cache",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["summary"]["contracts"] == 4
+    assert data["provenance"]["preset_hash"].startswith("sha256:")
 
 
 def test_audit_requires_contracts_and_text_discloses_scope(tmp_path: Path) -> None:

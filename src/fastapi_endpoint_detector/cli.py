@@ -24,7 +24,11 @@ from rich.progress import (
 
 from fastapi_endpoint_detector import __version__
 from fastapi_endpoint_detector.config import Config, load_config
-from fastapi_endpoint_detector.models.effect_contract import load_effect_contracts
+from fastapi_endpoint_detector.models.effect_contract import (
+    BUNDLED_EFFECT_PRESETS,
+    load_effect_contracts,
+    load_effect_preset,
+)
 from fastapi_endpoint_detector.models.surface_contract import load_surface_contracts
 
 console = Console()
@@ -154,16 +158,18 @@ def analyze(
     config: Config = ctx.obj["config"]
 
     # Validate mutually exclusive options
-    if config.analysis.surface_contracts is not None and not secure_ast:
+    has_surface_contracts = any((config.analysis.surface_contracts, config.analysis.surface_preset))
+    has_effect_contracts = any((config.analysis.effect_contracts, config.analysis.effect_preset))
+    if has_surface_contracts and not secure_ast:
         console.print("[red]Error:[/red] custom surface contracts require --secure-ast")
         raise click.Abort()
-    if config.analysis.effect_contracts is not None and vm:
+    if has_effect_contracts and vm:
         console.print("[red]Error:[/red] effect contract evidence is unavailable with --vm")
         raise click.Abort()
-    if config.analysis.effect_contracts is not None and scip:
+    if has_effect_contracts and scip:
         console.print("[red]Error:[/red] effect contract evidence requires the mypy backend")
         raise click.Abort()
-    if config.analysis.effect_contracts is not None and not secure_ast:
+    if has_effect_contracts and not secure_ast:
         console.print("[red]Error:[/red] effect contract evidence requires --secure-ast")
         raise click.Abort()
     if vm and secure_ast:
@@ -317,8 +323,12 @@ def analyze(
 @click.option(
     "--contracts",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    required=True,
     help="Strict YAML, JSON, or TOML effect-contract document.",
+)
+@click.option(
+    "--preset",
+    type=click.Choice(sorted(BUNDLED_EFFECT_PRESETS)),
+    help="Versioned package-owned effect preset; conflicts with --contracts.",
 )
 @click.option(
     "--format",
@@ -327,10 +337,20 @@ def analyze(
     default="text",
     help="Validation output format (default: text).",
 )
-def validate_effect_contracts(contracts: Path, output_format: str) -> None:
+def validate_effect_contracts(
+    contracts: Path | None,
+    preset: str | None,
+    output_format: str,
+) -> None:
     """Validate and hash data-only effect contracts without analyzing code."""
+    if (contracts is None) == (preset is None):
+        raise click.ClickException("exactly one of --contracts or --preset is required")
     try:
-        loaded = load_effect_contracts(contracts)
+        loaded = (
+            load_effect_contracts(contracts)
+            if contracts is not None
+            else load_effect_preset(preset or "")
+        )
         data = {
             "schema_version": loaded.document.schema_version,
             "source_path": str(loaded.source_path),
@@ -430,6 +450,11 @@ def validate_surface_contracts(contracts: Path, output_format: str) -> None:
     help="Contract document; conflicts with analysis.effect_contracts in --config.",
 )
 @click.option(
+    "--preset",
+    type=click.Choice(sorted(BUNDLED_EFFECT_PRESETS)),
+    help="Versioned package-owned effect preset; conflicts with other contract sources.",
+)
+@click.option(
     "--format",
     "output_format",
     type=click.Choice(["text", "json", "yaml"]),
@@ -465,6 +490,7 @@ def audit_effect_contracts_command(  # noqa: PLR0912
     ctx: click.Context,
     app: Path,
     contracts: Path | None,
+    preset: str | None,
     output_format: str,
     output: Path | None,
     app_var: str,
@@ -485,23 +511,24 @@ def audit_effect_contracts_command(  # noqa: PLR0912
     )
 
     config: Config = ctx.obj["config"]
-    configured = config.analysis.effect_contracts
-    if contracts is not None and configured is not None:
+    configured = any((config.analysis.effect_contracts, config.analysis.effect_preset))
+    supplied = sum(item is not None for item in (contracts, preset))
+    if supplied > 1:
+        raise click.ClickException("--contracts conflicts with --preset")
+    if supplied and configured:
+        raise click.ClickException("CLI contract source conflicts with configured effect contracts")
+    if not supplied and not configured:
         raise click.ClickException(
-            "--contracts conflicts with analysis.effect_contracts from --config"
-        )
-    contract_path = contracts.resolve() if contracts is not None else configured
-    if contract_path is None:
-        raise click.ClickException(
-            "effect contracts are required via --contracts or analysis.effect_contracts"
+            "effect contracts are required via --contracts, --preset, or configuration"
         )
 
     try:
-        loaded = (
-            config.load_effect_contract_snapshot()
-            if configured is not None
-            else load_effect_contracts(contract_path)
-        )
+        if configured:
+            loaded = config.load_effect_contract_snapshot()
+        elif contracts is not None:
+            loaded = load_effect_contracts(contracts.resolve())
+        else:
+            loaded = load_effect_preset(preset or "")
         if loaded is None:
             raise RuntimeError("configured effect contracts were not loaded")
         extractor = SecureASTExtractor(

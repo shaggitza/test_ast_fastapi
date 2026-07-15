@@ -95,11 +95,51 @@ Selectors are deliberately bounded:
 - `keyword` with a Python identifier `name`
 - an optional identifier-only `path`
 
-Package constraints are target-applicability metadata in schema v1. They are not checked against the detector's own environment, because that environment may differ from the analyzed snapshot.
+Package constraints are target-applicability metadata in schema v1. A package block
+may declare a paired `distribution` and `version`, a `python` range, or both; an
+empty block and an unpaired distribution/version are rejected. Applicability is
+not checked against the detector's own environment, because that environment may
+differ from the analyzed snapshot.
+
+## Package-owned presets
+
+Five conservative, independently versioned exact-symbol presets are bundled:
+
+- `redis-v1`
+- `mongodb-v1`
+- `filesystem-v1`
+- `http-clients-v1`
+- `object-storage-v1`
+
+Validate one without copying package data:
+
+```bash
+fastapi-endpoint-detector validate-effect-contracts --preset redis-v1 --format json
+```
+
+Select exactly one preset in configuration:
+
+```yaml
+analysis:
+  effect_preset: redis-v1
+```
+
+`effect_preset` and `effect_contracts` are mutually exclusive. Presets preserve the
+same exact `(canonical symbol, invocation)` matcher and evidence-only behavior as
+user documents. Version ranges are audited support metadata, not runtime package
+checks. Selector declarations are not resource-identity evidence in schema v1.
+Dynamic boto3 clients without `mypy-boto3-s3`, generic HTTP `request`/`send`,
+mode-dependent `open()`, deferred cursors, Redis pipelines, and bare method names
+are intentionally absent.
+
+Each family has its own `1.0.0` identity and semantic hash. The v1 changelog and
+known exclusions are frozen in `benchmarks/results/effect-presets-v1/README.md`.
+Multiple presets are not silently merged because the current provenance model has
+one authoritative contract source per analysis.
 
 ## Configuration
 
-Reference the document relative to the detector configuration file:
+Reference a user document relative to the detector configuration file:
 
 ```yaml
 analysis:

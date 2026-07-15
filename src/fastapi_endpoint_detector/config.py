@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 from fastapi_endpoint_detector.models.effect_contract import (
     LoadedEffectContracts,
     load_effect_contracts,
+    load_effect_preset,
 )
 from fastapi_endpoint_detector.models.surface_contract import (
     LoadedSurfaceContracts,
@@ -73,6 +74,19 @@ class AnalysisConfig(BaseModel):
         default=None,
         description="Path to a strict versioned effect-contract document.",
     )
+    effect_preset: (
+        Literal[
+            "filesystem-v1",
+            "http-clients-v1",
+            "mongodb-v1",
+            "object-storage-v1",
+            "redis-v1",
+        ]
+        | None
+    ) = Field(
+        default=None,
+        description="Named package-owned exact effect-contract preset.",
+    )
     surface_contracts: Path | None = Field(
         default=None,
         description="Path to strict data-only custom-surface contracts.",
@@ -85,7 +99,9 @@ class AnalysisConfig(BaseModel):
     )
 
     @model_validator(mode="after")
-    def validate_surface_source(self) -> "AnalysisConfig":
+    def validate_contract_sources(self) -> "AnalysisConfig":
+        if self.effect_contracts is not None and self.effect_preset is not None:
+            raise ValueError("effect_contracts and effect_preset are mutually exclusive")
         if self.surface_contracts is not None and self.surface_preset is not None:
             raise ValueError("surface_contracts and surface_preset are mutually exclusive")
         return self
@@ -159,10 +175,15 @@ class Config(BaseModel):
     def load_effect_contract_snapshot(self) -> LoadedEffectContracts | None:
         """Load configured contract bytes once for validation and later analysis."""
         path = self.analysis.effect_contracts
-        if path is None:
+        preset = self.analysis.effect_preset
+        if path is None and preset is None:
             return None
         if self._effect_contract_snapshot is None:
-            self._effect_contract_snapshot = load_effect_contracts(path)
+            self._effect_contract_snapshot = (
+                load_effect_contracts(path)
+                if path is not None
+                else load_effect_preset(preset or "")
+            )
         return self._effect_contract_snapshot
 
 

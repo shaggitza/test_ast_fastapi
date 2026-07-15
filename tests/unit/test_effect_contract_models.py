@@ -196,6 +196,19 @@ def test_receiver_selector_requires_an_invocation_with_receiver(
         EffectContractDocument.model_validate(data)
 
 
+def test_package_applicability_accepts_python_only_and_rejects_partial_distribution() -> None:
+    data = _document()
+    data["contracts"][0]["package"] = {"python": ">=3.10,<3.14"}  # type: ignore[index]
+
+    document = EffectContractDocument.model_validate(data)
+
+    assert document.contracts[0].package is not None
+    assert document.contracts[0].package.python == ">=3.10,<3.14"
+    data["contracts"][0]["package"] = {"distribution": "redis"}  # type: ignore[index]
+    with pytest.raises(ValidationError, match="provided together"):
+        EffectContractDocument.model_validate(data)
+
+
 def test_method_requires_class_qualified_symbol() -> None:
     data = _document()
     data["contracts"][0]["symbol"] = "client.set"  # type: ignore[index]
