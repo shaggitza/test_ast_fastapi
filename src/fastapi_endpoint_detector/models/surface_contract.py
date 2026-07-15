@@ -35,6 +35,7 @@ BUNDLED_SURFACE_PRESETS = {
     / "event_listeners_v1.yaml",
     "mcp-v1": Path(__file__).resolve().parent.parent / "presets" / "mcp_v1.yaml",
     "workers-v1": Path(__file__).resolve().parent.parent / "presets" / "workers_v1.yaml",
+    "framework-v1": Path(__file__).resolve().parent.parent / "presets" / "framework_v1.yaml",
 }
 
 

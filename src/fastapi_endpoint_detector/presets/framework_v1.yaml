@@ -1,0 +1,73 @@
+schema_version: 2
+preset:
+  id: framework-callbacks
+  version: "1"
+  provenance:
+    kind: preset
+    source: fastapi-endpoint-detector
+    revision: "1"
+contracts:
+  - id: fastapi-on-event
+    registration:
+      symbol: fastapi.FastAPI.on_event
+      invocation: instance_method
+      receiver_type: fastapi.FastAPI
+    handler: {kind: decorated_function}
+    surface:
+      kind: framework.lifecycle
+      id_template: "event:{resource}"
+      resource: {kind: argument, index: 0}
+    callback_mode: either
+    execution_mode: framework
+
+  - id: fastapi-add-event-handler
+    registration:
+      symbol: fastapi.FastAPI.add_event_handler
+      invocation: instance_method
+      receiver_type: fastapi.FastAPI
+    handler: {kind: argument, index: 1}
+    surface:
+      kind: framework.lifecycle
+      id_template: "event:{resource}"
+      resource: {kind: argument, index: 0}
+    callback_mode: either
+    execution_mode: framework
+
+  - id: starlette-on-event
+    registration:
+      symbol: starlette.applications.Starlette.on_event
+      invocation: instance_method
+      receiver_type: starlette.applications.Starlette
+    handler: {kind: decorated_function}
+    surface:
+      kind: framework.lifecycle
+      id_template: "event:{resource}"
+      resource: {kind: argument, index: 0}
+    callback_mode: either
+    execution_mode: framework
+
+  - id: starlette-add-event-handler
+    registration:
+      symbol: starlette.applications.Starlette.add_event_handler
+      invocation: instance_method
+      receiver_type: starlette.applications.Starlette
+    handler: {kind: argument, index: 1}
+    surface:
+      kind: framework.lifecycle
+      id_template: "event:{resource}"
+      resource: {kind: argument, index: 0}
+    callback_mode: either
+    execution_mode: framework
+
+  - id: fastapi-http-middleware
+    registration:
+      symbol: fastapi.FastAPI.middleware
+      invocation: instance_method
+      receiver_type: fastapi.FastAPI
+    handler: {kind: decorated_function}
+    surface:
+      kind: framework.middleware
+      id_template: "protocol:{resource}"
+      resource: {kind: argument, index: 0}
+    callback_mode: async
+    execution_mode: framework

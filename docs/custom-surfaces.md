@@ -94,6 +94,21 @@ The preset follows FastMCP's documented
 [`resource`](https://gofastmcp.com/servers/resources), and
 [`prompt`](https://gofastmcp.com/servers/prompts) APIs.
 
+## Framework callback preset
+
+Select `framework-v1` for exact FastAPI/Starlette startup, shutdown, and HTTP
+middleware surfaces:
+
+```yaml
+analysis:
+  surface_preset: framework-v1
+```
+
+The preset is execution-free and uses exact receiver identities. It does not
+model lifespan context-manager phases or class-based middleware. BackgroundTasks
+and dependency providers are handled by typed execution summaries rather than
+surface registration contracts. See [framework semantics](framework-semantics.md).
+
 ## Worker and CLI preset
 
 Select `workers-v1` for exact Celery, RQ, Arq, APScheduler, Click, Typer,
