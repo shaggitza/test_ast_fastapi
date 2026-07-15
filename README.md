@@ -28,7 +28,8 @@ This tool is designed for CI/CD pipelines to enable:
   logged, internal, and unresolved data effects ([details](docs/effect-evidence.md))
 - 📜 **Effect Contracts**: Strict data-only declarations and versioned Redis, MongoDB,
   filesystem, HTTP-client, and typed S3 presets for exact state and I/O symbols, with
-  canonical provenance hashes ([schema and presets](docs/effect-contracts.md))
+  canonical provenance hashes and bounded hashed resource identities
+  ([schema and presets](docs/effect-contracts.md))
 - 🛰️ **Custom Surfaces**: Declarative execution-free entrypoints for message listeners,
   tools, tasks, schedulers, CLIs, and reactors ([schema](docs/custom-surfaces.md))
 - 🔁 **Framework Semantics**: Exact lifecycle, middleware, background-task, and dependency

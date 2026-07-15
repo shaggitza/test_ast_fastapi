@@ -1133,6 +1133,9 @@ class ChangeMapper:
                 if contract_id is None:
                     continue
                 contract = contract_by_id[contract_id]
+                resource_identity = occurrence.resource_identity
+                if resource_identity is None:
+                    continue
                 evidence.append(
                     ContractEffectEvidence(
                         contract=contract,
@@ -1154,10 +1157,13 @@ class ChangeMapper:
                         resolver=occurrence.resolver,
                         resolver_version=occurrence.resolver_version,
                         matcher=audit.provenance.matcher,
+                        resource_identity_status=resource_identity.status,
+                        resource_identity=resource_identity,
                         limitations=(
                             "The contract declares call semantics; changed-code to call flow "
                             "is not established.",
-                            "Resource and value selectors are not resolved in this phase.",
+                            "Resource identities are hashed finite source evidence; receiver "
+                            "origins and dynamic arguments remain unavailable.",
                             "Contract evidence does not change candidate reachability "
                             "or confidence.",
                         ),

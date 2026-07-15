@@ -17,11 +17,14 @@ from fastapi_endpoint_detector.models.diff import (
     FileChange,
 )
 from fastapi_endpoint_detector.models.effect_contract import (
+    CallArgumentEvidence,
     EffectContract,
     EffectContractDocument,
     EffectContractError,
+    FiniteValueStatus,
     LoadedEffectContracts,
     ResolvedCallSite,
+    ResourceIdentityEvidence,
     load_effect_contracts,
     load_effect_preset,
 )
@@ -93,11 +96,14 @@ __all__ = [  # noqa: RUF022 - grouped by public model domain
     "FileChange",
     "ChangeType",
     # Effect contract models
+    "CallArgumentEvidence",
     "EffectContract",
     "EffectContractDocument",
     "EffectContractError",
+    "FiniteValueStatus",
     "LoadedEffectContracts",
     "ResolvedCallSite",
+    "ResourceIdentityEvidence",
     "load_effect_contracts",
     "load_effect_preset",
     # Custom surface contract models

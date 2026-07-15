@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import keyword
+import re
 import sys
 from enum import Enum
 from pathlib import Path
@@ -322,6 +323,71 @@ class CallResolutionStatus(str, Enum):
     UNRESOLVED = "unresolved"
 
 
+class FiniteValueStatus(str, Enum):
+    """Strength of one bounded source value set."""
+
+    EXACT = "exact"
+    FINITE = "finite"
+    UNAVAILABLE = "unavailable"
+
+
+class CallArgumentEvidence(_StrictModel):
+    """Hashed finite string evidence for one source call argument."""
+
+    source_index: StrictInt = Field(ge=0)
+    positional_index: StrictInt | None = Field(default=None, ge=0)
+    keyword: str | None = Field(default=None, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    status: FiniteValueStatus
+    value_hashes: tuple[str, ...] = Field(default=(), max_length=8)
+    reason_code: str | None = None
+
+    @model_validator(mode="after")
+    def validate_evidence(self) -> CallArgumentEvidence:
+        if (self.positional_index is None) == (self.keyword is None):
+            raise ValueError("argument evidence requires one positional or keyword identity")
+        if self.value_hashes != tuple(sorted(set(self.value_hashes))):
+            raise ValueError("argument value hashes must be sorted and unique")
+        if any(re.fullmatch(r"sha256:[0-9a-f]{64}", item) is None for item in self.value_hashes):
+            raise ValueError("argument values must be SHA-256 identities")
+        if self.status == FiniteValueStatus.EXACT:
+            if len(self.value_hashes) != 1 or self.reason_code is not None:
+                raise ValueError("exact argument evidence requires one hash and no reason")
+        elif self.status == FiniteValueStatus.FINITE:
+            if len(self.value_hashes) < 2 or self.reason_code is not None:
+                raise ValueError("finite argument evidence requires multiple hashes and no reason")
+        elif self.value_hashes or not self.reason_code:
+            raise ValueError("unavailable argument evidence requires only a reason code")
+        return self
+
+
+class ResourceIdentityEvidence(_StrictModel):
+    """Versioned finite resource identity without exposing source literals."""
+
+    schema_version: Literal[1] = 1
+    status: FiniteValueStatus
+    value_hashes: tuple[str, ...] = Field(default=(), max_length=8)
+    reason_code: str | None = None
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> ResourceIdentityEvidence:
+        if self.value_hashes != tuple(sorted(set(self.value_hashes))):
+            raise ValueError("resource value hashes must be sorted and unique")
+        if any(re.fullmatch(r"sha256:[0-9a-f]{64}", item) is None for item in self.value_hashes):
+            raise ValueError("resource values must be SHA-256 identities")
+        expected = (
+            FiniteValueStatus.EXACT
+            if len(self.value_hashes) == 1
+            else FiniteValueStatus.FINITE
+            if self.value_hashes
+            else FiniteValueStatus.UNAVAILABLE
+        )
+        if self.status != expected:
+            raise ValueError("resource identity status does not match value cardinality")
+        if (self.status == FiniteValueStatus.UNAVAILABLE) != bool(self.reason_code):
+            raise ValueError("only unavailable resource identities require a reason")
+        return self
+
+
 class ResolvedCallSite(_StrictModel):
     """Backend-neutral seam required before exact contract matching."""
 
@@ -338,6 +404,7 @@ class ResolvedCallSite(_StrictModel):
     resolver_version: str = Field(min_length=1)
     receiver_candidates: tuple[str, ...] = ()
     reason_code: str | None = None
+    arguments: tuple[CallArgumentEvidence, ...] = Field(default=(), max_length=64)
 
     @field_validator("file_path", "source_spelling", "resolver", "resolver_version")
     @classmethod
@@ -372,6 +439,17 @@ class ResolvedCallSite(_StrictModel):
             raise ValueError("ambiguous/unresolved call sites forbid a canonical symbol")
         if self.status != CallResolutionStatus.EXACT and not self.reason_code:
             raise ValueError("ambiguous/unresolved call sites require a reason code")
+        source_indexes = [item.source_index for item in self.arguments]
+        if source_indexes != sorted(set(source_indexes)):
+            raise ValueError("call argument source indexes must be sorted and unique")
+        positional_indexes = [
+            item.positional_index for item in self.arguments if item.positional_index is not None
+        ]
+        if positional_indexes != list(range(len(positional_indexes))):
+            raise ValueError("positional argument indexes must be contiguous")
+        keywords = [item.keyword for item in self.arguments if item.keyword is not None]
+        if len(keywords) != len(set(keywords)):
+            raise ValueError("call argument keywords must be unique")
         return self
 
 

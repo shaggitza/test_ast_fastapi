@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from fastapi_endpoint_detector.analyzer.mypy_analyzer import (
 )
 from fastapi_endpoint_detector.models.effect_contract import (
     CallResolutionStatus,
+    FiniteValueStatus,
     InvocationKind,
     ResolvedCallSite,
 )
@@ -92,6 +94,39 @@ def test_captures_exact_functions_constructors_and_method_kinds(tmp_path: Path) 
     assert ping.invocation == InvocationKind.FUNCTION
     assert ping.canonical_symbol and ping.canonical_symbol.endswith("Service.ping")
     assert all(site.resolver == "mypy" and site.resolver_version for site in sites)
+
+
+def test_captures_hashed_finite_string_arguments_without_exposing_literals(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "helpers.py").write_text(
+        "def emit(resource: str, *, alternate: str, dynamic: str) -> None: pass\n",
+        encoding="utf-8",
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from helpers import emit\n\n"
+        "def handler(flag: bool, value: str) -> None:\n"
+        "    emit('orders', alternate='a' if flag else 'b', dynamic=value)\n",
+        encoding="utf-8",
+    )
+
+    sites = MypyAnalyzer(tmp_path).analyze_endpoint(_endpoint(main, line=3)).resolved_call_sites
+    arguments = _site_by_spelling(sites, "emit")[0].arguments
+
+    def digest(value: str) -> str:
+        return f"sha256:{hashlib.sha256(value.encode()).hexdigest()}"
+
+    assert arguments[0].positional_index == 0
+    assert arguments[0].status == FiniteValueStatus.EXACT
+    assert arguments[0].value_hashes == (digest("orders"),)
+    assert arguments[1].keyword == "alternate"
+    assert arguments[1].status == FiniteValueStatus.FINITE
+    assert arguments[1].value_hashes == tuple(sorted((digest("a"), digest("b"))))
+    assert arguments[2].keyword == "dynamic"
+    assert arguments[2].status == FiniteValueStatus.UNAVAILABLE
+    assert arguments[2].reason_code == "dynamic_argument"
+    assert "orders" not in arguments[0].model_dump_json()
 
 
 def test_captures_module_qualified_functions_constructors_and_methods(tmp_path: Path) -> None:
