@@ -206,7 +206,7 @@ analysis:
   confidence_threshold: 0.5
   effect_contracts: effects.yaml       # optional, config-relative
   surface_contracts: surfaces.yaml     # optional, requires --secure-ast
-  # surface_preset: event-listeners-v1 # alternative RabbitMQ/Kafka adapter
+  # surface_preset: event-listeners-v1 # alternative: mcp-v1
 output:
   show_confidence: true
   show_dependency_chain: false

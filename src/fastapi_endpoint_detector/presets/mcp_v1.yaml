@@ -1,0 +1,130 @@
+schema_version: 1
+preset:
+  id: mcp-surfaces
+  version: "1"
+  provenance:
+    kind: preset
+    source: fastapi-endpoint-detector
+    revision: "1"
+contracts:
+  - id: fastmcp-tool-decorator
+    registration:
+      symbol: fastmcp.FastMCP.tool
+      invocation: instance_method
+      receiver_type: fastmcp.FastMCP
+    handler:
+      kind: decorated_function
+    surface:
+      kind: mcp.tool
+      id_template: "tool:{resource}"
+      resource:
+        kind: keyword_or_handler_name
+        name: name
+    callback_mode: either
+
+  - id: fastmcp-resource-decorator
+    registration:
+      symbol: fastmcp.FastMCP.resource
+      invocation: instance_method
+      receiver_type: fastmcp.FastMCP
+    handler:
+      kind: decorated_function
+    surface:
+      kind: mcp.resource
+      id_template: "resource:{resource}"
+      resource:
+        kind: argument_or_keyword
+        index: 0
+        name: uri
+    callback_mode: either
+
+  - id: fastmcp-prompt-decorator
+    registration:
+      symbol: fastmcp.FastMCP.prompt
+      invocation: instance_method
+      receiver_type: fastmcp.FastMCP
+    handler:
+      kind: decorated_function
+    surface:
+      kind: mcp.prompt
+      id_template: "prompt:{resource}"
+      resource:
+        kind: keyword_or_handler_name
+        name: name
+    callback_mode: either
+
+  - id: fastmcp-add-tool
+    registration:
+      symbol: fastmcp.FastMCP.add_tool
+      invocation: instance_method
+      receiver_type: fastmcp.FastMCP
+    handler:
+      kind: argument
+      index: 0
+    surface:
+      kind: mcp.tool
+      id_template: "tool:{resource}"
+      resource:
+        kind: handler_name
+    callback_mode: either
+
+  - id: fastmcp-add-prompt
+    registration:
+      symbol: fastmcp.FastMCP.add_prompt
+      invocation: instance_method
+      receiver_type: fastmcp.FastMCP
+    handler:
+      kind: argument
+      index: 0
+    surface:
+      kind: mcp.prompt
+      id_template: "prompt:{resource}"
+      resource:
+        kind: handler_name
+    callback_mode: either
+
+  - id: mcp-sdk-tool-decorator
+    registration:
+      symbol: mcp.server.fastmcp.FastMCP.tool
+      invocation: instance_method
+      receiver_type: mcp.server.fastmcp.FastMCP
+    handler:
+      kind: decorated_function
+    surface:
+      kind: mcp.tool
+      id_template: "tool:{resource}"
+      resource:
+        kind: keyword_or_handler_name
+        name: name
+    callback_mode: either
+
+  - id: mcp-sdk-resource-decorator
+    registration:
+      symbol: mcp.server.fastmcp.FastMCP.resource
+      invocation: instance_method
+      receiver_type: mcp.server.fastmcp.FastMCP
+    handler:
+      kind: decorated_function
+    surface:
+      kind: mcp.resource
+      id_template: "resource:{resource}"
+      resource:
+        kind: argument_or_keyword
+        index: 0
+        name: uri
+    callback_mode: either
+
+  - id: mcp-sdk-prompt-decorator
+    registration:
+      symbol: mcp.server.fastmcp.FastMCP.prompt
+      invocation: instance_method
+      receiver_type: mcp.server.fastmcp.FastMCP
+    handler:
+      kind: decorated_function
+    surface:
+      kind: mcp.prompt
+      id_template: "prompt:{resource}"
+      resource:
+        kind: keyword_or_handler_name
+        name: name
+    callback_mode: either

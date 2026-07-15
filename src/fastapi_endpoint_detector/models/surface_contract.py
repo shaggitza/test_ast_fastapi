@@ -33,6 +33,7 @@ BUNDLED_SURFACE_PRESETS = {
     "event-listeners-v1": Path(__file__).resolve().parent.parent
     / "presets"
     / "event_listeners_v1.yaml",
+    "mcp-v1": Path(__file__).resolve().parent.parent / "presets" / "mcp_v1.yaml",
 }
 
 
@@ -63,8 +64,10 @@ class ResourceSelectorKind(str, Enum):
     """How one or more finite surface resource identities are selected."""
 
     ARGUMENT = "argument"
+    ARGUMENT_OR_KEYWORD = "argument_or_keyword"
     ARGUMENTS = "arguments"
     KEYWORD = "keyword"
+    KEYWORD_OR_HANDLER_NAME = "keyword_or_handler_name"
     HANDLER_NAME = "handler_name"
     LITERAL = "literal"
 
@@ -174,7 +177,12 @@ class ResourceSelector(_StrictModel):
             ResourceSelectorKind.ARGUMENTS,
         }:
             valid = self.index is not None and self.name is None and self.value is None
-        elif self.kind == ResourceSelectorKind.KEYWORD:
+        elif self.kind == ResourceSelectorKind.ARGUMENT_OR_KEYWORD:
+            valid = self.index is not None and self.name is not None and self.value is None
+        elif self.kind in {
+            ResourceSelectorKind.KEYWORD,
+            ResourceSelectorKind.KEYWORD_OR_HANDLER_NAME,
+        }:
             valid = self.name is not None and self.index is None and self.value is None
         elif self.kind == ResourceSelectorKind.LITERAL:
             valid = self.value is not None and self.index is None and self.name is None

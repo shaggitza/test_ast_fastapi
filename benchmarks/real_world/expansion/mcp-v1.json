@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "adapter": "mcp-v1",
+  "purpose": "Pinned real-repository candidates for the 50-project expansion in issue #103",
+  "entries": [
+    {
+      "repository": "orenlab/ckdn",
+      "pr": 8,
+      "url": "https://github.com/orenlab/ckdn/pull/8",
+      "parent_sha": "c8e3bccbd5b7839292f1d8633966b01af83c08eb",
+      "merge_sha": "6b22eddeac5a124f9f1b0bc7c0407d61ccd06fb0",
+      "root": "src/ckdn",
+      "shape": "FastMCP tools registered inside register functions on dynamically imported/injected server receivers",
+      "expected_inventory": "conditional_or_unavailable"
+    },
+    {
+      "repository": "dmbch/lore",
+      "pr": 51,
+      "url": "https://github.com/dmbch/lore/pull/51",
+      "parent_sha": "dd2c9e65ec73b9bc6bf72dc570a311726cb017b8",
+      "merge_sha": "cc5561c3c994661f767f963499318464be355dba",
+      "root": "src/lore",
+      "shape": "FastMCP factory and lifespan assembly with tools registered in deferred factory scope",
+      "expected_inventory": "conditional_or_unavailable"
+    }
+  ]
+}
