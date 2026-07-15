@@ -555,6 +555,14 @@ class HtmlFormatter(BaseFormatter):
                 f"{audit.summary.matched_calls} matched calls / "
                 f"{audit.summary.physical_occurrences} physical calls</div>"
             )
+        if report.resource_coupling_graph is not None:
+            graph = report.resource_coupling_graph
+            content_lines.append(
+                '<div class="summary-item"><span class="summary-label">'
+                "Resource Coupling:</span> "
+                f"{len(graph.edges)} report-only edges / "
+                f"{len(graph.diagnostics)} diagnostics; does not change candidates</div>"
+            )
         content_lines.append("</div>")
 
         # Affected endpoints

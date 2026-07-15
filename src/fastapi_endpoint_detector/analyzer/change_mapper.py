@@ -24,6 +24,7 @@ from fastapi_endpoint_detector.analyzer.effect_contract_auditor import (
 )
 from fastapi_endpoint_detector.analyzer.endpoint_registry import EndpointRegistry
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
+from fastapi_endpoint_detector.analyzer.resource_coupling import build_resource_coupling_graph
 from fastapi_endpoint_detector.analyzer.scip_analyzer import (
     SCIPAnalyzer,
     SCIPAnalyzerError,
@@ -65,6 +66,10 @@ if TYPE_CHECKING:
     from fastapi_endpoint_detector.models.effect_contract_audit import (
         EffectContractAudit,
         EffectContractAuditOccurrence,
+    )
+    from fastapi_endpoint_detector.models.resource_coupling import (
+        LoadedResourceCoupling,
+        ResourceCouplingGraph,
     )
     from fastapi_endpoint_detector.models.surface_contract import LoadedSurfaceContracts
 
@@ -424,6 +429,9 @@ class ChangeMapper:
         self._effect_contracts: LoadedEffectContracts | None = (
             self.config.load_effect_contract_snapshot()
         )
+        self._resource_coupling: LoadedResourceCoupling | None = (
+            self.config.load_resource_coupling_snapshot()
+        )
         self._surface_contracts: LoadedSurfaceContracts | None = (
             self.config.load_surface_contract_snapshot()
         )
@@ -465,6 +473,7 @@ class ChangeMapper:
         self._registry: EndpointRegistry | None = None
         self._inventory: EndpointInventory | None = None
         self._effect_contract_audit: EffectContractAudit | None = None
+        self._resource_coupling_graph: ResourceCouplingGraph | None = None
         self._mypy_analyzer: MypyAnalyzer | None = None
         self._effect_analyzer = EffectAnalyzer(target_project_root)
         self._scip_analyzer: SCIPAnalyzer | None = None
@@ -1250,6 +1259,14 @@ class ChangeMapper:
         report_progress(10, 100, f"Analyzing {total_endpoints} endpoints (mypy)...")
         self._preanalyze_mypy(progress_callback)
         self._effect_contract_audit = self._build_effect_contract_audit()
+        if self._resource_coupling is not None:
+            if self._effect_contracts is None or self._effect_contract_audit is None:
+                raise ChangeMapperError("resource coupling requires a complete effect audit")
+            self._resource_coupling_graph = build_resource_coupling_graph(
+                self._resource_coupling,
+                self._effect_contracts,
+                self._effect_contract_audit,
+            )
 
         # Analyze each Python file
         report_progress(70, 100, f"Checking {len(python_files)} changed files...")
@@ -1309,7 +1326,7 @@ class ChangeMapper:
         duration_ms = (time.time() - start_time) * 1000
         report_progress(100, 100, "Complete!")
 
-        return AnalysisReport(
+        report = AnalysisReport(
             app_path=str(self.app_path),
             diff_source=diff_source_str,
             total_endpoints=len(self.registry),
@@ -1322,7 +1339,10 @@ class ChangeMapper:
             errors=errors,
             warnings=warnings,
             effect_contract_audit=self._effect_contract_audit,
+            resource_coupling_graph=self._resource_coupling_graph,
         )
+        self.mypy_analyzer.release_typed_snapshot()
+        return report
 
     def _preanalyze_mypy(
         self,

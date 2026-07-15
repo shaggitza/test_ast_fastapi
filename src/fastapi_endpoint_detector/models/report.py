@@ -21,6 +21,7 @@ from fastapi_endpoint_detector.models.effect_contract import (
 )
 from fastapi_endpoint_detector.models.effect_contract_audit import EffectContractAudit
 from fastapi_endpoint_detector.models.endpoint import Endpoint
+from fastapi_endpoint_detector.models.resource_coupling import ResourceCouplingGraph
 
 
 def _contract_hash(contract: EffectContract) -> str:
@@ -399,12 +400,59 @@ class AnalysisReport(BaseModel):
         default=None,
         description="Complete exact contract audit when configured.",
     )
+    resource_coupling_graph: ResourceCouplingGraph | None = Field(
+        default=None,
+        description="Report-only finite cross-endpoint resource graph.",
+    )
 
     @model_validator(mode="after")
     def populate_candidates_from_legacy_results(self) -> "AnalysisReport":
         """Keep manually constructed legacy reports internally consistent."""
         if not self.candidate_endpoints and self.affected_endpoints:
             self.candidate_endpoints = list(self.affected_endpoints)
+        return self
+
+    @model_validator(mode="after")
+    def validate_resource_coupling_graph(self) -> "AnalysisReport":
+        graph = self.resource_coupling_graph
+        if graph is None:
+            return self
+        audit = self.effect_contract_audit
+        if audit is None or graph.effect_audit_hash != audit.provenance.audit_hash:
+            raise ValueError("resource coupling graph requires its exact effect audit")
+        occurrence_by_id = {item.id: item for item in audit.occurrences}
+        group_by_id = {item.id: item for item in graph.groups}
+        for edge in graph.edges:
+            producer = occurrence_by_id.get(edge.producer_occurrence_id)
+            consumer = occurrence_by_id.get(edge.consumer_occurrence_id)
+            group = group_by_id.get(edge.group_id)
+            if producer is None or consumer is None or group is None:
+                raise ValueError("resource coupling edge references unknown audit evidence")
+            if (
+                producer.contract_id != edge.producer_contract_id
+                or consumer.contract_id != edge.consumer_contract_id
+                or edge.producer_contract_id not in group.producer_contract_ids
+                or edge.consumer_contract_id not in group.consumer_contract_ids
+                or edge.group_hash != group.group_hash
+                or edge.resource_space_hash != group.resource_space_hash
+                or edge.channel != group.channel
+            ):
+                raise ValueError("resource coupling edge contract/group evidence is inconsistent")
+            producer_linked = any(
+                item.id == edge.producer_endpoint_id for item in producer.endpoints
+            )
+            consumer_linked = any(
+                item.id == edge.consumer_endpoint_id for item in consumer.endpoints
+            )
+            if not producer_linked or not consumer_linked:
+                raise ValueError("resource coupling edge endpoint is absent from audit occurrence")
+            if (
+                producer.resource_identity is None
+                or consumer.resource_identity is None
+                or edge.resource_value_hash not in producer.resource_identity.value_hashes
+                or edge.resource_value_hash not in consumer.resource_identity.value_hashes
+            ):
+                raise ValueError("resource coupling edge has no exact finite resource overlap")
         return self
 
     @model_validator(mode="after")
