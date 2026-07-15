@@ -9,6 +9,7 @@ from click.testing import CliRunner
 from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper, ChangeMapperError
 from fastapi_endpoint_detector.cli import cli
 from fastapi_endpoint_detector.config import load_config
+from fastapi_endpoint_detector.models.report import ConfidenceLevel
 
 
 def _project(tmp_path: Path) -> tuple[Path, Path]:
@@ -159,6 +160,92 @@ def test_list_endpoints_cli_includes_configured_custom_surfaces(tmp_path: Path) 
     start = result.output.find("{")
     payload = json.loads(result.output[start:])
     assert payload["endpoints"][0]["surface"]["contract_id"] == "listen"
+
+
+def test_bundled_event_listener_preset_reaches_changed_handler(tmp_path: Path) -> None:
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "main.py").write_text(
+        "from faststream.rabbit import RabbitBroker\n"
+        "broker = RabbitBroker()\n\n"
+        "@broker.subscriber('orders')\n"
+        "async def process_order():\n"
+        "    return 2\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / ".endpoint-detector.yaml"
+    config_path.write_text(
+        "analysis:\n  surface_preset: event-listeners-v1\n",
+        encoding="utf-8",
+    )
+    diff = tmp_path / "change.diff"
+    diff.write_text(
+        "diff --git a/main.py b/main.py\n"
+        "--- a/main.py\n"
+        "+++ b/main.py\n"
+        "@@ -4,3 +4,3 @@\n"
+        " @broker.subscriber('orders')\n"
+        " async def process_order():\n"
+        "-    return 1\n"
+        "+    return 2\n",
+        encoding="utf-8",
+    )
+
+    report = ChangeMapper(
+        app_path=app,
+        config=load_config(config_path),
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+
+    assert [candidate.endpoint.identifier for candidate in report.candidate_endpoints] == [
+        "RABBITMQ queue:orders"
+    ]
+    surface = report.candidate_endpoints[0].endpoint.surface
+    assert surface is not None
+    assert surface.contract_id == "faststream-rabbit-subscriber"
+    assert surface.resource == "orders"
+
+
+def test_conditional_aio_pika_consumer_is_capped_low(tmp_path: Path) -> None:
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "main.py").write_text(
+        "from aio_pika.queue import Queue\n"
+        "queue = Queue()\n\n"
+        "async def process_order(message):\n"
+        "    return 2\n\n"
+        "queue.consume(process_order)\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / ".endpoint-detector.yaml"
+    config_path.write_text(
+        "analysis:\n  surface_preset: event-listeners-v1\n",
+        encoding="utf-8",
+    )
+    diff = tmp_path / "change.diff"
+    diff.write_text(
+        "diff --git a/main.py b/main.py\n"
+        "--- a/main.py\n"
+        "+++ b/main.py\n"
+        "@@ -4,2 +4,2 @@\n"
+        " async def process_order(message):\n"
+        "-    return 1\n"
+        "+    return 2\n",
+        encoding="utf-8",
+    )
+
+    report = ChangeMapper(
+        app_path=app,
+        config=load_config(config_path),
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+
+    assert len(report.candidate_endpoints) == 1
+    candidate = report.candidate_endpoints[0]
+    assert candidate.endpoint.identifier == "RABBITMQ handler:process_order"
+    assert candidate.confidence == ConfidenceLevel.LOW
 
 
 def test_custom_surfaces_require_secure_ast(tmp_path: Path) -> None:

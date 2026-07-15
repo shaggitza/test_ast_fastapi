@@ -21,6 +21,46 @@ fastapi-endpoint-detector validate-surface-contracts \
 
 See [`examples/surface_contracts.yaml`](../examples/surface_contracts.yaml).
 
+For the bundled RabbitMQ/Kafka adapter, select the package-owned preset instead
+of a custom document:
+
+```yaml
+analysis:
+  surface_preset: event-listeners-v1
+```
+
+`surface_preset` and `surface_contracts` are mutually exclusive so one analysis
+has one unambiguous config/raw/preset provenance chain.
+
+## Event-listener preset
+
+`event-listeners-v1` contains exact contracts for:
+
+- `faststream.rabbit.RabbitBroker.subscriber`, with one literal queue;
+- `faststream.kafka.KafkaBroker.subscriber`, with one or more literal topics;
+- `aio_pika.queue.Queue.consume`, with an exact async callback.
+
+FastStream registrations can be established when the receiver, async decorated
+handler, and every queue/topic string are source-proven. Kafka multi-topic
+positional arguments are normalized into sorted, deduplicated surfaces, capped
+at 32 resources per registration. Literal lists, tuples, and sets are also
+finite. If any member is dynamic, the entire registration fails closed; known
+members are never partially emitted and unknown topics never cause topic-wide
+fanout.
+
+Aio-pika queue identity normally originates in an awaited `declare_queue`
+factory and is not available to schema v1. The preset therefore emits only a
+conditional `rabbitmq handler:<callback>` surface when an exact `Queue.consume`
+receiver is otherwise source-proven. It never invents or fans out queue names.
+This limitation is preserved in discovery evidence.
+
+These contracts follow the documented FastStream Rabbit
+[`subscriber`](https://faststream.ag2.ai/latest/rabbit/) and Kafka
+[multi-topic subscriber](https://faststream.ag2.ai/latest/kafka/Subscriber/)
+APIs and aio-pika's callback-based
+[`Queue.consume`](https://docs.aio-pika.com/apidoc.html#aio_pika.queue.Queue.consume)
+API.
+
 ## Schema v1
 
 Each document has `schema_version: 1`, preset identity/provenance, and one or
@@ -36,7 +76,7 @@ A contract declares:
 - `handler`: `decorated_function`, positional `argument`, or named `keyword`;
 - `surface.kind`: a stable lower-case surface class;
 - `surface.id_template`: exactly one `{resource}` placeholder;
-- `surface.resource`: a literal string argument/keyword, handler name, or fixed literal;
+- `surface.resource`: a literal string argument/keyword, all positional arguments from a bounded index, handler name, or fixed literal;
 - `callback_mode`: `either`, `sync`, `async`, `generator`, or `async_generator`;
 - optional external `conditions`, which make discovery conditional.
 

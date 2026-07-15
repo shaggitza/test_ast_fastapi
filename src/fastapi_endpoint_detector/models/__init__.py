@@ -67,6 +67,7 @@ from fastapi_endpoint_detector.models.surface_contract import (
     SurfaceContractDocument,
     SurfaceContractError,
     load_surface_contracts,
+    load_surface_preset,
 )
 
 __all__ = [  # noqa: RUF022 - grouped by public model domain
@@ -102,6 +103,7 @@ __all__ = [  # noqa: RUF022 - grouped by public model domain
     "SurfaceContractDocument",
     "SurfaceContractError",
     "load_surface_contracts",
+    "load_surface_preset",
     # Effect contract audit models
     "AuditCallStatus",
     "AuditEndpoint",

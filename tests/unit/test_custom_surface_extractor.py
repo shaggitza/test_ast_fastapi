@@ -264,6 +264,92 @@ def test_wildcard_match_is_always_conditional_low_only(tmp_path: Path) -> None:
     assert "LOW-only wildcard" in endpoint.discovery_conditions[0].reason
 
 
+def test_finite_positional_topics_expand_to_distinct_surfaces(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n\n"
+        "@reactor.listen('payments', 'orders')\n"
+        "async def process(): pass\n",
+        encoding="utf-8",
+    )
+    path = _contracts(tmp_path)
+    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    payload["contracts"][0]["surface"]["resource"] = {
+        "kind": "arguments",
+        "index": 0,
+    }
+    path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    inventory = CustomSurfaceExtractor(tmp_path, load_surface_contracts(path)).extract_inventory()
+
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == [
+        "REACTOR topic:orders",
+        "REACTOR topic:payments",
+    ]
+
+
+def test_literal_topic_collection_is_finite_and_deduplicated(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n\n"
+        "@reactor.listen(['orders', 'payments', 'orders'])\n"
+        "async def process(): pass\n",
+        encoding="utf-8",
+    )
+    loaded = load_surface_contracts(_contracts(tmp_path))
+
+    inventory = CustomSurfaceExtractor(tmp_path, loaded).extract_inventory()
+
+    assert [endpoint.surface.resource for endpoint in inventory.endpoints if endpoint.surface] == [
+        "orders",
+        "payments",
+    ]
+
+
+def test_dynamic_member_of_topic_set_fails_closed_without_partial_fanout(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "dynamic = get_topic()\n\n"
+        "@reactor.listen('orders', dynamic)\n"
+        "async def process(): pass\n",
+        encoding="utf-8",
+    )
+    path = _contracts(tmp_path)
+    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    payload["contracts"][0]["surface"]["resource"] = {
+        "kind": "arguments",
+        "index": 0,
+    }
+    path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    inventory = CustomSurfaceExtractor(tmp_path, load_surface_contracts(path)).extract_inventory()
+
+    assert inventory.endpoints == []
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert "resource set was not finite literal data" in inventory.limitations[0].reason
+
+
+def test_resource_set_over_cap_fails_closed(tmp_path: Path) -> None:
+    resources = ", ".join(repr(f"topic-{index}") for index in range(33))
+    (tmp_path / "main.py").write_text(
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n\n"
+        f"@reactor.listen([{resources}])\n"
+        "async def process(): pass\n",
+        encoding="utf-8",
+    )
+    loaded = load_surface_contracts(_contracts(tmp_path))
+
+    inventory = CustomSurfaceExtractor(tmp_path, loaded).extract_inventory()
+
+    assert inventory.endpoints == []
+    assert inventory.status == InventoryStatus.CONDITIONAL
+
+
 def test_surface_provenance_is_visible_in_all_output_formats(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text(
         "from framework import Reactor\n"

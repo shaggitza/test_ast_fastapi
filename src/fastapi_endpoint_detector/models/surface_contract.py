@@ -7,7 +7,7 @@ import json
 import keyword
 import sys
 from enum import Enum
-from pathlib import Path  # noqa: TC003 - Pydantic consumes paths at runtime
+from pathlib import Path
 from typing import Any, Literal
 
 if sys.version_info >= (3, 11):
@@ -28,6 +28,12 @@ from fastapi_endpoint_detector.strict_data import (
     load_json_unique,
     load_yaml_unique,
 )
+
+BUNDLED_SURFACE_PRESETS = {
+    "event-listeners-v1": Path(__file__).resolve().parent.parent
+    / "presets"
+    / "event_listeners_v1.yaml",
+}
 
 
 class SurfaceContractError(ValueError):
@@ -54,9 +60,10 @@ class HandlerSelectorKind(str, Enum):
 
 
 class ResourceSelectorKind(str, Enum):
-    """How a finite surface resource identity is selected."""
+    """How one or more finite surface resource identities are selected."""
 
     ARGUMENT = "argument"
+    ARGUMENTS = "arguments"
     KEYWORD = "keyword"
     HANDLER_NAME = "handler_name"
     LITERAL = "literal"
@@ -162,7 +169,10 @@ class ResourceSelector(_StrictModel):
 
     @model_validator(mode="after")
     def validate_shape(self) -> ResourceSelector:
-        if self.kind == ResourceSelectorKind.ARGUMENT:
+        if self.kind in {
+            ResourceSelectorKind.ARGUMENT,
+            ResourceSelectorKind.ARGUMENTS,
+        }:
             valid = self.index is not None and self.name is None and self.value is None
         elif self.kind == ResourceSelectorKind.KEYWORD:
             valid = self.name is not None and self.index is None and self.value is None
@@ -305,6 +315,15 @@ class LoadedSurfaceContracts(_StrictModel):
     preset_hash: str
     contract_hashes: dict[str, str]
     document: SurfaceContractDocument
+
+
+def load_surface_preset(name: str) -> LoadedSurfaceContracts:
+    """Load one named package-owned surface preset as strict data."""
+    path = BUNDLED_SURFACE_PRESETS.get(name)
+    if path is None:
+        choices = ", ".join(sorted(BUNDLED_SURFACE_PRESETS))
+        raise SurfaceContractError(f"unknown surface preset {name!r}; choose from: {choices}")
+    return load_surface_contracts(path)
 
 
 def load_surface_contracts(path: Path) -> LoadedSurfaceContracts:

@@ -6,9 +6,10 @@ sensible defaults for all configuration options.
 """
 
 from pathlib import Path
+from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from fastapi_endpoint_detector.models.effect_contract import (
     LoadedEffectContracts,
@@ -17,6 +18,7 @@ from fastapi_endpoint_detector.models.effect_contract import (
 from fastapi_endpoint_detector.models.surface_contract import (
     LoadedSurfaceContracts,
     load_surface_contracts,
+    load_surface_preset,
 )
 from fastapi_endpoint_detector.strict_data import load_yaml_unique
 
@@ -75,6 +77,16 @@ class AnalysisConfig(BaseModel):
         default=None,
         description="Path to strict data-only custom-surface contracts.",
     )
+    surface_preset: Literal["event-listeners-v1"] | None = Field(
+        default=None,
+        description="Named package-owned custom-surface adapter preset.",
+    )
+
+    @model_validator(mode="after")
+    def validate_surface_source(self) -> "AnalysisConfig":
+        if self.surface_contracts is not None and self.surface_preset is not None:
+            raise ValueError("surface_contracts and surface_preset are mutually exclusive")
+        return self
 
 
 class OutputConfig(BaseModel):
@@ -131,10 +143,15 @@ class Config(BaseModel):
     def load_surface_contract_snapshot(self) -> LoadedSurfaceContracts | None:
         """Load configured custom surfaces once to prevent analysis-time drift."""
         path = self.analysis.surface_contracts
-        if path is None:
+        preset = self.analysis.surface_preset
+        if path is None and preset is None:
             return None
         if self._surface_contract_snapshot is None:
-            self._surface_contract_snapshot = load_surface_contracts(path)
+            self._surface_contract_snapshot = (
+                load_surface_contracts(path)
+                if path is not None
+                else load_surface_preset(preset or "")
+            )
         return self._surface_contract_snapshot
 
     def load_effect_contract_snapshot(self) -> LoadedEffectContracts | None:

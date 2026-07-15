@@ -124,6 +124,8 @@ class CustomSurfaceExtractorError(ValueError):
 class CustomSurfaceExtractor:
     """Match finite source registrations against strict data-only contracts."""
 
+    MAX_RESOURCES_PER_REGISTRATION = 32
+
     def __init__(
         self,
         app_path: Path,
@@ -140,7 +142,7 @@ class CustomSurfaceExtractor:
         ] = {}
         self._endpoints: list[Endpoint] = []
         self._limitations: list[EndpointDiscoveryCondition] = []
-        self._seen: set[tuple[str, int, int, str, str]] = set()
+        self._seen: set[tuple[str, int, int, str, str, str]] = set()
         self._module_states: dict[str, dict[str, _Binding | None]] = {}
         self._declared_receiver_types = {
             contract.registration.receiver_type
@@ -493,20 +495,19 @@ class CustomSurfaceExtractor:
                 )
                 continue
             handler_module, function = handler_result
-            resource = self._resource(contract, call, function)
-            if resource is None:
+            resources = self._resources(contract, call, function)
+            if resources is None:
                 self._limitations.append(
                     EndpointDiscoveryCondition(
                         source_path=module.path,
                         source_line=call.lineno,
                         reason=(
                             f"custom surface contract {contract.id!r} matched but "
-                            "resource was not literal"
+                            "resource set was not finite literal data"
                         ),
                     )
                 )
                 continue
-            surface_id = contract.surface.id_template.replace("{resource}", resource)
             conditions = list(inherited_conditions)
             for declared in contract.conditions:
                 conditions.append(
@@ -524,51 +525,60 @@ class CustomSurfaceExtractor:
                         reason=f"LOW-only wildcard surface match: {contract.registration.symbol}",
                     )
                 )
-            key = (str(module.path), call.lineno, call.col_offset, contract.id, handler_module.name)
-            if key in self._seen:
-                continue
-            self._seen.add(key)
             merged = tuple(dict.fromkeys(conditions))
-            evidence = SurfaceRegistrationEvidence(
-                surface_kind=contract.surface.kind,
-                surface_id=surface_id,
-                resource=resource,
-                callback_mode=contract.callback_mode,
-                contract_id=contract.id,
-                match_kind=contract.registration.match_kind,
-                registration_symbol=symbol,
-                registration_file=module.path,
-                registration_line=call.lineno,
-                registration_column=call.col_offset,
-                registration_source_hash=self._source_hash(module, call),
-                handler_source_hash=self._source_hash(handler_module, function),
-                contract_source_path=str(self.contracts.source_path),
-                raw_hash=self.contracts.raw_hash,
-                config_hash=self.contracts.config_hash,
-                preset_hash=self.contracts.preset_hash,
-                contract_hash=self.contracts.contract_hashes[contract.id],
-                conditions=contract.conditions,
-            )
-            self._endpoints.append(
-                Endpoint(
-                    path=surface_id,
-                    methods=[EndpointMethod.CUSTOM],
-                    handler=HandlerInfo(
-                        name=function.name,
-                        module=handler_module.name,
-                        file_path=handler_module.path,
-                        line_number=function.lineno,
-                        end_line_number=function.end_lineno,
-                    ),
-                    discovery_status=(
-                        EndpointDiscoveryStatus.CONDITIONAL
-                        if merged
-                        else EndpointDiscoveryStatus.ESTABLISHED
-                    ),
-                    discovery_conditions=merged,
-                    surface=evidence,
+            for resource in resources:
+                surface_id = contract.surface.id_template.replace("{resource}", resource)
+                key = (
+                    str(module.path),
+                    call.lineno,
+                    call.col_offset,
+                    contract.id,
+                    handler_module.name,
+                    resource,
                 )
-            )
+                if key in self._seen:
+                    continue
+                self._seen.add(key)
+                evidence = SurfaceRegistrationEvidence(
+                    surface_kind=contract.surface.kind,
+                    surface_id=surface_id,
+                    resource=resource,
+                    callback_mode=contract.callback_mode,
+                    contract_id=contract.id,
+                    match_kind=contract.registration.match_kind,
+                    registration_symbol=symbol,
+                    registration_file=module.path,
+                    registration_line=call.lineno,
+                    registration_column=call.col_offset,
+                    registration_source_hash=self._source_hash(module, call),
+                    handler_source_hash=self._source_hash(handler_module, function),
+                    contract_source_path=str(self.contracts.source_path),
+                    raw_hash=self.contracts.raw_hash,
+                    config_hash=self.contracts.config_hash,
+                    preset_hash=self.contracts.preset_hash,
+                    contract_hash=self.contracts.contract_hashes[contract.id],
+                    conditions=contract.conditions,
+                )
+                self._endpoints.append(
+                    Endpoint(
+                        path=surface_id,
+                        methods=[EndpointMethod.CUSTOM],
+                        handler=HandlerInfo(
+                            name=function.name,
+                            module=handler_module.name,
+                            file_path=handler_module.path,
+                            line_number=function.lineno,
+                            end_line_number=function.end_lineno,
+                        ),
+                        discovery_status=(
+                            EndpointDiscoveryStatus.CONDITIONAL
+                            if merged
+                            else EndpointDiscoveryStatus.ESTABLISHED
+                        ),
+                        discovery_conditions=merged,
+                        surface=evidence,
+                    )
+                )
 
     def _matches(
         self,
@@ -665,31 +675,71 @@ class CustomSurfaceExtractor:
             or (mode == CallbackMode.ASYNC_GENERATOR and is_async and has_yield)
         )
 
-    @staticmethod
-    def _resource(
+    @classmethod
+    def _resources(
+        cls,
         contract: SurfaceContract,
         call: ast.Call,
         handler: ast.FunctionDef | ast.AsyncFunctionDef,
-    ) -> str | None:
+    ) -> tuple[str, ...] | None:
+        """Resolve one bounded literal resource set without widening dynamic values."""
         selector = contract.surface.resource
-        expression: ast.expr | None = None
+        values: tuple[str, ...]
         if selector.kind == ResourceSelectorKind.HANDLER_NAME:
-            return handler.name if len(handler.name) <= 256 else None
-        if selector.kind == ResourceSelectorKind.LITERAL:
-            return selector.value
-        if selector.kind == ResourceSelectorKind.ARGUMENT:
-            index = selector.index or 0
-            expression = call.args[index] if index < len(call.args) else None
-        elif selector.kind == ResourceSelectorKind.KEYWORD:
-            expression = next(
-                (item.value for item in call.keywords if item.arg == selector.name), None
+            values = (handler.name,)
+        elif selector.kind == ResourceSelectorKind.LITERAL:
+            if selector.value is None:
+                return None
+            values = (selector.value,)
+        elif selector.kind == ResourceSelectorKind.ARGUMENTS:
+            start = selector.index or 0
+            selected = call.args[start:]
+            groups = [cls._literal_resources(expression) for expression in selected]
+            if not groups or any(group is None for group in groups):
+                return None
+            values = tuple(value for group in groups for value in group or ())
+        else:
+            expression: ast.expr | None
+            if selector.kind == ResourceSelectorKind.ARGUMENT:
+                index = selector.index or 0
+                expression = call.args[index] if index < len(call.args) else None
+            else:
+                expression = next(
+                    (item.value for item in call.keywords if item.arg == selector.name),
+                    None,
+                )
+            resolved = cls._literal_resources(expression)
+            if resolved is None:
+                return None
+            values = resolved
+        normalized = tuple(
+            sorted(
+                {
+                    value
+                    for value in values
+                    if value is not None and value.strip() and len(value) <= 256
+                }
             )
-        value = (
-            expression.value
-            if isinstance(expression, ast.Constant) and isinstance(expression.value, str)
-            else None
         )
-        return value if value is not None and 1 <= len(value) <= 256 else None
+        if len(normalized) != len(set(values)) or not (
+            1 <= len(normalized) <= cls.MAX_RESOURCES_PER_REGISTRATION
+        ):
+            return None
+        return normalized
+
+    @classmethod
+    def _literal_resources(cls, expression: ast.expr | None) -> tuple[str, ...] | None:
+        if isinstance(expression, ast.Constant) and isinstance(expression.value, str):
+            return (expression.value,)
+        if isinstance(expression, (ast.List, ast.Tuple, ast.Set)):
+            values: list[str] = []
+            for item in expression.elts:
+                resolved = cls._literal_resources(item)
+                if resolved is None:
+                    return None
+                values.extend(resolved)
+            return tuple(values)
+        return None
 
     @staticmethod
     def _source_hash(module: _Module, node: ast.AST) -> str:
