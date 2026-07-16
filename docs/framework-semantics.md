@@ -17,7 +17,9 @@ The versioned preset recognizes only exact source-proven receivers and handlers:
 
 - `FastAPI.on_event` and `FastAPI.add_event_handler`;
 - `Starlette.on_event` and `Starlette.add_event_handler`;
-- `FastAPI.middleware("http")`.
+- `FastAPI.middleware("http")`;
+- `FastAPI.add_middleware(LocalBaseHTTPMiddlewareSubclass)`;
+- `Starlette.add_middleware(LocalBaseHTTPMiddlewareSubclass)`.
 
 Startup and shutdown registrations have distinct `event:startup` and
 `event:shutdown` IDs. Exact `FastAPI(lifespan=...)` async-generator callbacks
@@ -27,9 +29,15 @@ statements before that yield for startup and only statements after it for
 shutdown, including transitive typed calls. Conditional, nested, absent, or
 multiple yields fail closed with inventory limitations.
 
-Middleware registrations retain every physical handler;
-multiple handlers for the same protocol remain conditional rather than being
-collapsed. Same-named methods on other receiver types never match.
+Middleware registrations retain every physical handler; multiple handlers for
+the same protocol remain conditional rather than being collapsed. Class-based
+HTTP middleware requires one exact project-local class, the exact
+`starlette.middleware.base.BaseHTTPMiddleware` base, and a directly declared
+async `dispatch` method. Class factories, instances, decorators, rebinding,
+explicit metaclasses, dynamic class-scope calls/imports/nested classes,
+inherited-only dispatch methods, additional/dynamic bases, and generic
+`__call__` spelling fail closed. Same-named methods on other receiver types
+never match.
 
 Mypy execution summaries also model:
 
@@ -51,8 +59,9 @@ no framework summary.
 
 Starlette constructor lifespan callbacks, imported callback factories, aliases,
 context-manager class implementations, and exception paths around `yield` remain
-unresolved. Startup-time route mutation, class-based middleware, arbitrary
-callback registries, and runtime plugin loading also remain unresolved.
+unresolved. Startup-time route mutation, generic ASGI middleware, middleware
+ordering, arbitrary callback registries, and runtime plugin loading also remain
+unresolved.
 
 The static framework preset is optional because custom-surface configuration
 currently has one provenance root. Composing several package presets without

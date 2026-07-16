@@ -1,11 +1,11 @@
-schema_version: 3
+schema_version: 4
 preset:
   id: framework-callbacks
-  version: "2"
+  version: "3"
   provenance:
     kind: preset
     source: fastapi-endpoint-detector
-    revision: "2"
+    revision: "3"
 contracts:
   - id: fastapi-lifespan-startup
     registration:
@@ -97,5 +97,39 @@ contracts:
       kind: framework.middleware
       id_template: "protocol:{resource}"
       resource: {kind: argument, index: 0}
+    callback_mode: async
+    execution_mode: framework
+
+  - id: fastapi-base-http-middleware
+    registration:
+      symbol: fastapi.FastAPI.add_middleware
+      invocation: instance_method
+      receiver_type: fastapi.FastAPI
+    handler:
+      kind: argument_class_method
+      index: 0
+      name: dispatch
+      base: starlette.middleware.base.BaseHTTPMiddleware
+    surface:
+      kind: framework.middleware
+      id_template: "protocol:{resource}"
+      resource: {kind: literal, value: http}
+    callback_mode: async
+    execution_mode: framework
+
+  - id: starlette-base-http-middleware
+    registration:
+      symbol: starlette.applications.Starlette.add_middleware
+      invocation: instance_method
+      receiver_type: starlette.applications.Starlette
+    handler:
+      kind: argument_class_method
+      index: 0
+      name: dispatch
+      base: starlette.middleware.base.BaseHTTPMiddleware
+    surface:
+      kind: framework.middleware
+      id_template: "protocol:{resource}"
+      resource: {kind: literal, value: http}
     callback_mode: async
     execution_mode: framework

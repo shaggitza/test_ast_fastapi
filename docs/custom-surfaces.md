@@ -141,13 +141,15 @@ function naming conventions. Those shapes remain unavailable unless their
 registration is explicitly represented in source or configured with a custom
 contract.
 
-## Schema v1, v2, and v3
+## Schema v1, v2, v3, and v4
 
-Each document has `schema_version: 1`, `2`, or `3`, preset identity/provenance,
-and one or more contracts. Version 1 preserves direct execution as its only
-boundary; version 2 adds explicit `execution_mode`; version 3 adds constructor
-registrations, optional keyword handlers, and yield-relative callback ranges.
-Earlier schemas reject these additions. Unknown fields, duplicate keys, duplicate contract IDs,
+Each document has `schema_version: 1`, `2`, `3`, or `4`, preset
+identity/provenance, and one or more contracts. Version 1 preserves direct
+execution as its only boundary; version 2 adds explicit `execution_mode`;
+version 3 adds constructor registrations, optional keyword handlers, and
+yield-relative callback ranges. Version 4 adds exact positional local-class
+method handlers constrained by a contract-owned base and method name. Earlier
+schemas reject these additions. Unknown fields, duplicate keys, duplicate contract IDs,
 duplicate matcher/handler selectors, non-integer schema versions, and files over
 1 MiB are rejected.
 
@@ -156,7 +158,8 @@ A contract declares:
 - `registration.symbol`: a fully qualified callable identity pattern;
 - `registration.invocation`: `function`, `instance_method`, `class_method`, or v3 `constructor`;
 - `registration.receiver_type`: mandatory exact type for method registrations;
-- `handler`: `decorated_function`, positional `argument`, or named `keyword`;
+- `handler`: `decorated_function`, positional `argument`, named `keyword`, or v4
+  `argument_class_method` with an argument index, direct method name, and exact base;
 - `surface.kind`: a stable lower-case surface class;
 - `surface.id_template`: exactly one `{resource}` placeholder;
 - `surface.resource`: a literal string argument/keyword, all positional arguments from a bounded index, handler name, or fixed literal;
@@ -215,9 +218,11 @@ Every custom endpoint preserves:
 JSON and YAML expose this as `endpoint.surface`; text, Markdown, and HTML include
 the contract, strength, registration location, and config hash.
 
-Only explicit imports, module attributes, finite constructor receivers, and
-unique project-local function handlers are supported. Rebinding, ambiguous
-handlers, dynamic factories, members stored in containers, non-literal resource
+Only explicit imports, module attributes, finite constructor receivers, unique
+project-local function handlers, and v4 exact direct methods on unique local
+classes are supported. Class methods require the sole exact declared base from
+the contract. Rebinding, ambiguous handlers, dynamic factories, inherited-only
+methods, decorated classes, members stored in containers, non-literal resource
 IDs, reflection, and unsupported control flow fail closed. Conditional matches
 remain visible with source-backed limitations. These contracts create analysis
 roots; they do not declare state effects or behavioral observation. Use effect

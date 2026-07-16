@@ -60,6 +60,7 @@ class HandlerSelectorKind(str, Enum):
     DECORATED_FUNCTION = "decorated_function"
     ARGUMENT = "argument"
     KEYWORD = "keyword"
+    ARGUMENT_CLASS_METHOD = "argument_class_method"
 
 
 class HandlerNameNormalization(str, Enum):
@@ -175,17 +176,35 @@ class HandlerSelector(_StrictModel):
     kind: HandlerSelectorKind
     index: StrictInt | None = Field(default=None, ge=0)
     name: str | None = Field(default=None, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    base: str | None = Field(default=None, min_length=3)
+
+    @field_validator("base")
+    @classmethod
+    def validate_base(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parts = value.split(".")
+        if len(parts) < 2 or any(
+            not part.isidentifier() or keyword.iskeyword(part) for part in parts
+        ):
+            raise ValueError("handler base must be an exact dotted Python identity")
+        return value
 
     @model_validator(mode="after")
     def validate_shape(self) -> HandlerSelector:
         if self.kind == HandlerSelectorKind.ARGUMENT:
-            if self.index is None or self.name is not None:
+            if self.index is None or self.name is not None or self.base is not None:
                 raise ValueError("argument handler selectors require only index")
         elif self.kind == HandlerSelectorKind.KEYWORD:
-            if self.name is None or self.index is not None:
+            if self.name is None or self.index is not None or self.base is not None:
                 raise ValueError("keyword handler selectors require only name")
-        elif self.index is not None or self.name is not None:
-            raise ValueError("decorated_function selectors forbid index and name")
+        elif self.kind == HandlerSelectorKind.ARGUMENT_CLASS_METHOD:
+            if self.index is None or self.name is None or self.base is None:
+                raise ValueError(
+                    "argument_class_method selectors require index, method name, and exact base"
+                )
+        elif self.index is not None or self.name is not None or self.base is not None:
+            raise ValueError("decorated_function selectors forbid index, name, and base")
         return self
 
 
@@ -286,7 +305,7 @@ class SurfaceContract(_StrictModel):
 class SurfaceContractDocument(_StrictModel):
     """Versioned deterministic custom-surface contract set."""
 
-    schema_version: Literal[1, 2, 3] = 1
+    schema_version: Literal[1, 2, 3, 4] = 1
     preset: PresetMetadata
     contracts: tuple[SurfaceContract, ...] = Field(min_length=1)
 
@@ -294,7 +313,7 @@ class SurfaceContractDocument(_StrictModel):
     @classmethod
     def validate_schema_version_type(cls, value: object) -> object:
         if type(value) is not int:
-            raise ValueError("schema_version must be the integer 1, 2, or 3")
+            raise ValueError("schema_version must be the integer 1, 2, 3, or 4")
         return value
 
     @model_validator(mode="after")
@@ -317,6 +336,11 @@ class SurfaceContractDocument(_StrictModel):
             raise ValueError(
                 "constructor registrations and callback ranges require schema_version 3"
             )
+        if self.schema_version < 4 and any(
+            contract.handler.kind == HandlerSelectorKind.ARGUMENT_CLASS_METHOD
+            for contract in self.contracts
+        ):
+            raise ValueError("class-method handlers require schema_version 4")
         ids: set[str] = set()
         keys: set[
             tuple[
@@ -324,6 +348,7 @@ class SurfaceContractDocument(_StrictModel):
                 InvocationKind,
                 HandlerSelectorKind,
                 int | None,
+                str | None,
                 str | None,
                 CallbackRangeMode,
             ]
@@ -339,6 +364,7 @@ class SurfaceContractDocument(_StrictModel):
                 contract.handler.kind,
                 contract.handler.index,
                 contract.handler.name,
+                contract.handler.base,
                 contract.callback_range,
             )
             if key in keys:

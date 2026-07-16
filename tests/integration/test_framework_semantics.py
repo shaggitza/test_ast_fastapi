@@ -82,6 +82,50 @@ def test_changed_startup_handler_is_a_framework_lifecycle_candidate(tmp_path: Pa
     assert report.candidate_endpoints[0].confidence == ConfidenceLevel.HIGH
 
 
+def test_changed_class_middleware_dispatch_is_exact_framework_candidate(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "from starlette.middleware.base import BaseHTTPMiddleware\n\n"
+        "class AuditMiddleware(BaseHTTPMiddleware):\n"
+        "    async def dispatch(self, request, call_next):\n"
+        "        response = await call_next(request)\n"
+        "        response.headers['x-audit'] = 'new'\n"
+        "        return response\n\n"
+        "app = FastAPI()\n"
+        "app.add_middleware(AuditMiddleware)\n",
+        encoding="utf-8",
+    )
+    diff = tmp_path / "change.diff"
+    diff.write_text(
+        "diff --git a/main.py b/main.py\n"
+        "--- a/main.py\n"
+        "+++ b/main.py\n"
+        "@@ -7,1 +7,1 @@\n"
+        "-        response.headers['x-audit'] = 'old'\n"
+        "+        response.headers['x-audit'] = 'new'\n",
+        encoding="utf-8",
+    )
+
+    report = ChangeMapper(
+        app_path=tmp_path,
+        config=Config(analysis=AnalysisConfig(surface_preset="framework-v1")),
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+
+    assert [candidate.endpoint.identifier for candidate in report.candidate_endpoints] == [
+        "FRAMEWORK.MIDDLEWARE protocol:http"
+    ]
+    candidate = report.candidate_endpoints[0]
+    assert candidate.endpoint.handler.name == "dispatch"
+    assert candidate.confidence == ConfidenceLevel.HIGH
+    assert all(
+        "starlette" not in frame.file_path for stack in candidate.call_stacks for frame in stack
+    )
+
+
 def test_changed_background_callback_is_low_boundary_from_http_handler(
     tmp_path: Path,
 ) -> None:
