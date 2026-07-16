@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "id": "pilot-telemetry-contract-v1",
+  "pi_subagents_version": "0.34.0",
+  "attempt_source_variants": {
+    "review_a_and_adjudication": {
+      "source_kind": "pi_subagents_lifecycle_v1",
+      "boundary": "Exact pi-subagents 0.34.0 status.json startedAt/deadline/terminal state and events.jsonl lifecycle event bytes for one runId; pid is sampled only for that runId process tree.",
+      "required_source_bytes": [
+        "status.json",
+        "events.jsonl",
+        "transcript",
+        "returned_artifact_when_any"
+      ],
+      "required_source_hashes": [
+        "status_sha256",
+        "events_sha256",
+        "transcript_sha256",
+        "artifact_sha256_when_any"
+      ]
+    },
+    "review_b": {
+      "source_kind": "supervisor_session_interval_v1",
+      "boundary": "Supervisor freezes unique start_event_id/start_message_id immediately before parent-written Review B work and end_event_id/end_message_id immediately after exact artifact bytes freeze. The inclusive interval contains only that PR-role review work.",
+      "required_source_bytes": [
+        "exact supervisor session events from start_event_id through end_event_id",
+        "exact supervisor messages from start_message_id through end_message_id",
+        "exact session usage and tool events in that interval",
+        "returned Review B artifact"
+      ],
+      "required_source_hashes": [
+        "supervisor_interval_sha256",
+        "transcript_sha256",
+        "artifact_sha256"
+      ],
+      "required_boundary_fields": [
+        "start_event_id",
+        "end_event_id",
+        "start_message_id",
+        "end_message_id"
+      ],
+      "isolation_rule": "No collection, orchestration, other PR, other role, prediction, or lane-A inspection may occur inside the bounded Review B interval."
+    }
+  },
+  "attempt_fields": [
+    "attempt_id",
+    "repository",
+    "pr",
+    "role",
+    "source_kind",
+    "provider",
+    "model",
+    "model_version",
+    "client_version",
+    "started_at",
+    "completed_at",
+    "wall_milliseconds",
+    "input_tokens",
+    "output_tokens",
+    "cached_input_tokens",
+    "tool_calls",
+    "input_bytes",
+    "output_bytes",
+    "sampled_peak_process_tree_rss_bytes",
+    "rss_sampling_interval_milliseconds",
+    "disk_scope",
+    "disk_bytes_before",
+    "disk_bytes_after",
+    "is_retry",
+    "retry_of_attempt_id",
+    "succeeded",
+    "failure_kind",
+    "status_sha256",
+    "events_sha256",
+    "supervisor_interval_sha256",
+    "start_event_id",
+    "end_event_id",
+    "start_message_id",
+    "end_message_id",
+    "transcript_sha256",
+    "artifact_sha256",
+    "cost_micro_usd",
+    "unavailable_reason"
+  ],
+  "mandatory_go_fields": [
+    "wall_milliseconds",
+    "input_tokens",
+    "output_tokens",
+    "cached_input_tokens",
+    "tool_calls",
+    "input_bytes",
+    "output_bytes",
+    "sampled_peak_process_tree_rss_bytes",
+    "rss_sampling_interval_milliseconds",
+    "disk_bytes_before",
+    "disk_bytes_after",
+    "succeeded",
+    "is_retry",
+    "cost_micro_usd",
+    "transcript_sha256"
+  ],
+  "all_attempts_required": true,
+  "unavailable_rule": "A measurement may be null only with a nonempty unavailable_reason. GO forbids null/unavailable_reason for every mandatory_go_field on every role and attempt; optional lifecycle fields inapplicable to the other source variant must be null with the fixed reason not_applicable_to_source_kind.",
+  "rss_measurement": {
+    "review_a_and_adjudication": "Supervisor samples the status.json pid and all descendants from procfs every 1000 milliseconds until terminal state, sums resident pages per sample, and retains the maximum.",
+    "review_b": "Supervisor samples its bounded Review B process tree from the start boundary through the end boundary every 1000 milliseconds, subtracts the frozen idle supervisor baseline without going below zero, and retains the maximum attributable RSS.",
+    "interval_milliseconds": 1000,
+    "sampling_supervisor_only": true
+  },
+  "disk_measurement": {
+    "scoped_roots": [
+      "pilot execution directory",
+      "pilot source packet directory",
+      "pi-subagents run directory or supervisor interval artifact directory"
+    ],
+    "method": "Supervisor records allocated bytes for each fixed scoped root immediately before and after every exact attempt boundary."
+  },
+  "token_cost_rules": {
+    "usage_source": "Exact pi lifecycle/provider usage for pi_subagents_lifecycle_v1; exact supervisor session usage events inside the frozen interval for supervisor_session_interval_v1. input_tokens excludes cached_input_tokens so cost operands are disjoint.",
+    "pricing_units": "Execution manifest freezes nonnegative integers input_micro_usd_per_million_tokens, cached_input_micro_usd_per_million_tokens, and output_micro_usd_per_million_tokens.",
+    "cost_formula": "cost_micro_usd = ceil((input_tokens*input_rate + cached_input_tokens*cached_rate + output_tokens*output_rate)/1000000), using integer arithmetic.",
+    "pricing_source": "Authenticated no-clobber execution manifest frozen before first attempt."
+  },
+  "nullable_fields": {
+    "retry_of_attempt_id": "null exactly when is_retry is false; non-null exactly when is_retry is true",
+    "failure_kind": "null exactly when succeeded is true; nonempty exactly when succeeded is false",
+    "artifact_sha256": "null only when no artifact was produced",
+    "status_sha256_and_events_sha256": "required for pi_subagents_lifecycle_v1; otherwise null with not_applicable_to_source_kind",
+    "supervisor_interval_and_boundary_ids": "required for supervisor_session_interval_v1; otherwise null with not_applicable_to_source_kind",
+    "unavailable_reason": "null only when every applicable measurement is available"
+  }
+}

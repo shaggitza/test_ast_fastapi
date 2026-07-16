@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "id": "blind-review-pilot-v1",
+  "phase": "preregistered_not_run",
+  "selection_source": {
+    "path": "benchmarks/real_world/expansion/pr-lock-2500-v2.json",
+    "sha256": "sha256:70496533d84a3f97db24fd41acdde416d09a2f10787e2088f802769ad8e24552",
+    "allowed_fields": [
+      "projects.repository",
+      "projects.records.pr",
+      "projects.selection_evidence.candidates.pr",
+      "projects.selection_evidence.candidates.merged_at",
+      "projects.selection_evidence.candidates.html_url"
+    ]
+  },
+  "prior_label_exclusions": [
+    {
+      "path": "benchmarks/real_world/review-a.jsonl",
+      "sha256": "sha256:a0a80b0592b6f9c8d0de1c3179c420d1e7892c53a29ad1716ee08a4b8b127f9f"
+    },
+    {
+      "path": "benchmarks/real_world/review-b.jsonl",
+      "sha256": "sha256:68a3d0fe73a051157b6dd00a1bd3dd4c7cbc1edf1084285bfcabb75178128cfb"
+    },
+    {
+      "path": "benchmarks/real_world/adjudicated.jsonl",
+      "sha256": "sha256:52f5150412e736ce5de430ac35bc8eeef2045524fdf8cc19a5fd3f24f0c23459"
+    }
+  ],
+  "selection": {
+    "rule": "Traverse projects in frozen lock order. For each project, union candidates from complete selection_evidence, exclude its 50 selected records and all exact prior-label identities, choose maximum (merged_at, PR number), and select the first three projects having an eligible candidate.",
+    "content_inspection": false,
+    "substitution_after_freeze": false,
+    "repositories": 3,
+    "pull_requests_per_repository": 1,
+    "expected": [
+      {
+        "repository": "fastapi/full-stack-fastapi-template",
+        "number": 2164,
+        "merged_at": "2026-02-02T10:56:30Z",
+        "identity_sha256": "sha256:a57c7c0f023c6f1a16d82d66846782c02c429f4dbc8f3dd91da1e33b131679a3"
+      },
+      {
+        "repository": "Kludex/starlette",
+        "number": 3257,
+        "merged_at": "2026-04-30T16:58:50Z",
+        "identity_sha256": "sha256:e98e51a456b142823fb46deb20fb3051f90cfbc88835bd14284416c4e98f7d96"
+      },
+      {
+        "repository": "PrefectHQ/prefect",
+        "number": 22189,
+        "merged_at": "2026-06-01T20:02:05Z",
+        "identity_sha256": "sha256:8214960a5da4a822f0a088df7fb3e3c6f6fd79e5fb277e7cad90cb44df325b48"
+      }
+    ]
+  },
+  "workflow": {
+    "review_a": "One custom fresh prediction-blind agent per PR, launched into escrow and not opened by supervisor until Review B freezes.",
+    "review_b": "Parent supervisor independently writes and hashes Review B inside an exact isolated supervisor-session start/end event and message interval before opening Review A escrow; interval usage/tool events and bytes are authenticated telemetry.",
+    "adjudication": "One custom fresh third agent per PR after exact A/B hashes freeze; every pilot PR receives terminal adjudication.",
+    "canonical_writer": "Only supervisor validates and writes custody, telemetry, reviews, adjudications, and imports.",
+    "ordering": [
+      "authenticate_execution_manifest_and_source_packet",
+      "source_binding_frozen",
+      "review_a_started_into_escrow",
+      "review_b_frozen",
+      "review_a_escrow_frozen",
+      "review_a_first_opened",
+      "reviews_validated",
+      "adjudication_started_and_frozen",
+      "terminal_imported"
+    ]
+  },
+  "frozen_contracts": [
+    "custody-contract-v1.json",
+    "telemetry-contract-v1.json",
+    "metrics-spec-v1.json",
+    "execution-manifest-schema-v1.json"
+  ],
+  "resource_limits": {
+    "max_concurrent_review_a": 3,
+    "max_concurrent_review_b": 1,
+    "max_concurrent_adjudications": 3,
+    "max_review_seconds": 1800,
+    "max_adjudication_seconds": 1800,
+    "max_tokens_per_run": 100000,
+    "max_tool_calls_per_run": 200,
+    "max_output_bytes_per_run": 2097152,
+    "max_retries_per_run": 1,
+    "max_total_runs_including_retries": 18,
+    "max_total_wall_seconds": 21600,
+    "max_total_artifact_bytes": 67108864,
+    "max_peak_rss_bytes_per_run": 4294967296,
+    "max_total_disk_delta_bytes": 10737418240
+  },
+  "go_no_go": {
+    "go_requires": [
+      "authenticated_no_clobber_execution_manifest_frozen_before_first_attempt",
+      "all_3_source_bindings_immutable_and_outside_evaluation_and_prior_labels",
+      "custom_agent_config_hash_matches_and_inheritProjectContext_is_false",
+      "child_tools_exactly_read_grep_find_ls_inside_read_only_packet",
+      "provider_control_plane_is_only_network_exception",
+      "6_of_6_reviews_schema_semantic_and_evidence_valid",
+      "3_of_3_terminal_adjudications_schema_semantic_scope_and_evidence_valid",
+      "3_of_3_review_b_hashes_frozen_before_review_a_first_open",
+      "zero_prediction_prior_label_or_other_lane_exposures",
+      "zero_source_execution_child_write_or_network_escape",
+      "zero_unresolved_custody_chain_breaks_or_incidents",
+      "all_attempts_including_failures_and_retries_have_authenticated_exact_boundaries_and_source_bytes",
+      "every_role_attempt_has_non_null_wall_tokens_tools_bytes_rss_disk_retry_failure_cost_and_transcript_telemetry",
+      "no_unavailable_reason_for_any_mandatory_go_telemetry_field",
+      "all_resource_limits_respected",
+      "scope_binding_is_fastapi_adapter_v1_version_1_and_definition_matches_exact_scope_policy_hash",
+      "all_metrics_reported_with_frozen_formulas_and_denominators",
+      "pre_pilot_three_pr_budget_approved_before_execution",
+      "post_pilot_2500_pr_cost_duration_resource_and_concurrency_scale_approved_separately"
+    ],
+    "no_go_on_any_failed_requirement": true,
+    "semantic_agreement_is_measured_not_optimized": true,
+    "concurrency_recommendation_required": true
+  },
+  "non_statistical_scope": "Three fresh, previously unlabeled PRs exercise custody, evidence, telemetry, and adjudication end to end. This pilot is not an accuracy estimate, does not justify population-level confidence intervals, and does not enter the 2,500-PR evaluation truth or scores."
+}

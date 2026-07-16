@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "id": "pilot-source-policy-v1",
+  "source_binding": "Exact pilot corpus_id, repository, PR, baseline commit/tree, target commit/tree, diff SHA-256 and bytes are frozen in the authenticated execution manifest before review.",
+  "packet_requirement": "Supervisor prepares a collision-resistant isolated packet containing only immutable binding, baseline/target source bytes, exact diff, prompt, policies, and schema. Packet manifest and root hashes freeze every byte; packet is read-only during child use.",
+  "cache_requirement": "Collision-resistant local bare Git cache has exact canonical GitHub remote and all locked objects before packet creation.",
+  "missing_object_disposition": "Fail closed as source-preparation no_go; never fetch during child review.",
+  "evidence_requirement": "Every changed-symbol census location overlaps a changed hunk; every claim chain is dense, connected, snapshot-bound, and starts in a changed hunk.",
+  "execution_boundary": "Supervisor prepares packets with argv-only bounded Git object reads. Children receive no command tool. Source is never imported, executed, installed, built, or tested.",
+  "untrusted_content": true,
+  "max_blob_bytes": 8388608,
+  "max_total_blob_bytes_per_packet": 134217728,
+  "max_git_commands_per_packet": 2000,
+  "max_source_lines_per_packet": 1000000,
+  "max_packet_files": 10000,
+  "max_packet_bytes": 536870912
+}
