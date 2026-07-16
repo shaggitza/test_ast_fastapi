@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import http.client
 import json
 import time
 import urllib.error
@@ -721,6 +722,51 @@ def test_blocking_diff_read_is_interrupted_at_wall_deadline(
     with pytest.raises(protocol.CorpusV2Error, match="diff request failed"):
         transport.hash_diff("o/r", 1)
     assert time.monotonic() - started < 1.5
+
+
+def test_diff_retries_remote_disconnect(monkeypatch: MonkeyPatch) -> None:
+    class DiffResponse:
+        def __init__(self) -> None:
+            self.headers = Message()
+            self.headers["Content-Type"] = "text/plain"
+            self.reads = 0
+
+        def __enter__(self) -> DiffResponse:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def geturl(self) -> str:
+            return "https://patch-diff.githubusercontent.com/raw/o/r/pull/1.diff"
+
+        def read(self, _size: int) -> bytes:
+            self.reads += 1
+            return b"diff" if self.reads == 1 else b""
+
+    class FlakyOpener:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def open(self, request: urllib.request.Request, timeout: float) -> DiffResponse:
+            del request, timeout
+            self.calls += 1
+            if self.calls == 1:
+                raise http.client.RemoteDisconnected("transient")
+            return DiffResponse()
+
+    opener = FlakyOpener()
+    budget = protocol.NetworkBudget(4, 1000, 100, 100, 10)
+    transport = protocol.GitHubTransport("secret", budget, 30, 1000, 10, 2)
+    transport._bounded_sleep = lambda delay: None  # type: ignore[method-assign]  # noqa: ARG005
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_args: opener)
+
+    digest, size, _url, _content_type = transport.hash_diff("o/r", 1)
+
+    assert opener.calls == 2
+    assert budget.requests == 2
+    assert size == 4
+    assert digest == f"sha256:{hashlib.sha256(b'diff').hexdigest()}"
 
 
 def test_rate_limit_delay_is_bounded() -> None:
