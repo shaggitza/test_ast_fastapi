@@ -37,9 +37,12 @@ used for production.
 Evidence is validated from collision-resistant local bare Git caches. The
 validator checks the exact canonical GitHub remote, locked commit and tree,
 regular blob identity, POSIX path, line range, dense connected chain, and that
-the chain starts in a changed hunk. It sets `GIT_NO_LAZY_FETCH=1`, never creates
-a worktree, never imports or executes source, and has command/blob/byte/line/wall
-budgets. Missing objects fail closed; operators must prepare caches separately.
+the chain starts in a changed hunk. Every changed-symbol census location must
+also overlap a changed hunk on its declared baseline or target side; ordinary
+chain nodes remain valid source locations without that extra requirement. It
+sets `GIT_NO_LAZY_FETCH=1`, never creates a worktree, never imports or executes
+source, and has command/blob/byte/line/wall budgets. Missing objects fail closed;
+operators must prepare caches separately.
 
 ## Store and release invariants
 

@@ -23,7 +23,7 @@ from benchmarks.real_world.expansion_protocol_v2 import (
 )
 
 from . import SCHEMA_VERSION, GroundTruthError
-from .evidence import GitEvidenceValidator
+from .evidence import EvidenceValidator
 from .schema import (
     AdjudicationArtifactV1,
     CorpusDefinition,
@@ -39,7 +39,7 @@ from .schema import (
 PACKAGE = Path(__file__).parent
 MIGRATION_MANIFEST = PACKAGE / "migrations" / "manifest.json"
 IMPORTER_SHA256 = "sha256:" + hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
-ValidatorFactory = Callable[[str], GitEvidenceValidator]
+ValidatorFactory = Callable[[str], EvidenceValidator]
 TreeResolver = Callable[[str, str], str]
 
 
@@ -439,7 +439,7 @@ def _validate_review_identities(
         assert validator is not None or not (edges or item.changed_symbols)
         if validator is not None:
             for symbol in item.changed_symbols:
-                validator.validate_location(symbol.location)
+                validator.validate_changed_location(symbol.location)
             for claim in item.claims:
                 validator.validate_edges(claim.evidence)
 

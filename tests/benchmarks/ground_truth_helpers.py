@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from benchmarks.real_world.ground_truth_v2.schema import CorpusDefinition
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from benchmarks.real_world.ground_truth_v2.schema import EvidenceEdge, EvidenceLocation
 
 H = "sha256:" + "a" * 64
 BASE = "1" * 40
@@ -182,13 +187,16 @@ def adjudication(a_hash: str, b_hash: str) -> bytes:
 
 
 class AcceptEvidence:
-    def validate_location(self, location: object) -> None:
+    def validate_changed_location(self, location: EvidenceLocation) -> None:
         del location
 
-    def validate_edges(self, edges: object) -> None:
+    def validate_location(self, location: EvidenceLocation) -> None:
+        del location
+
+    def validate_edges(self, edges: Sequence[EvidenceEdge]) -> None:
         del edges
 
 
-def validator_factory(pr_id: str) -> Any:
+def validator_factory(pr_id: str) -> AcceptEvidence:
     assert pr_id.startswith("pr:")
     return AcceptEvidence()
