@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "id": "blind-review-pilot-source-bindings-checksums-v1",
+  "preregistration_profile_sha256": "sha256:beac156227a700497f1fb9588e91d8c4f80a1dac88bb9e831433eea167c20c8e",
+  "collector_sha256": "sha256:8d3c1d60d7030e027987d9203f021e664a23b221c8bbbe4721c19c237880866d",
+  "source_bindings_sha256": "sha256:5a7b5b29bf23f6f0a03e048df56bef50e34bf8718cc4777617be6d9a87c97d9d"
+}

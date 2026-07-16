@@ -1,0 +1,101 @@
+{
+  "collected_at": "2026-07-16T21:43:14.683131Z",
+  "collector_sha256": "sha256:8d3c1d60d7030e027987d9203f021e664a23b221c8bbbe4721c19c237880866d",
+  "id": "blind-review-pilot-source-bindings-v1",
+  "network_budget": {
+    "diff_bytes": 11792,
+    "elapsed_seconds": 12,
+    "limits": {
+      "max_diff_bytes": 16777216,
+      "max_requests": 45,
+      "max_response_bytes": 67108864,
+      "max_retries_per_request": 2,
+      "max_total_diff_bytes": 67108864,
+      "max_wall_seconds": 600,
+      "request_timeout_seconds": 30
+    },
+    "requests": 21,
+    "response_bytes": 185259,
+    "selected_diff_bytes": 11792
+  },
+  "phase": "source_bindings_frozen_reviews_not_run",
+  "preregistration_profile_sha256": "sha256:beac156227a700497f1fb9588e91d8c4f80a1dac88bb9e831433eea167c20c8e",
+  "records": [
+    {
+      "base_sha": "1c6d656482d9ab7d885138d4fd27cf0fdd9ea2fa",
+      "baseline_commit": "1c6d656482d9ab7d885138d4fd27cf0fdd9ea2fa",
+      "baseline_commit_response_sha256": "sha256:d128baedbfedaa511877018729fb9d6c54e2b5e363abb6ae6270911345a280f7",
+      "baseline_rule": "first_parent_of_merge_commit",
+      "baseline_tree": "447cf9698930186846212575fd764c4d1b271528",
+      "confirmation_pull_response_sha256": "sha256:c42a506296e4465a2fc15169c856308b55e4a258c350f5436221c1a6ffd311b7",
+      "diff_bytes": 1840,
+      "diff_content_type": "text/plain; charset=utf-8",
+      "diff_final_url": "https://patch-diff.githubusercontent.com/raw/fastapi/full-stack-fastapi-template/pull/2164.diff",
+      "diff_sha256": "sha256:2813b083e5366d8ee4bdf1202e61089ff96096421e406b3eabc4498e7f841f20",
+      "initial_pull_response_sha256": "sha256:c42a506296e4465a2fc15169c856308b55e4a258c350f5436221c1a6ffd311b7",
+      "merge_commit": "0d3bc003f101678546fc30938f7e0aa77cd847cb",
+      "merge_commit_response_sha256": "sha256:d3a0fca316f1d5cd39ea09a5656291dd9c35681392df2869ce393dd4fd0c52e7",
+      "merge_parent_shas": [
+        "1c6d656482d9ab7d885138d4fd27cf0fdd9ea2fa"
+      ],
+      "merged_at": "2026-02-02T10:56:30Z",
+      "pr": 2164,
+      "repository": "fastapi/full-stack-fastapi-template",
+      "target_commit": "6de6bd9ebe73fb618311cf9a25c4f3e14fdd9fa6",
+      "target_commit_response_sha256": "sha256:23ed9b6fed66fe7fcb3c3e2dbb14262d65903ea19b834acb5283dff7662f66cc",
+      "target_rule": "head_sha",
+      "target_tree": "c620db32a503c979e992709fe662e80a778ea21d"
+    },
+    {
+      "base_sha": "0a29b5ccdcbd1285c75c4fdb5d62ae1d244a21b0",
+      "baseline_commit": "0a29b5ccdcbd1285c75c4fdb5d62ae1d244a21b0",
+      "baseline_commit_response_sha256": "sha256:6ae19c0ad230f700ee749ad66267cabe25042f992683b6efad98d4ac5c6bbac2",
+      "baseline_rule": "first_parent_of_merge_commit",
+      "baseline_tree": "2b66b682af12e029cfe5ab33a7f9866479ac0a2d",
+      "confirmation_pull_response_sha256": "sha256:4c3d1a6ce978b62d0826142402db4e786bd94fb6366df265934f23007a8a07f3",
+      "diff_bytes": 659,
+      "diff_content_type": "text/plain; charset=utf-8",
+      "diff_final_url": "https://patch-diff.githubusercontent.com/raw/Kludex/starlette/pull/3257.diff",
+      "diff_sha256": "sha256:c945698f9f8d15ae995b3d107ac92190ef7c6aeeaa2b470cb0b008ec79d4a5c2",
+      "initial_pull_response_sha256": "sha256:4c3d1a6ce978b62d0826142402db4e786bd94fb6366df265934f23007a8a07f3",
+      "merge_commit": "2fc965f86e9ca26f929307a31f03f34ffc7ace55",
+      "merge_commit_response_sha256": "sha256:a7d2de4010f6f9433bb41e16d3ffcd5c17242628dda5d4cc069a690dd6b56a35",
+      "merge_parent_shas": [
+        "0a29b5ccdcbd1285c75c4fdb5d62ae1d244a21b0"
+      ],
+      "merged_at": "2026-04-30T16:58:50Z",
+      "pr": 3257,
+      "repository": "Kludex/starlette",
+      "target_commit": "9df041cdd97876089bf47c0c19e96e4443af9fb0",
+      "target_commit_response_sha256": "sha256:b39aed66a0140abd6c35c430e80cfa23f902491139c156f15a251e5797223925",
+      "target_rule": "head_sha",
+      "target_tree": "c12e0d6d321a78730c19e7fbaf32c864e13d5f19"
+    },
+    {
+      "base_sha": "d1cf94290246f9911651763f456ee584c2ce7f43",
+      "baseline_commit": "d1cf94290246f9911651763f456ee584c2ce7f43",
+      "baseline_commit_response_sha256": "sha256:4b5b5315b960fcd50a162912b0b8a6dbab10cc62c5de3f1d1b1f0a99728f8153",
+      "baseline_rule": "first_parent_of_merge_commit",
+      "baseline_tree": "f1cce49080218afbf6110f1330eca7fcfeb6c6db",
+      "confirmation_pull_response_sha256": "sha256:fc8661f872a951234fa33e869333d5816a1c72710b0c9fc8a76c3d5a594e1fd8",
+      "diff_bytes": 9293,
+      "diff_content_type": "text/plain; charset=utf-8",
+      "diff_final_url": "https://patch-diff.githubusercontent.com/raw/PrefectHQ/prefect/pull/22189.diff",
+      "diff_sha256": "sha256:e17d014f6644ead84644a4b1bcab5d83ec1f73730ecb1bf61b187bf20e54ec4a",
+      "initial_pull_response_sha256": "sha256:fc8661f872a951234fa33e869333d5816a1c72710b0c9fc8a76c3d5a594e1fd8",
+      "merge_commit": "00b01ad96ff32ae8b3d8d386f5555bfc7aaa8674",
+      "merge_commit_response_sha256": "sha256:f19f2a013190a6cd7fba114fb6010b2cddf27bc3330488474cf6444859f38d0c",
+      "merge_parent_shas": [
+        "d1cf94290246f9911651763f456ee584c2ce7f43"
+      ],
+      "merged_at": "2026-06-01T20:02:05Z",
+      "pr": 22189,
+      "repository": "PrefectHQ/prefect",
+      "target_commit": "6d3dbc28adc08457652d21b5bc3f25b34cd1a24c",
+      "target_commit_response_sha256": "sha256:13e3442e36e833f45dfc3d55efc4d501e060002a84b4e5f55094fdd2e013678c",
+      "target_rule": "head_sha",
+      "target_tree": "c23006ca81399849903fe98edc8e593429012dff"
+    }
+  ],
+  "schema_version": 1
+}
