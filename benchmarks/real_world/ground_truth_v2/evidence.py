@@ -12,7 +12,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from . import GroundTruthError
 
@@ -69,6 +69,16 @@ class EvidenceBudget:
 GitRunner = Callable[[Path, Sequence[str]], bytes]
 
 
+class EvidenceValidator(Protocol):
+    """Structural interface accepted by the canonical review importer."""
+
+    def validate_changed_location(self, location: EvidenceLocation) -> None: ...
+
+    def validate_location(self, location: EvidenceLocation) -> None: ...
+
+    def validate_edges(self, edges: Sequence[EvidenceEdge]) -> None: ...
+
+
 def collision_resistant_cache_name(repository: str) -> str:
     """Return a filesystem-safe cache name that retains full repository identity."""
     slug = repository.replace("/", "--")
@@ -98,6 +108,7 @@ class GitEvidenceValidator:
         self.runner = runner or self._run_git
         self._locations: set[tuple[object, ...]] = set()
         self._blobs: dict[str, tuple[int, int]] = {}
+        self._changed_ranges: dict[str, tuple[tuple[int, int, int, int], ...]] = {}
         self._verified = False
 
     def validate_edges(self, edges: Sequence[EvidenceEdge]) -> None:
@@ -114,6 +125,13 @@ class GitEvidenceValidator:
                 raise GroundTruthError("evidence chain is disconnected")
         if not self._location_is_changed(edges[0].from_location):
             raise GroundTruthError("evidence chain does not start in a changed line range")
+
+    def validate_changed_location(self, location: EvidenceLocation) -> None:
+        """Validate a location and require overlap with its snapshot side's changed hunk."""
+        self._verify_repository()
+        self.validate_location(location)
+        if not self._location_is_changed(location):
+            raise GroundTruthError("changed-symbol location does not overlap a changed line range")
 
     def validate_location(self, location: EvidenceLocation) -> None:
         expected_commit = self.commits[location.side]
@@ -183,27 +201,35 @@ class GitEvidenceValidator:
         self._verified = True
 
     def _location_is_changed(self, location: EvidenceLocation) -> bool:
-        diff = self._git(
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--no-color",
-            "--unified=0",
-            self.commits["baseline"],
-            self.commits["target"],
-            "--",
-            f":(literal){location.path}",
-        )
-        for line in diff.splitlines():
-            match = _HUNK.match(line)
-            if match is None:
-                continue
-            old_start, old_count, new_start, new_count = (
-                int(match.group(1)),
-                int(match.group(2) or b"1"),
-                int(match.group(3)),
-                int(match.group(4) or b"1"),
+        ranges = self._changed_ranges.get(location.path)
+        if ranges is None:
+            diff = self._git(
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "--unified=0",
+                self.commits["baseline"],
+                self.commits["target"],
+                "--",
+                f":(literal){location.path}",
             )
+            parsed: list[tuple[int, int, int, int]] = []
+            for line in diff.splitlines():
+                match = _HUNK.match(line)
+                if match is None:
+                    continue
+                parsed.append(
+                    (
+                        int(match.group(1)),
+                        int(match.group(2) or b"1"),
+                        int(match.group(3)),
+                        int(match.group(4) or b"1"),
+                    )
+                )
+            ranges = tuple(parsed)
+            self._changed_ranges[location.path] = ranges
+        for old_start, old_count, new_start, new_count in ranges:
             start, count = (
                 (old_start, old_count) if location.side == "baseline" else (new_start, new_count)
             )

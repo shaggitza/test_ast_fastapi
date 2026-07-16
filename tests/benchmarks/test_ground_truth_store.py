@@ -8,14 +8,20 @@ import pytest
 if TYPE_CHECKING:
     from pathlib import Path
 from benchmarks.real_world.ground_truth_v2 import GroundTruthError
-from benchmarks.real_world.ground_truth_v2.schema import artifact_sha256
+from benchmarks.real_world.ground_truth_v2.schema import EvidenceLocation, artifact_sha256
 from benchmarks.real_world.ground_truth_v2.store import (
     import_adjudications,
     import_reviews,
     initialize_database,
     validate_database,
 )
-from tests.benchmarks.ground_truth_helpers import adjudication, corpus, review, validator_factory
+from tests.benchmarks.ground_truth_helpers import (
+    AcceptEvidence,
+    adjudication,
+    corpus,
+    review,
+    validator_factory,
+)
 
 
 def test_synthetic_opt_in_and_atomic_complete_review_import(tmp_path: Path) -> None:
@@ -44,6 +50,33 @@ def test_wrong_snapshot_duplicate_and_partial_fail_without_rows(tmp_path: Path) 
     assert validate_database(database)["reviewer_runs"] == 0
     with pytest.raises(GroundTruthError, match="exactly one A and B"):
         import_reviews(database, [review("A"), review("A")], validator_factory=validator_factory)
+
+
+def test_review_import_requires_changed_location_validation(tmp_path: Path) -> None:
+    database = tmp_path / "changed-location.sqlite"
+    initialize_database(database, corpus(), allow_synthetic=True)
+
+    class ChangedOnlyEvidence(AcceptEvidence):
+        changed_calls = 0
+
+        def validate_changed_location(self, location: EvidenceLocation) -> None:
+            del location
+            self.changed_calls += 1
+
+        def validate_location(self, location: EvidenceLocation) -> None:
+            del location
+            raise AssertionError("review importer used weaker location validation")
+
+    validators: list[ChangedOnlyEvidence] = []
+
+    def factory(pr_id: str) -> ChangedOnlyEvidence:
+        assert pr_id.startswith("pr:")
+        validator = ChangedOnlyEvidence()
+        validators.append(validator)
+        return validator
+
+    import_reviews(database, [review("A"), review("B")], validator_factory=factory)
+    assert [validator.changed_calls for validator in validators] == [1, 1]
 
 
 def test_decision_provenance_append_only_and_blob_validation(tmp_path: Path) -> None:
