@@ -5,8 +5,13 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import TYPE_CHECKING
 
-from fastapi_endpoint_detector.models.effect_contract import EffectChannel, EffectOperation
+from fastapi_endpoint_detector.models.effect_contract import (
+    EffectChannel,
+    EffectOperation,
+    TransactionScope,
+)
 from fastapi_endpoint_detector.models.sql_transaction import (
+    SQLTransactionBeginScopeEvidence,
     SQLTransactionEndpointEvidence,
     SQLTransactionOutcome,
     SQLTransactionReport,
@@ -33,6 +38,7 @@ def build_sql_transaction_diagnostics(
     """Aggregate endpoint-reachable SQL boundaries without inventing path ordering."""
     contract_by_id = {contract.id: contract for contract in effects.document.contracts}
     by_endpoint: dict[str, dict[EffectOperation, set[str]]] = defaultdict(lambda: defaultdict(set))
+    begin_scopes: dict[str, dict[str, SQLTransactionBeginScopeEvidence]] = defaultdict(dict)
     for occurrence in audit.occurrences:
         if occurrence.contract_id is None:
             continue
@@ -41,6 +47,12 @@ def build_sql_transaction_diagnostics(
             continue
         for endpoint in occurrence.endpoints:
             by_endpoint[endpoint.id][contract.operation].add(occurrence.id)
+            if contract.operation == EffectOperation.BEGIN:
+                begin_scopes[endpoint.id][occurrence.id] = SQLTransactionBeginScopeEvidence(
+                    occurrence_id=occurrence.id,
+                    scope=contract.behavior.transaction_scope or TransactionScope.NONE,
+                    timing=contract.behavior.timing,
+                )
 
     evidence = []
     for endpoint_id in sorted(by_endpoint):
@@ -65,6 +77,10 @@ def build_sql_transaction_diagnostics(
                 stage_occurrence_ids=stages,
                 flush_occurrence_ids=tuple(sorted(operations[EffectOperation.FLUSH])),
                 begin_occurrence_ids=tuple(sorted(operations[EffectOperation.BEGIN])),
+                begin_scopes=tuple(
+                    begin_scopes[endpoint_id][item]
+                    for item in sorted(operations[EffectOperation.BEGIN])
+                ),
                 commit_occurrence_ids=commits,
                 rollback_occurrence_ids=rollbacks,
                 outcome=outcome,

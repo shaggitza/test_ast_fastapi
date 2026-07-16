@@ -375,6 +375,7 @@ def build_sql_transaction_path_diagnostics(  # noqa: PLR0912
     )
     for evidence in transaction_report.endpoint_evidence:
         begins = tuple(occurrence_by_id[item] for item in evidence.begin_occurrence_ids)
+        begin_scope_by_id = {item.occurrence_id: item.scope for item in evidence.begin_scopes}
         boundaries: tuple[tuple[str, _BOUNDARY], ...] = tuple(
             (item, "commit") for item in evidence.commit_occurrence_ids
         ) + tuple((item, "rollback") for item in evidence.rollback_occurrence_ids)
@@ -481,13 +482,19 @@ def build_sql_transaction_path_diagnostics(  # noqa: PLR0912
                     )
                     continue
                 assert stage.receiver_hash is not None
+                begin_occurrence_id = _nearest_begin(begins, contexts, stage)
                 paths.append(
                     build_sql_transaction_ordered_path(
                         endpoint_id=evidence.endpoint_id,
                         file_path=stage.file_path,
                         function_name=stage.function_name,
                         receiver_hash=stage.receiver_hash,
-                        begin_occurrence_id=_nearest_begin(begins, contexts, stage),
+                        begin_occurrence_id=begin_occurrence_id,
+                        begin_scope=(
+                            begin_scope_by_id[begin_occurrence_id]
+                            if begin_occurrence_id is not None
+                            else None
+                        ),
                         stage_occurrence_id=stage_id,
                         boundary_occurrence_id=boundary_id,
                         boundary=boundary_kind,

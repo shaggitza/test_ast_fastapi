@@ -131,7 +131,7 @@ def test_semantic_change_changes_hash(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "mutation,match",
     [
-        (lambda data: data.update(schema_version=2), "schema_version"),
+        (lambda data: data.update(schema_version=3), "schema_version"),
         (lambda data: data.update(unknown=True), "Extra inputs"),
         (
             lambda data: data["contracts"][0].update(symbol="redis.client.Redis.*"),
@@ -152,6 +152,34 @@ def test_rejects_unsafe_or_malformed_contracts(mutation: object, match: str) -> 
     mutation(data)  # type: ignore[operator]
 
     with pytest.raises(ValidationError, match=match):
+        EffectContractDocument.model_validate(data)
+
+
+def test_transaction_scope_requires_schema_v2_sql_begin_context() -> None:
+    data = _document()
+    contracts = data["contracts"]
+    assert isinstance(contracts, list)
+    contract = contracts[0]
+    contract.update(
+        operation="begin",
+        channel="sql",
+        behavior={
+            "async_mode": "sync",
+            "timing": "context_enter",
+            "transaction_scope": "savepoint",
+        },
+    )
+
+    with pytest.raises(ValidationError, match="schema_version 2"):
+        EffectContractDocument.model_validate(data)
+
+    data["schema_version"] = 2
+    document = EffectContractDocument.model_validate(data)
+    scope = document.contracts[0].behavior.transaction_scope
+    assert scope is not None and scope.value == "savepoint"
+
+    contract["operation"] = "commit"
+    with pytest.raises(ValidationError, match="SQL begin"):
         EffectContractDocument.model_validate(data)
 
 

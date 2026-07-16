@@ -3,7 +3,9 @@
 import pytest
 from pydantic import ValidationError
 
+from fastapi_endpoint_detector.models.effect_contract import EffectTiming, TransactionScope
 from fastapi_endpoint_detector.models.sql_transaction import (
+    SQLTransactionBeginScopeEvidence,
     SQLTransactionEndpointEvidence,
     SQLTransactionOrderedPath,
     SQLTransactionOutcome,
@@ -42,6 +44,29 @@ def test_outcome_is_derived_from_reachable_boundaries() -> None:
     assert all(item.persistence_status == "not_established" for item in report.endpoint_evidence)
 
 
+def test_begin_scope_records_are_exact_and_complete() -> None:
+    evidence = SQLTransactionEndpointEvidence(
+        endpoint_id=_HASH_A,
+        stage_occurrence_ids=(_HASH_B,),
+        begin_occurrence_ids=(_HASH_C,),
+        begin_scopes=(
+            SQLTransactionBeginScopeEvidence(
+                occurrence_id=_HASH_C,
+                scope=TransactionScope.SAVEPOINT,
+                timing=EffectTiming.CONTEXT_ENTER,
+            ),
+        ),
+        outcome=SQLTransactionOutcome.PENDING_PERSISTENCE,
+        limitations=("ordering unavailable",),
+    )
+
+    assert evidence.begin_scopes[0].scope == TransactionScope.SAVEPOINT
+    payload = evidence.model_dump(mode="json")
+    payload["begin_scopes"] = []
+    with pytest.raises(ValidationError, match="every begin occurrence"):
+        SQLTransactionEndpointEvidence.model_validate(payload)
+
+
 def test_roles_and_outcomes_fail_closed() -> None:
     with pytest.raises(ValidationError, match="roles must be disjoint"):
         SQLTransactionEndpointEvidence(
@@ -67,6 +92,7 @@ def test_ordered_paths_are_content_addressed_and_bounded() -> None:
         function_name="handler",
         receiver_hash=_HASH_B,
         begin_occurrence_id=_HASH_C,
+        begin_scope=TransactionScope.TRANSACTION,
         stage_occurrence_id=_HASH_B,
         boundary_occurrence_id=_HASH_D,
         boundary="commit",

@@ -42,7 +42,7 @@ Source spelling, receiver candidates, suffixes, bare method names, package metad
 
 Equivalent YAML/JSON/TOML key and contract ordering produces the same semantic hashes. Formatting changes can change only the raw hash.
 
-## Schema v1
+## Schema v1 and v2
 
 ```yaml
 schema_version: 1
@@ -86,6 +86,13 @@ Supported operations:
 - `read`, `write`, `update`, `delete`, `append`
 - `publish`, `consume`, `request`, `execute`
 - `stage`, `flush`, `begin`, `commit`, `rollback`
+
+Schema v2 adds optional `behavior.transaction_scope` for exact SQL `begin`
+contracts. Values are `transaction` and `savepoint`; they require `channel: sql`,
+`operation: begin`, and `timing: context_enter`. The declaration classifies the
+boundary only—it does not prove context-manager use, runtime transaction identity,
+commit, rollback, or persistence. Schema v1 semantics and hashes remain unchanged
+when the field is absent.
 
 Selectors are deliberately bounded:
 
