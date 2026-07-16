@@ -40,21 +40,28 @@ commits and GitHub license metadata, and refuses to overwrite the committed
 lock. See `benchmarks/results/oss-expansion-50-v1/README.md` for frozen hashes,
 the diversity matrix, safety limits, and deliberately pending review work.
 
-The additive 50×50 v2 protocol targets 50 PRs for each frozen repository. Its
-selection and lock schema are preregistered in
-`expansion/projects-50x50-v2.json`; no 2,500-PR live lock is claimed yet. The
-validator preserves byte sentinels for every v1 frozen artifact:
+The additive 50×50 v2 corpus freezes 50 PRs for each repository: 2,500
+immutable identities in total, with no underfilled or unavailable repositories.
+The selection protocol remains preregistered in
+`expansion/projects-50x50-v2.json`; the exact live lock and its independent
+checksum profile are `expansion/pr-lock-2500-v2.json` and
+`expansion/checksums-50x50-v2.json`. Validate both provenance layers offline:
 
 ```bash
 .venv/bin/python benchmarks/real_world/expansion_protocol_v2.py --validate-only
+.venv/bin/python benchmarks/real_world/expansion_protocol_v2.py \
+  --validate-lock benchmarks/real_world/expansion/pr-lock-2500-v2.json \
+  --checksums benchmarks/real_world/expansion/checksums-50x50-v2.json
 ```
 
-See `benchmarks/results/oss-expansion-50x50-v2/README.md` for the explicit live
-collection gate and non-claims. The strict, prediction-blind canonical review,
-adjudication, evidence-validation, and release foundation for v2 is documented
-in [`ground_truth_v2/README.md`](ground_truth_v2/README.md). It uses an explicit
-synthetic corpus only for offline tests; production initialization stays blocked
-until the authenticated live v2 lock exists.
+The validator also preserves byte sentinels for every v1 frozen artifact. See
+`benchmarks/results/oss-expansion-50x50-v2/README.md` for frozen hashes,
+resource totals, and remaining review/adjudication non-claims. The strict,
+prediction-blind canonical review, adjudication, evidence-validation, and
+release foundation is documented in
+[`ground_truth_v2/README.md`](ground_truth_v2/README.md). Production
+initialization can now authenticate the committed lock; review/adjudication
+artifacts and a public truth release remain pending.
 
 ## Execution-free route census
 

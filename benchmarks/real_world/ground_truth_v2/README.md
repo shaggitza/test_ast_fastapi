@@ -1,9 +1,10 @@
 # Benchmark v2 canonical ground truth
 
 This repository-local package is the prediction-blind canonical store for issue
-#146. It is deliberately outside the product wheel. The live database and a
-public release remain blocked until issue #145 publishes the independently
-authenticated 50x50-v2 lock.
+#146. It is deliberately outside the product wheel. Issue #145 now publishes
+the independently authenticated 50x50-v2 lock, so production initialization is
+enabled. A live database and public release remain gated on complete independent
+reviews, adjudications, immutable Git object caches, and publication approval.
 
 ## Custody and workflow
 

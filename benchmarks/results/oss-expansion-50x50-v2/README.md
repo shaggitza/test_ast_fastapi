@@ -1,8 +1,9 @@
-# OSS expansion 50×50 v2 — preregistered collection protocol
+# OSS expansion 50×50 v2 — frozen live corpus
 
-This phase preregisters the immutable selection, provenance, safety, and output
-schema for the requested 50-repository × 50-PR corpus. It does **not** claim that
-the live 2,500-PR lock has been collected.
+This release freezes the preregistered 50-repository × 50-PR corpus: 50 complete
+repository records and exactly 2,500 immutable PR identities. Selection and live
+collection remain separate provenance layers; reviews, adjudications, labels,
+and analyzer scores are still pending and are not claimed here.
 
 ## Frozen inputs
 
@@ -13,10 +14,16 @@ the live 2,500-PR lock has been collected.
   - SHA-256: `5ddbbf4a701b0e247c5b400cb8904709743291ce7637ed9d003f3d3a8c37a1d7`
 - Independent preregistration profile:
   `benchmarks/real_world/expansion/checksums-50x50-v2-preregistered.json`
+- Exact live lock: `benchmarks/real_world/expansion/pr-lock-2500-v2.json`
+  - SHA-256: `70496533d84a3f97db24fd41acdde416d09a2f10787e2088f802769ad8e24552`
+- Independent live checksum profile:
+  `benchmarks/real_world/expansion/checksums-50x50-v2.json`
+  - SHA-256: `94e535d1d54e951c0d893652f1b5a8df95aa406390fd169938b71157516436fe`
 
-The profile explicitly records `live_lock_status: not_collected` and a null lock
-hash. A later live collection must publish a separate exact-byte checksum
-profile; it must not rewrite this preregistration or any v1 artifact.
+The preregistration remains byte-identical and still records
+`live_lock_status: not_collected`; it is a historical pre-collection commitment,
+not mutable status. The separate live profile authenticates exact manifest,
+collector, and lock bytes without rewriting any preregistration or v1 artifact.
 
 ## Selection
 
@@ -80,20 +87,29 @@ test.
 
 ```bash
 .venv/bin/python benchmarks/real_world/expansion_protocol_v2.py --validate-only
+.venv/bin/python benchmarks/real_world/expansion_protocol_v2.py \
+  --validate-lock benchmarks/real_world/expansion/pr-lock-2500-v2.json \
+  --checksums benchmarks/real_world/expansion/checksums-50x50-v2.json
 .venv/bin/python scripts/run_tests_bounded.py \
   tests/benchmarks/test_expansion_protocol_v2.py --pytest-arg=-x
 ```
 
+The authenticated validator reports 50 projects and lock hash
+`sha256:70496533d84a3f97db24fd41acdde416d09a2f10787e2088f802769ad8e24552`.
+All repositories are `complete`, each has ranks 1–50, and all 2,500
+case-insensitive repository/PR identities are unique. The collection consumed
+8,108 requests, 284,550,321 response bytes, 76,738,081 diff bytes, and 8,756
+seconds, all within frozen bounds.
+
 Offline tests cover immutable v1 byte sentinels, fixed policy, merged-time and
-PR tie ordering, shard gaps, proven underfill, unavailable separation, 2,500-row
-lock validation, exact-byte authentication, one-nibble tampering, diff bounds,
+PR tie ordering, shard gaps, proven underfill, unavailable separation, committed
+2,500-row lock authentication, exact-byte tampering, diff bounds, no-clobber,
 and credential-safe redirects.
 
-## Remaining live gate
+## Remaining non-claims
 
-No live 2,500-PR collection was run in this phase. The allowlisted GitHub
-shard/detail/diff transport and resumable per-repository checkpoints are covered
-by fake-transport tests, but still require the dedicated live run under frozen
-aggregate limits. Issue #145 must remain open until a complete or explicitly
-terminal result exists for all 50 repositories and the final lock/checksum
-profile is committed and validated.
+Collection does not establish semantic ground truth. Every PR remains
+`unclassified` with Review A, Review B, and adjudication `pending`. Issue #147
+must pass the blind-review pilot before repository review issues #149–#198
+begin. Analyzer predictions and final benchmark scores remain excluded until the
+complete adjudicated truth release is frozen.
