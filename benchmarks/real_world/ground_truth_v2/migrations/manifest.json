@@ -1,0 +1,10 @@
+{
+  "migrations": [
+    {
+      "name": "0001.sql",
+      "sha256": "sha256:944942446f1361114bd27f1abcd8b40b17edb0c80c5fe1dffc268c3e9fa397ef",
+      "version": 1
+    }
+  ],
+  "schema_version": 1
+}
