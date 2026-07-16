@@ -1,7 +1,9 @@
 """Strict custom-surface contract schema and loader tests."""
 
+from __future__ import annotations
+
 import json
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 import yaml
@@ -15,8 +17,13 @@ from fastapi_endpoint_detector.models.surface_contract import (
     load_surface_contracts,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
+    from typing import Any
 
-def _document(*, symbol: str = "framework.Reactor.listen") -> dict[str, object]:
+
+def _document(*, symbol: str = "framework.Reactor.listen") -> dict[str, Any]:
     return {
         "schema_version": 1,
         "preset": {
@@ -90,10 +97,10 @@ def test_surface_contract_hash_is_order_independent() -> None:
                 "resource": {"kind": "argument", "index": 0},
             },
         },
-        *payload["contracts"],  # type: ignore[misc]
+        *payload["contracts"],
     ]
     second = SurfaceContractDocument.model_validate(payload)
-    payload["contracts"] = list(reversed(payload["contracts"]))  # type: ignore[arg-type]
+    payload["contracts"] = list(reversed(payload["contracts"]))
     reversed_document = SurfaceContractDocument.model_validate(payload)
 
     assert second.config_hash == reversed_document.config_hash
@@ -114,7 +121,9 @@ def test_surface_contract_hash_is_order_independent() -> None:
         lambda value: value["contracts"][0]["surface"].update(id_template="topic:{other}"),
     ],
 )
-def test_surface_contract_rejects_unsafe_shapes(mutation) -> None:
+def test_surface_contract_rejects_unsafe_shapes(
+    mutation: Callable[[dict[str, Any]], None],
+) -> None:
     payload = _document()
     mutation(payload)
     with pytest.raises(ValidationError):
@@ -123,7 +132,7 @@ def test_surface_contract_rejects_unsafe_shapes(mutation) -> None:
 
 def test_execution_mode_requires_schema_v2() -> None:
     payload = _document()
-    payload["contracts"][0]["execution_mode"] = "process_worker"  # type: ignore[index]
+    payload["contracts"][0]["execution_mode"] = "process_worker"
 
     with pytest.raises(ValidationError, match="schema_version 2"):
         SurfaceContractDocument.model_validate(payload)
@@ -135,7 +144,7 @@ def test_execution_mode_requires_schema_v2() -> None:
 
 def test_constructor_and_yield_ranges_require_schema_v3() -> None:
     payload = _document()
-    contract = payload["contracts"][0]  # type: ignore[index]
+    contract = payload["contracts"][0]
     contract["registration"] = {
         "symbol": "framework.App",
         "invocation": "constructor",
@@ -152,6 +161,35 @@ def test_constructor_and_yield_ranges_require_schema_v3() -> None:
     payload["schema_version"] = 3
     document = SurfaceContractDocument.model_validate(payload)
     assert document.contracts[0].callback_range.value == "before_yield"
+
+
+def test_class_method_handlers_require_schema_v4_and_exact_shape() -> None:
+    payload = _document()
+    contract = payload["contracts"][0]
+    contract["handler"] = {
+        "kind": "argument_class_method",
+        "index": 0,
+        "name": "dispatch",
+        "base": "starlette.middleware.base.BaseHTTPMiddleware",
+    }
+
+    with pytest.raises(ValidationError, match="schema_version 4"):
+        SurfaceContractDocument.model_validate(payload)
+
+    payload["schema_version"] = 4
+    document = SurfaceContractDocument.model_validate(payload)
+    assert document.contracts[0].handler.name == "dispatch"
+    assert document.contracts[0].handler.base == ("starlette.middleware.base.BaseHTTPMiddleware")
+
+    second = json.loads(json.dumps(contract))
+    second["id"] = "listener-other-base"
+    second["handler"]["base"] = "other.middleware.BaseHTTPMiddleware"
+    payload["contracts"].append(second)
+    assert len(SurfaceContractDocument.model_validate(payload).contracts) == 2
+
+    contract["handler"]["base"] = "BaseHTTPMiddleware"
+    with pytest.raises(ValidationError, match="exact dotted"):
+        SurfaceContractDocument.model_validate(payload)
 
 
 def test_surface_contract_rejects_duplicate_yaml_keys(tmp_path: Path) -> None:

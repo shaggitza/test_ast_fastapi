@@ -94,6 +94,77 @@ class _StatementMutationVisitor(ast.NodeVisitor):
         return
 
 
+class _ClassAttributeMutationVisitor(ast.NodeVisitor):
+    """Detect direct class-body rebinding without entering nested scopes."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.found = False
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if node.id == self.name and isinstance(node.ctx, (ast.Store, ast.Del)):
+            self.found = True
+
+    def _visit_function_header(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        if node.name == self.name or node.decorator_list:
+            self.found = True
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        self.visit(node.args)
+        if node.returns is not None:
+            self.visit(node.returns)
+        for type_parameter in getattr(node, "type_params", ()):
+            self.visit(type_parameter)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function_header(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function_header(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.found = True
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for base in node.bases:
+            self.visit(base)
+        for class_keyword in node.keywords:
+            self.visit(class_keyword.value)
+        for type_parameter in getattr(node, "type_params", ()):
+            self.visit(type_parameter)
+
+    def visit_Import(self, _node: ast.Import) -> None:
+        self.found = True
+
+    def visit_ImportFrom(self, _node: ast.ImportFrom) -> None:
+        self.found = True
+
+    def visit_Call(self, _node: ast.Call) -> None:
+        self.found = True
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.name == self.name:
+            self.found = True
+        self.generic_visit(node)
+
+    def visit_MatchAs(self, node: ast.MatchAs) -> None:
+        if node.name == self.name:
+            self.found = True
+        self.generic_visit(node)
+
+    def visit_MatchStar(self, node: ast.MatchStar) -> None:
+        if node.name == self.name:
+            self.found = True
+
+    def visit_MatchMapping(self, node: ast.MatchMapping) -> None:
+        if node.rest == self.name:
+            self.found = True
+        self.generic_visit(node)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        self.visit(node.args)
+
+
 class _YieldVisitor(ast.NodeVisitor):
     """Detect yields in one callback body without entering nested callables."""
 
@@ -145,6 +216,8 @@ class CustomSurfaceExtractor:
         self._functions: dict[
             str, list[tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef]]
         ] = {}
+        self._classes: dict[str, list[tuple[_Module, ast.ClassDef]]] = {}
+        self._class_bases: dict[str, tuple[str, ...] | None] = {}
         self._endpoints: list[Endpoint] = []
         self._limitations: list[EndpointDiscoveryCondition] = []
         self._seen: set[tuple[str, int, int, str, str, str]] = set()
@@ -313,6 +386,8 @@ class CustomSurfaceExtractor:
             for node in tree.body:
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     self._functions.setdefault(f"{name}.{node.name}", []).append((module, node))
+                elif isinstance(node, ast.ClassDef):
+                    self._classes.setdefault(f"{name}.{node.name}", []).append((module, node))
 
     def _process_statements(  # noqa: PLR0912, PLR0915
         self,
@@ -338,7 +413,13 @@ class CustomSurfaceExtractor:
                     )
                 continue
             if isinstance(statement, ast.ClassDef):
-                state[statement.name] = _Binding("symbol", f"{module.name}.{statement.name}")
+                identity = f"{module.name}.{statement.name}"
+                if self._building_states:
+                    bases = tuple(
+                        self._direct_symbol_identity(base, state) or "" for base in statement.bases
+                    )
+                    self._class_bases[identity] = bases if all(bases) else None
+                state[statement.name] = _Binding("symbol", identity)
                 continue
             if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 for decorator in statement.decorator_list:
@@ -462,7 +543,7 @@ class CustomSurfaceExtractor:
             )
         return None
 
-    def _inspect_registration(  # noqa: PLR0912
+    def _inspect_registration(  # noqa: PLR0912, PLR0915
         self,
         module: _Module,
         call: ast.Call,
@@ -508,7 +589,10 @@ class CustomSurfaceExtractor:
                 )
             else:
                 handler_result = None
-                if contract.handler.kind == HandlerSelectorKind.ARGUMENT:
+                if contract.handler.kind in {
+                    HandlerSelectorKind.ARGUMENT,
+                    HandlerSelectorKind.ARGUMENT_CLASS_METHOD,
+                }:
                     index = contract.handler.index or 0
                     if index < len(call.args):
                         handler_expression = call.args[index]
@@ -518,7 +602,15 @@ class CustomSurfaceExtractor:
                         None,
                     )
                 if handler_expression is not None:
-                    handler_result = self._resolve_handler(handler_expression, state)
+                    if contract.handler.kind == HandlerSelectorKind.ARGUMENT_CLASS_METHOD:
+                        handler_result = self._resolve_class_method(
+                            handler_expression,
+                            state,
+                            contract.handler.name or "",
+                            contract.handler.base or "",
+                        )
+                    else:
+                        handler_result = self._resolve_handler(handler_expression, state)
                 elif contract.handler_optional:
                     continue
             if handler_result is None or not self._callback_matches(
@@ -740,6 +832,87 @@ class CustomSurfaceExtractor:
                 and resolved[0] in self._declared_receiver_types
             ):
                 return _Binding("receiver", resolved[0])
+        return None
+
+    def _resolve_class_method(
+        self,
+        expression: ast.expr,
+        state: dict[str, _Binding | None],
+        method_name: str,
+        required_base: str,
+    ) -> tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef] | None:
+        """Resolve one direct method on one exact local class with one exact base."""
+        identity = self._symbol_identity(expression, state)
+        candidates = self._classes.get(identity or "", [])
+        if len(candidates) != 1 or self._class_bases.get(identity or "") != (required_base,):
+            return None
+        module, class_node = candidates[0]
+        if class_node.decorator_list or class_node.keywords:
+            return None
+        methods = [
+            item
+            for item in class_node.body
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and item.name == method_name
+            and not item.decorator_list
+        ]
+        mutation = _ClassAttributeMutationVisitor(method_name)
+        for item in class_node.body:
+            if item not in methods:
+                mutation.visit(item)
+        if len(methods) != 1 or mutation.found:
+            return None
+        header_risk = _ClassAttributeMutationVisitor("__surface_dynamic_header__")
+        header_risk._visit_function_header(methods[0])
+        if header_risk.found:
+            return None
+        return module, methods[0]
+
+    def _direct_symbol_identity(
+        self, expression: ast.expr, state: dict[str, _Binding | None]
+    ) -> str | None:
+        binding: _Binding | None = None
+        if isinstance(expression, ast.Name):
+            binding = state.get(expression.id)
+        elif isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name):
+            owner = state.get(expression.value.id)
+            if owner is not None and owner.kind == "module":
+                binding = _Binding("symbol", f"{owner.identity}.{expression.attr}")
+        return binding.identity if binding is not None and binding.kind == "symbol" else None
+
+    def _symbol_identity(  # noqa: PLR0911
+        self, expression: ast.expr, state: dict[str, _Binding | None]
+    ) -> str | None:
+        identity = self._direct_symbol_identity(expression, state)
+        if identity is None:
+            return None
+        current = _Binding("symbol", identity)
+        seen: set[str] = set()
+        for _depth in range(16):
+            if current.identity in seen:
+                return current.identity
+            seen.add(current.identity)
+            candidates = [
+                module
+                for module in self._module_states
+                if current.identity.startswith(f"{module}.")
+            ]
+            if not candidates:
+                return current.identity
+            longest = max(len(module) for module in candidates)
+            selected = [module for module in candidates if len(module) == longest]
+            if len(selected) != 1:
+                return None
+            module_name = selected[0]
+            exported_name = current.identity[len(module_name) + 1 :]
+            if "." in exported_name:
+                return None
+            replacement = self._module_states[module_name].get(exported_name)
+            if replacement is None or replacement.kind != "symbol":
+                return None
+            if replacement.identity == current.identity:
+                return current.identity
+            current = replacement
         return None
 
     def _resolve_handler(
