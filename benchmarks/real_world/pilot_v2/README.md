@@ -103,11 +103,64 @@ runs offline:
 
 Neither file may claim reviews, adjudications, metrics, or a passed gate.
 
+## Private cache and packet preparation
+
+The cache/packet tool authenticates both frozen profiles before doing any work.
+Caches are collision-resistant bare repositories containing exactly the two
+locked shallow commit objects (deduplicated when equal), their trees/blobs, no
+refs, and no other commit history. Validation is offline with lazy fetch,
+alternates, replacement refs, partial/promisor objects, maintenance/gc, and
+writable content forbidden. Packet snapshots are materialized directly from
+strict `git ls-tree -rz --full-tree -r` identities and one bounded `git cat-file
+--batch` stream per tree, so export attributes and substitutions cannot alter
+bytes. Regular blobs become inert 0444 files; symlink target bytes and gitlinks
+remain manifest-only metadata. The frozen remote diff hash/size and the local
+Git diff hash/size remain explicit distinct fields.
+
+Every validation requires the locked cache, holds private advisory locks across
+cache validation and complete regeneration, verifies directory device/inode
+stability, regenerates both snapshots and the local diff into a fresh bounded
+temporary directory, and compares the exact semantic manifest and
+domain-separated root. Process groups, CPU/address/file size/process counts,
+wall time, output, staging disk, paths, modes, file counts, permissions,
+inventories, and hashes fail closed. Preparation parents must be current-UID
+0700 directories; published cache and packet trees are fully read-only. The
+packet staging proof caps each snapshot at 256 MiB and each packet at 512 MiB:
+three packets (1,536 MiB) plus one 260 MiB batch spool, 64 MiB tree listing, and
+32 MiB diff total 1,892 MiB, below the 2 GiB aggregate cap. Cache staging is
+capped at 8 GiB. Both phases preflight additional disk headroom and monitor the
+whole staging root while subprocesses and blob copies run. Each cache is capped
+at 2 GiB, so three complete caches consume at most 6 GiB and leave 2 GiB for
+bounded fetch/index staging inside the 8 GiB aggregate ceiling. Validation
+preflights 3 GiB so the published packet set and one bounded regenerated packet
+can coexist. Advisory locks attest cooperating processes; the operator must
+ensure no lock-ignoring process under the same UID mutates private roots during
+validation. Payload inventories are re-read after regeneration to detect
+in-window mutation. Caches and packets remain private and are never committed:
+
+```bash
+install -d -m 700 "$HOME/.cache/fastapi-endpoint-detector/pilot-v1-private"
+.venv/bin/python -m benchmarks.real_world.pilot_packet_v2 \
+  --prepare-cache \
+  --cache-root "$HOME/.cache/fastapi-endpoint-detector/pilot-v1-private/cache"
+.venv/bin/python -m benchmarks.real_world.pilot_packet_v2 \
+  --validate-cache \
+  --cache-root "$HOME/.cache/fastapi-endpoint-detector/pilot-v1-private/cache"
+.venv/bin/python -m benchmarks.real_world.pilot_packet_v2 \
+  --prepare-packets \
+  --cache-root "$HOME/.cache/fastapi-endpoint-detector/pilot-v1-private/cache" \
+  --packet-root "$HOME/.cache/fastapi-endpoint-detector/pilot-v1-private/packets"
+.venv/bin/python -m benchmarks.real_world.pilot_packet_v2 \
+  --validate-packets \
+  --cache-root "$HOME/.cache/fastapi-endpoint-detector/pilot-v1-private/cache" \
+  --packet-root "$HOME/.cache/fastapi-endpoint-detector/pilot-v1-private/packets"
+```
+
 ## Remaining live phases
 
-Supervisor must next prepare bare caches, isolated read-only packets, custom
-agent config, execution manifest, ledger, telemetry sampler, and metric reducer,
-all under frozen contracts. For each PR, Review A runs into unopened escrow;
-parent freezes Review B; then A is opened/validated and a fresh adjudicator runs.
-Only after all objective gates and a separate post-pilot scale approval may
-issues #149–#198 begin.
+Supervisor must next privately prepare those caches/packets, then freeze the
+custom agent config, execution manifest, ledger, telemetry sampler, and metric
+reducer. For each PR, Review A runs into unopened escrow; parent freezes Review
+B; then A is opened/validated and a fresh adjudicator runs. Only after all
+objective gates and a separate post-pilot scale approval may issues #149–#198
+begin.
