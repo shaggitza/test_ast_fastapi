@@ -192,6 +192,26 @@ def test_class_method_handlers_require_schema_v4_and_exact_shape() -> None:
         SurfaceContractDocument.model_validate(payload)
 
 
+def test_route_activation_requires_schema_v5_framework_lifecycle() -> None:
+    payload = _document()
+    contract = payload["contracts"][0]
+    payload["schema_version"] = 4
+    contract["execution_mode"] = "framework"
+    contract["surface"]["kind"] = "framework.lifecycle"
+    contract["activates_routes"] = True
+
+    with pytest.raises(ValidationError, match="schema_version 5"):
+        SurfaceContractDocument.model_validate(payload)
+
+    payload["schema_version"] = 5
+    document = SurfaceContractDocument.model_validate(payload)
+    assert document.contracts[0].activates_routes is True
+
+    contract["surface"]["kind"] = "worker"
+    with pytest.raises(ValidationError, match="framework lifecycle"):
+        SurfaceContractDocument.model_validate(payload)
+
+
 def test_surface_contract_rejects_duplicate_yaml_keys(tmp_path: Path) -> None:
     path = tmp_path / "duplicate.yaml"
     path.write_text("schema_version: 1\nschema_version: 1\n", encoding="utf-8")

@@ -20,6 +20,7 @@ from fastapi_endpoint_detector.models.endpoint import (
     EndpointMethod,
     HandlerInfo,
     InventoryStatus,
+    RouteActivationEvidence,
     SurfaceRegistrationEvidence,
 )
 from fastapi_endpoint_detector.models.surface_contract import (
@@ -221,6 +222,7 @@ class CustomSurfaceExtractor:
         self._endpoints: list[Endpoint] = []
         self._limitations: list[EndpointDiscoveryCondition] = []
         self._seen: set[tuple[str, int, int, str, str, str]] = set()
+        self._startup_route_seen: set[tuple[str, int, str, tuple[EndpointMethod, ...], str]] = set()
         self._module_states: dict[str, dict[str, _Binding | None]] = {}
         self._building_states = False
         self._declared_receiver_types = {
@@ -280,10 +282,17 @@ class CustomSurfaceExtractor:
                 continue
             for endpoint in matches:
                 surface = endpoint.surface
-                assert surface is not None
                 condition = EndpointDiscoveryCondition(
-                    source_path=surface.registration_file,
-                    source_line=surface.registration_line,
+                    source_path=(
+                        surface.registration_file
+                        if surface is not None
+                        else endpoint.handler.file_path
+                    ),
+                    source_line=(
+                        surface.registration_line
+                        if surface is not None
+                        else endpoint.handler.line_number
+                    ),
                     reason=f"custom surface identity {identifier!r} maps to multiple handlers",
                 )
                 normalized.append(
@@ -693,6 +702,7 @@ class CustomSurfaceExtractor:
                     callback_mode=contract.callback_mode,
                     callback_range=contract.callback_range,
                     execution_mode=contract.execution_mode,
+                    activates_routes=contract.activates_routes,
                     contract_id=contract.id,
                     match_kind=contract.registration.match_kind,
                     registration_symbol=symbol,
@@ -728,6 +738,305 @@ class CustomSurfaceExtractor:
                         surface=evidence,
                     )
                 )
+                if contract.activates_routes and resources == ("startup",):
+                    self._emit_startup_routes(
+                        contract,
+                        call,
+                        handler_module,
+                        function,
+                        handler_range,
+                        merged,
+                        evidence,
+                        state,
+                    )
+
+    def _emit_startup_routes(  # noqa: PLR0912, PLR0915
+        self,
+        contract: SurfaceContract,
+        registration_call: ast.Call,
+        handler_module: _Module,
+        function: ast.FunctionDef | ast.AsyncFunctionDef,
+        handler_range: tuple[int, int],
+        inherited_conditions: tuple[EndpointDiscoveryCondition, ...],
+        lifecycle_evidence: SurfaceRegistrationEvidence,
+        registration_state: dict[str, _Binding | None],
+    ) -> None:
+        """Emit only direct finite routes installed by one exact startup callback."""
+        state = dict(self._module_states.get(handler_module.name, {}))
+        arguments = [
+            *function.args.posonlyargs,
+            *function.args.args,
+            *function.args.kwonlyargs,
+        ]
+        for argument in arguments:
+            state[argument.arg] = None
+        expected_receiver_names: set[str] = set()
+        if contract.registration.invocation == InvocationKind.CONSTRUCTOR and arguments:
+            state[arguments[0].arg] = _Binding("receiver", contract.registration.symbol)
+            expected_receiver_names.add(arguments[0].arg)
+        elif isinstance(registration_call.func, ast.Attribute) and isinstance(
+            registration_call.func.value, ast.Name
+        ):
+            receiver_name = registration_call.func.value.id
+            receiver = registration_state.get(receiver_name)
+            if receiver is not None and receiver.kind == "receiver":
+                expected_receiver_names.add(receiver_name)
+
+        supported = {
+            "add_api_route",
+            "add_route",
+            "add_api_websocket_route",
+            "add_websocket_route",
+        }
+        route_mutations = {*supported, "include_router", "include_routes", "mount"}
+        start_line, end_line = handler_range
+        for statement in function.body:
+            if statement.lineno < start_line or statement.lineno > end_line:
+                continue
+            if isinstance(statement, (ast.Return, ast.Raise)):
+                break
+            direct_call = (
+                statement.value
+                if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call)
+                else None
+            )
+            if (
+                direct_call is not None
+                and self._is_expected_route_call(
+                    direct_call, expected_receiver_names, route_mutations
+                )
+                and not self._is_route_receiver_call(direct_call, state, route_mutations)
+            ):
+                self._record_startup_route_limitation(
+                    handler_module,
+                    statement.lineno,
+                    "startup route receiver was rebound or became unresolved",
+                )
+                continue
+            if direct_call is not None and self._is_route_receiver_call(
+                direct_call, state, route_mutations
+            ):
+                assert isinstance(direct_call.func, ast.Attribute)
+                operation = direct_call.func.attr
+                if operation not in supported:
+                    self._record_startup_route_limitation(
+                        handler_module,
+                        statement.lineno,
+                        f"startup route mutation {operation!r} is not finitely modeled",
+                    )
+                    continue
+                route = self._startup_route_from_call(
+                    direct_call,
+                    state,
+                    operation,
+                )
+                if route is None:
+                    self._record_startup_route_limitation(
+                        handler_module,
+                        statement.lineno,
+                        "startup route registration has dynamic or unresolved arguments",
+                    )
+                    continue
+                path, methods, route_handler = route
+                condition = EndpointDiscoveryCondition(
+                    source_path=handler_module.path,
+                    source_line=statement.lineno,
+                    reason="route is registered only if framework startup lifecycle executes",
+                )
+                conditions = tuple(dict.fromkeys((*inherited_conditions, condition)))
+                key = (
+                    str(handler_module.path),
+                    statement.lineno,
+                    path,
+                    methods,
+                    f"{route_handler[0].name}.{route_handler[1].name}",
+                )
+                if key in self._startup_route_seen:
+                    continue
+                self._startup_route_seen.add(key)
+                route_module, route_function = route_handler
+                self._endpoints.append(
+                    Endpoint(
+                        path=path,
+                        methods=list(methods),
+                        handler=HandlerInfo(
+                            name=route_function.name,
+                            module=route_module.name,
+                            file_path=route_module.path,
+                            line_number=route_function.lineno,
+                            end_line_number=route_function.end_lineno,
+                        ),
+                        discovery_status=EndpointDiscoveryStatus.CONDITIONAL,
+                        discovery_conditions=conditions,
+                        activation=RouteActivationEvidence(
+                            lifecycle_surface_id=lifecycle_evidence.surface_id,
+                            contract_id=lifecycle_evidence.contract_id,
+                            registration_file=lifecycle_evidence.registration_file,
+                            registration_line=lifecycle_evidence.registration_line,
+                            activation_file=handler_module.path,
+                            activation_line=statement.lineno,
+                            activation_source_hash=self._source_hash(handler_module, direct_call),
+                            contract_source_path=lifecycle_evidence.contract_source_path,
+                            raw_hash=lifecycle_evidence.raw_hash,
+                            config_hash=lifecycle_evidence.config_hash,
+                            preset_hash=lifecycle_evidence.preset_hash,
+                            contract_hash=lifecycle_evidence.contract_hash,
+                        ),
+                    )
+                )
+                continue
+
+            mutation = _StatementMutationVisitor()
+            mutation.visit(statement)
+            if any(
+                self._is_expected_route_call(call, expected_receiver_names, route_mutations)
+                and not self._is_route_receiver_call(call, state, route_mutations)
+                for call in mutation.calls
+            ):
+                self._record_startup_route_limitation(
+                    handler_module,
+                    statement.lineno,
+                    "startup route receiver was rebound or became unresolved",
+                )
+                continue
+            if any(
+                self._is_route_receiver_call(call, state, route_mutations)
+                for call in mutation.calls
+            ):
+                self._record_startup_route_limitation(
+                    handler_module,
+                    statement.lineno,
+                    "startup route registration appears in unsupported control flow or expression",
+                )
+                continue
+            if self._statement_uses_startup_receiver(statement, state):
+                self._record_startup_route_limitation(
+                    handler_module,
+                    statement.lineno,
+                    "startup app receiver escapes through an unsupported expression",
+                )
+
+    @staticmethod
+    def _is_expected_route_call(
+        call: ast.Call, receiver_names: set[str], operations: set[str]
+    ) -> bool:
+        return (
+            isinstance(call.func, ast.Attribute)
+            and call.func.attr in operations
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id in receiver_names
+        )
+
+    def _statement_uses_startup_receiver(
+        self, statement: ast.stmt, state: dict[str, _Binding | None]
+    ) -> bool:
+        for node in ast.walk(statement):
+            if not isinstance(node, ast.Name):
+                continue
+            binding = state.get(node.id)
+            if binding is None:
+                continue
+            binding = self._follow_project_binding(binding)
+            if binding.kind == "receiver" and binding.identity in {
+                "fastapi.FastAPI",
+                "starlette.applications.Starlette",
+            }:
+                return True
+        return False
+
+    def _is_route_receiver_call(
+        self,
+        call: ast.Call,
+        state: dict[str, _Binding | None],
+        operations: set[str],
+    ) -> bool:
+        if (
+            not isinstance(call.func, ast.Attribute)
+            or call.func.attr not in operations
+            or not isinstance(call.func.value, ast.Name)
+        ):
+            return False
+        binding = state.get(call.func.value.id)
+        if binding is None:
+            return False
+        binding = self._follow_project_binding(binding)
+        return binding.kind == "receiver" and binding.identity in {
+            "fastapi.FastAPI",
+            "starlette.applications.Starlette",
+        }
+
+    def _startup_route_from_call(  # noqa: PLR0911
+        self,
+        call: ast.Call,
+        state: dict[str, _Binding | None],
+        operation: str,
+    ) -> (
+        tuple[
+            str,
+            tuple[EndpointMethod, ...],
+            tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef],
+        ]
+        | None
+    ):
+        if any(isinstance(argument, ast.Starred) for argument in call.args) or any(
+            keyword.arg is None for keyword in call.keywords
+        ):
+            return None
+
+        def selected(index: int, name: str) -> ast.expr | None:
+            if index < len(call.args):
+                if any(keyword.arg == name for keyword in call.keywords):
+                    return None
+                return call.args[index]
+            values = [keyword.value for keyword in call.keywords if keyword.arg == name]
+            return values[0] if len(values) == 1 else None
+
+        path_expression = selected(0, "path")
+        handler_expression = selected(1, "endpoint")
+        paths = self._literal_resources(path_expression)
+        handler = (
+            self._resolve_handler(handler_expression, state)
+            if handler_expression is not None
+            else None
+        )
+        if paths is None or len(paths) != 1 or handler is None:
+            return None
+
+        methods: tuple[EndpointMethod, ...]
+        if operation in {"add_api_websocket_route", "add_websocket_route"}:
+            methods = (EndpointMethod.WEBSOCKET,)
+        else:
+            method_values = [keyword.value for keyword in call.keywords if keyword.arg == "methods"]
+            if len(method_values) > 1:
+                return None
+            methods_expression = method_values[0] if method_values else None
+            if methods_expression is None:
+                methods = (EndpointMethod.GET,)
+            else:
+                values = self._literal_resources(methods_expression)
+                if values is None or not values:
+                    return None
+                try:
+                    methods = tuple(
+                        sorted(
+                            {EndpointMethod(value.upper()) for value in values},
+                            key=lambda item: item.value,
+                        )
+                    )
+                except ValueError:
+                    return None
+                if EndpointMethod.CUSTOM in methods or EndpointMethod.WEBSOCKET in methods:
+                    return None
+        return paths[0], methods, handler
+
+    def _record_startup_route_limitation(self, module: _Module, line: int, reason: str) -> None:
+        self._limitations.append(
+            EndpointDiscoveryCondition(
+                source_path=module.path,
+                source_line=line,
+                reason=reason,
+            )
+        )
 
     def _matches(
         self,

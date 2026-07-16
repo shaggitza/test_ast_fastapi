@@ -273,6 +273,7 @@ class SurfaceContract(_StrictModel):
     callback_mode: CallbackMode = CallbackMode.EITHER
     callback_range: CallbackRangeMode = CallbackRangeMode.FULL
     execution_mode: SurfaceExecutionMode = SurfaceExecutionMode.DIRECT
+    activates_routes: bool = False
     conditions: tuple[str, ...] = ()
     provenance: ContractProvenance | None = None
 
@@ -299,13 +300,18 @@ class SurfaceContract(_StrictModel):
             CallbackMode.ASYNC_GENERATOR,
         }:
             raise ValueError("yield-relative callback ranges require a generator callback")
+        if self.activates_routes and (
+            self.execution_mode != SurfaceExecutionMode.FRAMEWORK
+            or self.surface.kind != "framework.lifecycle"
+        ):
+            raise ValueError("route activation requires a framework lifecycle contract")
         return self
 
 
 class SurfaceContractDocument(_StrictModel):
     """Versioned deterministic custom-surface contract set."""
 
-    schema_version: Literal[1, 2, 3, 4] = 1
+    schema_version: Literal[1, 2, 3, 4, 5] = 1
     preset: PresetMetadata
     contracts: tuple[SurfaceContract, ...] = Field(min_length=1)
 
@@ -313,7 +319,7 @@ class SurfaceContractDocument(_StrictModel):
     @classmethod
     def validate_schema_version_type(cls, value: object) -> object:
         if type(value) is not int:
-            raise ValueError("schema_version must be the integer 1, 2, 3, or 4")
+            raise ValueError("schema_version must be the integer 1, 2, 3, 4, or 5")
         return value
 
     @model_validator(mode="after")
@@ -341,6 +347,10 @@ class SurfaceContractDocument(_StrictModel):
             for contract in self.contracts
         ):
             raise ValueError("class-method handlers require schema_version 4")
+        if self.schema_version < 5 and any(
+            contract.activates_routes for contract in self.contracts
+        ):
+            raise ValueError("route-activating lifecycle contracts require schema_version 5")
         ids: set[str] = set()
         keys: set[
             tuple[

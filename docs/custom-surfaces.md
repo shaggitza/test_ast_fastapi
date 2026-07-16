@@ -141,15 +141,16 @@ function naming conventions. Those shapes remain unavailable unless their
 registration is explicitly represented in source or configured with a custom
 contract.
 
-## Schema v1, v2, v3, and v4
+## Schema v1 through v5
 
-Each document has `schema_version: 1`, `2`, `3`, or `4`, preset
-identity/provenance, and one or more contracts. Version 1 preserves direct
-execution as its only boundary; version 2 adds explicit `execution_mode`;
-version 3 adds constructor registrations, optional keyword handlers, and
-yield-relative callback ranges. Version 4 adds exact positional local-class
-method handlers constrained by a contract-owned base and method name. Earlier
-schemas reject these additions. Unknown fields, duplicate keys, duplicate contract IDs,
+Each document has `schema_version: 1` through `5`, preset identity/provenance,
+and one or more contracts. Version 1 preserves direct execution as its only
+boundary; version 2 adds explicit `execution_mode`; version 3 adds constructor
+registrations, optional keyword handlers, and yield-relative callback ranges.
+Version 4 adds exact positional local-class method handlers constrained by a
+contract-owned base and method name. Version 5 adds opt-in route activation for
+framework lifecycle callbacks. Earlier schemas reject these additions. Unknown
+fields, duplicate keys, duplicate contract IDs,
 duplicate matcher/handler selectors, non-integer schema versions, and files over
 1 MiB are rejected.
 
@@ -167,6 +168,8 @@ A contract declares:
 - `callback_range` (v3): `full`, `before_yield`, or `after_yield`;
 - `handler_optional` (v3): skip a constructor contract when its named callback keyword is absent;
 - `execution_mode` (v2): `direct`, `event_loop`, `threadpool`, `process_worker`, `scheduler`, `cli_dispatch`, or `framework`;
+- `activates_routes` (v5): opt in to bounded direct route registrations from a
+  `framework.lifecycle` callback; all activated routes remain conditional;
 - optional external `conditions`, which make discovery conditional.
 
 For example:

@@ -126,6 +126,45 @@ def test_changed_class_middleware_dispatch_is_exact_framework_candidate(
     )
 
 
+def test_changed_startup_added_route_is_a_conditional_http_candidate(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n\n"
+        "async def late() -> int:\n"
+        "    return 2\n\n"
+        "@app.on_event('startup')\n"
+        "async def install() -> None:\n"
+        "    app.add_api_route('/late', late)\n",
+        encoding="utf-8",
+    )
+    diff = tmp_path / "change.diff"
+    diff.write_text(
+        "diff --git a/main.py b/main.py\n"
+        "--- a/main.py\n"
+        "+++ b/main.py\n"
+        "@@ -5,2 +5,2 @@\n"
+        " async def late() -> int:\n"
+        "-    return 1\n"
+        "+    return 2\n",
+        encoding="utf-8",
+    )
+
+    report = ChangeMapper(
+        app_path=tmp_path,
+        config=Config(analysis=AnalysisConfig(surface_preset="framework-v1")),
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+
+    candidates = {
+        candidate.endpoint.identifier: candidate for candidate in report.candidate_endpoints
+    }
+    assert "GET /late" in candidates
+    assert candidates["GET /late"].confidence == ConfidenceLevel.LOW
+    assert candidates["GET /late"].endpoint.discovery_conditions
+    assert candidates["GET /late"].endpoint.activation is not None
+
+
 def test_changed_background_callback_is_low_boundary_from_http_handler(
     tmp_path: Path,
 ) -> None:

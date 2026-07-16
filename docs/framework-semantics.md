@@ -29,6 +29,19 @@ statements before that yield for startup and only statements after it for
 shutdown, including transitive typed calls. Conditional, nested, absent, or
 multiple yields fail closed with inventory limitations.
 
+Startup lifecycle callbacks may also expose direct finite serving surfaces.
+The schema-v5 preset recognizes exact `FastAPI`/`Starlette` receivers calling
+`add_api_route`, `add_route`, `add_api_websocket_route`, or
+`add_websocket_route` with one literal path, finite literal methods, and one
+exact project-local handler. Lifespan activation is restricted to the
+pre-yield range. Every activated route remains conditional on successful
+startup lifecycle execution and cannot establish exhaustive route inventory.
+Each route retains separate activation evidence for the lifecycle contract,
+registration occurrence, route-call occurrence, phase, and provenance hashes.
+Dynamic paths, unresolved handlers or receivers, receiver escape/rebinding,
+control-flow registrations, router inclusion, mounts, factories, stars, and
+unsupported methods fail closed with source limitations.
+
 Middleware registrations retain every physical handler; multiple handlers for
 the same protocol remain conditional rather than being collapsed. Class-based
 HTTP middleware requires one exact project-local class, the exact
@@ -59,9 +72,9 @@ no framework summary.
 
 Starlette constructor lifespan callbacks, imported callback factories, aliases,
 context-manager class implementations, and exception paths around `yield` remain
-unresolved. Startup-time route mutation, generic ASGI middleware, middleware
-ordering, arbitrary callback registries, and runtime plugin loading also remain
-unresolved.
+unresolved. Startup helper-mediated route mutation, router inclusion, mounts,
+generic ASGI middleware, middleware ordering, arbitrary callback registries,
+and runtime plugin loading also remain unresolved.
 
 The static framework preset is optional because custom-surface configuration
 currently has one provenance root. Composing several package presets without
