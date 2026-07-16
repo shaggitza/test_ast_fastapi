@@ -79,11 +79,20 @@ writers, changes elsewhere in a writer implementation, package-constrained
 contracts, and dynamic resources add nothing. Candidate overflow aborts the
 whole expansion rather than returning an order-dependent prefix.
 
-## Current boundary
+## Completed Issue #98 scope and current boundary
+
+The versioned model now covers deterministic finite
+`write|update|delete|append -> read` and `publish -> consume` edges, separate
+cross-request evidence, unknown-resource diagnostics without global fanout,
+atomic limits, LOW-only exact-added-callsite candidates, and a reproducible
+10,000-occurrence scale gate. These satisfy the finite resource graph scope of
+Issue #98.
 
 Graph edges mean only that exact endpoint-reachable declared calls may access the
 same qualified finite identity. Even candidate mode establishes only that the
 producer call syntax changed; it does not establish runtime execution or
 ordering, persistence, transaction commit, downstream observation, or impact.
-Receiver origins, composite resources, removed producers, package applicability
-attestation, and scale/precision gates remain deferred.
+Receiver origins and composite resource extraction remain follow-up preset/data-
+flow work under Issue #97. Removed producers and package-applicability
+attestation remain optional future candidate-expansion gates rather than claims
+made by the completed report-only graph.
