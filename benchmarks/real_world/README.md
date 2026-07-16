@@ -40,6 +40,18 @@ commits and GitHub license metadata, and refuses to overwrite the committed
 lock. See `benchmarks/results/oss-expansion-50-v1/README.md` for frozen hashes,
 the diversity matrix, safety limits, and deliberately pending review work.
 
+The additive 50×50 v2 protocol targets 50 PRs for each frozen repository. Its
+selection and lock schema are preregistered in
+`expansion/projects-50x50-v2.json`; no 2,500-PR live lock is claimed yet. The
+validator preserves byte sentinels for every v1 frozen artifact:
+
+```bash
+.venv/bin/python benchmarks/real_world/expansion_protocol_v2.py --validate-only
+```
+
+See `benchmarks/results/oss-expansion-50x50-v2/README.md` for the explicit live
+collection gate and non-claims.
+
 ## Execution-free route census
 
 `build_route_census.py` inventories configured FastAPI routes in both the merge

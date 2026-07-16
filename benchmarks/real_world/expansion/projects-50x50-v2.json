@@ -1,0 +1,314 @@
+{
+  "schema_version": 2,
+  "id": "oss-expansion-50x50-v2",
+  "frozen_at": "2026-07-16T12:00:00Z",
+  "source_population": {
+    "manifest_id": "oss-expansion-50-v1",
+    "manifest_hash": "sha256:194afecc671535639cf51b4b98e6fbe2d36a6159c882de1ae2bd3a4df1a28fe0",
+    "longlist_hash": "sha256:271011f84984972c04cf3984a3e608399f3663c9ce493be9a12817968e63abe1"
+  },
+  "policy": {
+    "project_count": 50,
+    "target_prs_per_project": 50,
+    "merged_before": "2026-06-15T00:00:00Z",
+    "selection": "merged_at descending, then pull-request number descending",
+    "content_filtering_allowed": false,
+    "not_evaluable_retained": true,
+    "runtime_execution_allowed": false,
+    "baseline_rule": "first_parent_of_merge_commit",
+    "target_rule": "head_sha",
+    "diff_rule": "github_pull_diff_media_exact_bytes",
+    "underfill_rule": "only after complete merged-time coverage reaches repository creation time",
+    "unavailable_rule": "budget, API, redirect, dense-shard, identity, or diff failure is terminal unavailable; never underfill",
+    "draft_rule": "merged PRs are eligible regardless of prior draft history",
+    "merge_queue_rule": "merge-queue PRs are eligible when immutable merge identity and diff evidence exist",
+    "bot_rule": "bot-authored PRs are eligible",
+    "revert_rule": "revert PRs are eligible",
+    "repository_identity_rule": "renamed, transferred, deleted, inaccessible, or redirecting repositories are terminal unavailable; never substitute"
+  },
+  "sharding": {
+    "field": "merged_at",
+    "direction": "newest_first",
+    "initial_window_days": 30,
+    "maximum_results_per_complete_shard": 100,
+    "split_dense_shards": true,
+    "contiguous_from_cutoff": true,
+    "overlap_deduplicated_by_pr_number": true
+  },
+  "bounds": {
+    "max_requests": 10000,
+    "max_response_bytes": 21474836480,
+    "max_diff_bytes": 67108864,
+    "max_total_diff_bytes": 10737418240,
+    "max_wall_seconds": 21600,
+    "request_timeout_seconds": 30,
+    "max_rate_limit_wait_seconds": 3700,
+    "max_retries_per_request": 3,
+    "max_search_pages_per_shard": 1,
+    "max_shards_per_project": 512,
+    "max_api_response_bytes": 16777216,
+    "max_checkpoint_bytes": 2097152,
+    "max_lock_bytes": 67108864,
+    "max_checkpoint_files": 100,
+    "max_candidates_per_project": 5000,
+    "max_diagnostics_per_project": 10,
+    "max_diagnostic_chars": 1000
+  },
+  "terminal_project_statuses": [
+    "complete",
+    "underfilled",
+    "unavailable"
+  ],
+  "projects": [
+    {
+      "repository": "fastapi/full-stack-fastapi-template",
+      "partition": "verification",
+      "survey_commit": "4d3d5e92c1ea6b3fa0fab02c41124844ec45bca8"
+    },
+    {
+      "repository": "Kludex/starlette",
+      "partition": "verification",
+      "survey_commit": "5174d4c8358a6f06aa8056bafd14c2272dab8dd1"
+    },
+    {
+      "repository": "PrefectHQ/prefect",
+      "partition": "verification",
+      "survey_commit": "b749a6732bccbdcee1351e9afa806d32fb530d99"
+    },
+    {
+      "repository": "gradio-app/gradio",
+      "partition": "stress",
+      "survey_commit": "ec3c6735a1df6824fe9d4cd9938ef8d0fbf41fc8"
+    },
+    {
+      "repository": "run-llama/llama_index",
+      "partition": "stress",
+      "survey_commit": "67514f63410c6d4c2344e7ca14b3ea7214d0bb84"
+    },
+    {
+      "repository": "litestar-org/litestar",
+      "partition": "verification",
+      "survey_commit": "2453f456ade2bda83ed6fbba91fe7b7224d8c2be"
+    },
+    {
+      "repository": "sanic-org/sanic",
+      "partition": "verification",
+      "survey_commit": "5ffc7b3710838eaf016d2f9612a86a08626915e5"
+    },
+    {
+      "repository": "vllm-project/aibrix",
+      "partition": "verification",
+      "survey_commit": "82afd1b916d08dbd39333900a9d27971a1065a07"
+    },
+    {
+      "repository": "Kludex/uvicorn",
+      "partition": "verification",
+      "survey_commit": "7e11cc65f0642c823ef18ea01ff6b23af90aaa9e"
+    },
+    {
+      "repository": "apache/airflow",
+      "partition": "stress",
+      "survey_commit": "5930c02ad0fc058a6a40ad37b2436105fd7fb51f"
+    },
+    {
+      "repository": "django/django",
+      "partition": "verification",
+      "survey_commit": "cae38ec9b9bd394f630bdcbffa013c2761e831e9"
+    },
+    {
+      "repository": "saleor/saleor",
+      "partition": "verification",
+      "survey_commit": "4086a98fdc787bf429db9653def58ed741c0a064"
+    },
+    {
+      "repository": "falconry/falcon",
+      "partition": "verification",
+      "survey_commit": "6a498817595c788d0723cb312dc04298f75c4037"
+    },
+    {
+      "repository": "fastapi/fastapi",
+      "partition": "verification",
+      "survey_commit": "9b8410bdc9fa1fd679ea7e65b926535c7045ab87"
+    },
+    {
+      "repository": "wagtail/wagtail",
+      "partition": "verification",
+      "survey_commit": "af68909d2ee1408c1035ac028e7d552d51a605fd"
+    },
+    {
+      "repository": "pallets/flask",
+      "partition": "verification",
+      "survey_commit": "36e4a824f340fdee7ed50937ba8e7f6bc7d17f81"
+    },
+    {
+      "repository": "netbox-community/netbox",
+      "partition": "verification",
+      "survey_commit": "6c501413ee403613817c01709d3004cf243c9880"
+    },
+    {
+      "repository": "apache/superset",
+      "partition": "stress",
+      "survey_commit": "8ce6d42942801f9dbc9e6382924424d7d64c6545"
+    },
+    {
+      "repository": "PrefectHQ/fastmcp",
+      "partition": "verification",
+      "survey_commit": "1d932cc778a24cc0bf46fc4baad8306d4fed9c4b"
+    },
+    {
+      "repository": "modelcontextprotocol/python-sdk",
+      "partition": "verification",
+      "survey_commit": "2713b53b127afc094dc97d6067df9f69b647661c"
+    },
+    {
+      "repository": "temporalio/sdk-python",
+      "partition": "verification",
+      "survey_commit": "fd822986429b944f87341c4cb01784d69f1461e6"
+    },
+    {
+      "repository": "coleifer/huey",
+      "partition": "verification",
+      "survey_commit": "42df37f2fdb84bd059b9fa7b355fb93578b52161"
+    },
+    {
+      "repository": "taskiq-python/taskiq",
+      "partition": "verification",
+      "survey_commit": "ae2b788007a4c985394dda913f4df875ec79711a"
+    },
+    {
+      "repository": "ag2ai/faststream",
+      "partition": "verification",
+      "survey_commit": "d1e756f112cb2f1f7cff95867e20f8ce1da65678"
+    },
+    {
+      "repository": "mosquito/aio-pika",
+      "partition": "verification",
+      "survey_commit": "a6c69f6e292e7ee7ada34009e53dcd26b2ffd6a3"
+    },
+    {
+      "repository": "dpkp/kafka-python",
+      "partition": "verification",
+      "survey_commit": "a48ac06d76a29e8755d02e64fb99ae70273f7cbd"
+    },
+    {
+      "repository": "aio-libs/aiokafka",
+      "partition": "verification",
+      "survey_commit": "0ff6e7123a887fe254bb06b5d1f7b2742e6c4274"
+    },
+    {
+      "repository": "agronholm/apscheduler",
+      "partition": "verification",
+      "survey_commit": "26bff5d1001d8d259f4d7ddaad6cf055072bb257"
+    },
+    {
+      "repository": "Bogdanp/dramatiq",
+      "partition": "verification",
+      "survey_commit": "f5105d918af967afad035ef013e7507f83492db0"
+    },
+    {
+      "repository": "python-arq/arq",
+      "partition": "verification",
+      "survey_commit": "5ee4b48cf6faf4dc181f1ccb76dfb1bc1fedf9bf"
+    },
+    {
+      "repository": "pallets/click",
+      "partition": "verification",
+      "survey_commit": "b67832c2167e5b0ff6764a8c04a0a9087e697b5a"
+    },
+    {
+      "repository": "fastapi/typer",
+      "partition": "verification",
+      "survey_commit": "60af34b60ab2650a74af32c6ce340c5cfbceb3d8"
+    },
+    {
+      "repository": "Textualize/rich",
+      "partition": "verification",
+      "survey_commit": "9d8f9a372cc5916fd4781fec207ced7ddac2f08f"
+    },
+    {
+      "repository": "redis/redis-py",
+      "partition": "verification",
+      "survey_commit": "a8b461458d9b7a3e412aecfa2f05f402e92c2ed2"
+    },
+    {
+      "repository": "mongodb/mongo-python-driver",
+      "partition": "verification",
+      "survey_commit": "1a527ee2ef64f652e25a137028a8ae434a92bc21"
+    },
+    {
+      "repository": "sqlalchemy/sqlalchemy",
+      "partition": "verification",
+      "survey_commit": "a559cd4b81ae0f4ca17744909a807e6c98db987e"
+    },
+    {
+      "repository": "encode/httpx",
+      "partition": "verification",
+      "survey_commit": "b5addb64f0161ff6bfe94c124ef76f6a1fba5254"
+    },
+    {
+      "repository": "psf/requests",
+      "partition": "verification",
+      "survey_commit": "f361ead047be5cb873174218582f7d8b9fcd9f49"
+    },
+    {
+      "repository": "aio-libs/aiohttp",
+      "partition": "verification",
+      "survey_commit": "cba121d5864966d95b48f4a790ff0cefad7f041f"
+    },
+    {
+      "repository": "boto/boto3",
+      "partition": "verification",
+      "survey_commit": "d2937da5351e7da82f983c2c572ba35615746b62"
+    },
+    {
+      "repository": "boto/botocore",
+      "partition": "stress",
+      "survey_commit": "10f305e588ce4ebe24dd0c8d8ff0e825782bbd85"
+    },
+    {
+      "repository": "dbt-labs/dbt-core",
+      "partition": "verification",
+      "survey_commit": "e308781defb22d4ef7c68733985e3c741dc64038"
+    },
+    {
+      "repository": "frappe/frappe",
+      "partition": "stress",
+      "survey_commit": "e6b2dae094582118fbb452ba678bb47e38043065"
+    },
+    {
+      "repository": "home-assistant/core",
+      "partition": "stress",
+      "survey_commit": "f3c69980ed65d191414e386aaca03ff89a1441a9"
+    },
+    {
+      "repository": "fivetran/great_expectations",
+      "partition": "verification",
+      "survey_commit": "1b9d139ce4f92932f21b1291ebc5ca336e7d2def"
+    },
+    {
+      "repository": "mlflow/mlflow",
+      "partition": "stress",
+      "survey_commit": "14414ab000889614875b07d970af95093c12ff8a"
+    },
+    {
+      "repository": "ray-project/ray",
+      "partition": "stress",
+      "survey_commit": "338e9ac31567cc7686a5204b84f4d1d237e963cb"
+    },
+    {
+      "repository": "python-poetry/poetry",
+      "partition": "verification",
+      "survey_commit": "f46702336862f30050d5c641d5ed6f7568ded793"
+    },
+    {
+      "repository": "pydantic/pydantic",
+      "partition": "stress",
+      "survey_commit": "60a3c5938aa64c527fde2fb102426de7d800146d"
+    },
+    {
+      "repository": "pytest-dev/pytest",
+      "partition": "verification",
+      "survey_commit": "67a174fcee355334c53588be2eeba8df702477e9"
+    }
+  ]
+}
