@@ -201,7 +201,7 @@ class _SafeDiffRedirects(urllib.request.HTTPRedirectHandler):
         safe_headers = {
             key: value
             for key, value in req.header_items()
-            if key.casefold() not in {"authorization", "cookie", "proxy-authorization"}
+            if key.casefold() not in {"authorization", "cookie", "host", "proxy-authorization"}
         }
         return urllib.request.Request(newurl, headers=safe_headers, method="GET")
 
