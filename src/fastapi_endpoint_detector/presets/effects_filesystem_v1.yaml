@@ -1,11 +1,11 @@
 schema_version: 1
 preset:
   id: stdlib-filesystem-effects
-  version: 1.0.0
+  version: 2.0.0
   provenance:
     kind: preset
     source: fastapi-endpoint-detector/effects_filesystem_v1.yaml
-    revision: "1"
+    revision: "2"
 contracts:
   - id: pathlib-read-text
     symbol: pathlib.Path.read_text
@@ -20,6 +20,36 @@ contracts:
     operation: read
     channel: filesystem
     resource: {kind: receiver}
+    package: {python: ">=3.10,<3.14"}
+  - id: io-text-read
+    symbol: _io._TextIOBase.read
+    invocation: instance_method
+    operation: read
+    channel: filesystem
+    resource: {kind: receiver}
+    package: {python: ">=3.10,<3.14"}
+  - id: io-text-write
+    symbol: _io._TextIOBase.write
+    invocation: instance_method
+    operation: write
+    channel: filesystem
+    resource: {kind: receiver}
+    value: {kind: argument, index: 0}
+    package: {python: ">=3.10,<3.14"}
+  - id: io-buffered-read
+    symbol: _io._BufferedIOBase.read
+    invocation: instance_method
+    operation: read
+    channel: filesystem
+    resource: {kind: receiver}
+    package: {python: ">=3.10,<3.14"}
+  - id: io-buffered-write
+    symbol: _io.BufferedWriter.write
+    invocation: instance_method
+    operation: write
+    channel: filesystem
+    resource: {kind: receiver}
+    value: {kind: argument, index: 0}
     package: {python: ">=3.10,<3.14"}
   - id: pathlib-write-text
     symbol: pathlib.Path.write_text

@@ -112,12 +112,14 @@ def test_filesystem_preset_matches_exact_sink_through_wrapper(tmp_path: Path) ->
     assert [(item["canonical_symbol"], item["contract_id"]) for item in matches] == [
         ("pathlib.Path.write_text", "pathlib-write-text")
     ]
-    assert matches[0]["resource_identity"] == {
+    expected_hash = f"sha256:{hashlib.sha256(b'result.txt').hexdigest()}"
+    expected_identity = {
         "schema_version": 1,
-        "status": "unavailable",
-        "value_hashes": [],
-        "reason_code": "receiver_origin_unavailable",
+        "status": "exact",
+        "value_hashes": [expected_hash],
     }
+    assert matches[0]["receiver_origin"] == expected_identity
+    assert matches[0]["resource_identity"] == expected_identity
 
 
 def test_audit_effect_contracts_json_is_separate_from_impact_results(tmp_path: Path) -> None:
@@ -226,7 +228,7 @@ def test_audit_loads_configured_effect_preset(tmp_path: Path) -> None:
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
-    assert data["summary"]["contracts"] == 4
+    assert data["summary"]["contracts"] == 8
     assert data["provenance"]["preset_hash"].startswith("sha256:")
 
 

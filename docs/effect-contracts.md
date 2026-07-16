@@ -42,7 +42,7 @@ Source spelling, receiver candidates, suffixes, bare method names, package metad
 
 Equivalent YAML/JSON/TOML key and contract ordering produces the same semantic hashes. Formatting changes can change only the raw hash.
 
-## Schema v1 and v2
+## Schema v1, v2, and v3
 
 ```yaml
 schema_version: 1
@@ -96,6 +96,11 @@ Declarations alone do not prove context-manager use, runtime transaction
 identity, a particular exit path, outcome success, or persistence. Schema v1
 semantics and hashes remain unchanged when both fields are absent.
 
+Schema v3 adds optional structured `http_method` metadata for exact
+`channel: outbound_http`, `operation: request` contracts. Only `GET`, `POST`,
+`PUT`, `PATCH`, `DELETE`, `HEAD`, and `OPTIONS` are accepted. A method is
+contract semantics, not runtime observation or a fallback match key.
+
 Selectors are deliberately bounded:
 
 - `none`
@@ -137,13 +142,22 @@ analysis:
 `effect_preset` and `effect_contracts` are mutually exclusive. Presets preserve the
 same exact `(canonical symbol, invocation)` matcher and evidence-only behavior as
 user documents. Version ranges are audited support metadata, not runtime package
-checks. Only direct positional/keyword finite strings currently produce hashed
-resource-identity evidence; receiver-based preset selectors remain unavailable.
-Dynamic boto3 clients without `mypy-boto3-s3`, generic HTTP `request`/`send`,
-mode-dependent `open()`, deferred cursors, Redis pipelines, and bare method names
-are intentionally absent.
+checks. Direct positional/keyword finite strings produce hashed resource
+identities. `filesystem-v1` 2.0 additionally traces an exact `pathlib.Path(...)`
+or `builtins.open(...)` constructor through one unconditional local assignment
+or active `with` binding into exact `_io`/`Path` instance methods. Reassignment,
+escaped handles, control flow, aliases, captured handles, composition, dynamic
+arguments, and unsupported factories fail closed.
 
-Each family has its own `1.0.0` identity and semantic hash. The v1 changelog and
+Dynamic boto3 clients without `mypy-boto3-s3`, generic HTTP `request`/`send`,
+mode-specific append classification, deferred cursors, Redis pipelines, and bare
+method names are intentionally absent.
+
+Each family has an independent identity and semantic hash. Filesystem receiver
+origins and exact HTTP verb tables are version `2.0.0`; the other non-SQL
+families remain `1.0.0`. HTTP contracts preserve `GET`, `POST`, `PUT`, `PATCH`,
+`DELETE`, `HEAD`, or `OPTIONS` as structured contract semantics while finite
+URLs remain hashed resource evidence. The v1 changelog and
 known exclusions are frozen in `benchmarks/results/effect-presets-v1/README.md`.
 Multiple presets are not silently merged because the current provenance model has
 one authoritative contract source per analysis.
@@ -181,10 +195,11 @@ Only already reachable candidates receive `contract_evidence`. This evidence pre
 - Ambiguous receivers and dynamic imports remain unresolved.
 - Dry-run matches and configured contract evidence never promote or filter candidates.
 - Declared operations and channels are not projected into behavioral effect fields without causal data flow.
-- Positional and keyword resource selectors can preserve exact or bounded finite string
-  identities as SHA-256 values; source literals are never emitted. These unsalted hashes
-  reveal equality and do not protect guessable low-entropy values. Dynamic arguments,
-  receiver origins, selector paths, `*args`, and `**kwargs` remain unavailable.
+- Positional, keyword, and narrowly source-proven filesystem receiver selectors can
+  preserve exact or bounded finite string identities as SHA-256 values; source literals
+  are never emitted. These unsalted hashes reveal equality and do not protect guessable
+  low-entropy values. General receiver origins, selector paths, `*args`, and `**kwargs`
+  remain unavailable.
 - Finite resource identities are evidence only and never create cross-endpoint fanout in
   this phase.
 - Project source paths are relative and deterministic across checkout relocation; contract files outside the app root use a content-addressed `content://sha256/...` source label.

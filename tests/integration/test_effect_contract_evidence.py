@@ -274,6 +274,53 @@ def test_cli_analyze_enables_contract_evidence_only_with_secure_ast(tmp_path: Pa
     )
 
 
+def test_filesystem_preset_attaches_open_handle_and_path_resource_origins(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from pathlib import Path\n"
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n\n"
+        "@app.get('/')\n"
+        "def handler() -> str:\n"
+        "    path = Path('/tmp/a')\n"
+        "    text = path.read_text()\n"
+        "    with open('/tmp/output', 'w') as handle:\n"
+        "        handle.write(text)\n"
+        "    return text\n",
+        encoding="utf-8",
+    )
+    diff = tmp_path / "change.diff"
+    diff.write_text(
+        "diff --git a/main.py b/main.py\n"
+        "--- a/main.py\n"
+        "+++ b/main.py\n"
+        "@@ -9,1 +9,1 @@\n"
+        "-    text = path.read_text()\n"
+        "+    text = path.read_text().strip()\n",
+        encoding="utf-8",
+    )
+
+    report = ChangeMapper(
+        app_path=tmp_path,
+        config=Config(analysis=AnalysisConfig(effect_preset="filesystem-v1")),
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+
+    audit = report.effect_contract_audit
+    assert audit is not None
+    matched = {item.contract_id: item for item in audit.occurrences if item.contract_id}
+    assert matched["pathlib-read-text"].resource_identity is not None
+    assert matched["pathlib-read-text"].resource_identity.status.value == "exact"
+    assert len(matched["pathlib-read-text"].resource_identity.value_hashes) == 1
+    assert matched["io-text-write"].resource_identity is not None
+    assert matched["io-text-write"].resource_identity.status.value == "exact"
+    serialized = report.model_dump_json()
+    assert "/tmp/a" not in serialized
+    assert "/tmp/output" not in serialized
+
+
 def test_contract_evidence_and_audit_render_in_all_formats(tmp_path: Path) -> None:
     contracts, diff = _project(tmp_path)
     report = ChangeMapper(
