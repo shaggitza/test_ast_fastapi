@@ -1,11 +1,11 @@
 schema_version: 2
 preset:
   id: sqlalchemy-transaction-effects
-  version: 2.0.0
+  version: 3.0.0
   provenance:
     kind: preset
     source: fastapi-endpoint-detector/effects_sqlalchemy_v1.yaml
-    revision: "2"
+    revision: "3"
 contracts:
   - id: sqlalchemy-session-add
     symbol: sqlalchemy.orm.session.Session.add
@@ -47,14 +47,14 @@ contracts:
     invocation: instance_method
     operation: begin
     channel: sql
-    behavior: {async_mode: sync, timing: context_enter, transaction_scope: transaction}
+    behavior: {async_mode: sync, timing: context_enter, transaction_scope: transaction, context_exit: transaction_commit_rollback}
     package: {distribution: sqlalchemy, version: ">=2,<3"}
   - id: sqlalchemy-session-begin-nested
     symbol: sqlalchemy.orm.session.Session.begin_nested
     invocation: instance_method
     operation: begin
     channel: sql
-    behavior: {async_mode: sync, timing: context_enter, transaction_scope: savepoint}
+    behavior: {async_mode: sync, timing: context_enter, transaction_scope: savepoint, context_exit: savepoint_release_rollback}
     package: {distribution: sqlalchemy, version: ">=2,<3"}
   - id: sqlalchemy-session-commit
     symbol: sqlalchemy.orm.session.Session.commit
@@ -110,14 +110,14 @@ contracts:
     invocation: instance_method
     operation: begin
     channel: sql
-    behavior: {async_mode: sync, timing: context_enter, transaction_scope: transaction}
+    behavior: {async_mode: sync, timing: context_enter, transaction_scope: transaction, context_exit: transaction_commit_rollback}
     package: {distribution: sqlalchemy, version: ">=2,<3"}
   - id: sqlalchemy-async-session-begin-nested
     symbol: sqlalchemy.ext.asyncio.session.AsyncSession.begin_nested
     invocation: instance_method
     operation: begin
     channel: sql
-    behavior: {async_mode: sync, timing: context_enter, transaction_scope: savepoint}
+    behavior: {async_mode: sync, timing: context_enter, transaction_scope: savepoint, context_exit: savepoint_release_rollback}
     package: {distribution: sqlalchemy, version: ">=2,<3"}
   - id: sqlalchemy-async-session-commit
     symbol: sqlalchemy.ext.asyncio.session.AsyncSession.commit

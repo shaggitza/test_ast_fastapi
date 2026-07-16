@@ -462,7 +462,7 @@ class AnalysisReport(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_sql_transaction_path_report(self) -> "AnalysisReport":
+    def validate_sql_transaction_path_report(self) -> "AnalysisReport":  # noqa: PLR0912
         path_report = self.sql_transaction_path_report
         if path_report is None:
             return self
@@ -526,6 +526,32 @@ class AnalysisReport(BaseModel):
             path_pairs.append(
                 (path.endpoint_id, path.stage_occurrence_id, path.boundary_occurrence_id)
             )
+        for context_path in path_report.context_paths:
+            evidence = evidence_by_endpoint.get(context_path.endpoint_id)
+            if evidence is None:
+                raise ValueError("SQL context path references unknown endpoint evidence")
+            begin_by_id = {item.occurrence_id: item for item in evidence.begin_scopes}
+            begin = begin_by_id.get(context_path.begin_occurrence_id)
+            if (
+                context_path.stage_occurrence_id not in evidence.stage_occurrence_ids
+                or begin is None
+                or begin.scope != context_path.begin_scope
+                or begin.context_exit != context_path.context_exit
+            ):
+                raise ValueError("SQL context path roles contradict transaction evidence")
+            if any(
+                occurrence_by_id.get(item) is None
+                or occurrence_by_id[item].file_path != context_path.file_path
+                or not any(
+                    endpoint.id == context_path.endpoint_id
+                    for endpoint in occurrence_by_id[item].endpoints
+                )
+                for item in (
+                    context_path.begin_occurrence_id,
+                    context_path.stage_occurrence_id,
+                )
+            ):
+                raise ValueError("SQL context path is absent from its source audit")
         diagnostic_pairs = [
             (item.endpoint_id, item.stage_occurrence_id, item.boundary_occurrence_id)
             for item in path_report.diagnostics

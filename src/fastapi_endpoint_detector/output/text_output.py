@@ -110,9 +110,10 @@ class TextFormatter(BaseFormatter):
             paths = report.sql_transaction_path_report
             console.print(
                 "  SQL Ordered Paths: "
-                f"{paths.summary.ordered_paths} proven / "
+                f"{paths.summary.ordered_paths} explicit boundaries / "
+                f"{paths.summary.context_manager_paths} context exits / "
                 f"{paths.summary.unresolved_pairs} unresolved pairs "
-                "(lexical only; persistence not established)"
+                "(lexical and conditional only; persistence not established)"
             )
         console.print()
 

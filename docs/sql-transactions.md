@@ -36,7 +36,8 @@ User-defined unit-of-work wrappers can opt into the same classification through
 effect-contract schema v2. Unclassified schema-v1 begin contracts remain
 explicitly `none`; method spelling never supplies scope.
 
-A second explicit option adds strictly lexical stage-to-boundary evidence:
+A second explicit option adds strictly lexical stage-to-boundary and
+context-manager exit evidence:
 
 ```yaml
 analysis:
@@ -56,19 +57,28 @@ savepoint scope. Calls under branches, loops, `try`,
 receivers, reversed boundaries, and reassigned receivers remain explicit
 unresolved diagnostics.
 
+An exact single-item `with session.begin():` or `async with
+session.begin():` containing a direct stage call records both conditional exits:
+normal transaction exit makes commit reachable while exceptional exit makes
+rollback reachable. For `begin_nested`, normal exit makes savepoint release
+reachable and exceptional exit makes rollback reachable. The analyzer never
+chooses between these outcomes. Captured `as` targets, multiple context items,
+helper-mediated stages, nested control flow, receiver changes, and contracts
+without exact context-exit semantics fail closed.
+
 The pair cap is checked atomically before source analysis. Exceeding it fails
 explicitly without a partial report. Receiver hashes expose no source value and
 prove spelling stability only—not alias, session, connection, or runtime
-transaction identity. Ordered commit retains the `not_established` persistence
-status because exceptions, runtime execution, commit success, and database
-durability are outside this evidence.
+transaction identity. Every explicit or context-managed outcome retains the
+`not_established` persistence status because runtime execution, outcome success,
+and database durability are outside this evidence.
 
 ## Conservative limits
 
-The current diagnostics intentionally do not infer branch ordering, exception
-paths, transaction identity, context-manager exit behavior, savepoint release,
-autoflush, implicit commit, database durability, or ORM object/resource
-identity. `execute()` and textual SQL are omitted because their read/write
+The current diagnostics intentionally do not infer branch ordering, which
+context-manager exit occurs, caught/suppressed exception behavior, transaction
+identity, savepoint success, autoflush, implicit commit, database durability,
+or ORM object/resource identity. `execute()` and textual SQL are omitted because their read/write
 semantics depend on the statement. Configured unit-of-work wrappers can be
 modeled only with exact user effect contracts; spelling-based `commit`,
 `rollback`, `flush`, or `add` matching is forbidden.

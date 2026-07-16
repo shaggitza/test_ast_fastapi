@@ -576,9 +576,10 @@ class HtmlFormatter(BaseFormatter):
             content_lines.append(
                 '<div class="summary-item"><span class="summary-label">'
                 "SQL Ordered Paths:</span> "
-                f"{paths.summary.ordered_paths} proven / "
+                f"{paths.summary.ordered_paths} explicit boundaries / "
+                f"{paths.summary.context_manager_paths} context exits / "
                 f"{paths.summary.unresolved_pairs} unresolved pairs; "
-                "lexical only, persistence not established</div>"
+                "lexical and conditional only, persistence not established</div>"
             )
         content_lines.append("</div>")
 
