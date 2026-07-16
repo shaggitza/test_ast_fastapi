@@ -1,7 +1,8 @@
-# Blind review/adjudication pilot v1 — preregistration
+# Blind review/adjudication pilot v1
 
-This directory freezes issue #147 protocol inputs. It does **not** claim source
-bindings, execution manifest, reviews, adjudications, metrics, or a passed gate.
+This directory freezes issue #147 protocol inputs and authenticated immutable
+source bindings for three pilot PRs. It does **not** claim an execution manifest,
+reviews, adjudications, metrics, or a passed gate.
 
 ## Fresh content-blind selection
 
@@ -65,11 +66,48 @@ policy bytes without reopening them; reproduces selection; verifies all frozen
 hashes; and proves zero evaluation/prior-label overlap. It performs no network
 access and never imports or executes upstream source.
 
-## Live phase still required
+## Live source-binding phase
 
-Supervisor must next prepare immutable source bindings, bare caches, isolated
-read-only packets, custom agent config, execution manifest, ledger, telemetry
-sampler, and metric reducer, all under frozen contracts. For each PR, Review A
-runs into unopened escrow; parent freezes Review B; then A is opened/validated
-and a fresh adjudicator runs. Only after all objective gates and a separate
-post-pilot scale approval may issues #149–#198 begin.
+The bounded collector authenticates this preregistration before requesting only
+the three frozen PR identities. It records initial and post-diff confirmation
+pull responses, merge-commit, baseline, target, and exact streamed diff
+provenance without cloning, extracting, importing, or executing source. The
+frozen protocol requires at least 21 actual HTTP transactions: five API
+responses plus the exact GitHub-to-patch redirect transaction pair per PR.
+Redirect bodies are bounded and counted, and any identity change during diff
+streaming fails closed:
+
+```bash
+GITHUB_TOKEN=... .venv/bin/python -m benchmarks.real_world.pilot_source_v2 \
+  --collect \
+  --output benchmarks/real_world/pilot_v2/source-bindings-v1.json
+```
+
+Publication is atomic and no-clobber. The completed binding contains all three
+records and consumed 21 actual HTTP transactions, 185,259 response bytes,
+11,792 diff bytes, and 12 conservatively rounded seconds. Exact frozen hashes:
+
+- source collector: `8d3c1d60d7030e027987d9203f021e664a23b221c8bbbe4721c19c237880866d`;
+- source bindings: `5a7b5b29bf23f6f0a03e048df56bef50e34bf8718cc4777617be6d9a87c97d9d`;
+- independent binding profile: `b04cdfc58d0326a58099d69ebc2710d53ff682a97f8bf925d039f13cab3eed47`.
+
+The independent `source-bindings-checksums-v1.json` authenticates exact
+preregistration-profile, collector, and source-binding bytes. Authentication
+runs offline:
+
+```bash
+.venv/bin/python -m benchmarks.real_world.pilot_source_v2 \
+  --validate benchmarks/real_world/pilot_v2/source-bindings-v1.json \
+  --checksums benchmarks/real_world/pilot_v2/source-bindings-checksums-v1.json
+```
+
+Neither file may claim reviews, adjudications, metrics, or a passed gate.
+
+## Remaining live phases
+
+Supervisor must next prepare bare caches, isolated read-only packets, custom
+agent config, execution manifest, ledger, telemetry sampler, and metric reducer,
+all under frozen contracts. For each PR, Review A runs into unopened escrow;
+parent freezes Review B; then A is opened/validated and a fresh adjudicator runs.
+Only after all objective gates and a separate post-pilot scale approval may
+issues #149–#198 begin.
