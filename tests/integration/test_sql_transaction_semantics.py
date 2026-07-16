@@ -125,7 +125,7 @@ def test_sql_diagnostics_separate_pending_and_reachable_boundaries(tmp_path: Pat
     assert configured.orphan_changes == baseline.orphan_changes
     report = configured.sql_transaction_report
     assert report is not None
-    assert report.schema_version == 2
+    assert report.schema_version == 3
     assert report.status == "diagnostic_only"
     assert report.summary.model_dump() == {
         "endpoints_with_staging": 4,
@@ -208,6 +208,11 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
         "    def add(self, value: str) -> None: pass\n"
         "    def commit(self) -> None: pass\n"
         "    def rollback(self) -> None: pass\n\n"
+        "class AsyncSession:\n"
+        "    def begin(self): return self\n"
+        "    async def __aenter__(self): return self\n"
+        "    async def __aexit__(self, exc_type, exc, tb): pass\n"
+        "    async def add(self, value: str) -> None: pass\n\n"
         "class Holder:\n"
         "    def __init__(self) -> None:\n"
         "        self.session = Session()\n\n"
@@ -225,6 +230,26 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
         "    session.begin_nested()\n"
         "    session.add('nested')\n"
         "    session.commit()\n\n"
+        "@app.post('/context')\n"
+        "def managed_context() -> None:\n"
+        "    session = Session()\n"
+        "    with session.begin():\n"
+        "        session.add('context')\n\n"
+        "@app.post('/async-context')\n"
+        "async def managed_async_context() -> None:\n"
+        "    session = AsyncSession()\n"
+        "    async with session.begin():\n"
+        "        await session.add('async-context')\n\n"
+        "@app.post('/savepoint-context')\n"
+        "def managed_savepoint() -> None:\n"
+        "    session = Session()\n"
+        "    with session.begin_nested():\n"
+        "        session.add('savepoint')\n\n"
+        "@app.post('/captured-context')\n"
+        "def captured_context() -> None:\n"
+        "    session = Session()\n"
+        "    with session.begin() as transaction:\n"
+        "        session.add('captured')\n\n"
         "@app.post('/attribute')\n"
         "def attribute_receiver() -> None:\n"
         "    holder = Holder()\n"
@@ -292,6 +317,11 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
                                         if operation == "begin_nested"
                                         else "transaction"
                                     ),
+                                    "context_exit": (
+                                        "savepoint_release_rollback"
+                                        if operation == "begin_nested"
+                                        else "transaction_commit_rollback"
+                                    ),
                                 }
                             }
                             if operation in {"begin", "begin_nested"}
@@ -299,6 +329,26 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
                         ),
                     }
                     for operation in ("add", "begin", "begin_nested", "commit", "rollback")
+                ]
+                + [
+                    {
+                        "id": f"async-{operation}",
+                        "symbol": f"{root.name}.main.AsyncSession.{operation}",
+                        "invocation": "instance_method",
+                        "operation": "stage" if operation == "add" else "begin",
+                        "channel": "sql",
+                        "behavior": (
+                            {"async_mode": "async", "timing": "await"}
+                            if operation == "add"
+                            else {
+                                "async_mode": "sync",
+                                "timing": "context_enter",
+                                "transaction_scope": "transaction",
+                                "context_exit": "transaction_commit_rollback",
+                            }
+                        ),
+                    }
+                    for operation in ("add", "begin")
                 ],
             },
             sort_keys=False,
@@ -349,11 +399,14 @@ def test_ordered_paths_require_same_scope_receiver_and_straight_line(tmp_path: P
     assert configured.orphan_changes == baseline.orphan_changes
     paths = configured.sql_transaction_path_report
     assert paths is not None
-    assert paths.schema_version == 2
+    assert paths.schema_version == 3
     assert paths.summary.model_dump() == {
         "ordered_paths": 3,
         "ordered_commits": 3,
         "ordered_rollbacks": 0,
+        "context_manager_paths": 3,
+        "context_transactions": 2,
+        "context_savepoints": 1,
         "unresolved_pairs": 5,
     }
     ordered = next(item for item in paths.ordered_paths if item.function_name == "ordered")
@@ -367,6 +420,20 @@ def test_ordered_paths_require_same_scope_receiver_and_straight_line(tmp_path: P
     nested = next(item for item in paths.ordered_paths if item.function_name == "nested")
     assert nested.begin_scope is not None and nested.begin_scope.value == "savepoint"
     assert ordered.persistence_status == "not_established"
+    assert {item.function_name for item in paths.context_paths} == {
+        "managed_async_context",
+        "managed_context",
+        "managed_savepoint",
+    }
+    managed = next(item for item in paths.context_paths if item.function_name == "managed_context")
+    assert managed.normal_exit == "commit_reachable"
+    assert managed.exceptional_exit == "rollback_reachable"
+    assert managed.status == "conditional_on_context_exit"
+    savepoint = next(
+        item for item in paths.context_paths if item.function_name == "managed_savepoint"
+    )
+    assert savepoint.normal_exit == "savepoint_release_reachable"
+    assert all(item.persistence_status == "not_established" for item in paths.context_paths)
     assert {item.reason_code for item in paths.diagnostics} == {
         "boundary_precedes_stage",
         "control_flow_unavailable",

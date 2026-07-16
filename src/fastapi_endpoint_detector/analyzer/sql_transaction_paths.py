@@ -9,10 +9,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from fastapi_endpoint_detector.models.sql_transaction import (
+    SQLTransactionContextPath,
     SQLTransactionOrderedPath,
     SQLTransactionPathDiagnostic,
     SQLTransactionPathError,
     SQLTransactionPathReport,
+    build_sql_transaction_context_path,
     build_sql_transaction_ordered_path,
     build_sql_transaction_path_report,
 )
@@ -25,7 +27,10 @@ if TYPE_CHECKING:
         EffectContractAudit,
         EffectContractAuditOccurrence,
     )
-    from fastapi_endpoint_detector.models.sql_transaction import SQLTransactionReport
+    from fastapi_endpoint_detector.models.sql_transaction import (
+        SQLTransactionBeginScopeEvidence,
+        SQLTransactionReport,
+    )
 
 _MAX_SOURCE_BYTES = 2 * 1024 * 1024
 _BOUNDARY = Literal["commit", "rollback"]
@@ -50,6 +55,8 @@ class _SourceCall:
     receiver_key: tuple[str, ...] | None
     receiver_hash: str | None
     function_body: tuple[ast.stmt, ...] | None
+    context_id: str | None
+    context_body_index: int | None
 
 
 class _CallIndexer(ast.NodeVisitor):
@@ -84,6 +91,8 @@ class _CallIndexer(ast.NodeVisitor):
             direct = _direct_statement_call(statement)
             if direct is not None:
                 self._record(direct, function_name, index, body)
+            elif isinstance(statement, (ast.With, ast.AsyncWith)):
+                self._record_context(statement, function_name, index, body)
         # Generic traversal records control-flow calls as non-straight-line and
         # gives nested definitions their own lexical identity.
         for statement in node.body:
@@ -97,6 +106,8 @@ class _CallIndexer(ast.NodeVisitor):
         statement_index: int | None,
         function_body: tuple[ast.stmt, ...] | None,
         *,
+        context_id: str | None = None,
+        context_body_index: int | None = None,
         overwrite: bool = True,
     ) -> None:
         function = call.func
@@ -122,9 +133,52 @@ class _CallIndexer(ast.NodeVisitor):
                 else None
             ),
             function_body=function_body,
+            context_id=context_id,
+            context_body_index=context_body_index,
         )
         if overwrite or key not in self.calls:
             self.calls[key] = record
+
+    def _record_context(
+        self,
+        statement: ast.With | ast.AsyncWith,
+        function_name: str,
+        statement_index: int,
+        function_body: tuple[ast.stmt, ...],
+    ) -> None:
+        if len(statement.items) != 1 or statement.items[0].optional_vars is not None:
+            return
+        begin = _unwrap_call(statement.items[0].context_expr)
+        if begin is None:
+            return
+        context_id = _semantic_hash(
+            {
+                "kind": "sql_context",
+                "file": self.file_path,
+                "function": function_name,
+                "line": statement.lineno,
+                "column": statement.col_offset,
+            }
+        )
+        self._record(
+            begin,
+            function_name,
+            statement_index,
+            function_body,
+            context_id=context_id,
+        )
+        context_body = tuple(statement.body)
+        for body_index, body_statement in enumerate(context_body):
+            direct = _direct_statement_call(body_statement)
+            if direct is not None:
+                self._record(
+                    direct,
+                    function_name,
+                    body_index,
+                    context_body,
+                    context_id=context_id,
+                    context_body_index=body_index,
+                )
 
 
 def _semantic_hash(payload: object) -> str:
@@ -327,7 +381,63 @@ def _nearest_begin(
     return max(eligible)[1] if eligible else None
 
 
-def build_sql_transaction_path_diagnostics(  # noqa: PLR0912
+def _context_manager_paths(
+    endpoint_id: str,
+    begin_scopes: tuple[SQLTransactionBeginScopeEvidence, ...],
+    stage_ids: tuple[str, ...],
+    contexts: dict[str, _SourceCall | None],
+) -> list[SQLTransactionContextPath]:
+    paths: list[SQLTransactionContextPath] = []
+    for begin_scope in begin_scopes:
+        if begin_scope.context_exit is None:
+            continue
+        begin = contexts.get(begin_scope.occurrence_id)
+        if begin is None or begin.context_id is None or begin.receiver_key is None:
+            continue
+        for stage_id in stage_ids:
+            stage = contexts.get(stage_id)
+            if (
+                stage is None
+                or stage.context_id != begin.context_id
+                or stage.context_body_index is None
+                or stage.file_path != begin.file_path
+                or stage.function_name is None
+                or stage.function_name != begin.function_name
+                or stage.receiver_key is None
+                or stage.receiver_key != begin.receiver_key
+                or stage.receiver_hash is None
+                or stage.function_body is None
+                or _receiver_reassigned(
+                    stage.function_body,
+                    -1,
+                    stage.context_body_index,
+                    stage.receiver_key,
+                )
+            ):
+                continue
+            paths.append(
+                build_sql_transaction_context_path(
+                    endpoint_id=endpoint_id,
+                    file_path=stage.file_path,
+                    function_name=stage.function_name,
+                    receiver_hash=stage.receiver_hash,
+                    begin_occurrence_id=begin_scope.occurrence_id,
+                    begin_scope=begin_scope.scope,
+                    context_exit=begin_scope.context_exit,
+                    stage_occurrence_id=stage_id,
+                    limitations=(
+                        "Normal exit makes commit or savepoint release reachable; exceptional "
+                        "exit makes rollback reachable. Which exit occurs is not established.",
+                        "Context-manager evidence proves exact lexical containment and stable "
+                        "receiver spelling, not runtime transaction identity or outcome success.",
+                        "Persistence remains not established and candidates are never promoted.",
+                    ),
+                )
+            )
+    return paths
+
+
+def build_sql_transaction_path_diagnostics(  # noqa: PLR0912, PLR0915
     source_root: Path,
     audit: EffectContractAudit,
     transaction_report: SQLTransactionReport,
@@ -341,7 +451,11 @@ def build_sql_transaction_path_diagnostics(  # noqa: PLR0912
     occurrence_by_id = {item.id: item for item in audit.occurrences}
     pair_count = sum(
         len(item.stage_occurrence_ids)
-        * (len(item.commit_occurrence_ids) + len(item.rollback_occurrence_ids))
+        * (
+            len(item.begin_occurrence_ids)
+            + len(item.commit_occurrence_ids)
+            + len(item.rollback_occurrence_ids)
+        )
         for item in transaction_report.endpoint_evidence
     )
     if pair_count > max_pairs:
@@ -366,6 +480,7 @@ def build_sql_transaction_path_diagnostics(  # noqa: PLR0912
         contexts[occurrence_id] = indexes.get(occurrence.file_path, {}).get(key) if key else None
 
     paths: list[SQLTransactionOrderedPath] = []
+    context_paths: list[SQLTransactionContextPath] = []
     diagnostics: list[SQLTransactionPathDiagnostic] = []
     limitations = (
         "Ordering proves only lexical source order in one direct function body; runtime "
@@ -374,6 +489,14 @@ def build_sql_transaction_path_diagnostics(  # noqa: PLR0912
         "Receiver equality is a stable finite source expression, not runtime object identity.",
     )
     for evidence in transaction_report.endpoint_evidence:
+        context_paths.extend(
+            _context_manager_paths(
+                evidence.endpoint_id,
+                evidence.begin_scopes,
+                evidence.stage_occurrence_ids,
+                contexts,
+            )
+        )
         begins = tuple(occurrence_by_id[item] for item in evidence.begin_occurrence_ids)
         begin_scope_by_id = {item.occurrence_id: item.scope for item in evidence.begin_scopes}
         boundaries: tuple[tuple[str, _BOUNDARY], ...] = tuple(
@@ -502,6 +625,7 @@ def build_sql_transaction_path_diagnostics(  # noqa: PLR0912
                     )
                 )
     unique_paths = {item.id: item for item in paths}
+    unique_context_paths = {item.id: item for item in context_paths}
     unique_diagnostics = {
         (item.endpoint_id, item.stage_occurrence_id, item.boundary_occurrence_id): item
         for item in diagnostics
@@ -511,5 +635,6 @@ def build_sql_transaction_path_diagnostics(  # noqa: PLR0912
         transaction_report.report_hash,
         tuple(unique_paths.values()),
         tuple(unique_diagnostics.values()),
+        context_paths=tuple(unique_context_paths.values()),
         max_pairs=max_pairs,
     )

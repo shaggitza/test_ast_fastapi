@@ -87,12 +87,14 @@ Supported operations:
 - `publish`, `consume`, `request`, `execute`
 - `stage`, `flush`, `begin`, `commit`, `rollback`
 
-Schema v2 adds optional `behavior.transaction_scope` for exact SQL `begin`
-contracts. Values are `transaction` and `savepoint`; they require `channel: sql`,
-`operation: begin`, and `timing: context_enter`. The declaration classifies the
-boundary only—it does not prove context-manager use, runtime transaction identity,
-commit, rollback, or persistence. Schema v1 semantics and hashes remain unchanged
-when the field is absent.
+Schema v2 adds optional `behavior.transaction_scope` and `behavior.context_exit`
+for exact SQL `begin` contracts. Scopes are `transaction` and `savepoint`.
+Context exits are `transaction_commit_rollback` and
+`savepoint_release_rollback`, and must match the corresponding scope. These
+fields require `channel: sql`, `operation: begin`, and `timing: context_enter`.
+Declarations alone do not prove context-manager use, runtime transaction
+identity, a particular exit path, outcome success, or persistence. Schema v1
+semantics and hashes remain unchanged when both fields are absent.
 
 Selectors are deliberately bounded:
 

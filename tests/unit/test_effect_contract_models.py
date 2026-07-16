@@ -167,6 +167,7 @@ def test_transaction_scope_requires_schema_v2_sql_begin_context() -> None:
             "async_mode": "sync",
             "timing": "context_enter",
             "transaction_scope": "savepoint",
+            "context_exit": "savepoint_release_rollback",
         },
     )
 
@@ -175,9 +176,16 @@ def test_transaction_scope_requires_schema_v2_sql_begin_context() -> None:
 
     data["schema_version"] = 2
     document = EffectContractDocument.model_validate(data)
-    scope = document.contracts[0].behavior.transaction_scope
-    assert scope is not None and scope.value == "savepoint"
+    behavior = document.contracts[0].behavior
+    assert behavior.transaction_scope is not None
+    assert behavior.transaction_scope.value == "savepoint"
+    assert behavior.context_exit is not None
+    assert behavior.context_exit.value == "savepoint_release_rollback"
 
+    contract["behavior"]["transaction_scope"] = "transaction"
+    with pytest.raises(ValidationError, match="must match"):
+        EffectContractDocument.model_validate(data)
+    contract["behavior"]["transaction_scope"] = "savepoint"
     contract["operation"] = "commit"
     with pytest.raises(ValidationError, match="SQL begin"):
         EffectContractDocument.model_validate(data)

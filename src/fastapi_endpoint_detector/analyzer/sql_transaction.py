@@ -52,6 +52,7 @@ def build_sql_transaction_diagnostics(
                     occurrence_id=occurrence.id,
                     scope=contract.behavior.transaction_scope or TransactionScope.NONE,
                     timing=contract.behavior.timing,
+                    context_exit=contract.behavior.context_exit,
                 )
 
     evidence = []

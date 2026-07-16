@@ -3,13 +3,19 @@
 import pytest
 from pydantic import ValidationError
 
-from fastapi_endpoint_detector.models.effect_contract import EffectTiming, TransactionScope
+from fastapi_endpoint_detector.models.effect_contract import (
+    ContextExitSemantics,
+    EffectTiming,
+    TransactionScope,
+)
 from fastapi_endpoint_detector.models.sql_transaction import (
     SQLTransactionBeginScopeEvidence,
+    SQLTransactionContextPath,
     SQLTransactionEndpointEvidence,
     SQLTransactionOrderedPath,
     SQLTransactionOutcome,
     SQLTransactionPathReport,
+    build_sql_transaction_context_path,
     build_sql_transaction_ordered_path,
     build_sql_transaction_path_report,
     build_sql_transaction_report,
@@ -54,6 +60,7 @@ def test_begin_scope_records_are_exact_and_complete() -> None:
                 occurrence_id=_HASH_C,
                 scope=TransactionScope.SAVEPOINT,
                 timing=EffectTiming.CONTEXT_ENTER,
+                context_exit=ContextExitSemantics.SAVEPOINT_RELEASE_ROLLBACK,
             ),
         ),
         outcome=SQLTransactionOutcome.PENDING_PERSISTENCE,
@@ -83,6 +90,28 @@ def test_roles_and_outcomes_fail_closed() -> None:
             outcome=SQLTransactionOutcome.COMMIT_REACHABLE,
             limitations=("ordering unavailable",),
         )
+
+
+def test_context_paths_preserve_both_conditional_exit_outcomes() -> None:
+    path = build_sql_transaction_context_path(
+        endpoint_id=_HASH_A,
+        file_path="main.py",
+        function_name="handler",
+        receiver_hash=_HASH_B,
+        begin_occurrence_id=_HASH_C,
+        begin_scope=TransactionScope.TRANSACTION,
+        context_exit=ContextExitSemantics.TRANSACTION_COMMIT_ROLLBACK,
+        stage_occurrence_id=_HASH_D,
+        limitations=("conditional exit only",),
+    )
+
+    assert path.normal_exit == "commit_reachable"
+    assert path.exceptional_exit == "rollback_reachable"
+    assert path.persistence_status == "not_established"
+    payload = path.model_dump(mode="json")
+    payload["normal_exit"] = "savepoint_release_reachable"
+    with pytest.raises(ValidationError, match="declared scope"):
+        SQLTransactionContextPath.model_validate(payload)
 
 
 def test_ordered_paths_are_content_addressed_and_bounded() -> None:

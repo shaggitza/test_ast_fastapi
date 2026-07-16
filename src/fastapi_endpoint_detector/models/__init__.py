@@ -18,6 +18,7 @@ from fastapi_endpoint_detector.models.diff import (
 )
 from fastapi_endpoint_detector.models.effect_contract import (
     CallArgumentEvidence,
+    ContextExitSemantics,
     EffectContract,
     EffectContractDocument,
     EffectContractError,
@@ -78,6 +79,7 @@ from fastapi_endpoint_detector.models.resource_coupling import (
 )
 from fastapi_endpoint_detector.models.sql_transaction import (
     SQLTransactionBeginScopeEvidence,
+    SQLTransactionContextPath,
     SQLTransactionEndpointEvidence,
     SQLTransactionOrderedPath,
     SQLTransactionOutcome,
@@ -122,6 +124,7 @@ __all__ = [  # noqa: RUF022 - grouped by public model domain
     "ChangeType",
     # Effect contract models
     "CallArgumentEvidence",
+    "ContextExitSemantics",
     "EffectContract",
     "EffectContractDocument",
     "EffectContractError",
@@ -143,6 +146,7 @@ __all__ = [  # noqa: RUF022 - grouped by public model domain
     "load_resource_coupling",
     # SQL transaction evidence
     "SQLTransactionBeginScopeEvidence",
+    "SQLTransactionContextPath",
     "SQLTransactionEndpointEvidence",
     "SQLTransactionOrderedPath",
     "SQLTransactionOutcome",

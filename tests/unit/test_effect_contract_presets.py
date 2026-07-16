@@ -24,7 +24,7 @@ _EXPECTED_PRESET_HASHES = {
     "mongodb-v1": "sha256:7e0f41e452ac61b7340f02215963e8aa765333988b67d441b7aece9dfa53191c",
     "object-storage-v1": "sha256:53a918b63f7813f54a23b502c68dfea40246d2a8a465275fb221bce018420996",
     "redis-v1": "sha256:ce681490563300ce01dec68cd42af26c5fe8e06c7d5d45ae652dfce73c531ca2",
-    "sqlalchemy-v1": "sha256:a13d9a66eef904756f442cf7d1499072c37d262fba10b3c7ec314480ae66e493",
+    "sqlalchemy-v1": "sha256:132982ba61f04626df531dc80c71ce5d21c12ec583a932d21c220486785c8d04",
 }
 
 _EXPECTED_CONTRACT_IDS = {
@@ -81,8 +81,8 @@ def test_bundled_effect_presets_are_strict_versioned_snapshots(name: str) -> Non
     loaded = load_effect_preset(name)
 
     assert loaded.source_path == BUNDLED_EFFECT_PRESETS[name].resolve()
-    expected_version = "2.0.0" if name == "sqlalchemy-v1" else "1.0.0"
-    expected_revision = "2" if name == "sqlalchemy-v1" else "1"
+    expected_version = "3.0.0" if name == "sqlalchemy-v1" else "1.0.0"
+    expected_revision = "3" if name == "sqlalchemy-v1" else "1"
     assert loaded.document.preset.version == expected_version
     assert loaded.document.preset.provenance.kind == ProvenanceKind.PRESET
     assert loaded.document.preset.provenance.revision == expected_revision
@@ -127,6 +127,21 @@ def test_sqlalchemy_preset_declares_exact_transaction_and_savepoint_scopes() -> 
         "sqlalchemy-session-begin-nested": "savepoint",
         "sqlalchemy-async-session-begin": "transaction",
         "sqlalchemy-async-session-begin-nested": "savepoint",
+    }
+    exits = {
+        contract.id: (
+            contract.behavior.context_exit.value
+            if contract.behavior.context_exit is not None
+            else None
+        )
+        for contract in loaded.document.contracts
+        if contract.operation.value == "begin"
+    }
+    assert exits == {
+        "sqlalchemy-session-begin": "transaction_commit_rollback",
+        "sqlalchemy-session-begin-nested": "savepoint_release_rollback",
+        "sqlalchemy-async-session-begin": "transaction_commit_rollback",
+        "sqlalchemy-async-session-begin-nested": "savepoint_release_rollback",
     }
 
 

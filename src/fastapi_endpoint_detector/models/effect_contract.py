@@ -123,6 +123,13 @@ class TransactionScope(str, Enum):
     SAVEPOINT = "savepoint"
 
 
+class ContextExitSemantics(str, Enum):
+    """Declared normal/exceptional outcome of an exact SQL context boundary."""
+
+    TRANSACTION_COMMIT_ROLLBACK = "transaction_commit_rollback"
+    SAVEPOINT_RELEASE_ROLLBACK = "savepoint_release_rollback"
+
+
 class ProvenanceKind(str, Enum):
     """Origin of a contract set."""
 
@@ -202,6 +209,7 @@ class EffectBehavior(_StrictModel):
     async_mode: AsyncMode = AsyncMode.EITHER
     timing: EffectTiming = EffectTiming.IMMEDIATE
     transaction_scope: TransactionScope | None = None
+    context_exit: ContextExitSemantics | None = None
 
     @model_validator(mode="after")
     def validate_async_timing(self) -> EffectBehavior:
@@ -245,7 +253,9 @@ class EffectContract(_StrictModel):
             and len(self.symbol.split(".")) < 3
         ):
             raise ValueError("method contracts require a class-qualified exact symbol")
-        if self.behavior.transaction_scope not in {None, TransactionScope.NONE} and (
+        scope = self.behavior.transaction_scope
+        context_exit = self.behavior.context_exit
+        if scope not in {None, TransactionScope.NONE} and (
             self.channel != EffectChannel.SQL
             or self.operation != EffectOperation.BEGIN
             or self.behavior.timing != EffectTiming.CONTEXT_ENTER
@@ -253,6 +263,14 @@ class EffectContract(_StrictModel):
             raise ValueError(
                 "transaction scopes require a SQL begin operation with context_enter timing"
             )
+        if context_exit is not None:
+            expected_scope = (
+                TransactionScope.TRANSACTION
+                if context_exit == ContextExitSemantics.TRANSACTION_COMMIT_ROLLBACK
+                else TransactionScope.SAVEPOINT
+            )
+            if scope != expected_scope:
+                raise ValueError("context-exit semantics must match the declared transaction scope")
         selectors = (self.resource, self.value)
         if self.invocation in {InvocationKind.FUNCTION, InvocationKind.CONSTRUCTOR} and any(
             selector is not None and selector.kind == SelectorKind.RECEIVER
@@ -279,9 +297,11 @@ class EffectContractDocument(_StrictModel):
     @model_validator(mode="after")
     def validate_contract_keys(self) -> EffectContractDocument:
         if self.schema_version < 2 and any(
-            contract.behavior.transaction_scope is not None for contract in self.contracts
+            contract.behavior.transaction_scope is not None
+            or contract.behavior.context_exit is not None
+            for contract in self.contracts
         ):
-            raise ValueError("transaction scopes require schema_version 2")
+            raise ValueError("transaction scopes and context exits require schema_version 2")
         ids: set[str] = set()
         keys: dict[tuple[str, InvocationKind], EffectContract] = {}
         for contract in self.contracts:
