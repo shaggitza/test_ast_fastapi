@@ -1005,7 +1005,18 @@ class GitHubTransport:
             raise CorpusV2Error("GitHub rate-limit wait exceeds aggregate wall budget") from exc
         return delay
 
-    def get_json(self, url: str) -> dict[str, Any]:
+    def _transient_delay(self, attempt: int) -> int | None:
+        if attempt >= self._max_retries_per_request:
+            return None
+        return min(1 << attempt, self._max_rate_limit_wait_seconds)
+
+    def _bounded_sleep(self, delay: int) -> None:
+        if time.monotonic() - self.budget.started + delay > self.budget.max_wall_seconds:
+            raise CorpusV2Error("retry wait exceeds aggregate wall budget")
+        with _wall_deadline(self.budget):
+            time.sleep(delay)
+
+    def get_json(self, url: str) -> dict[str, Any]:  # noqa: PLR0912
         parsed = urllib.parse.urlsplit(url)
         if (
             parsed.scheme != "https"
@@ -1047,12 +1058,16 @@ class GitHubTransport:
                 break
             except urllib.error.HTTPError as exc:
                 delay = self._rate_limit_delay(exc, attempt)
+                if delay is None and exc.code in {500, 502, 503, 504}:
+                    delay = self._transient_delay(attempt)
                 if delay is None:
                     raise CorpusV2Error(f"GitHub API request failed: {url}") from exc
-                with _wall_deadline(self.budget):
-                    time.sleep(delay)
-            except (urllib.error.URLError, TimeoutError) as exc:
-                raise CorpusV2Error(f"GitHub API request failed: {url}") from exc
+                self._bounded_sleep(delay)
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                delay = self._transient_delay(attempt)
+                if delay is None:
+                    raise CorpusV2Error(f"GitHub API request failed: {url}") from exc
+                self._bounded_sleep(delay)
         if raw is None:
             raise CorpusV2Error(f"GitHub API retries exhausted: {url}")
         self.budget.consume(len(raw))
@@ -1068,7 +1083,6 @@ class GitHubTransport:
         url = f"https://github.com/{repository}/pull/{number}.diff"
         handler = _SafeDiffRedirects(repository, number)
         opener = urllib.request.build_opener(handler)
-        self.budget.reserve()
         request = urllib.request.Request(
             url,
             headers={
@@ -1076,31 +1090,48 @@ class GitHubTransport:
                 "User-Agent": "fastapi-endpoint-detector-benchmark-v2/1",
             },
         )
-        digest = hashlib.sha256()
-        size = 0
-        try:
-            timeout = min(self._timeout, self.budget.remaining_wall_seconds())
-            with (
-                _wall_deadline(self.budget),
-                opener.open(request, timeout=timeout) as response,
-            ):
-                final_url = response.geturl()
-                handler._validate(final_url)
-                content_type = response.headers.get("Content-Type", "")
-                if not (
-                    content_type.startswith("text/plain") or content_type.startswith("text/x-diff")
+        for attempt in range(self._max_retries_per_request + 1):
+            self.budget.reserve()
+            digest = hashlib.sha256()
+            size = 0
+            try:
+                timeout = min(self._timeout, self.budget.remaining_wall_seconds())
+                with (
+                    _wall_deadline(self.budget),
+                    opener.open(request, timeout=timeout) as response,
                 ):
-                    raise CorpusV2Error("GitHub diff response has an invalid content type")
-                while chunk := response.read(64 * 1024):
-                    next_size = size + len(chunk)
-                    if next_size > self.budget.max_diff_bytes:
-                        raise CorpusV2Error("one diff exceeded its byte budget")
-                    self.budget.consume(len(chunk), diff=True)
-                    size = next_size
-                    digest.update(chunk)
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
-            raise CorpusV2Error(f"GitHub diff request failed: {url}") from exc
-        return f"sha256:{digest.hexdigest()}", size, final_url, content_type
+                    final_url = response.geturl()
+                    handler._validate(final_url)
+                    content_type = response.headers.get("Content-Type", "")
+                    if not (
+                        content_type.startswith("text/plain")
+                        or content_type.startswith("text/x-diff")
+                    ):
+                        raise CorpusV2Error("GitHub diff response has an invalid content type")
+                    while chunk := response.read(64 * 1024):
+                        next_size = size + len(chunk)
+                        if next_size > self.budget.max_diff_bytes:
+                            raise CorpusV2Error("one diff exceeded its byte budget")
+                        self.budget.consume(len(chunk), diff=True)
+                        size = next_size
+                        digest.update(chunk)
+                return f"sha256:{digest.hexdigest()}", size, final_url, content_type
+            except urllib.error.HTTPError as exc:
+                if exc.code in {429, 500, 502, 503, 504}:
+                    delay = self._rate_limit_delay(exc, attempt)
+                    if delay is None:
+                        delay = self._transient_delay(attempt)
+                else:
+                    delay = None
+                if delay is None:
+                    raise CorpusV2Error(f"GitHub diff request failed: {url}") from exc
+                self._bounded_sleep(delay)
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                delay = self._transient_delay(attempt)
+                if delay is None:
+                    raise CorpusV2Error(f"GitHub diff request failed: {url}") from exc
+                self._bounded_sleep(delay)
+        raise CorpusV2Error(f"GitHub diff retries exhausted: {url}")
 
     def repository_created_at(self, repository: str) -> datetime:
         quoted = urllib.parse.quote(repository, safe="/")
