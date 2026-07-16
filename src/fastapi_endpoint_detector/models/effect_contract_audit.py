@@ -103,6 +103,7 @@ class EffectContractAuditOccurrence(_StrictAuditModel):
     resolver_version: str = Field(min_length=1)
     receiver_candidates: tuple[str, ...] = ()
     reason_code: str | None = None
+    receiver_origin: ResourceIdentityEvidence | None = None
     resource_identity: ResourceIdentityEvidence | None = None
     contract_id: str | None = None
     contract_hash: str | None = None
@@ -136,6 +137,11 @@ class EffectContractAuditOccurrence(_StrictAuditModel):
                 raise ValueError("exact audit calls require canonical symbol and invocation")
         elif self.canonical_symbol is not None or self.invocation is not None:
             raise ValueError("non-exact audit calls forbid canonical symbol and invocation")
+        if self.receiver_origin is not None and (
+            self.resolver_status != CallResolutionStatus.EXACT
+            or self.invocation != InvocationKind.INSTANCE_METHOD
+        ):
+            raise ValueError("receiver origins require exact instance-method calls")
         if self.audit_status == AuditCallStatus.MATCHED:
             if self.resolver_status != CallResolutionStatus.EXACT or self.contract_id is None:
                 raise ValueError("matched calls require an exact resolver result and contract")
@@ -361,6 +367,11 @@ class EffectContractAudit(_StrictAuditModel):
                     "resolver_version": item.resolver_version,
                     "receiver_candidates": list(item.receiver_candidates),
                     "reason_code": item.reason_code,
+                    "receiver_origin": (
+                        item.receiver_origin.model_dump(mode="json")
+                        if item.receiver_origin is not None
+                        else None
+                    ),
                     "id": item.id,
                     "endpoint_ids": [endpoint.id for endpoint in item.endpoints],
                 }

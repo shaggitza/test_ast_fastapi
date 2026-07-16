@@ -122,6 +122,11 @@ def _call_payload(site: ResolvedCallSite, relative_path: str) -> dict[str, Any]:
         "receiver_candidates": sorted(set(site.receiver_candidates)),
         "reason_code": site.reason_code,
         "arguments": [item.model_dump(mode="json") for item in site.arguments],
+        "receiver_origin": (
+            site.receiver_origin.model_dump(mode="json")
+            if site.receiver_origin is not None
+            else None
+        ),
     }
 
 
@@ -141,10 +146,13 @@ def _resource_identity(
             reason_code="resource_selector_absent",
         )
     if selector.kind == SelectorKind.RECEIVER:
-        return ResourceIdentityEvidence(
-            status=FiniteValueStatus.UNAVAILABLE,
-            reason_code="receiver_origin_unavailable",
-        )
+        origin = site_payload["receiver_origin"]
+        if origin is None:
+            return ResourceIdentityEvidence(
+                status=FiniteValueStatus.UNAVAILABLE,
+                reason_code="receiver_origin_unavailable",
+            )
+        return ResourceIdentityEvidence.model_validate(origin)
     selected = None
     for argument in site_payload["arguments"]:
         if (
@@ -303,6 +311,11 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
             resolver_version=payload["resolver_version"],
             receiver_candidates=tuple(payload["receiver_candidates"]),
             reason_code=payload["reason_code"],
+            receiver_origin=(
+                ResourceIdentityEvidence.model_validate(payload["receiver_origin"])
+                if payload["receiver_origin"] is not None
+                else None
+            ),
             resource_identity=(
                 _resource_identity(contract, payload) if contract is not None else None
             ),

@@ -131,7 +131,7 @@ def test_semantic_change_changes_hash(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "mutation,match",
     [
-        (lambda data: data.update(schema_version=3), "schema_version"),
+        (lambda data: data.update(schema_version=4), "schema_version"),
         (lambda data: data.update(unknown=True), "Extra inputs"),
         (
             lambda data: data["contracts"][0].update(symbol="redis.client.Redis.*"),
@@ -273,6 +273,26 @@ def test_serialized_duplicate_keys_are_rejected(tmp_path: Path) -> None:
         load_effect_contracts(json_path)
 
 
+def test_http_method_requires_exact_outbound_request_semantics() -> None:
+    data = _document()
+    contracts = data["contracts"]
+    assert isinstance(contracts, list)
+    contract = contracts[0]
+    contract["http_method"] = "POST"
+
+    with pytest.raises(ValidationError, match="outbound_http request"):
+        EffectContractDocument.model_validate(data)
+
+    contract["operation"] = "request"
+    contract["channel"] = "outbound_http"
+    with pytest.raises(ValidationError, match="schema_version 3"):
+        EffectContractDocument.model_validate(data)
+
+    data["schema_version"] = 3
+    document = EffectContractDocument.model_validate(data)
+    assert document.contracts[0].http_method == "POST"
+
+
 def test_resource_identity_requires_canonical_finite_hashes() -> None:
     digest = "sha256:" + "a" * 64
     exact = ResourceIdentityEvidence(
@@ -304,6 +324,22 @@ def test_resolved_call_site_requires_exact_identity_and_columns() -> None:
     )
 
     assert site.status == CallResolutionStatus.EXACT
+    origin = ResourceIdentityEvidence(
+        status=FiniteValueStatus.EXACT,
+        value_hashes=(f"sha256:{'a' * 64}",),
+    )
+    origin_site = ResolvedCallSite.model_validate(
+        {**site.model_dump(mode="json"), "receiver_origin": origin.model_dump(mode="json")}
+    )
+    assert origin_site.receiver_origin == origin
+    with pytest.raises(ValidationError, match="receiver origins require"):
+        ResolvedCallSite.model_validate(
+            {
+                **site.model_dump(mode="json"),
+                "invocation": "function",
+                "receiver_origin": origin.model_dump(mode="json"),
+            }
+        )
     with pytest.raises(ValidationError, match="class-qualified"):
         ResolvedCallSite(
             file_path="service.py",

@@ -32,6 +32,7 @@ from fastapi_endpoint_detector.models.effect_contract import (
     FiniteValueStatus,
     InvocationKind,
     ResolvedCallSite,
+    ResourceIdentityEvidence,
 )
 from fastapi_endpoint_detector.models.endpoint import Endpoint
 from fastapi_endpoint_detector.models.surface_contract import CallbackRangeMode
@@ -371,7 +372,7 @@ class MypyAnalyzer:
     and extract precise file/line information for all references.
     """
 
-    CACHE_SCHEMA_VERSION = 15
+    CACHE_SCHEMA_VERSION = 16
     MAX_POINTS_TO_TARGETS = 8
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
@@ -2512,6 +2513,170 @@ class MypyAnalyzer:
                 positional_index += 1
         return tuple(evidence)
 
+    @staticmethod
+    def _identity_from_argument(
+        call: Any,
+    ) -> ResourceIdentityEvidence:
+        """Use only the first finite positional argument as a constructor resource."""
+        arguments = MypyAnalyzer._call_argument_evidence(call)
+        selected = next((item for item in arguments if item.positional_index == 0), None)
+        if selected is None:
+            return ResourceIdentityEvidence(
+                status=FiniteValueStatus.UNAVAILABLE,
+                reason_code="origin_argument_absent",
+            )
+        return ResourceIdentityEvidence(
+            status=selected.status,
+            value_hashes=selected.value_hashes,
+            reason_code=selected.reason_code,
+        )
+
+    def _enclosing_function(self, current_file: str, line: int) -> Any | None:
+        """Find one exact top-level or class function containing a source line."""
+        from mypy.nodes import ClassDef, Decorator, FuncDef
+
+        modules = self._modules_by_canonical_path.get(str(Path(current_file).resolve()), ())
+        candidates: list[Any] = []
+        for module in modules:
+            tree = self._trees.get(module)
+            if tree is None:
+                continue
+            definitions = list(tree.defs)
+            for definition in definitions:
+                nested = definition.defs.body if isinstance(definition, ClassDef) else ()
+                for item in (definition, *nested):
+                    function = item.func if isinstance(item, Decorator) else item
+                    if not isinstance(function, FuncDef):
+                        continue
+                    start, end = self._get_func_lines(function)
+                    if start <= line <= end:
+                        candidates.append(function)
+        unique = {id(item): item for item in candidates}
+        return next(iter(unique.values())) if len(unique) == 1 else None
+
+    @staticmethod
+    def _origin_call_for_receiver(
+        receiver: Any,
+        function: Any,
+        target_line: int,
+    ) -> tuple[Any | None, str | None]:
+        """Trace one local receiver through unconditional assignment or with binding."""
+        from mypy.nodes import (
+            AssignmentStmt,
+            CallExpr,
+            ForStmt,
+            IfStmt,
+            MatchStmt,
+            NameExpr,
+            OperatorAssignmentStmt,
+            TryStmt,
+            WhileStmt,
+            WithStmt,
+        )
+
+        if isinstance(receiver, CallExpr):
+            return receiver, None
+        if not isinstance(receiver, NameExpr) or receiver.node is None:
+            return None, "receiver_expression_unavailable"
+        variable = receiver.node
+        origin: Any | None = None
+
+        def assign(candidate: Any) -> bool:
+            nonlocal origin
+            if origin is not None or not isinstance(candidate, CallExpr):
+                return False
+            origin = candidate
+            return True
+
+        def scan(block: Any, depth: int = 0) -> str | None:
+            for statement in block.body:
+                statement_line = getattr(statement, "line", -1)
+                statement_end = getattr(statement, "end_line", statement_line) or statement_line
+                if statement_line > target_line:
+                    break
+                if isinstance(statement, AssignmentStmt) and statement_line < target_line:
+                    if any(
+                        isinstance(target, NameExpr) and target.node is variable
+                        for target in statement.lvalues
+                    ) and not assign(statement.rvalue):
+                        return "receiver_reassigned"
+                    continue
+                if (
+                    isinstance(statement, OperatorAssignmentStmt)
+                    and statement_line < target_line
+                    and isinstance(statement.lvalue, NameExpr)
+                    and statement.lvalue.node is variable
+                ):
+                    return "receiver_reassigned"
+                if isinstance(statement, WithStmt):
+                    contains_target = statement_line <= target_line <= statement_end
+                    if contains_target and (len(statement.expr) != 1 or depth > 0):
+                        return "receiver_context_unavailable"
+                    matched = False
+                    for expression, target in zip(statement.expr, statement.target, strict=True):
+                        if isinstance(target, NameExpr) and target.node is variable:
+                            matched = True
+                            if not contains_target or not assign(expression):
+                                return "receiver_context_unavailable"
+                    if contains_target:
+                        nested_reason = scan(statement.body, depth + 1)
+                        return nested_reason
+                    if matched:
+                        return "receiver_context_escaped"
+                    continue
+                if isinstance(statement, (IfStmt, ForStmt, WhileStmt, TryStmt, MatchStmt)):
+                    if statement_line <= target_line:
+                        return "receiver_control_flow_unavailable"
+            return None
+
+        reason = scan(function.body)
+        if reason is not None:
+            return None, reason
+        if origin is None:
+            return None, "receiver_origin_unavailable"
+        return origin, None
+
+    def _receiver_origin_identity(
+        self,
+        callee: Any,
+        current_file: str,
+        import_map: dict[str, str],
+        line: int,
+    ) -> ResourceIdentityEvidence:
+        """Resolve finite Path/open receiver resources without spelling fallback."""
+        from mypy.nodes import MemberExpr
+
+        if not isinstance(callee, MemberExpr):
+            return ResourceIdentityEvidence(
+                status=FiniteValueStatus.UNAVAILABLE,
+                reason_code="receiver_expression_unavailable",
+            )
+        function = self._enclosing_function(current_file, line)
+        if function is None:
+            return ResourceIdentityEvidence(
+                status=FiniteValueStatus.UNAVAILABLE,
+                reason_code="receiver_scope_unavailable",
+            )
+        origin, reason = self._origin_call_for_receiver(callee.expr, function, line)
+        if origin is None:
+            return ResourceIdentityEvidence(
+                status=FiniteValueStatus.UNAVAILABLE,
+                reason_code=reason or "receiver_origin_unavailable",
+            )
+        origin_site = self._resolved_call_site(origin, current_file, import_map)
+        if origin_site is None or (
+            origin_site.canonical_symbol,
+            origin_site.invocation,
+        ) not in {
+            ("builtins.open", InvocationKind.FUNCTION),
+            ("pathlib.Path", InvocationKind.CONSTRUCTOR),
+        }:
+            return ResourceIdentityEvidence(
+                status=FiniteValueStatus.UNAVAILABLE,
+                reason_code="receiver_origin_unsupported",
+            )
+        return self._identity_from_argument(origin)
+
     def _resolved_call_site_uncached(
         self,
         call: Any,
@@ -2590,6 +2755,11 @@ class MypyAnalyzer:
             else:
                 reason_code = "unresolved_super_dispatch"
         resolver_version = self._resolver_version
+        receiver_origin = (
+            self._receiver_origin_identity(callee, current_file, import_map, line)
+            if status == CallResolutionStatus.EXACT and invocation == InvocationKind.INSTANCE_METHOD
+            else None
+        )
         try:
             return ResolvedCallSite(
                 file_path=str(Path(current_file).resolve()),
@@ -2606,6 +2776,7 @@ class MypyAnalyzer:
                 receiver_candidates=receiver_candidates,
                 reason_code=reason_code,
                 arguments=self._call_argument_evidence(call),
+                receiver_origin=receiver_origin,
             )
         except ValueError:
             return ResolvedCallSite(

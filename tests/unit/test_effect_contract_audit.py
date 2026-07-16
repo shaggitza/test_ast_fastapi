@@ -9,8 +9,10 @@ from pydantic import ValidationError
 from fastapi_endpoint_detector.analyzer.effect_contract_auditor import audit_effect_contracts
 from fastapi_endpoint_detector.models.effect_contract import (
     CallResolutionStatus,
+    FiniteValueStatus,
     InvocationKind,
     ResolvedCallSite,
+    ResourceIdentityEvidence,
     load_effect_contracts,
 )
 from fastapi_endpoint_detector.models.effect_contract_audit import (
@@ -419,6 +421,66 @@ def test_external_contract_source_uses_relocation_stable_content_identity(
         loaded=load_effect_contracts(renamed),
     )
     assert reports[0].model_dump(mode="json") == renamed_report.model_dump(mode="json")
+
+
+def test_receiver_selector_uses_only_source_proven_finite_origin(tmp_path: Path) -> None:
+    contracts = tmp_path / "receiver-effects.yaml"
+    contracts.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "preset": {
+                    "id": "receiver-audit",
+                    "version": "1.0.0",
+                    "provenance": {"kind": "user", "source": "receiver-effects.yaml"},
+                },
+                "contracts": [
+                    {
+                        "id": "path-read",
+                        "symbol": "pathlib.Path.read_text",
+                        "invocation": "instance_method",
+                        "operation": "read",
+                        "channel": "filesystem",
+                        "resource": {"kind": "receiver"},
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    endpoint = _endpoint(tmp_path, "handler")
+    resource_hash = f"sha256:{'a' * 64}"
+    site = _site(
+        tmp_path,
+        column=2,
+        symbol="pathlib.Path.read_text",
+        invocation=InvocationKind.INSTANCE_METHOD,
+        spelling="path.read_text",
+    ).model_copy(
+        update={
+            "receiver_origin": ResourceIdentityEvidence(
+                status=FiniteValueStatus.EXACT,
+                value_hashes=(resource_hash,),
+            )
+        }
+    )
+
+    audit = _audit(
+        tmp_path,
+        [(endpoint, [site])],
+        loaded=load_effect_contracts(contracts),
+    )
+
+    identity = audit.occurrences[0].resource_identity
+    assert identity is not None
+    assert identity.status == FiniteValueStatus.EXACT
+    assert identity.value_hashes == (resource_hash,)
+    assert identity.reason_code is None
+    payload = audit.model_dump(mode="json")
+    payload["occurrences"][0]["receiver_origin"]["value_hashes"] = [f"sha256:{'b' * 64}"]
+    with pytest.raises(ValidationError, match="occurrence corpus hash"):
+        type(audit).model_validate(payload)
 
 
 def test_package_applicability_is_reported_but_not_used_for_matching(tmp_path: Path) -> None:

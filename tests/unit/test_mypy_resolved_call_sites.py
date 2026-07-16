@@ -129,6 +129,102 @@ def test_captures_hashed_finite_string_arguments_without_exposing_literals(
     assert "orders" not in arguments[0].model_dump_json()
 
 
+def test_captures_exact_path_and_open_handle_receiver_origins(tmp_path: Path) -> None:
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from pathlib import Path\n\n"
+        "def handler(flag: bool, value: str) -> str:\n"
+        "    path = Path('/tmp/a' if flag else '/tmp/b')\n"
+        "    text = path.read_text()\n"
+        "    with open('/tmp/out', 'w') as handle:\n"
+        "        handle.write(value)\n"
+        "    direct = open('/tmp/input', 'r')\n"
+        "    return text + direct.read()\n",
+        encoding="utf-8",
+    )
+
+    sites = MypyAnalyzer(tmp_path).analyze_endpoint(_endpoint(main, line=3)).resolved_call_sites
+
+    def digest(value: str) -> str:
+        return f"sha256:{hashlib.sha256(value.encode()).hexdigest()}"
+
+    path_read = _site_by_spelling(sites, "path.read_text")[0]
+    handle_write = _site_by_spelling(sites, "handle.write")[0]
+    direct_read = _site_by_spelling(sites, "direct.read")[0]
+    assert path_read.receiver_origin is not None
+    assert path_read.receiver_origin.status == FiniteValueStatus.FINITE
+    assert path_read.receiver_origin.value_hashes == tuple(
+        sorted((digest("/tmp/a"), digest("/tmp/b")))
+    )
+    assert handle_write.receiver_origin is not None
+    assert handle_write.receiver_origin.status == FiniteValueStatus.EXACT
+    assert handle_write.receiver_origin.value_hashes == (digest("/tmp/out"),)
+    assert direct_read.receiver_origin is not None
+    assert direct_read.receiver_origin.value_hashes == (digest("/tmp/input"),)
+    serialized = path_read.model_dump_json()
+    assert "/tmp/a" not in serialized
+    assert "/tmp/b" not in serialized
+
+
+def test_receiver_origins_fail_closed_on_reassignment_and_control_flow(tmp_path: Path) -> None:
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from pathlib import Path\n\n"
+        "def handler(flag: bool) -> str:\n"
+        "    path = Path('/tmp/a')\n"
+        "    path = Path('/tmp/b')\n"
+        "    first = path.read_text()\n"
+        "    augmented = Path('/tmp/e')\n"
+        "    augmented /= 'child'\n"
+        "    third = augmented.read_text()\n"
+        "    other = Path('/tmp/c')\n"
+        "    if flag:\n"
+        "        other = Path('/tmp/d')\n"
+        "    return first + third + other.read_text()\n",
+        encoding="utf-8",
+    )
+
+    sites = MypyAnalyzer(tmp_path).analyze_endpoint(_endpoint(main, line=3)).resolved_call_sites
+    first = _site_by_spelling(sites, "path.read_text")[0]
+    other = _site_by_spelling(sites, "other.read_text")[0]
+    augmented = _site_by_spelling(sites, "augmented.read_text")[0]
+
+    assert first.receiver_origin is not None
+    assert first.receiver_origin.status == FiniteValueStatus.UNAVAILABLE
+    assert first.receiver_origin.reason_code == "receiver_reassigned"
+    assert other.receiver_origin is not None
+    assert other.receiver_origin.status == FiniteValueStatus.UNAVAILABLE
+    assert other.receiver_origin.reason_code == "receiver_control_flow_unavailable"
+    assert augmented.receiver_origin is not None
+    assert augmented.receiver_origin.status == FiniteValueStatus.UNAVAILABLE
+    assert augmented.receiver_origin.reason_code == "receiver_reassigned"
+
+
+def test_receiver_origins_fail_closed_for_multiple_and_nested_contexts(tmp_path: Path) -> None:
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def handler() -> str:\n"
+        "    with open('/tmp/a') as first, open('/tmp/b') as second:\n"
+        "        left = first.read()\n"
+        "    with open('/tmp/c') as outer:\n"
+        "        with open('/tmp/d') as inner:\n"
+        "            right = inner.read()\n"
+        "    return left + right\n",
+        encoding="utf-8",
+    )
+
+    sites = MypyAnalyzer(tmp_path).analyze_endpoint(_endpoint(main, line=1)).resolved_call_sites
+    first = _site_by_spelling(sites, "first.read")[0]
+    inner = _site_by_spelling(sites, "inner.read")[0]
+
+    assert first.receiver_origin is not None
+    assert first.receiver_origin.status == FiniteValueStatus.UNAVAILABLE
+    assert first.receiver_origin.reason_code == "receiver_context_unavailable"
+    assert inner.receiver_origin is not None
+    assert inner.receiver_origin.status == FiniteValueStatus.UNAVAILABLE
+    assert inner.receiver_origin.reason_code == "receiver_context_unavailable"
+
+
 def test_captures_module_qualified_functions_constructors_and_methods(tmp_path: Path) -> None:
     (tmp_path / "helpers.py").write_text(
         "def emit() -> int:\n    return 1\n\n"

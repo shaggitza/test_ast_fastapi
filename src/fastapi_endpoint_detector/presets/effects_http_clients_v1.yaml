@@ -1,11 +1,11 @@
-schema_version: 1
+schema_version: 3
 preset:
   id: python-http-client-effects
-  version: 1.0.0
+  version: 2.0.0
   provenance:
     kind: preset
     source: fastapi-endpoint-detector/effects_http_clients_v1.yaml
-    revision: "1"
+    revision: "2"
 contracts:
   - id: requests-session-get
     symbol: requests.sessions.Session.get
@@ -13,34 +13,238 @@ contracts:
     operation: request
     channel: outbound_http
     resource: {kind: argument, index: 0}
-    package: {distribution: requests, version: ">=2.31,<3"}
+    http_method: GET
+    package: &requests {distribution: requests, version: ">=2.31,<3"}
   - id: requests-session-post
     symbol: requests.sessions.Session.post
     invocation: instance_method
     operation: request
     channel: outbound_http
     resource: {kind: argument, index: 0}
-    package: {distribution: requests, version: ">=2.31,<3"}
+    http_method: POST
+    package: *requests
+  - id: requests-session-put
+    symbol: requests.sessions.Session.put
+    invocation: instance_method
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: PUT
+    package: *requests
+  - id: requests-session-patch
+    symbol: requests.sessions.Session.patch
+    invocation: instance_method
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: PATCH
+    package: *requests
+  - id: requests-session-delete
+    symbol: requests.sessions.Session.delete
+    invocation: instance_method
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: DELETE
+    package: *requests
+  - id: requests-session-head
+    symbol: requests.sessions.Session.head
+    invocation: instance_method
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: HEAD
+    package: *requests
+  - id: requests-session-options
+    symbol: requests.sessions.Session.options
+    invocation: instance_method
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: OPTIONS
+    package: *requests
+
   - id: httpx-client-get
     symbol: httpx._client.Client.get
     invocation: instance_method
     operation: request
     channel: outbound_http
     resource: {kind: argument, index: 0}
-    package: {distribution: httpx, version: ">=0.27,<1"}
+    http_method: GET
+    package: &httpx {distribution: httpx, version: ">=0.27,<1"}
+  - id: httpx-client-post
+    symbol: httpx._client.Client.post
+    invocation: instance_method
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: POST
+    package: *httpx
+  - id: httpx-client-put
+    symbol: httpx._client.Client.put
+    invocation: instance_method
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: PUT
+    package: *httpx
+  - id: httpx-client-patch
+    symbol: httpx._client.Client.patch
+    invocation: instance_method
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: PATCH
+    package: *httpx
+  - id: httpx-client-delete
+    symbol: httpx._client.Client.delete
+    invocation: instance_method
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: DELETE
+    package: *httpx
+  - id: httpx-client-head
+    symbol: httpx._client.Client.head
+    invocation: instance_method
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: HEAD
+    package: *httpx
+  - id: httpx-client-options
+    symbol: httpx._client.Client.options
+    invocation: instance_method
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: OPTIONS
+    package: *httpx
+
   - id: httpx-async-client-get
     symbol: httpx._client.AsyncClient.get
     invocation: instance_method
     operation: request
     channel: outbound_http
     resource: {kind: argument, index: 0}
-    behavior: {async_mode: async, timing: await}
-    package: {distribution: httpx, version: ">=0.27,<1"}
+    http_method: GET
+    behavior: &httpx_async {async_mode: async, timing: await}
+    package: *httpx
+  - id: httpx-async-client-post
+    symbol: httpx._client.AsyncClient.post
+    invocation: instance_method
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: POST
+    behavior: *httpx_async
+    package: *httpx
+  - id: httpx-async-client-put
+    symbol: httpx._client.AsyncClient.put
+    invocation: instance_method
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: PUT
+    behavior: *httpx_async
+    package: *httpx
+  - id: httpx-async-client-patch
+    symbol: httpx._client.AsyncClient.patch
+    invocation: instance_method
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: PATCH
+    behavior: *httpx_async
+    package: *httpx
+  - id: httpx-async-client-delete
+    symbol: httpx._client.AsyncClient.delete
+    invocation: instance_method
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: DELETE
+    behavior: *httpx_async
+    package: *httpx
+  - id: httpx-async-client-head
+    symbol: httpx._client.AsyncClient.head
+    invocation: instance_method
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: HEAD
+    behavior: *httpx_async
+    package: *httpx
+  - id: httpx-async-client-options
+    symbol: httpx._client.AsyncClient.options
+    invocation: instance_method
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: OPTIONS
+    behavior: *httpx_async
+    package: *httpx
+
   - id: aiohttp-session-get
     symbol: aiohttp.client.ClientSession.get
     invocation: instance_method
     operation: request
     channel: outbound_http
     resource: {kind: argument, index: 0}
-    behavior: {async_mode: async, timing: context_enter}
-    package: {distribution: aiohttp, version: ">=3.9,<4"}
+    http_method: GET
+    behavior: &aiohttp_async {async_mode: async, timing: context_enter}
+    package: &aiohttp {distribution: aiohttp, version: ">=3.9,<4"}
+  - id: aiohttp-session-post
+    symbol: aiohttp.client.ClientSession.post
+    invocation: instance_method
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: POST
+    behavior: *aiohttp_async
+    package: *aiohttp
+  - id: aiohttp-session-put
+    symbol: aiohttp.client.ClientSession.put
+    invocation: instance_method
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: PUT
+    behavior: *aiohttp_async
+    package: *aiohttp
+  - id: aiohttp-session-patch
+    symbol: aiohttp.client.ClientSession.patch
+    invocation: instance_method
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: PATCH
+    behavior: *aiohttp_async
+    package: *aiohttp
+  - id: aiohttp-session-delete
+    symbol: aiohttp.client.ClientSession.delete
+    invocation: instance_method
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: DELETE
+    behavior: *aiohttp_async
+    package: *aiohttp
+  - id: aiohttp-session-head
+    symbol: aiohttp.client.ClientSession.head
+    invocation: instance_method
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: HEAD
+    behavior: *aiohttp_async
+    package: *aiohttp
+  - id: aiohttp-session-options
+    symbol: aiohttp.client.ClientSession.options
+    invocation: instance_method
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: OPTIONS
+    behavior: *aiohttp_async
+    package: *aiohttp

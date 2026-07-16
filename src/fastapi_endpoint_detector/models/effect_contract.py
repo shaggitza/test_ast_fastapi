@@ -231,6 +231,7 @@ class EffectContract(_StrictModel):
     behavior: EffectBehavior = Field(default_factory=EffectBehavior)
     package: PackageApplicability | None = None
     provenance: ContractProvenance | None = None
+    http_method: Literal["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] | None = None
 
     @field_validator("symbol")
     @classmethod
@@ -271,6 +272,10 @@ class EffectContract(_StrictModel):
             )
             if scope != expected_scope:
                 raise ValueError("context-exit semantics must match the declared transaction scope")
+        if self.http_method is not None and (
+            self.channel != EffectChannel.OUTBOUND_HTTP or self.operation != EffectOperation.REQUEST
+        ):
+            raise ValueError("HTTP methods require an outbound_http request contract")
         selectors = (self.resource, self.value)
         if self.invocation in {InvocationKind.FUNCTION, InvocationKind.CONSTRUCTOR} and any(
             selector is not None and selector.kind == SelectorKind.RECEIVER
@@ -283,7 +288,7 @@ class EffectContract(_StrictModel):
 class EffectContractDocument(_StrictModel):
     """Versioned root document for a deterministic contract set."""
 
-    schema_version: Literal[1, 2] = 1
+    schema_version: Literal[1, 2, 3] = 1
     preset: PresetMetadata
     contracts: tuple[EffectContract, ...] = Field(min_length=1)
 
@@ -291,7 +296,7 @@ class EffectContractDocument(_StrictModel):
     @classmethod
     def validate_schema_version_type(cls, value: object) -> object:
         if type(value) is not int:  # bool is intentionally excluded
-            raise ValueError("schema_version must be the integer 1 or 2")
+            raise ValueError("schema_version must be the integer 1, 2, or 3")
         return value
 
     @model_validator(mode="after")
@@ -302,6 +307,10 @@ class EffectContractDocument(_StrictModel):
             for contract in self.contracts
         ):
             raise ValueError("transaction scopes and context exits require schema_version 2")
+        if self.schema_version < 3 and any(
+            contract.http_method is not None for contract in self.contracts
+        ):
+            raise ValueError("structured HTTP methods require schema_version 3")
         ids: set[str] = set()
         keys: dict[tuple[str, InvocationKind], EffectContract] = {}
         for contract in self.contracts:
@@ -450,6 +459,7 @@ class ResolvedCallSite(_StrictModel):
     receiver_candidates: tuple[str, ...] = ()
     reason_code: str | None = None
     arguments: tuple[CallArgumentEvidence, ...] = Field(default=(), max_length=64)
+    receiver_origin: ResourceIdentityEvidence | None = None
 
     @field_validator("file_path", "source_spelling", "resolver", "resolver_version")
     @classmethod
@@ -495,6 +505,11 @@ class ResolvedCallSite(_StrictModel):
         keywords = [item.keyword for item in self.arguments if item.keyword is not None]
         if len(keywords) != len(set(keywords)):
             raise ValueError("call argument keywords must be unique")
+        if self.receiver_origin is not None and (
+            self.status != CallResolutionStatus.EXACT
+            or self.invocation != InvocationKind.INSTANCE_METHOD
+        ):
+            raise ValueError("receiver origins require an exact instance-method call")
         return self
 
 
