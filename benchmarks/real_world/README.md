@@ -50,7 +50,11 @@ validator preserves byte sentinels for every v1 frozen artifact:
 ```
 
 See `benchmarks/results/oss-expansion-50x50-v2/README.md` for the explicit live
-collection gate and non-claims.
+collection gate and non-claims. The strict, prediction-blind canonical review,
+adjudication, evidence-validation, and release foundation for v2 is documented
+in [`ground_truth_v2/README.md`](ground_truth_v2/README.md). It uses an explicit
+synthetic corpus only for offline tests; production initialization stays blocked
+until the authenticated live v2 lock exists.
 
 ## Execution-free route census
 
