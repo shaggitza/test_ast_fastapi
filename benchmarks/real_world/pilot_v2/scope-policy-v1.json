@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "id": "pilot-scope-policy-v1",
+  "scope_binding": {
+    "scope_id": "fastapi-adapter-v1",
+    "scope_version": 1,
+    "product": "fastapi-endpoint-detector",
+    "definition_sha256_source": "Exact SHA-256 of this scope-policy-v1.json byte stream authenticated by checksums-v1.json"
+  },
+  "truth_scope": "All source-established public entrypoints affected by a changed symbol, independent of analyzer capability or product support.",
+  "canonical_nonopaque_rule": "An included canonical entrypoint is source-established by validated evidence and is therefore non-opaque for this classification; unresolved or opaque behavior remains unknown/not_evaluable rather than an included canonical entrypoint.",
+  "entrypoint_kinds": [
+    "http",
+    "graphql",
+    "task",
+    "event",
+    "cli",
+    "cron",
+    "sdk",
+    "other"
+  ],
+  "classification_rule": "Every included canonical entrypoint decision receives exactly one ScopeMembership with the frozen scope_id, scope_version, product, and definition_sha256 equal to the authenticated checksums-v1.json hash for scope-policy-v1.json. A source-established canonical entrypoint with kind http is in_scope. Every other schema kind is out_of_scope. Scope never removes canonical truth.",
+  "in_scope_kinds": [
+    "http"
+  ],
+  "out_of_scope_kinds": [
+    "graphql",
+    "task",
+    "event",
+    "cli",
+    "cron",
+    "sdk",
+    "other"
+  ],
+  "terminal_states": [
+    "positive",
+    "negative_control",
+    "unknown",
+    "not_evaluable"
+  ],
+  "negative_rule": "Empty claims are not negative. A negative control requires a complete changed-symbol census, searched entrypoint families, and explicit limitations.",
+  "unknown_rule": "Dynamic, missing, ambiguous, opaque, or unevaluable behavior remains structured unknown/not_evaluable and is never guessed.",
+  "prediction_boundary": "Analyzer predictions, scores, route census, and vendor output are unavailable to selection, review, adjudication, and evaluability decisions."
+}

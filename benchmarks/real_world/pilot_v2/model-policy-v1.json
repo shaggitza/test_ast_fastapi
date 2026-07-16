@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "pilot-model-policy-v1",
+  "single_execution_profile": true,
+  "identity_freeze": "Before first live attempt, supervisor atomically freezes one exact provider, model, model version, client version, decoding configuration and SHA-256, pi-subagents 0.34.0 version, integer micro-USD-per-million-token pricing, three-PR integer micro-USD budget approval, and custom-agent config hash in the authenticated execution manifest.",
+  "fresh_context": "Review A and adjudication use a fresh custom agent per PR with inheritProjectContext false. Review B is independently written by the parent supervisor inside one exact, isolated supervisor-session interval before Review A escrow is opened.",
+  "review_b_measurement": "Each parent Review B interval has unique start/end event and message IDs. Exact session usage and tool events in the interval provide tokens/tool calls; exact interval bytes are hashed; wall, RSS, disk, bytes, retries/failure, and integer cost use telemetry-contract-v1. No unrelated work may occur inside the interval.",
+  "prediction_blind": true,
+  "training_or_memory_rule": "Do not solicit prior labels or benchmark knowledge; accidental recognition is an append-only custody incident, produces no schema artifact, and is no_go.",
+  "retry_rule": "At most one fresh-context retry for transport, malformed JSON, or tool failure; record every attempt; never retry for a preferred semantic answer.",
+  "required_execution_identity_fields": [
+    "provider",
+    "model",
+    "model_version",
+    "client_name",
+    "client_version",
+    "decoding_configuration_sha256",
+    "pi_subagents_version",
+    "pricing_micro_usd_per_million_tokens",
+    "custom_agent_config_sha256"
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "id": "blind-review-pilot-checksums-v1",
+  "files": {
+    "adjudication-prompt-v1.md": "sha256:f916b422c344fa2c5a941f442d52de407faf281b4f1a21e2765256d016d7d843",
+    "custody-contract-v1.json": "sha256:92d746b366f5cf6a7066ec5d8af98a6f147951681421c319b71067be3b9f59cc",
+    "execution-manifest-schema-v1.json": "sha256:338ccec8a2eba0fe7b838e7d97f5f4c796a74770059ee99a1cfac9936d74cabb",
+    "metrics-spec-v1.json": "sha256:9f8b98fe023aaca77b6bdaaccb8f6c64b052187eb255c9a6837d76fd1d99f017",
+    "model-policy-v1.json": "sha256:4f3d066f95e9c4eb9850f1b54d5c6617d42131bf9944935c83424300945c18d3",
+    "pilot-policy-v1.json": "sha256:7129a71a236f81a76f0febf5ea43beaaa7e08377f0538e48987f3f70e70d4b59",
+    "review-prompt-v1.md": "sha256:fb179126e2a5e7a2e2408385f01366e97e921df3a9c4c6350197c0ac1f3343c2",
+    "scope-policy-v1.json": "sha256:bd0bee2531070516ab1d7408f2d5dbbce0bc139a593d2ed4065fb3ac58111b48",
+    "source-policy-v1.json": "sha256:53f7ec3b6d0b9708354a4effefd61d02351fe730dbfdaf93c7ce5f99484e590e",
+    "telemetry-contract-v1.json": "sha256:d2d8ca5f478a9190e6df9461fa050a129d5a114fdc4de28e6dffb3460478d087",
+    "tool-policy-v1.json": "sha256:f80b0cf2bf26235896b2317226a0ac2ddd47f574bdd16dac7cd44bea86e30607"
+  }
+}

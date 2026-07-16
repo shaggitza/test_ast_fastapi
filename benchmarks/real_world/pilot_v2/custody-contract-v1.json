@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "pilot-custody-contract-v1",
+  "writer": "supervisor_only",
+  "storage": {
+    "format": "canonical_jsonl_utf8_lf",
+    "sort_keys": true,
+    "separators": [",", ":"],
+    "floats": "forbidden",
+    "publication": "atomic_no_clobber",
+    "append_only": true
+  },
+  "chain": {
+    "genesis_previous_event_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "event_sha256": "sha256(canonical event bytes excluding event_sha256)",
+    "previous_event_sha256": "exact prior event_sha256 for this repository/PR custody stream",
+    "required_input_hashes": true,
+    "required_output_hashes": true
+  },
+  "event_fields": [
+    "schema_version",
+    "repository",
+    "pr",
+    "sequence",
+    "event",
+    "occurred_at",
+    "supervisor_actor",
+    "attempt_id",
+    "input_sha256",
+    "output_sha256",
+    "transcript_sha256",
+    "telemetry_sha256",
+    "incident_kind",
+    "retry_of_attempt_id",
+    "previous_event_sha256",
+    "event_sha256"
+  ],
+  "required_events": [
+    "source_binding_frozen",
+    "review_a_started",
+    "review_b_frozen",
+    "review_a_escrow_frozen",
+    "review_a_first_opened",
+    "reviews_validated",
+    "adjudication_started",
+    "adjudication_frozen",
+    "terminal_imported"
+  ],
+  "escrow_order": [
+    "review_a_started",
+    "review_b_frozen",
+    "review_a_escrow_frozen",
+    "review_a_first_opened"
+  ],
+  "retry_rules": {
+    "every_attempt_recorded": true,
+    "retry_requires_retry_of_attempt_id": true,
+    "semantic_preference_retry_forbidden": true,
+    "incidents_are_append_only": true
+  },
+  "failure_rules": {
+    "prediction_or_prior_label_exposure": "no_go",
+    "review_a_opened_before_review_b_frozen": "no_go",
+    "hash_or_sequence_break": "no_go",
+    "child_write_or_child_custody_event": "no_go"
+  }
+}

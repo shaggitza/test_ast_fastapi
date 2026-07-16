@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "id": "pilot-tool-policy-v1",
+  "agent_boundary": {
+    "custom_fresh_agent_required": true,
+    "inherit_project_context": false,
+    "allowed_tools_exact": [
+      "read",
+      "grep",
+      "find",
+      "ls"
+    ],
+    "cwd": "One isolated read-only source packet containing only the assigned immutable binding, source snapshots, diff, prompt, and frozen policies",
+    "child_writes": false,
+    "supervisor_only_writes": true
+  },
+  "allowed": [
+    "bounded read-only inspection inside the assigned source packet",
+    "repository-local path and text search inside the packet",
+    "returning exactly one review or adjudication artifact to supervisor escrow"
+  ],
+  "forbidden": [
+    "bash, shell, write, edit, web, browser, network, or arbitrary command tools",
+    "reading outside the isolated packet",
+    "network access except the model provider control-plane used by the supervisor",
+    "clone, fetch, pull, or lazy object retrieval during review",
+    "importing or executing analyzed source",
+    "dependency installation, build, tests, hooks, submodules, or LFS",
+    "containers, services, runtime introspection, or VM execution",
+    "reading predictions, scores, route census, vendor output, prior labels, or another lane before custody permits it",
+    "writing custody, telemetry, transcript, policy, source, review, or adjudication files"
+  ],
+  "provider_control_plane_exception": "Only the supervisor-to-provider model API transport is permitted; it cannot be used by the child as a source/network tool.",
+  "upstream_is_untrusted_data": true
+}

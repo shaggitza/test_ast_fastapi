@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "id": "pilot-metrics-spec-v1",
+  "integer_arithmetic": {
+    "floats": "forbidden in source telemetry, execution manifest, and metric artifact",
+    "ceil_div": "ceil_div(a,b)=(a+b-1)//b for nonnegative integer a and positive integer b",
+    "reported_rates": "Report integer numerator and denominator plus null when denominator is zero; decimal display is derived presentation only."
+  },
+  "populations": {
+    "attempt": "One exact bounded lifecycle execution identified by attempt_id for one repository/PR/role. Failed and retried attempts remain separate attempts.",
+    "pr_role_stream": "All attempts for one exact repository/PR/role ordered by started_at, beginning at its first attempt and ending at successful artifact freeze or terminal allowed failure.",
+    "stream_wall_milliseconds": "completed_at of final stream attempt minus started_at of first stream attempt; includes retry gaps.",
+    "stream_tokens_bytes_tools_cost": "Integer sum across every attempt in the stream, including failed and retried attempts.",
+    "successful_role_populations": "Review A streams, Review B streams, and adjudication streams are reported separately; each expected denominator is 3.",
+    "pooled_review_population": "The six successful Review A and Review B streams only; adjudication is excluded."
+  },
+  "quantiles": {
+    "input": "Successful stream values in the named role population, or all six successful review streams only when explicitly named pooled_review.",
+    "median": "Sort ascending; odd n selects rank (n+1)//2; even n reports numerator=sum of ranks n//2 and n//2+1 with denominator=2, without float coercion.",
+    "p95": "Sort ascending and select one-indexed nearest rank ceil_div(95*n,100).",
+    "empty": "Report null with numerator 0 and denominator 0."
+  },
+  "failure_retry": {
+    "all_attempt_count": "Count every recorded attempt across all roles.",
+    "failed_attempt_count": "Attempts whose explicit success disposition is false.",
+    "retry_attempt_count": "Attempts with non-null retry_of_attempt_id.",
+    "required_pr_role_stream_count": 9,
+    "terminal_failed_stream_count": "Required PR-role streams with no successful allowed attempt.",
+    "failure_rate": "failed_attempt_count/all_attempt_count as numerator/denominator.",
+    "retry_rate": "retry_attempt_count/all_attempt_count as numerator/denominator.",
+    "terminal_failure_rate": "terminal_failed_stream_count/9 as numerator/denominator.",
+    "role_overhead_attempts_per_stream": "For each role, total attempt count for that role divided by 3; retain numerator/denominator for projection ceiling."
+  },
+  "agreement": {
+    "claim_set": "For each lane and PR, the set of exact (kind,public_id) for claims with recommendation include.",
+    "positive_claim_population": "PRs where union(A_claim_set,B_claim_set) is nonempty.",
+    "exact_set_match": "Count PRs in positive_claim_population where A_claim_set equals B_claim_set; report numerator and positive population denominator.",
+    "per_pr_jaccard": "For each PR in positive_claim_population, intersection_count=|A intersect B| and union_count=|A union B|; report each integer pair. For exact macro Jaccard let L be the least common multiple of all positive union_count values, macro_numerator=sum(intersection_count*(L//union_count)), and macro_denominator=L*positive_population_count; reduce by gcd. Presentation may derive a decimal from this exact rational but must not average rounded values.",
+    "zero_union": "Exclude zero-union PRs from Jaccard and exact-set-match positive population; report zero_union_count separately. Never coerce zero union to 1.",
+    "both_empty_agreement": "Count PRs where both exact include claim sets are empty divided by all 3 pilot PRs.",
+    "terminal_status_agreement": "Exact terminal_recommendation equality count divided by all 3 pilot PRs.",
+    "evaluability_agreement": "Equality of the boolean terminal_recommendation==not_evaluable divided by all 3 pilot PRs.",
+    "matching": "No alias, suffix, spelling, wildcard, or semantic normalization."
+  },
+  "projection_2500": {
+    "scope": "Operational non-statistical conservative projection with Review A, Review B, and terminal adjudication for every PR.",
+    "role_streams": "For each role exactly 2500 projected PR-role streams.",
+    "role_attempts": "ceil_div(2500*observed_role_attempt_count,3); total projected attempts is the sum across roles.",
+    "role_tokens": "ceil_div(2500*sum observed stream total tokens for role,3); sum roles for total.",
+    "role_bytes": "ceil_div(2500*sum observed stream input_bytes+output_bytes for role,3); sum roles for total.",
+    "role_serial_wall_milliseconds": "ceil_div(2500*sum observed stream wall_milliseconds for role,3); sum roles for total.",
+    "role_parallel_wall_milliseconds": "ceil_div(2500,approved_role_concurrency)*observed role p95 stream wall_milliseconds; roles execute sequentially in A then B then adjudication phases for conservative total, so sum roles.",
+    "role_cost_micro_usd": "ceil_div(2500*sum observed stream cost_micro_usd for role,3); sum roles for total.",
+    "attempt_cost_micro_usd": "ceil_div(input_tokens*input_micro_usd_per_million_tokens + cached_input_tokens*cached_input_micro_usd_per_million_tokens + output_tokens*output_micro_usd_per_million_tokens,1000000).",
+    "rounding": "Apply ceil_div once per role formula exactly as written, then integer-sum roles; do not round per token, byte, millisecond, or PR first."
+  },
+  "resource_and_concurrency": {
+    "host_inputs": "Execution manifest freezes available_ram_bytes, idle_supervisor_rss_bytes, provider_concurrency_cap, disk_free_bytes, immutable_cache_bytes, and policy role caps before pilot.",
+    "role_peak_rss": "Nearest-rank p95 of mandatory sampled_peak_process_tree_rss_bytes across all attempts for that role; it must be a positive integer, and zero or missing is no_go with no concurrency approval.",
+    "role_scratch_disk": "Maximum of 0 and disk_bytes_after-disk_bytes_before across all attempts for that role.",
+    "memory_cap": "When role_peak_rss is positive, floor((available_ram_bytes*70//100-idle_supervisor_rss_bytes)/role_peak_rss), with nonpositive numerator forcing 0; role_peak_rss zero or missing is no_go and memory_cap is null, never divided.",
+    "approved_role_concurrency": "max(1,min(policy_role_cap,provider_concurrency_cap,memory_cap)) only when memory_cap>=1 and every mandatory measurement exists; otherwise no_go and no concurrency approval.",
+    "projected_peak_ram_bytes": "idle_supervisor_rss_bytes + approved_role_concurrency*role_peak_rss, reported per role and maximum across sequential roles.",
+    "projected_disk_bytes": "immutable_cache_bytes + max over roles(approved_role_concurrency*role_scratch_disk) + ceil_div(2500*sum observed successful stream artifact+transcript+telemetry bytes across all roles,3).",
+    "disk_gate": "projected_disk_bytes must not exceed disk_free_bytes*70//100 and the frozen policy disk bound.",
+    "assumptions": "No shared-memory savings, phase overlap, cache compression, or provider batching is credited. All projections are operational and non-statistical."
+  },
+  "approval_boundary": {
+    "pre_pilot_budget": "Execution manifest freezes integer budget_micro_usd and explicit approval for only three PRs before any attempt.",
+    "post_pilot_scale": "Projected 2500-PR integer micro-USD spend, duration, tokens, bytes, concurrency, RAM, and disk require separate explicit supervisor approval; pre-pilot approval cannot authorize scale execution."
+  }
+}

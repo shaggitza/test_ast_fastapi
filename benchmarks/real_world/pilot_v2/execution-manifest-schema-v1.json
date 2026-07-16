@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "id": "pilot-execution-manifest-schema-v1",
+  "canonical_encoding": "canonical_json_utf8_lf_no_floats",
+  "required_fields": [
+    "schema_version",
+    "execution_id",
+    "created_at",
+    "provider",
+    "model",
+    "model_version",
+    "client_name",
+    "client_version",
+    "decoding_configuration",
+    "decoding_configuration_sha256",
+    "pi_subagents_version",
+    "pricing_micro_usd_per_million_tokens",
+    "budget_micro_usd",
+    "pre_pilot_budget_approved_by",
+    "pre_pilot_budget_approved_at",
+    "custom_agent_config",
+    "custom_agent_config_sha256",
+    "inherit_project_context",
+    "allowed_tools",
+    "review_b_measurement",
+    "resource_projection_inputs",
+    "policy_hashes",
+    "prompt_hashes",
+    "source_bindings",
+    "source_packet_hashes",
+    "scope_binding",
+    "custody_ledger_path",
+    "telemetry_path"
+  ],
+  "constraints": {
+    "pi_subagents_version": "must equal 0.34.0",
+    "inherit_project_context": false,
+    "allowed_tools": [
+      "read",
+      "grep",
+      "find",
+      "ls"
+    ],
+    "provider_control_plane_only_network": true,
+    "pricing_micro_usd_per_million_tokens_keys": [
+      "input",
+      "cached_input",
+      "output"
+    ],
+    "pricing_and_budget_values": "nonnegative integers only; floats forbidden",
+    "budget_scope": "three PR pilot only",
+    "post_pilot_scale_approval_not_in_manifest": true,
+    "review_b_measurement_fields": [
+      "source_kind",
+      "supervisor_session_path",
+      "start_event_id_policy",
+      "end_event_id_policy",
+      "start_message_id_policy",
+      "end_message_id_policy",
+      "interval_usage_rule",
+      "interval_tool_event_rule",
+      "interval_source_hash_rule"
+    ],
+    "review_b_source_kind": "supervisor_session_interval_v1",
+    "resource_projection_input_fields": [
+      "available_ram_bytes",
+      "idle_supervisor_rss_bytes",
+      "provider_concurrency_cap",
+      "disk_free_bytes",
+      "immutable_cache_bytes",
+      "review_a_concurrency_cap",
+      "review_b_concurrency_cap",
+      "adjudication_concurrency_cap"
+    ],
+    "resource_projection_input_values": "nonnegative integers; available RAM, provider cap, disk free, and every role cap must be positive",
+    "source_binding_fields": [
+      "corpus_id",
+      "repository",
+      "pr",
+      "baseline_commit",
+      "baseline_tree",
+      "target_commit",
+      "target_tree",
+      "diff_sha256",
+      "diff_bytes"
+    ],
+    "packet_hash_fields": [
+      "repository",
+      "pr",
+      "packet_root_sha256",
+      "packet_manifest_sha256"
+    ],
+    "scope_binding": {
+      "scope_id": "fastapi-adapter-v1",
+      "scope_version": 1,
+      "product": "fastapi-endpoint-detector",
+      "definition_sha256": "must equal authenticated checksums-v1.json files[scope-policy-v1.json]"
+    }
+  },
+  "publication": "Supervisor validates, hashes, and atomically publishes no-clobber before first live attempt."
+}

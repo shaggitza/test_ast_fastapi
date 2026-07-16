@@ -61,7 +61,9 @@ prediction-blind canonical review, adjudication, evidence-validation, and
 release foundation is documented in
 [`ground_truth_v2/README.md`](ground_truth_v2/README.md). Production
 initialization can now authenticate the committed lock; review/adjudication
-artifacts and a public truth release remain pending.
+artifacts and a public truth release remain pending. The three-PR blind workflow
+pilot is preregistered in [`pilot_v2/README.md`](pilot_v2/README.md); it claims
+no live reviews or go/no-go result yet.
 
 ## Execution-free route census
 
