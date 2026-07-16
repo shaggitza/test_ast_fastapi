@@ -10,7 +10,7 @@ the live 2,500-PR lock has been collected.
 - V2 manifest: `benchmarks/real_world/expansion/projects-50x50-v2.json`
   - SHA-256: `abd4ee6418a70bf1963a379b26d3ddaf1fe43b2a5a5b60f4090801d1ac5dbc1c`
 - V2 collector/validator: `benchmarks/real_world/expansion_protocol_v2.py`
-  - SHA-256: `93952998c0087d66b17622c95ea4b77c5796efa7a3ea1ce8584415b66d5d4ad6`
+  - SHA-256: `14fd901a22acf13dfdca79687ba24a495ac977adfbe58dfcd24d3483e971d708`
 - Independent preregistration profile:
   `benchmarks/real_world/expansion/checksums-50x50-v2-preregistered.json`
 

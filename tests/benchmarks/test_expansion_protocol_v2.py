@@ -529,7 +529,11 @@ def test_diff_redirect_strips_credentials_and_binds_exact_pr() -> None:
     handler = protocol._SafeDiffRedirects("o/r", 1)
     request = urllib.request.Request(
         "https://github.com/o/r/pull/1.diff",
-        headers={"Authorization": "Bearer secret", "Accept": "text/plain"},
+        headers={
+            "Authorization": "Bearer secret",
+            "Accept": "text/plain",
+            "Host": "github.com",
+        },
     )
     redirected = handler.redirect_request(
         request,
@@ -540,6 +544,7 @@ def test_diff_redirect_strips_credentials_and_binds_exact_pr() -> None:
         "https://patch-diff.githubusercontent.com/raw/o/r/pull/1.diff",
     )
     assert redirected.get_header("Authorization") is None
+    assert redirected.get_header("Host") is None
     assert redirected.get_header("Accept") == "text/plain"
     invalid = (
         "https://evil.test/x",

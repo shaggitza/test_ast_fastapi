@@ -2,7 +2,7 @@
   "schema_version": 2,
   "id": "oss-expansion-50x50-preregistration-v2",
   "manifest_hash": "sha256:abd4ee6418a70bf1963a379b26d3ddaf1fe43b2a5a5b60f4090801d1ac5dbc1c",
-  "collector_hash": "sha256:93952998c0087d66b17622c95ea4b77c5796efa7a3ea1ce8584415b66d5d4ad6",
+  "collector_hash": "sha256:14fd901a22acf13dfdca79687ba24a495ac977adfbe58dfcd24d3483e971d708",
   "v1_sentinels": {
     "manifest_hash": "sha256:194afecc671535639cf51b4b98e6fbe2d36a6159c882de1ae2bd3a4df1a28fe0",
     "longlist_hash": "sha256:271011f84984972c04cf3984a3e608399f3663c9ce493be9a12817968e63abe1",
