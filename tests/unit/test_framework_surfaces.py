@@ -150,7 +150,7 @@ def test_fastapi_class_middleware_resolves_exact_local_dispatch(tmp_path: Path) 
     assert (endpoint.handler.line_number, endpoint.handler.end_line_number) == (5, 6)
     assert endpoint.surface is not None
     assert endpoint.surface.contract_id == "fastapi-base-http-middleware"
-    assert endpoint.surface.schema_version == 4
+    assert endpoint.surface.schema_version == 5
 
 
 def test_starlette_class_middleware_resolves_imported_local_class(tmp_path: Path) -> None:
@@ -298,6 +298,112 @@ def test_duplicate_middleware_protocol_retains_physical_handlers_conditionally(
         endpoint.discovery_status == EndpointDiscoveryStatus.CONDITIONAL
         for endpoint in inventory.endpoints
     )
+
+
+def test_startup_callback_adds_only_conditional_direct_routes(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n\n"
+        "async def late() -> dict[str, bool]: return {'ready': True}\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    app.add_api_route('/late', late, methods=['POST'])\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == [
+        "FRAMEWORK.LIFECYCLE event:startup",
+        "POST /late",
+    ]
+    lifecycle = inventory.endpoints[0]
+    assert lifecycle.surface is not None and lifecycle.surface.activates_routes is True
+    route = inventory.endpoints[1]
+    assert route.surface is None
+    assert route.activation is not None
+    assert route.activation.phase == "startup"
+    assert route.activation.contract_id == "fastapi-on-event"
+    assert route.activation.lifecycle_surface_id == "event:startup"
+    assert route.handler.name == "late"
+    assert route.discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+    assert any("only if framework startup" in item.reason for item in route.discovery_conditions)
+
+
+def test_startup_route_receiver_rebinding_fails_closed(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n\n"
+        "async def late(): return None\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    app.add_api_route('/late', late)\n\n"
+        "app = factory()\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == [
+        "FRAMEWORK.LIFECYCLE event:startup"
+    ]
+    assert any("receiver was rebound" in item.reason for item in inventory.limitations)
+
+
+def test_lifespan_adds_pre_yield_route_but_not_shutdown_route(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from contextlib import asynccontextmanager\n"
+        "from fastapi import FastAPI\n\n"
+        "async def early(): return {'phase': 'startup'}\n"
+        "async def late(): return {'phase': 'shutdown'}\n\n"
+        "@asynccontextmanager\n"
+        "async def lifespan(app: FastAPI):\n"
+        "    app.add_api_route('/early', early)\n"
+        "    yield\n"
+        "    app.add_api_route('/late', late)\n\n"
+        "app = FastAPI(lifespan=lifespan)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == [
+        "FRAMEWORK.LIFECYCLE lifespan:shutdown",
+        "FRAMEWORK.LIFECYCLE lifespan:startup",
+        "GET /early",
+    ]
+    assert all(endpoint.path != "/late" for endpoint in inventory.endpoints)
+
+
+def test_startup_route_control_flow_and_dynamic_arguments_fail_closed(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n\n"
+        "async def late(): return None\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    if enabled():\n"
+        "        app.add_api_route('/guarded', late)\n"
+        "    app.add_api_route(dynamic_path(), late)\n"
+        "    app.include_router(build_router())\n"
+        "    configure(app)\n"
+        "    return\n"
+        "    app.add_api_route('/unreachable', late)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == [
+        "FRAMEWORK.LIFECYCLE event:startup"
+    ]
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    reasons = {item.reason for item in inventory.limitations}
+    assert any("unsupported control flow" in reason for reason in reasons)
+    assert any("dynamic or unresolved" in reason for reason in reasons)
+    assert any("not finitely modeled" in reason for reason in reasons)
+    assert any("receiver escapes" in reason for reason in reasons)
 
 
 def test_same_named_unrelated_lifecycle_method_never_matches(tmp_path: Path) -> None:

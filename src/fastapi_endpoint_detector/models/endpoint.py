@@ -85,13 +85,14 @@ class HandlerInfo(BaseModel):
 class SurfaceRegistrationEvidence(BaseModel):
     """Data-only registration and contract provenance for a custom surface."""
 
-    schema_version: Literal[1, 2, 3, 4] = 1
+    schema_version: Literal[1, 2, 3, 4, 5] = 1
     surface_kind: str = Field(pattern=r"^[a-z][a-z0-9_.-]*$", max_length=64)
     surface_id: str = Field(min_length=1, max_length=512)
     resource: str = Field(min_length=1, max_length=256)
     callback_mode: CallbackMode
     callback_range: CallbackRangeMode = CallbackRangeMode.FULL
     execution_mode: SurfaceExecutionMode = SurfaceExecutionMode.DIRECT
+    activates_routes: bool = False
     contract_id: str
     match_kind: SurfaceMatchKind
     registration_symbol: str
@@ -106,6 +107,29 @@ class SurfaceRegistrationEvidence(BaseModel):
     preset_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     contract_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     conditions: tuple[str, ...] = ()
+
+    class Config:
+        frozen = True
+
+
+class RouteActivationEvidence(BaseModel):
+    """Exact lifecycle contract and source occurrence that conditionally installs a route."""
+
+    schema_version: Literal[5] = 5
+    phase: Literal["startup"] = "startup"
+    execution_mode: SurfaceExecutionMode = SurfaceExecutionMode.FRAMEWORK
+    lifecycle_surface_id: str = Field(min_length=1, max_length=512)
+    contract_id: str
+    registration_file: Path
+    registration_line: int = Field(ge=1)
+    activation_file: Path
+    activation_line: int = Field(ge=1)
+    activation_source_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    contract_source_path: str
+    raw_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    config_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    preset_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    contract_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
     class Config:
         frozen = True
@@ -126,6 +150,7 @@ class Endpoint(BaseModel):
     discovery_status: EndpointDiscoveryStatus = EndpointDiscoveryStatus.ESTABLISHED
     discovery_conditions: tuple[EndpointDiscoveryCondition, ...] = ()
     surface: SurfaceRegistrationEvidence | None = None
+    activation: RouteActivationEvidence | None = None
 
     @model_validator(mode="after")
     def validate_discovery_provenance(self) -> "Endpoint":
@@ -139,6 +164,15 @@ class Endpoint(BaseModel):
             raise ValueError("CUSTOM must be the only method on a custom surface")
         if custom != (self.surface is not None):
             raise ValueError("custom endpoints require CUSTOM method and surface provenance")
+        if self.activation is not None and (
+            custom
+            or self.surface is not None
+            or self.discovery_status != EndpointDiscoveryStatus.CONDITIONAL
+            or not self.discovery_conditions
+        ):
+            raise ValueError(
+                "activated routes must be conditional native endpoints with source conditions"
+            )
         if self.surface is not None:
             if self.path != self.surface.surface_id:
                 raise ValueError("custom endpoint path must equal its surface ID")
@@ -149,6 +183,14 @@ class Endpoint(BaseModel):
                 raise ValueError("wildcard custom surfaces must remain conditional")
             if self.surface.conditions and not self.discovery_conditions:
                 raise ValueError("declared surface conditions require discovery conditions")
+            if self.surface.activates_routes and (
+                self.surface.schema_version < 5
+                or self.surface.surface_kind != "framework.lifecycle"
+                or self.surface.execution_mode != SurfaceExecutionMode.FRAMEWORK
+            ):
+                raise ValueError(
+                    "route activation evidence requires schema-v5 framework lifecycle semantics"
+                )
         return self
 
     class Config:

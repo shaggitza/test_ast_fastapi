@@ -48,6 +48,7 @@ from fastapi_endpoint_detector.models.endpoint import (
     EndpointMethod,
     HandlerInfo,
     InventoryStatus,
+    RouteActivationEvidence,
     SurfaceRegistrationEvidence,
 )
 from fastapi_endpoint_detector.models.report import (
@@ -106,6 +107,7 @@ __all__ = [  # noqa: RUF022 - grouped by public model domain
     "EndpointMethod",
     "HandlerInfo",
     "InventoryStatus",
+    "RouteActivationEvidence",
     "SurfaceRegistrationEvidence",
     # Dependency models
     "Dependency",
