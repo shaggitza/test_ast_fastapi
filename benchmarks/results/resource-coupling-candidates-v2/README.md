@@ -34,8 +34,11 @@ hot-resource atomic omission, and all output formats. The complete test corpus i
 run one file per process to bound retained mypy heap rather than using one
 monolithic pytest process.
 
-## Deferred
+## Subsequent status
 
-Publish/consume, receiver origins, composite resources, package applicability
-attestation, removed-writer baseline analysis, and the 10,000-occurrence
-scale/precision gate remain open under Issue #98.
+This v2 snapshot originally deferred publish/consume and the 10,000-occurrence
+scale gate. Both were completed by
+`resource-coupling-publish-consume-v3`. Receiver origins and composite resource
+extraction remain follow-up preset/data-flow work under Issue #97; package
+applicability and removed-writer analysis remain optional stricter candidate
+expansion rather than missing report-only graph semantics.
