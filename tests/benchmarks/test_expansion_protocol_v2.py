@@ -22,6 +22,8 @@ if TYPE_CHECKING:
 
 _MANIFEST = Path("benchmarks/real_world/expansion/projects-50x50-v2.json")
 _PREREGISTRATION = Path("benchmarks/real_world/expansion/checksums-50x50-v2-preregistered.json")
+_LIVE_LOCK = Path("benchmarks/real_world/expansion/pr-lock-2500-v2.json")
+_LIVE_CHECKSUMS = Path("benchmarks/real_world/expansion/checksums-50x50-v2.json")
 
 
 def _timestamp(days: int, seconds: int = 0) -> str:
@@ -227,6 +229,14 @@ def test_lock_round_trip_authenticates_before_parsing(tmp_path: Path) -> None:
     )
     with pytest.raises(protocol.CorpusV2Error, match="lock_hash"):
         protocol.load_lock_authenticated(lock_path, _MANIFEST, checksums)
+
+
+def test_committed_live_lock_authenticates() -> None:
+    lock, lock_hash = protocol.load_lock_authenticated(_LIVE_LOCK, _MANIFEST, _LIVE_CHECKSUMS)
+    assert lock_hash == ("sha256:70496533d84a3f97db24fd41acdde416d09a2f10787e2088f802769ad8e24552")
+    assert len(lock["projects"]) == 50
+    assert all(project["status"] == "complete" for project in lock["projects"])
+    assert sum(project["selected_count"] for project in lock["projects"]) == 2_500
 
 
 def test_underfill_and_unavailable_are_not_interchangeable() -> None:
