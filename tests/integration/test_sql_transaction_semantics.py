@@ -125,9 +125,13 @@ def test_sql_diagnostics_separate_pending_and_reachable_boundaries(tmp_path: Pat
     assert configured.orphan_changes == baseline.orphan_changes
     report = configured.sql_transaction_report
     assert report is not None
+    assert report.schema_version == 2
     assert report.status == "diagnostic_only"
     assert report.summary.model_dump() == {
         "endpoints_with_staging": 4,
+        "transaction_begins": 0,
+        "savepoint_begins": 0,
+        "unclassified_begins": 1,
         "pending_persistence": 1,
         "commit_reachable": 1,
         "rollback_reachable": 1,
@@ -200,6 +204,7 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
         "app = FastAPI()\n\n"
         "class Session:\n"
         "    def begin(self) -> None: pass\n"
+        "    def begin_nested(self) -> None: pass\n"
         "    def add(self, value: str) -> None: pass\n"
         "    def commit(self) -> None: pass\n"
         "    def rollback(self) -> None: pass\n\n"
@@ -213,6 +218,12 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
         "    session = Session()\n"
         "    session.begin()\n"
         "    session.add('ordered')\n"
+        "    session.commit()\n\n"
+        "@app.post('/nested')\n"
+        "def nested() -> None:\n"
+        "    session = Session()\n"
+        "    session.begin_nested()\n"
+        "    session.add('nested')\n"
         "    session.commit()\n\n"
         "@app.post('/attribute')\n"
         "def attribute_receiver() -> None:\n"
@@ -253,7 +264,7 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
     contracts.write_text(
         yaml.safe_dump(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "preset": {
                     "id": "sql-ordered-test",
                     "version": "1.0.0",
@@ -264,10 +275,30 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
                         "id": operation,
                         "symbol": f"{root.name}.main.Session.{operation}",
                         "invocation": "instance_method",
-                        "operation": "stage" if operation == "add" else operation,
+                        "operation": (
+                            "stage"
+                            if operation == "add"
+                            else "begin"
+                            if operation == "begin_nested"
+                            else operation
+                        ),
                         "channel": "sql",
+                        **(
+                            {
+                                "behavior": {
+                                    "timing": "context_enter",
+                                    "transaction_scope": (
+                                        "savepoint"
+                                        if operation == "begin_nested"
+                                        else "transaction"
+                                    ),
+                                }
+                            }
+                            if operation in {"begin", "begin_nested"}
+                            else {}
+                        ),
                     }
-                    for operation in ("add", "begin", "commit", "rollback")
+                    for operation in ("add", "begin", "begin_nested", "commit", "rollback")
                 ],
             },
             sort_keys=False,
@@ -279,7 +310,7 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
         "diff --git a/main.py b/main.py\n"
         "--- a/main.py\n"
         "+++ b/main.py\n"
-        "@@ -7,1 +7,1 @@\n"
+        "@@ -8,1 +8,1 @@\n"
         "-    def add(self, value: str) -> None: pass\n"
         "+    def add(self, value: str) -> None: return None\n",
         encoding="utf-8",
@@ -318,18 +349,23 @@ def test_ordered_paths_require_same_scope_receiver_and_straight_line(tmp_path: P
     assert configured.orphan_changes == baseline.orphan_changes
     paths = configured.sql_transaction_path_report
     assert paths is not None
+    assert paths.schema_version == 2
     assert paths.summary.model_dump() == {
-        "ordered_paths": 2,
-        "ordered_commits": 2,
+        "ordered_paths": 3,
+        "ordered_commits": 3,
         "ordered_rollbacks": 0,
         "unresolved_pairs": 5,
     }
     ordered = next(item for item in paths.ordered_paths if item.function_name == "ordered")
     assert {item.function_name for item in paths.ordered_paths} == {
         "attribute_receiver",
+        "nested",
         "ordered",
     }
     assert ordered.begin_occurrence_id is not None
+    assert ordered.begin_scope is not None and ordered.begin_scope.value == "transaction"
+    nested = next(item for item in paths.ordered_paths if item.function_name == "nested")
+    assert nested.begin_scope is not None and nested.begin_scope.value == "savepoint"
     assert ordered.persistence_status == "not_established"
     assert {item.reason_code for item in paths.diagnostics} == {
         "boundary_precedes_stage",

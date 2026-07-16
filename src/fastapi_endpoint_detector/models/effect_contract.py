@@ -115,6 +115,14 @@ class EffectTiming(str, Enum):
     CONTEXT_EXIT = "context_exit"
 
 
+class TransactionScope(str, Enum):
+    """Declared SQL boundary scope without runtime transaction identity."""
+
+    NONE = "none"
+    TRANSACTION = "transaction"
+    SAVEPOINT = "savepoint"
+
+
 class ProvenanceKind(str, Enum):
     """Origin of a contract set."""
 
@@ -193,6 +201,7 @@ class EffectBehavior(_StrictModel):
 
     async_mode: AsyncMode = AsyncMode.EITHER
     timing: EffectTiming = EffectTiming.IMMEDIATE
+    transaction_scope: TransactionScope | None = None
 
     @model_validator(mode="after")
     def validate_async_timing(self) -> EffectBehavior:
@@ -236,6 +245,14 @@ class EffectContract(_StrictModel):
             and len(self.symbol.split(".")) < 3
         ):
             raise ValueError("method contracts require a class-qualified exact symbol")
+        if self.behavior.transaction_scope not in {None, TransactionScope.NONE} and (
+            self.channel != EffectChannel.SQL
+            or self.operation != EffectOperation.BEGIN
+            or self.behavior.timing != EffectTiming.CONTEXT_ENTER
+        ):
+            raise ValueError(
+                "transaction scopes require a SQL begin operation with context_enter timing"
+            )
         selectors = (self.resource, self.value)
         if self.invocation in {InvocationKind.FUNCTION, InvocationKind.CONSTRUCTOR} and any(
             selector is not None and selector.kind == SelectorKind.RECEIVER
@@ -248,7 +265,7 @@ class EffectContract(_StrictModel):
 class EffectContractDocument(_StrictModel):
     """Versioned root document for a deterministic contract set."""
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 1
     preset: PresetMetadata
     contracts: tuple[EffectContract, ...] = Field(min_length=1)
 
@@ -256,11 +273,15 @@ class EffectContractDocument(_StrictModel):
     @classmethod
     def validate_schema_version_type(cls, value: object) -> object:
         if type(value) is not int:  # bool is intentionally excluded
-            raise ValueError("schema_version must be the integer 1")
+            raise ValueError("schema_version must be the integer 1 or 2")
         return value
 
     @model_validator(mode="after")
     def validate_contract_keys(self) -> EffectContractDocument:
+        if self.schema_version < 2 and any(
+            contract.behavior.transaction_scope is not None for contract in self.contracts
+        ):
+            raise ValueError("transaction scopes require schema_version 2")
         ids: set[str] = set()
         keys: dict[tuple[str, InvocationKind], EffectContract] = {}
         for contract in self.contracts:

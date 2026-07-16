@@ -9,6 +9,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from fastapi_endpoint_detector.models.effect_contract import EffectTiming, TransactionScope
+
 
 class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -36,14 +38,24 @@ class SQLTransactionOutcome(str, Enum):
     OUTCOME_UNRESOLVED = "outcome_unresolved"
 
 
+class SQLTransactionBeginScopeEvidence(_StrictModel):
+    """Declared transaction/savepoint scope for one exact reachable begin occurrence."""
+
+    schema_version: Literal[1] = 1
+    occurrence_id: Digest
+    scope: TransactionScope
+    timing: EffectTiming
+
+
 class SQLTransactionEndpointEvidence(_StrictModel):
     """SQL staging and boundaries reachable from one endpoint, without path claims."""
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     endpoint_id: Digest
     stage_occurrence_ids: tuple[Digest, ...] = Field(min_length=1)
     flush_occurrence_ids: tuple[Digest, ...] = ()
     begin_occurrence_ids: tuple[Digest, ...] = ()
+    begin_scopes: tuple[SQLTransactionBeginScopeEvidence, ...] = ()
     commit_occurrence_ids: tuple[Digest, ...] = ()
     rollback_occurrence_ids: tuple[Digest, ...] = ()
     outcome: SQLTransactionOutcome
@@ -64,6 +76,14 @@ class SQLTransactionEndpointEvidence(_StrictModel):
         all_ids = [item for items in collections for item in items]
         if len(all_ids) != len(set(all_ids)):
             raise ValueError("transaction occurrence roles must be disjoint")
+        scoped_ids = tuple(item.occurrence_id for item in self.begin_scopes)
+        if scoped_ids != self.begin_occurrence_ids:
+            raise ValueError("every begin occurrence requires one sorted scope record")
+        if any(
+            item.scope != TransactionScope.NONE and item.timing != EffectTiming.CONTEXT_ENTER
+            for item in self.begin_scopes
+        ):
+            raise ValueError("classified begin scopes require context_enter timing")
         expected = (
             SQLTransactionOutcome.OUTCOME_UNRESOLVED
             if self.commit_occurrence_ids and self.rollback_occurrence_ids
@@ -82,6 +102,9 @@ class SQLTransactionEndpointEvidence(_StrictModel):
 
 class SQLTransactionSummary(_StrictModel):
     endpoints_with_staging: int = Field(ge=0)
+    transaction_begins: int = Field(ge=0)
+    savepoint_begins: int = Field(ge=0)
+    unclassified_begins: int = Field(ge=0)
     pending_persistence: int = Field(ge=0)
     commit_reachable: int = Field(ge=0)
     rollback_reachable: int = Field(ge=0)
@@ -103,7 +126,7 @@ class SQLTransactionSummary(_StrictModel):
 class SQLTransactionReport(_StrictModel):
     """Versioned report-only SQL staging/transaction evidence."""
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     status: Literal["diagnostic_only"] = "diagnostic_only"
     effect_audit_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     endpoint_evidence: tuple[SQLTransactionEndpointEvidence, ...]
@@ -118,8 +141,16 @@ class SQLTransactionReport(_StrictModel):
         endpoint_ids = [item.endpoint_id for item in self.endpoint_evidence]
         if endpoint_ids != sorted(set(endpoint_ids)):
             raise ValueError("transaction endpoint evidence must be sorted and unique")
+        begin_scopes = [
+            scope for evidence in self.endpoint_evidence for scope in evidence.begin_scopes
+        ]
         expected = SQLTransactionSummary(
             endpoints_with_staging=len(self.endpoint_evidence),
+            transaction_begins=sum(
+                item.scope == TransactionScope.TRANSACTION for item in begin_scopes
+            ),
+            savepoint_begins=sum(item.scope == TransactionScope.SAVEPOINT for item in begin_scopes),
+            unclassified_begins=sum(item.scope == TransactionScope.NONE for item in begin_scopes),
             pending_persistence=sum(
                 item.outcome == SQLTransactionOutcome.PENDING_PERSISTENCE
                 for item in self.endpoint_evidence
@@ -150,8 +181,12 @@ def build_sql_transaction_report(
 ) -> SQLTransactionReport:
     """Construct a validated content-addressed transaction report."""
     sorted_evidence = tuple(sorted(endpoint_evidence, key=lambda item: item.endpoint_id))
+    begin_scopes = [scope for evidence in sorted_evidence for scope in evidence.begin_scopes]
     summary = SQLTransactionSummary(
         endpoints_with_staging=len(sorted_evidence),
+        transaction_begins=sum(item.scope == TransactionScope.TRANSACTION for item in begin_scopes),
+        savepoint_begins=sum(item.scope == TransactionScope.SAVEPOINT for item in begin_scopes),
+        unclassified_begins=sum(item.scope == TransactionScope.NONE for item in begin_scopes),
         pending_persistence=sum(
             item.outcome == SQLTransactionOutcome.PENDING_PERSISTENCE for item in sorted_evidence
         ),
@@ -186,13 +221,14 @@ class SQLTransactionPathError(ValueError):
 class SQLTransactionOrderedPath(_StrictModel):
     """One same-scope, same-receiver straight-line stage-to-boundary relation."""
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     id: Digest
     endpoint_id: Digest
     file_path: str = Field(min_length=1)
     function_name: str = Field(min_length=1)
     receiver_hash: Digest
     begin_occurrence_id: Digest | None = None
+    begin_scope: TransactionScope | None = None
     stage_occurrence_id: Digest
     boundary_occurrence_id: Digest
     boundary: Literal["commit", "rollback"]
@@ -217,6 +253,8 @@ class SQLTransactionOrderedPath(_StrictModel):
         )
         if len(role_ids) != len(set(role_ids)):
             raise ValueError("ordered transaction path occurrence roles must be disjoint")
+        if (self.begin_occurrence_id is None) != (self.begin_scope is None):
+            raise ValueError("ordered begin occurrence and scope must be provided together")
         if not self.file_path.strip() or not self.function_name.strip():
             raise ValueError("ordered transaction source identity must not be blank")
         if any(not item.strip() for item in self.limitations):
@@ -257,7 +295,7 @@ class SQLTransactionPathSummary(_StrictModel):
 class SQLTransactionPathReport(_StrictModel):
     """Content-addressed bounded straight-line ordering evidence."""
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     status: Literal["diagnostic_only"] = "diagnostic_only"
     effect_audit_hash: Digest
     transaction_report_hash: Digest
@@ -310,6 +348,7 @@ def build_sql_transaction_ordered_path(
     boundary_occurrence_id: str,
     boundary: Literal["commit", "rollback"],
     begin_occurrence_id: str | None = None,
+    begin_scope: TransactionScope | None = None,
     limitations: tuple[str, ...],
 ) -> SQLTransactionOrderedPath:
     """Construct one content-addressed ordered-path record."""
@@ -320,6 +359,7 @@ def build_sql_transaction_ordered_path(
         function_name=function_name,
         receiver_hash=receiver_hash,
         begin_occurrence_id=begin_occurrence_id,
+        begin_scope=begin_scope,
         stage_occurrence_id=stage_occurrence_id,
         boundary_occurrence_id=boundary_occurrence_id,
         boundary=boundary,
@@ -332,6 +372,7 @@ def build_sql_transaction_ordered_path(
         function_name=function_name,
         receiver_hash=receiver_hash,
         begin_occurrence_id=begin_occurrence_id,
+        begin_scope=begin_scope,
         stage_occurrence_id=stage_occurrence_id,
         boundary_occurrence_id=boundary_occurrence_id,
         boundary=boundary,

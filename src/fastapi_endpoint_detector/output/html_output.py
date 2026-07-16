@@ -566,6 +566,8 @@ class HtmlFormatter(BaseFormatter):
                 '<div class="summary-item"><span class="summary-label">'
                 "SQL Transactions:</span> "
                 f"{transaction.summary.endpoints_with_staging} staged endpoints / "
+                f"{transaction.summary.transaction_begins} transaction begins / "
+                f"{transaction.summary.savepoint_begins} savepoints / "
                 f"{transaction.summary.outcome_unresolved} unresolved outcomes; "
                 "diagnostic only, persistence not established</div>"
             )

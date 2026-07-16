@@ -24,7 +24,7 @@ _EXPECTED_PRESET_HASHES = {
     "mongodb-v1": "sha256:7e0f41e452ac61b7340f02215963e8aa765333988b67d441b7aece9dfa53191c",
     "object-storage-v1": "sha256:53a918b63f7813f54a23b502c68dfea40246d2a8a465275fb221bce018420996",
     "redis-v1": "sha256:ce681490563300ce01dec68cd42af26c5fe8e06c7d5d45ae652dfce73c531ca2",
-    "sqlalchemy-v1": "sha256:139fe41076b28730e8d24395ba684f421e8698bcf4d14a037e40064c9a69bf9e",
+    "sqlalchemy-v1": "sha256:a13d9a66eef904756f442cf7d1499072c37d262fba10b3c7ec314480ae66e493",
 }
 
 _EXPECTED_CONTRACT_IDS = {
@@ -81,9 +81,11 @@ def test_bundled_effect_presets_are_strict_versioned_snapshots(name: str) -> Non
     loaded = load_effect_preset(name)
 
     assert loaded.source_path == BUNDLED_EFFECT_PRESETS[name].resolve()
-    assert loaded.document.preset.version == "1.0.0"
+    expected_version = "2.0.0" if name == "sqlalchemy-v1" else "1.0.0"
+    expected_revision = "2" if name == "sqlalchemy-v1" else "1"
+    assert loaded.document.preset.version == expected_version
     assert loaded.document.preset.provenance.kind == ProvenanceKind.PRESET
-    assert loaded.document.preset.provenance.revision == "1"
+    assert loaded.document.preset.provenance.revision == expected_revision
     assert {contract.id for contract in loaded.document.contracts} == _EXPECTED_CONTRACT_IDS[name]
     assert set(loaded.contract_hashes) == _EXPECTED_CONTRACT_IDS[name]
     assert loaded.raw_hash.startswith("sha256:")
@@ -106,6 +108,26 @@ def test_presets_never_contain_bare_or_generic_method_symbols() -> None:
             assert contract.package.python is not None or (
                 contract.package.distribution is not None and contract.package.version is not None
             )
+
+
+def test_sqlalchemy_preset_declares_exact_transaction_and_savepoint_scopes() -> None:
+    loaded = load_effect_preset("sqlalchemy-v1")
+    scopes = {
+        contract.id: (
+            contract.behavior.transaction_scope.value
+            if contract.behavior.transaction_scope is not None
+            else None
+        )
+        for contract in loaded.document.contracts
+        if contract.operation.value == "begin"
+    }
+
+    assert scopes == {
+        "sqlalchemy-session-begin": "transaction",
+        "sqlalchemy-session-begin-nested": "savepoint",
+        "sqlalchemy-async-session-begin": "transaction",
+        "sqlalchemy-async-session-begin-nested": "savepoint",
+    }
 
 
 def test_unknown_effect_preset_fails_closed() -> None:

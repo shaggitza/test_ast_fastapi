@@ -13,7 +13,8 @@ The execution-free analyzer recognizes exact SQLAlchemy 2.x `Session` and
 
 - `add`, `add_all`, `delete`, and `merge` as `stage`;
 - `flush` as a pending-persistence boundary;
-- `begin` and `begin_nested` as transaction boundaries;
+- `begin` as a declared transaction boundary and `begin_nested` as a declared
+  savepoint boundary;
 - `commit` and `rollback` as reachable outcome boundaries.
 
 The report distinguishes `pending_persistence`, `commit_reachable`,
@@ -30,6 +31,11 @@ inventory, secure AST discovery, and mypy call resolution remain mandatory.
 
 ## Bounded ordered-path diagnostics
 
+Every exact reachable begin occurrence retains its declared scope and timing.
+User-defined unit-of-work wrappers can opt into the same classification through
+effect-contract schema v2. Unclassified schema-v1 begin contracts remain
+explicitly `none`; method spelling never supplies scope.
+
 A second explicit option adds strictly lexical stage-to-boundary evidence:
 
 ```yaml
@@ -44,7 +50,8 @@ An ordered path requires exact audited stage and commit/rollback occurrences in
 the same source file, direct function body, and lexical order. Both calls must
 use the same finite `Name`/`Attribute` receiver expression, with no intervening
 assignment to that expression or one of its lexical ancestors. A nearest prior
-same-receiver `begin` may be attached. Calls under branches, loops, `try`,
+same-receiver `begin` may be attached together with its declared transaction or
+savepoint scope. Calls under branches, loops, `try`,
 `with`, comprehensions, lambdas, nested scopes, dynamic receivers, mismatched
 receivers, reversed boundaries, and reassigned receivers remain explicit
 unresolved diagnostics.
@@ -58,8 +65,8 @@ durability are outside this evidence.
 
 ## Conservative limits
 
-Version 1 intentionally does not infer branch ordering, exception paths,
-transaction identity, context-manager exit behavior, savepoint release,
+The current diagnostics intentionally do not infer branch ordering, exception
+paths, transaction identity, context-manager exit behavior, savepoint release,
 autoflush, implicit commit, database durability, or ORM object/resource
 identity. `execute()` and textual SQL are omitted because their read/write
 semantics depend on the statement. Configured unit-of-work wrappers can be

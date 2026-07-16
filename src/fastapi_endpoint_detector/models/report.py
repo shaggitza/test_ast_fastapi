@@ -493,6 +493,7 @@ class AnalysisReport(BaseModel):
             evidence = evidence_by_endpoint.get(path.endpoint_id)
             if evidence is None:
                 raise ValueError("SQL ordered path references unknown endpoint evidence")
+            begin_scope_by_id = {item.occurrence_id: item.scope for item in evidence.begin_scopes}
             expected_boundaries = (
                 evidence.commit_occurrence_ids
                 if path.boundary == "commit"
@@ -503,7 +504,10 @@ class AnalysisReport(BaseModel):
                 or path.boundary_occurrence_id not in expected_boundaries
                 or (
                     path.begin_occurrence_id is not None
-                    and path.begin_occurrence_id not in evidence.begin_occurrence_ids
+                    and (
+                        path.begin_occurrence_id not in evidence.begin_occurrence_ids
+                        or path.begin_scope != begin_scope_by_id[path.begin_occurrence_id]
+                    )
                 )
             ):
                 raise ValueError("SQL ordered path roles contradict transaction evidence")

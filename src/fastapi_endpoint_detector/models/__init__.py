@@ -25,6 +25,7 @@ from fastapi_endpoint_detector.models.effect_contract import (
     LoadedEffectContracts,
     ResolvedCallSite,
     ResourceIdentityEvidence,
+    TransactionScope,
     load_effect_contracts,
     load_effect_preset,
 )
@@ -76,6 +77,7 @@ from fastapi_endpoint_detector.models.resource_coupling import (
     load_resource_coupling,
 )
 from fastapi_endpoint_detector.models.sql_transaction import (
+    SQLTransactionBeginScopeEvidence,
     SQLTransactionEndpointEvidence,
     SQLTransactionOrderedPath,
     SQLTransactionOutcome,
@@ -127,6 +129,7 @@ __all__ = [  # noqa: RUF022 - grouped by public model domain
     "LoadedEffectContracts",
     "ResolvedCallSite",
     "ResourceIdentityEvidence",
+    "TransactionScope",
     "load_effect_contracts",
     "load_effect_preset",
     # Resource coupling models
@@ -139,6 +142,7 @@ __all__ = [  # noqa: RUF022 - grouped by public model domain
     "ResourceCouplingGraph",
     "load_resource_coupling",
     # SQL transaction evidence
+    "SQLTransactionBeginScopeEvidence",
     "SQLTransactionEndpointEvidence",
     "SQLTransactionOrderedPath",
     "SQLTransactionOutcome",
