@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "id": "oss-expansion-checksums-v1",
+  "manifest_id": "oss-expansion-50-v1",
+  "manifest_hash": "sha256:194afecc671535639cf51b4b98e6fbe2d36a6159c882de1ae2bd3a4df1a28fe0",
+  "longlist_hash": "sha256:271011f84984972c04cf3984a3e608399f3663c9ce493be9a12817968e63abe1",
+  "collector_hash": "sha256:633200e3c540ac7b38210f02eeac2f2b9db5814bc3848a5c2ec5ab439fa887a3",
+  "lock_hash": "sha256:6df3dc426888e0c8a97a079dbac8ca48ee421fa8ecd1ce63ddd7bf825a61291f"
+}

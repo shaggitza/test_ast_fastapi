@@ -22,6 +22,24 @@ Third-party source and patches are fetched on demand and are not vendored.
 Re-running the collector creates a new corpus; it must not silently replace the
 frozen benchmark used in a published comparison.
 
+## Frozen 50-project expansion
+
+Issue #103 adds a disjoint, metadata-only expansion with 50 projects and 100
+immutable PR identities. The strict manifest, 60-project longlist/exclusions,
+and collected PR lock live under `expansion/`. Validate them without network
+access or source execution:
+
+```bash
+.venv/bin/python benchmarks/real_world/expansion_protocol.py --validate-only
+.venv/bin/python benchmarks/real_world/expansion_protocol.py \
+  --validate-lock benchmarks/real_world/expansion/pr-lock-100-v1.json
+```
+
+The collector is resource-bounded, rejects redirects, verifies pinned survey
+commits and GitHub license metadata, and refuses to overwrite the committed
+lock. See `benchmarks/results/oss-expansion-50-v1/README.md` for frozen hashes,
+the diversity matrix, safety limits, and deliberately pending review work.
+
 ## Execution-free route census
 
 `build_route_census.py` inventories configured FastAPI routes in both the merge

@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "id": "oss-expansion-longlist-60-v1",
+  "frozen_at": "2026-07-15T23:42:31Z",
+  "manifest_id": "oss-expansion-50-v1",
+  "selection_attestation": "Frozen before expansion predictions; no analyzer result was consulted for inclusion, exclusion, or partition assignment.",
+  "selected": [
+    "fastapi/full-stack-fastapi-template",
+    "Kludex/starlette",
+    "PrefectHQ/prefect",
+    "gradio-app/gradio",
+    "run-llama/llama_index",
+    "litestar-org/litestar",
+    "sanic-org/sanic",
+    "vllm-project/aibrix",
+    "Kludex/uvicorn",
+    "apache/airflow",
+    "django/django",
+    "saleor/saleor",
+    "falconry/falcon",
+    "fastapi/fastapi",
+    "wagtail/wagtail",
+    "pallets/flask",
+    "netbox-community/netbox",
+    "apache/superset",
+    "PrefectHQ/fastmcp",
+    "modelcontextprotocol/python-sdk",
+    "temporalio/sdk-python",
+    "coleifer/huey",
+    "taskiq-python/taskiq",
+    "ag2ai/faststream",
+    "mosquito/aio-pika",
+    "dpkp/kafka-python",
+    "aio-libs/aiokafka",
+    "agronholm/apscheduler",
+    "Bogdanp/dramatiq",
+    "python-arq/arq",
+    "pallets/click",
+    "fastapi/typer",
+    "Textualize/rich",
+    "redis/redis-py",
+    "mongodb/mongo-python-driver",
+    "sqlalchemy/sqlalchemy",
+    "encode/httpx",
+    "psf/requests",
+    "aio-libs/aiohttp",
+    "boto/boto3",
+    "boto/botocore",
+    "dbt-labs/dbt-core",
+    "frappe/frappe",
+    "home-assistant/core",
+    "fivetran/great_expectations",
+    "mlflow/mlflow",
+    "ray-project/ray",
+    "python-poetry/poetry",
+    "pydantic/pydantic",
+    "pytest-dev/pytest"
+  ],
+  "excluded": [
+    {
+      "repository": "healthchecks/healthchecks",
+      "reason_code": "pull_metadata_unavailable",
+      "reason": "GitHub repository metadata is public but its pull-request API is unavailable, so immutable PR identities cannot be collected."
+    },
+    {
+      "repository": "langgenius/dify",
+      "reason_code": "language_dominance",
+      "reason": "Large multi-language application where Python is not the sole implementation surface."
+    },
+    {
+      "repository": "OpenHands/OpenHands",
+      "reason_code": "stratum_quota",
+      "reason": "Agent-application stratum already represented by selected monorepos."
+    },
+    {
+      "repository": "pretix/pretix",
+      "reason_code": "stratum_quota",
+      "reason": "Django application quota reached by projects spanning more size bands."
+    },
+    {
+      "repository": "localstack/localstack",
+      "reason_code": "license_feasibility",
+      "reason": "Current licensing requires a separate benchmark redistribution review."
+    },
+    {
+      "repository": "ansible/awx",
+      "reason_code": "dependency_feasibility",
+      "reason": "Deployment-heavy monorepo adds no unique required stratum under the source-only budget."
+    },
+    {
+      "repository": "celery/celery",
+      "reason_code": "stratum_quota",
+      "reason": "Task-worker stratum already represented by ten selected projects."
+    },
+    {
+      "repository": "rq/rq",
+      "reason_code": "stratum_quota",
+      "reason": "Redis task-worker stratum already represented by selected worker and Redis projects."
+    },
+    {
+      "repository": "confluentinc/confluent-kafka-python",
+      "reason_code": "dependency_feasibility",
+      "reason": "Native client dependency is outside the metadata-only collection budget; Kafka remains represented."
+    },
+    {
+      "repository": "jlowin/fastmcp",
+      "reason_code": "repository_superseded",
+      "reason": "Superseded by the canonical PrefectHQ/fastmcp repository identity in the selected set."
+    }
+  ]
+}
