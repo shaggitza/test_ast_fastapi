@@ -289,3 +289,19 @@ PRs. `relaxed-pilot-report-v1.json` records review hashes, agreement, validation
 resources, projections, deviations, and the objective `NO_GO` scale decision.
 Issues #149–#198 remain blocked until schema delivery and review cost are
 materially improved and re-piloted.
+
+## Luna-medium comparison
+
+`luna-medium-comparison-v1.json` repeats the same six fresh reviews with
+`openai-codex/gpt-5.6-luna` at medium reasoning and compares them with the Sol
+pilot. Luna reached exact semantic agreement within both lanes and with Sol on
+all three PR outcomes and all three Prefect SDK claims. After correction, all six
+artifacts pass strict schema and immutable Git evidence validation.
+
+Luna is materially cheaper but less reliable as a direct canonical artifact
+writer. The complete observed workflow cost USD 0.6077722 versus USD 6.89956 for
+Sol, while first-attempt schema validity was 1/6 versus 2/6. Luna required 11
+correction runs, including two immutable-evidence corrections; Sol required four
+formatting-only corrections. The candidate therefore receives `GO` for bounded
+semantic analysis behind deterministic serialization and evidence validation,
+but `NO_GO` as a direct strict canonical artifact writer.

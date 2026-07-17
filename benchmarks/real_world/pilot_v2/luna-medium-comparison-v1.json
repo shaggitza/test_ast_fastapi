@@ -1,0 +1,161 @@
+{
+  "candidate_reviews": [
+    {
+      "claims": [],
+      "lane": "A",
+      "pr": 3257,
+      "repository": "Kludex/starlette",
+      "sha256": "sha256:3b9407e0a88da3ba1be84515dff817d10de147f1820473f0cf518f059593774d",
+      "terminal_recommendation": "negative_control"
+    },
+    {
+      "claims": [],
+      "lane": "B",
+      "pr": 3257,
+      "repository": "Kludex/starlette",
+      "sha256": "sha256:9297a870c77ce8c2d131bacb4e565f3be0454692d4d835e4287d4cd6e406b8bf",
+      "terminal_recommendation": "negative_control"
+    },
+    {
+      "claims": [
+        "prefect_redis.client.RedisMessagingSettings",
+        "prefect_redis.client.async_redis_from_settings",
+        "prefect_redis.client.get_async_redis_client"
+      ],
+      "lane": "A",
+      "pr": 22189,
+      "repository": "PrefectHQ/prefect",
+      "sha256": "sha256:bb960549d13486a3c46e41ffe440e19fc2c9a289e9f7f35777f4e544e8763b84",
+      "terminal_recommendation": "positive"
+    },
+    {
+      "claims": [
+        "prefect_redis.client.RedisMessagingSettings",
+        "prefect_redis.client.async_redis_from_settings",
+        "prefect_redis.client.get_async_redis_client"
+      ],
+      "lane": "B",
+      "pr": 22189,
+      "repository": "PrefectHQ/prefect",
+      "sha256": "sha256:340a96ac207cce28b2db187967cdd99230f46fe1c9e81edd72aa77621ebfd203",
+      "terminal_recommendation": "positive"
+    },
+    {
+      "claims": [],
+      "lane": "A",
+      "pr": 2164,
+      "repository": "fastapi/full-stack-fastapi-template",
+      "sha256": "sha256:942ca15827a19fdefd9c770a06bbbb9d1a230422335c16cb8c9b289774d48e69",
+      "terminal_recommendation": "negative_control"
+    },
+    {
+      "claims": [],
+      "lane": "B",
+      "pr": 2164,
+      "repository": "fastapi/full-stack-fastapi-template",
+      "sha256": "sha256:a8b18c8d61b9ebf6f4c8780610412740673b80350b2c5d419ca3b9bf6f873569",
+      "terminal_recommendation": "negative_control"
+    }
+  ],
+  "decision": {
+    "direct_strict_canonical_artifact_writer": "NO_GO",
+    "reasons": [
+      "Exact semantic agreement with Sol on all three PRs and all three Prefect SDK claims.",
+      "Observed complete-workflow cost was over 11x lower than Sol.",
+      "Only 1/6 first outputs was schema-valid, versus 2/6 for Sol.",
+      "Luna required 11 correction runs and two immutable-evidence corrections, versus four formatting corrections and zero evidence corrections for Sol."
+    ],
+    "recommended_role": "Use Luna-medium for bounded blind semantic analysis only behind deterministic schema serialization and mandatory immutable Git evidence validation; retain a stricter model or deterministic parent for canonical artifacts.",
+    "semantic_analysis": "GO"
+  },
+  "models": {
+    "baseline": {
+      "model": "openai-codex/gpt-5.6-sol",
+      "thinking": "high"
+    },
+    "candidate": {
+      "model": "openai-codex/gpt-5.6-luna",
+      "thinking": "medium"
+    }
+  },
+  "projection_2500_prs": {
+    "baseline_sol_cost_usd": 5749.633333333334,
+    "candidate_luna_cost_usd": 506.47683333333333,
+    "candidate_luna_input_tokens": 241350833.3333333,
+    "candidate_luna_output_tokens": 36038333.333333336,
+    "method": "linear_observed_mean_no_compounding",
+    "warning": "Three-PR operational arithmetic only; not a statistical population estimate."
+  },
+  "report_id": "blind-review-pilot-luna-medium-comparison-v1",
+  "resources": {
+    "baseline_sol": {
+      "cost_usd": 6.89956,
+      "input_tokens": 765116,
+      "observed_wall_seconds": 979.654,
+      "output_tokens": 54722
+    },
+    "candidate_luna": {
+      "cost_usd": 0.6077722,
+      "input_tokens": 289621,
+      "observed_wall_seconds": 782.591,
+      "output_tokens": 43246
+    },
+    "candidate_relative_to_baseline": {
+      "cost_ratio": 0.08808854477676838,
+      "cost_reduction": 0.9119114552232316,
+      "input_token_ratio": 0.37853214414546293,
+      "output_token_ratio": 0.790285442783524,
+      "wall_time_ratio": 0.7988442858396945
+    }
+  },
+  "schema_version": 1,
+  "semantic_quality": {
+    "adjudications_required": 0,
+    "agreed_outcomes": [
+      {
+        "claims": [],
+        "pr": 2164,
+        "repository": "fastapi/full-stack-fastapi-template",
+        "terminal_recommendation": "negative_control"
+      },
+      {
+        "claims": [],
+        "pr": 3257,
+        "repository": "Kludex/starlette",
+        "terminal_recommendation": "negative_control"
+      },
+      {
+        "claims": [
+          "prefect_redis.client.RedisMessagingSettings",
+          "prefect_redis.client.async_redis_from_settings",
+          "prefect_redis.client.get_async_redis_client"
+        ],
+        "pr": 22189,
+        "repository": "PrefectHQ/prefect",
+        "terminal_recommendation": "positive"
+      }
+    ],
+    "candidate_internal_agreement_prs": 3,
+    "candidate_internal_agreement_rate": 1.0,
+    "cross_model_exact_outcome_agreements": 3,
+    "cross_model_exact_outcome_rate": 1.0
+  },
+  "source_binding_sha256": "sha256:5a7b5b29bf23f6f0a03e048df56bef50e34bf8718cc4777617be6d9a87c97d9d",
+  "structured_reliability": {
+    "baseline_sol": {
+      "evidence_corrections": 0,
+      "final_schema_and_git_evidence_valid": 6,
+      "first_attempt_schema_valid": 2,
+      "format_correction_runs": 4,
+      "reviews": 6
+    },
+    "candidate_luna": {
+      "correction_runs": 11,
+      "evidence_corrections": 2,
+      "final_schema_and_git_evidence_valid": 6,
+      "first_attempt_schema_valid": 1,
+      "reviews": 6
+    },
+    "finding": "Luna-medium matched semantic truth but followed the strict artifact/evidence contract substantially less reliably."
+  }
+}
