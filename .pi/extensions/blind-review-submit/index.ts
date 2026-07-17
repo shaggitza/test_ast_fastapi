@@ -1,13 +1,14 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { defineTool } from "@earendil-works/pi-coding-agent";
-import { lstat, realpath } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { connect } from "node:net";
-import { isAbsolute, parse, resolve } from "node:path";
+import { isAbsolute, join, parse, resolve } from "node:path";
 import { ReviewDraftSchema } from "./review-schema.ts";
 
 const MAX_REQUEST_BYTES = 2_200_000;
 const MAX_RESPONSE_BYTES = 16 * 1024;
-const DEADLINE_MS = 600_000;
+const DEADLINE_MS = 1_800_000;
 const CAPABILITY = /^[0-9a-f]{64}$/;
 
 interface Receipt {
@@ -50,26 +51,93 @@ async function rejectSymlinkAncestors(target: string): Promise<void> {
   }
 }
 
-async function trustedSocketPath(): Promise<string> {
-  const socketPath = process.env.PILOT_REVIEW_SUBMIT_SOCKET;
-  if (!socketPath || !isAbsolute(socketPath) || resolve(socketPath) !== socketPath) {
-    throw new Error("submission socket is not a normalized absolute path");
-  }
-  await rejectSymlinkAncestors(socketPath);
-  const status = await lstat(socketPath);
-  const uid = process.getuid?.();
-  if (!status.isSocket() || uid === undefined || status.uid !== uid || (status.mode & 0o777) !== 0o600) {
-    throw new Error("submission socket owner, type, or mode is invalid");
-  }
-  return socketPath;
+interface TransportBinding {
+  socketPath: string;
+  capability: string;
+  cwd: string;
 }
 
-function trustedCapability(): string {
-  const capability = process.env.PILOT_REVIEW_SUBMIT_CAPABILITY;
-  if (!capability || !CAPABILITY.test(capability)) {
-    throw new Error("submission capability is unavailable");
+async function validatePrivateDirectory(path: string, uid: number): Promise<void> {
+  await rejectSymlinkAncestors(join(path, "entry"));
+  const status = await lstat(path);
+  if (!status.isDirectory() || status.isSymbolicLink() || status.uid !== uid || (status.mode & 0o777) !== 0o700) {
+    throw new Error("submission registry directory is invalid");
   }
-  return capability;
+}
+
+async function registryTransport(cwd: string, uid: number): Promise<TransportBinding> {
+  const cwdStatus = await stat(cwd, { bigint: true });
+  if (!cwdStatus.isDirectory() || cwdStatus.uid !== BigInt(uid)) {
+    throw new Error("submission cwd identity is invalid");
+  }
+  const runtimeRoot = `/tmp/pilot-review-v3-${uid}`;
+  const registry = join(runtimeRoot, "registry");
+  await validatePrivateDirectory(runtimeRoot, uid);
+  await validatePrivateDirectory(registry, uid);
+  const key = createHash("sha256")
+    .update(`${cwdStatus.dev.toString()}:${cwdStatus.ino.toString()}`, "utf8")
+    .digest("hex");
+  const descriptorPath = join(registry, `${key}.json`);
+  const descriptorStatus = await lstat(descriptorPath);
+  if (
+    !descriptorStatus.isFile() ||
+    descriptorStatus.isSymbolicLink() ||
+    descriptorStatus.uid !== uid ||
+    (descriptorStatus.mode & 0o777) !== 0o600
+  ) {
+    throw new Error("submission registry descriptor is invalid");
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(descriptorPath, "utf8"));
+  } catch {
+    throw new Error("submission registry descriptor is not JSON");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("submission registry descriptor is not an object");
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    Object.keys(record).sort().join(",") !==
+      "attempt_id,capability,cwd,cwd_device,cwd_inode,protocol,schema_version,socket_path" ||
+    record.schema_version !== 1 ||
+    record.protocol !== "blind-review-native-registry-v3" ||
+    typeof record.attempt_id !== "string" ||
+    record.cwd !== cwd ||
+    record.cwd_device !== cwdStatus.dev.toString() ||
+    record.cwd_inode !== cwdStatus.ino.toString() ||
+    typeof record.socket_path !== "string" ||
+    typeof record.capability !== "string" ||
+    !CAPABILITY.test(record.capability)
+  ) {
+    throw new Error("submission registry descriptor fields are invalid");
+  }
+  return { socketPath: record.socket_path, capability: record.capability, cwd };
+}
+
+async function trustedTransport(inputCwd: string): Promise<TransportBinding> {
+  const uid = process.getuid?.();
+  if (uid === undefined) throw new Error("submission peer uid is unavailable");
+  const cwd = await realpath(inputCwd);
+  const socketPath = process.env.PILOT_REVIEW_SUBMIT_SOCKET;
+  const capability = process.env.PILOT_REVIEW_SUBMIT_CAPABILITY;
+  if ((socketPath === undefined) !== (capability === undefined)) {
+    throw new Error("submission environment binding is incomplete");
+  }
+  const binding =
+    socketPath !== undefined && capability !== undefined
+      ? { socketPath, capability, cwd }
+      : await registryTransport(cwd, uid);
+  if (!CAPABILITY.test(binding.capability)) throw new Error("submission capability is unavailable");
+  if (!isAbsolute(binding.socketPath) || resolve(binding.socketPath) !== binding.socketPath) {
+    throw new Error("submission socket is not a normalized absolute path");
+  }
+  await rejectSymlinkAncestors(binding.socketPath);
+  const socketStatus = await lstat(binding.socketPath);
+  if (!socketStatus.isSocket() || socketStatus.uid !== uid || (socketStatus.mode & 0o777) !== 0o600) {
+    throw new Error("submission socket owner, type, or mode is invalid");
+  }
+  return binding;
 }
 
 function parseResponse(raw: Buffer): BrokerResponse {
@@ -201,12 +269,10 @@ const submitBlindReview = defineTool({
   ],
   parameters: ReviewDraftSchema,
   async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-    const socketPath = await trustedSocketPath();
-    const capability = trustedCapability();
-    const cwd = await realpath(ctx.cwd);
+    const binding = await trustedTransport(ctx.cwd);
     const response = await brokerRequest(
-      socketPath,
-      { protocol_version: 3, capability, cwd, draft: params },
+      binding.socketPath,
+      { protocol_version: 3, capability: binding.capability, cwd: binding.cwd, draft: params },
       signal,
     );
     if (!response.ok) {

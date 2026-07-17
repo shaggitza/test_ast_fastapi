@@ -8,7 +8,7 @@ import struct
 import subprocess
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -362,6 +362,24 @@ def test_bound_output_limit_rejects_before_publish(tmp_path: Path) -> None:
     assert not Path(limited.escrow_path).exists()
 
 
+def test_completion_and_publish_deadlines_fail_closed(tmp_path: Path) -> None:
+    record = _packet_and_record(tmp_path)
+    late = START + timedelta(seconds=record.run.limits.max_seconds, microseconds=1)
+    with pytest.raises(submit.SubmissionRejected, match="COMPLETION_TIME_INVALID"):
+        submit.validate_submission(_negative(), record, validator=FakeEvidence(), completed_at=late)
+
+    times = iter([END, START + timedelta(seconds=record.run.limits.max_seconds)])
+    with pytest.raises(submit.SubmissionRejected, match="DEADLINE_EXPIRED"):
+        submit.escrow_submission(
+            _negative(),
+            record,
+            validator=FakeEvidence(),
+            clock=lambda: next(times),
+            deadline=START + timedelta(seconds=record.run.limits.max_seconds),
+        )
+    assert not Path(record.escrow_path).exists()
+
+
 def test_escrow_idempotent_recovery_and_altered_artifact_fail_closed(tmp_path: Path) -> None:
     record = _packet_and_record(tmp_path)
     first = submit.escrow_submission(
@@ -542,10 +560,14 @@ def test_server_rejects_then_accepts_and_cleans_socket(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     record = _packet_and_record(tmp_path, attempts=2)
+    record = record.model_copy(
+        update={"run": record.run.model_copy(update={"started_at": datetime.now(timezone.utc)})}
+    )
     bindings = tmp_path / "bindings.json"
     _write_bindings(bindings, record)
     socket_path = _private(tmp_path / "socket") / "submit.sock"
     monkeypatch.setattr(submit, "GitEvidenceValidator", _fake_evidence_factory)
+    monkeypatch.setattr(submit, "_verify_peer_cwd", lambda *_args: None)
     outcome: list[BaseException | int] = []
     thread = _serve_thread(socket_path, bindings, outcome)
     base = {
@@ -566,10 +588,14 @@ def test_dropped_success_response_retries_to_exact_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     record = _packet_and_record(tmp_path)
+    record = record.model_copy(
+        update={"run": record.run.model_copy(update={"started_at": datetime.now(timezone.utc)})}
+    )
     bindings = tmp_path / "bindings.json"
     _write_bindings(bindings, record)
     socket_path = _private(tmp_path / "socket") / "submit.sock"
     monkeypatch.setattr(submit, "GitEvidenceValidator", _fake_evidence_factory)
+    monkeypatch.setattr(submit, "_verify_peer_cwd", lambda *_args: None)
     original = submit._send_frame
     dropped = False
 
@@ -691,5 +717,7 @@ def test_extension_schema_is_semantic_only_and_runtime_load_is_deferred() -> Non
         (root / "benchmarks/real_world/pilot_v3/runtime-policy-v1.json").read_text()
     )
     assert runtime["child_extension_loading"]["phase_1_source_contract_test"] is True
-    assert runtime["child_extension_loading"]["phase_2_extension_load_proved"] is False
-    assert runtime["child_extension_loading"]["phase_2_subagent_propagation_proved"] is False
+    loading = runtime["child_extension_loading"]
+    assert loading["phase_2_extension_load_proved_live_for_pinned_execution"] is True
+    assert loading["phase_2_subagent_propagation_proved_for_pinned_execution"] is True
+    assert loading["global_unversioned_propagation_proof"] is False

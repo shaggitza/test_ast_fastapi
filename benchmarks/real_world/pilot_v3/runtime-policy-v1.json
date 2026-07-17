@@ -2,18 +2,45 @@
   "child_extension_loading": {
     "extensions": "",
     "phase_1_source_contract_test": true,
-    "phase_2_extension_load_proved": false,
-    "phase_2_subagent_propagation_proved": false,
+    "phase_2_native_lifecycle_implemented": true,
+    "phase_2_extension_load_proved_live_for_pinned_execution": true,
+    "phase_2_subagent_propagation_proved_for_pinned_execution": true,
+    "global_unversioned_propagation_proof": false,
+    "python_review_model_launch_forbidden": true,
     "required_tool_allowlist_entry": "submit_blind_review",
-    "subagentOnlyExtensions_path_rule": "supervisor-resolved normalized absolute path with frozen source hash"
+    "runner_kind": "parent_native_subagent_tool_only",
+    "subagentOnlyExtensions_path_rule": "generated_absolute_private_agent_path",
+    "resolver_binding": "unique_receipt_bound_definition_across_project_legacy_user_and_builtin_roots",
+    "extra_agent_dirs": "rejected"
   },
   "deadlines_seconds": {
+    "absolute_attempt_max": 1800,
     "broker_evidence_budget": 240,
-    "child_client": 600,
-    "server_io_default": 300
+    "child_client_max": 1800,
+    "server_io_max": 1800
   },
   "id": "blind-review-runtime-policy-v3-v1",
   "linux_only": true,
+  "native_launch": {
+    "artifacts": false,
+    "context": "fresh",
+    "max_concurrency": 3,
+    "output": false,
+    "progress": false,
+    "absolute_deadline_required": true,
+    "hash_bound_agent_installation_receipt_required": true,
+    "remaining_timeout_required": true,
+    "session_audit_required": true,
+    "terminal_authority": "broker_validated_escrow_not_native_parent_status"
+  },
+  "scale_gate": {
+    "medium_typed_submission": "GO",
+    "overall": "NO_GO",
+    "blockers": [
+      "native_parent_eventual_escrow_status_semantics",
+      "xhigh_typed_terminal_completion"
+    ]
+  },
   "node": "24.12.0",
   "pi_coding_agent": "0.80.7",
   "pi_subagents": "0.34.0",
