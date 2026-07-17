@@ -63,6 +63,16 @@ def _assistant(identity: str, tools: list[tuple[str, dict[str, Any]]], text: str
     ).encode()
 
 
+def _with_thinking(raw: bytes, count: int = 1) -> bytes:
+    item = json.loads(raw)
+    for index in range(count):
+        item["message"]["content"].insert(
+            index,
+            {"type": "thinking", "thinking": f"internal-{index}"},
+        )
+    return (json.dumps(item, separators=(",", ":")) + "\n").encode()
+
+
 def _tool_result(
     identity: str, call_id: str | None = None, tool_name: str | None = None, *, error: bool = False
 ) -> bytes:
@@ -240,19 +250,21 @@ def test_interval_rejects_tools_paths_identity_and_text(
         capture._interval(raw, marker, boundary, manifest)
 
 
-def test_start_detection_requires_exact_sole_command() -> None:
+def test_start_detection_requires_exact_sole_executable_command() -> None:
     expected = [sys.executable, "-m", "benchmarks.real_world.pilot_review_b_v2", "--start"]
     command = shlex.join(expected)
-    assert capture._last_start_call(_assistant("start", [("bash", {"command": command})]), expected)
+    exact = _assistant("start", [("bash", {"command": command})])
+    assert capture._last_start_call(exact, expected)
+    assert capture._last_start_call(_with_thinking(exact, count=2), expected)
     for bad in (
-        _assistant("compound", [("bash", {"command": f"curl bad; {command}"})]),
+        _with_thinking(_assistant("compound", [("bash", {"command": f"curl bad; {command}"})])),
         _assistant("text", [("bash", {"command": command})], "extra"),
         _assistant(
             "tools",
             [("bash", {"command": command}), ("bash", {"command": "true"})],
         ),
     ):
-        with pytest.raises(capture.PilotReviewBError, match="exact sole canonical"):
+        with pytest.raises(capture.PilotReviewBError, match="sole executable canonical"):
             capture._last_start_call(bad, expected)
 
 
@@ -276,14 +288,24 @@ def test_finish_detection_requires_exact_command(tmp_path: Path) -> None:
         capture._interval(raw, marker, boundary, manifest)
 
 
+def test_finish_boundary_accepts_internal_thinking(tmp_path: Path) -> None:
+    marker, boundary, manifest = _interval_fixture(tmp_path)
+    raw = _valid_interval(marker)
+    finish = _finish_line(marker["expected_finish_tokens"])
+    thinking_finish = _with_thinking(finish, count=2)
+    raw = raw[: -len(finish)] + thinking_finish
+    interval, _ = capture._interval(raw, marker, boundary, manifest)
+    assert b'"type":"thinking"' not in interval
+
+
 @pytest.mark.parametrize("extra", ["text", "second-tool"])
-def test_finish_boundary_is_one_tool_call_only(tmp_path: Path, extra: str) -> None:
+def test_finish_boundary_is_one_executable_tool_call_only(tmp_path: Path, extra: str) -> None:
     marker, boundary, manifest = _interval_fixture(tmp_path)
     raw = _valid_interval(marker)
     finish = _finish_line(marker["expected_finish_tokens"])
     item = json.loads(finish)
     if extra == "text":
-        item["message"]["content"].insert(0, {"type": "thinking", "thinking": "finish"})
+        item["message"]["content"].insert(0, {"type": "text", "text": "finish"})
     else:
         item["message"]["content"].append(
             {"type": "toolCall", "id": "extra", "name": "bash", "arguments": {"command": "true"}}

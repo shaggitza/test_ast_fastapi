@@ -38,6 +38,7 @@ _MAX_TOKENS: Final = 100_000
 _MAX_TOOLS: Final = 200
 _MAX_ARTIFACT_BYTES: Final = 2_097_152
 _SAMPLE_TOLERANCE_MS: Final = 1500
+_CLOCK_SKEW_TOLERANCE_MS: Final = 5
 _ALLOWED_READ_TOOLS = {"read", "grep", "find", "ls"}
 _ALLOWED_TOOLS = _ALLOWED_READ_TOOLS | {"bash"}
 _FORBIDDEN_TERMS = (
@@ -551,7 +552,7 @@ def _last_start_call(raw: bytes, expected: list[str]) -> str:
         _fail("start boundary lacks assistant message")
     call_id = _single_exact_tool_call(message, expected)
     if call_id is None:
-        _fail("start boundary must be the exact sole canonical start command")
+        _fail("start boundary must be the exact sole executable canonical start command")
     return call_id
 
 
@@ -894,15 +895,23 @@ def _single_exact_tool_call(  # noqa: PLR0911 - fail-closed exact boundary parse
     }:
         return None
     content = message.get("content")
-    if not isinstance(content, list) or len(content) != 1:
+    if not isinstance(content, list):
         return None
-    part = content[0]
-    if not isinstance(part, dict) or set(part) != {"type", "id", "name", "arguments"}:
+    tool_call: dict[str, Any] | None = None
+    for part in content:
+        if not isinstance(part, dict):
+            return None
+        if part.get("type") == "thinking":
+            continue
+        if part.get("type") != "toolCall" or tool_call is not None:
+            return None
+        tool_call = part
+    if tool_call is None or set(tool_call) != {"type", "id", "name", "arguments"}:
         return None
-    if part.get("type") != "toolCall" or part.get("name") != "bash":
+    if tool_call.get("name") != "bash":
         return None
-    call_id = part.get("id")
-    arguments = part.get("arguments")
+    call_id = tool_call.get("id")
+    arguments = tool_call.get("arguments")
     if not isinstance(call_id, str) or not call_id or not isinstance(arguments, dict):
         return None
     if set(arguments) != {"command"}:
@@ -1241,9 +1250,15 @@ def _samples(
         _fail("RSS samples do not cover interval start")
     if monotonic[-1] < end_monotonic_ns or monotonic[-1] - end_monotonic_ns > tolerance_ns:
         _fail("RSS samples do not cover interval end")
-    if unix[0] > start_unix_ms or start_unix_ms - unix[0] > _SAMPLE_TOLERANCE_MS:
+    if (
+        unix[0] - start_unix_ms > _CLOCK_SKEW_TOLERANCE_MS
+        or start_unix_ms - unix[0] > _SAMPLE_TOLERANCE_MS
+    ):
         _fail("RSS UTC samples do not cover interval start")
-    if unix[-1] < end_unix_ms or unix[-1] - end_unix_ms > _SAMPLE_TOLERANCE_MS:
+    if (
+        end_unix_ms - unix[-1] > _CLOCK_SKEW_TOLERANCE_MS
+        or unix[-1] - end_unix_ms > _SAMPLE_TOLERANCE_MS
+    ):
         _fail("RSS UTC samples do not cover interval end")
     return max(0, max(rss) - idle), len(rows)
 
