@@ -223,10 +223,10 @@ def test_interval_rejects_bad_ids_or_finish_position(
         ("subagent", {"task": "x"}, "", "forbidden orchestration"),
         ("read", {"path": "<SIBLING>"}, "", "outside assigned"),
         ("read", {"path": "<PACKET>", "extra": 1}, "", "exact schema"),
-        ("read", {"path": "<PACKET>"}, "see OTHER/REPO", "another pilot PR"),
-        ("read", {"path": "<PACKET>"}, "see #222", "another pilot PR"),
-        ("read", {"path": "<PACKET>"}, "call /pull/222", "another pilot PR"),
-        ("read", {"path": "<PACKET>"}, "prior labels", "forbidden orchestration"),
+        ("read", {"path": "<PACKET>"}, "see OTHER/REPO", "visible or unknown"),
+        ("read", {"path": "<PACKET>"}, "see #222", "visible or unknown"),
+        ("read", {"path": "<PACKET>"}, "call /pull/222", "visible or unknown"),
+        ("read", {"path": "<PACKET>"}, "prior labels", "visible or unknown"),
     ],
 )
 def test_interval_rejects_tools_paths_identity_and_text(
@@ -247,6 +247,50 @@ def test_interval_rejects_tools_paths_identity_and_text(
         + _finish_line(marker["expected_finish_tokens"])
     )
     with pytest.raises(capture.PilotReviewBError, match=match):
+        capture._interval(raw, marker, boundary, manifest)
+
+
+def test_interval_accounts_but_does_not_treat_thinking_as_activity(tmp_path: Path) -> None:
+    marker, boundary, manifest = _interval_fixture(tmp_path)
+    packet = marker["packet_path"]
+    artifact = marker["artifact_path"]
+    read = _with_thinking(
+        _assistant("read", [("read", {"path": f"{packet}/snapshot.diff"})]), count=1
+    ).replace(b"internal-0", b"predictions prior labels other/repo #222 orchestration")
+    raw = b"".join(
+        [
+            _start_result(),
+            read,
+            _tool_result("read-result"),
+            _assistant("write", [("bash", {"command": f"cat > {artifact} <<'EOF'\n{{}}\nEOF"})]),
+            _tool_result("write-result"),
+            _finish_line(marker["expected_finish_tokens"]),
+        ]
+    )
+    interval, objects = capture._interval(raw, marker, boundary, manifest)
+    assert b"predictions prior labels other/repo" in interval
+    assert len(objects) == 4
+
+
+def test_interval_rejects_forbidden_executable_arguments(tmp_path: Path) -> None:
+    marker, boundary, manifest = _interval_fixture(tmp_path)
+    raw = b"".join(
+        [
+            _start_result(),
+            _assistant(
+                "grep",
+                [
+                    (
+                        "grep",
+                        {"pattern": "prior labels", "path": marker["packet_path"]},
+                    )
+                ],
+            ),
+            _tool_result("grep-result", "grep-call-0", "grep"),
+            _finish_line(marker["expected_finish_tokens"]),
+        ]
+    )
+    with pytest.raises(capture.PilotReviewBError, match="forbidden orchestration"):
         capture._interval(raw, marker, boundary, manifest)
 
 
