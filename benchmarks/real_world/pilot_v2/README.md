@@ -201,6 +201,54 @@ Children never write custody. Reviewer task envelopes expose only the exact
 packet/binding/policy/model/limit inputs and explicitly exclude predictions,
 prior labels, Review B, and adjudications.
 
+## Isolated parent Review B intervals (execution v3)
+
+Execution v2 correctly failed closed before Review A escrow was opened because
+one shared supervisor-session interval mixed all three PRs and orchestration.
+Execution v3 uses `pilot_review_b_v2.py` and exactly one active PR interval. The
+start command authenticates manifest/cache/packets and clean A-started custody,
+records the command-time session offset and fixed-scope allocated bytes, and
+launches a private one-second supervisor-process-tree RSS sampler. Finish
+requires exactly one successful leading tool result matching the stored start
+call ID, making the retained boundary post-command, and excludes its own exact
+single-tool finish assistant message. Every retained tool call must have exactly
+one successful matching tool result before another assistant/final boundary.
+Between start and finish, the parent may perform only assigned packet
+`read`/`grep`/`find`/`ls` and exactly one bounded artifact-write `bash` command.
+Finish rejects other PRs/paths/tools/network/orchestration, validates
+strict lane-B artifact identity and policies, freezes exact session bytes,
+provider usage, cost, RSS, disk, transcript, artifact, and boundary hashes, and
+removes the active marker. A crash or contamination retains an incident-required
+marker; it is never repaired in place.
+
+```bash
+# Before the isolated interval, generate and privately retain both canonical
+# lines. ASSIGNED is deterministic OWNER--REPO--NUMBER.
+.venv/bin/python -m benchmarks.real_world.pilot_review_b_v2 \
+  --print-start-command \
+  --manifest "$PRIVATE/execution-v3/execution-manifest.json" \
+  --execution-root "$PRIVATE/execution-v3" --cache-root "$PRIVATE/cache" \
+  --packet-root "$PRIVATE/packets" --agent-config "$AGENT" \
+  --repository OWNER/REPO --pr NUMBER --supervisor-session "$SUPERVISOR_SESSION" \
+  --supervisor-pid "$SUPERVISOR_PID" \
+  --interval-root "$PRIVATE/execution-v3/review-b-intervals"
+.venv/bin/python -m benchmarks.real_world.pilot_review_b_v2 \
+  --print-finish-command \
+  --manifest "$PRIVATE/execution-v3/execution-manifest.json" \
+  --execution-root "$PRIVATE/execution-v3" --cache-root "$PRIVATE/cache" \
+  --packet-root "$PRIVATE/packets" --agent-config "$AGENT" \
+  --repository OWNER/REPO --pr NUMBER --supervisor-session "$SUPERVISOR_SESSION" \
+  --interval-root "$PRIVATE/execution-v3/review-b-intervals" \
+  --artifact "$PRIVATE/execution-v3/review-b-intervals/ASSIGNED/review-b.json"
+# Copy the print-start helper's exact output line as the sole bash tool call.
+# Its JSON result supplies assigned_root, boundary_sha256, and exact started_at.
+# Parent reads only the assigned packet, then writes ReviewArtifactV1 once with
+# run.started_at exactly equal to that started_at and completed_at no later than
+# the later finish boundary. Copy the print-finish output as the sole final bash.
+# Never wrap either line in eval, a variable, cd/PYTHONPATH, prose, thinking,
+# another tool, or a compound shell command.
+```
+
 ## Remaining live phases
 
 Supervisor must next launch Review A into unopened escrow, independently freeze
