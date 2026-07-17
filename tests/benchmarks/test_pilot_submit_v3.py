@@ -366,9 +366,7 @@ def test_completion_and_publish_deadlines_fail_closed(tmp_path: Path) -> None:
     record = _packet_and_record(tmp_path)
     late = START + timedelta(seconds=record.run.limits.max_seconds, microseconds=1)
     with pytest.raises(submit.SubmissionRejected, match="COMPLETION_TIME_INVALID"):
-        submit.validate_submission(
-            _negative(), record, validator=FakeEvidence(), completed_at=late
-        )
+        submit.validate_submission(_negative(), record, validator=FakeEvidence(), completed_at=late)
 
     times = iter([END, START + timedelta(seconds=record.run.limits.max_seconds)])
     with pytest.raises(submit.SubmissionRejected, match="DEADLINE_EXPIRED"):

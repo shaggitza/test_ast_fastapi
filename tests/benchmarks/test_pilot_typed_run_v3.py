@@ -356,9 +356,7 @@ def test_launch_plan_is_deterministic_and_exact_native_tool_shape(
         for attempt in ("a", "b")
     ]
     frozen_now = (min(deadlines) - 10_000) / 1_000
-    monkeypatch.setattr(
-        "benchmarks.real_world.pilot_typed_run_v3.time.time", lambda: frozen_now
-    )
+    monkeypatch.setattr("benchmarks.real_world.pilot_typed_run_v3.time.time", lambda: frozen_now)
     first = canonical_json(runner.native_launch_plan(execution, ["b", "a"]))
     second = canonical_json(runner.native_launch_plan(execution, ["a", "b"]))
     assert first == second
@@ -430,9 +428,7 @@ def test_launch_rejects_duplicate_user_project_collision_and_extra_roots(
         runner.native_launch_plan(execution, ["resolver"])
     duplicate.unlink()
     valid_plan = runner.native_launch_plan(execution, ["resolver"])
-    assert cast("dict[str, Any]", valid_plan["authentication"])["agent_file"] == str(
-        installed
-    )
+    assert cast("dict[str, Any]", valid_plan["authentication"])["agent_file"] == str(installed)
 
     fake_project = _private(tmp_path / "fake-project")
     _write_agent_definition(fake_project / ".pi/agents/collision.md")
@@ -566,9 +562,7 @@ def test_finalize_is_serialized_and_existing_result_is_reauthenticated(
     def finish() -> None:
         try:
             results.append(
-                runner.finalize_native_attempt(
-                    execution_root=execution, attempt_id="concurrent"
-                )
+                runner.finalize_native_attempt(execution_root=execution, attempt_id="concurrent")
             )
         except BaseException as exc:  # pragma: no cover - assertion captures thread failure
             failures.append(exc)
@@ -654,9 +648,7 @@ def test_dead_unpublished_preparation_lease_is_reconciled(
     source = Path(__file__).resolve().parents[2]
     parent = _private(tmp_path / "private")
     execution = parent / "execution"
-    execution = runner._open_execution(
-        source, execution, "openai-codex/gpt-5.6-luna", "medium"
-    )
+    execution = runner._open_execution(source, execution, "openai-codex/gpt-5.6-luna", "medium")
     attempt = _private(execution / "attempts/orphan")
     lease = execution / "leases/slot-0.json"
     lease.write_bytes(
