@@ -317,6 +317,16 @@ def _execution_keys(root: Path) -> set[str]:
     return set(fields) | {"approval"}
 
 
+def _validated_supervisor_session_path(value: str) -> str:
+    path = Path(value).expanduser().resolve(strict=True)
+    status = path.stat()
+    if not path.is_file() or path.is_symlink() or status.st_uid != os.getuid():
+        _fail("supervisor session path is not an owned regular file")
+    if status.st_size > 256 * 1024 * 1024:
+        _fail("supervisor session exceeds private telemetry bound")
+    return str(path)
+
+
 def build_execution_manifest(
     root: Path,
     cache_root: Path,
@@ -331,6 +341,7 @@ def build_execution_manifest(
 ) -> dict[str, object]:
     records, bindings_hash, packets = authenticate_inputs(root, cache_root, packet_root)
     agent = _parse_agent(agent_config)
+    supervisor_session_path = _validated_supervisor_session_path(supervisor_session_path)
     policies, prompts = _policy_hashes(root)
     decoding = {"thinking": "high", "temperature": "provider_default", "top_p": "provider_default"}
     approval = {
@@ -505,6 +516,8 @@ def validate_execution_manifest(  # noqa: PLR0912,PLR0915 - strict cross-artifac
         review_b.get("source_kind") != "supervisor_session_interval_v1"
         or not isinstance(review_b.get("supervisor_session_path"), str)
         or not review_b["supervisor_session_path"]
+        or review_b["supervisor_session_path"]
+        != _validated_supervisor_session_path(str(review_b["supervisor_session_path"]))
     ):
         _fail("Review B measurement identity changed")
     fixed_measurements = {
@@ -1202,7 +1215,7 @@ def main() -> int:  # noqa: PLR0915 - explicit private custody CLI
     parser.add_argument("--execution-root", type=Path)
     parser.add_argument("--occurred-at")
     parser.add_argument("--supervisor-actor", default="benchmark-parent-supervisor")
-    parser.add_argument("--supervisor-session-path", default="private-supervisor-session")
+    parser.add_argument("--supervisor-session-path")
     parser.add_argument("--repository")
     parser.add_argument("--pr", type=int)
     parser.add_argument("--event")
@@ -1224,6 +1237,8 @@ def main() -> int:  # noqa: PLR0915 - explicit private custody CLI
     if args.freeze_execution:
         if not all((args.cache_root, args.packet_root, args.execution_root, args.occurred_at)):
             parser.error("freeze execution requires private roots and --occurred-at")
+        if args.supervisor_session_path is None:
+            parser.error("--freeze-execution requires --supervisor-session-path")
         path, digest = freeze_execution(
             args.root,
             args.cache_root,
