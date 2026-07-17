@@ -1,0 +1,21 @@
+{
+  "adjudication": {
+    "implemented_in_phase_1": false,
+    "issue": 218,
+    "model": "gpt-5.6-luna",
+    "provider": "openai-codex",
+    "thinking": "xhigh",
+    "trigger": "frozen_semantic_disagreement_or_unresolved_evaluability_only"
+  },
+  "id": "blind-review-model-policy-v3-v1",
+  "review": {
+    "independent_lanes": [
+      "A",
+      "B"
+    ],
+    "model": "gpt-5.6-luna",
+    "provider": "openai-codex",
+    "thinking": "medium"
+  },
+  "schema_version": 1
+}

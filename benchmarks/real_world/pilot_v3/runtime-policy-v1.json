@@ -1,0 +1,22 @@
+{
+  "child_extension_loading": {
+    "extensions": "",
+    "phase_1_source_contract_test": true,
+    "phase_2_extension_load_proved": false,
+    "phase_2_subagent_propagation_proved": false,
+    "required_tool_allowlist_entry": "submit_blind_review",
+    "subagentOnlyExtensions_path_rule": "supervisor-resolved normalized absolute path with frozen source hash"
+  },
+  "deadlines_seconds": {
+    "broker_evidence_budget": 240,
+    "child_client": 600,
+    "server_io_default": 300
+  },
+  "id": "blind-review-runtime-policy-v3-v1",
+  "linux_only": true,
+  "node": "24.12.0",
+  "pi_coding_agent": "0.80.7",
+  "pi_subagents": "0.34.0",
+  "python": "3.12.3",
+  "schema_version": 1
+}
