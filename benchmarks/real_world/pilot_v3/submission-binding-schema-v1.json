@@ -1,0 +1,355 @@
+{
+  "$defs": {
+    "Actor": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "human",
+            "agent"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "name",
+        "version"
+      ],
+      "title": "Actor",
+      "type": "object"
+    },
+    "AuthenticatedInput": {
+      "additionalProperties": false,
+      "properties": {
+        "bytes": {
+          "maximum": 8388608,
+          "minimum": 1,
+          "title": "Bytes",
+          "type": "integer"
+        },
+        "mode": {
+          "enum": [
+            256,
+            292
+          ],
+          "title": "Mode",
+          "type": "integer"
+        },
+        "name": {
+          "enum": [
+            "packet_manifest",
+            "review_prompt",
+            "model_policy",
+            "tool_policy",
+            "source_policy"
+          ],
+          "title": "Name",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "path",
+        "sha256",
+        "bytes",
+        "mode"
+      ],
+      "title": "AuthenticatedInput",
+      "type": "object"
+    },
+    "BoundRun": {
+      "additionalProperties": false,
+      "properties": {
+        "limits": {
+          "$ref": "#/$defs/ResourceLimits"
+        },
+        "model_policy_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Model Policy Sha256",
+          "type": "string"
+        },
+        "prompt_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Prompt Sha256",
+          "type": "string"
+        },
+        "source_policy_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Source Policy Sha256",
+          "type": "string"
+        },
+        "started_at": {
+          "format": "date-time",
+          "title": "Started At",
+          "type": "string"
+        },
+        "tool_policy_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Tool Policy Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "prompt_sha256",
+        "model_policy_sha256",
+        "tool_policy_sha256",
+        "source_policy_sha256",
+        "started_at",
+        "limits"
+      ],
+      "title": "BoundRun",
+      "type": "object"
+    },
+    "ResourceLimits": {
+      "additionalProperties": false,
+      "properties": {
+        "max_output_bytes": {
+          "exclusiveMinimum": 0,
+          "maximum": 2097152,
+          "title": "Max Output Bytes",
+          "type": "integer"
+        },
+        "max_seconds": {
+          "exclusiveMinimum": 0,
+          "maximum": 604800,
+          "title": "Max Seconds",
+          "type": "integer"
+        },
+        "max_tokens": {
+          "maximum": 10000000,
+          "minimum": 0,
+          "title": "Max Tokens",
+          "type": "integer"
+        },
+        "max_tool_calls": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Max Tool Calls",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_tokens",
+        "max_tool_calls",
+        "max_seconds",
+        "max_output_bytes"
+      ],
+      "title": "ResourceLimits",
+      "type": "object"
+    },
+    "SnapshotBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "baseline_commit": {
+          "pattern": "^[0-9a-f]{40}$",
+          "title": "Baseline Commit",
+          "type": "string"
+        },
+        "target_commit": {
+          "pattern": "^[0-9a-f]{40}$",
+          "title": "Target Commit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "baseline_commit",
+        "target_commit"
+      ],
+      "title": "SnapshotBinding",
+      "type": "object"
+    },
+    "SubmissionBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_id": {
+          "title": "Attempt Id",
+          "type": "string"
+        },
+        "authenticated_inputs": {
+          "items": {
+            "$ref": "#/$defs/AuthenticatedInput"
+          },
+          "maxItems": 5,
+          "minItems": 5,
+          "title": "Authenticated Inputs",
+          "type": "array"
+        },
+        "baseline_tree": {
+          "pattern": "^[0-9a-f]{40}$",
+          "title": "Baseline Tree",
+          "type": "string"
+        },
+        "blob_inventory_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Blob Inventory Sha256",
+          "type": "string"
+        },
+        "cache_root": {
+          "title": "Cache Root",
+          "type": "string"
+        },
+        "capability": {
+          "title": "Capability",
+          "type": "string"
+        },
+        "corpus_id": {
+          "maxLength": 300,
+          "minLength": 1,
+          "title": "Corpus Id",
+          "type": "string"
+        },
+        "escrow_path": {
+          "title": "Escrow Path",
+          "type": "string"
+        },
+        "lane": {
+          "enum": [
+            "A",
+            "B"
+          ],
+          "title": "Lane",
+          "type": "string"
+        },
+        "max_validation_attempts": {
+          "maximum": 3,
+          "minimum": 1,
+          "title": "Max Validation Attempts",
+          "type": "integer"
+        },
+        "packet_device": {
+          "minimum": 0,
+          "title": "Packet Device",
+          "type": "integer"
+        },
+        "packet_inode": {
+          "exclusiveMinimum": 0,
+          "title": "Packet Inode",
+          "type": "integer"
+        },
+        "packet_manifest_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Packet Manifest Sha256",
+          "type": "string"
+        },
+        "packet_path": {
+          "title": "Packet Path",
+          "type": "string"
+        },
+        "packet_root_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Packet Root Sha256",
+          "type": "string"
+        },
+        "pr": {
+          "exclusiveMinimum": 0,
+          "title": "Pr",
+          "type": "integer"
+        },
+        "repository": {
+          "maxLength": 300,
+          "pattern": "^[^/\\s]+/[^/\\s]+$",
+          "title": "Repository",
+          "type": "string"
+        },
+        "reviewer": {
+          "$ref": "#/$defs/Actor"
+        },
+        "run": {
+          "$ref": "#/$defs/BoundRun"
+        },
+        "schema_version": {
+          "const": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "snapshots": {
+          "$ref": "#/$defs/SnapshotBinding"
+        },
+        "target_tree": {
+          "pattern": "^[0-9a-f]{40}$",
+          "title": "Target Tree",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "attempt_id",
+        "capability",
+        "packet_path",
+        "packet_device",
+        "packet_inode",
+        "packet_manifest_sha256",
+        "packet_root_sha256",
+        "blob_inventory_sha256",
+        "authenticated_inputs",
+        "escrow_path",
+        "cache_root",
+        "corpus_id",
+        "repository",
+        "pr",
+        "lane",
+        "snapshots",
+        "baseline_tree",
+        "target_tree",
+        "reviewer",
+        "run",
+        "max_validation_attempts"
+      ],
+      "title": "SubmissionBinding",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "protocol": {
+      "const": "blind-review-submit-v3",
+      "title": "Protocol",
+      "type": "string"
+    },
+    "records": {
+      "items": {
+        "$ref": "#/$defs/SubmissionBinding"
+      },
+      "maxItems": 1,
+      "minItems": 1,
+      "title": "Records",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "protocol",
+    "records"
+  ],
+  "title": "Blind review submission binding v3",
+  "type": "object"
+}

@@ -1,0 +1,53 @@
+{
+  "agent_boundary": {
+    "analyzed_source_execution": false,
+    "child_shell": false,
+    "child_writes": false,
+    "generic_output_paths": false,
+    "network": false,
+    "supervisor_only_escrow": true
+  },
+  "allowed_child_tools": [
+    "find",
+    "grep",
+    "ls",
+    "read",
+    "submit_blind_review"
+  ],
+  "broker": {
+    "authenticated_inputs_rechecked": [
+      "packet_manifest",
+      "packet_payload",
+      "review_prompt",
+      "model_policy",
+      "tool_policy",
+      "source_policy"
+    ],
+    "capability_required": true,
+    "cwd_device_inode_binding": true,
+    "deterministic_injected_fields": [
+      "identity",
+      "provenance",
+      "commit_sha",
+      "blob_sha",
+      "ids",
+      "evidence_ordinals",
+      "completion_timestamp"
+    ],
+    "git_evidence_validation": true,
+    "idempotent_exact_recovery": true,
+    "max_validation_attempts": 3,
+    "model_selectable_destination": false,
+    "one_process_per_attempt": true,
+    "parent_revalidation_required": true,
+    "receipt_sidecar_required": true
+  },
+  "fallback": {
+    "implemented_in_phase_1": false,
+    "issue": 218,
+    "recursive": false
+  },
+  "id": "blind-review-tool-policy-v3-v1",
+  "provider_facing_payload": "semantic_review_draft_only",
+  "schema_version": 1
+}

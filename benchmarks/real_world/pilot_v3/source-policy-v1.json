@@ -1,0 +1,15 @@
+{
+  "allowed_sources": [
+    "authenticated_packet_manifest",
+    "baseline_snapshot",
+    "target_snapshot",
+    "snapshot_diff",
+    "frozen_packet_policies"
+  ],
+  "analyzed_source_execution": false,
+  "external_network": false,
+  "id": "blind-review-source-policy-v3-v1",
+  "packet_only": true,
+  "schema_version": 1,
+  "supervisor_broker_may_use_offline_git_cache": true
+}
