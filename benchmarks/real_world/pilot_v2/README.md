@@ -211,15 +211,21 @@ records the command-time session offset and fixed-scope allocated bytes, and
 launches a private one-second supervisor-process-tree RSS sampler. Finish
 requires exactly one successful leading tool result matching the stored start
 call ID, making the retained boundary post-command, and excludes its own exact
-single-tool finish assistant message. Every retained tool call must have exactly
-one successful matching tool result before another assistant/final boundary.
+single-executable-tool finish assistant message. The start and finish messages
+may also contain any number of internal `thinking` items; those items cannot
+execute activity, remain covered by the hashed session metadata, and lie outside
+the retained work interval. Text, images, other content, and a second tool call
+remain forbidden. Every retained tool call must have exactly one successful
+matching tool result before another assistant/final boundary.
 Between start and finish, the parent may perform only assigned packet
 `read`/`grep`/`find`/`ls` and exactly one bounded artifact-write `bash` command.
 Finish rejects other PRs/paths/tools/network/orchestration, validates
 strict lane-B artifact identity and policies, freezes exact session bytes,
 provider usage, cost, RSS, disk, transcript, artifact, and boundary hashes, and
-removes the active marker. A crash or contamination retains an incident-required
-marker; it is never repaired in place.
+removes the active marker. A crash or contamination after marker publication
+retains an incident-required marker; it is never repaired in place. A start
+boundary that fails validation before marker publication cleans its private
+staging directory and requires no incident.
 
 ```bash
 # Before the isolated interval, generate and privately retain both canonical
@@ -240,13 +246,14 @@ marker; it is never repaired in place.
   --repository OWNER/REPO --pr NUMBER --supervisor-session "$SUPERVISOR_SESSION" \
   --interval-root "$PRIVATE/execution-v3/review-b-intervals" \
   --artifact "$PRIVATE/execution-v3/review-b-intervals/ASSIGNED/review-b.json"
-# Copy the print-start helper's exact output line as the sole bash tool call.
+# Copy the print-start helper's exact output line as the sole executable tool call.
 # Its JSON result supplies assigned_root, boundary_sha256, and exact started_at.
 # Parent reads only the assigned packet, then writes ReviewArtifactV1 once with
 # run.started_at exactly equal to that started_at and completed_at no later than
-# the later finish boundary. Copy the print-finish output as the sole final bash.
-# Never wrap either line in eval, a variable, cd/PYTHONPATH, prose, thinking,
-# another tool, or a compound shell command.
+# the later finish boundary. Copy the print-finish output as the sole executable
+# tool call in the final assistant message. Optional internal thinking is allowed;
+# never wrap either line in eval, a variable, cd/PYTHONPATH, prose, another tool,
+# or a compound shell command.
 ```
 
 ## Remaining live phases
