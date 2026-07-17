@@ -101,11 +101,54 @@ remains `unknown`. Full non-private results are frozen in
 The native parent reported 0/3 success in each wave even though all six eventual
 escrows validated, because historical tool errors or terminating no-output
 dominated its task status. Broker escrow remains authoritative. Medium typed
-submission is `GO`; scale remains `NO_GO` until native status semantics and an
-xhigh typed terminal surface are fixed. Per-attempt report costs preserve the
-provider-observed USD totals; deterministic session audits additionally publish
-integer micro-USD values rounded once per session, so summed audit micro-USD can
-differ slightly from rounding the exact aggregate once.
+submission is `GO`. Per-attempt report costs preserve the provider-observed USD
+totals; deterministic session audits additionally publish integer micro-USD
+values rounded once per session, so summed audit micro-USD can differ slightly
+from rounding the exact aggregate once.
+
+Phase 3 implements issue #218 in `pilot_adjudicate_v3.py`. It deterministically
+reauthenticates and compares exact finalized A/B escrows using order-insensitive
+claim atoms, rejects lane-internal conflicts and every PR group with a duplicate
+lane, and freezes a no-clobber pair before any fallback. Only terminal disagreement, normalized-claim disagreement,
+unknown/not-evaluable terminal state, or an unknown claim recommendation can
+trigger Luna-xhigh. Formatting, schema, evidence, tool, transport, or other
+operational failures never trigger a semantic model. The exact Prefect pair in
+the checksum-authenticated historical report is recognized as already consumed
+and cannot be rerun.
+
+Each exact pair has a durable one-shot state machine:
+`prepared -> launched -> completed|terminal_unknown`. The transition to
+`launched` occurs before the launch plan is returned; a lost response cannot
+create a second process. A private host claim binds the pair to one preserved
+canonical adjudication root and rejects a secondary root on this host; this is
+not represented as an undeletable cross-host guarantee. Expiry, invalid session
+audit, partial publication, or validation failure is terminal `unknown` and is
+reconciled after crashes. The immutable adjudication packet nests the fully
+authenticated source packet under `source/`, exact Review A/B bytes, pair freeze,
+and complete packet inventory. Source manifest, payload, policies, snapshots,
+and both recovered attempt bindings must agree before copying. Python never
+launches a model.
+
+The native launch is deliberately a one-step pi-subagents **chain**. Its step has
+the literal strict `outputSchema`; no top-level single-run `outputSchema` is
+allowed. The exact full call must pass the pinned runtime `SubagentParams`
+`Value.Check`. Model, xhigh thinking, and the read/grep/find/ls allowlist come
+only from the authenticated effective agent config, not unsupported chain-step
+fields. The chain runtime supplies `structured_output` with exact arguments
+`{value: output}`. Before launch, a hash-bound environment receipt requires the
+current bridge mode to be `off` or `fork-only` for the fresh chain; the tool does
+not mutate global config. The session audit runs under the pair state lock and
+fails terminally on contact/intercom/subagent, packet escape, prose, unknown
+events/roles, identity drift, missing/duplicate tool results, or a nonterminal,
+malformed, or multiple structured output call. Parent finalization validates strict schema and offline
+Git evidence, injects trusted pair/model/lifecycle fields, and publishes only a
+mode-0400 `blind_review_pilot_completion_v3` plus receipt. It never creates or
+imports `AdjudicationArtifactV1`.
+
+The implementation is offline-tested but is not a live proof. Scale remains
+`NO_GO` until a **new** non-Prefect disagreement/uncertainty canary proves the
+typed chain surface and until native medium parent-status semantics are fixed.
+There is no second Prefect fallback and no recursive xhigh fallback.
 
 ## Runner CLI
 
@@ -129,6 +172,36 @@ python -m benchmarks.real_world.pilot_typed_run_v3 finalize-native-attempt \
 python -m benchmarks.real_world.pilot_typed_run_v3 audit-native-sessions \
   --execution-root "$PRIVATE/execution-typed-v3" \
   --session ATTEMPT=/absolute/pinned/session.jsonl
+
+python -m benchmarks.real_world.pilot_adjudicate_v3 compare \
+  --execution-root "$PRIVATE/execution-typed-v3"
+python -m benchmarks.real_world.pilot_adjudicate_v3 prepare-adjudication \
+  --execution-root "$PRIVATE/execution-typed-v3" \
+  --packet-root "$PRIVATE/packets-v3" \
+  --adjudication-root "$PRIVATE/adjudication-v3" \
+  --repository OWNER/REPO --pr NUMBER --attempt-id ADJUDICATION
+python -m benchmarks.real_world.pilot_adjudicate_v3 create-native-adjudicator \
+  --adjudication-root "$PRIVATE/adjudication-v3" \
+  --output "$HOME/.pi/agent/agents/benchmark-pilot-v3-private/pilot-semantic-adjudicator-luna-xhigh-v3.md"
+# The supervisor must first configure intercomBridge.mode=\"fork-only\" or \"off\",
+# preserve the old bytes for restoration, and only then restart/reload the parent Pi.
+# The running parent captures bridge mode when its extension registers: changing the
+# file after this parent started is insufficient. After the fresh parent is active,
+# freeze the exact effective environment. Disk attestation alone cannot prove the
+# already-running parent uses those bytes. This command never edits the user config.
+python -m benchmarks.real_world.pilot_adjudicate_v3 attest-native-environment \
+  --adjudication-root "$PRIVATE/adjudication-v3"
+python -m benchmarks.real_world.pilot_adjudicate_v3 native-adjudication-launch-plan \
+  --adjudication-root "$PRIVATE/adjudication-v3" --pair-sha256 sha256:PAIR
+# Parent passes only result.subagent_call to native subagent(...). The intercom
+# bridge must be inactive. The returned structured value is supervisor-written
+# to one private file; Python never launches the model.
+python -m benchmarks.real_world.pilot_adjudicate_v3 audit-adjudication-session \
+  --adjudication-root "$PRIVATE/adjudication-v3" --pair-sha256 sha256:PAIR \
+  --session /absolute/pinned/session.jsonl
+python -m benchmarks.real_world.pilot_adjudicate_v3 finalize-adjudication \
+  --adjudication-root "$PRIVATE/adjudication-v3" --pair-sha256 sha256:PAIR \
+  --output "$PRIVATE/structured-output.json"
 ```
 
 The session audit accepts an eventual validated escrow even when a historical
@@ -147,7 +220,11 @@ rebuilds that census and refuses missing, stale, shadowed, duplicate, symlinked,
 or modified installations. Resolver tests cover `~/.agents`, changed
 `PI_CODING_AGENT_DIR`, and a same-name agent delivered by a settings-configured
 package. `PI_SUBAGENT_EXTRA_AGENT_DIRS` is rejected because this profile does not
-silently omit additional resolver roots. Tests may isolate discovery with
+silently omit additional resolver roots. Terminal publication is monotonic: a durable
+`terminal-unknown.json` permanently wins, even if completion and receipt bytes also exist;
+that combination remains `terminal_unknown` with an explicit custody contradiction. A
+completed state without an unknown marker refuses every later attempt to create one.
+Tests may isolate discovery with
 `--user-agent-root` / `--builtin-agent-root` (or the corresponding
 `PILOT_PI_USER_AGENT_ROOT` / `PILOT_PI_BUILTIN_AGENT_ROOT` variables); production
 uses Pi's user and installed-package locations. Execution and packet parents must
@@ -158,11 +235,15 @@ already be private mode-0700 directories.
 ```bash
 .venv/bin/python scripts/run_tests_bounded.py \
   tests/benchmarks/test_pilot_submit_v3.py --pytest-arg=-x --timeout-seconds=300
+.venv/bin/python scripts/run_tests_bounded.py \
+  tests/benchmarks/test_pilot_adjudicate_v3.py --pytest-arg=-x --timeout-seconds=300
 .venv/bin/ruff check benchmarks/real_world/pilot_submit_v3.py \
-  tests/benchmarks/test_pilot_submit_v3.py
+  benchmarks/real_world/pilot_adjudicate_v3.py tests/benchmarks/test_pilot_submit_v3.py \
+  tests/benchmarks/test_pilot_adjudicate_v3.py
 MYPYPATH=src .venv/bin/mypy --strict --explicit-package-bases \
   benchmarks/real_world/pilot_submit_v3.py benchmarks/real_world/pilot_typed_run_v3.py \
-  tests/benchmarks/test_pilot_submit_v3.py tests/benchmarks/test_pilot_typed_run_v3.py
+  benchmarks/real_world/pilot_adjudicate_v3.py tests/benchmarks/test_pilot_submit_v3.py \
+  tests/benchmarks/test_pilot_typed_run_v3.py tests/benchmarks/test_pilot_adjudicate_v3.py
 # Tests use a socket-protocol-equivalent fake child and never invoke a real model.
 # The separately recorded pinned live execution supplies the scoped live proof.
 ```

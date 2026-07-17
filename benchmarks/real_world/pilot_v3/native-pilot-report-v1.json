@@ -204,5 +204,11 @@
       "Luna-xhigh needs a typed terminal completion surface available under its exact tool allowlist"
     ]
   },
+  "follow_up_implementation": {
+    "issue": 218,
+    "module": "benchmarks/real_world/pilot_adjudicate_v3.py",
+    "status": "implemented_offline_live_canary_pending",
+    "historical_prefect_pair_may_rerun": false
+  },
   "canonical_database_imported": false
 }

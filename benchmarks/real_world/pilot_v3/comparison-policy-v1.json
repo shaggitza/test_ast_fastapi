@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "id": "blind-review-comparison-policy-v3-v1",
+  "normalized_claim_atom": [
+    "claim_kind",
+    "recommendation",
+    "entrypoint.kind",
+    "entrypoint.public_id",
+    "entrypoint.confidence"
+  ],
+  "order_insensitive": ["claims", "claim_evidence"],
+  "ignored_for_semantic_equality": ["claim_id", "summary", "evidence_ordinal", "evidence_order"],
+  "internal_conflict_rule": "Reject a lane when one (claim_kind, entrypoint.kind, entrypoint.public_id) has more than one recommendation or confidence.",
+  "xhigh_triggers": [
+    "terminal_recommendation_disagreement",
+    "normalized_claim_atom_disagreement",
+    "terminal_unknown_or_not_evaluable",
+    "claim_recommendation_unknown"
+  ],
+  "non_triggers": [
+    "formatting_failure",
+    "schema_failure",
+    "transport_failure",
+    "tool_failure",
+    "evidence_validation_failure",
+    "ancillary_unknown_with_agreed_resolved_terminal_and_claim_atoms"
+  ],
+  "fallback": {
+    "model": "openai-codex/gpt-5.6-luna",
+    "thinking": "xhigh",
+    "one_process_per_pair_in_preserved_canonical_root": true,
+    "host_private_cross_root_claim_required": true,
+    "recursive": false,
+    "failure_disposition": "unknown"
+  }
+}
