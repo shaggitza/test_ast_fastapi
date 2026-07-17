@@ -19,7 +19,7 @@ import socket
 import stat
 import struct
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Any, Literal, NoReturn, cast
 
@@ -671,7 +671,11 @@ def materialize_review(
     if completed_at.tzinfo is None or completed_at.utcoffset() is None:
         raise SubmissionRejected("COMPLETION_TIME_INVALID")
     completed_at = completed_at.astimezone(timezone.utc)
-    if completed_at < record.run.started_at:
+    if (
+        completed_at < record.run.started_at
+        or completed_at
+        > record.run.started_at + timedelta(seconds=record.run.limits.max_seconds)
+    ):
         raise SubmissionRejected("COMPLETION_TIME_INVALID")
 
     def location(value: DraftLocation) -> EvidenceLocation:
@@ -946,10 +950,19 @@ def escrow_submission(
     *,
     validator: EvidenceValidator | None = None,
     clock: Callable[[], datetime] | None = None,
+    deadline: datetime | None = None,
 ) -> SubmissionReceipt:
     """Publish or idempotently recover one fully validated review."""
     artifact_path = Path(record.escrow_path)
     evidence = validator or _evidence_validator(record)
+    now = clock or (lambda: datetime.now(timezone.utc))
+
+    def checked_now() -> datetime:
+        value = now().astimezone(timezone.utc)
+        if deadline is not None and value >= deadline.astimezone(timezone.utc):
+            raise SubmissionRejected("DEADLINE_EXPIRED")
+        return value
+
     with _escrow_lock(artifact_path):
         if artifact_path.exists() or _receipt_path(artifact_path).exists():
             return _recover_locked(record, validator=evidence)
@@ -957,8 +970,9 @@ def escrow_submission(
             draft_value,
             record,
             validator=evidence,
-            completed_at=(clock or (lambda: datetime.now(timezone.utc)))(),
+            completed_at=checked_now(),
         )
+        checked_now()
         receipt = _make_receipt(record, review, raw)
         sidecar = EscrowReceipt(
             schema_version=1,
@@ -1008,12 +1022,31 @@ def _send_frame(connection: socket.socket, value: dict[str, object]) -> None:
     connection.sendall(struct.pack("!I", len(raw)) + raw)
 
 
-def _peer_uid(connection: socket.socket) -> int:
+def _peer_credentials(connection: socket.socket) -> tuple[int, int]:
     if not hasattr(socket, "SO_PEERCRED"):
         _fail("peer credentials are unavailable")
     raw = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
-    _pid, uid, _gid = struct.unpack("3i", raw)
-    return cast("int", uid)
+    pid, uid, _gid = struct.unpack("3i", raw)
+    if pid <= 0 or uid < 0:
+        _fail("peer credentials are invalid")
+    return cast("tuple[int, int]", (pid, uid))
+
+
+def _verify_peer_cwd(pid: int, record: SubmissionBinding) -> None:
+    """Bind the live Unix peer process to the exact authenticated packet cwd."""
+    proc_cwd = Path(f"/proc/{pid}/cwd")
+    try:
+        peer_path = proc_cwd.resolve(strict=True)
+        peer_status = proc_cwd.stat()
+        packet_path = Path(record.packet_path).resolve(strict=True)
+    except OSError as exc:
+        raise SubmissionRejected("PEER_CWD_UNAVAILABLE") from exc
+    if (
+        peer_path != packet_path
+        or peer_status.st_dev != record.packet_device
+        or peer_status.st_ino != record.packet_inode
+    ):
+        raise SubmissionRejected("PEER_CWD_INVALID")
 
 
 def _request(raw: bytes, record: SubmissionBinding) -> object:
@@ -1063,10 +1096,27 @@ def _success(receipt: SubmissionReceipt) -> dict[str, object]:
 
 
 def serve(  # noqa: PLR0912,PLR0915
-    socket_path: Path, bindings_path: Path, *, timeout_seconds: int = 300
+    socket_path: Path,
+    bindings_path: Path,
+    *,
+    timeout_seconds: int = 300,
+    deadline_unix_ms: int | None = None,
 ) -> int:
-    """Serve one bound attempt until success or bounded validation exhaustion."""
+    """Serve one bound attempt until success or the single absolute deadline."""
     record = load_bindings(bindings_path).records[0]
+    binding_deadline = record.run.started_at + timedelta(seconds=record.run.limits.max_seconds)
+    requested_deadline = (
+        datetime.fromtimestamp(deadline_unix_ms / 1000, timezone.utc)
+        if deadline_unix_ms is not None
+        else datetime.now(timezone.utc) + timedelta(seconds=timeout_seconds)
+    )
+    deadline = min(binding_deadline, requested_deadline)
+
+    def remaining_timeout() -> float:
+        remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
+        if remaining <= 0:
+            raise PilotSubmitError("broker absolute deadline expired")
+        return remaining
     if not socket_path.is_absolute():
         _fail("socket path must be absolute")
     _reject_symlink_ancestors(socket_path)
@@ -1087,19 +1137,22 @@ def serve(  # noqa: PLR0912,PLR0915
         server.bind(str(socket_path))
         socket_path.chmod(0o600)
         server.listen(1)
-        server.settimeout(timeout_seconds)
         while rejected < record.max_validation_attempts:
+            server.settimeout(remaining_timeout())
             try:
                 connection, _ = server.accept()
             except TimeoutError as exc:
                 raise PilotSubmitError("broker accept timeout") from exc
             with connection:
-                connection.settimeout(timeout_seconds)
+                connection.settimeout(remaining_timeout())
                 try:
-                    if _peer_uid(connection) != os.getuid():
+                    peer_pid, peer_uid = _peer_credentials(connection)
+                    if peer_uid != os.getuid():
                         raise SubmissionRejected("PEER_UID_INVALID")
+                    _verify_peer_cwd(peer_pid, record)
                     draft = _request(_recv_frame(connection), record)
-                    receipt = escrow_submission(draft, record)
+                    remaining_timeout()
+                    receipt = escrow_submission(draft, record, deadline=deadline)
                     try:
                         _send_frame(connection, _success(receipt))
                     except OSError:
@@ -1135,6 +1188,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--socket", type=Path)
     parser.add_argument("--bindings", type=Path)
     parser.add_argument("--timeout-seconds", type=int, default=300)
+    parser.add_argument("--deadline-unix-ms", type=int)
     return parser
 
 
@@ -1142,9 +1196,16 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if not args.serve or args.socket is None or args.bindings is None:
         _fail("--serve, --socket, and --bindings are required")
-    if args.timeout_seconds <= 0 or args.timeout_seconds > 600:
+    if args.timeout_seconds <= 0 or args.timeout_seconds > 1800:
         _fail("timeout is out of range")
-    return serve(args.socket, args.bindings, timeout_seconds=args.timeout_seconds)
+    if args.deadline_unix_ms is not None and args.deadline_unix_ms <= 0:
+        _fail("deadline is out of range")
+    return serve(
+        args.socket,
+        args.bindings,
+        timeout_seconds=args.timeout_seconds,
+        deadline_unix_ms=args.deadline_unix_ms,
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover

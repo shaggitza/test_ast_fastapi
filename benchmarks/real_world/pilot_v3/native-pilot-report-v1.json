@@ -1,0 +1,208 @@
+{
+  "schema_version": 1,
+  "id": "blind-review-native-subagent-pilot-v3-v1",
+  "protocol": "blind-review-native-subagent-v3",
+  "execution_binding": {
+    "execution_sha256": "sha256:3a88488dae5419c44e578cf51902e2277939508f4484425027b25397b9c959da",
+    "agent_sha256": "sha256:a0328561e08d32b5e121ba10de781ae56d80fb1c40014712f33550b755b84d8c",
+    "scope": "exact pinned private execution only",
+    "private_paths_committed": false
+  },
+  "medium_review": {
+    "model": "openai-codex/gpt-5.6-luna",
+    "thinking": "medium",
+    "native_subagent_tool_launch": true,
+    "subagent_only_extension_propagation_live_proved": true,
+    "terminating_submission_live_proved": true,
+    "proof_scope": "hash-and-version-scoped execution; not a global Pi guarantee",
+    "broker_finalized_artifacts": 6,
+    "strict_artifacts": 6,
+    "immutable_git_recoveries": 6,
+    "first_submit_accepted": 2,
+    "submit_calls": 11,
+    "correction_submissions": 5,
+    "separate_correction_model_reruns": 0,
+    "usage": {
+      "input_tokens": 113604,
+      "output_tokens": 19455,
+      "cache_read_tokens": 141824,
+      "cost_usd": 0.2445164
+    },
+    "attempts": [
+      {
+        "attempt_id": "fs2164-A",
+        "repository": "fastapi/full-stack-fastapi-template",
+        "pr": 2164,
+        "lane": "A",
+        "terminal_recommendation": "negative_control",
+        "claims": 0,
+        "artifact_sha256": "sha256:ecfb50aaed6691920d194b058c9fb57e0007b6acbc989e2c747905017db3b693",
+        "submit_calls": 2,
+        "duration_seconds": 159.898186,
+        "usage": {
+          "input_tokens": 19847,
+          "output_tokens": 2513,
+          "cache_read_tokens": 14336,
+          "cost_usd": 0.0363586
+        }
+      },
+      {
+        "attempt_id": "prefect22189-A",
+        "repository": "PrefectHQ/prefect",
+        "pr": 22189,
+        "lane": "A",
+        "terminal_recommendation": "positive",
+        "claims": 3,
+        "artifact_sha256": "sha256:b743dd43689b4090da9c855a7c0f469474994bcf0b860b19523c95771c47a3c8",
+        "submit_calls": 2,
+        "duration_seconds": 153.239134,
+        "usage": {
+          "input_tokens": 27037,
+          "output_tokens": 5387,
+          "cache_read_tokens": 40960,
+          "cost_usd": 0.063455
+        }
+      },
+      {
+        "attempt_id": "starlette3257-A",
+        "repository": "Kludex/starlette",
+        "pr": 3257,
+        "lane": "A",
+        "terminal_recommendation": "negative_control",
+        "claims": 0,
+        "artifact_sha256": "sha256:d439c303740ee01c024eabc9be65781d986d556c2a04652922ccdd9efea49d80",
+        "submit_calls": 1,
+        "duration_seconds": 155.694045,
+        "usage": {
+          "input_tokens": 5399,
+          "output_tokens": 1748,
+          "cache_read_tokens": 8704,
+          "cost_usd": 0.0167574
+        }
+      },
+      {
+        "attempt_id": "fs2164-B",
+        "repository": "fastapi/full-stack-fastapi-template",
+        "pr": 2164,
+        "lane": "B",
+        "terminal_recommendation": "negative_control",
+        "claims": 0,
+        "artifact_sha256": "sha256:a0cbfcc2d26ad883f4429e377d52d8333fc3bd9ed9a30b10a5575b4af59a4186",
+        "submit_calls": 1,
+        "duration_seconds": 167.445642,
+        "usage": {
+          "input_tokens": 15181,
+          "output_tokens": 1386,
+          "cache_read_tokens": 31232,
+          "cost_usd": 0.0266202
+        }
+      },
+      {
+        "attempt_id": "prefect22189-B",
+        "repository": "PrefectHQ/prefect",
+        "pr": 22189,
+        "lane": "B",
+        "terminal_recommendation": "negative_control",
+        "claims": 0,
+        "artifact_sha256": "sha256:23ce9ca7861165f48877d99ebc7ac55e33087c3a79e1aaa0f827f75d84f9843c",
+        "submit_calls": 3,
+        "duration_seconds": 197.97337,
+        "usage": {
+          "input_tokens": 34321,
+          "output_tokens": 7169,
+          "cache_read_tokens": 45056,
+          "cost_usd": 0.0818406
+        }
+      },
+      {
+        "attempt_id": "starlette3257-B",
+        "repository": "Kludex/starlette",
+        "pr": 3257,
+        "lane": "B",
+        "terminal_recommendation": "negative_control",
+        "claims": 0,
+        "artifact_sha256": "sha256:ef96b062313cb2946f02ab49b789fdf8660ccdb0d083a6aef317ba7742664d99",
+        "submit_calls": 2,
+        "duration_seconds": 160.329246,
+        "usage": {
+          "input_tokens": 11819,
+          "output_tokens": 1252,
+          "cache_read_tokens": 1536,
+          "cost_usd": 0.0194846
+        }
+      }
+    ]
+  },
+  "semantic_comparison": {
+    "pairs": 3,
+    "agreements": 2,
+    "disagreements": 1,
+    "agreement_rate": 0.6666666666666666,
+    "outcomes": [
+      {
+        "repository": "fastapi/full-stack-fastapi-template",
+        "pr": 2164,
+        "lane_a": "negative_control",
+        "lane_b": "negative_control",
+        "status": "agreement"
+      },
+      {
+        "repository": "Kludex/starlette",
+        "pr": 3257,
+        "lane_a": "negative_control",
+        "lane_b": "negative_control",
+        "status": "agreement"
+      },
+      {
+        "repository": "PrefectHQ/prefect",
+        "pr": 22189,
+        "lane_a": "positive",
+        "lane_b": "negative_control",
+        "status": "semantic_disagreement"
+      }
+    ]
+  },
+  "xhigh_terminal_fallback": {
+    "attempts_launched": 1,
+    "second_attempt_launched": false,
+    "model": "openai-codex/gpt-5.6-luna",
+    "thinking": "xhigh",
+    "trigger": "PrefectHQ/prefect#22189 semantic disagreement",
+    "failure": "one detached assistant JSON text was produced without structured_output and failed the requested simplified schema: required decision missing, unknowns had the wrong shape, and additional fields were present",
+    "terminal_disposition": "unknown",
+    "internal_reasoning_used_as_truth": false,
+    "usage": {
+      "input_tokens": 81719,
+      "output_tokens": 11576,
+      "cache_read_tokens": 707072,
+      "cost_usd": 0.2218822,
+      "tool_calls": 37
+    },
+    "typed_terminal_output_produced": false,
+    "untyped_terminal_text_produced": true,
+    "untyped_terminal_text_bytes": 3394,
+    "untyped_terminal_text_used_as_truth": false
+  },
+  "integration_observation": {
+    "native_parent_reported_successes_per_wave": [
+      0,
+      0
+    ],
+    "native_parent_wave_sizes": [
+      3,
+      3
+    ],
+    "broker_validated_eventual_escrows": 6,
+    "cause": "historical tool errors or no-output termination dominated the native parent task result even after valid eventual escrow",
+    "authority": "broker-finalized escrow and independent immutable Git recovery"
+  },
+  "decision": {
+    "medium_typed_submission": "GO",
+    "scale": "NO_GO",
+    "blockers": [
+      "native parent status must distinguish eventual validated escrow from historical tool errors or terminating no-output",
+      "Luna-xhigh needs a typed terminal completion surface available under its exact tool allowlist"
+    ]
+  },
+  "canonical_database_imported": false
+}

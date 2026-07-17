@@ -1,12 +1,14 @@
 {
   "files": {
-    ".pi/extensions/blind-review-submit/index.ts": "sha256:0e59de4aca532e315247944021f372f96cfd7907ed9b841b613a8ca034c8050d",
+    ".pi/extensions/blind-review-submit/index.ts": "sha256:0243259e05920a39d1e615541bccce42ddfc5403244717c3b0bab2d1297ee610",
     ".pi/extensions/blind-review-submit/review-schema.ts": "sha256:87ff078e054bdffaca8d0702e5f3f5901364b7763a4f83fed2fd8287058dbc81",
-    "benchmarks/real_world/pilot_submit_v3.py": "sha256:d5b405bcf406de1b2eaf7ffa198ed10e81ca0a818ac2c9fef0a3a21b6501736e",
-    "benchmarks/real_world/pilot_v3/README.md": "sha256:5455930a3f45a4fe1fd9e23f1cebec67cb319704732df9893e7043673b473919",
+    "benchmarks/real_world/pilot_submit_v3.py": "sha256:b54872d5035c2c7496e21e10f89a0edf5e972d89f313e3226f9afbf63234cf48",
+    "benchmarks/real_world/pilot_typed_run_v3.py": "sha256:6e3b06fad161c1dd96de5c5a7ab6c7ceea06ea3cafa63ec6e2f97b652dc613b2",
+    "benchmarks/real_world/pilot_v3/README.md": "sha256:e8e1f0a4d5bf2cba9fcf2d4c6fd80c81a35a877e85472bb0570ef9210f01872e",
     "benchmarks/real_world/pilot_v3/model-policy-v1.json": "sha256:48cef6a821fdc662295278b3c0016436dee6faa61d9bc823aca97c0033f8fa9d",
+    "benchmarks/real_world/pilot_v3/native-pilot-report-v1.json": "sha256:025f21bcffb2a3c49bc5a5019a9f532846be020d26c3009c776d883e0e02ee51",
     "benchmarks/real_world/pilot_v3/review-prompt-v1.md": "sha256:0087f594c16fe2cfa846d7f4a373805c359ad407e69be1b48f75a4311d49eefa",
-    "benchmarks/real_world/pilot_v3/runtime-policy-v1.json": "sha256:aed0bfd739b7f08e42f24a23ae849ca5bc2a1b661a45fe02180e1cfd5d9d54ad",
+    "benchmarks/real_world/pilot_v3/runtime-policy-v1.json": "sha256:f9009b705d6080f770925adf6ce420e47fd034bb4378b9d2a76e41c2ebd39968",
     "benchmarks/real_world/pilot_v3/source-policy-v1.json": "sha256:da448e13043d1bda2d7e3c3a0d424c0906d829fdda95209dd68b76092b53194a",
     "benchmarks/real_world/pilot_v3/submission-binding-schema-v1.json": "sha256:c6b15e260f9d690a4a61f55d0aea1d0da0f183308997b9fb1b669e89e9362acd",
     "benchmarks/real_world/pilot_v3/tool-policy-v1.json": "sha256:c2ba4ad094de3c033824143ff858a55b1ce87c7813dac171c413116963507aeb"
