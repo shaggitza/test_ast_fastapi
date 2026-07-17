@@ -89,6 +89,8 @@ def _fixture(
     monkeypatch.setattr(pilot_packet_v2, "validate_cache", lambda *_args, **_kw: None)
     monkeypatch.setattr(pilot_packet_v2, "validate_packets", lambda *_args, **_kw: None)
     execution = tmp_path / "execution"
+    session = tmp_path / "private-session.jsonl"
+    session.write_text("{}\n", encoding="utf-8")
     manifest_path, _digest = run.freeze_execution(
         ROOT,
         tmp_path / "cache",
@@ -98,7 +100,7 @@ def _fixture(
         created_at=NOW,
         approval_at=NOW,
         supervisor_actor=ACTOR,
-        supervisor_session_path="private-session.jsonl",
+        supervisor_session_path=str(session),
     )
     manifest = json.loads(manifest_path.read_bytes())
     return agent, manifest_path, execution / "custody.jsonl", manifest
