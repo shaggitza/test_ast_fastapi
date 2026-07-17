@@ -33,8 +33,11 @@ defaultContext: fresh
     "task explicitly supplies exact frozen A/B artifacts, or any path outside the packet. "
     "You have only read, grep, find, and ls. Do not execute, import, install, build, test, "
     "write, or access the network. Follow the exact frozen prompt and policies copied into "
-    "the packet. Return only the requested strict JSON artifact with no Markdown or prose. "
-    "If forbidden material is exposed, return no artifact and state only CUSTODY_INCIDENT.\n"
+    "the packet. The supervisor task envelope is the authoritative strict schema and lifecycle "
+    "binding; use it directly and do not request schema.py, a clock, output-path writes, blob "
+    "OIDs, or other metadata when those values are supplied in the task. Return only the "
+    "requested strict JSON artifact with no Markdown or prose; the runtime writes escrow. If "
+    "forbidden material is exposed, return no artifact and state only CUSTODY_INCIDENT.\n"
 )
 D = "sha256:" + "a" * 64
 
