@@ -205,18 +205,24 @@ prior labels, Review B, and adjudications.
 
 Execution v2 correctly failed closed before Review A escrow was opened because
 one shared supervisor-session interval mixed all three PRs and orchestration.
-Execution v3 uses `pilot_review_b_v2.py` and exactly one active PR interval. The
-start command authenticates manifest/cache/packets and clean A-started custody,
+Execution v3 also failed closed during its first active Review B interval because
+Pi's unavoidable internal reasoning mentioned orchestration; its A escrow and B
+artifact are quarantined and never canonical. Execution v4 uses
+`pilot_review_b_v2.py` and exactly one active PR interval. The start command
+authenticates manifest/cache/packets and clean A-started custody,
 records the command-time session offset and fixed-scope allocated bytes, and
 launches a private one-second supervisor-process-tree RSS sampler. Finish
 requires exactly one successful leading tool result matching the stored start
 call ID, making the retained boundary post-command, and excludes its own exact
 single-executable-tool finish assistant message. The start and finish messages
-may also contain any number of internal `thinking` items; those items cannot
-execute activity, remain covered by the hashed session metadata, and lie outside
-the retained work interval. Text, images, other content, and a second tool call
+may also contain any number of internal `thinking` items. Throughout the interval,
+internal reasoning cannot access external data or execute activity, remains in the
+raw hashed transcript and usage accounting, and is not treated as a data-access
+surface. Visible text, images, unknown content, and a second boundary tool call
 remain forbidden. Every retained tool call must have exactly one successful
-matching tool result before another assistant/final boundary.
+matching tool result before another assistant/final boundary. Parent Review B is
+independently authored and frozen before A is opened; it is not a clean-context
+review lane.
 Between start and finish, the parent may perform only assigned packet
 `read`/`grep`/`find`/`ls` and exactly one bounded artifact-write `bash` command.
 Finish rejects other PRs/paths/tools/network/orchestration, validates

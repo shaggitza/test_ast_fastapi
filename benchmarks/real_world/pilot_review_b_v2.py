@@ -1030,8 +1030,12 @@ def _successful_tool_results(  # noqa: PLR0912 - strict tool lifecycle automaton
             if not isinstance(content, list):
                 _fail("assistant content is invalid")
             for part in content:
-                if not isinstance(part, dict) or part.get("type") != "toolCall":
+                if not isinstance(part, dict):
+                    _fail("assistant content is invalid")
+                if part.get("type") == "thinking":
                     continue
+                if part.get("type") != "toolCall":
+                    _fail("Review B interval contains visible or unknown assistant content")
                 call_id = part.get("id")
                 name = part.get("name")
                 if not isinstance(call_id, str) or not call_id or call_id in seen:
@@ -1113,18 +1117,26 @@ def _interval(  # noqa: PLR0912,PLR0915
         if message.get("role") != "assistant":
             continue
         assistant_count += 1
-        all_text = "\n".join(_flatten_strings(message))
-        folded = all_text.casefold()
-        if any(term in folded for term in _FORBIDDEN_TERMS):
-            _fail("Review B interval contains forbidden orchestration or benchmark material")
-        if any(_contains_other_identity(all_text, repo, number) for repo, number in other):
-            _fail("Review B interval references another pilot PR")
         content = message.get("content")
         if not isinstance(content, list):
             _fail("assistant content is invalid")
         for part in content:
-            if not isinstance(part, dict) or part.get("type") != "toolCall":
+            if not isinstance(part, dict):
+                _fail("assistant content is invalid")
+            if part.get("type") == "thinking":
+                # Pi always emits internal reasoning. It cannot access external data or
+                # execute activity; raw session bytes and usage still bind/account it.
                 continue
+            if part.get("type") != "toolCall":
+                _fail("Review B interval contains visible or unknown assistant content")
+            executable_text = "\n".join(_flatten_strings(part))
+            folded = executable_text.casefold()
+            if any(term in folded for term in _FORBIDDEN_TERMS):
+                _fail("Review B interval contains forbidden orchestration or benchmark material")
+            if any(
+                _contains_other_identity(executable_text, repo, number) for repo, number in other
+            ):
+                _fail("Review B interval references another pilot PR")
             name = part.get("name")
             if not isinstance(name, str) or name not in _ALLOWED_TOOLS:
                 _fail("Review B interval used forbidden tool")
