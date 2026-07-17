@@ -18,6 +18,7 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, NoReturn, cast
@@ -47,6 +48,7 @@ _MAX_CACHE_BYTES = 2 * 1024 * 1024 * 1024
 # 2 GiB for bounded fetch output/index staging inside this aggregate ceiling.
 _MAX_CACHE_STAGING_BYTES = 8 * 1024 * 1024 * 1024
 _MIN_DISK_HEADROOM_BYTES = 256 * 1024 * 1024
+_METADATA_RESERVE_BYTES = 4096
 _MAX_PATH_BYTES = 2048
 _PACKET_ID = "blind-review-pilot-packet-v1"
 _PACKET_KEYS = {
@@ -227,6 +229,56 @@ def _lstat_inventory(root: Path, *, byte_limit: int) -> tuple[set[str], set[str]
     return directories, files, total
 
 
+def _check_disk_headroom(root: Path) -> None:
+    try:
+        free = shutil.disk_usage(root).free
+    except OSError as exc:
+        raise PilotPacketError("cannot inspect staging disk") from exc
+    if free < _MIN_DISK_HEADROOM_BYTES:
+        _fail("staging disk headroom exhausted")
+
+
+@dataclass
+class StagingByteBudget:
+    """O(1) monotonic accounting between exact recursive reconciliations."""
+
+    root: Path
+    limit: int
+    accounted: int = 0
+
+    @classmethod
+    def from_root(cls, root: Path, limit: int) -> StagingByteBudget:
+        directories, files, total = _lstat_inventory(root, byte_limit=limit)
+        metadata = (1 + len(directories) + len(files)) * _METADATA_RESERVE_BYTES
+        if total + metadata > limit:
+            _fail("staging byte budget exceeded")
+        return cls(root=root, limit=limit, accounted=total + metadata)
+
+    def charge(self, size: int) -> None:
+        if size < 0 or self.accounted + size > self.limit:
+            _fail("staging byte budget exceeded")
+        self.accounted += size
+        _check_disk_headroom(self.root)
+
+    def release(self, size: int) -> None:
+        if size < 0 or size > self.accounted:
+            _fail("staging byte accounting underflow")
+        self.accounted -= size
+
+    def check_unaccounted(self, size: int) -> None:
+        if size < 0 or self.accounted + size > self.limit:
+            _fail("staging byte budget exceeded")
+        _check_disk_headroom(self.root)
+
+    def reconcile(self) -> None:
+        directories, files, total = _lstat_inventory(self.root, byte_limit=self.limit)
+        metadata = (1 + len(directories) + len(files)) * _METADATA_RESERVE_BYTES
+        if total + metadata > self.limit:
+            _fail("staging byte budget exceeded")
+        self.accounted = total + metadata
+        _check_disk_headroom(self.root)
+
+
 class GitRunner:
     """Run argv-only Git commands with temp-file output and active bounds."""
 
@@ -261,6 +313,7 @@ class GitRunner:
         limit: int,
         disk_root: Path | None = None,
         disk_limit: int = _MAX_CACHE_STAGING_BYTES,
+        staging_budget: StagingByteBudget | None = None,
         input_path: Path | None = None,
     ) -> None:
         self.commands += 1
@@ -299,14 +352,22 @@ class GitRunner:
                     ):
                         _kill_wait(process)
                         _fail("Git command output exceeded bound")
-                    if disk_root is not None:
+                    if staging_budget is not None:
+                        staging_budget.check_unaccounted(
+                            output.stat().st_size
+                            + stderr_path.stat().st_size
+                            + 2 * _METADATA_RESERVE_BYTES
+                        )
+                    elif disk_root is not None:
                         _lstat_inventory(disk_root, byte_limit=disk_limit)
                     time.sleep(0.05)
                 code = process.wait(timeout=5)
                 _kill_wait(process)
             if output.stat().st_size > limit or stderr_path.stat().st_size > _MAX_STDERR_BYTES:
                 _fail("Git command output exceeded bound")
-            if disk_root is not None:
+            if staging_budget is not None:
+                staging_budget.reconcile()
+            elif disk_root is not None:
                 _lstat_inventory(disk_root, byte_limit=disk_limit)
             if code != 0:
                 _fail(f"Git command failed: {args[0]}")
@@ -750,18 +811,28 @@ def _parse_tree(raw: bytes) -> tuple[list[dict[str, str]], list[dict[str, str]]]
     return blobs, gitlinks
 
 
-def _copy_exact(source: Path, target: Path, expected: int, staging_root: Path) -> str:
+def _copy_exact(
+    source: Path, target: Path, expected: int, staging_budget: StagingByteBudget
+) -> str:
     digest = hashlib.sha256()
     written = 0
+    missing: list[Path] = []
+    parent = target.parent
+    while parent != staging_budget.root and not parent.exists():
+        missing.append(parent)
+        parent = parent.parent
+    if parent != staging_budget.root and not parent.exists():
+        _fail("blob target escaped staging root")
+    staging_budget.charge((len(missing) + 1) * _METADATA_RESERVE_BYTES)
     target.parent.mkdir(parents=True, exist_ok=True)
     with source.open("rb") as input_handle, target.open("xb") as output_handle:
         while chunk := input_handle.read(64 * 1024):
             written += len(chunk)
             if written > expected or written > _MAX_FILE_BYTES:
                 _fail("Git blob changed size")
+            staging_budget.charge(len(chunk))
             digest.update(chunk)
             output_handle.write(chunk)
-            _lstat_inventory(staging_root, byte_limit=_MAX_PACKET_STAGING_BYTES)
     if written != expected:
         _fail("Git blob size mismatch")
     target.chmod(0o444)
@@ -773,22 +844,24 @@ def _materialize_blobs(  # noqa: PLR0912,PLR0915 - bounded batch protocol parser
     cache: Path,
     destination: Path,
     entries: list[dict[str, str]],
-    staging_root: Path,
+    staging_budget: StagingByteBudget,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     by_oid: dict[str, list[dict[str, str]]] = {}
     for entry in entries:
         by_oid.setdefault(entry["oid"], []).append(entry)
     input_file = destination.parent / f".{destination.name}.batch-input"
     output_file = destination.parent / f".{destination.name}.batch-output"
-    input_file.write_bytes(b"".join(f"{oid}\n".encode() for oid in by_oid))
+    batch_input = b"".join(f"{oid}\n".encode() for oid in by_oid)
+    staging_budget.check_unaccounted(len(batch_input) + _METADATA_RESERVE_BYTES)
+    input_file.write_bytes(batch_input)
+    staging_budget.reconcile()
     try:
         runner.run_to_path(
             cache,
             ("cat-file", "--batch"),
             output_file,
             limit=_MAX_BATCH_BYTES,
-            disk_root=staging_root,
-            disk_limit=_MAX_PACKET_STAGING_BYTES,
+            staging_budget=staging_budget,
             input_path=input_file,
         )
         files: list[dict[str, object]] = []
@@ -806,10 +879,12 @@ def _materialize_blobs(  # noqa: PLR0912,PLR0915 - bounded batch protocol parser
                     raise PilotPacketError("malformed Git cat-file batch header") from exc
                 if returned != oid or kind != "blob" or size < 0 or size > _MAX_FILE_BYTES:
                     _fail("Git cat-file batch identity/type/size mismatch")
+                staging_budget.charge(_METADATA_RESERVE_BYTES)
                 descriptor, blob_name = tempfile.mkstemp(
                     prefix="pilot-blob-", dir=destination.parent
                 )
                 blob = Path(blob_name)
+                blob_charged = _METADATA_RESERVE_BYTES
                 digest = hashlib.sha256()
                 try:
                     with os.fdopen(descriptor, "wb") as target:
@@ -818,10 +893,11 @@ def _materialize_blobs(  # noqa: PLR0912,PLR0915 - bounded batch protocol parser
                             chunk = stream.read(min(64 * 1024, remaining))
                             if not chunk:
                                 _fail("Git cat-file batch blob truncated")
+                            staging_budget.charge(len(chunk))
+                            blob_charged += len(chunk)
                             digest.update(chunk)
                             target.write(chunk)
                             remaining -= len(chunk)
-                            _lstat_inventory(staging_root, byte_limit=_MAX_PACKET_STAGING_BYTES)
                     if stream.read(1) != b"\n":
                         _fail("Git cat-file batch blob delimiter missing")
                     blob_hash = f"sha256:{digest.hexdigest()}"
@@ -842,7 +918,7 @@ def _materialize_blobs(  # noqa: PLR0912,PLR0915 - bounded batch protocol parser
                             )
                         else:
                             path = destination.joinpath(*PurePosixPath(entry["path"]).parts)
-                            actual_hash = _copy_exact(blob, path, size, staging_root)
+                            actual_hash = _copy_exact(blob, path, size, staging_budget)
                             if actual_hash != blob_hash:
                                 _fail("Git blob copy hash changed")
                             files.append(
@@ -856,6 +932,7 @@ def _materialize_blobs(  # noqa: PLR0912,PLR0915 - bounded batch protocol parser
                             )
                 finally:
                     blob.unlink(missing_ok=True)
+                    staging_budget.release(blob_charged)
             if stream.read(1):
                 _fail("Git cat-file batch emitted trailing bytes")
         return sorted(files, key=lambda item: str(item["path"])), sorted(
@@ -864,6 +941,7 @@ def _materialize_blobs(  # noqa: PLR0912,PLR0915 - bounded batch protocol parser
     finally:
         input_file.unlink(missing_ok=True)
         output_file.unlink(missing_ok=True)
+        staging_budget.reconcile()
 
 
 def _snapshot_from_cache(
@@ -871,7 +949,7 @@ def _snapshot_from_cache(
     cache: Path,
     tree: str,
     destination: Path,
-    staging_root: Path,
+    staging_budget: StagingByteBudget,
 ) -> dict[str, object]:
     destination.mkdir()
     listing_path = destination.parent / f".{destination.name}.ls-tree"
@@ -881,15 +959,15 @@ def _snapshot_from_cache(
             ("ls-tree", "-rz", "--full-tree", "-r", tree),
             listing_path,
             limit=_MAX_TREE_BYTES,
-            disk_root=staging_root,
-            disk_limit=_MAX_PACKET_STAGING_BYTES,
+            staging_budget=staging_budget,
         )
         blobs, gitlinks = _parse_tree(_read_bounded(listing_path, _MAX_TREE_BYTES))
         if len(blobs) + len(gitlinks) > _MAX_FILES:
             _fail("snapshot file count exceeded")
-        files, symlinks = _materialize_blobs(runner, cache, destination, blobs, staging_root)
+        files, symlinks = _materialize_blobs(runner, cache, destination, blobs, staging_budget)
     finally:
         listing_path.unlink(missing_ok=True)
+        staging_budget.reconcile()
     return {"files": files, "symlinks": symlinks, "gitlinks": gitlinks}
 
 
@@ -900,12 +978,14 @@ def _expected_packet_manifest(
     record: dict[str, Any],
     bindings_hash: str,
     runner: GitRunner,
+    staging_budget: StagingByteBudget,
 ) -> dict[str, Any]:
     policy_root = root / "benchmarks/real_world/pilot_v2"
     (packet / "policies").mkdir()
     for name in _CONTROL_FILES:
         shutil.copyfile(policy_root / name, packet / "policies" / name)
     (packet / "binding.json").write_bytes(_canonical(record))
+    staging_budget.reconcile()
     cache = _cache_path(cache_root, str(record["repository"]))
     snapshots: dict[str, object] = {}
     for side in ("baseline", "target"):
@@ -914,7 +994,7 @@ def _expected_packet_manifest(
             cache,
             str(record[f"{side}_tree"]),
             packet / side,
-            packet.parent,
+            staging_budget,
         )
         snapshots[side] = {"tree": record[f"{side}_tree"], **snapshot}
     diff_path = packet / "snapshot.diff"
@@ -930,8 +1010,7 @@ def _expected_packet_manifest(
         ),
         diff_path,
         limit=_MAX_DIFF_BYTES,
-        disk_root=packet.parent,
-        disk_limit=_MAX_PACKET_STAGING_BYTES,
+        staging_budget=staging_budget,
     )
     diff_hash, diff_bytes = _hash_file(diff_path, _MAX_DIFF_BYTES)
     payload_files = _record_payload_files(packet, exclude={"packet-manifest.json"})
@@ -955,6 +1034,7 @@ def _expected_packet_manifest(
         "packet_root_sha256": "",
     }
     manifest["packet_root_sha256"] = _manifest_root(manifest)
+    staging_budget.reconcile()
     return manifest
 
 
@@ -1017,6 +1097,7 @@ def prepare_packets(
     staging = Path(tempfile.mkdtemp(prefix=f".{packet_root.name}.", dir=packet_root.parent))
     staging.chmod(0o700)
     runner = GitRunner()
+    staging_budget = StagingByteBudget.from_root(staging, _MAX_PACKET_STAGING_BYTES)
     try:
         with _validation_lock(cache_root):
             cache_identity = _directory_identity(cache_root)
@@ -1025,10 +1106,16 @@ def prepare_packets(
                 packet = staging / _packet_name(record)
                 packet.mkdir()
                 manifest = _expected_packet_manifest(
-                    root, cache_root, packet, record, bindings_hash, runner
+                    root,
+                    cache_root,
+                    packet,
+                    record,
+                    bindings_hash,
+                    runner,
+                    staging_budget,
                 )
                 (packet / "packet-manifest.json").write_bytes(_canonical(manifest))
-                _lstat_inventory(staging, byte_limit=_MAX_PACKET_STAGING_BYTES)
+                staging_budget.reconcile()
             if _directory_identity(cache_root) != cache_identity:
                 _fail("cache root changed during packet preparation")
         _readonly(staging)
@@ -1103,6 +1190,9 @@ def _validate_packets_unlocked(  # noqa: PLR0912 - fail-closed packet reconcilia
         ) as name_temp:
             regenerated = Path(name_temp) / "packet"
             regenerated.mkdir()
+            regeneration_budget = StagingByteBudget.from_root(
+                Path(name_temp), _MAX_PACKET_STAGING_BYTES
+            )
             expected_manifest = _expected_packet_manifest(
                 source_root,
                 cache_root,
@@ -1110,6 +1200,7 @@ def _validate_packets_unlocked(  # noqa: PLR0912 - fail-closed packet reconcilia
                 record,
                 bindings_hash,
                 GitRunner(),
+                regeneration_budget,
             )
             if manifest != expected_manifest:
                 _fail("packet differs from locked Git object regeneration")

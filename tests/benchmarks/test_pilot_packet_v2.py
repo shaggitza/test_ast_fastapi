@@ -157,6 +157,43 @@ def _validate(
     )
 
 
+def test_blob_chunk_accounting_avoids_recursive_hot_loop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = tmp_path / "staging"
+    root.mkdir()
+    source = root / "source"
+    source.write_bytes(b"x" * (2 * 1024 * 1024))
+    budget = packet.StagingByteBudget.from_root(root, 8 * 1024 * 1024)
+    original = packet._lstat_inventory
+    inventories = 0
+
+    def counted(path: Path, *, byte_limit: int) -> tuple[set[str], set[str], int]:
+        nonlocal inventories
+        inventories += 1
+        return original(path, byte_limit=byte_limit)
+
+    monkeypatch.setattr(packet, "_lstat_inventory", counted)
+    digest = packet._copy_exact(source, root / "target", source.stat().st_size, budget)
+    assert digest == packet._sha(source.read_bytes())
+    assert inventories == 0
+    budget.reconcile()
+    assert inventories == 1
+
+
+def test_empty_blob_and_parent_metadata_are_budgeted(tmp_path: Path) -> None:
+    root = tmp_path / "staging"
+    root.mkdir()
+    source = root / "empty"
+    source.write_bytes(b"")
+    budget = packet.StagingByteBudget.from_root(root, 1024 * 1024)
+    before = budget.accounted
+    target = root / "a" / "b" / "c" / "empty.py"
+    packet._copy_exact(source, target, 0, budget)
+    assert budget.accounted - before == 4 * packet._METADATA_RESERVE_BYTES
+    assert target.is_file()
+
+
 def test_prepare_validate_exact_packet_and_no_clobber(tmp_path: Path) -> None:
     cache_root, records = _cache(tmp_path)
     packet_root = tmp_path / "packets"
@@ -411,7 +448,7 @@ def test_packet_aggregate_staging_bound_cleans_output(
     cache_root, records = _cache(tmp_path)
     packet_root = tmp_path / "packets"
     monkeypatch.setattr(packet, "_MAX_PACKET_STAGING_BYTES", 1)
-    with pytest.raises(packet.PilotPacketError, match="byte bound"):
+    with pytest.raises(packet.PilotPacketError, match=r"byte (bound|budget)"):
         packet.prepare_packets(
             Path(__file__).resolve().parents[2],
             cache_root,
