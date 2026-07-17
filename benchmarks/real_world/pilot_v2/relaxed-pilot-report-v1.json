@@ -1,0 +1,131 @@
+{
+  "agreement": {
+    "adjudications_required": 0,
+    "outcomes": [
+      {
+        "claims": [],
+        "pr": 2164,
+        "repository": "fastapi/full-stack-fastapi-template",
+        "terminal_recommendation": "negative_control"
+      },
+      {
+        "claims": [],
+        "pr": 3257,
+        "repository": "Kludex/starlette",
+        "terminal_recommendation": "negative_control"
+      },
+      {
+        "claims": [
+          "prefect_redis.client.RedisMessagingSettings",
+          "prefect_redis.client.async_redis_from_settings",
+          "prefect_redis.client.get_async_redis_client"
+        ],
+        "pr": 22189,
+        "repository": "PrefectHQ/prefect",
+        "terminal_recommendation": "positive"
+      }
+    ],
+    "prs": 3,
+    "rate": 1.0,
+    "semantic_agreements": 3
+  },
+  "decision": {
+    "issues_149_198_unblocked": false,
+    "reasons": [
+      "All three PRs reached independent semantic agreement with immutable Git-valid evidence.",
+      "Only 2 of 6 first outputs were schema-valid; four bounded formatting retries were required.",
+      "Observed cost projects to about USD 5,749.63 for 2,500 PRs.",
+      "The exact relaxed workflow should not scale until schema is embedded directly and a materially cheaper validated review configuration is piloted."
+    ],
+    "scale_execution": "NO_GO",
+    "workflow_truth_quality": "GO"
+  },
+  "projection_2500_prs": {
+    "analysis_reviews": 5000,
+    "cost_usd": 5749.633333,
+    "expected_format_correction_runs_at_observed_rate": 3333.333333,
+    "input_tokens": 637596666.667,
+    "method": "linear_observed_mean_no_compounding",
+    "output_tokens": 45601666.667,
+    "warning": "Pilot is non-statistical; projection is operational arithmetic, not a population estimate."
+  },
+  "protocol_status": "authorized_deviation_not_preregistered_v1_compliance",
+  "report_id": "blind-review-pilot-relaxed-v1",
+  "resources": {
+    "analysis_peak_concurrency": 3,
+    "analysis_reviews": 6,
+    "cost_usd": 6.89956,
+    "format_correction_runs": 4,
+    "format_retry_peak_concurrency": 3,
+    "input_tokens": 765116,
+    "observed_wall_seconds": 979.654,
+    "output_tokens": 54722
+  },
+  "reviews": [
+    {
+      "claims": [],
+      "lane": "A",
+      "pr": 3257,
+      "repository": "Kludex/starlette",
+      "sha256": "sha256:e544226bf7a6bdeac8d91a2aa4f81fa3eec6cdfe099480a1af6525ea100ec9bf",
+      "terminal_recommendation": "negative_control"
+    },
+    {
+      "claims": [],
+      "lane": "B",
+      "pr": 3257,
+      "repository": "Kludex/starlette",
+      "sha256": "sha256:91ac3a032ee2d5cc6ddea852a01b06301d92014c91e46f9bc8eec67942f06ff1",
+      "terminal_recommendation": "negative_control"
+    },
+    {
+      "claims": [
+        "prefect_redis.client.RedisMessagingSettings",
+        "prefect_redis.client.async_redis_from_settings",
+        "prefect_redis.client.get_async_redis_client"
+      ],
+      "lane": "A",
+      "pr": 22189,
+      "repository": "PrefectHQ/prefect",
+      "sha256": "sha256:d5edaca3836169680d1102596ab80550def8b68731de17fdc13adac39f38a4a7",
+      "terminal_recommendation": "positive"
+    },
+    {
+      "claims": [
+        "prefect_redis.client.RedisMessagingSettings",
+        "prefect_redis.client.async_redis_from_settings",
+        "prefect_redis.client.get_async_redis_client"
+      ],
+      "lane": "B",
+      "pr": 22189,
+      "repository": "PrefectHQ/prefect",
+      "sha256": "sha256:08432ad4237e507145d81a9025415feb1005cb5740858f8c7df42420ea7a55bf",
+      "terminal_recommendation": "positive"
+    },
+    {
+      "claims": [],
+      "lane": "A",
+      "pr": 2164,
+      "repository": "fastapi/full-stack-fastapi-template",
+      "sha256": "sha256:37bc59bf097f7b00b164f8821c50cccf1a5acddfa4a8d04d6b80514f8a272b56",
+      "terminal_recommendation": "negative_control"
+    },
+    {
+      "claims": [],
+      "lane": "B",
+      "pr": 2164,
+      "repository": "fastapi/full-stack-fastapi-template",
+      "sha256": "sha256:db000c56854b8c90a9916060c48b9453bd41c97d698587d7acd9d18840e71bf2",
+      "terminal_recommendation": "negative_control"
+    }
+  ],
+  "schema_version": 1,
+  "source_binding_sha256": "sha256:5a7b5b29bf23f6f0a03e048df56bef50e34bf8718cc4777617be6d9a87c97d9d",
+  "validation": {
+    "first_attempt_schema_valid": 2,
+    "format_corrections": 4,
+    "git_evidence_valid": 6,
+    "strict_schema_valid": 6,
+    "substantive_reanalysis_for_corrections": false
+  }
+}

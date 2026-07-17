@@ -1,8 +1,11 @@
 # Blind review/adjudication pilot v1
 
 This directory freezes issue #147 protocol inputs and authenticated immutable
-source bindings for three pilot PRs. It does **not** claim an execution manifest,
-reviews, adjudications, metrics, or a passed gate.
+source bindings for three pilot PRs. The preregistered-v1 materials do **not**
+claim a successful strict execution or passed gate. A later, explicitly
+authorized and separately versioned relaxed pilot report records reviews,
+metrics, a workflow-quality pass, and a scale `NO_GO`; it is not
+preregistered-v1 compliance.
 
 ## Fresh content-blind selection
 
@@ -262,10 +265,27 @@ staging directory and requires no incident.
 # or a compound shell command.
 ```
 
-## Remaining live phases
+## Authorized relaxed pilot result
 
-Supervisor must next launch Review A into unopened escrow, independently freeze
-parent Review B with exact session boundaries, append custody/telemetry, then
-open and validate A and run fresh adjudicators. Metrics and the objective go/no-go
-report remain absent. Only after all gates and a separate post-pilot scale
-approval may issues #149–#198 begin.
+The strict execution series through v8 remained fail-closed and quarantined. It
+produced no canonical preregistered-v1 result. The operator subsequently approved
+a separate bounded, nonrecursive protocol deviation so reviewers could complete
+thorough fresh-context analysis without the parent-session token ceiling. This
+result is versioned as `blind-review-pilot-relaxed-v1`; it must never be described
+as preregistered-v1 compliance.
+
+Six independent reviews covered both lanes for all three PRs. All six artifacts
+pass strict `ReviewArtifactV1` parsing and immutable Git evidence validation.
+Both lanes agree semantically for every PR, so no adjudication was required:
+
+- `fastapi/full-stack-fastapi-template#2164`: `negative_control`;
+- `Kludex/starlette#3257`: `negative_control`;
+- `PrefectHQ/prefect#22189`: `positive`, with three agreed SDK entrypoints.
+
+The workflow-quality gate passes, but the scale gate does not. Four of six first
+outputs needed bounded formatting-only correction, and total observed cost was
+USD 6.89956. Linear arithmetic projects approximately USD 5,749.63 for 2,500
+PRs. `relaxed-pilot-report-v1.json` records review hashes, agreement, validation,
+resources, projections, deviations, and the objective `NO_GO` scale decision.
+Issues #149–#198 remain blocked until schema delivery and review cost are
+materially improved and re-piloted.
