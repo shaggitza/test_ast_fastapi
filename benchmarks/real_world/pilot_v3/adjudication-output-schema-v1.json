@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "blind-review-adjudication-output-v3-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["terminal_recommendation", "decision", "claims", "unknowns"],
+  "properties": {
+    "terminal_recommendation": {
+      "enum": ["positive", "negative_control", "unknown", "not_evaluable"]
+    },
+    "decision": {"type": "string", "minLength": 1, "maxLength": 20000, "pattern": "^[\\s\\S]*\\S[\\s\\S]*$"},
+    "claims": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["claim_kind", "recommendation", "entrypoint", "summary", "evidence"],
+        "properties": {
+          "claim_kind": {"const": "entrypoint"},
+          "recommendation": {"enum": ["include", "exclude", "unknown"]},
+          "entrypoint": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "public_id", "confidence"],
+            "properties": {
+              "kind": {"enum": ["http", "graphql", "task", "event", "cli", "cron", "sdk", "other"]},
+              "public_id": {"type": "string", "minLength": 1, "maxLength": 2000, "pattern": "^[\\s\\S]*\\S[\\s\\S]*$"},
+              "confidence": {"enum": ["confirmed", "probable", "possible"]}
+            }
+          },
+          "summary": {"type": "string", "minLength": 1, "maxLength": 20000, "pattern": "^[\\s\\S]*\\S[\\s\\S]*$"},
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1000,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["side", "path", "start_line", "end_line"],
+              "properties": {
+                "side": {"enum": ["baseline", "target"]},
+                "path": {"type": "string", "minLength": 1, "maxLength": 1000},
+                "start_line": {"type": "integer", "minimum": 1, "maximum": 10000000},
+                "end_line": {"type": "integer", "minimum": 1, "maximum": 10000000}
+              }
+            }
+          }
+        }
+      }
+    },
+    "unknowns": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["category", "description", "evidence_limit"],
+        "properties": {
+          "category": {"type": "string", "minLength": 1, "maxLength": 1000, "pattern": "^[\\s\\S]*\\S[\\s\\S]*$"},
+          "description": {"type": "string", "minLength": 1, "maxLength": 20000, "pattern": "^[\\s\\S]*\\S[\\s\\S]*$"},
+          "evidence_limit": {"type": "string", "minLength": 1, "maxLength": 20000, "pattern": "^[\\s\\S]*\\S[\\s\\S]*$"}
+        }
+      }
+    }
+  }
+}

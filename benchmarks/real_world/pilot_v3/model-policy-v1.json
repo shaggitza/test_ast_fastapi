@@ -1,11 +1,14 @@
 {
   "adjudication": {
-    "implemented_in_phase_1": false,
+    "implemented": true,
     "issue": 218,
+    "live_typed_chain_canary_proved": false,
     "model": "gpt-5.6-luna",
     "provider": "openai-codex",
+    "terminal_failure_disposition": "unknown",
     "thinking": "xhigh",
-    "trigger": "frozen_semantic_disagreement_or_unresolved_evaluability_only"
+    "trigger": "frozen_semantic_disagreement_or_unresolved_evaluability_only",
+    "typed_surface": "native_pi_subagents_chain_outputSchema_structured_output"
   },
   "id": "blind-review-model-policy-v3-v1",
   "review": {

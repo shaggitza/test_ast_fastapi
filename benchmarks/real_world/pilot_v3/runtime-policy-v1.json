@@ -33,12 +33,32 @@
     "session_audit_required": true,
     "terminal_authority": "broker_validated_escrow_not_native_parent_status"
   },
+  "native_adjudication": {
+    "absolute_deadline_required": true,
+    "agent_tools": [
+      "find",
+      "grep",
+      "ls",
+      "read"
+    ],
+    "chain_step_outputSchema_required": true,
+    "intercom_bridge": "prelaunch_config_receipt_requires_off_or_fork-only_for_fresh_chain",
+    "max_processes_per_exact_pair_in_preserved_canonical_root": 1,
+    "host_private_cross_root_claim_required": true,
+    "model_launch_in_python": false,
+    "recursive": false,
+    "runtime_structured_output_tool_required": true,
+    "runtime_structured_output_wrapper": "exact_{value:output}",
+    "pinned_SubagentParams_Value_Check_required": true,
+    "single_mode_outputSchema_forbidden": true,
+    "terminal_failure_disposition": "unknown"
+  },
   "scale_gate": {
     "medium_typed_submission": "GO",
     "overall": "NO_GO",
     "blockers": [
       "native_parent_eventual_escrow_status_semantics",
-      "xhigh_typed_terminal_completion"
+      "new_non_prefect_typed_xhigh_chain_canary"
     ]
   },
   "node": "24.12.0",
