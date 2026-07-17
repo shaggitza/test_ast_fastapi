@@ -156,11 +156,55 @@ install -d -m 700 "$HOME/.cache/fastapi-endpoint-detector/pilot-v1-private"
   --packet-root "$HOME/.cache/fastapi-endpoint-detector/pilot-v1-private/packets"
 ```
 
+## Private execution and custody foundation
+
+After cache/packet validation, the supervisor freezes a strict private execution
+manifest and initializes one append-only hash-chained custody stream per PR. The
+human explicitly approved proceeding without a separate monetary hard cap; the
+manifest retains the frozen 18-run/100,000-token limits and records their
+protocol-derived worst-case ceiling of 54,000,000 micro-USD, plus the exact
+approval text/hash/mode. This is not a claim that the ceiling will be spent.
+
+```bash
+AGENT="$HOME/.pi/agent/agents/benchmark-pilot.pilot-blind-reviewer-v1.md"
+PRIVATE="$HOME/.cache/fastapi-endpoint-detector/pilot-v1-private"
+NOW="2026-07-16T22:30:00Z"  # operator supplies the actual canonical UTC time
+.venv/bin/python -m benchmarks.real_world.pilot_run_v2 \
+  --freeze-execution --agent-config "$AGENT" \
+  --cache-root "$PRIVATE/cache" --packet-root "$PRIVATE/packets" \
+  --execution-root "$PRIVATE/execution" --occurred-at "$NOW"
+.venv/bin/python -m benchmarks.real_world.pilot_run_v2 \
+  --initialize-ledger --agent-config "$AGENT" \
+  --manifest "$PRIVATE/execution/execution-manifest.json" \
+  --cache-root "$PRIVATE/cache" --packet-root "$PRIVATE/packets" \
+  --ledger "$PRIVATE/execution/custody.jsonl" --occurred-at "$NOW"
+.venv/bin/python -m benchmarks.real_world.pilot_run_v2 \
+  --write-review-a-tasks --agent-config "$AGENT" \
+  --manifest "$PRIVATE/execution/execution-manifest.json" \
+  --cache-root "$PRIVATE/cache" --packet-root "$PRIVATE/packets" \
+  --task-root "$PRIVATE/execution/review-a-tasks"
+```
+
+The canonical custody ledger path is always derived from the authenticated
+execution manifest. An optional CLI `--ledger` must resolve to that exact path;
+shadow ledgers are rejected and all actions share its single lock namespace.
+Task generation requires exactly the three initialized
+`source_binding_frozen` events and refuses missing, advanced, or incident/no-go
+ledgers. The custody CLI locks and validates the full ledger and execution
+manifest plus complete private cache/packet regeneration before every task,
+validation, or prospective append. Invalid order, broken hashes, retry
+misbinding, added packet bytes, or any global no-go incident is rejected before
+immutable bytes are appended. A crash can leave a partial append; this fails
+closed as a corrupt/no-go custody stream and requires a new versioned execution,
+never truncation, repair, or continuation.
+Children never write custody. Reviewer task envelopes expose only the exact
+packet/binding/policy/model/limit inputs and explicitly exclude predictions,
+prior labels, Review B, and adjudications.
+
 ## Remaining live phases
 
-Supervisor must next privately prepare those caches/packets, then freeze the
-custom agent config, execution manifest, ledger, telemetry sampler, and metric
-reducer. For each PR, Review A runs into unopened escrow; parent freezes Review
-B; then A is opened/validated and a fresh adjudicator runs. Only after all
-objective gates and a separate post-pilot scale approval may issues #149–#198
-begin.
+Supervisor must next launch Review A into unopened escrow, independently freeze
+parent Review B with exact session boundaries, append custody/telemetry, then
+open and validate A and run fresh adjudicators. Metrics and the objective go/no-go
+report remain absent. Only after all gates and a separate post-pilot scale
+approval may issues #149–#198 begin.
