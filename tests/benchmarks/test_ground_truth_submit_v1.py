@@ -228,7 +228,12 @@ def _packet_and_record(
     for name, raw in policy_raw.items():
         payloads.append(_payload(packet, policy_paths[name], raw))
     source_structure = {
+        "schema_version": 1,
+        "id": "ground-truth-production-source-structure-v1",
+        "repository": "owner/repo",
+        "pr": 7,
         "baseline": {
+            "tree": baseline_tree,
             "files": [
                 {
                     "path": "src/main.py",
@@ -242,6 +247,7 @@ def _packet_and_record(
             "gitlinks": [],
         },
         "target": {
+            "tree": target_tree,
             "files": [
                 {
                     "path": "src/main.py",

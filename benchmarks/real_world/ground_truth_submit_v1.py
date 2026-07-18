@@ -533,13 +533,28 @@ def _inventory(
     source_structure: dict[str, Any],
 ) -> tuple[dict[tuple[str, str], str], str]:
     snapshots = source_structure
-    if not isinstance(snapshots, dict) or set(snapshots) != {"baseline", "target"}:
+    if (
+        not isinstance(snapshots, dict)
+        or set(snapshots) != {"schema_version", "id", "repository", "pr", "baseline", "target"}
+        or snapshots.get("schema_version") != 1
+        or snapshots.get("id") != "ground-truth-production-source-structure-v1"
+        or not isinstance(snapshots.get("repository"), str)
+        or not isinstance(snapshots.get("pr"), int)
+    ):
         _fail("packet snapshot inventory is invalid")
     lookup: dict[tuple[str, str], str] = {}
     rows: list[dict[str, str]] = []
     for side in ("baseline", "target"):
         snapshot = snapshots[side]
-        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("files"), list):
+        if (
+            not isinstance(snapshot, dict)
+            or set(snapshot) != {"tree", "files", "symlinks", "gitlinks"}
+            or not isinstance(snapshot.get("tree"), str)
+            or not _GIT_SHA.fullmatch(snapshot["tree"])
+            or not isinstance(snapshot.get("files"), list)
+            or not isinstance(snapshot.get("symlinks"), list)
+            or not isinstance(snapshot.get("gitlinks"), list)
+        ):
             _fail("packet snapshot file inventory is invalid")
         for item in snapshot["files"]:
             if not isinstance(item, dict):
