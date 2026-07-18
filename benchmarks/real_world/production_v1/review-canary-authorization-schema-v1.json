@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/ground-truth-production-v1/review-canary-authorization-schema-v1.json",
+  "title": "Ground truth review canary authorization v1",
+  "$defs": {"digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}},
+  "type": "object",
+  "required": ["schema_version", "protocol", "campaign_id", "campaign_manifest_sha256", "runtime_attestation_entry_hash", "agent_installation_sha256", "production_profile_sha256", "lanes", "limits", "issued_at", "expires_at", "authorizations", "previous_hash", "entry_hash"],
+  "properties": {
+    "schema_version": {"const": 1}, "protocol": {"const": "ground-truth-review-canary-authorization-v1"}, "campaign_id": {"type": "string", "minLength": 1},
+    "campaign_manifest_sha256": {"$ref": "#/$defs/digest"}, "runtime_attestation_entry_hash": {"$ref": "#/$defs/digest"}, "agent_installation_sha256": {"$ref": "#/$defs/digest"}, "production_profile_sha256": {"$ref": "#/$defs/digest"},
+    "lanes": {
+      "type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": true,
+      "items": {"type": "object", "required": ["lane_key", "attempt_id", "reviewer"], "properties": {"lane_key": {"type": "string", "minLength": 1}, "attempt_id": {"type": "string", "pattern": "^prod-v1-i[0-9]{3}-rank001-pr[0-9]+-[AB]$"}, "reviewer": {"type": "object", "required": ["name", "version"], "properties": {"name": {"type": "string"}, "version": {"type": "string"}}, "additionalProperties": false}}, "additionalProperties": false}
+    },
+    "limits": {"const": {"max_global_active": 3, "max_processes_per_lane": 1, "replacement_attempts": 0}}, "issued_at": {"type": "string"}, "expires_at": {"type": "string"},
+    "authorizations": {"const": {"review_launch": true, "adjudication": false, "canonical_import": false}}, "previous_hash": {"$ref": "#/$defs/digest"}, "entry_hash": {"$ref": "#/$defs/digest"}
+  }, "additionalProperties": false
+}

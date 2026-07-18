@@ -18,8 +18,9 @@ The current authorization gates are deliberately false:
 
 The campaign manifest alone authorizes none of those operations. Source cache and
 packet materialization are separately layered milestones; model launch,
-adjudication, and database import remain unavailable. Runtime policy records the
-expected `pi-subagents` 0.35.1 profile but does not attest or launch it.
+adjudication, and database import remain unavailable from the base manifest. Native
+review authority can only be layered through the separately attested, expiring
+rank-1 A/B canary protocol described below.
 
 ## Commands
 
@@ -152,3 +153,42 @@ and reauthenticates the exact profile/source/cache/packet boundary before no-clo
 publication. Recovery creates a fresh exact-cache evidence validator between fresh
 custody authentications. Cleanup removes only publication links whose device/inode
 still matches the link created by that invocation, so a raced-in file is never unlinked.
+
+## Native runtime and rank-1 A/B canary
+
+`ground_truth_run_v1.py` authenticates the complete production custody chain and
+pins `pi-subagents` 0.35.1, Pi 0.80.10, resolver/package/config bytes, the resolver's
+builtin/package/user/project/effective census, discovery roots, and fork-only/off
+intercom. Attestation copies the submit extension only into a private execution root
+and appends a no-launch ledger successor. A unique mode-0400 Luna-medium agent must
+then be installed under the recognized private user discovery root; resolver
+collisions, hash drift, wrong tools/model/thinking, or a different effective agent
+fail closed.
+
+Only the exact rank-1 A/B campaign lanes can receive the initial expiring canary
+authorization. Their ordered lane keys, attempt IDs, and reviewer identities are hashed
+into the runtime attestation and must match the authorization byte-for-byte. Each lane
+is single-process and nonreplaceable. Preparation repeatedly reauthenticates the full
+runtime/installation/ledger tuple under the ledger lock before binding publication,
+broker spawn, and the prepared event; drift fails closed and cleans the attempt.
+Preparation also enforces three global durable active slots, writes the inode-keyed
+private registry descriptor, and starts only the resource-bounded local broker.
+`native-launch-plan` validates the complete call against pinned Pi 0.35.1
+`SubagentParams` before atomically recording the ordered attempt/task-index mapping in
+one batch `launch_claimed` successor and emitting data for the supervisor's native
+`subagent(...)` tool. Python never launches Pi, a model, or a provider. A lost plan
+remains claimed and cannot be relaunched.
+
+`bind-native-result` freezes one native run ID per batch and requires each child session
+at the exact authenticated Pi layout
+`<sessions>/<parent-session>/<native-run-id>/run-<task-index>/session.jsonl`, with a
+start timestamp no earlier than the batch claim. It binds parent status and immutable
+child session identity before escrow finalization. Parent failure
+becomes monotonic `operational_failed`. Eligibility requires that prior success
+binding, exact chained Pi v3 session grammar with unique event IDs and a linear
+parent-ID chain, one byte-exact initial task with no steering, Luna-medium identity,
+packet-confined tools, one-to-three nonerror
+submissions, final `SUBMISSION_COMPLETE`, integer usage/micro-USD, and fresh
+escrow/evidence recovery. Reconciliation scans every durable slot, including claims
+that failed before a lane event; claimed launches are never relaunched. Adjudication
+and canonical import remain false.
