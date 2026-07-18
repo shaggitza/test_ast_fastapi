@@ -2,7 +2,9 @@
   "adjudication": {
     "implemented": true,
     "issue": 218,
-    "live_typed_chain_canary_proved": false,
+    "live_typed_chain_canary_proved": true,
+    "live_typed_chain_canary_pair_sha256": "sha256:acf9857bad081e1220bee4927f8478e44647232a6618536fb6f3cef397d27eb3",
+    "live_typed_chain_canary_scope": "exact_hash_and_version_scoped_synthetic_canary_only",
     "model": "gpt-5.6-luna",
     "provider": "openai-codex",
     "terminal_failure_disposition": "unknown",

@@ -153,11 +153,18 @@ imports `AdjudicationArtifactV1`.
 The initial synthetic non-Prefect chain canary exposed the missing static tool
 activation: its one xhigh process emitted inadmissible text, so that exact pair is
 terminal `unknown`, was not retried, and is not truth. Its hash-scoped external
-record is `xhigh-chain-canary-v1.json`. The fixed implementation remains
-offline-tested but is not yet a successful live proof. Scale remains `NO_GO` until
-a **new exact-pair** non-Prefect canary proves the corrected typed chain surface
-and until native medium parent-status semantics are fixed. There is no second
-Prefect fallback and no recursive xhigh fallback.
+record is `xhigh-chain-canary-v1.json`.
+
+A new, distinct non-Prefect synthetic pair then proved the corrected native typed
+chain surface. One Luna-xhigh process completed one pi-subagents chain step in
+48.2 seconds; `structured_output` was its exact final call, with no prose,
+coordination, delegation, retry, or canonical database import. Strict schema,
+Pydantic, path, line, changed-hunk, session, completion, and receipt validation
+passed. The exact evidence and usage are frozen in
+`xhigh-chain-canary-v2.json`. The typed Luna-xhigh chain gate is therefore
+hash-and-version-scoped `GO`. Overall scale remains `NO_GO` only until native
+medium parent-status semantics in issue #223 are fixed; reviews #149–#198 remain
+blocked. There is no second Prefect fallback and no recursive xhigh fallback.
 
 ## Runner CLI
 
