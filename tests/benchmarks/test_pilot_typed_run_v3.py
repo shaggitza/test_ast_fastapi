@@ -718,6 +718,7 @@ def _session_file(
     escaped_path: str | None = None,
     prose: str = "",
     model: str = "gpt-5.6-luna",
+    submit_transport_error: bool = False,
 ) -> Path:
     calls = [
         {
@@ -778,8 +779,30 @@ def _session_file(
                 "role": "toolResult",
                 "toolCallId": "submit-1",
                 "toolName": "submit_blind_review",
-                "content": [{"type": "text", "text": "rejected"}],
-                "isError": True,
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "connection refused"
+                            if submit_transport_error
+                            else "SUBMISSION_REJECTED code=EVIDENCE_INVALID "
+                            "diagnostic=claims[0].evidence[0] misses changed hunk"
+                        ),
+                    }
+                ],
+                **(
+                    {}
+                    if submit_transport_error
+                    else {
+                        "details": {
+                            "protocol_version": 3,
+                            "ok": False,
+                            "code": "EVIDENCE_INVALID",
+                            "diagnostic": "claims[0].evidence[0] misses changed hunk",
+                        }
+                    }
+                ),
+                "isError": submit_transport_error,
             },
         },
         {
@@ -830,7 +853,7 @@ def _session_file(
     return path
 
 
-def test_native_session_audit_accepts_eventual_escrow_after_historical_tool_error(
+def test_native_session_audit_accepts_nonerror_rejection_then_terminal_escrow(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source, packets, cache, execution = _setup(tmp_path, monkeypatch)
@@ -852,7 +875,9 @@ def test_native_session_audit_accepts_eventual_escrow_after_historical_tool_erro
     assert row["eventual_escrow_accepted"] is True
     assert row["submit_calls"] == 2
     assert row["correction_submissions"] == 1
-    assert row["submit_errors"] == 1
+    assert row["submit_errors"] == 0
+    assert row["semantic_rejections"] == 1
+    assert row["parent_success_compatible"] is True
     assert row["usage"] == {
         "input_tokens": 60,
         "output_tokens": 12,
@@ -860,6 +885,30 @@ def test_native_session_audit_accepts_eventual_escrow_after_historical_tool_erro
         "cost_usd_observed": pytest.approx(0.0070367),
         "cost_micro_usd": 7037,
     }
+
+
+def test_native_session_audit_rejects_submit_transport_error_even_before_escrow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, packets, cache, execution = _setup(tmp_path, monkeypatch)
+    _prepare(source, packets, cache, execution, "transport-error")
+    client = _client_script(tmp_path / "client.py")
+    assert _submit(execution, "transport-error", client).returncode == 0
+    runner.finalize_native_attempt(execution_root=execution, attempt_id="transport-error")
+    _, state = runner._load_native_state(execution, "transport-error")
+    authenticated = runner._json(
+        execution / "attempts/transport-error/native-result.json",
+        2 * 1024 * 1024,
+        modes={0o400},
+    )
+    session = _session_file(
+        tmp_path / "transport-error.jsonl",
+        Path(str(state["packet"])),
+        cast("dict[str, Any]", authenticated["receipt"]),
+        submit_transport_error=True,
+    )
+    with pytest.raises(runner.PilotTypedRunError, match="transport, security, or protocol"):
+        runner.audit_native_session(execution, "transport-error", session)
 
 
 @pytest.mark.parametrize(
@@ -891,7 +940,7 @@ def test_native_session_audit_rejects_identity_path_and_prose_tamper(
         tmp_path / "session.jsonl",
         Path(str(state["packet"])),
         cast("dict[str, Any]", authenticated["receipt"]),
-        **kwargs,
+        **cast("dict[str, Any]", kwargs),
     )
     with pytest.raises(runner.PilotTypedRunError, match=match):
         runner.audit_native_session(execution, "tampered-session", session)

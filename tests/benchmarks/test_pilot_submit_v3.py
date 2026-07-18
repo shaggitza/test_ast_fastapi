@@ -721,3 +721,25 @@ def test_extension_schema_is_semantic_only_and_runtime_load_is_deferred() -> Non
     assert loading["phase_2_extension_load_proved_live_for_pinned_execution"] is True
     assert loading["phase_2_subagent_propagation_proved_for_pinned_execution"] is True
     assert loading["global_unversioned_propagation_proof"] is False
+
+
+def test_extension_rejection_is_nonthrowing_nonterminating_but_success_terminates() -> None:
+    root = Path(__file__).resolve().parents[2]
+    runtime = (root / ".pi/extensions/blind-review-submit/index.ts").read_text()
+    assert (
+        'const CORRECTABLE_REJECTION_CODES = new Set(["DRAFT_INVALID", "EVIDENCE_INVALID"]);'
+        in runtime
+    )
+    assert "function submissionToolResult(response: BrokerResponse)" in runtime
+    assert "text: `SUBMISSION_REJECTED code=${response.code}${diagnostic}`" in runtime
+    assert "details," in runtime
+    assert "terminate: false" in runtime
+    assert "terminate: true" in runtime
+    assert "throw new Error(`SUBMISSION_REJECTED" not in runtime
+    assert "if (!CORRECTABLE_REJECTION_CODES.has(response.code))" in runtime
+    assert "throw new Error(`SUBMISSION_FATAL code=${response.code}${diagnostic}`);" in runtime
+    assert "return submissionToolResult(response);" in runtime
+    assert "!/^[A-Z][A-Z0-9_]{0,99}$/.test(response.code)" in runtime
+    assert "const binding = await trustedTransport(ctx.cwd);" in runtime
+    assert "const response = await brokerRequest(" in runtime
+    assert 'throw new Error("broker success response is invalid")' in runtime

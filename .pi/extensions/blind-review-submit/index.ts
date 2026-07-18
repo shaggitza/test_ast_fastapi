@@ -10,6 +10,7 @@ const MAX_REQUEST_BYTES = 2_200_000;
 const MAX_RESPONSE_BYTES = 16 * 1024;
 const DEADLINE_MS = 1_800_000;
 const CAPABILITY = /^[0-9a-f]{64}$/;
+const CORRECTABLE_REJECTION_CODES = new Set(["DRAFT_INVALID", "EVIDENCE_INVALID"]);
 
 interface Receipt {
   schema_version: 1;
@@ -26,13 +27,28 @@ interface Receipt {
   summary: string;
 }
 
-interface BrokerResponse {
+interface BrokerSuccessResponse {
   protocol_version: 3;
-  ok: boolean;
+  ok: true;
+  code: string;
+  summary: string;
+  receipt: Receipt;
+}
+
+interface BrokerRejectionResponse {
+  protocol_version: 3;
+  ok: false;
   code: string;
   diagnostic?: string;
-  summary?: string;
-  receipt?: Receipt;
+}
+
+type BrokerResponse = BrokerSuccessResponse | BrokerRejectionResponse;
+
+interface RejectionDetails {
+  protocol_version: 3;
+  ok: false;
+  code: string;
+  diagnostic?: string;
 }
 
 async function rejectSymlinkAncestors(target: string): Promise<void> {
@@ -155,7 +171,8 @@ function parseResponse(raw: Buffer): BrokerResponse {
   if (
     response.protocol_version !== 3 ||
     typeof response.ok !== "boolean" ||
-    typeof response.code !== "string"
+    typeof response.code !== "string" ||
+    !/^[A-Z][A-Z0-9_]{0,99}$/.test(response.code)
   ) {
     throw new Error("broker response fields are invalid");
   }
@@ -190,6 +207,45 @@ function parseResponse(raw: Buffer): BrokerResponse {
     throw new Error("broker diagnostic is invalid");
   }
   return response as unknown as BrokerResponse;
+}
+
+function compactDiagnostic(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function submissionToolResult(response: BrokerResponse) {
+  if (!response.ok) {
+    const diagnostic = response.diagnostic === undefined
+      ? ""
+      : ` diagnostic=${compactDiagnostic(response.diagnostic)}`;
+    if (!CORRECTABLE_REJECTION_CODES.has(response.code)) {
+      throw new Error(`SUBMISSION_FATAL code=${response.code}${diagnostic}`);
+    }
+    const details: RejectionDetails = {
+      protocol_version: 3,
+      ok: false,
+      code: response.code,
+      ...(response.diagnostic === undefined ? {} : { diagnostic: response.diagnostic }),
+    };
+    return {
+      content: [{ type: "text" as const, text: `SUBMISSION_REJECTED code=${response.code}${diagnostic}` }],
+      details,
+      terminate: false,
+    };
+  }
+  if (
+    response.code !== "SUBMITTED" ||
+    typeof response.summary !== "string" ||
+    !response.receipt ||
+    response.receipt.summary !== response.summary
+  ) {
+    throw new Error("broker success response is invalid");
+  }
+  return {
+    content: [{ type: "text" as const, text: response.summary }],
+    details: response.receipt,
+    terminate: true,
+  };
 }
 
 async function brokerRequest(
@@ -275,23 +331,7 @@ const submitBlindReview = defineTool({
       { protocol_version: 3, capability: binding.capability, cwd: binding.cwd, draft: params },
       signal,
     );
-    if (!response.ok) {
-      const diagnostic = typeof response.diagnostic === "string" ? ` diagnostic=${response.diagnostic}` : "";
-      throw new Error(`SUBMISSION_REJECTED code=${response.code}${diagnostic}`);
-    }
-    if (
-      response.code !== "SUBMITTED" ||
-      typeof response.summary !== "string" ||
-      !response.receipt ||
-      response.receipt.summary !== response.summary
-    ) {
-      throw new Error("broker success response is invalid");
-    }
-    return {
-      content: [{ type: "text" as const, text: response.summary }],
-      details: response.receipt,
-      terminate: true,
-    };
+    return submissionToolResult(response);
   },
 });
 
