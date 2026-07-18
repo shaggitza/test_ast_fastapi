@@ -2156,7 +2156,6 @@ def audit_native_session(  # noqa: PLR0912,PLR0915
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "cache_read_tokens": cache_read_tokens,
-            "cost_usd_observed": cost_usd,
             "cost_micro_usd": round(cost_usd * 1_000_000),
         },
     }
@@ -2186,7 +2185,6 @@ def audit_native_sessions(
             "input_tokens": sum(row["input_tokens"] for row in usage_rows),
             "output_tokens": sum(row["output_tokens"] for row in usage_rows),
             "cache_read_tokens": sum(row["cache_read_tokens"] for row in usage_rows),
-            "cost_usd_observed": sum(float(row["cost_usd_observed"]) for row in usage_rows),
             "cost_micro_usd": sum(int(row["cost_micro_usd"]) for row in usage_rows),
         },
     }

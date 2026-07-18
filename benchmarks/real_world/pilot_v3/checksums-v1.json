@@ -4,7 +4,7 @@
     ".pi/extensions/blind-review-submit/review-schema.ts": "sha256:87ff078e054bdffaca8d0702e5f3f5901364b7763a4f83fed2fd8287058dbc81",
     "benchmarks/real_world/pilot_adjudicate_v3.py": "sha256:cd3fc69f54143b2a196e8471d3ff29cda49c462ead7c96a420a1e0534bc039ab",
     "benchmarks/real_world/pilot_submit_v3.py": "sha256:b54872d5035c2c7496e21e10f89a0edf5e972d89f313e3226f9afbf63234cf48",
-    "benchmarks/real_world/pilot_typed_run_v3.py": "sha256:b62988db40c724a5adc680b21899cbed72ba7db9e71395909765be7c8656df53",
+    "benchmarks/real_world/pilot_typed_run_v3.py": "sha256:f0b0fe0234e0fcbaf7a02e80c9c8a745fcb9cbbdde93322aa504664e45e34509",
     "benchmarks/real_world/pilot_v3/README.md": "sha256:ea75982e57e3491a2ba050987cb84ede88ccce643c3ff77bba7b3f6d3d324b2f",
     "benchmarks/real_world/pilot_v3/adjudication-output-schema-v1.json": "sha256:c6487942416ba305843e067f25245e527aeb308c2c29a2faf6f55f8e2c22679e",
     "benchmarks/real_world/pilot_v3/adjudication-prompt-v1.md": "sha256:9fda68150e1cd5026129e5acb3a754adbc7fb06d3ac15abff2669924b1a38d89",
