@@ -170,9 +170,15 @@ pins `pi-subagents` 0.35.1, Pi 0.80.10, resolver/package/config bytes, the resol
 builtin/package/user/project/effective census, discovery roots, and fork-only/off
 intercom. Attestation copies the submit extension only into a private execution root
 and appends a no-launch ledger successor. A unique mode-0400 Luna-medium agent must
-then be installed under the recognized private user discovery root; resolver
-collisions, hash drift, wrong tools/model/thinking, or a different effective agent
-fail closed.
+then be installed at the exact flat user path
+`~/.pi/agent/agents/ground-truth-production-reviewer-v1.md`; resolver collisions,
+hash drift, wrong tools/model/thinking, or a different effective agent fail closed.
+
+Before any review authorization or lane event exists, one operational recovery may
+append `runtime-attestation-supersession-001.json` on a new absent execution root.
+It must name and immediately follow the immutable initial attestation, becomes the
+only current runtime head, and still grants no review launch, adjudication, or import.
+A second supersession or any supersession after authorization/activity fails closed.
 
 Only the exact rank-1 A/B campaign lanes can receive the initial expiring canary
 authorization. Their ordered lane keys, attempt IDs, and reviewer identities are hashed

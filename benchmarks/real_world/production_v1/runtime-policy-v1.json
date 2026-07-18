@@ -28,6 +28,8 @@
   "max_submission_calls": 3,
   "max_tool_calls": 203,
   "model": "openai-codex/gpt-5.6-luna",
+  "native_agent_discovery_layout": "flat-user-root-exact-path",
+  "native_agent_discovery_path": "~/.pi/agent/agents/ground-truth-production-reviewer-v1.md",
   "native_agent_name": "ground-truth-production-reviewer-v1",
   "native_plan_validation": "pinned-SubagentParams-Value.Check-before-atomic-batch-claim",
   "native_result_binding_required": true,
@@ -47,6 +49,17 @@
     "max_seconds": 30,
     "network": false,
     "shell": false
+  },
+  "runtime_attestation_supersession": {
+    "filename": "runtime-attestation-supersession-001.json",
+    "grants_adjudication": false,
+    "grants_canonical_import": false,
+    "grants_review_launch": false,
+    "maximum": 1,
+    "purpose": "operational-preflight-recovery-only",
+    "requires_initial_attestation": true,
+    "requires_no_lane_events": true,
+    "requires_no_review_authorization": true
   },
   "runtime_files": [
     "package.json",

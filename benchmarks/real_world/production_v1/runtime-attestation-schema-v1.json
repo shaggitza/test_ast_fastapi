@@ -113,6 +113,38 @@
   "$id": "https://example.invalid/ground-truth-production-v1/runtime-attestation-schema-v1.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "protocol": {
+            "const": "ground-truth-runtime-attestation-v1"
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "required": [
+            "supersedes_entry_hash"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "protocol": {
+            "const": "ground-truth-runtime-attestation-supersession-v1"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "supersedes_entry_hash"
+        ]
+      }
+    }
+  ],
   "properties": {
     "agent_source_sha256": {
       "$ref": "#/$defs/digest"
@@ -171,7 +203,10 @@
       "$ref": "#/$defs/digest"
     },
     "protocol": {
-      "const": "ground-truth-runtime-attestation-v1"
+      "enum": [
+        "ground-truth-runtime-attestation-v1",
+        "ground-truth-runtime-attestation-supersession-v1"
+      ]
     },
     "runtime_identity": {
       "additionalProperties": false,
@@ -406,6 +441,9 @@
       "const": 1
     },
     "source_bindings_sha256": {
+      "$ref": "#/$defs/digest"
+    },
+    "supersedes_entry_hash": {
       "$ref": "#/$defs/digest"
     }
   },
