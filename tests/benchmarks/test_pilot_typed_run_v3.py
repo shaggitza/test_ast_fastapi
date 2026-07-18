@@ -836,6 +836,19 @@ def _session_file(
                 "isError": False,
             },
         },
+        {
+            "type": "message",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "SUBMISSION_COMPLETE"}],
+                "usage": {
+                    "input": 5,
+                    "output": 1,
+                    "cacheRead": 0,
+                    "cost": {"total": 0.0001},
+                },
+            },
+        },
     ]
     events = [
         {"type": "session", "version": 3, "id": "session", "cwd": str(packet)},
@@ -877,14 +890,127 @@ def test_native_session_audit_accepts_nonerror_rejection_then_terminal_escrow(
     assert row["correction_submissions"] == 1
     assert row["submit_errors"] == 0
     assert row["semantic_rejections"] == 1
+    assert row["terminal_acknowledgement"] == "SUBMISSION_COMPLETE"
     assert row["parent_success_compatible"] is True
     assert row["usage"] == {
-        "input_tokens": 60,
-        "output_tokens": 12,
+        "input_tokens": 65,
+        "output_tokens": 13,
         "cache_read_tokens": 15,
-        "cost_usd_observed": pytest.approx(0.0070367),
-        "cost_micro_usd": 7037,
+        "cost_usd_observed": pytest.approx(0.0071367),
+        "cost_micro_usd": 7137,
     }
+
+
+def test_native_session_audit_accepts_first_success_then_exact_acknowledgement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, packets, cache, execution = _setup(tmp_path, monkeypatch)
+    _prepare(source, packets, cache, execution, "first-success")
+    client = _client_script(tmp_path / "client.py")
+    assert _submit(execution, "first-success", client).returncode == 0
+    runner.finalize_native_attempt(execution_root=execution, attempt_id="first-success")
+    _, state = runner._load_native_state(execution, "first-success")
+    authenticated = runner._json(
+        execution / "attempts/first-success/native-result.json",
+        2 * 1024 * 1024,
+        modes={0o400},
+    )
+    session = _session_file(
+        tmp_path / "first-success.jsonl",
+        Path(str(state["packet"])),
+        cast("dict[str, Any]", authenticated["receipt"]),
+    )
+    events = [json.loads(line) for line in session.read_text().splitlines()]
+    events = [
+        event
+        for event in events
+        if not (
+            event.get("type") == "message"
+            and event["message"].get("role") in {"assistant", "toolResult"}
+            and (
+                event["message"].get("toolCallId") == "submit-1"
+                or any(
+                    part.get("id") == "submit-1"
+                    for part in event["message"].get("content", [])
+                    if isinstance(part, dict)
+                )
+            )
+        )
+    ]
+    session.write_text("".join(json.dumps(event) + "\n" for event in events))
+    row = runner.audit_native_session(execution, "first-success", session)
+    assert row["submit_calls"] == 1
+    assert row["correction_submissions"] == 0
+    assert row["terminal_acknowledgement"] == "SUBMISSION_COMPLETE"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    [
+        ("missing", "submission result is invalid"),
+        ("wrong", "exact terminal acknowledgement"),
+        ("early", "forbidden prose"),
+        ("later_tool", "exact terminal acknowledgement"),
+    ],
+)
+def test_native_session_audit_rejects_invalid_acknowledgement_sequence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    match: str,
+) -> None:
+    source, packets, cache, execution = _setup(tmp_path, monkeypatch)
+    _prepare(source, packets, cache, execution, f"ack-{mutation}")
+    client = _client_script(tmp_path / "client.py")
+    assert _submit(execution, f"ack-{mutation}", client).returncode == 0
+    runner.finalize_native_attempt(execution_root=execution, attempt_id=f"ack-{mutation}")
+    _, state = runner._load_native_state(execution, f"ack-{mutation}")
+    authenticated = runner._json(
+        execution / f"attempts/ack-{mutation}/native-result.json",
+        2 * 1024 * 1024,
+        modes={0o400},
+    )
+    session = _session_file(
+        tmp_path / f"ack-{mutation}.jsonl",
+        Path(str(state["packet"])),
+        cast("dict[str, Any]", authenticated["receipt"]),
+    )
+    events = [json.loads(line) for line in session.read_text().splitlines()]
+    ack = events[-1]
+    if mutation == "missing":
+        events.pop()
+    elif mutation == "wrong":
+        ack["message"]["content"][0]["text"] = "SUBMISSION COMPLETE"
+    elif mutation == "early":
+        events.pop()
+        events.insert(-1, ack)
+    else:
+        events.insert(
+            -1,
+            {
+                "type": "message",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "toolCall",
+                            "id": "read-late",
+                            "name": "read",
+                            "arguments": {"path": "target/src/main.py"},
+                        }
+                    ],
+                    "usage": {
+                        "input": 1,
+                        "output": 1,
+                        "cacheRead": 0,
+                        "cost": {"total": 0.0},
+                    },
+                },
+            },
+        )
+    session.write_text("".join(json.dumps(event) + "\n" for event in events))
+    with pytest.raises(runner.PilotTypedRunError, match=match):
+        runner.audit_native_session(execution, f"ack-{mutation}", session)
 
 
 def test_native_session_audit_rejects_submit_transport_error_even_before_escrow(

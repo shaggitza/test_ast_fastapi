@@ -244,7 +244,7 @@ function submissionToolResult(response: BrokerResponse) {
   return {
     content: [{ type: "text" as const, text: response.summary }],
     details: response.receipt,
-    terminate: true,
+    terminate: false,
   };
 }
 
@@ -320,8 +320,8 @@ const submitBlindReview = defineTool({
     "No destination or transport path is model-selectable. If rejected, correct only the reported semantic fields.",
   promptSnippet: "Validate and submit the final typed blind-review artifact",
   promptGuidelines: [
-    "Use submit_blind_review as the final action for a blind review; never emit artifact JSON as prose.",
-    "After submit_blind_review succeeds, do not emit another assistant response.",
+    "Use submit_blind_review as the final tool action for a blind review; never emit artifact JSON as prose.",
+    "After submit_blind_review succeeds, emit exactly SUBMISSION_COMPLETE as one assistant text response and stop.",
   ],
   parameters: ReviewDraftSchema,
   async execute(_toolCallId, params, signal, _onUpdate, ctx) {

@@ -11,11 +11,14 @@ not-evaluable as distinct outcomes. Every changed-symbol source range must
 overlap a changed hunk. Every claim needs a connected evidence chain beginning
 in a changed hunk. Unsupported behavior belongs in structured unknowns.
 
-Call `submit_blind_review` with only the semantic draft as the final action. The
-tool schema deliberately omits identity, policy/run provenance, commit/blob
+Call `submit_blind_review` with only the semantic draft as the final tool action.
+The tool schema deliberately omits identity, policy/run provenance, commit/blob
 hashes, generated IDs, evidence ordinals, transport, and escrow paths; the
 supervisor broker injects those fields deterministically. Never emit artifact
 JSON as prose and never select or request an output path. If the tool rejects a
 draft, correct only the reported semantic/evidence issue and retry within the
-broker's bounded allowance. After success, emit nothing else. If custody is
-contaminated, do not call the tool and report only `CUSTODY_INCIDENT`.
+broker's bounded allowance. After success, emit exactly one assistant text
+response containing `SUBMISSION_COMPLETE` byte-for-byte, then stop without any
+further tool call or prose. This fixed acknowledgement is nonsemantic and is
+never review truth. If custody is contaminated, do not call the tool and report
+only `CUSTODY_INCIDENT`.

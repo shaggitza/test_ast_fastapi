@@ -100,14 +100,16 @@ remains `unknown`. Full non-private results are frozen in
 
 The native parent reported 0/3 success in each wave even though all six eventual
 escrows validated, because expected broker rejections were thrown tool errors and
-dominated its task status. Issue #223 changes only that expected validation path:
-only `DRAFT_INVALID` or `EVIDENCE_INVALID` is now a successful, nonterminating
-tool result with bounded structured details, so Luna can correct it without Pi
-recording `isError`. Final authenticated broker success still terminates. Transport,
-capability, custody, protocol, and malformed-response failures still throw and
-remain terminal. The broker continues to enforce the existing maximum of three
-attempts. This status change is implemented and statically/integration tested,
-but scale remains `NO_GO` until a separately published live status canary passes.
+dominated its task status. Issue #223 changes the expected validation and successful-completion paths:
+only `DRAFT_INVALID` or `EVIDENCE_INVALID` is a successful, nonterminating tool
+result with bounded structured details, so Luna can correct it without Pi recording
+`isError`. Final authenticated broker success is also nonterminating and must be
+followed immediately by the exact nonsemantic assistant acknowledgement
+`SUBMISSION_COMPLETE`; that terminal text lets Pi report success while escrow remains
+the sole authority. Transport, capability, custody, protocol, and malformed-response
+failures still throw and remain terminal. The broker continues to enforce the existing
+maximum of three attempts. This status change is implemented and statically/integration
+tested, but scale remains `NO_GO` until a separately published live status canary passes.
 Per-attempt report costs preserve the provider-observed USD totals; deterministic
 session audits additionally publish integer micro-USD values rounded once per
 session, so summed audit micro-USD can differ slightly from rounding the exact
@@ -228,15 +230,25 @@ python -m benchmarks.real_world.pilot_adjudicate_v3 finalize-adjudication \
 ```
 
 The session audit accepts bounded non-error semantic/evidence rejections followed
-by one terminal validated escrow. It requires each rejection's exact compact text
-and structured details, records `semantic_rejections`, and marks the session
+by one validated escrow and exactly one terminal assistant text response equal
+byte-for-byte to `SUBMISSION_COMPLETE`. It requires each rejection's exact compact
+text and structured details, records `semantic_rejections`, and marks the session
 `parent_success_compatible`. Any submission transport, security, custody, or
 protocol tool error is terminal even if an escrow appears later. The audit
 reauthenticates the binding, exact escrow, receipt, and immutable Git evidence;
 requires model and thinking bindings before assistant activity; and requires the
-successful submit tool result to be terminal. It also fails closed on tools or
-paths outside policy, prose, malformed JSONL, tool/result cardinality,
-non-integer token counters, non-finite/negative cost, and submission bounds.
+fixed acknowledgement immediately after the successful submit result with no later
+events or tools. It fails closed on any other prose, malformed JSONL, tools or paths
+outside policy, tool/result cardinality, non-integer token counters,
+non-finite/negative cost, and submission bounds.
+
+This acknowledgement profile is a narrow, separately hash-bound departure from
+the earlier v3 rule that successful submission terminated without another model
+response. Pi-subagents 0.34.0 reports a successful terminating tool-only turn as
+"no output"; the fixed nonsemantic acknowledgement supplies the parent-visible
+terminal text without making model prose a truth source. Authenticated supervisor
+escrow remains the sole terminal semantic authority. The scale gate remains
+`NO_GO` until this exact profile passes a fresh live native status canary.
 
 `create-native-agent` copies the exact hash-bound execution agent to a mode-0400
 agent definition below the recognized Pi user discovery root and atomically

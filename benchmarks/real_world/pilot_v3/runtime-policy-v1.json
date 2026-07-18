@@ -37,9 +37,11 @@
     ],
     "expected_broker_rejection": "nonerror_nonterminating_tool_result",
     "unexpected_transport_security_custody_protocol_failure": "terminal_tool_error",
-    "final_broker_success": "terminating_authenticated_receipt",
+    "final_broker_success": "nonterminating_authenticated_receipt_then_exact_fixed_acknowledgement",
+    "fixed_terminal_acknowledgement": "SUBMISSION_COMPLETE",
+    "fixed_terminal_acknowledgement_semantic_authority": false,
     "parent_status_semantics": "implemented_pending_live_canary",
-    "terminal_authority": "broker_validated_escrow_and_parent_success_after_live_proof"
+    "terminal_authority": "broker_validated_escrow_only"
   },
   "native_adjudication": {
     "absolute_deadline_required": true,
