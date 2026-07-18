@@ -99,12 +99,19 @@ remains `unknown`. Full non-private results are frozen in
 `native-pilot-report-v1.json`; no artifact was imported into the canonical DB.
 
 The native parent reported 0/3 success in each wave even though all six eventual
-escrows validated, because historical tool errors or terminating no-output
-dominated its task status. Broker escrow remains authoritative. Medium typed
-submission is `GO`. Per-attempt report costs preserve the provider-observed USD
-totals; deterministic session audits additionally publish integer micro-USD
-values rounded once per session, so summed audit micro-USD can differ slightly
-from rounding the exact aggregate once.
+escrows validated, because expected broker rejections were thrown tool errors and
+dominated its task status. Issue #223 changes only that expected validation path:
+only `DRAFT_INVALID` or `EVIDENCE_INVALID` is now a successful, nonterminating
+tool result with bounded structured details, so Luna can correct it without Pi
+recording `isError`. Final authenticated broker success still terminates. Transport,
+capability, custody, protocol, and malformed-response failures still throw and
+remain terminal. The broker continues to enforce the existing maximum of three
+attempts. This status change is implemented and statically/integration tested,
+but scale remains `NO_GO` until a separately published live status canary passes.
+Per-attempt report costs preserve the provider-observed USD totals; deterministic
+session audits additionally publish integer micro-USD values rounded once per
+session, so summed audit micro-USD can differ slightly from rounding the exact
+aggregate once.
 
 Phase 3 implements issue #218 in `pilot_adjudicate_v3.py`. It deterministically
 reauthenticates and compares exact finalized A/B escrows using order-insensitive
@@ -162,8 +169,8 @@ coordination, delegation, retry, or canonical database import. Strict schema,
 Pydantic, path, line, changed-hunk, session, completion, and receipt validation
 passed. The exact evidence and usage are frozen in
 `xhigh-chain-canary-v2.json`. The typed Luna-xhigh chain gate is therefore
-hash-and-version-scoped `GO`. Overall scale remains `NO_GO` only until native
-medium parent-status semantics in issue #223 are fixed; reviews #149–#198 remain
+hash-and-version-scoped `GO`. Overall scale remains `NO_GO` until the new native
+medium parent-status semantics pass a live canary; reviews #149–#198 remain
 blocked. There is no second Prefect fallback and no recursive xhigh fallback.
 
 ## Runner CLI
@@ -220,13 +227,16 @@ python -m benchmarks.real_world.pilot_adjudicate_v3 finalize-adjudication \
   --output "$PRIVATE/structured-output.json"
 ```
 
-The session audit accepts an eventual validated escrow even when a historical
-tool error makes the native parent status look failed. It reauthenticates the
-binding, exact escrow, receipt, and immutable Git evidence; requires model and
-thinking bindings before assistant activity; and requires the successful submit
-tool result to be terminal. It also fails closed on tools or paths outside
-policy, prose, malformed JSONL, tool/result cardinality, non-integer token
-counters, non-finite/negative cost, and submission bounds.
+The session audit accepts bounded non-error semantic/evidence rejections followed
+by one terminal validated escrow. It requires each rejection's exact compact text
+and structured details, records `semantic_rejections`, and marks the session
+`parent_success_compatible`. Any submission transport, security, custody, or
+protocol tool error is terminal even if an escrow appears later. The audit
+reauthenticates the binding, exact escrow, receipt, and immutable Git evidence;
+requires model and thinking bindings before assistant activity; and requires the
+successful submit tool result to be terminal. It also fails closed on tools or
+paths outside policy, prose, malformed JSONL, tool/result cardinality,
+non-integer token counters, non-finite/negative cost, and submission bounds.
 
 `create-native-agent` copies the exact hash-bound execution agent to a mode-0400
 agent definition below the recognized Pi user discovery root and atomically

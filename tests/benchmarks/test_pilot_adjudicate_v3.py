@@ -1096,7 +1096,7 @@ def test_live_xhigh_canary_v2_report_and_scale_gate_are_consistent() -> None:
         "medium_typed_submission": "GO",
         "typed_xhigh_chain": "GO",
         "overall": "NO_GO",
-        "blockers": ["native_parent_eventual_escrow_status_semantics"],
+        "blockers": ["native_parent_status_live_canary"],
     }
     assert model["adjudication"]["live_typed_chain_canary_proved"] is True
     assert tool["fallback"]["live_typed_chain_canary"]["status"] == "GO"

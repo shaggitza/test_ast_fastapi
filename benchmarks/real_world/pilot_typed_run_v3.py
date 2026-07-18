@@ -50,6 +50,8 @@ _MAX_RSS_BYTES = 4 * 1024 * 1024 * 1024
 _ATTEMPT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _AGENT_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _SHA = re.compile(r"^sha256:[0-9a-f]{64}$")
+_REJECTION_CODE = re.compile(r"^[A-Z][A-Z0-9_]{0,99}$")
+_CORRECTABLE_REJECTION_CODES = {"DRAFT_INVALID", "EVIDENCE_INVALID"}
 _NATIVE_AGENT_NAME = "pilot-blind-reviewer-luna-medium-v3"
 _MAX_AGENT_FILES = 5_000
 _MAX_AGENT_CENSUS_BYTES = 64 * 1024 * 1024
@@ -1203,9 +1205,7 @@ def _validator_for(binding: pilot_submit_v3.SubmissionBinding) -> GitEvidenceVal
     )
 
 
-def _authenticated_result(
-    path: Path, binding: pilot_submit_v3.SubmissionBinding
-) -> dict[str, Any]:
+def _authenticated_result(path: Path, binding: pilot_submit_v3.SubmissionBinding) -> dict[str, Any]:
     result = _json(path, _MAX_RESULT_BYTES, modes={0o400})
     receipt = pilot_submit_v3.recover_submission(binding, validator=_validator_for(binding))
     artifact = _read(Path(binding.escrow_path), binding.run.limits.max_output_bytes, modes={0o400})
@@ -1375,9 +1375,7 @@ def _normalized_discovery_root(path: Path, field: str) -> Path:
     current = Path(normalized.anchor)
     for part in normalized.parts[1:]:
         current /= part
-        if (current.exists() or current.is_symlink()) and stat.S_ISLNK(
-            current.lstat().st_mode
-        ):
+        if (current.exists() or current.is_symlink()) and stat.S_ISLNK(current.lstat().st_mode):
             _fail(f"{field} agent discovery root has a symlink ancestor")
     return normalized
 
@@ -1390,9 +1388,7 @@ def _pi_config_dir_name() -> str:
     payload = _json(root / "package.json", 1024 * 1024)
     config = payload.get("piConfig")
     value = config.get("configDir") if isinstance(config, dict) else None
-    if payload.get("name") != "@earendil-works/pi-coding-agent" or not isinstance(
-        value, str
-    ):
+    if payload.get("name") != "@earendil-works/pi-coding-agent" or not isinstance(value, str):
         _fail("Pi coding-agent package config is invalid")
     if not value.strip() or "/" in value or "\\" in value or value in {".", ".."}:
         _fail("Pi coding-agent config directory is unsafe")
@@ -1535,9 +1531,7 @@ def _discovery_roots(
         ("legacy_user", Path.home() / ".agents"),
     ]
     if builtin_agent_root is not None:
-        roots.append(
-            ("builtin", _normalized_discovery_root(builtin_agent_root, "builtin"))
-        )
+        roots.append(("builtin", _normalized_discovery_root(builtin_agent_root, "builtin")))
     else:
         override = os.environ.get("PILOT_PI_BUILTIN_AGENT_ROOT")
         if override:
@@ -1924,6 +1918,31 @@ def _session_tool_path(packet: Path, value: object) -> None:
         raise PilotTypedRunError("session source tool escaped assigned packet") from exc
 
 
+def _session_submission_rejection(message: dict[str, Any]) -> bool:
+    details = message.get("details")
+    if not isinstance(details, dict):
+        return False
+    expected_keys = {"protocol_version", "ok", "code"}
+    diagnostic = details.get("diagnostic")
+    if diagnostic is not None:
+        expected_keys.add("diagnostic")
+    code = details.get("code")
+    if (
+        set(details) != expected_keys
+        or details.get("protocol_version") != 3
+        or details.get("ok") is not False
+        or not isinstance(code, str)
+        or code not in _CORRECTABLE_REJECTION_CODES
+        or not _REJECTION_CODE.fullmatch(code)
+        or (diagnostic is not None and (not isinstance(diagnostic, str) or len(diagnostic) > 500))
+    ):
+        return False
+    compact_diagnostic = "" if diagnostic is None else re.sub(r"\s+", " ", diagnostic).strip()
+    compact = "" if diagnostic is None else f" diagnostic={compact_diagnostic}"
+    content = message.get("content")
+    return content == [{"type": "text", "text": f"SUBMISSION_REJECTED code={code}{compact}"}]
+
+
 def audit_native_session(  # noqa: PLR0912,PLR0915
     execution_root: Path, attempt_id: str, session_path: Path
 ) -> dict[str, object]:
@@ -1959,6 +1978,7 @@ def audit_native_session(  # noqa: PLR0912,PLR0915
     result_ids: set[str] = set()
     tool_errors = 0
     submit_errors = 0
+    semantic_rejections = 0
     submit_successes = 0
     input_tokens = 0
     output_tokens = 0
@@ -2058,12 +2078,16 @@ def audit_native_session(  # noqa: PLR0912,PLR0915
                 tool_errors += 1
                 if name == "submit_blind_review":
                     submit_errors += 1
+                    _fail("submission transport, security, or protocol tool error is terminal")
             elif name == "submit_blind_review":
                 details = message.get("details")
-                if not isinstance(details, dict) or details != receipt:
-                    _fail("successful submission receipt does not match authenticated escrow")
-                submit_successes += 1
-                terminal_success_seen = True
+                if isinstance(details, dict) and details == receipt:
+                    submit_successes += 1
+                    terminal_success_seen = True
+                elif _session_submission_rejection(message):
+                    semantic_rejections += 1
+                else:
+                    _fail("submission result is neither rejection nor authenticated escrow")
         elif role not in {"user", "system"}:
             _fail("session message role is invalid")
 
@@ -2072,7 +2096,13 @@ def audit_native_session(  # noqa: PLR0912,PLR0915
     if not assistant_messages or len(calls) > 203 or set(calls) != result_ids:
         _fail("session tool/result cardinality is invalid")
     submit_calls = sum(name == "submit_blind_review" for name in calls.values())
-    if not 1 <= submit_calls <= 3 or submit_successes != 1 or not terminal_success_seen:
+    if (
+        not 1 <= submit_calls <= 3
+        or submit_successes != 1
+        or semantic_rejections != submit_calls - 1
+        or submit_errors != 0
+        or not terminal_success_seen
+    ):
         _fail("session submission result is invalid")
     return {
         "schema_version": 1,
@@ -2088,6 +2118,8 @@ def audit_native_session(  # noqa: PLR0912,PLR0915
         "correction_submissions": submit_calls - 1,
         "tool_errors": tool_errors,
         "submit_errors": submit_errors,
+        "semantic_rejections": semantic_rejections,
+        "parent_success_compatible": True,
         "eventual_escrow_accepted": True,
         "usage": {
             "input_tokens": input_tokens,
@@ -2248,9 +2280,7 @@ def main(argv: list[str] | None = None) -> int:
             builtin_agent_root=args.builtin_agent_root,
         )
     elif args.command == "serve-native-broker":
-        return _serve_native_broker(
-            args.socket, args.binding, args.status, args.deadline_unix_ms
-        )
+        return _serve_native_broker(args.socket, args.binding, args.status, args.deadline_unix_ms)
     elif args.command == "audit-native-sessions":
         result = audit_native_sessions(args.execution_root, args.session)
         raw = canonical_json(result)

@@ -37,6 +37,14 @@
     ],
     "git_evidence_validation": true,
     "idempotent_exact_recovery": true,
+    "correctable_rejection_codes": [
+      "DRAFT_INVALID",
+      "EVIDENCE_INVALID"
+    ],
+    "expected_rejection_result": "successful_nonterminating_tool_result_with_bounded_structured_details",
+    "expected_rejection_isError": false,
+    "unexpected_transport_security_custody_protocol_failure": "thrown_tool_error",
+    "final_success_result": "terminating_tool_result_with_authenticated_receipt",
     "max_validation_attempts": 3,
     "model_selectable_destination": false,
     "one_process_per_attempt": true,
@@ -69,5 +77,6 @@
   },
   "id": "blind-review-tool-policy-v3-v1",
   "provider_facing_payload": "semantic_review_draft_only",
+  "native_parent_status_semantics": "implemented_pending_live_canary",
   "schema_version": 1
 }

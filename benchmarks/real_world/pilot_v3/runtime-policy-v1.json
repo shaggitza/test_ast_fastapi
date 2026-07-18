@@ -31,7 +31,15 @@
     "hash_bound_agent_installation_receipt_required": true,
     "remaining_timeout_required": true,
     "session_audit_required": true,
-    "terminal_authority": "broker_validated_escrow_not_native_parent_status"
+    "correctable_broker_rejection_codes": [
+      "DRAFT_INVALID",
+      "EVIDENCE_INVALID"
+    ],
+    "expected_broker_rejection": "nonerror_nonterminating_tool_result",
+    "unexpected_transport_security_custody_protocol_failure": "terminal_tool_error",
+    "final_broker_success": "terminating_authenticated_receipt",
+    "parent_status_semantics": "implemented_pending_live_canary",
+    "terminal_authority": "broker_validated_escrow_and_parent_success_after_live_proof"
   },
   "native_adjudication": {
     "absolute_deadline_required": true,
@@ -64,7 +72,7 @@
     "typed_xhigh_chain": "GO",
     "overall": "NO_GO",
     "blockers": [
-      "native_parent_eventual_escrow_status_semantics"
+      "native_parent_status_live_canary"
     ]
   },
   "node": "24.12.0",
