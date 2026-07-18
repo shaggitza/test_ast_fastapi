@@ -54,14 +54,17 @@
     "runtime_structured_output_wrapper": "exact_{value:output}",
     "pinned_SubagentParams_Value_Check_required": true,
     "single_mode_outputSchema_forbidden": true,
-    "terminal_failure_disposition": "unknown"
+    "terminal_failure_disposition": "unknown",
+    "typed_chain_live_gate": "GO",
+    "typed_chain_live_gate_pair_sha256": "sha256:acf9857bad081e1220bee4927f8478e44647232a6618536fb6f3cef397d27eb3",
+    "typed_chain_live_gate_scope": "exact_hash_and_version_scoped_synthetic_canary_only"
   },
   "scale_gate": {
     "medium_typed_submission": "GO",
+    "typed_xhigh_chain": "GO",
     "overall": "NO_GO",
     "blockers": [
-      "native_parent_eventual_escrow_status_semantics",
-      "new_non_prefect_typed_xhigh_chain_canary"
+      "native_parent_eventual_escrow_status_semantics"
     ]
   },
   "node": "24.12.0",

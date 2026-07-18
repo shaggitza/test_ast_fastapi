@@ -1055,3 +1055,50 @@ def test_summary_preserves_terminal_state(tmp_path: Path) -> None:
     assert result["pairs"] == [
         {"pair_sha256": pair_sha, "repository": "owner/repo", "pr": 1, "status": "terminal_unknown"}
     ]
+
+
+def test_live_xhigh_canary_v2_report_and_scale_gate_are_consistent() -> None:
+    root = Path(__file__).resolve().parents[2]
+    profile = root / "benchmarks/real_world/pilot_v3"
+    first = json.loads((profile / "xhigh-chain-canary-v1.json").read_text())
+    second_path = profile / "xhigh-chain-canary-v2.json"
+    second = json.loads(second_path.read_text())
+    runtime = json.loads((profile / "runtime-policy-v1.json").read_text())
+    model = json.loads((profile / "model-policy-v1.json").read_text())
+    tool = json.loads((profile / "tool-policy-v1.json").read_text())
+    checksums = json.loads((profile / "checksums-v1.json").read_text())
+
+    assert first["pair_sha256"] != second["pair_sha256"]
+    assert first["terminal_status"] == "terminal_unknown"
+    assert first["retry_permitted"] is False
+    assert (
+        second["pair_sha256"]
+        == "sha256:acf9857bad081e1220bee4927f8478e44647232a6618536fb6f3cef397d27eb3"
+    )
+    assert second["terminal"]["claim"]["entrypoint"] == {
+        "kind": "sdk",
+        "public_id": "sample.api.format_message",
+        "confidence": "confirmed",
+    }
+    assert second["tool_audit"]["tools_in_order"][-1] == "structured_output"
+    assert second["tool_audit"]["structured_output_calls"] == 1
+    assert second["tool_audit"]["assistant_prose_messages"] == 0
+    assert second["usage"] == {
+        "input_tokens": 6170,
+        "output_tokens": 2020,
+        "cache_read_tokens": 0,
+        "cost_usd": 0.01829,
+    }
+    assert all(second["validation"].values())
+    assert second["canonical_database_imported"] is False
+    assert runtime["native_adjudication"]["typed_chain_live_gate"] == "GO"
+    assert runtime["scale_gate"] == {
+        "medium_typed_submission": "GO",
+        "typed_xhigh_chain": "GO",
+        "overall": "NO_GO",
+        "blockers": ["native_parent_eventual_escrow_status_semantics"],
+    }
+    assert model["adjudication"]["live_typed_chain_canary_proved"] is True
+    assert tool["fallback"]["live_typed_chain_canary"]["status"] == "GO"
+    relative = "benchmarks/real_world/pilot_v3/xhigh-chain-canary-v2.json"
+    assert checksums["files"][relative] == adjudicate._sha(second_path.read_bytes())

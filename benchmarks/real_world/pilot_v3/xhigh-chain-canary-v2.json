@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "id": "synthetic-non-prefect-xhigh-chain-canary-v2",
+  "protocol": "blind-review-adjudication-v3-synthetic-canary",
+  "repository": "synthetic/typed-chain-canary-two",
+  "pr": 2,
+  "pair_sha256": "sha256:acf9857bad081e1220bee4927f8478e44647232a6618536fb6f3cef397d27eb3",
+  "distinct_from_failed_canary_v1": true,
+  "trigger_reasons": [
+    "normalized_claim_atom_disagreement",
+    "terminal_recommendation_disagreement",
+    "terminal_unknown_or_not_evaluable"
+  ],
+  "launch": {
+    "native_pi_subagents_chain": true,
+    "steps": 1,
+    "chain_step_output_schema": true,
+    "xhigh_processes": 1,
+    "duration_seconds": 48.2,
+    "model": "openai-codex/gpt-5.6-luna",
+    "thinking": "xhigh"
+  },
+  "terminal": {
+    "status": "completed",
+    "terminal_recommendation": "positive",
+    "claims": 1,
+    "claim": {
+      "claim_kind": "entrypoint",
+      "recommendation": "include",
+      "entrypoint": {
+        "kind": "sdk",
+        "public_id": "sample.api.format_message",
+        "confidence": "confirmed"
+      }
+    },
+    "unknowns": 0
+  },
+  "tool_audit": {
+    "tools_in_order": [
+      "ls",
+      "read",
+      "read",
+      "read",
+      "read",
+      "read",
+      "read",
+      "read",
+      "structured_output"
+    ],
+    "structured_output_calls": 1,
+    "structured_output_final": true,
+    "assistant_prose_messages": 0,
+    "contact_supervisor_calls": 0,
+    "intercom_calls": 0,
+    "subagent_calls": 0
+  },
+  "validation": {
+    "strict_pydantic": true,
+    "strict_output_schema": true,
+    "packet_path_containment": true,
+    "line_ranges": true,
+    "changed_hunk_overlap": true,
+    "session_grammar": true,
+    "completion_receipt": true
+  },
+  "hashes": {
+    "structured_output_sha256": "sha256:ffa53b31bf8d3d5549a3544e02d10e2f54657cacd5762f55e4aa23b3333a94c2",
+    "session_sha256": "sha256:8b57532bdb2df1ce233c11066a72f5e0e003061f52a6dd67081379248b32343a",
+    "schema_sha256": "sha256:49c2d12212413c611db3e9ce57d720724351ae845e7e1fc43bbfcb0d3a41f942",
+    "completion_sha256": "sha256:5be75458ca1fec79b8ee6bfd5ec6ef0203bd097d1e7d45c90148f5a396e185f2",
+    "completion_receipt_sha256": "sha256:1364908b5ef1e2068b989f995e978e9c33c917b4523fe1f8dad6c69f9b641c7a"
+  },
+  "completion_bytes": 1543,
+  "usage": {
+    "input_tokens": 6170,
+    "output_tokens": 2020,
+    "cache_read_tokens": 0,
+    "cost_usd": 0.01829
+  },
+  "failed_canary_v1": {
+    "pair_sha256": "sha256:49b8c0f9118f8c0ba1d1a9beb84c8426f3ea79ff5522c2301fbe2a6e167e35f8",
+    "terminal_status": "terminal_unknown",
+    "retried": false
+  },
+  "live_gate": "GO",
+  "proof_scope": "exact hash-and-version-scoped synthetic canary only",
+  "canonical_database_imported": false,
+  "disposition": "external typed-chain capability proof only; no review or adjudication truth"
+}

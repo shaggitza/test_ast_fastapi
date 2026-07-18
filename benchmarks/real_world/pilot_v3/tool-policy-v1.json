@@ -58,6 +58,11 @@
     "structured_output_static_allowlist_required": true,
     "structured_output_registration_boundary": "runtime_registers_only_when_chain_schema_environment_exists",
     "native_argv_activation_probe_required": true,
+    "live_typed_chain_canary": {
+      "status": "GO",
+      "pair_sha256": "sha256:acf9857bad081e1220bee4927f8478e44647232a6618536fb6f3cef397d27eb3",
+      "scope": "exact_hash_and_version_scoped_synthetic_canary_only"
+    },
     "structured_output_runtime_wrapper": "exactly_{value:output}",
     "pinned_SubagentParams_Value_Check_required": true,
     "supervisor_canonical_database_import": false
