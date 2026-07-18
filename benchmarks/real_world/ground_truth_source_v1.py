@@ -290,7 +290,6 @@ class GitRunner:
             "GIT_OPTIONAL_LOCKS": "0",
             "GIT_NO_LAZY_FETCH": "1",
             "GIT_LFS_SKIP_SMUDGE": "1",
-            "GIT_HTTP_PROXY_AUTHMETHOD": "none",
             "NO_PROXY": "github.com",
             "no_proxy": "github.com",
         }
@@ -851,6 +850,18 @@ def _remove_init_extras(cache: Path) -> None:
         exclude.unlink()
 
 
+def _clear_failed_fetch_locks(staging: Path) -> None:
+    for relative in ("shallow.lock", "FETCH_HEAD.lock", "packed-refs.lock", "config.lock"):
+        path = staging / relative
+        try:
+            status = path.lstat()
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(status.st_mode) or status.st_uid != os.getuid():
+            _fail("failed fetch left an unsafe lock file")
+        path.unlink()
+
+
 def _fetch_commit(
     runner: GitRunner,
     staging: Path,
@@ -874,6 +885,7 @@ def _fetch_commit(
         except SourceV1Error as exc:
             last_error = exc
             if retry == 0:
+                _clear_failed_fetch_locks(staging)
                 time.sleep(1)
     if last_error is not None:
         raise last_error
