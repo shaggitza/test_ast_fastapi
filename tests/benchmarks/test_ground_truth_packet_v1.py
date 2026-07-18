@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import shutil
 import stat
 import subprocess
 import time
@@ -569,7 +570,11 @@ def test_publication_boundary_rejects_profile_drift(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     expected = packet.ProfileSnapshot({}, b"one", {})
-    monkeypatch.setattr(packet, "_profile", lambda _root: packet.ProfileSnapshot({}, b"two", {}))
+    monkeypatch.setattr(
+        packet,
+        "_profile_by_hash",
+        lambda _root, _digest: packet.ProfileSnapshot({}, b"two", {}),
+    )
     monkeypatch.setattr(packet, "_bindings", lambda *_args: ({}, b"bindings", {}))
     monkeypatch.setattr(source, "_inventory", lambda _cache: {"inventory": "same"})
     with pytest.raises(packet.PacketV1Error, match="drifted at publication boundary"):
@@ -707,6 +712,35 @@ def test_rename_noreplace_rejects_collision(tmp_path: Path) -> None:
     with pytest.raises(packet.PacketV1Error, match="already exists"):
         packet._rename_noreplace(source_path, target)
     assert source_path.exists() and target.exists()
+
+
+def test_frozen_packet_profile_exact_hash_selection_and_unknown_rejection() -> None:
+    historical_path = ROOT / packet._HISTORICAL_CHECKSUMS
+    assert packet._sha(historical_path.read_bytes()) == (
+        "sha256:4f1ffa49a7c864a71fb7ad76a1c44cdf129935e46e83bf943b8b7ee9193d8e50"
+    )
+    historical = packet._historical_profile(ROOT)
+    assert packet._profile_by_hash(ROOT, packet._sha(historical.raw)) == historical
+    assert historical.files[packet._MODULE] == (ROOT / packet._MODULE).read_bytes()
+    with pytest.raises(packet.PacketV1Error, match="unknown production profile"):
+        packet._profile_by_hash(ROOT, "sha256:" + "f" * 64)
+
+
+def test_edited_frozen_packet_profile_fails_current_profile_authentication(tmp_path: Path) -> None:
+    current = json.loads((ROOT / packet._CHECKSUMS).read_bytes())
+    copied = tmp_path / "repo"
+    for relative in current["files"]:
+        source_path = ROOT / relative
+        target = copied / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, target)
+    checksum_target = copied / packet._CHECKSUMS
+    checksum_target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ROOT / packet._CHECKSUMS, checksum_target)
+    historical = copied / packet._HISTORICAL_CHECKSUMS
+    historical.write_bytes(historical.read_bytes() + b" ")
+    with pytest.raises(packet.PacketV1Error, match="current-profile authenticated"):
+        packet._historical_profile(copied)
 
 
 def test_profile_checksums_and_dependency_are_exact() -> None:
