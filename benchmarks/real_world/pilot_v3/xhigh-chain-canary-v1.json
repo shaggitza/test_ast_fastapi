@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "id": "synthetic-non-prefect-xhigh-chain-canary-v1",
+  "protocol": "blind-review-adjudication-v3-synthetic-canary",
+  "pair_sha256": "sha256:49b8c0f9118f8c0ba1d1a9beb84c8426f3ea79ff5522c2301fbe2a6e167e35f8",
+  "repository": "synthetic/typed-chain-canary",
+  "pr": 1,
+  "trigger_reasons": [
+    "normalized_claim_atom_disagreement",
+    "terminal_recommendation_disagreement"
+  ],
+  "xhigh_processes": 1,
+  "terminal_status": "terminal_unknown",
+  "failure": "structured_output was runtime-registered by the chain schema environment but absent from the generated agent static tool allowlist, so Pi did not activate it",
+  "untyped_text_produced": true,
+  "untyped_text_used_as_truth": false,
+  "retry_permitted": false,
+  "canonical_database_imported": false,
+  "usage": {
+    "input_tokens": 19197,
+    "output_tokens": 2307,
+    "cache_read_tokens": 24576,
+    "cost_usd": 0.0354966
+  },
+  "disposition": "external hash-scoped failed canary only; no review or adjudication truth"
+}

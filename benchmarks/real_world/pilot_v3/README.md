@@ -132,10 +132,15 @@ launches a model.
 The native launch is deliberately a one-step pi-subagents **chain**. Its step has
 the literal strict `outputSchema`; no top-level single-run `outputSchema` is
 allowed. The exact full call must pass the pinned runtime `SubagentParams`
-`Value.Check`. Model, xhigh thinking, and the read/grep/find/ls allowlist come
-only from the authenticated effective agent config, not unsupported chain-step
-fields. The chain runtime supplies `structured_output` with exact arguments
-`{value: output}`. Before launch, a hash-bound environment receipt requires the
+`Value.Check`. Model and xhigh thinking come only from the authenticated effective agent config,
+not unsupported chain-step fields. That config statically allowlists exactly
+read/grep/find/ls/structured_output: Pi needs the custom tool name in `--tools` to
+activate it, while the runtime registers `structured_output` only when the chain
+schema/capture environment exists. The environment receipt therefore probes the
+pinned native argv builder and requires both the exact active tool list and both
+structured-output environment bindings. The chain runtime supplies
+`structured_output` with exact arguments `{value: output}`. Before launch, a
+hash-bound environment receipt requires the
 current bridge mode to be `off` or `fork-only` for the fresh chain; the tool does
 not mutate global config. The session audit runs under the pair state lock and
 fails terminally on contact/intercom/subagent, packet escape, prose, unknown
@@ -145,10 +150,14 @@ Git evidence, injects trusted pair/model/lifecycle fields, and publishes only a
 mode-0400 `blind_review_pilot_completion_v3` plus receipt. It never creates or
 imports `AdjudicationArtifactV1`.
 
-The implementation is offline-tested but is not a live proof. Scale remains
-`NO_GO` until a **new** non-Prefect disagreement/uncertainty canary proves the
-typed chain surface and until native medium parent-status semantics are fixed.
-There is no second Prefect fallback and no recursive xhigh fallback.
+The initial synthetic non-Prefect chain canary exposed the missing static tool
+activation: its one xhigh process emitted inadmissible text, so that exact pair is
+terminal `unknown`, was not retried, and is not truth. Its hash-scoped external
+record is `xhigh-chain-canary-v1.json`. The fixed implementation remains
+offline-tested but is not yet a successful live proof. Scale remains `NO_GO` until
+a **new exact-pair** non-Prefect canary proves the corrected typed chain surface
+and until native medium parent-status semantics are fixed. There is no second
+Prefect fallback and no recursive xhigh fallback.
 
 ## Runner CLI
 

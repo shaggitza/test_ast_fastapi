@@ -997,6 +997,23 @@ def test_historical_consumed_report_is_checksum_authenticated(tmp_path: Path) ->
         adjudicate._consumed_pairs(tmp_path)
 
 
+def test_generated_agent_exactly_allowlists_runtime_structured_output() -> None:
+    body = adjudicate._agent_bytes(Path(__file__).resolve().parents[2]).decode()
+    tools_lines = [line for line in body.splitlines() if line.startswith("tools:")]
+    assert tools_lines == ["tools: read, grep, find, ls, structured_output"]
+
+
+def test_native_argv_probe_activates_runtime_structured_output() -> None:
+    result = adjudicate._structured_output_activation_probe(
+        {"tools": ["read", "grep", "find", "ls", "structured_output"]}
+    )
+    assert result == {
+        "toolsArg": "read,grep,find,ls,structured_output",
+        "schemaEnv": True,
+        "captureEnv": True,
+    }
+
+
 def test_agent_install_is_no_clobber_and_resolver_bound(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1018,7 +1035,7 @@ def test_agent_install_is_no_clobber_and_resolver_bound(
             "filePath": str(output.resolve()),
             "model": adjudicate._MODEL,
             "thinking": "xhigh",
-            "tools": ["read", "grep", "find", "ls"],
+            "tools": ["read", "grep", "find", "ls", "structured_output"],
             "extensions": [],
             "inheritProjectContext": False,
             "inheritSkills": False,

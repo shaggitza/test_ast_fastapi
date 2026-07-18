@@ -2,20 +2,21 @@
   "files": {
     ".pi/extensions/blind-review-submit/index.ts": "sha256:0243259e05920a39d1e615541bccce42ddfc5403244717c3b0bab2d1297ee610",
     ".pi/extensions/blind-review-submit/review-schema.ts": "sha256:87ff078e054bdffaca8d0702e5f3f5901364b7763a4f83fed2fd8287058dbc81",
-    "benchmarks/real_world/pilot_adjudicate_v3.py": "sha256:cb8c9f15dc6abd1a893d1987d448c31e93413df9942e474edf4f0dd637ebb349",
+    "benchmarks/real_world/pilot_adjudicate_v3.py": "sha256:cd3fc69f54143b2a196e8471d3ff29cda49c462ead7c96a420a1e0534bc039ab",
     "benchmarks/real_world/pilot_submit_v3.py": "sha256:b54872d5035c2c7496e21e10f89a0edf5e972d89f313e3226f9afbf63234cf48",
     "benchmarks/real_world/pilot_typed_run_v3.py": "sha256:6e3b06fad161c1dd96de5c5a7ab6c7ceea06ea3cafa63ec6e2f97b652dc613b2",
-    "benchmarks/real_world/pilot_v3/README.md": "sha256:38ede56b0000b43470d7f403e76e1cab993243d7954867317c6f6a5ceb77dc44",
+    "benchmarks/real_world/pilot_v3/README.md": "sha256:34c976515d7d125b97cb8ae89e31648f5b988fa77f652e50817268655d472eea",
     "benchmarks/real_world/pilot_v3/adjudication-output-schema-v1.json": "sha256:c6487942416ba305843e067f25245e527aeb308c2c29a2faf6f55f8e2c22679e",
     "benchmarks/real_world/pilot_v3/adjudication-prompt-v1.md": "sha256:9fda68150e1cd5026129e5acb3a754adbc7fb06d3ac15abff2669924b1a38d89",
     "benchmarks/real_world/pilot_v3/comparison-policy-v1.json": "sha256:7286c1021fb1ac6239ddb9dc7e495885038312882c197c917773b3a7b8693366",
     "benchmarks/real_world/pilot_v3/model-policy-v1.json": "sha256:9edcd0ce49fe7eb77bbb74bbf785051d772c6f40cfb7308a04c437cb9aa8196b",
     "benchmarks/real_world/pilot_v3/native-pilot-report-v1.json": "sha256:c222c36411b9230bfd41cfa70711c75bef9d942f62d248865557c08874ac2207",
     "benchmarks/real_world/pilot_v3/review-prompt-v1.md": "sha256:0087f594c16fe2cfa846d7f4a373805c359ad407e69be1b48f75a4311d49eefa",
-    "benchmarks/real_world/pilot_v3/runtime-policy-v1.json": "sha256:784452ff8c89a84a16fe9a24860a8824c2047004a68988e936a7ea2ce34b4aeb",
+    "benchmarks/real_world/pilot_v3/runtime-policy-v1.json": "sha256:2157c5a176b8220b20b19c8a4af451fae6aa28d7b6b794a263a4d6cbebf1a20f",
     "benchmarks/real_world/pilot_v3/source-policy-v1.json": "sha256:da448e13043d1bda2d7e3c3a0d424c0906d829fdda95209dd68b76092b53194a",
     "benchmarks/real_world/pilot_v3/submission-binding-schema-v1.json": "sha256:c6b15e260f9d690a4a61f55d0aea1d0da0f183308997b9fb1b669e89e9362acd",
-    "benchmarks/real_world/pilot_v3/tool-policy-v1.json": "sha256:a6ed583b069d1eea759fb6930b10d3abb2c5f731f46b85b8fcde0fda683c3df1"
+    "benchmarks/real_world/pilot_v3/tool-policy-v1.json": "sha256:1d417f8e9e3eda0d22b51033c8e1effbaf0af642b3f0d9fc945accd81896ee9d",
+    "benchmarks/real_world/pilot_v3/xhigh-chain-canary-v1.json": "sha256:ac666ecb9a0e45e50eab64e507005b746551fcc171fd5422d73655e66be12fa4"
   },
   "id": "blind-review-pilot-v3-checksums-v1",
   "schema_version": 1

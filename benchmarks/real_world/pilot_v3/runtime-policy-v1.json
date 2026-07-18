@@ -39,7 +39,8 @@
       "find",
       "grep",
       "ls",
-      "read"
+      "read",
+      "structured_output"
     ],
     "chain_step_outputSchema_required": true,
     "intercom_bridge": "prelaunch_config_receipt_requires_off_or_fork-only_for_fresh_chain",
@@ -48,6 +49,8 @@
     "model_launch_in_python": false,
     "recursive": false,
     "runtime_structured_output_tool_required": true,
+    "structured_output_activation": "statically_allowlisted_but_registered_only_when_chain_schema_environment_exists",
+    "native_argv_activation_probe_required": true,
     "runtime_structured_output_wrapper": "exact_{value:output}",
     "pinned_SubagentParams_Value_Check_required": true,
     "single_mode_outputSchema_forbidden": true,
