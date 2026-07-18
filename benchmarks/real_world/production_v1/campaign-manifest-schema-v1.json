@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Offline production-v1 repository campaign. The Python validator is authoritative and binds every record to the authenticated corpus lock.",
+  "properties": {
+    "assignment": {"type": "object"},
+    "authorization": {"type": "object"},
+    "corpus": {"type": "object"},
+    "id": {"pattern": "^ground-truth-production-v1-issue-[0-9]+$", "type": "string"},
+    "lanes": {"maxItems": 100, "minItems": 100, "type": "array"},
+    "protocol": {"type": "object"},
+    "records": {"maxItems": 50, "minItems": 50, "type": "array"},
+    "schema_version": {"const": 1}
+  },
+  "required": ["schema_version", "id", "authorization", "corpus", "assignment", "protocol", "records", "lanes"],
+  "title": "Ground truth production campaign manifest v1",
+  "type": "object"
+}
