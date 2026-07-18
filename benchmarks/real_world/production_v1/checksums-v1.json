@@ -4,7 +4,7 @@
     "benchmarks/real_world/ground_truth_packet_v1.py": "sha256:4076395d9b5f230cc5330b7ca481272c14215914cd0c8ec5f742cd66da72a28c",
     "benchmarks/real_world/ground_truth_run_v1.py": "sha256:7b8d160be79eb4b19a3815ccdf833330c83c024da858ee5b68012c4794bae2d5",
     "benchmarks/real_world/ground_truth_source_v1.py": "sha256:8c1626111e2753a1ed0f3706b77460569508585bffd81dc903726f187e557ed5",
-    "benchmarks/real_world/ground_truth_submit_v1.py": "sha256:e8baa0fc06cd150a0fd28ae3830fe9619cf4598463f15bbb95be1e324e2323cd",
+    "benchmarks/real_world/ground_truth_submit_v1.py": "sha256:363f54c63385e2fc49f42cd723a8bbd6e9e715482bd395d0d371986bba76f34f",
     "benchmarks/real_world/pilot_packet_v2.py": "sha256:7347c6fa91afb7122707980369c273c50419d4de654bdd9c4e57b3d006651895",
     "benchmarks/real_world/production_v1/README.md": "sha256:678a7ca0c243fd1a05347c0d11c34dfbd06fcadc6b42879d7580dd418be48736",
     "benchmarks/real_world/production_v1/assignments-v1.json": "sha256:93daeb3aa957737a24b48345e753201f616cd9fefd968ee593461896a41e5f87",
