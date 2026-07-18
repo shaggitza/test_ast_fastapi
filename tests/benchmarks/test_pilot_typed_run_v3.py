@@ -840,7 +840,13 @@ def _session_file(
             "type": "message",
             "message": {
                 "role": "assistant",
-                "content": [{"type": "text", "text": "SUBMISSION_COMPLETE"}],
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "SUBMISSION_COMPLETE",
+                        "textSignature": '{"v":1,"phase":"final_answer"}',
+                    }
+                ],
                 "usage": {
                     "input": 5,
                     "output": 1,

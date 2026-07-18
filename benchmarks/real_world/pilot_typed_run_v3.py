@@ -2040,7 +2040,13 @@ def audit_native_session(  # noqa: PLR0912,PLR0915
                 text_parts = [part for part in acknowledgement if part.get("type") == "text"]
                 if (
                     len(acknowledgement) != len(content)
-                    or text_parts != [{"type": "text", "text": "SUBMISSION_COMPLETE"}]
+                    or len(text_parts) != 1
+                    or text_parts[0].get("text") != "SUBMISSION_COMPLETE"
+                    or set(text_parts[0]) - {"type", "text", "textSignature"}
+                    or (
+                        "textSignature" in text_parts[0]
+                        and not isinstance(text_parts[0]["textSignature"], str)
+                    )
                     or any(part.get("type") not in {"thinking", "text"} for part in acknowledgement)
                 ):
                     _fail("successful submission lacks exact terminal acknowledgement")
