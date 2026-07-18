@@ -1,0 +1,11 @@
+{
+  "files": {
+    "benchmarks/real_world/ground_truth_campaign_v1.py": "sha256:bdb49dc79b56101cee53c3398968a55ac99ae616e09517cad1aeea8eff6fd34c",
+    "benchmarks/real_world/production_v1/README.md": "sha256:ac77ce449fd0a7b6baf9e6c47020dbb9cab898091b52abbd9279d2207022e274",
+    "benchmarks/real_world/production_v1/assignments-v1.json": "sha256:93daeb3aa957737a24b48345e753201f616cd9fefd968ee593461896a41e5f87",
+    "benchmarks/real_world/production_v1/campaign-manifest-schema-v1.json": "sha256:28ffac7ec5fc52774fee4eb78c62eb91f0daf799feec9e9ab9e20af3f1629be4",
+    "benchmarks/real_world/production_v1/campaign-policy-v1.json": "sha256:49dde2c0a0b1d38586f0219af0bc3cfeb484672ab28f749d487eff783050a630"
+  },
+  "id": "ground-truth-production-checksums-v1",
+  "schema_version": 1
+}

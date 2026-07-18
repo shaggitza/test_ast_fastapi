@@ -1,0 +1,33 @@
+{
+  "authorization": {
+    "canonical_import_authorized": false,
+    "live_launch_authorized": false,
+    "source_packet_materialization_authorized": false
+  },
+  "campaign": {
+    "lanes_per_pr": 2,
+    "max_global_concurrency": 3,
+    "prs_per_repository": 50,
+    "reviewer_context": "fresh",
+    "reviewer_independence": "lane-qualified distinct identity"
+  },
+  "id": "ground-truth-production-policy-v1",
+  "ledger": {
+    "genesis_previous_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "initial_state": "planned",
+    "lane_count": 100,
+    "no_clobber": true,
+    "private_root_mode": "0700",
+    "state_file_mode": "0400"
+  },
+  "runtime": {
+    "model": "openai-codex/gpt-5.6-luna",
+    "pi_subagents_version": "0.35.1",
+    "thinking": "medium"
+  },
+  "schema_version": 1,
+  "source_packets": {
+    "initial_state": "pending",
+    "trees_resolved": false
+  }
+}

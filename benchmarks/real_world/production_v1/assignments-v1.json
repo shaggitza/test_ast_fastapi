@@ -1,0 +1,257 @@
+{
+  "assignments": [
+    {
+      "issue": 149,
+      "ordinal": 1,
+      "repository": "fastapi/full-stack-fastapi-template"
+    },
+    {
+      "issue": 150,
+      "ordinal": 2,
+      "repository": "Kludex/starlette"
+    },
+    {
+      "issue": 151,
+      "ordinal": 3,
+      "repository": "PrefectHQ/prefect"
+    },
+    {
+      "issue": 152,
+      "ordinal": 4,
+      "repository": "gradio-app/gradio"
+    },
+    {
+      "issue": 153,
+      "ordinal": 5,
+      "repository": "run-llama/llama_index"
+    },
+    {
+      "issue": 154,
+      "ordinal": 6,
+      "repository": "litestar-org/litestar"
+    },
+    {
+      "issue": 155,
+      "ordinal": 7,
+      "repository": "sanic-org/sanic"
+    },
+    {
+      "issue": 156,
+      "ordinal": 8,
+      "repository": "vllm-project/aibrix"
+    },
+    {
+      "issue": 157,
+      "ordinal": 9,
+      "repository": "Kludex/uvicorn"
+    },
+    {
+      "issue": 158,
+      "ordinal": 10,
+      "repository": "apache/airflow"
+    },
+    {
+      "issue": 159,
+      "ordinal": 11,
+      "repository": "django/django"
+    },
+    {
+      "issue": 160,
+      "ordinal": 12,
+      "repository": "saleor/saleor"
+    },
+    {
+      "issue": 161,
+      "ordinal": 13,
+      "repository": "falconry/falcon"
+    },
+    {
+      "issue": 162,
+      "ordinal": 14,
+      "repository": "fastapi/fastapi"
+    },
+    {
+      "issue": 163,
+      "ordinal": 15,
+      "repository": "wagtail/wagtail"
+    },
+    {
+      "issue": 164,
+      "ordinal": 16,
+      "repository": "pallets/flask"
+    },
+    {
+      "issue": 165,
+      "ordinal": 17,
+      "repository": "netbox-community/netbox"
+    },
+    {
+      "issue": 166,
+      "ordinal": 18,
+      "repository": "apache/superset"
+    },
+    {
+      "issue": 167,
+      "ordinal": 19,
+      "repository": "PrefectHQ/fastmcp"
+    },
+    {
+      "issue": 168,
+      "ordinal": 20,
+      "repository": "modelcontextprotocol/python-sdk"
+    },
+    {
+      "issue": 169,
+      "ordinal": 21,
+      "repository": "temporalio/sdk-python"
+    },
+    {
+      "issue": 170,
+      "ordinal": 22,
+      "repository": "coleifer/huey"
+    },
+    {
+      "issue": 171,
+      "ordinal": 23,
+      "repository": "taskiq-python/taskiq"
+    },
+    {
+      "issue": 172,
+      "ordinal": 24,
+      "repository": "ag2ai/faststream"
+    },
+    {
+      "issue": 173,
+      "ordinal": 25,
+      "repository": "mosquito/aio-pika"
+    },
+    {
+      "issue": 174,
+      "ordinal": 26,
+      "repository": "dpkp/kafka-python"
+    },
+    {
+      "issue": 175,
+      "ordinal": 27,
+      "repository": "aio-libs/aiokafka"
+    },
+    {
+      "issue": 176,
+      "ordinal": 28,
+      "repository": "agronholm/apscheduler"
+    },
+    {
+      "issue": 177,
+      "ordinal": 29,
+      "repository": "Bogdanp/dramatiq"
+    },
+    {
+      "issue": 178,
+      "ordinal": 30,
+      "repository": "python-arq/arq"
+    },
+    {
+      "issue": 179,
+      "ordinal": 31,
+      "repository": "pallets/click"
+    },
+    {
+      "issue": 180,
+      "ordinal": 32,
+      "repository": "fastapi/typer"
+    },
+    {
+      "issue": 181,
+      "ordinal": 33,
+      "repository": "Textualize/rich"
+    },
+    {
+      "issue": 182,
+      "ordinal": 34,
+      "repository": "redis/redis-py"
+    },
+    {
+      "issue": 183,
+      "ordinal": 35,
+      "repository": "mongodb/mongo-python-driver"
+    },
+    {
+      "issue": 184,
+      "ordinal": 36,
+      "repository": "sqlalchemy/sqlalchemy"
+    },
+    {
+      "issue": 185,
+      "ordinal": 37,
+      "repository": "encode/httpx"
+    },
+    {
+      "issue": 186,
+      "ordinal": 38,
+      "repository": "psf/requests"
+    },
+    {
+      "issue": 187,
+      "ordinal": 39,
+      "repository": "aio-libs/aiohttp"
+    },
+    {
+      "issue": 188,
+      "ordinal": 40,
+      "repository": "boto/boto3"
+    },
+    {
+      "issue": 189,
+      "ordinal": 41,
+      "repository": "boto/botocore"
+    },
+    {
+      "issue": 190,
+      "ordinal": 42,
+      "repository": "dbt-labs/dbt-core"
+    },
+    {
+      "issue": 191,
+      "ordinal": 43,
+      "repository": "frappe/frappe"
+    },
+    {
+      "issue": 192,
+      "ordinal": 44,
+      "repository": "home-assistant/core"
+    },
+    {
+      "issue": 193,
+      "ordinal": 45,
+      "repository": "fivetran/great_expectations"
+    },
+    {
+      "issue": 194,
+      "ordinal": 46,
+      "repository": "mlflow/mlflow"
+    },
+    {
+      "issue": 195,
+      "ordinal": 47,
+      "repository": "ray-project/ray"
+    },
+    {
+      "issue": 196,
+      "ordinal": 48,
+      "repository": "python-poetry/poetry"
+    },
+    {
+      "issue": 197,
+      "ordinal": 49,
+      "repository": "pydantic/pydantic"
+    },
+    {
+      "issue": 198,
+      "ordinal": 50,
+      "repository": "pytest-dev/pytest"
+    }
+  ],
+  "id": "ground-truth-production-assignments-v1",
+  "lock_id": "oss-expansion-50x50-lock-v2",
+  "schema_version": 1
+}
