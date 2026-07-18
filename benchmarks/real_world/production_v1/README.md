@@ -42,3 +42,39 @@ absolute mode-0700 directory. Initialization serializes with `flock`, binds the
 campaign file hash/device/inode, publishes exactly 100 `planned` states, and
 creates a deterministic hash-chain genesis. It stores no capability or secret.
 There are intentionally no state-transition or launch commands yet.
+
+## Exact source cache milestone
+
+`ground_truth_source_v1.py` authenticates one mode-0400 campaign manifest and
+prepares a separate bare Git cache without touching pilot state. Production
+transport is limited to full-SHA, depth-one, no-tag HTTPS fetches from the exact
+`https://github.com/OWNER/REPOSITORY.git` remote. The runner uses argv arrays,
+an isolated noninteractive Git environment, formula-derived 515-command preparation
+and 313-command validation bounds at 100 commits, streaming aggregate output and
+in-flight staging-disk enforcement with immediate process-group kill/reap, and no
+credentials, hooks, checkout, worktree, archive, submodules, LFS, or lazy fetch.
+Publication uses Linux `renameat2(RENAME_NOREPLACE)`, recursively read-only content,
+and parent-directory fsync below a current-UID mode-0700 non-symlinked parent.
+
+Offline validation requires the exact sorted, duplicate-free baseline/target shallow
+boundary, no refs or `FETCH_HEAD`, exact object closure with no unreachable extra
+objects, exact local configuration, and no replacement/alternate/promisor/partial
+state. It computes a complete deterministic inventory over every descendant
+path/type/mode/size/file SHA before and after all Git checks. Source bindings freeze
+that inventory root, counts, disk bytes, cache device/inode, all 50 commit/tree
+identities, and all diff identities; binding publication repeats the inventory on
+both sides of publication so descendant drift cannot enter an accepted binding.
+They keep packet, review, live-launch, and canonical-import gates false.
+
+```console
+python -m benchmarks.real_world.ground_truth_source_v1 prepare-cache \
+  --campaign /private/campaign-149.json --cache /private/source-149.git
+python -m benchmarks.real_world.ground_truth_source_v1 validate-cache \
+  --campaign /private/campaign-149.json --cache /private/source-149.git
+python -m benchmarks.real_world.ground_truth_source_v1 build-source-bindings \
+  --campaign /private/campaign-149.json --cache /private/source-149.git \
+  --output /private/source-bindings-149.json
+python -m benchmarks.real_world.ground_truth_source_v1 validate-source-bindings \
+  --campaign /private/campaign-149.json --cache /private/source-149.git \
+  --bindings /private/source-bindings-149.json
+```

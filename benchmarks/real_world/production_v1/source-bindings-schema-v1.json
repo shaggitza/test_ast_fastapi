@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ground-truth-production-source-bindings-schema-v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "id",
+    "authorization",
+    "campaign_manifest_sha256",
+    "campaign_id",
+    "corpus_id",
+    "repository",
+    "cache",
+    "records"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "id": {"type": "string"},
+    "authorization": {"type": "object"},
+    "campaign_manifest_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "campaign_id": {"type": "string"},
+    "corpus_id": {"const": "oss-expansion-pr-lock-2500-v2"},
+    "repository": {"type": "string"},
+    "cache": {
+      "type": "object",
+      "required": [
+        "logical_id",
+        "device",
+        "inode",
+        "content_sha256",
+        "remote",
+        "commit_count",
+        "object_count",
+        "inventory_sha256",
+        "inventory_path_count",
+        "file_count",
+        "disk_bytes"
+      ],
+      "properties": {
+        "logical_id": {"type": "string"},
+        "device": {"type": "integer", "minimum": 0},
+        "inode": {"type": "integer", "minimum": 1},
+        "content_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "remote": {"type": "string", "pattern": "^https://github\\.com/[^/]+/[^/]+\\.git$"},
+        "commit_count": {"type": "integer", "minimum": 1, "maximum": 100},
+        "object_count": {"type": "integer", "minimum": 1},
+        "inventory_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "inventory_path_count": {"type": "integer", "minimum": 1, "maximum": 2000000},
+        "file_count": {"type": "integer", "minimum": 1, "maximum": 2000000},
+        "disk_bytes": {"type": "integer", "minimum": 1, "maximum": 5368709120}
+      },
+      "additionalProperties": false
+    },
+    "records": {"type": "array", "minItems": 50, "maxItems": 50}
+  },
+  "additionalProperties": false
+}

@@ -28,6 +28,9 @@ _SCHEMA: Final = f"{_PROFILE_DIR}/campaign-manifest-schema-v1.json"
 _README: Final = f"{_PROFILE_DIR}/README.md"
 _CHECKSUMS: Final = f"{_PROFILE_DIR}/checksums-v1.json"
 _MODULE: Final = "benchmarks/real_world/ground_truth_campaign_v1.py"
+_SOURCE_MODULE: Final = "benchmarks/real_world/ground_truth_source_v1.py"
+_SOURCE_POLICY: Final = f"{_PROFILE_DIR}/source-policy-v1.json"
+_SOURCE_SCHEMA: Final = f"{_PROFILE_DIR}/source-bindings-schema-v1.json"
 _MANIFEST: Final = "benchmarks/real_world/expansion/projects-50x50-v2.json"
 _LOCK: Final = "benchmarks/real_world/expansion/pr-lock-2500-v2.json"
 _LOCK_CHECKSUMS: Final = "benchmarks/real_world/expansion/checksums-50x50-v2.json"
@@ -137,7 +140,16 @@ def _authenticate_profile(root: Path) -> dict[str, Any]:
     profile, _ = _json(root / _CHECKSUMS)
     _strict(profile, {"schema_version", "id", "files"}, "checksum profile")
     files = profile["files"]
-    expected_files = {_ASSIGNMENTS, _POLICY, _SCHEMA, _README, _MODULE}
+    expected_files = {
+        _ASSIGNMENTS,
+        _POLICY,
+        _SCHEMA,
+        _README,
+        _MODULE,
+        _SOURCE_MODULE,
+        _SOURCE_POLICY,
+        _SOURCE_SCHEMA,
+    }
     if (
         profile["schema_version"] != 1
         or profile["id"] != "ground-truth-production-checksums-v1"

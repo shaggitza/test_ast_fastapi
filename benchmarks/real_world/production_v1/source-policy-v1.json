@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "id": "ground-truth-production-source-policy-v1",
+  "scope": "one authenticated 50-PR repository campaign",
+  "transport": {
+    "scheme": "https",
+    "host": "github.com",
+    "exact_full_sha_fetch_only": true,
+    "depth": 1,
+    "tags": false,
+    "credentials": false,
+    "prompts": false,
+    "proxy": false,
+    "retry_count": 1
+  },
+  "forbidden": [
+    "clone",
+    "checkout",
+    "worktree",
+    "archive",
+    "import",
+    "install",
+    "build",
+    "tests",
+    "hooks",
+    "submodules",
+    "lfs",
+    "analyzed_source_execution",
+    "model_launch"
+  ],
+  "bounds": {
+    "unique_commits": 100,
+    "validation_git_commands": 313,
+    "preparation_git_commands": 515,
+    "command_formula": "preparation=2*commits+2+3*commits+13; validation=3*commits+13",
+    "command_timeout_seconds": 180,
+    "captured_output_bytes": 8388608,
+    "disk_bytes": 5368709120,
+    "filesystem_entries": 2000000,
+    "child_processes": 512
+  },
+  "publication": {
+    "private_parent_mode": "0700",
+    "cache_directory_mode": "0500",
+    "cache_file_mode": "0400",
+    "bindings_mode": "0400",
+    "no_clobber": true,
+    "fsync": true,
+    "pilot_cache_mutation": false,
+    "atomic_rename_noreplace": true,
+    "private_current_uid_parent_required_on_every_validation": true,
+    "complete_descendant_inventory_bound": true,
+    "streaming_output_and_disk_enforcement": true
+  },
+  "authorization": {
+    "packet_materialization": false,
+    "live_launch": false,
+    "canonical_import": false
+  }
+}

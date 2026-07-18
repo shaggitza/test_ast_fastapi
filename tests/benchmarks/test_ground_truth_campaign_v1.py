@@ -256,6 +256,9 @@ def test_profile_checksums_cover_all_offline_files() -> None:
         "benchmarks/real_world/production_v1/campaign-manifest-schema-v1.json",
         "benchmarks/real_world/production_v1/README.md",
         "benchmarks/real_world/ground_truth_campaign_v1.py",
+        "benchmarks/real_world/ground_truth_source_v1.py",
+        "benchmarks/real_world/production_v1/source-policy-v1.json",
+        "benchmarks/real_world/production_v1/source-bindings-schema-v1.json",
     }
     for relative, expected in profile["files"].items():
         actual = "sha256:" + hashlib.sha256((ROOT / relative).read_bytes()).hexdigest()
