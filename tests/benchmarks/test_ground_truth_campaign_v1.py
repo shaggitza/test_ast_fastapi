@@ -268,6 +268,15 @@ def test_profile_checksums_cover_all_offline_files() -> None:
         "benchmarks/real_world/production_v1/packet-authorization-schema-v1.json",
         "benchmarks/real_world/production_v1/packet-publication-schema-v1.json",
         "benchmarks/real_world/production_v1/packet-aggregate-schema-v1.json",
+        "benchmarks/real_world/ground_truth_submit_v1.py",
+        "benchmarks/real_world/production_v1/submission-policy-v1.json",
+        "benchmarks/real_world/production_v1/submission-binding-schema-v1.json",
+        "benchmarks/real_world/production_v1/review-prompt-v1.md",
+        "benchmarks/real_world/production_v1/model-policy-review-v1.json",
+        "benchmarks/real_world/production_v1/tool-policy-review-v1.json",
+        "benchmarks/real_world/production_v1/review-source-policy-v1.json",
+        "benchmarks/real_world/production_v1/extensions/ground-truth-review-submit/index.ts",
+        "benchmarks/real_world/production_v1/extensions/ground-truth-review-submit/review-schema.ts",
     }
     for relative, expected in profile["files"].items():
         actual = "sha256:" + hashlib.sha256((ROOT / relative).read_bytes()).hexdigest()

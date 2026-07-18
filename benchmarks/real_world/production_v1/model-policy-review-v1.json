@@ -1,0 +1,22 @@
+{
+  "authority": {
+    "adjudication": false,
+    "canonical_import": false,
+    "live_launch": false
+  },
+  "id": "ground-truth-production-review-model-v1",
+  "review": {
+    "independent_lanes": [
+      "A",
+      "B"
+    ],
+    "model": "gpt-5.6-luna",
+    "provider": "openai-codex",
+    "thinking": "medium"
+  },
+  "runtime_canary": {
+    "required_before_live_launch": true,
+    "status": "pending"
+  },
+  "schema_version": 1
+}

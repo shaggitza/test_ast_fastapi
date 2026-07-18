@@ -1,0 +1,14 @@
+{
+  "canonical_import_authorized": false,
+  "corpus_id": "oss-expansion-50x50-lock-v2",
+  "correctable_codes": [
+    "DRAFT_INVALID",
+    "EVIDENCE_INVALID"
+  ],
+  "id": "ground-truth-review-submit-v1",
+  "live_launch_authorized": false,
+  "max_validation_attempts": 3,
+  "protocol_version": 1,
+  "schema_version": 1,
+  "terminal_acknowledgement": "SUBMISSION_COMPLETE"
+}
