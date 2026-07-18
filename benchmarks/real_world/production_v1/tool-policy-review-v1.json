@@ -1,0 +1,51 @@
+{
+  "agent_boundary": {
+    "analyzed_source_execution": false,
+    "child_shell": false,
+    "child_writes": false,
+    "generic_output_paths": false,
+    "network": false,
+    "supervisor_only_escrow": true
+  },
+  "allowed_child_tools": [
+    "find",
+    "grep",
+    "ls",
+    "read",
+    "submit_blind_review"
+  ],
+  "authority": {
+    "adjudication": false,
+    "canonical_import": false,
+    "live_launch": false
+  },
+  "broker": {
+    "authenticated_inputs_rechecked": true,
+    "capability_required": true,
+    "correctable_rejection_codes": [
+      "DRAFT_INVALID",
+      "EVIDENCE_INVALID"
+    ],
+    "cwd_device_inode_binding": true,
+    "fresh_exact_git_evidence_recovery": true,
+    "hard_failure_classes": [
+      "capability",
+      "peer",
+      "cwd",
+      "protocol",
+      "deadline",
+      "transport",
+      "custody"
+    ],
+    "max_validation_attempts": 3,
+    "model_selectable_destination": false,
+    "post_success_acknowledgement": "SUBMISSION_COMPLETE",
+    "provider_facing_payload": "semantic_review_draft_only"
+  },
+  "id": "ground-truth-production-review-tool-policy-v1",
+  "runtime_canary": {
+    "required_before_live_launch": true,
+    "status": "pending"
+  },
+  "schema_version": 1
+}

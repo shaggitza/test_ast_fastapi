@@ -38,6 +38,19 @@ _PACKET_AUTH_SCHEMA: Final = f"{_PROFILE_DIR}/packet-authorization-schema-v1.jso
 _PACKET_PUBLICATION_SCHEMA: Final = f"{_PROFILE_DIR}/packet-publication-schema-v1.json"
 _PACKET_AGGREGATE_SCHEMA: Final = f"{_PROFILE_DIR}/packet-aggregate-schema-v1.json"
 _PILOT_PACKET_DEPENDENCY: Final = "benchmarks/real_world/pilot_packet_v2.py"
+_SUBMIT_MODULE: Final = "benchmarks/real_world/ground_truth_submit_v1.py"
+_SUBMIT_POLICY: Final = f"{_PROFILE_DIR}/submission-policy-v1.json"
+_SUBMIT_SCHEMA: Final = f"{_PROFILE_DIR}/submission-binding-schema-v1.json"
+_REVIEW_PROMPT: Final = f"{_PROFILE_DIR}/review-prompt-v1.md"
+_REVIEW_MODEL_POLICY: Final = f"{_PROFILE_DIR}/model-policy-review-v1.json"
+_REVIEW_TOOL_POLICY: Final = f"{_PROFILE_DIR}/tool-policy-review-v1.json"
+_REVIEW_SOURCE_POLICY: Final = f"{_PROFILE_DIR}/review-source-policy-v1.json"
+_SUBMIT_EXTENSION: Final = (
+    "benchmarks/real_world/production_v1/extensions/ground-truth-review-submit/index.ts"
+)
+_SUBMIT_EXTENSION_SCHEMA: Final = (
+    "benchmarks/real_world/production_v1/extensions/ground-truth-review-submit/review-schema.ts"
+)
 _MANIFEST: Final = "benchmarks/real_world/expansion/projects-50x50-v2.json"
 _LOCK: Final = "benchmarks/real_world/expansion/pr-lock-2500-v2.json"
 _LOCK_CHECKSUMS: Final = "benchmarks/real_world/expansion/checksums-50x50-v2.json"
@@ -163,6 +176,15 @@ def _authenticate_profile(root: Path) -> dict[str, Any]:
         _PACKET_PUBLICATION_SCHEMA,
         _PACKET_AGGREGATE_SCHEMA,
         _PILOT_PACKET_DEPENDENCY,
+        _SUBMIT_MODULE,
+        _SUBMIT_POLICY,
+        _SUBMIT_SCHEMA,
+        _REVIEW_PROMPT,
+        _REVIEW_MODEL_POLICY,
+        _REVIEW_TOOL_POLICY,
+        _REVIEW_SOURCE_POLICY,
+        _SUBMIT_EXTENSION,
+        _SUBMIT_EXTENSION_SCHEMA,
     }
     if (
         profile["schema_version"] != 1

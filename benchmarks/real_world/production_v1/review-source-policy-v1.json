@@ -1,0 +1,15 @@
+{
+  "allowed_sources": [
+    "authenticated_packet_manifest",
+    "baseline_snapshot",
+    "target_snapshot",
+    "snapshot_diff",
+    "frozen_production_policies"
+  ],
+  "analyzed_source_execution": false,
+  "external_network": false,
+  "id": "ground-truth-production-review-source-policy-v1",
+  "packet_only": true,
+  "schema_version": 1,
+  "supervisor_broker_may_use_exact_offline_git_cache": true
+}

@@ -130,3 +130,25 @@ python -m benchmarks.real_world.ground_truth_packet_v1 validate-packets \
   --cache /private/source-149.git --ledger-root /private/ledger-149 \
   --output /private/packets-149
 ```
+
+## Typed submission broker milestone
+
+`ground_truth_submit_v1.py` prepares one supervisor-owned, lane-qualified binding
+from an authenticated published packet and exposes the local Unix-socket semantic
+submission broker. The reviewer sees only the immutable packet and review policies;
+canonical corpus/reviewer identity, commits, trees, blob IDs, evidence ordinals, and
+escrow paths remain supervisor-owned. Expected draft/evidence errors are correctable
+for at most three calls. Accepted escrow is mode 0400 and requires the exact
+nonsemantic `SUBMISSION_COMPLETE` acknowledgement.
+
+This milestone does **not** add a scheduler, native agent, launch plan, session audit,
+live-review authorization, adjudication, or canonical import. All such gates remain
+false. The extension is stored inertly below `production_v1/extensions` and may only
+be copied into a future hash-bound child runtime; it is not a parent project extension.
+It uses only `/tmp/ground-truth-review-v1-UID` registry descriptors and does not accept
+environment-based transport bindings. Binding preparation captures the authenticated
+production checksum profile and every policy byte once, copies only that snapshot,
+and reauthenticates the exact profile/source/cache/packet boundary before no-clobber
+publication. Recovery creates a fresh exact-cache evidence validator between fresh
+custody authentications. Cleanup removes only publication links whose device/inode
+still matches the link created by that invocation, so a raced-in file is never unlinked.
