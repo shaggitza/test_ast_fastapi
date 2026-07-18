@@ -51,6 +51,12 @@ _SUBMIT_EXTENSION: Final = (
 _SUBMIT_EXTENSION_SCHEMA: Final = (
     "benchmarks/real_world/production_v1/extensions/ground-truth-review-submit/review-schema.ts"
 )
+_RUN_MODULE: Final = "benchmarks/real_world/ground_truth_run_v1.py"
+_RUNTIME_POLICY: Final = f"{_PROFILE_DIR}/runtime-policy-v1.json"
+_RUNTIME_SCHEMA: Final = f"{_PROFILE_DIR}/runtime-attestation-schema-v1.json"
+_REVIEW_AUTH_SCHEMA: Final = f"{_PROFILE_DIR}/review-canary-authorization-schema-v1.json"
+_LANE_EVENT_SCHEMA: Final = f"{_PROFILE_DIR}/lane-event-schema-v1.json"
+_SESSION_AUDIT_SCHEMA: Final = f"{_PROFILE_DIR}/session-audit-schema-v1.json"
 _MANIFEST: Final = "benchmarks/real_world/expansion/projects-50x50-v2.json"
 _LOCK: Final = "benchmarks/real_world/expansion/pr-lock-2500-v2.json"
 _LOCK_CHECKSUMS: Final = "benchmarks/real_world/expansion/checksums-50x50-v2.json"
@@ -185,6 +191,12 @@ def _authenticate_profile(root: Path) -> dict[str, Any]:
         _REVIEW_SOURCE_POLICY,
         _SUBMIT_EXTENSION,
         _SUBMIT_EXTENSION_SCHEMA,
+        _RUN_MODULE,
+        _RUNTIME_POLICY,
+        _RUNTIME_SCHEMA,
+        _REVIEW_AUTH_SCHEMA,
+        _LANE_EVENT_SCHEMA,
+        _SESSION_AUDIT_SCHEMA,
     }
     if (
         profile["schema_version"] != 1
@@ -795,10 +807,23 @@ def _validate_ledger_unlocked(root: Path, repository_root: Path) -> dict[str, An
             _fail("packet publication ledger transition is invalid")
         head = publication["entry_hash"]
         publication_hash = publication["entry_hash"]
+    canary_lanes = [
+        {
+            "lane_key": row["lane_key"],
+            "attempt_id": row["attempt_id"],
+            "reviewer": row["reviewer"],
+        }
+        for row in campaign["lanes"]
+        if row["rank"] == 1 and row["lane"] in {"A", "B"}
+    ]
+    if len(canary_lanes) != 2:
+        _fail("campaign canary lane projection is invalid")
     return {
         "schema_version": 1,
         "campaign_id": campaign["id"],
         "campaign_manifest_sha256": genesis["campaign_manifest_sha256"],
+        "campaign_canary_lanes": canary_lanes,
+        "campaign_canary_lanes_sha256": _sha(canonical_json(canary_lanes)),
         "lane_count": 100,
         "planned": 100,
         "entry_hash": head,

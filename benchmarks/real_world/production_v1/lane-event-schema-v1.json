@@ -1,0 +1,478 @@
+{
+  "$defs": {
+    "attempt": {
+      "pattern": "^prod-v1-i[0-9]{3}-rank[0-9]{3}-pr[0-9]+-[AB]$",
+      "type": "string"
+    },
+    "common": {
+      "properties": {
+        "entry_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "kind": {
+          "enum": [
+            "prepared",
+            "launch_claimed",
+            "native_result",
+            "pending",
+            "completed",
+            "operational_failed"
+          ]
+        },
+        "previous_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "protocol": {
+          "const": "ground-truth-review-lane-event-v1"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "sequence": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "protocol",
+        "sequence",
+        "kind",
+        "previous_hash",
+        "entry_hash"
+      ],
+      "type": "object"
+    },
+    "digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "$id": "https://example.invalid/ground-truth-production-v1/lane-event-schema-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "$ref": "#/$defs/common"
+        }
+      ],
+      "properties": {
+        "attempt_id": {
+          "$ref": "#/$defs/attempt"
+        },
+        "binding_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "broker_pid": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "broker_start_identity": {
+          "pattern": "^[0-9]+$",
+          "type": "string"
+        },
+        "entry_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "kind": {
+          "const": "prepared"
+        },
+        "lane": {
+          "enum": [
+            "A",
+            "B"
+          ]
+        },
+        "lane_key": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "packet_root_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "prepared_at": {
+          "type": "string"
+        },
+        "previous_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "protocol": {
+          "const": "ground-truth-review-lane-event-v1"
+        },
+        "rank": {
+          "const": 1
+        },
+        "runtime_attestation_entry_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "sequence": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "attempt_id",
+        "rank",
+        "lane",
+        "lane_key",
+        "binding_sha256",
+        "runtime_attestation_entry_hash",
+        "packet_root_sha256",
+        "broker_pid",
+        "broker_start_identity",
+        "prepared_at"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "$ref": "#/$defs/common"
+        }
+      ],
+      "properties": {
+        "attempt_ids": {
+          "items": {
+            "$ref": "#/$defs/attempt"
+          },
+          "maxItems": 3,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "batch_id": {
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "type": "string"
+        },
+        "claimed_at": {
+          "type": "string"
+        },
+        "entry_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "kind": {
+          "const": "launch_claimed"
+        },
+        "plan_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "previous_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "protocol": {
+          "const": "ground-truth-review-lane-event-v1"
+        },
+        "runtime_attestation_entry_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "sequence": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "task_indices": {
+          "items": {
+            "maximum": 2,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 3,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "batch_id",
+        "attempt_ids",
+        "task_indices",
+        "runtime_attestation_entry_hash",
+        "plan_sha256",
+        "claimed_at"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "$ref": "#/$defs/common"
+        }
+      ],
+      "properties": {
+        "attempt_id": {
+          "$ref": "#/$defs/attempt"
+        },
+        "batch_id": {
+          "type": "string"
+        },
+        "bound_at": {
+          "type": "string"
+        },
+        "entry_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "kind": {
+          "const": "native_result"
+        },
+        "native_run_id": {
+          "type": "string"
+        },
+        "parent_status": {
+          "enum": [
+            "success",
+            "failure"
+          ]
+        },
+        "previous_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "protocol": {
+          "const": "ground-truth-review-lane-event-v1"
+        },
+        "runtime_attestation_entry_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "sequence": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "session_device": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "session_inode": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "session_mode": {
+          "enum": [
+            384,
+            420
+          ]
+        },
+        "session_path": {
+          "pattern": "^/",
+          "type": "string"
+        },
+        "session_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "session_uid": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "task_index": {
+          "maximum": 2,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "attempt_id",
+        "batch_id",
+        "native_run_id",
+        "task_index",
+        "runtime_attestation_entry_hash",
+        "session_path",
+        "session_device",
+        "session_inode",
+        "session_uid",
+        "session_mode",
+        "session_sha256",
+        "parent_status",
+        "bound_at"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "$ref": "#/$defs/common"
+        }
+      ],
+      "properties": {
+        "attempt_id": {
+          "$ref": "#/$defs/attempt"
+        },
+        "binding_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "entry_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "escrow_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "kind": {
+          "const": "pending"
+        },
+        "pending_at": {
+          "type": "string"
+        },
+        "previous_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "protocol": {
+          "const": "ground-truth-review-lane-event-v1"
+        },
+        "receipt_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "review_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "sequence": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "attempt_id",
+        "review_sha256",
+        "escrow_sha256",
+        "receipt_sha256",
+        "binding_sha256",
+        "pending_at"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "$ref": "#/$defs/common"
+        }
+      ],
+      "properties": {
+        "attempt_id": {
+          "$ref": "#/$defs/attempt"
+        },
+        "audit_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "binding_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "completed_at": {
+          "type": "string"
+        },
+        "eligible": {
+          "const": true
+        },
+        "entry_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "kind": {
+          "const": "completed"
+        },
+        "packet_root_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "previous_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "protocol": {
+          "const": "ground-truth-review-lane-event-v1"
+        },
+        "receipt_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "review_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "runtime_attestation_entry_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "sequence": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "session_sha256": {
+          "$ref": "#/$defs/digest"
+        }
+      },
+      "required": [
+        "attempt_id",
+        "review_sha256",
+        "receipt_sha256",
+        "session_sha256",
+        "audit_sha256",
+        "runtime_attestation_entry_hash",
+        "packet_root_sha256",
+        "binding_sha256",
+        "completed_at",
+        "eligible"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "$ref": "#/$defs/common"
+        }
+      ],
+      "properties": {
+        "attempt_id": {
+          "$ref": "#/$defs/attempt"
+        },
+        "entry_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "failed_at": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "operational_failed"
+        },
+        "previous_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "protocol": {
+          "const": "ground-truth-review-lane-event-v1"
+        },
+        "reason": {
+          "maxLength": 500,
+          "type": "string"
+        },
+        "relaunch_authorized": {
+          "const": false
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "sequence": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "attempt_id",
+        "reason",
+        "failed_at",
+        "relaunch_authorized"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "Ground truth production lane event v1"
+}

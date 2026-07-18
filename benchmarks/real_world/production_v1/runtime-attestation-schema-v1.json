@@ -1,0 +1,436 @@
+{
+  "$defs": {
+    "agent": {
+      "additionalProperties": false,
+      "properties": {
+        "disabled": {
+          "type": "boolean"
+        },
+        "extensions": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ]
+        },
+        "filePath": {
+          "pattern": "^/",
+          "type": "string"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            "builtin",
+            "package",
+            "user",
+            "project"
+          ]
+        },
+        "subagentOnlyExtensions": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ]
+        },
+        "thinking": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tools": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "filePath",
+        "source",
+        "model",
+        "thinking",
+        "tools",
+        "extensions",
+        "subagentOnlyExtensions",
+        "disabled"
+      ],
+      "type": "object"
+    },
+    "digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "file": {
+      "additionalProperties": false,
+      "properties": {
+        "bytes": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "path": {
+          "pattern": "^/",
+          "type": "string"
+        },
+        "sha256": {
+          "$ref": "#/$defs/digest"
+        }
+      },
+      "required": [
+        "path",
+        "sha256",
+        "bytes"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://example.invalid/ground-truth-production-v1/runtime-attestation-schema-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "agent_source_sha256": {
+      "$ref": "#/$defs/digest"
+    },
+    "attested_at": {
+      "type": "string"
+    },
+    "authorizations": {
+      "const": {
+        "adjudication": false,
+        "canonical_import": false,
+        "review_launch": false
+      }
+    },
+    "campaign_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "campaign_lanes_sha256": {
+      "$ref": "#/$defs/digest"
+    },
+    "campaign_manifest_sha256": {
+      "$ref": "#/$defs/digest"
+    },
+    "entry_hash": {
+      "$ref": "#/$defs/digest"
+    },
+    "execution_device": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "execution_inode": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "execution_root": {
+      "pattern": "^/",
+      "type": "string"
+    },
+    "extension_schema_sha256": {
+      "$ref": "#/$defs/digest"
+    },
+    "extension_sha256": {
+      "$ref": "#/$defs/digest"
+    },
+    "packet_publication_entry_hash": {
+      "$ref": "#/$defs/digest"
+    },
+    "previous_hash": {
+      "$ref": "#/$defs/digest"
+    },
+    "production_files_sha256": {
+      "$ref": "#/$defs/digest"
+    },
+    "production_profile_sha256": {
+      "$ref": "#/$defs/digest"
+    },
+    "protocol": {
+      "const": "ground-truth-runtime-attestation-v1"
+    },
+    "runtime_identity": {
+      "additionalProperties": false,
+      "properties": {
+        "config": {
+          "additionalProperties": false,
+          "properties": {
+            "bytes": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "intercom_mode": {
+              "enum": [
+                "fork-only",
+                "off"
+              ]
+            },
+            "path": {
+              "pattern": "^/",
+              "type": "string"
+            },
+            "sha256": {
+              "$ref": "#/$defs/digest"
+            }
+          },
+          "required": [
+            "path",
+            "sha256",
+            "bytes",
+            "intercom_mode"
+          ],
+          "type": "object"
+        },
+        "pi_package": {
+          "$ref": "#/$defs/file"
+        },
+        "pi_subagents_version": {
+          "const": "0.35.1"
+        },
+        "pi_version": {
+          "const": "0.80.10"
+        },
+        "resolver_census": {
+          "additionalProperties": false,
+          "properties": {
+            "builtin": {
+              "items": {
+                "$ref": "#/$defs/agent"
+              },
+              "type": "array"
+            },
+            "effective": {
+              "items": {
+                "$ref": "#/$defs/agent"
+              },
+              "type": "array"
+            },
+            "package": {
+              "items": {
+                "$ref": "#/$defs/agent"
+              },
+              "type": "array"
+            },
+            "project": {
+              "items": {
+                "$ref": "#/$defs/agent"
+              },
+              "type": "array"
+            },
+            "roots": {
+              "additionalProperties": false,
+              "properties": {
+                "projectDir": {
+                  "pattern": "^/",
+                  "type": "string"
+                },
+                "projectSettingsPath": {
+                  "pattern": "^/",
+                  "type": "string"
+                },
+                "userDir": {
+                  "pattern": "^/",
+                  "type": "string"
+                },
+                "userSettingsPath": {
+                  "pattern": "^/",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "userDir",
+                "projectDir",
+                "userSettingsPath",
+                "projectSettingsPath"
+              ],
+              "type": "object"
+            },
+            "user": {
+              "items": {
+                "$ref": "#/$defs/agent"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "builtin",
+            "package",
+            "user",
+            "project",
+            "effective",
+            "roots"
+          ],
+          "type": "object"
+        },
+        "resolver_census_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "resolver_execution": {
+          "additionalProperties": false,
+          "properties": {
+            "argv_sha256": {
+              "$ref": "#/$defs/digest"
+            },
+            "network_authorized": {
+              "const": false
+            },
+            "node_path": {
+              "pattern": "^/",
+              "type": "string"
+            },
+            "node_sha256": {
+              "$ref": "#/$defs/digest"
+            },
+            "script_sha256": {
+              "$ref": "#/$defs/digest"
+            },
+            "shell": {
+              "const": false
+            },
+            "timeout_seconds": {
+              "const": 30
+            }
+          },
+          "required": [
+            "node_path",
+            "node_sha256",
+            "script_sha256",
+            "argv_sha256",
+            "timeout_seconds",
+            "network_authorized",
+            "shell"
+          ],
+          "type": "object"
+        },
+        "roots": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "exists": {
+                "type": "boolean"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "path": {
+                "pattern": "^/",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "path",
+              "exists"
+            ],
+            "type": "object"
+          },
+          "maxItems": 5,
+          "minItems": 5,
+          "type": "array"
+        },
+        "runtime_files": {
+          "additionalProperties": false,
+          "properties": {
+            "agents": {
+              "$ref": "#/$defs/file"
+            },
+            "foreground_execution": {
+              "$ref": "#/$defs/file"
+            },
+            "foreground_executor": {
+              "$ref": "#/$defs/file"
+            },
+            "package": {
+              "$ref": "#/$defs/file"
+            },
+            "pi_args": {
+              "$ref": "#/$defs/file"
+            },
+            "schemas": {
+              "$ref": "#/$defs/file"
+            }
+          },
+          "required": [
+            "package",
+            "agents",
+            "schemas",
+            "pi_args",
+            "foreground_execution",
+            "foreground_executor"
+          ],
+          "type": "object"
+        },
+        "schema_version": {
+          "const": 1
+        }
+      },
+      "required": [
+        "schema_version",
+        "pi_subagents_version",
+        "pi_version",
+        "pi_package",
+        "runtime_files",
+        "config",
+        "roots",
+        "resolver_census",
+        "resolver_census_sha256",
+        "resolver_execution"
+      ],
+      "type": "object"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "source_bindings_sha256": {
+      "$ref": "#/$defs/digest"
+    }
+  },
+  "required": [
+    "schema_version",
+    "protocol",
+    "campaign_id",
+    "campaign_manifest_sha256",
+    "campaign_lanes_sha256",
+    "source_bindings_sha256",
+    "packet_publication_entry_hash",
+    "production_profile_sha256",
+    "production_files_sha256",
+    "runtime_identity",
+    "extension_sha256",
+    "extension_schema_sha256",
+    "agent_source_sha256",
+    "execution_root",
+    "execution_device",
+    "execution_inode",
+    "attested_at",
+    "authorizations",
+    "previous_hash",
+    "entry_hash"
+  ],
+  "title": "Ground truth production runtime attestation v1",
+  "type": "object"
+}

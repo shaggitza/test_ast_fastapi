@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/ground-truth-production-v1/session-audit-schema-v1.json",
+  "title": "Ground truth production session audit v1",
+  "$defs": {"digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}},
+  "type": "object",
+  "required": ["schema_version", "protocol", "attempt_id", "session_sha256", "tool_calls", "submit_calls", "correction_submissions", "input_tokens", "output_tokens", "cache_read_tokens", "cost_micro_usd", "terminal_acknowledgement", "native_parent_success", "binding_sha256", "pending_sha256", "review_sha256", "receipt_sha256", "runtime_attestation_entry_hash", "packet_root_sha256", "reviewer", "eligible"],
+  "properties": {
+    "schema_version": {"const": 1}, "protocol": {"const": "ground-truth-review-session-audit-v1"}, "attempt_id": {"type": "string", "pattern": "^prod-v1-i[0-9]{3}-rank[0-9]{3}-pr[0-9]+-[AB]$"},
+    "session_sha256": {"$ref": "#/$defs/digest"}, "tool_calls": {"type": "integer", "minimum": 1, "maximum": 203}, "submit_calls": {"type": "integer", "minimum": 1, "maximum": 3}, "correction_submissions": {"type": "integer", "minimum": 0, "maximum": 2},
+    "input_tokens": {"type": "integer", "minimum": 0}, "output_tokens": {"type": "integer", "minimum": 0}, "cache_read_tokens": {"type": "integer", "minimum": 0}, "cost_micro_usd": {"type": "integer", "minimum": 0},
+    "terminal_acknowledgement": {"const": "SUBMISSION_COMPLETE"}, "native_parent_success": {"const": true}, "binding_sha256": {"$ref": "#/$defs/digest"}, "pending_sha256": {"$ref": "#/$defs/digest"}, "review_sha256": {"$ref": "#/$defs/digest"}, "receipt_sha256": {"$ref": "#/$defs/digest"}, "runtime_attestation_entry_hash": {"$ref": "#/$defs/digest"}, "packet_root_sha256": {"$ref": "#/$defs/digest"},
+    "reviewer": {"type": "object", "required": ["kind", "name", "version"], "properties": {"kind": {"const": "agent"}, "name": {"type": "string"}, "version": {"type": "string"}}, "additionalProperties": false}, "eligible": {"const": true}
+  }, "additionalProperties": false
+}

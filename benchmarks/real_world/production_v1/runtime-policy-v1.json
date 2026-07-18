@@ -1,0 +1,72 @@
+{
+  "adjudication_authorized": false,
+  "all_other_subprocesses_forbidden": true,
+  "ambient_extensions": false,
+  "base_gates_remain_false": true,
+  "batch_claim_binding": "ordered-attempt-ids-and-zero-based-task-indices",
+  "broker_subprocess": {
+    "kind": "bounded-posix-spawn",
+    "model_launch": false
+  },
+  "campaign_lane_binding": "sha256-of-ordered-exact-rank1-A-B-lane-key-attempt-reviewer-rows",
+  "canary_lanes": [
+    "A",
+    "B"
+  ],
+  "canary_ranks": [
+    1
+  ],
+  "canonical_import_authorized": false,
+  "id": "ground-truth-production-runtime-policy-v1",
+  "intercom_modes": [
+    "fork-only",
+    "off"
+  ],
+  "max_global_active": 3,
+  "max_processes_per_lane": 1,
+  "max_seconds": 1800,
+  "max_submission_calls": 3,
+  "max_tool_calls": 203,
+  "model": "openai-codex/gpt-5.6-luna",
+  "native_agent_name": "ground-truth-production-reviewer-v1",
+  "native_plan_validation": "pinned-SubagentParams-Value.Check-before-atomic-batch-claim",
+  "native_result_binding_required": true,
+  "native_run_binding": "first-result-freezes-one-run-id-per-batch",
+  "parent_launch": "native-subagent-tool-only",
+  "pi_coding_agent_version": "0.80.10",
+  "pi_subagents_version": "0.35.1",
+  "prepare_runtime_reauthentication": [
+    "before-binding",
+    "before-broker-spawn",
+    "before-prepared-event"
+  ],
+  "registry_namespace": "/tmp/ground-truth-review-v1-UID",
+  "replacements": 0,
+  "resolver_subprocess": {
+    "kind": "bounded-local-node-attestation",
+    "max_seconds": 30,
+    "network": false,
+    "shell": false
+  },
+  "runtime_files": [
+    "package.json",
+    "src/agents/agents.ts",
+    "src/extension/schemas.ts",
+    "src/runs/shared/pi-args.ts",
+    "src/runs/foreground/execution.ts",
+    "src/runs/foreground/subagent-executor.ts"
+  ],
+  "schema_version": 1,
+  "session_event_identity": "unique-ids-linear-parent-chain",
+  "session_grammar": "pi-session-v3-exact-chain",
+  "session_path_layout": "<sessions>/<parent-session>/<native-run-id>/run-<task-index>/session.jsonl",
+  "subagent_only_extension_count": 1,
+  "thinking": "medium",
+  "tools": [
+    "read",
+    "grep",
+    "find",
+    "ls",
+    "submit_blind_review"
+  ]
+}
