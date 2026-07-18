@@ -1,0 +1,103 @@
+{
+  "$id": "https://example.invalid/ground-truth-production-packet-aggregate-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "aggregate_root_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "authorization_entry_hash": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "campaign_id": {
+      "type": "string"
+    },
+    "campaign_manifest_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "id": {
+      "const": "ground-truth-production-packet-aggregate-v1"
+    },
+    "packet_count": {
+      "const": 50
+    },
+    "packets": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "directory": {
+            "pattern": "^[^/\\\\\\u0000]+$",
+            "type": "string"
+          },
+          "packet_root_sha256": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "pr": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "rank": {
+            "maximum": 50,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "repository": {
+            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rank",
+          "repository",
+          "pr",
+          "directory",
+          "packet_root_sha256"
+        ],
+        "type": "object"
+      },
+      "maxItems": 50,
+      "minItems": 50,
+      "type": "array"
+    },
+    "payload_bytes": {
+      "maximum": 26843545600,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "payload_entries": {
+      "maximum": 500000,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "publication_timestamp": {
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "source_bindings_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "id",
+    "campaign_id",
+    "campaign_manifest_sha256",
+    "source_bindings_sha256",
+    "authorization_entry_hash",
+    "publication_timestamp",
+    "packet_count",
+    "packets",
+    "payload_bytes",
+    "payload_entries",
+    "aggregate_root_sha256"
+  ],
+  "type": "object"
+}

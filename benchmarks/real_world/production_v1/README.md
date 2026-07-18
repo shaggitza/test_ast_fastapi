@@ -16,8 +16,9 @@ The current authorization gates are deliberately false:
 - `source_packet_materialization_authorized: false`;
 - `canonical_import_authorized: false`.
 
-Source trees and packets remain pending. No model, network, packet, adjudication,
-or database-import operation exists in this milestone. Runtime policy records the
+The campaign manifest alone authorizes none of those operations. Source cache and
+packet materialization are separately layered milestones; model launch,
+adjudication, and database import remain unavailable. Runtime policy records the
 expected `pi-subagents` 0.35.1 profile but does not attest or launch it.
 
 ## Commands
@@ -77,4 +78,55 @@ python -m benchmarks.real_world.ground_truth_source_v1 build-source-bindings \
 python -m benchmarks.real_world.ground_truth_source_v1 validate-source-bindings \
   --campaign /private/campaign-149.json --cache /private/source-149.git \
   --bindings /private/source-bindings-149.json
+```
+
+## Layered packet materialization
+
+The immutable campaign and source-binding packet gates remain false. Packet
+materialization requires a separate expiring, hash-chained
+`PacketMaterializationAuthorizationV1` ledger transition. It binds the exact
+campaign, source bindings, cache inventory/device/inode, production checksum
+profile, private output parent identity and absent basename, and fixed limits. It
+grants packet materialization only; live launch and canonical import remain false.
+
+Authorization is single-use. Every fallible source, cache, profile, output-parent,
+and inventory check completes before its durable ledger append. Build requires that
+unused authorization as the current head. Each Git command receives a fresh
+180-second deadline inside the six-hour aggregate deadline, while an independent
+250-command counter covers each build or regeneration pass.
+
+Publication is one same-parent aggregate `RENAME_NOREPLACE`. Immediately afterward,
+a monotonic `packet-materialization-publication-v1` successor consumes the
+authorization and binds output device/inode, aggregate manifest/root, complete
+inventory, payload totals, and the actual final-boundary timestamp. A crash between
+rename and ledger append is recovered only with `finalize-packets`, which fully
+regenerates and authenticates the existing output before appending that exact
+successor. Validation requires the successor; it may run after authorization expiry
+only when the bound publication timestamp was within the original interval. Each of
+the 50 reviewer packets exposes only baseline/target regular files, a locally generated
+`snapshot.diff`, source-structure metadata for omitted symlinks/gitlinks, its
+manifest, and checksum-authenticated packet policy/schema. The remote diff hash and
+size remain metadata with `payload_present: false`; the local relation is always
+`not_compared`. Validation regenerates all 50 packets from the exact cache. Pilot-v2
+bytes are a checksum-bound low-level parser/materializer dependency and are neither
+modified nor used for production authorization, custody, or publication.
+
+```console
+python -m benchmarks.real_world.ground_truth_packet_v1 authorize-packets \
+  --campaign /private/campaign-149.json --bindings /private/source-bindings-149.json \
+  --cache /private/source-149.git --ledger-root /private/ledger-149 \
+  --output-root /private/packets-149
+python -m benchmarks.real_world.ground_truth_packet_v1 build-packets \
+  --campaign /private/campaign-149.json --bindings /private/source-bindings-149.json \
+  --cache /private/source-149.git --ledger-root /private/ledger-149 \
+  --output /private/packets-149
+# Recovery only when atomic publication succeeded but its successor append did not:
+python -m benchmarks.real_world.ground_truth_packet_v1 finalize-packets \
+  --campaign /private/campaign-149.json --bindings /private/source-bindings-149.json \
+  --cache /private/source-149.git --ledger-root /private/ledger-149 \
+  --output /private/packets-149
+python -m benchmarks.real_world.ground_truth_packet_v1 validate-packets \
+  --campaign /private/campaign-149.json --bindings /private/source-bindings-149.json \
+  --cache /private/source-149.git --ledger-root /private/ledger-149 \
+  --output /private/packets-149
 ```

@@ -31,6 +31,13 @@ _MODULE: Final = "benchmarks/real_world/ground_truth_campaign_v1.py"
 _SOURCE_MODULE: Final = "benchmarks/real_world/ground_truth_source_v1.py"
 _SOURCE_POLICY: Final = f"{_PROFILE_DIR}/source-policy-v1.json"
 _SOURCE_SCHEMA: Final = f"{_PROFILE_DIR}/source-bindings-schema-v1.json"
+_PACKET_MODULE: Final = "benchmarks/real_world/ground_truth_packet_v1.py"
+_PACKET_POLICY: Final = f"{_PROFILE_DIR}/packet-policy-v1.json"
+_PACKET_SCHEMA: Final = f"{_PROFILE_DIR}/packet-manifest-schema-v1.json"
+_PACKET_AUTH_SCHEMA: Final = f"{_PROFILE_DIR}/packet-authorization-schema-v1.json"
+_PACKET_PUBLICATION_SCHEMA: Final = f"{_PROFILE_DIR}/packet-publication-schema-v1.json"
+_PACKET_AGGREGATE_SCHEMA: Final = f"{_PROFILE_DIR}/packet-aggregate-schema-v1.json"
+_PILOT_PACKET_DEPENDENCY: Final = "benchmarks/real_world/pilot_packet_v2.py"
 _MANIFEST: Final = "benchmarks/real_world/expansion/projects-50x50-v2.json"
 _LOCK: Final = "benchmarks/real_world/expansion/pr-lock-2500-v2.json"
 _LOCK_CHECKSUMS: Final = "benchmarks/real_world/expansion/checksums-50x50-v2.json"
@@ -149,6 +156,13 @@ def _authenticate_profile(root: Path) -> dict[str, Any]:
         _SOURCE_MODULE,
         _SOURCE_POLICY,
         _SOURCE_SCHEMA,
+        _PACKET_MODULE,
+        _PACKET_POLICY,
+        _PACKET_SCHEMA,
+        _PACKET_AUTH_SCHEMA,
+        _PACKET_PUBLICATION_SCHEMA,
+        _PACKET_AGGREGATE_SCHEMA,
+        _PILOT_PACKET_DEPENDENCY,
     }
     if (
         profile["schema_version"] != 1
@@ -610,67 +624,174 @@ def init_ledger(root: Path, campaign_path: Path, repository_root: Path) -> dict[
     return validate_ledger(private, repository_root)
 
 
+def _validate_ledger_unlocked(root: Path, repository_root: Path) -> dict[str, Any]:
+    states, states_raw = _json(root / "lane-states.json", modes={0o400})
+    genesis, _ = _json(root / "ledger-genesis.json", modes={0o400})
+    _strict(states, {"schema_version", "campaign_id", "states"}, "lane states")
+    _strict(
+        genesis,
+        {
+            "schema_version",
+            "protocol",
+            "campaign_id",
+            "campaign_manifest_path",
+            "campaign_manifest_sha256",
+            "campaign_manifest_device",
+            "campaign_manifest_inode",
+            "lane_count",
+            "states_sha256",
+            "previous_hash",
+            "entry_hash",
+        },
+        "ledger genesis",
+    )
+    campaign_path = Path(genesis["campaign_manifest_path"])
+    campaign, campaign_raw, campaign_status = _manifest_file(repository_root, campaign_path)
+    rows = states["states"]
+    if not isinstance(rows, list) or len(rows) != 100:
+        _fail("ledger state cardinality is invalid")
+    expected_rows = [
+        {
+            "ordinal": index,
+            "lane_key": lane["lane_key"],
+            "attempt_id": lane["attempt_id"],
+            "state": "planned",
+        }
+        for index, lane in enumerate(campaign["lanes"], 1)
+    ]
+    if states != {"schema_version": 1, "campaign_id": campaign["id"], "states": expected_rows}:
+        _fail("ledger states differ from campaign lanes")
+    base = {key: value for key, value in genesis.items() if key != "entry_hash"}
+    if (
+        genesis["schema_version"] != 1
+        or genesis["protocol"] != "ground-truth-production-ledger-v1"
+        or genesis["campaign_id"] != campaign["id"]
+        or genesis["campaign_manifest_sha256"] != _sha(campaign_raw)
+        or genesis["campaign_manifest_device"] != campaign_status.st_dev
+        or genesis["campaign_manifest_inode"] != campaign_status.st_ino
+        or genesis["lane_count"] != 100
+        or genesis["states_sha256"] != _sha(states_raw)
+        or genesis["previous_hash"] != _ZERO_HASH
+        or genesis["entry_hash"] != _sha(canonical_json(base))
+    ):
+        _fail("ledger genesis binding or hash chain is invalid")
+    head = genesis["entry_hash"]
+    transition_path = root / "packet-materialization-authorization.json"
+    transition_present = transition_path.exists() or transition_path.is_symlink()
+    authorization_hash: str | None = None
+    if transition_present:
+        transition, transition_raw = _json(transition_path, modes={0o400})
+        required = {
+            "schema_version",
+            "protocol",
+            "campaign_id",
+            "campaign_manifest_sha256",
+            "source_bindings_sha256",
+            "cache_content_sha256",
+            "cache_device",
+            "cache_inode",
+            "issue",
+            "repository",
+            "pr_count",
+            "lane_count",
+            "production_profile_sha256",
+            "output_parent",
+            "output_basename",
+            "output_parent_device",
+            "output_parent_inode",
+            "limits",
+            "authorizations",
+            "issued_at",
+            "expires_at",
+            "previous_hash",
+            "entry_hash",
+        }
+        _strict(transition, required, "packet authorization transition")
+        transition_base = {key: value for key, value in transition.items() if key != "entry_hash"}
+        expected_hash = _sha(
+            b"packet-materialization-authorization-v1\0" + canonical_json(transition_base)
+        )
+        if (
+            canonical_json(transition) != transition_raw
+            or transition["schema_version"] != 1
+            or transition["protocol"] != "packet-materialization-authorization-v1"
+            or transition["campaign_id"] != campaign["id"]
+            or transition["campaign_manifest_sha256"] != _sha(campaign_raw)
+            or transition["issue"] != campaign["assignment"]["issue"]
+            or transition["repository"] != campaign["assignment"]["repository"]
+            or transition["pr_count"] != 50
+            or transition["lane_count"] != 100
+            or transition["authorizations"]
+            != {"packet_materialization": True, "live_launch": False, "canonical_import": False}
+            or transition["previous_hash"] != head
+            or transition["entry_hash"] != expected_hash
+        ):
+            _fail("packet authorization ledger transition is invalid")
+        head = transition["entry_hash"]
+        authorization_hash = transition["entry_hash"]
+    publication_path = root / "packet-materialization-publication.json"
+    publication_present = publication_path.exists() or publication_path.is_symlink()
+    publication_hash: str | None = None
+    if publication_present:
+        if authorization_hash is None:
+            _fail("packet publication exists without authorization")
+        publication, publication_raw = _json(publication_path, modes={0o400})
+        required_publication = {
+            "schema_version",
+            "protocol",
+            "campaign_id",
+            "campaign_manifest_sha256",
+            "authorization_entry_hash",
+            "source_bindings_sha256",
+            "output_path",
+            "output_device",
+            "output_inode",
+            "aggregate_manifest_sha256",
+            "aggregate_root_sha256",
+            "inventory_sha256",
+            "payload_entries",
+            "payload_bytes",
+            "publication_timestamp",
+            "previous_hash",
+            "entry_hash",
+        }
+        _strict(publication, required_publication, "packet publication transition")
+        publication_base = {key: value for key, value in publication.items() if key != "entry_hash"}
+        expected_publication_hash = _sha(
+            b"packet-materialization-publication-v1\0" + canonical_json(publication_base)
+        )
+        if (
+            canonical_json(publication) != publication_raw
+            or publication["schema_version"] != 1
+            or publication["protocol"] != "packet-materialization-publication-v1"
+            or publication["campaign_id"] != campaign["id"]
+            or publication["campaign_manifest_sha256"] != _sha(campaign_raw)
+            or publication["authorization_entry_hash"] != authorization_hash
+            or publication["previous_hash"] != head
+            or publication["entry_hash"] != expected_publication_hash
+        ):
+            _fail("packet publication ledger transition is invalid")
+        head = publication["entry_hash"]
+        publication_hash = publication["entry_hash"]
+    return {
+        "schema_version": 1,
+        "campaign_id": campaign["id"],
+        "campaign_manifest_sha256": genesis["campaign_manifest_sha256"],
+        "lane_count": 100,
+        "planned": 100,
+        "entry_hash": head,
+        "packet_authorization_present": transition_present,
+        "packet_authorization_entry_hash": authorization_hash,
+        "packet_publication_present": publication_present,
+        "packet_publication_entry_hash": publication_hash,
+        "genesis_entry_hash": genesis["entry_hash"],
+    }
+
+
 def validate_ledger(root: Path, repository_root: Path) -> dict[str, Any]:
     private = _private_root(root)
     with _ledger_lock(private):
-        states, states_raw = _json(private / "lane-states.json", modes={0o400})
-        genesis, _ = _json(private / "ledger-genesis.json", modes={0o400})
-        _strict(states, {"schema_version", "campaign_id", "states"}, "lane states")
-        _strict(
-            genesis,
-            {
-                "schema_version",
-                "protocol",
-                "campaign_id",
-                "campaign_manifest_path",
-                "campaign_manifest_sha256",
-                "campaign_manifest_device",
-                "campaign_manifest_inode",
-                "lane_count",
-                "states_sha256",
-                "previous_hash",
-                "entry_hash",
-            },
-            "ledger genesis",
-        )
-        campaign_path = Path(genesis["campaign_manifest_path"])
-        campaign, campaign_raw, campaign_status = _manifest_file(repository_root, campaign_path)
-        rows = states["states"]
-        if not isinstance(rows, list) or len(rows) != 100:
-            _fail("ledger state cardinality is invalid")
-        expected_rows = [
-            {
-                "ordinal": index,
-                "lane_key": lane["lane_key"],
-                "attempt_id": lane["attempt_id"],
-                "state": "planned",
-            }
-            for index, lane in enumerate(campaign["lanes"], 1)
-        ]
-        if states != {"schema_version": 1, "campaign_id": campaign["id"], "states": expected_rows}:
-            _fail("ledger states differ from campaign lanes")
-        base = {key: value for key, value in genesis.items() if key != "entry_hash"}
-        if (
-            genesis["schema_version"] != 1
-            or genesis["protocol"] != "ground-truth-production-ledger-v1"
-            or genesis["campaign_id"] != campaign["id"]
-            or genesis["campaign_manifest_sha256"] != _sha(campaign_raw)
-            or genesis["campaign_manifest_device"] != campaign_status.st_dev
-            or genesis["campaign_manifest_inode"] != campaign_status.st_ino
-            or genesis["lane_count"] != 100
-            or genesis["states_sha256"] != _sha(states_raw)
-            or genesis["previous_hash"] != _ZERO_HASH
-            or genesis["entry_hash"] != _sha(canonical_json(base))
-        ):
-            _fail("ledger genesis binding or hash chain is invalid")
-        return {
-            "schema_version": 1,
-            "campaign_id": campaign["id"],
-            "campaign_manifest_sha256": genesis["campaign_manifest_sha256"],
-            "lane_count": 100,
-            "planned": 100,
-            "entry_hash": genesis["entry_hash"],
-        }
+        return _validate_ledger_unlocked(private, repository_root)
 
 
 def _parser() -> argparse.ArgumentParser:

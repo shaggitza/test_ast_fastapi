@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/packet-materialization-publication-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "protocol", "campaign_id", "campaign_manifest_sha256",
+    "authorization_entry_hash", "source_bindings_sha256", "output_path",
+    "output_device", "output_inode", "aggregate_manifest_sha256",
+    "aggregate_root_sha256", "inventory_sha256", "payload_entries",
+    "payload_bytes", "publication_timestamp", "previous_hash", "entry_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "protocol": {"const": "packet-materialization-publication-v1"},
+    "campaign_id": {"type": "string", "minLength": 1},
+    "campaign_manifest_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "authorization_entry_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "source_bindings_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "output_path": {"type": "string", "minLength": 1},
+    "output_device": {"type": "integer", "minimum": 0},
+    "output_inode": {"type": "integer", "minimum": 1},
+    "aggregate_manifest_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "aggregate_root_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "inventory_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "payload_entries": {"type": "integer", "minimum": 1, "maximum": 500000},
+    "payload_bytes": {"type": "integer", "minimum": 0, "maximum": 26843545600},
+    "publication_timestamp": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "previous_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "entry_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}

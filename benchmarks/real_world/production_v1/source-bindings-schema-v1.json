@@ -19,7 +19,7 @@
     "authorization": {"type": "object"},
     "campaign_manifest_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
     "campaign_id": {"type": "string"},
-    "corpus_id": {"const": "oss-expansion-pr-lock-2500-v2"},
+    "corpus_id": {"const": "oss-expansion-50x50-lock-v2"},
     "repository": {"type": "string"},
     "cache": {
       "type": "object",
