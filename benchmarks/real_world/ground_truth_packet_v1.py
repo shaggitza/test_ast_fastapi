@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
 _PROFILE_DIR: Final = "benchmarks/real_world/production_v1"
 _CHECKSUMS: Final = f"{_PROFILE_DIR}/checksums-v1.json"
+_HISTORICAL_CHECKSUMS: Final = f"{_PROFILE_DIR}/checksums-packet-v1.json"
 _POLICY: Final = f"{_PROFILE_DIR}/packet-policy-v1.json"
 _SCHEMA: Final = f"{_PROFILE_DIR}/packet-manifest-schema-v1.json"
 _AUTH_SCHEMA: Final = f"{_PROFILE_DIR}/packet-authorization-schema-v1.json"
@@ -186,45 +187,119 @@ def _identity(status: os.stat_result) -> tuple[int, int, int, int, int, int, int
     )
 
 
-def _profile(root: Path) -> ProfileSnapshot:
-    profile_path = root / _CHECKSUMS
+_PACKET_PROFILE_FILES: Final = {
+    _MODULE,
+    _POLICY,
+    _SCHEMA,
+    _AUTH_SCHEMA,
+    _PUBLICATION_SCHEMA,
+    _AGGREGATE_SCHEMA,
+    _DEPENDENCY,
+}
+_HISTORICAL_PROFILE_FILES: Final = {
+    "benchmarks/real_world/ground_truth_campaign_v1.py",
+    "benchmarks/real_world/ground_truth_packet_v1.py",
+    "benchmarks/real_world/ground_truth_source_v1.py",
+    "benchmarks/real_world/pilot_packet_v2.py",
+    f"{_PROFILE_DIR}/README.md",
+    f"{_PROFILE_DIR}/assignments-v1.json",
+    f"{_PROFILE_DIR}/campaign-manifest-schema-v1.json",
+    f"{_PROFILE_DIR}/campaign-policy-v1.json",
+    _AGGREGATE_SCHEMA,
+    _AUTH_SCHEMA,
+    _SCHEMA,
+    _POLICY,
+    _PUBLICATION_SCHEMA,
+    f"{_PROFILE_DIR}/source-bindings-schema-v1.json",
+    f"{_PROFILE_DIR}/source-policy-v1.json",
+}
+
+
+def _load_profile(
+    root: Path,
+    relative_path: str,
+    *,
+    exact_files: set[str] | None = None,
+    historical: bool = False,
+) -> ProfileSnapshot:
+    profile_path = root / relative_path
     profile, raw, profile_opened = _json(profile_path)
     _strict(profile, {"schema_version", "id", "files"}, "production profile")
     files = profile.get("files")
-    required = {
-        _MODULE,
-        _POLICY,
-        _SCHEMA,
-        _AUTH_SCHEMA,
-        _PUBLICATION_SCHEMA,
-        _AGGREGATE_SCHEMA,
-        _DEPENDENCY,
-    }
     if (
         profile.get("schema_version") != 1
         or profile.get("id") != "ground-truth-production-checksums-v1"
         or not isinstance(files, dict)
-        or not required <= set(files)
+        or (exact_files is not None and set(files) != exact_files)
+        or not set(files) >= _PACKET_PROFILE_FILES
     ):
         _fail("unsupported packet production profile")
-    snapshots: list[tuple[Path, tuple[int, int, int, int, int, int, int]]] = []
-    captured: dict[str, bytes] = {}
-    for relative in required:
-        expected = files.get(relative)
+    for expected in files.values():
         if not isinstance(expected, str) or not _DIGEST.fullmatch(expected):
             _fail("invalid packet profile digest")
+    snapshots: list[tuple[Path, tuple[int, int, int, int, int, int, int]]] = []
+    captured: dict[str, bytes] = {}
+    for relative in _PACKET_PROFILE_FILES:
+        # The historical file binds the exact authorization-era module digest,
+        # but compatibility code necessarily changes that module. Current
+        # checksums-v1 authenticates the executable module; every historical
+        # packet policy/schema/dependency digest remains exact.
+        if historical and relative == _MODULE:
+            continue
+        expected = cast("dict[str, str]", files)[relative]
         path = root / relative
         actual, opened = _read(path)
         if _sha(actual) != expected:
             _fail(f"packet profile checksum mismatch: {relative}")
         captured[relative] = actual
         snapshots.append((path, _identity(opened)))
+    if historical:
+        current_module, opened = _read(root / _MODULE)
+        captured[_MODULE] = current_module
+        snapshots.append((root / _MODULE, _identity(opened)))
     if _identity(profile_opened) != _identity(profile_path.stat(follow_symlinks=False)):
         _fail("packet profile drifted during authentication")
     for path, expected_identity in snapshots:
         if _identity(path.stat(follow_symlinks=False)) != expected_identity:
             _fail("packet dependency drifted during authentication")
     return ProfileSnapshot(profile, raw, captured)
+
+
+def _profile(root: Path) -> ProfileSnapshot:
+    return _load_profile(root, _CHECKSUMS)
+
+
+def _historical_profile(root: Path, current: ProfileSnapshot | None = None) -> ProfileSnapshot:
+    current_profile = _profile(root) if current is None else current
+    expected_historical = current_profile.value.get("files", {}).get(_HISTORICAL_CHECKSUMS)
+    if not isinstance(expected_historical, str) or not _DIGEST.fullmatch(expected_historical):
+        _fail("historical packet profile is absent from current production profile")
+    historical = _load_profile(
+        root,
+        _HISTORICAL_CHECKSUMS,
+        exact_files=_HISTORICAL_PROFILE_FILES,
+        historical=True,
+    )
+    expected_module = current_profile.value.get("files", {}).get(_MODULE)
+    if (
+        _sha(historical.raw) != expected_historical
+        or not isinstance(expected_module, str)
+        or _sha(historical.files[_MODULE]) != expected_module
+    ):
+        _fail("historical packet profile is not current-profile authenticated")
+    return historical
+
+
+def _profile_by_hash(root: Path, expected_sha256: str) -> ProfileSnapshot:
+    if not _DIGEST.fullmatch(expected_sha256):
+        _fail("packet authorization profile digest is invalid")
+    current = _profile(root)
+    if _sha(current.raw) == expected_sha256:
+        return current
+    historical = _historical_profile(root, current)
+    if _sha(historical.raw) == expected_sha256:
+        return historical
+    _fail("packet authorization references an unknown production profile")
 
 
 def _campaign(root: Path, path: Path) -> tuple[dict[str, Any], bytes]:
@@ -447,7 +522,6 @@ def _receipt(
     ProfileSnapshot,
     dict[str, Any],
 ]:
-    profile = _profile(root)
     campaign, campaign_raw = _campaign(root, campaign_path)
     bindings, bindings_raw, cache_summary = _bindings(root, campaign_path, cache, bindings_path)
     ledger = campaign_v1.validate_ledger(ledger_root, root)
@@ -458,6 +532,10 @@ def _receipt(
     if not require_unused and not ledger["packet_publication_present"]:
         _fail("packet publication transition is absent")
     receipt, receipt_raw, _ = _json(ledger_root / _AUTH_FILE, modes={0o400})
+    profile_digest = receipt.get("production_profile_sha256")
+    if not isinstance(profile_digest, str):
+        _fail("packet authorization profile digest is absent")
+    profile = _profile_by_hash(root, profile_digest)
     base = {key: value for key, value in receipt.items() if key != "entry_hash"}
     parent, parent_status = _private_parent(output_root, absent=False)
     expected = {
@@ -1035,7 +1113,7 @@ def _reauthenticate_boundary(
     expected_cache: dict[str, Any],
     expected_inventory: dict[str, Any],
 ) -> None:
-    profile = _profile(root)
+    profile = _profile_by_hash(root, _sha(expected_profile.raw))
     bindings, bindings_raw, cache_summary = _bindings(root, campaign_path, cache, bindings_path)
     inventory = source_v1._inventory(cache)
     if (

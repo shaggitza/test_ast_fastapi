@@ -1,0 +1,21 @@
+{
+  "files": {
+    "benchmarks/real_world/ground_truth_campaign_v1.py": "sha256:18e71774aabb778d872169ed64031696a49c57da9416efb28e3acbaa677f867a",
+    "benchmarks/real_world/ground_truth_packet_v1.py": "sha256:c8007127bbd73d8f482b69ec477705765fb72bcfa0439874318c98552835da2f",
+    "benchmarks/real_world/ground_truth_source_v1.py": "sha256:8c1626111e2753a1ed0f3706b77460569508585bffd81dc903726f187e557ed5",
+    "benchmarks/real_world/pilot_packet_v2.py": "sha256:7347c6fa91afb7122707980369c273c50419d4de654bdd9c4e57b3d006651895",
+    "benchmarks/real_world/production_v1/README.md": "sha256:dab3e524edb6702dc3d3ce26e17496c8ba22e32016d5fbe63464de5b45420b4c",
+    "benchmarks/real_world/production_v1/assignments-v1.json": "sha256:93daeb3aa957737a24b48345e753201f616cd9fefd968ee593461896a41e5f87",
+    "benchmarks/real_world/production_v1/campaign-manifest-schema-v1.json": "sha256:28ffac7ec5fc52774fee4eb78c62eb91f0daf799feec9e9ab9e20af3f1629be4",
+    "benchmarks/real_world/production_v1/campaign-policy-v1.json": "sha256:49dde2c0a0b1d38586f0219af0bc3cfeb484672ab28f749d487eff783050a630",
+    "benchmarks/real_world/production_v1/packet-aggregate-schema-v1.json": "sha256:a2c1f4b37b55b2b77d0e2afe44a525b18626f77ec2065d2377f64b35daebe349",
+    "benchmarks/real_world/production_v1/packet-authorization-schema-v1.json": "sha256:9022e6335efb8285a8cd76e941ff9697ce4a18fc35725be91bb52f3f3b413ba7",
+    "benchmarks/real_world/production_v1/packet-manifest-schema-v1.json": "sha256:96eb30200d0ef41f4010bb0adf9bc08232747c7d7afed4eaed67fd9e087096a9",
+    "benchmarks/real_world/production_v1/packet-policy-v1.json": "sha256:f80734a433b85184bda2e5348359da090a26c8a81f72c8aea150da928ea1fc36",
+    "benchmarks/real_world/production_v1/packet-publication-schema-v1.json": "sha256:0ac0e006ecfa8ed28ae1c33213d0d42e5f7c4219e855f8f65e4cbe45e3f016c7",
+    "benchmarks/real_world/production_v1/source-bindings-schema-v1.json": "sha256:75abea28887dc6e6b0b61daff571ea16028e03e963d1344a803d968f5a3e4025",
+    "benchmarks/real_world/production_v1/source-policy-v1.json": "sha256:f8bccddab37866c2db777db20328dae129966df9af67f62eaa87679d519b9f20"
+  },
+  "id": "ground-truth-production-checksums-v1",
+  "schema_version": 1
+}
