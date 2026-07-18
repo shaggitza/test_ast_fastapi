@@ -83,7 +83,7 @@ def _campaign(commits: list[str], *, unique: bool = False) -> tuple[dict[str, An
             "live_launch_authorized": False,
             "source_packet_materialization_authorized": False,
         },
-        "corpus": {"id": "oss-expansion-pr-lock-2500-v2"},
+        "corpus": {"id": "oss-expansion-50x50-lock-v2"},
         "assignment": {"issue": 149, "repository": "owner/repository"},
         "records": records,
         "lanes": lanes,

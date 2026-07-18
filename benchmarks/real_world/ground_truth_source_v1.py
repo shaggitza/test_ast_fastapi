@@ -201,7 +201,7 @@ def _campaign(root: Path, path: Path) -> tuple[dict[str, Any], bytes]:
         or not isinstance(lanes, list)
         or len(lanes) != 100
         or not isinstance(corpus, dict)
-        or corpus.get("id") != "oss-expansion-pr-lock-2500-v2"
+        or corpus.get("id") != "oss-expansion-50x50-lock-v2"
     ):
         _fail("campaign is not the canonical offline production slice")
     return value, raw
