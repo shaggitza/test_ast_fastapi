@@ -454,7 +454,7 @@ name: {_AGENT_NAME}
 description: One-shot typed terminal semantic adjudicator
 model: {_MODEL}
 thinking: {_THINKING}
-tools: read, grep, find, ls
+tools: read, grep, find, ls, structured_output
 extensions:
 systemPromptMode: replace
 inheritProjectContext: false
@@ -926,7 +926,7 @@ process.stdout.write(JSON.stringify({
         config.get("model") != _MODEL
         or config.get("thinking") != _THINKING
         or not isinstance(tools, list)
-        or sorted(tools) != ["find", "grep", "ls", "read"]
+        or sorted(tools) != ["find", "grep", "ls", "read", "structured_output"]
         or any(tool in {"contact_supervisor", "intercom", "subagent"} for tool in tools)
         or config.get("inheritProjectContext") is not False
         or config.get("inheritSkills") is not False
@@ -961,16 +961,70 @@ def _intercom_config() -> dict[str, object]:
     }
 
 
+def _structured_output_activation_probe(agent: dict[str, Any]) -> dict[str, object]:
+    module = review_run._pi_subagents_agents_module()
+    pi_args = module.parent.parent / "runs/shared/pi-args.ts"
+    jiti = module.parents[3] / "jiti/lib/jiti.mjs"
+    script = """
+import { pathToFileURL } from 'node:url';
+const { createJiti } = await import(pathToFileURL(process.argv[1]).href);
+const jiti = createJiti(import.meta.url);
+const api = await jiti.import(process.argv[2]);
+const tools = JSON.parse(process.argv[3]);
+const result = api.buildPiArgs({
+  baseArgs: [], task: 'typed-adjudication-probe', sessionEnabled: false,
+  model: 'openai-codex/gpt-5.6-luna', thinking: 'xhigh',
+  inheritProjectContext: false, inheritSkills: false, tools, extensions: [],
+  structuredOutput: {
+    schema: {type: 'object'}, schemaPath: '/probe/schema.json',
+    outputPath: '/probe/output.json'
+  }
+});
+const index = result.args.indexOf('--tools');
+const expected = 'read,grep,find,ls,structured_output';
+if (index < 0 || result.args[index + 1] !== expected) process.exit(11);
+const schemaEnv = Boolean(result.env.PI_SUBAGENT_STRUCTURED_OUTPUT_SCHEMA);
+const captureEnv = Boolean(result.env.PI_SUBAGENT_STRUCTURED_OUTPUT_CAPTURE);
+if (!schemaEnv || !captureEnv) process.exit(12);
+process.stdout.write(JSON.stringify({toolsArg: result.args[index + 1], schemaEnv, captureEnv}));
+"""
+    node = shutil.which("node")
+    tools = agent.get("tools")
+    if node is None or not isinstance(tools, list):
+        _fail("Node or adjudicator tools unavailable for activation probe")
+    result = subprocess.run(
+        [
+            node,
+            "--input-type=module",
+            "-e",
+            script,
+            str(jiti),
+            str(pi_args),
+            canonical_json(tools).decode(),
+        ],
+        cwd=module.parents[2],
+        env=dict(os.environ),
+        check=False,
+        capture_output=True,
+        timeout=15,
+    )
+    if result.returncode != 0 or result.stderr or len(result.stdout) > _MAX_JSON:
+        _fail("structured_output activation probe failed")
+    return _json_bytes(result.stdout, "structured_output activation probe")
+
+
 def attest_native_environment(adjudication_root: Path) -> dict[str, object]:
     root = _private_root(adjudication_root)
     config = _intercom_config()
     agent = _effective_agent_config(Path(__file__).resolve().parents[2])
+    activation = _structured_output_activation_probe(agent)
     receipt = {
         "schema_version": 1,
         "protocol": "blind-review-adjudication-environment-v3",
         "intercom": config,
         "agent_config_sha256": _sha(canonical_json(agent)),
         "agent_config": agent,
+        "structured_output_activation": activation,
     }
     path = root / "environment-attestation.json"
     raw = canonical_json(receipt)
@@ -986,11 +1040,13 @@ def _environment_attestation(root: Path) -> dict[str, Any]:
     receipt = _json(root / "environment-attestation.json", _MAX_JSON, modes={0o400})
     current_intercom = _intercom_config()
     current_agent = _effective_agent_config(Path(__file__).resolve().parents[2])
+    current_activation = _structured_output_activation_probe(current_agent)
     if (
         receipt.get("protocol") != "blind-review-adjudication-environment-v3"
         or receipt.get("intercom") != current_intercom
         or receipt.get("agent_config") != current_agent
         or receipt.get("agent_config_sha256") != _sha(canonical_json(current_agent))
+        or receipt.get("structured_output_activation") != current_activation
     ):
         _fail("adjudication environment attestation no longer matches")
     return receipt
