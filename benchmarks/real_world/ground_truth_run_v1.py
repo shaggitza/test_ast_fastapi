@@ -70,6 +70,12 @@ _TASK_TEXT: Final = (
 )
 _CORRECTABLE = {"DRAFT_INVALID", "EVIDENCE_INVALID"}
 _ZERO = "sha256:" + "0" * 64
+_RUNTIME_FILE: Final = "runtime-attestation.json"
+_RUNTIME_SUPERSESSION_FILE: Final = "runtime-attestation-supersession-001.json"
+_RUNTIME_PROTOCOL: Final = "ground-truth-runtime-attestation-v1"
+_RUNTIME_SUPERSESSION_PROTOCOL: Final = "ground-truth-runtime-attestation-supersession-v1"
+_RUNTIME_DOMAIN: Final = b"ground-truth-runtime-attestation-v1\0"
+_RUNTIME_SUPERSESSION_DOMAIN: Final = b"ground-truth-runtime-attestation-supersession-v1\0"
 
 
 class GroundTruthRunError(RuntimeError):
@@ -716,66 +722,114 @@ def _event_expected_keys(kind: str) -> set[str]:
         raise GroundTruthRunError("lane event kind is invalid") from exc
 
 
+def _validate_runtime_ledger_entry(
+    value: dict[str, Any],
+    raw: bytes,
+    base: dict[str, Any],
+    previous_hash: str,
+    *,
+    supersedes_entry_hash: str | None,
+) -> None:
+    expected_keys = {
+        "schema_version",
+        "protocol",
+        "campaign_id",
+        "campaign_manifest_sha256",
+        "campaign_lanes_sha256",
+        "source_bindings_sha256",
+        "packet_publication_entry_hash",
+        "production_profile_sha256",
+        "production_files_sha256",
+        "runtime_identity",
+        "extension_sha256",
+        "extension_schema_sha256",
+        "agent_source_sha256",
+        "execution_root",
+        "execution_device",
+        "execution_inode",
+        "attested_at",
+        "authorizations",
+        "previous_hash",
+        "entry_hash",
+    }
+    protocol = _RUNTIME_PROTOCOL
+    domain = _RUNTIME_DOMAIN
+    if supersedes_entry_hash is not None:
+        expected_keys.add("supersedes_entry_hash")
+        protocol = _RUNTIME_SUPERSESSION_PROTOCOL
+        domain = _RUNTIME_SUPERSESSION_DOMAIN
+    _strict_keys(value, expected_keys, "runtime attestation")
+    body = {key: item for key, item in value.items() if key != "entry_hash"}
+    if (
+        canonical_json(value) != raw
+        or value["schema_version"] != 1
+        or value["protocol"] != protocol
+        or value["campaign_id"] != base["campaign_id"]
+        or value["campaign_manifest_sha256"] != base["campaign_manifest_sha256"]
+        or value["campaign_lanes_sha256"] != base["campaign_canary_lanes_sha256"]
+        or value["packet_publication_entry_hash"] != base["packet_publication_entry_hash"]
+        or value["authorizations"]
+        != {"review_launch": False, "adjudication": False, "canonical_import": False}
+        or value["previous_hash"] != previous_hash
+        or (
+            supersedes_entry_hash is not None
+            and value["supersedes_entry_hash"] != supersedes_entry_hash
+        )
+        or value["entry_hash"] != _entry_hash(domain, body)
+    ):
+        _fail("runtime attestation ledger entry is invalid")
+    _parse_timestamp(value["attested_at"])
+    for key in (
+        "source_bindings_sha256",
+        "production_profile_sha256",
+        "production_files_sha256",
+        "extension_sha256",
+        "extension_schema_sha256",
+        "agent_source_sha256",
+    ):
+        if not isinstance(value[key], str) or not _DIGEST.fullmatch(value[key]):
+            _fail("runtime attestation digest is invalid")
+    _validate_runtime_identity(value["runtime_identity"])
+
+
 def _extended_ledger(root: Path, repository_root: Path) -> dict[str, Any]:  # noqa: PLR0912,PLR0915
     base = campaign_v1._validate_ledger_unlocked(root, repository_root)
     if not base.get("packet_publication_present"):
         _fail("runtime requires packet publication")
     head = cast("str", base["entry_hash"])
-    runtime_path = root / "runtime-attestation.json"
+    runtime_path = root / _RUNTIME_FILE
     runtime: dict[str, Any] | None = None
+    first_runtime: dict[str, Any] | None = None
     if runtime_path.exists() or runtime_path.is_symlink():
-        runtime, raw = _json_raw(runtime_path, modes={0o400})
-        expected_keys = {
-            "schema_version",
-            "protocol",
-            "campaign_id",
-            "campaign_manifest_sha256",
-            "campaign_lanes_sha256",
-            "source_bindings_sha256",
-            "packet_publication_entry_hash",
-            "production_profile_sha256",
-            "production_files_sha256",
-            "runtime_identity",
-            "extension_sha256",
-            "extension_schema_sha256",
-            "agent_source_sha256",
-            "execution_root",
-            "execution_device",
-            "execution_inode",
-            "attested_at",
-            "authorizations",
-            "previous_hash",
-            "entry_hash",
-        }
-        _strict_keys(runtime, expected_keys, "runtime attestation")
-        body = {key: value for key, value in runtime.items() if key != "entry_hash"}
-        if (
-            canonical_json(runtime) != raw
-            or runtime["schema_version"] != 1
-            or runtime["protocol"] != "ground-truth-runtime-attestation-v1"
-            or runtime["campaign_id"] != base["campaign_id"]
-            or runtime["campaign_manifest_sha256"] != base["campaign_manifest_sha256"]
-            or runtime["campaign_lanes_sha256"] != base["campaign_canary_lanes_sha256"]
-            or runtime["packet_publication_entry_hash"] != base["packet_publication_entry_hash"]
-            or runtime["authorizations"]
-            != {"review_launch": False, "adjudication": False, "canonical_import": False}
-            or runtime["previous_hash"] != head
-            or runtime["entry_hash"] != _entry_hash(b"ground-truth-runtime-attestation-v1\0", body)
-        ):
-            _fail("runtime attestation ledger entry is invalid")
-        _parse_timestamp(runtime["attested_at"])
-        for key in (
-            "source_bindings_sha256",
-            "production_profile_sha256",
-            "production_files_sha256",
-            "extension_sha256",
-            "extension_schema_sha256",
-            "agent_source_sha256",
-        ):
-            if not isinstance(runtime[key], str) or not _DIGEST.fullmatch(runtime[key]):
-                _fail("runtime attestation digest is invalid")
-        _validate_runtime_identity(runtime["runtime_identity"])
+        first_runtime, raw = _json_raw(runtime_path, modes={0o400})
+        _validate_runtime_ledger_entry(
+            first_runtime,
+            raw,
+            base,
+            head,
+            supersedes_entry_hash=None,
+        )
+        runtime = first_runtime
         head = cast("str", runtime["entry_hash"])
+    supersession_path = root / _RUNTIME_SUPERSESSION_FILE
+    supersession_files = sorted(root.glob("runtime-attestation-supersession-*.json"))
+    if [path.name for path in supersession_files] not in ([], [_RUNTIME_SUPERSESSION_FILE]):
+        _fail("runtime attestation supersession cardinality is invalid")
+    runtime_superseded = False
+    if supersession_path.exists() or supersession_path.is_symlink():
+        if first_runtime is None:
+            _fail("runtime supersession exists without an initial attestation")
+        supersession, raw = _json_raw(supersession_path, modes={0o400})
+        _validate_runtime_ledger_entry(
+            supersession,
+            raw,
+            base,
+            head,
+            supersedes_entry_hash=cast("str", first_runtime["entry_hash"]),
+        )
+        runtime = supersession
+        head = cast("str", runtime["entry_hash"])
+        runtime_superseded = True
     auth_path = root / "review-canary-authorization.json"
     authorization: dict[str, Any] | None = None
     if auth_path.exists() or auth_path.is_symlink():
@@ -1035,6 +1089,8 @@ def _extended_ledger(root: Path, repository_root: Path) -> dict[str, Any]:  # no
     return {
         "base": base,
         "runtime": runtime,
+        "first_runtime": first_runtime,
+        "runtime_superseded": runtime_superseded,
         "authorization": authorization,
         "events": events,
         "states": states,
@@ -1060,17 +1116,23 @@ def validate_runtime_ledger(ledger: Path, root: Path) -> dict[str, Any]:
     }
 
 
-def _append_runtime_entry(
-    ledger: Path, root: Path, filename: str, domain: bytes, body: dict[str, Any]
-) -> dict[str, Any]:
-    private = campaign_v1._private_root(ledger)
-    with campaign_v1._ledger_lock(private):
-        current = _extended_ledger(private, root)
-        value = {**body, "previous_hash": current["head"]}
-        value["entry_hash"] = _entry_hash(domain, value)
-        campaign_v1._publish(private / filename, value)
-        _extended_ledger(private, root)
-        return value
+def _runtime_attestation_publication(
+    current: dict[str, Any],
+) -> tuple[str, str, bytes, dict[str, str]]:
+    if current["runtime"] is None:
+        return _RUNTIME_FILE, _RUNTIME_PROTOCOL, _RUNTIME_DOMAIN, {}
+    if (
+        current["authorization"] is None
+        and not current["events"]
+        and not current["runtime_superseded"]
+    ):
+        return (
+            _RUNTIME_SUPERSESSION_FILE,
+            _RUNTIME_SUPERSESSION_PROTOCOL,
+            _RUNTIME_SUPERSESSION_DOMAIN,
+            {"supersedes_entry_hash": cast("str", current["runtime"]["entry_hash"])},
+        )
+    _fail("runtime attestation cannot be superseded after authorization or lane activity")
 
 
 def attest_runtime(
@@ -1107,7 +1169,6 @@ def attest_runtime(
     runtime.chmod(0o500)
     entry_body = {
         "schema_version": 1,
-        "protocol": "ground-truth-runtime-attestation-v1",
         "campaign_id": campaign["id"],
         "campaign_manifest_sha256": _sha(campaign_raw),
         "campaign_lanes_sha256": _sha(
@@ -1141,13 +1202,24 @@ def attest_runtime(
             "canonical_import": False,
         },
     }
-    entry = _append_runtime_entry(
-        ledger,
-        root,
-        "runtime-attestation.json",
-        b"ground-truth-runtime-attestation-v1\0",
-        entry_body,
-    )
+    private = campaign_v1._private_root(ledger)
+    with campaign_v1._ledger_lock(private):
+        current = _extended_ledger(private, root)
+        filename, protocol, domain, supersedes = _runtime_attestation_publication(current)
+        body_with_chain = {
+            **entry_body,
+            "protocol": protocol,
+            **supersedes,
+            "previous_hash": current["head"],
+        }
+        entry = {
+            **body_with_chain,
+            "entry_hash": _entry_hash(domain, body_with_chain),
+        }
+        campaign_v1._publish(private / filename, entry)
+        verified = _extended_ledger(private, root)
+        if verified["runtime"] != entry:
+            _fail("runtime attestation publication did not become the ledger head")
     _atomic(execution_root / "runtime-attestation.json", entry)
     return {
         "runtime_attestation_entry_hash": entry["entry_hash"],
@@ -1170,7 +1242,7 @@ tools:
   - find
   - ls
   - submit_blind_review
-extensions: []
+extensions:
 subagentOnlyExtensions:
   - {extension}
 ---
@@ -1181,32 +1253,36 @@ subagentOnlyExtensions:
 
 def _runtime_attestation(root: Path, execution_root: Path) -> dict[str, Any]:
     value, raw = _json_raw(execution_root / "runtime-attestation.json", modes={0o400})
-    _strict_keys(
-        value,
-        {
-            "schema_version",
-            "protocol",
-            "campaign_id",
-            "campaign_manifest_sha256",
-            "campaign_lanes_sha256",
-            "source_bindings_sha256",
-            "packet_publication_entry_hash",
-            "production_profile_sha256",
-            "production_files_sha256",
-            "runtime_identity",
-            "extension_sha256",
-            "extension_schema_sha256",
-            "agent_source_sha256",
-            "execution_root",
-            "execution_device",
-            "execution_inode",
-            "attested_at",
-            "authorizations",
-            "previous_hash",
-            "entry_hash",
-        },
-        "runtime attestation",
-    )
+    expected_keys = {
+        "schema_version",
+        "protocol",
+        "campaign_id",
+        "campaign_manifest_sha256",
+        "campaign_lanes_sha256",
+        "source_bindings_sha256",
+        "packet_publication_entry_hash",
+        "production_profile_sha256",
+        "production_files_sha256",
+        "runtime_identity",
+        "extension_sha256",
+        "extension_schema_sha256",
+        "agent_source_sha256",
+        "execution_root",
+        "execution_device",
+        "execution_inode",
+        "attested_at",
+        "authorizations",
+        "previous_hash",
+        "entry_hash",
+    }
+    protocol = value.get("protocol")
+    domain = _RUNTIME_DOMAIN
+    if protocol == _RUNTIME_SUPERSESSION_PROTOCOL:
+        expected_keys.add("supersedes_entry_hash")
+        domain = _RUNTIME_SUPERSESSION_DOMAIN
+    elif protocol != _RUNTIME_PROTOCOL:
+        _fail("runtime attestation protocol is invalid")
+    _strict_keys(value, expected_keys, "runtime attestation")
     status = execution_root.stat(follow_symlinks=False)
     profile = _profile(root)
     extension = submit_v1._owned_file(
@@ -1224,7 +1300,7 @@ def _runtime_attestation(root: Path, execution_root: Path) -> dict[str, Any]:
     if (
         canonical_json(value) != raw
         or value.get("schema_version") != 1
-        or value.get("protocol") != "ground-truth-runtime-attestation-v1"
+        or value.get("protocol") != protocol
         or value.get("execution_root") != str(execution_root)
         or value.get("execution_device") != status.st_dev
         or value.get("execution_inode") != status.st_ino
@@ -1239,7 +1315,11 @@ def _runtime_attestation(root: Path, execution_root: Path) -> dict[str, Any]:
         or value.get("agent_source_sha256") != _sha(agent)
         or not isinstance(value.get("campaign_lanes_sha256"), str)
         or not _DIGEST.fullmatch(cast("str", value["campaign_lanes_sha256"]))
-        or value.get("entry_hash") != _entry_hash(b"ground-truth-runtime-attestation-v1\0", body)
+        or value.get("entry_hash") != _entry_hash(domain, body)
+        or (
+            protocol == _RUNTIME_SUPERSESSION_PROTOCOL
+            and not _DIGEST.fullmatch(str(value.get("supersedes_entry_hash", "")))
+        )
         or value.get("authorizations")
         != {"review_launch": False, "adjudication": False, "canonical_import": False}
         or not _DIGEST.fullmatch(str(value.get("previous_hash", "")))
@@ -1281,13 +1361,10 @@ def create_native_agent(root: Path, execution_root: Path, output: Path) -> dict[
         or stat.S_IMODE(user_status.st_mode) & 0o022
     ):
         _fail("user agent discovery root is unsafe")
-    expected_parent = user_root / "ground-truth-production-v1-private"
-    _private_directory(expected_parent, create=True)
+    expected_output = user_root / "ground-truth-production-reviewer-v1.md"
     output = output.absolute()
-    try:
-        output.relative_to(expected_parent)
-    except ValueError as exc:
-        raise GroundTruthRunError("agent output is outside private user discovery") from exc
+    if output != expected_output:
+        _fail("agent output is not the exact flat user discovery path")
     if output.exists() or output.is_symlink():
         _fail("agent output already exists")
     body = submit_v1._owned_file(

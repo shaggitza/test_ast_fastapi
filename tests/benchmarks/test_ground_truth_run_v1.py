@@ -75,6 +75,23 @@ def _runtime(previous: str = BASE) -> dict[str, Any]:
     return {**body, "entry_hash": run._entry_hash(b"ground-truth-runtime-attestation-v1\0", body)}
 
 
+def _supersession(runtime: dict[str, Any]) -> dict[str, Any]:
+    body = {
+        **{
+            key: value
+            for key, value in runtime.items()
+            if key not in {"protocol", "previous_hash", "entry_hash"}
+        },
+        "protocol": run._RUNTIME_SUPERSESSION_PROTOCOL,
+        "supersedes_entry_hash": runtime["entry_hash"],
+        "previous_hash": runtime["entry_hash"],
+    }
+    return {
+        **body,
+        "entry_hash": run._entry_hash(run._RUNTIME_SUPERSESSION_DOMAIN, body),
+    }
+
+
 def _auth(runtime: dict[str, Any]) -> dict[str, Any]:
     body = {
         "schema_version": 1,
@@ -167,9 +184,45 @@ def test_actual_runtime_identity_and_config_are_exact() -> None:
     assert identity["resolver_execution"]["network_authorized"] is False
 
 
+def test_actual_resolver_resolves_exact_flat_user_agent_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    identity = run._runtime_identity(ROOT)
+    resolver = Path(identity["runtime_files"]["agents"]["path"])
+    agent_dir = tmp_path / "agent-home"
+    agents = agent_dir / "agents"
+    agents.mkdir(parents=True)
+    flat = agents / "ground-truth-production-reviewer-v1.md"
+    extension = tmp_path / "index.ts"
+    flat.write_bytes(run._agent_body(extension, "fixture\n"))
+    nested = agents / "nested"
+    nested.mkdir()
+    (nested / "resolver-nested-fixture.md").write_text(
+        "---\nname: resolver-nested-fixture\n"
+        "description: nested fixture\ntools: [read]\n---\nfixture\n"
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(agent_dir))
+    census, execution = run._resolver_census(project, resolver)
+    user_names = {row["name"] for row in census["user"] if isinstance(row, dict)}
+    assert run._AGENT_NAME in user_names
+    flat_rows = [row for row in census["user"] if row.get("name") == run._AGENT_NAME]
+    assert len(flat_rows) == 1
+    assert flat_rows[0]["filePath"] == str(flat)
+    assert flat_rows[0]["extensions"] == []
+    assert flat_rows[0]["subagentOnlyExtensions"] == [str(extension)]
+    # The pinned resolver also sees nested files, so production deliberately
+    # requires the exact flat path rather than relying on directory privacy.
+    assert "resolver-nested-fixture" in user_names
+    assert execution["network_authorized"] is False
+    assert execution["shell"] is False
+
+
 def test_agent_disables_ambient_extensions_and_pinned_pi_args_supports_it(tmp_path: Path) -> None:
     body = run._agent_body(tmp_path / "index.ts", "prompt\n").decode()
-    assert "extensions: []" in body
+    assert "extensions:\n" in body
+    assert "extensions: []" not in body
     assert "subagentOnlyExtensions:" in body
     pi_args = Path(run._runtime_identity(ROOT)["runtime_files"]["pi_args"]["path"]).read_text()
     assert 'args.push("--no-extensions")' in pi_args
@@ -237,6 +290,62 @@ def test_ledger_rejects_incomplete_runtime_identity_and_unrelated_campaign_lane(
     _replace(ledger / "review-canary-authorization.json", auth)
     with pytest.raises(run.GroundTruthRunError, match="runtime attestation ledger"):
         run._extended_ledger(ledger, ROOT)
+
+
+def test_runtime_supersession_is_single_monotonic_no_authority_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger, _ = _ledger(tmp_path / "valid", monkeypatch)
+    (ledger / "review-canary-authorization.json").unlink()
+    first = _runtime()
+    supersession = _supersession(first)
+    _publish(ledger / run._RUNTIME_SUPERSESSION_FILE, supersession)
+    state = run._extended_ledger(ledger, ROOT)
+    assert state["first_runtime"] == first
+    assert state["runtime"] == supersession
+    assert state["runtime_superseded"] is True
+    assert state["authorization"] is None
+    assert supersession["authorizations"] == {
+        "review_launch": False,
+        "adjudication": False,
+        "canonical_import": False,
+    }
+
+    tampered = dict(supersession)
+    tampered["supersedes_entry_hash"] = "sha256:" + "f" * 64
+    body = {key: value for key, value in tampered.items() if key != "entry_hash"}
+    tampered["entry_hash"] = run._entry_hash(run._RUNTIME_SUPERSESSION_DOMAIN, body)
+    _replace(ledger / run._RUNTIME_SUPERSESSION_FILE, tampered)
+    with pytest.raises(run.GroundTruthRunError, match="runtime attestation ledger"):
+        run._extended_ledger(ledger, ROOT)
+
+    _replace(ledger / run._RUNTIME_SUPERSESSION_FILE, supersession)
+    _publish(ledger / "runtime-attestation-supersession-002.json", supersession)
+    with pytest.raises(run.GroundTruthRunError, match="supersession cardinality"):
+        run._extended_ledger(ledger, ROOT)
+
+
+def test_runtime_supersession_publication_rejects_auth_activity_and_second() -> None:
+    first = _runtime()
+    base: dict[str, Any] = {
+        "runtime": first,
+        "authorization": None,
+        "events": [],
+        "runtime_superseded": False,
+    }
+    assert run._runtime_attestation_publication(base) == (
+        run._RUNTIME_SUPERSESSION_FILE,
+        run._RUNTIME_SUPERSESSION_PROTOCOL,
+        run._RUNTIME_SUPERSESSION_DOMAIN,
+        {"supersedes_entry_hash": first["entry_hash"]},
+    )
+    for changed in (
+        {**base, "authorization": _auth(first)},
+        {**base, "events": [{"kind": "prepared"}]},
+        {**base, "runtime_superseded": True},
+    ):
+        with pytest.raises(run.GroundTruthRunError, match="cannot be superseded"):
+            run._runtime_attestation_publication(changed)
 
 
 def test_strict_complete_ledger_chain_and_lost_plan_claim(
