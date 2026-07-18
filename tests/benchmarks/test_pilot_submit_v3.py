@@ -723,7 +723,7 @@ def test_extension_schema_is_semantic_only_and_runtime_load_is_deferred() -> Non
     assert loading["global_unversioned_propagation_proof"] is False
 
 
-def test_extension_rejection_is_nonthrowing_nonterminating_but_success_terminates() -> None:
+def test_extension_rejection_and_success_are_nonthrowing_nonterminating() -> None:
     root = Path(__file__).resolve().parents[2]
     runtime = (root / ".pi/extensions/blind-review-submit/index.ts").read_text()
     assert (
@@ -733,8 +733,9 @@ def test_extension_rejection_is_nonthrowing_nonterminating_but_success_terminate
     assert "function submissionToolResult(response: BrokerResponse)" in runtime
     assert "text: `SUBMISSION_REJECTED code=${response.code}${diagnostic}`" in runtime
     assert "details," in runtime
-    assert "terminate: false" in runtime
-    assert "terminate: true" in runtime
+    assert runtime.count("terminate: false") == 2
+    assert "terminate: true" not in runtime
+    assert "SUBMISSION_COMPLETE" in runtime
     assert "throw new Error(`SUBMISSION_REJECTED" not in runtime
     assert "if (!CORRECTABLE_REJECTION_CODES.has(response.code))" in runtime
     assert "throw new Error(`SUBMISSION_FATAL code=${response.code}${diagnostic}`);" in runtime

@@ -1766,8 +1766,9 @@ def native_launch_plan(
             {
                 "agent": launch["agent"],
                 "task": (
-                    "Perform the assigned blind review. Follow your exact system policy and "
-                    "terminate through submit_blind_review."
+                    "Perform the assigned blind review. Follow your exact system policy, "
+                    "submit through submit_blind_review, then follow its terminal "
+                    "acknowledgement protocol."
                 ),
                 "cwd": launch["cwd"],
                 "model": launch["model"],
@@ -1985,11 +1986,12 @@ def audit_native_session(  # noqa: PLR0912,PLR0915
     cache_read_tokens = 0
     cost_usd = 0.0
     terminal_success_seen = False
+    terminal_ack_seen = False
     identity_ready = False
 
     for line in raw.splitlines():
-        if terminal_success_seen:
-            _fail("successful submission was not the terminal session event")
+        if terminal_ack_seen:
+            _fail("submission acknowledgement was not the terminal session event")
         try:
             event = json.loads(
                 line,
@@ -2001,6 +2003,8 @@ def audit_native_session(  # noqa: PLR0912,PLR0915
         if not isinstance(event, dict) or event.get("type") not in allowed_event_types:
             _fail("session event is invalid")
         event_type = event["type"]
+        if terminal_success_seen and event_type != "message":
+            _fail("successful submission was not followed directly by its acknowledgement")
         if event_type == "session":
             session_events += 1
             if event.get("cwd") != str(packet):
@@ -2031,30 +2035,45 @@ def audit_native_session(  # noqa: PLR0912,PLR0915
             usage = message.get("usage")
             if not isinstance(content, list) or not isinstance(usage, dict):
                 _fail("session assistant message is invalid")
-            for part in content:
-                if not isinstance(part, dict):
-                    _fail("session assistant content is invalid")
-                kind = part.get("type")
-                if kind == "thinking":
-                    continue
-                if kind == "text":
-                    if str(part.get("text", "")).strip():
-                        _fail("session assistant emitted forbidden prose")
-                    continue
-                if kind != "toolCall":
-                    _fail("session assistant content type is invalid")
-                call_id, name, arguments = part.get("id"), part.get("name"), part.get("arguments")
+            if terminal_success_seen:
+                acknowledgement = [part for part in content if isinstance(part, dict)]
+                text_parts = [part for part in acknowledgement if part.get("type") == "text"]
                 if (
-                    not isinstance(call_id, str)
-                    or not call_id
-                    or call_id in calls
-                    or name not in allowed_tools
-                    or not isinstance(arguments, dict)
+                    len(acknowledgement) != len(content)
+                    or text_parts != [{"type": "text", "text": "SUBMISSION_COMPLETE"}]
+                    or any(part.get("type") not in {"thinking", "text"} for part in acknowledgement)
                 ):
-                    _fail("session tool call is invalid")
-                calls[call_id] = cast("str", name)
-                if name in source_tools:
-                    _session_tool_path(packet, arguments.get("path", "."))
+                    _fail("successful submission lacks exact terminal acknowledgement")
+                terminal_ack_seen = True
+            else:
+                for part in content:
+                    if not isinstance(part, dict):
+                        _fail("session assistant content is invalid")
+                    kind = part.get("type")
+                    if kind == "thinking":
+                        continue
+                    if kind == "text":
+                        if str(part.get("text", "")).strip():
+                            _fail("session assistant emitted forbidden prose")
+                        continue
+                    if kind != "toolCall":
+                        _fail("session assistant content type is invalid")
+                    call_id, name, arguments = (
+                        part.get("id"),
+                        part.get("name"),
+                        part.get("arguments"),
+                    )
+                    if (
+                        not isinstance(call_id, str)
+                        or not call_id
+                        or call_id in calls
+                        or name not in allowed_tools
+                        or not isinstance(arguments, dict)
+                    ):
+                        _fail("session tool call is invalid")
+                    calls[call_id] = cast("str", name)
+                    if name in source_tools:
+                        _session_tool_path(packet, arguments.get("path", "."))
             input_tokens += _session_integer(usage.get("input"), "input")
             output_tokens += _session_integer(usage.get("output"), "output")
             cache_read_tokens += _session_integer(usage.get("cacheRead"), "cacheRead")
@@ -2063,6 +2082,8 @@ def audit_native_session(  # noqa: PLR0912,PLR0915
                 _fail("session usage cost is invalid")
             cost_usd += _session_cost(cost.get("total"))
         elif role == "toolResult":
+            if terminal_success_seen:
+                _fail("successful submission was followed by another tool result")
             call_id = message.get("toolCallId")
             name = message.get("toolName")
             if (
@@ -2090,6 +2111,8 @@ def audit_native_session(  # noqa: PLR0912,PLR0915
                     _fail("submission result is neither rejection nor authenticated escrow")
         elif role not in {"user", "system"}:
             _fail("session message role is invalid")
+        elif terminal_success_seen:
+            _fail("successful submission was followed by a non-acknowledgement message")
 
     if session_events != 1 or model_events != 1 or thinking_events != 1:
         _fail("session identity event cardinality is invalid")
@@ -2102,6 +2125,7 @@ def audit_native_session(  # noqa: PLR0912,PLR0915
         or semantic_rejections != submit_calls - 1
         or submit_errors != 0
         or not terminal_success_seen
+        or not terminal_ack_seen
     ):
         _fail("session submission result is invalid")
     return {
@@ -2119,6 +2143,7 @@ def audit_native_session(  # noqa: PLR0912,PLR0915
         "tool_errors": tool_errors,
         "submit_errors": submit_errors,
         "semantic_rejections": semantic_rejections,
+        "terminal_acknowledgement": "SUBMISSION_COMPLETE",
         "parent_success_compatible": True,
         "eventual_escrow_accepted": True,
         "usage": {
