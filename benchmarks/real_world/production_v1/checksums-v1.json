@@ -1,7 +1,7 @@
 {
   "files": {
     "benchmarks/real_world/ground_truth_campaign_v1.py": "sha256:709184dc01e217212612f8d85841966eee264a02b6d8c7ce0cf156ab046314f3",
-    "benchmarks/real_world/ground_truth_source_v1.py": "sha256:28cd5ebbdf9a379f04251ff57a479420e0fe3713da300d793bd8dbfe06ea3271",
+    "benchmarks/real_world/ground_truth_source_v1.py": "sha256:8c1626111e2753a1ed0f3706b77460569508585bffd81dc903726f187e557ed5",
     "benchmarks/real_world/production_v1/README.md": "sha256:08f1bd0b0e687aec5aa8e18249ef1fd3e1789b5a96037e90afb69ab57bff9cd0",
     "benchmarks/real_world/production_v1/assignments-v1.json": "sha256:93daeb3aa957737a24b48345e753201f616cd9fefd968ee593461896a41e5f87",
     "benchmarks/real_world/production_v1/campaign-manifest-schema-v1.json": "sha256:28ffac7ec5fc52774fee4eb78c62eb91f0daf799feec9e9ab9e20af3f1629be4",

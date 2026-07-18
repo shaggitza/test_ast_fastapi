@@ -460,6 +460,35 @@ def test_root_and_file_mode_tamper_fail(prepared: tuple[Any, ...]) -> None:
         source.validate_cache(Path.cwd(), campaign_path, cache)
 
 
+def test_fetch_retry_removes_owned_stale_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class RetryRunner:
+        calls = 0
+
+        def run(self, git_dir: Path, args: list[str], **kwargs: Any) -> None:
+            del args, kwargs
+            self.calls += 1
+            lock = git_dir / "shallow.lock"
+            if self.calls == 1:
+                lock.write_bytes(b"stale")
+                raise source.SourceV1Error("transient fetch failure")
+            assert not lock.exists()
+            (git_dir / "FETCH_HEAD").write_bytes(b"head")
+
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    runner = RetryRunner()
+    source._fetch_commit(
+        runner,  # type: ignore[arg-type]
+        tmp_path,
+        "https://github.com/example/repository.git",
+        "1" * 40,
+        test_transport=False,
+    )
+    assert runner.calls == 2
+    assert not (tmp_path / "FETCH_HEAD").exists()
+
+
 def test_full_cardinality_command_formula_and_bound(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
