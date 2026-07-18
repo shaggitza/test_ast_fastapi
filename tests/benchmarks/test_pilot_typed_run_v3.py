@@ -902,7 +902,6 @@ def test_native_session_audit_accepts_nonerror_rejection_then_terminal_escrow(
         "input_tokens": 65,
         "output_tokens": 13,
         "cache_read_tokens": 15,
-        "cost_usd_observed": pytest.approx(0.0071367),
         "cost_micro_usd": 7137,
     }
 
