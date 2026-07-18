@@ -90,14 +90,14 @@ campaign, source bindings, cache inventory/device/inode, production checksum
 profile, private output parent identity and absent basename, and fixed limits. It
 grants packet materialization only; live launch and canonical import remain false.
 
-Published authorization from PR #237 remains bound to the exact historical
-`checksums-v1.json` bytes preserved as `checksums-packet-v1.json`. The evolving
-`checksums-v1.json` authenticates that frozen file and the current compatibility
-module. Receipt validation selects current or historical packet profile only by the
-receipt's exact profile hash. For the historical profile, every packet policy, schema,
-and low-level dependency retains its old digest; only the old packet-module self-digest
-is non-authoritative because current `checksums-v1.json` now authenticates that
-executable module. Unknown or edited phase profiles fail closed.
+`checksums-packet-v1.json` permanently authorizes every production-v1 packet
+generation. The evolving `checksums-v1.json` authenticates that frozen file and the
+current compatibility module. Authorization and receipt validation select the frozen
+packet profile by its exact profile hash, so later submit/runtime growth cannot stale
+immutable packets. Every packet policy, schema, and low-level dependency retains its
+frozen digest; only the old packet-module self-digest is non-authoritative because
+current `checksums-v1.json` authenticates that executable module. Unknown or edited
+phase profiles fail closed.
 
 Authorization is single-use. Every fallible source, cache, profile, output-parent,
 and inventory check completes before its durable ledger append. Build requires that

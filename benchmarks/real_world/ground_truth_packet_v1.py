@@ -422,7 +422,9 @@ def authorize_packets(
     *,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    profile = _profile(root)
+    # Packet authorization is permanently bound to the frozen packet-phase
+    # profile, never the evolving campaign/runtime checksum profile.
+    profile = _historical_profile(root)
     campaign, campaign_raw = _campaign(root, campaign_path)
     bindings, bindings_raw, cache_summary = _bindings(root, campaign_path, cache, bindings_path)
     parent, parent_status = _private_parent(output_root, absent=True)
@@ -441,7 +443,7 @@ def authorize_packets(
             _fail("packet authorization transition already exists")
         # Reauthenticate every fallible binding before the durable append. Nothing
         # after _publish may invalidate an already-recorded authorization.
-        current_profile = _profile(root)
+        current_profile = _historical_profile(root)
         if current_profile != profile:
             _fail("production profile drifted before authorization")
         current_bindings, current_bindings_raw, current_cache = _bindings(

@@ -363,6 +363,7 @@ def test_authorize_layered_receipt_duplicate_and_output_parent_binding(  # noqa:
     inventory = {"inventory_sha256": "sha256:" + "4" * 64}
     profile = packet.ProfileSnapshot({}, b"profile\n", {})
     monkeypatch.setattr(packet, "_profile", lambda _root: profile)
+    monkeypatch.setattr(packet, "_historical_profile", lambda _root: profile)
     monkeypatch.setattr(packet, "_campaign", lambda _root, _path: (campaign_value, campaign_raw))
     monkeypatch.setattr(packet, "_bindings", lambda *_args: (bindings, bindings_raw, cache_summary))
     inventory_calls = 0
@@ -419,6 +420,7 @@ def test_authorize_layered_receipt_duplicate_and_output_parent_binding(  # noqa:
         "live_launch": False,
         "canonical_import": False,
     }
+    assert receipt["production_profile_sha256"] == packet._sha(profile.raw)
     assert receipt["output_parent_device"] == private.stat().st_dev
     assert receipt["expires_at"] == "2026-01-02T00:00:00Z"
     with pytest.raises(packet.PacketV1Error, match="already exists"):
