@@ -4,6 +4,8 @@ import ast
 import contextlib
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -217,6 +219,15 @@ def test_actual_resolver_resolves_exact_flat_user_agent_path(
     assert "resolver-nested-fixture" in user_names
     assert execution["network_authorized"] is False
     assert execution["shell"] is False
+
+
+def test_broker_process_limit_allows_bounded_evidence_child() -> None:
+    script = (
+        "import subprocess; "
+        "from benchmarks.real_world.ground_truth_run_v1 import _broker_limits; "
+        "_broker_limits(); subprocess.run(['/bin/true'], check=True)"
+    )
+    subprocess.run([sys.executable, "-c", script], check=True, cwd=ROOT)
 
 
 def test_agent_disables_ambient_extensions_and_pinned_pi_args_supports_it(tmp_path: Path) -> None:

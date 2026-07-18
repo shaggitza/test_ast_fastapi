@@ -1685,7 +1685,10 @@ def _broker_limits() -> None:
     resource.setrlimit(resource.RLIMIT_AS, (_MAX_RSS, _MAX_RSS))
     resource.setrlimit(resource.RLIMIT_FSIZE, (_MAX_OUTPUT, _MAX_OUTPUT))
     resource.setrlimit(resource.RLIMIT_NOFILE, (128, 128))
-    resource.setrlimit(resource.RLIMIT_NPROC, (32, 32))
+    # RLIMIT_NPROC is UID-wide and counts threads, including the parent Pi
+    # process. Keep a finite ceiling while leaving room for authenticated Git
+    # evidence subprocesses on the supervisor account.
+    resource.setrlimit(resource.RLIMIT_NPROC, (256, 256))
 
 
 def serve_broker(socket_path: Path, binding: Path, deadline_ms: int) -> int:

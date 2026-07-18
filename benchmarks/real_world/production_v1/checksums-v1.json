@@ -2,7 +2,7 @@
   "files": {
     "benchmarks/real_world/ground_truth_campaign_v1.py": "sha256:41c537fb8fa9b99b30e5129204df7c15b680e8e6f58d4386a96be9ec67165a18",
     "benchmarks/real_world/ground_truth_packet_v1.py": "sha256:686f6738b04bf5f327dbd8b9deed30f06d0cd0ad68d0adc1edc6c02426c72f43",
-    "benchmarks/real_world/ground_truth_run_v1.py": "sha256:7b8d160be79eb4b19a3815ccdf833330c83c024da858ee5b68012c4794bae2d5",
+    "benchmarks/real_world/ground_truth_run_v1.py": "sha256:463d3b1f2428e3bb6e6e4cfe62af039ef90312432c3a2abbdb6e923d1c777792",
     "benchmarks/real_world/ground_truth_source_v1.py": "sha256:8c1626111e2753a1ed0f3706b77460569508585bffd81dc903726f187e557ed5",
     "benchmarks/real_world/ground_truth_submit_v1.py": "sha256:c5a3ef5cbea1571dc02b2dc8b2cb04d4701433f2bddcfb6d4220083486476f1f",
     "benchmarks/real_world/pilot_packet_v2.py": "sha256:7347c6fa91afb7122707980369c273c50419d4de654bdd9c4e57b3d006651895",
@@ -24,7 +24,7 @@
     "benchmarks/real_world/production_v1/review-prompt-v1.md": "sha256:83a1bd09e6562006308ba5fb30bf9e51aa71be2488cfc261ad4f2fff5f670c27",
     "benchmarks/real_world/production_v1/review-source-policy-v1.json": "sha256:99cd88ed605cbd12ae4fd3791c472bca001cf1481cf092fb0e8fced3bab690dc",
     "benchmarks/real_world/production_v1/runtime-attestation-schema-v1.json": "sha256:dcbf2c62d332f21809b2e0b0b27e86a97b7564a598264ac5464f6937e2e42d26",
-    "benchmarks/real_world/production_v1/runtime-policy-v1.json": "sha256:459ab2068028dfb58a7ad1c6dd941dde026a5d83817705d64aec00ed9bd0f864",
+    "benchmarks/real_world/production_v1/runtime-policy-v1.json": "sha256:1ee9048f5b837314715f12fd4b2fab5b23801afdd6c490addaf9ac6409fd5954",
     "benchmarks/real_world/production_v1/session-audit-schema-v1.json": "sha256:5ca9c544208b3043aab48622b3978beee3e53778d09388c467be20cf0ac99d46",
     "benchmarks/real_world/production_v1/source-bindings-schema-v1.json": "sha256:75abea28887dc6e6b0b61daff571ea16028e03e963d1344a803d968f5a3e4025",
     "benchmarks/real_world/production_v1/source-policy-v1.json": "sha256:f8bccddab37866c2db777db20328dae129966df9af67f62eaa87679d519b9f20",
