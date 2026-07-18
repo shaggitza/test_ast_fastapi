@@ -118,12 +118,23 @@ def _prepare_binding_inputs(
         child.chmod(0o600)
     policies.chmod(0o700)
     shutil.rmtree(policies)
+    policies.mkdir(mode=0o700)
     manifest_path = original / "packet-manifest.json"
     manifest_path.chmod(0o600)
     manifest = json.loads(manifest_path.read_bytes())
     manifest["payload_files"] = [
         item for item in manifest["payload_files"] if not item["path"].startswith("policies/")
     ]
+    manifest["payload_files"].extend(
+        [
+            _payload(original, "policies/packet-policy-v1.json", b'{"packet":true}\n'),
+            _payload(
+                original,
+                "policies/packet-manifest-schema-v1.json",
+                b'{"schema":true}\n',
+            ),
+        ]
+    )
     manifest["packet_root_sha256"] = submit._manifest_root(manifest)
     manifest_path.write_bytes(canonical_json(manifest))
     submit._freeze_packet(original)

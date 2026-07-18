@@ -1589,7 +1589,13 @@ def prepare_binding(  # noqa: PLR0912,PLR0915 - linear fail-closed preparation
         shutil.copytree(original, packet, symlinks=True, copy_function=shutil.copy2)
         packet.chmod(0o700)
         policies = packet / "policies"
-        policies.mkdir(mode=0o700)
+        if policies.exists() or policies.is_symlink():
+            policy_status = policies.lstat()
+            if policies.is_symlink() or not stat.S_ISDIR(policy_status.st_mode):
+                _fail("packet policies path is not a directory")
+            policies.chmod(0o700)
+        else:
+            policies.mkdir(mode=0o700)
         for name, filename in _PRODUCTION_POLICY_FILES.items():
             del name
             relative = f"{_PROFILE_DIR}/{filename}"
