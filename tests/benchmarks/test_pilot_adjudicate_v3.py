@@ -1095,8 +1095,11 @@ def test_live_xhigh_canary_v2_report_and_scale_gate_are_consistent() -> None:
     assert runtime["scale_gate"] == {
         "medium_typed_submission": "GO",
         "typed_xhigh_chain": "GO",
-        "overall": "NO_GO",
-        "blockers": ["native_parent_status_live_canary"],
+        "overall": "GO",
+        "blockers": [],
+        "authorization": "start_reviews_149_through_198_at_frozen_max_concurrency_3",
+        "truth_and_scoring_dependency": "complete_reviews_and_required_adjudication",
+        "preregistered_v1_compliance": False,
     }
     assert model["adjudication"]["live_typed_chain_canary_proved"] is True
     assert tool["fallback"]["live_typed_chain_canary"]["status"] == "GO"

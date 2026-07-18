@@ -906,6 +906,66 @@ def test_native_session_audit_accepts_nonerror_rejection_then_terminal_escrow(
     }
 
 
+def test_live_native_parent_status_canary_and_scale_gate_are_consistent() -> None:
+    root = Path(__file__).resolve().parents[2]
+    profile = root / "benchmarks/real_world/pilot_v3"
+    report_path = profile / "native-status-canary-v1.json"
+    report = json.loads(report_path.read_text())
+    runtime = json.loads((profile / "runtime-policy-v1.json").read_text())
+    tool = json.loads((profile / "tool-policy-v1.json").read_text())
+    checksums = json.loads((profile / "checksums-v1.json").read_text())
+
+    assert report["schema_version"] == 1
+    assert report["scope"] == {
+        "purpose": "native_parent_eventual_escrow_status_canary",
+        "canary_only": True,
+        "duplicate_review": True,
+        "preregistered_v1_compliance": False,
+        "canonical_database_import": False,
+        "semantic_content_used_as_truth": False,
+        "private_paths_committed": False,
+    }
+    assert report["native_parent_result"] == {
+        "tasks": 1,
+        "successes": 1,
+        "failures": 0,
+        "final_output": "SUBMISSION_COMPLETE",
+        "final_output_is_semantic_authority": False,
+    }
+    audit = report["authenticated_audit"]
+    assert audit["semantic_rejections"] == 1
+    assert audit["submit_calls"] == 2
+    assert audit["source_tool_calls"] == 12
+    assert audit["tool_calls"] == 14
+    assert audit["tool_errors"] == 0
+    assert audit["terminal_acknowledgement"] == "SUBMISSION_COMPLETE"
+    assert audit["usage"] == {
+        "input_tokens": 20208,
+        "output_tokens": 2384,
+        "cache_read_tokens": 16384,
+        "cost_micro_usd": 36150,
+    }
+    assert report["custody"]["broker_finalize_passed"] is True
+    assert report["custody"]["immutable_git_recovery_passed"] is True
+    assert report["custody"]["strict_session_audit_passed"] is True
+    assert report["prior_noncanonical_intermediate"]["native_parent_successes"] == 0
+    assert report["prior_noncanonical_intermediate"]["eventual_escrow_accepted"] is True
+    assert report["decision"]["typed_luna_medium_native_parent_status"] == "GO"
+    assert report["decision"]["overall_scale_gate"] == "GO"
+    assert report["decision"]["final_scoring_unblocked"] is False
+
+    native = runtime["native_launch"]
+    assert native["parent_status_semantics"] == "hash_scoped_GO"
+    assert native["parent_status_live_canary_report"] == report_path.name
+    assert runtime["scale_gate"]["overall"] == "GO"
+    assert runtime["scale_gate"]["blockers"] == []
+    assert runtime["scale_gate"]["preregistered_v1_compliance"] is False
+    assert tool["native_parent_status_semantics"] == "hash_scoped_GO"
+    assert tool["native_parent_status_live_canary"]["status"] == "GO"
+    relative = "benchmarks/real_world/pilot_v3/native-status-canary-v1.json"
+    assert checksums["files"][relative] == _sha(report_path.read_bytes())
+
+
 def test_native_session_audit_accepts_first_success_then_exact_acknowledgement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

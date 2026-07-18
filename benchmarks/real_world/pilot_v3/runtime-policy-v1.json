@@ -40,8 +40,11 @@
     "final_broker_success": "nonterminating_authenticated_receipt_then_exact_fixed_acknowledgement",
     "fixed_terminal_acknowledgement": "SUBMISSION_COMPLETE",
     "fixed_terminal_acknowledgement_semantic_authority": false,
-    "parent_status_semantics": "implemented_pending_live_canary",
-    "terminal_authority": "broker_validated_escrow_only"
+    "parent_status_semantics": "hash_scoped_GO",
+    "terminal_authority": "broker_validated_escrow_only",
+    "parent_status_live_canary_report": "native-status-canary-v1.json",
+    "parent_status_live_canary_execution_sha256": "sha256:e47edf6b2484b3c491632e1982c3527c551545c14fb0e6327ff8f0ff76d31366",
+    "parent_status_live_canary_agent_sha256": "sha256:1d28c454e0762173bd78522921ae91631f87a48383235625e2521df7a284c62b"
   },
   "native_adjudication": {
     "absolute_deadline_required": true,
@@ -72,10 +75,11 @@
   "scale_gate": {
     "medium_typed_submission": "GO",
     "typed_xhigh_chain": "GO",
-    "overall": "NO_GO",
-    "blockers": [
-      "native_parent_status_live_canary"
-    ]
+    "overall": "GO",
+    "blockers": [],
+    "authorization": "start_reviews_149_through_198_at_frozen_max_concurrency_3",
+    "truth_and_scoring_dependency": "complete_reviews_and_required_adjudication",
+    "preregistered_v1_compliance": false
   },
   "node": "24.12.0",
   "pi_coding_agent": "0.80.7",

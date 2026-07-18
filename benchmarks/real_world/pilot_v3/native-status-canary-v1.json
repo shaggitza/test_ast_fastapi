@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "id": "blind-review-native-parent-status-canary-v3-v1",
+  "protocol": "blind-review-native-subagent-v3",
+  "scope": {
+    "purpose": "native_parent_eventual_escrow_status_canary",
+    "canary_only": true,
+    "duplicate_review": true,
+    "preregistered_v1_compliance": false,
+    "canonical_database_import": false,
+    "semantic_content_used_as_truth": false,
+    "private_paths_committed": false
+  },
+  "execution_binding": {
+    "attempt_id": "statuscanary-fs2164-B-ack",
+    "execution_sha256": "sha256:e47edf6b2484b3c491632e1982c3527c551545c14fb0e6327ff8f0ff76d31366",
+    "agent_sha256": "sha256:1d28c454e0762173bd78522921ae91631f87a48383235625e2521df7a284c62b",
+    "model": "openai-codex/gpt-5.6-luna",
+    "thinking": "medium"
+  },
+  "native_parent_result": {
+    "tasks": 1,
+    "successes": 1,
+    "failures": 0,
+    "final_output": "SUBMISSION_COMPLETE",
+    "final_output_is_semantic_authority": false
+  },
+  "authenticated_audit": {
+    "assistant_messages": 7,
+    "source_tool_calls": 12,
+    "submit_calls": 2,
+    "semantic_rejections": 1,
+    "tool_calls": 14,
+    "tool_errors": 0,
+    "terminal_acknowledgement": "SUBMISSION_COMPLETE",
+    "parent_success_compatible": true,
+    "eventual_escrow_accepted": true,
+    "session_sha256": "sha256:b8a476e8795b113fa38328e5a21acae48a14aa77bd45dafb625283d465d423aa",
+    "usage": {
+      "input_tokens": 20208,
+      "output_tokens": 2384,
+      "cache_read_tokens": 16384,
+      "cost_micro_usd": 36150
+    }
+  },
+  "custody": {
+    "artifact_sha256": "sha256:aaa82d8c0ab3b064c6cdf84e8bd50c9376673c3e6bf5c98bf9cc84642e4e51dd",
+    "broker_finalize_passed": true,
+    "immutable_git_recovery_passed": true,
+    "strict_session_audit_passed": true,
+    "stored_recommendation": "negative_control",
+    "stored_recommendation_relevance": "irrelevant_noncanonical_canary_data"
+  },
+  "prior_noncanonical_intermediate": {
+    "execution": "execution-status-canary-v3",
+    "native_parent_tasks": 1,
+    "native_parent_successes": 0,
+    "failure": "successful terminating tool result produced no assistant output",
+    "eventual_escrow_accepted": true,
+    "artifact_sha256": "sha256:d1874b97cc0a904701e6abf9c1c33fad868081e6a61e36b41ed1f87480c6a68a",
+    "disposition": "failed_noncanonical_intermediate_not_truth",
+    "remediation": "exact_nonsemantic_terminal_acknowledgement"
+  },
+  "decision": {
+    "typed_luna_medium_native_parent_status": "GO",
+    "proof_scope": "exact_hash_and_version_scoped_live_canary_only",
+    "overall_scale_gate": "GO",
+    "scale_authorization": "start_reviews_149_through_198_at_frozen_max_concurrency_3",
+    "truth_freeze_complete": false,
+    "final_scoring_unblocked": false,
+    "remaining_truth_dependency": "complete_independent_reviews_and_required_adjudication"
+  }
+}

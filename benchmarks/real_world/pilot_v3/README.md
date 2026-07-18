@@ -108,8 +108,13 @@ followed immediately by the exact nonsemantic assistant acknowledgement
 `SUBMISSION_COMPLETE`; that terminal text lets Pi report success while escrow remains
 the sole authority. Transport, capability, custody, protocol, and malformed-response
 failures still throw and remain terminal. The broker continues to enforce the existing
-maximum of three attempts. This status change is implemented and statically/integration
-tested, but scale remains `NO_GO` until a separately published live status canary passes.
+maximum of three attempts. A checksum-bound live canary then exercised the full
+correction path: one expected semantic rejection, one accepted submission, exact
+`SUBMISSION_COMPLETE`, native parent 1/1 success, broker finalization, immutable-Git
+recovery, and strict session audit. The prior no-output 0/1 run remains a failed,
+noncanonical intermediate. The final evidence is frozen in
+`native-status-canary-v1.json`; the native medium parent-status gate is hash-scoped
+`GO`, and neither canary is truth or a canonical database import.
 Per-attempt report costs preserve the provider-observed USD totals; deterministic
 session audits additionally publish integer micro-USD values rounded once per
 session, so summed audit micro-USD can differ slightly from rounding the exact
@@ -171,9 +176,12 @@ coordination, delegation, retry, or canonical database import. Strict schema,
 Pydantic, path, line, changed-hunk, session, completion, and receipt validation
 passed. The exact evidence and usage are frozen in
 `xhigh-chain-canary-v2.json`. The typed Luna-xhigh chain gate is therefore
-hash-and-version-scoped `GO`. Overall scale remains `NO_GO` until the new native
-medium parent-status semantics pass a live canary; reviews #149–#198 remain
-blocked. There is no second Prefect fallback and no recursive xhigh fallback.
+hash-and-version-scoped `GO`. With the native medium parent-status canary also
+hash-scoped `GO`, the overall scale gate is `GO`: reviews #149–#198 may start at
+the frozen maximum concurrency of three. This is not preregistered-v1 compliance,
+and truth freeze and final scoring remain blocked until independent reviews and
+required adjudication complete. There is no second Prefect fallback and no
+recursive xhigh fallback.
 
 ## Runner CLI
 
@@ -247,8 +255,10 @@ the earlier v3 rule that successful submission terminated without another model
 response. Pi-subagents 0.34.0 reports a successful terminating tool-only turn as
 "no output"; the fixed nonsemantic acknowledgement supplies the parent-visible
 terminal text without making model prose a truth source. Authenticated supervisor
-escrow remains the sole terminal semantic authority. The scale gate remains
-`NO_GO` until this exact profile passes a fresh live native status canary.
+escrow remains the sole terminal semantic authority. That exact profile passed the
+hash-scoped live native status canary recorded in `native-status-canary-v1.json`,
+so the scale gate is now `GO` only for reviews #149–#198 at frozen concurrency
+three; truth freeze and scoring remain blocked until review and adjudication finish.
 
 `create-native-agent` copies the exact hash-bound execution agent to a mode-0400
 agent definition below the recognized Pi user discovery root and atomically
