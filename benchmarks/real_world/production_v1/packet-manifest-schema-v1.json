@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/ground-truth-production-packet-manifest-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "repository",
+    "pr",
+    "source_bindings_sha256",
+    "baseline_commit",
+    "baseline_tree",
+    "target_commit",
+    "target_tree",
+    "remote_diff",
+    "local_snapshot",
+    "source_structure_sha256",
+    "payload_files",
+    "payload_bytes",
+    "packet_root_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "id": {"const": "ground-truth-production-review-packet-v1"},
+    "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+    "pr": {"type": "integer", "minimum": 1},
+    "source_bindings_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "baseline_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "baseline_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "target_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "target_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "remote_diff": {"type": "object"},
+    "local_snapshot": {"type": "object"},
+    "source_structure_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "payload_files": {"type": "array"},
+    "payload_bytes": {"type": "integer", "minimum": 0, "maximum": 536870912},
+    "packet_root_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}

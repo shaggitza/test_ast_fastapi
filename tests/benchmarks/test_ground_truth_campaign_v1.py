@@ -199,6 +199,8 @@ def test_manifest_and_ledger_no_clobber_modes_and_validation(tmp_path: Path) -> 
     assert (ledger / "ledger-genesis.json").stat().st_mode & 0o777 == 0o400
     assert (ledger / ".ledger.lock").stat().st_mode & 0o777 == 0o600
     assert campaign.validate_ledger(ledger, ROOT) == result
+    assert result["packet_authorization_present"] is False
+    assert result["genesis_entry_hash"] == result["entry_hash"]
     with pytest.raises(campaign.CampaignV1Error, match="overwrite"):
         campaign.init_ledger(ledger, manifest, ROOT)
 
@@ -259,6 +261,13 @@ def test_profile_checksums_cover_all_offline_files() -> None:
         "benchmarks/real_world/ground_truth_source_v1.py",
         "benchmarks/real_world/production_v1/source-policy-v1.json",
         "benchmarks/real_world/production_v1/source-bindings-schema-v1.json",
+        "benchmarks/real_world/ground_truth_packet_v1.py",
+        "benchmarks/real_world/pilot_packet_v2.py",
+        "benchmarks/real_world/production_v1/packet-policy-v1.json",
+        "benchmarks/real_world/production_v1/packet-manifest-schema-v1.json",
+        "benchmarks/real_world/production_v1/packet-authorization-schema-v1.json",
+        "benchmarks/real_world/production_v1/packet-publication-schema-v1.json",
+        "benchmarks/real_world/production_v1/packet-aggregate-schema-v1.json",
     }
     for relative, expected in profile["files"].items():
         actual = "sha256:" + hashlib.sha256((ROOT / relative).read_bytes()).hexdigest()

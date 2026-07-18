@@ -1,0 +1,190 @@
+{
+  "$id": "https://example.invalid/packet-materialization-authorization-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "authorizations": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_import": {
+          "const": false
+        },
+        "live_launch": {
+          "const": false
+        },
+        "packet_materialization": {
+          "const": true
+        }
+      },
+      "required": [
+        "packet_materialization",
+        "live_launch",
+        "canonical_import"
+      ],
+      "type": "object"
+    },
+    "cache_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "cache_device": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "cache_inode": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "campaign_id": {
+      "type": "string"
+    },
+    "campaign_manifest_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "entry_hash": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "expires_at": {
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "type": "string"
+    },
+    "issue": {
+      "maximum": 198,
+      "minimum": 149,
+      "type": "integer"
+    },
+    "issued_at": {
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "type": "string"
+    },
+    "lane_count": {
+      "const": 100
+    },
+    "limits": {
+      "additionalProperties": false,
+      "properties": {
+        "aggregate_deadline_seconds": {
+          "const": 21600
+        },
+        "aggregate_entries": {
+          "const": 500000
+        },
+        "aggregate_payload_bytes": {
+          "const": 26843545600
+        },
+        "blob_bytes": {
+          "const": 33554432
+        },
+        "command_timeout_seconds": {
+          "const": 180
+        },
+        "commands_per_pass": {
+          "const": 250
+        },
+        "diff_bytes": {
+          "const": 33554432
+        },
+        "files_per_packet": {
+          "const": 10000
+        },
+        "packet_payload_bytes": {
+          "const": 536870912
+        },
+        "packets": {
+          "const": 50
+        },
+        "snapshot_bytes": {
+          "const": 268435456
+        },
+        "staging_bytes": {
+          "const": 29264838656
+        },
+        "unique_commits": {
+          "const": 100
+        }
+      },
+      "required": [
+        "packets",
+        "unique_commits",
+        "files_per_packet",
+        "blob_bytes",
+        "snapshot_bytes",
+        "packet_payload_bytes",
+        "diff_bytes",
+        "aggregate_entries",
+        "aggregate_payload_bytes",
+        "staging_bytes",
+        "commands_per_pass",
+        "command_timeout_seconds",
+        "aggregate_deadline_seconds"
+      ],
+      "type": "object"
+    },
+    "output_basename": {
+      "type": "string"
+    },
+    "output_parent": {
+      "type": "string"
+    },
+    "output_parent_device": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "output_parent_inode": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "pr_count": {
+      "const": 50
+    },
+    "previous_hash": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "production_profile_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "protocol": {
+      "const": "packet-materialization-authorization-v1"
+    },
+    "repository": {
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "source_bindings_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "protocol",
+    "campaign_id",
+    "campaign_manifest_sha256",
+    "source_bindings_sha256",
+    "cache_content_sha256",
+    "cache_device",
+    "cache_inode",
+    "issue",
+    "repository",
+    "pr_count",
+    "lane_count",
+    "production_profile_sha256",
+    "output_parent",
+    "output_basename",
+    "output_parent_device",
+    "output_parent_inode",
+    "limits",
+    "authorizations",
+    "issued_at",
+    "expires_at",
+    "previous_hash",
+    "entry_hash"
+  ],
+  "type": "object"
+}
