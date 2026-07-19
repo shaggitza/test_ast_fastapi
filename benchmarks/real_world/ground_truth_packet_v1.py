@@ -31,6 +31,7 @@ _PROFILE_DIR: Final = "benchmarks/real_world/production_v1"
 _CHECKSUMS: Final = f"{_PROFILE_DIR}/checksums-v1.json"
 _HISTORICAL_CHECKSUMS: Final = f"{_PROFILE_DIR}/checksums-packet-v1.json"
 _SELECTION_CHECKSUMS: Final = f"{_PROFILE_DIR}/checksums-packet-selection-v1.json"
+_RUNTIME_REPAIR_CHECKSUMS: Final = f"{_PROFILE_DIR}/checksums-runtime-repair-v1.json"
 _POLICY: Final = f"{_PROFILE_DIR}/packet-policy-v1.json"
 _SCHEMA: Final = f"{_PROFILE_DIR}/packet-manifest-schema-v1.json"
 _AUTH_SCHEMA: Final = f"{_PROFILE_DIR}/packet-authorization-schema-v1.json"
@@ -291,19 +292,25 @@ def _historical_profile(root: Path, current: ProfileSnapshot | None = None) -> P
     return historical
 
 
-def _selection_profile(root: Path, current: ProfileSnapshot) -> ProfileSnapshot:
-    expected = current.value.get("files", {}).get(_SELECTION_CHECKSUMS)
+def _authenticated_compatibility_profile(
+    root: Path, current: ProfileSnapshot, relative: str, label: str
+) -> ProfileSnapshot:
+    expected = current.value.get("files", {}).get(relative)
     if not isinstance(expected, str) or not _DIGEST.fullmatch(expected):
-        _fail("selection packet profile is absent from current production profile")
-    profile = _load_profile(root, _SELECTION_CHECKSUMS, historical=True)
+        _fail(f"{label} packet profile is absent from current production profile")
+    profile = _load_profile(root, relative, historical=True)
     current_module = current.value.get("files", {}).get(_MODULE)
     if (
         _sha(profile.raw) != expected
         or not isinstance(current_module, str)
         or _sha(profile.files[_MODULE]) != current_module
     ):
-        _fail("selection packet profile is not current-profile authenticated")
+        _fail(f"{label} packet profile is not current-profile authenticated")
     return profile
+
+
+def _selection_profile(root: Path, current: ProfileSnapshot) -> ProfileSnapshot:
+    return _authenticated_compatibility_profile(root, current, _SELECTION_CHECKSUMS, "selection")
 
 
 def _profile_by_hash(root: Path, expected_sha256: str) -> ProfileSnapshot:
@@ -318,6 +325,11 @@ def _profile_by_hash(root: Path, expected_sha256: str) -> ProfileSnapshot:
     selection = _selection_profile(root, current)
     if _sha(selection.raw) == expected_sha256:
         return selection
+    runtime_repair = _authenticated_compatibility_profile(
+        root, current, _RUNTIME_REPAIR_CHECKSUMS, "runtime repair"
+    )
+    if _sha(runtime_repair.raw) == expected_sha256:
+        return runtime_repair
     _fail("packet authorization references an unknown production profile")
 
 
