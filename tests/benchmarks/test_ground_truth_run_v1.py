@@ -221,6 +221,19 @@ def test_actual_resolver_resolves_exact_flat_user_agent_path(
     assert execution["shell"] is False
 
 
+def test_broker_socket_path_is_short_private_and_attempt_bound() -> None:
+    first = run._broker_socket_path(A)
+    second = run._broker_socket_path(B)
+    assert first != second
+    assert len(os.fsencode(first)) < 100
+    first.touch()
+    try:
+        with pytest.raises(run.GroundTruthRunError, match="already exists"):
+            run._broker_socket_path(A)
+    finally:
+        first.unlink(missing_ok=True)
+
+
 def test_broker_process_limit_allows_bounded_evidence_child() -> None:
     script = (
         "import subprocess; "

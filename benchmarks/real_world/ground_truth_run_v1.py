@@ -1658,6 +1658,20 @@ def _terminate(pid: int, identity: str) -> None:
             os.killpg(pid, signal.SIGKILL)
 
 
+def _broker_socket_path(attempt_id: str) -> Path:
+    runtime = Path(f"/tmp/ground-truth-review-v1-{os.getuid()}")
+    _private_directory(runtime, create=True)
+    sockets = runtime / "sockets"
+    _private_directory(sockets, create=True)
+    name = hashlib.sha256(attempt_id.encode()).hexdigest()[:24] + ".sock"
+    path = sockets / name
+    if len(os.fsencode(path)) >= 100:
+        _fail("broker socket path exceeds conservative AF_UNIX bound")
+    if path.exists() or path.is_symlink():
+        _fail("broker socket path already exists")
+    return path
+
+
 def _registry(packet: Path, record: submit_v1.SubmissionBinding, socket_path: Path) -> Path:
     runtime = Path(f"/tmp/ground-truth-review-v1-{os.getuid()}")
     _private_directory(runtime, create=True)
@@ -1857,11 +1871,9 @@ def prepare_attempt(  # noqa: PLR0915
             )
             if before_spawn["states"].get(attempt_id) is not None:
                 _fail("lane changed before broker spawn")
-        socket_dir = attempt / "socket"
-        socket_dir.mkdir(mode=0o700)
         logs = attempt / "logs"
         logs.mkdir(mode=0o700)
-        socket_path = socket_dir / "submit.sock"
+        socket_path = _broker_socket_path(attempt_id)
         registry = _registry(attempt / "packet", record, socket_path)
         deadline_ms = int((now or _now()).timestamp() * 1000) + _MAX_WALL * 1000
         stdout = os.open(logs / "broker.stdout", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
