@@ -1,0 +1,12 @@
+{
+  "full_regeneration_commands": 250,
+  "full_regeneration_uses": [
+    "campaign runtime attestation",
+    "final audit"
+  ],
+  "id": "ground-truth-production-selection-validation-policy-v1",
+  "schema_version": 1,
+  "selected_attempt_regeneration_commands": 5,
+  "selected_attempt_still_authenticates_all_packet_hashes": true,
+  "selected_attempt_still_brackets_complete_aggregate_and_cache_inventory": true
+}

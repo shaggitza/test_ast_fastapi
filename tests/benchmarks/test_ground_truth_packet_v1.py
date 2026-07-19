@@ -122,7 +122,9 @@ def test_build_packet_modes_symlink_gitlink_and_diff_distinction(tmp_path: Path)
     packet._validate_one_packet(staging / "packet", records[0], "sha256:" + "a" * 64, profile.files)
 
 
-def test_exact_fifty_build_uses_250_commands_and_validates_aggregate(tmp_path: Path) -> None:
+def test_exact_fifty_build_uses_250_commands_and_validates_aggregate(  # noqa: PLR0915
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     cache, records = _bare_fixture(tmp_path)
     staging = tmp_path / "aggregate"
     staging.mkdir()
@@ -188,6 +190,130 @@ def test_exact_fifty_build_uses_250_commands_and_validates_aggregate(tmp_path: P
         regenerate=False,
     )
     assert validated["packets"] == packet_rows
+    cache_summary = {"content_sha256": "sha256:" + "d" * 64}
+    monkeypatch.setattr(
+        packet,
+        "_receipt",
+        lambda *_args, **_kwargs: (
+            receipt,
+            campaign_value,
+            campaign_raw,
+            {"records": records},
+            bindings_raw,
+            cache_summary,
+            profile,
+            {},
+        ),
+    )
+    monkeypatch.setattr(source, "_inventory", lambda *_args: {"inventory": "stable-cache"})
+    monkeypatch.setattr(packet, "_reauthenticate_boundary", lambda *_args: None)
+    monkeypatch.setattr(
+        packet,
+        "_validate_publication_transition",
+        lambda *_args: {"entry_hash": "sha256:" + "e" * 64},
+    )
+    selected = packet.validate_packet_selection(
+        ROOT,
+        tmp_path / "campaign",
+        tmp_path / "bindings",
+        cache,
+        tmp_path / "ledger",
+        staging,
+        1,
+    )
+    assert selected["commands"] == 5
+    assert selected["rank"] == 1
+    assert selected["packets"] == 50
+    with pytest.raises(packet.PacketV1Error, match="rank is invalid"):
+        packet.validate_packet_selection(
+            ROOT,
+            tmp_path / "campaign",
+            tmp_path / "bindings",
+            cache,
+            tmp_path / "ledger",
+            staging,
+            0,
+        )
+    duplicate_records = copy.deepcopy(records)
+    duplicate_records[1]["rank"] = 1
+    monkeypatch.setattr(
+        packet,
+        "_receipt",
+        lambda *_args, **_kwargs: (
+            receipt,
+            campaign_value,
+            campaign_raw,
+            {"records": duplicate_records},
+            bindings_raw,
+            cache_summary,
+            profile,
+            {},
+        ),
+    )
+    with pytest.raises(packet.PacketV1Error, match="absent or duplicate"):
+        packet.validate_packet_selection(
+            ROOT,
+            tmp_path / "campaign",
+            tmp_path / "bindings",
+            cache,
+            tmp_path / "ledger",
+            staging,
+            1,
+        )
+    monkeypatch.setattr(
+        packet,
+        "_receipt",
+        lambda *_args, **_kwargs: (
+            receipt,
+            campaign_value,
+            campaign_raw,
+            {"records": records},
+            bindings_raw,
+            cache_summary,
+            profile,
+            {},
+        ),
+    )
+    other_packet = staging / packet._packet_name(records[1])
+    other_payload = other_packet / "snapshot.diff"
+    original_other = other_payload.read_bytes()
+    other_payload.chmod(0o600)
+    other_payload.write_bytes(original_other + b"tamper")
+    other_payload.chmod(0o400)
+    with pytest.raises(packet.PacketV1Error, match=r"payload|hash|root"):
+        packet.validate_packet_selection(
+            ROOT,
+            tmp_path / "campaign",
+            tmp_path / "bindings",
+            cache,
+            tmp_path / "ledger",
+            staging,
+            1,
+        )
+    other_payload.chmod(0o600)
+    other_payload.write_bytes(original_other)
+    other_payload.chmod(0o400)
+    original_build = packet._build_packet
+
+    def drift_selected(*args: Any, **kwargs: Any) -> tuple[dict[str, Any], int]:
+        value, used = original_build(*args, **kwargs)
+        changed = copy.deepcopy(value)
+        changed["local_snapshot"]["relation_to_remote"] = "compared"
+        changed["packet_root_sha256"] = packet._packet_root(changed)
+        return changed, used
+
+    monkeypatch.setattr(packet, "_build_packet", drift_selected)
+    with pytest.raises(packet.PacketV1Error, match="differs from exact Git"):
+        packet.validate_packet_selection(
+            ROOT,
+            tmp_path / "campaign",
+            tmp_path / "bindings",
+            cache,
+            tmp_path / "ledger",
+            staging,
+            1,
+        )
+    monkeypatch.setattr(packet, "_build_packet", original_build)
     aggregate_path = staging / "aggregate-manifest.json"
     staging.chmod(0o700)
     aggregate_path.chmod(0o600)

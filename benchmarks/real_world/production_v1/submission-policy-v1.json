@@ -8,7 +8,9 @@
   "id": "ground-truth-review-submit-v1",
   "live_launch_authorized": false,
   "max_validation_attempts": 3,
+  "packet_validation": "all-hashes-plus-selected-rank-regeneration",
   "protocol_version": 1,
+  "selected_regeneration_git_commands": 5,
   "schema_version": 1,
   "terminal_acknowledgement": "SUBMISSION_COMPLETE"
 }

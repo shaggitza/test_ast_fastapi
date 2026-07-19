@@ -28,6 +28,7 @@ _SCHEMA: Final = f"{_PROFILE_DIR}/campaign-manifest-schema-v1.json"
 _README: Final = f"{_PROFILE_DIR}/README.md"
 _CHECKSUMS: Final = f"{_PROFILE_DIR}/checksums-v1.json"
 _PACKET_PHASE_CHECKSUMS: Final = f"{_PROFILE_DIR}/checksums-packet-v1.json"
+_SELECTION_VALIDATION_POLICY: Final = f"{_PROFILE_DIR}/selection-validation-policy-v1.json"
 _MODULE: Final = "benchmarks/real_world/ground_truth_campaign_v1.py"
 _SOURCE_MODULE: Final = "benchmarks/real_world/ground_truth_source_v1.py"
 _SOURCE_POLICY: Final = f"{_PROFILE_DIR}/source-policy-v1.json"
@@ -199,6 +200,7 @@ def _authenticate_profile(root: Path) -> dict[str, Any]:
         _LANE_EVENT_SCHEMA,
         _SESSION_AUDIT_SCHEMA,
         _PACKET_PHASE_CHECKSUMS,
+        _SELECTION_VALIDATION_POLICY,
     }
     if (
         profile["schema_version"] != 1

@@ -44,8 +44,11 @@ END = datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc)
 def _production_authentication(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         production_packet,
-        "validate_packets",
+        "validate_packet_selection",
         lambda *_args, **_kwargs: {
+            "rank": 1,
+            "repository": "owner/repo",
+            "pr": 7,
             "aggregate_root_sha256": "sha256:" + "a" * 64,
             "publication_entry_hash": "sha256:" + "b" * 64,
         },
@@ -344,6 +347,7 @@ def _packet_and_record(
         corpus_id="oss-expansion-50x50-lock-v2",
         repository="owner/repo",
         pr=7,
+        rank=1,
         lane="A",
         snapshots=SnapshotBinding(baseline_commit=baseline_commit, target_commit=target_commit),
         baseline_tree=baseline_tree,
@@ -758,6 +762,44 @@ def test_prepare_binding_policy_drift_fails_without_publication(
             started_at=START,
         )
     assert not attempt.exists()
+
+
+def test_broker_authentication_uses_exact_selected_rank_validator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = _packet_and_record(tmp_path)
+    binding = tmp_path / "bindings.json"
+    _write_bindings(binding, record)
+    ranks: list[int] = []
+
+    def selected(*args: Any, **_kwargs: Any) -> dict[str, Any]:
+        ranks.append(cast("int", args[-1]))
+        return {
+            "rank": record.rank,
+            "repository": record.repository,
+            "pr": record.pr,
+            "aggregate_root_sha256": record.aggregate_root_sha256,
+            "publication_entry_hash": record.publication_entry_hash,
+            "commands": 5,
+        }
+
+    monkeypatch.setattr(production_packet, "validate_packet_selection", selected)
+    assert submit.load_bindings(binding).records[0].rank == 1
+    assert ranks == [1]
+    monkeypatch.setattr(
+        production_packet,
+        "validate_packet_selection",
+        lambda *_args, **_kwargs: {
+            "rank": 2,
+            "repository": "other/repo",
+            "pr": 99,
+            "aggregate_root_sha256": record.aggregate_root_sha256,
+            "publication_entry_hash": record.publication_entry_hash,
+            "commands": 5,
+        },
+    )
+    with pytest.raises(submit.GroundTruthSubmitError, match="publication binding changed"):
+        submit.load_bindings(binding)
 
 
 def test_binding_loader_reauthenticates_packet_policies_and_recovery_state(tmp_path: Path) -> None:

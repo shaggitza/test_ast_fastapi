@@ -330,6 +330,12 @@
           "title": "Publication Entry Hash",
           "type": "string"
         },
+        "rank": {
+          "maximum": 50,
+          "minimum": 1,
+          "title": "Rank",
+          "type": "integer"
+        },
         "repository": {
           "maxLength": 300,
           "pattern": "^[^/\\s]+/[^/\\s]+$",
@@ -402,6 +408,7 @@
         "corpus_id",
         "repository",
         "pr",
+        "rank",
         "lane",
         "snapshots",
         "baseline_tree",
