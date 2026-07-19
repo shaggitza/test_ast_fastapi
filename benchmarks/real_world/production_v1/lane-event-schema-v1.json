@@ -747,6 +747,155 @@
     {
       "additionalProperties": false,
       "properties": {
+        "agent_source_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "attested_at": {
+          "type": "string"
+        },
+        "authorizations": {
+          "additionalProperties": false,
+          "properties": {
+            "adjudication": {
+              "const": false
+            },
+            "canonical_import": {
+              "const": false
+            },
+            "review_launch": {
+              "const": false
+            }
+          },
+          "required": [
+            "review_launch",
+            "adjudication",
+            "canonical_import"
+          ],
+          "type": "object"
+        },
+        "bad_agent_source_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "bad_execution_root": {
+          "pattern": "^/",
+          "type": "string"
+        },
+        "bad_production_profile_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "campaign_id": {
+          "type": "string"
+        },
+        "campaign_lanes_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "campaign_manifest_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "entry_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "execution_device": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "execution_inode": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "execution_root": {
+          "pattern": "^/",
+          "type": "string"
+        },
+        "extension_schema_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "extension_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "kind": {
+          "const": "runtime_migrated_repair"
+        },
+        "migration_entry_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "packet_publication_entry_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "previous_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "production_files_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "production_profile_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "protocol": {
+          "const": "ground-truth-runtime-attestation-migration-repair-v1"
+        },
+        "runtime_custody_receipt_path": {
+          "pattern": "^/",
+          "type": "string"
+        },
+        "runtime_custody_receipt_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "runtime_identity": {
+          "type": "object"
+        },
+        "schema_version": {
+          "const": 2
+        },
+        "sequence": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "source_bindings_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "supersedes_entry_hash": {
+          "$ref": "#/$defs/digest"
+        }
+      },
+      "required": [
+        "agent_source_sha256",
+        "attested_at",
+        "authorizations",
+        "bad_agent_source_sha256",
+        "bad_execution_root",
+        "bad_production_profile_sha256",
+        "campaign_id",
+        "campaign_lanes_sha256",
+        "campaign_manifest_sha256",
+        "entry_hash",
+        "execution_device",
+        "execution_inode",
+        "execution_root",
+        "extension_schema_sha256",
+        "extension_sha256",
+        "kind",
+        "migration_entry_hash",
+        "packet_publication_entry_hash",
+        "previous_hash",
+        "production_files_sha256",
+        "production_profile_sha256",
+        "protocol",
+        "runtime_custody_receipt_path",
+        "runtime_custody_receipt_sha256",
+        "runtime_identity",
+        "schema_version",
+        "sequence",
+        "source_bindings_sha256",
+        "supersedes_entry_hash"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
         "agent_installation_sha256": {
           "$ref": "#/$defs/digest"
         },

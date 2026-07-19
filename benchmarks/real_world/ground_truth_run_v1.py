@@ -62,7 +62,7 @@ _RUNTIME_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _ATTEMPT = re.compile(r"^prod-v1-i[0-9]{3}-rank[0-9]{3}-pr[0-9]+-[AB]$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _EVENT_FILE = re.compile(
-    r"^([0-9]{6})-(prepared|launch_claimed|native_result|pending|completed|operational_failed|prelaunch_migration|runtime_migrated|canary_reauthorized)-([A-Za-z0-9_-]+)\.json$"
+    r"^([0-9]{6})-(prepared|launch_claimed|native_result|pending|completed|operational_failed|prelaunch_migration|runtime_migrated|runtime_migrated_repair|canary_reauthorized)-([A-Za-z0-9_-]+)\.json$"
 )
 _NATIVE_RUN = re.compile(r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$|^[0-9a-f]{8,64}$")
 _SESSION_ID = re.compile(r"^[0-9A-Za-z_-]{8,128}$")
@@ -82,9 +82,11 @@ _RUNTIME_SUPERSESSION_DOMAIN: Final = b"ground-truth-runtime-attestation-superse
 _MIGRATION_PROTOCOL: Final = "ground-truth-prelaunch-custody-migration-v1"
 _MIGRATION_RUNTIME_PROTOCOL: Final = "ground-truth-runtime-attestation-migration-v1"
 _MIGRATED_AUTH_PROTOCOL: Final = "ground-truth-review-canary-authorization-generation2-v1"
+_MIGRATION_REPAIR_PROTOCOL: Final = "ground-truth-runtime-attestation-migration-repair-v1"
 _MIGRATION_DOMAIN: Final = b"ground-truth-prelaunch-custody-migration-v1\0"
 _MIGRATION_RUNTIME_DOMAIN: Final = b"ground-truth-runtime-attestation-migration-v1\0"
 _MIGRATED_AUTH_DOMAIN: Final = b"ground-truth-review-canary-authorization-generation2-v1\0"
+_MIGRATION_REPAIR_DOMAIN: Final = b"ground-truth-runtime-attestation-migration-repair-v1\0"
 
 
 class GroundTruthRunError(RuntimeError):
@@ -829,6 +831,31 @@ def _event_expected_keys(kind: str) -> set[str]:
             "supersedes_entry_hash",
             "migration_entry_hash",
         },
+        "runtime_migrated_repair": {
+            "campaign_id",
+            "campaign_manifest_sha256",
+            "campaign_lanes_sha256",
+            "source_bindings_sha256",
+            "packet_publication_entry_hash",
+            "runtime_custody_receipt_path",
+            "runtime_custody_receipt_sha256",
+            "production_profile_sha256",
+            "production_files_sha256",
+            "runtime_identity",
+            "extension_sha256",
+            "extension_schema_sha256",
+            "agent_source_sha256",
+            "execution_root",
+            "execution_device",
+            "execution_inode",
+            "attested_at",
+            "authorizations",
+            "supersedes_entry_hash",
+            "migration_entry_hash",
+            "bad_execution_root",
+            "bad_production_profile_sha256",
+            "bad_agent_source_sha256",
+        },
         "canary_reauthorized": {
             "campaign_id",
             "campaign_manifest_sha256",
@@ -1053,6 +1080,7 @@ def _extended_ledger(root: Path, repository_root: Path) -> dict[str, Any]:  # no
     native_results: dict[str, dict[str, Any]] = {}
     events: list[dict[str, Any]] = []
     migration: dict[str, Any] | None = None
+    repair: dict[str, Any] | None = None
     generation = 1
     generation2_attempts: set[str] = set()
     launched_attempts: set[str] = set()
@@ -1074,6 +1102,10 @@ def _extended_ledger(root: Path, repository_root: Path) -> dict[str, Any]:  # no
             special = {
                 "prelaunch_migration": (_MIGRATION_PROTOCOL, _MIGRATION_DOMAIN),
                 "runtime_migrated": (_MIGRATION_RUNTIME_PROTOCOL, _MIGRATION_RUNTIME_DOMAIN),
+                "runtime_migrated_repair": (
+                    _MIGRATION_REPAIR_PROTOCOL,
+                    _MIGRATION_REPAIR_DOMAIN,
+                ),
                 "canary_reauthorized": (_MIGRATED_AUTH_PROTOCOL, _MIGRATED_AUTH_DOMAIN),
             }
             event_protocol, event_domain = special.get(
@@ -1081,7 +1113,8 @@ def _extended_ledger(root: Path, repository_root: Path) -> dict[str, Any]:  # no
             )
             if (
                 canonical_json(event) != raw
-                or event["schema_version"] not in ({2} if kind == "runtime_migrated" else {1})
+                or event["schema_version"]
+                not in ({2} if kind in {"runtime_migrated", "runtime_migrated_repair"} else {1})
                 or event["protocol"] != event_protocol
                 or event["sequence"] != expected_sequence
                 or event["kind"] != match.group(2)
@@ -1162,6 +1195,24 @@ def _extended_ledger(root: Path, repository_root: Path) -> dict[str, Any]:  # no
                 )
                 runtime = event
                 runtime_entry_hash = event["entry_hash"]
+            elif kind == "runtime_migrated_repair":
+                if identifier != "runtime-repair" or repair is not None:
+                    _fail("migrated runtime repair identifier is invalid")
+                _validate_repaired_event_candidate(
+                    {
+                        "events": events,
+                        "head": head,
+                        "migration": migration,
+                        "generation": generation,
+                        "runtime": runtime,
+                        "authorization": authorization,
+                        "base": base,
+                    },
+                    event,
+                )
+                repair = event
+                runtime = event
+                runtime_entry_hash = event["entry_hash"]
             elif kind == "canary_reauthorized":
                 if (
                     identifier != "canary"
@@ -1169,7 +1220,7 @@ def _extended_ledger(root: Path, repository_root: Path) -> dict[str, Any]:  # no
                     or generation != 1
                     or authorization is not None
                     or runtime is None
-                    or runtime.get("kind") != "runtime_migrated"
+                    or runtime.get("kind") not in {"runtime_migrated", "runtime_migrated_repair"}
                     or event["generation"] != 2
                     or event["migration_entry_hash"] != migration["entry_hash"]
                     or event["runtime_attestation_entry_hash"] != runtime["entry_hash"]
@@ -1377,6 +1428,7 @@ def _extended_ledger(root: Path, repository_root: Path) -> dict[str, Any]:  # no
         "first_runtime": first_runtime,
         "runtime_superseded": runtime_superseded,
         "migration": migration,
+        "repair": repair,
         "generation": generation,
         "generation2_attempts": generation2_attempts,
         "authorization": authorization,
@@ -1484,7 +1536,7 @@ def _migrated_candidate_files(root: Path, execution_root: Path, value: dict[str,
     )
     if (
         value.get("schema_version") != 2
-        or value.get("kind") != "runtime_migrated"
+        or value.get("kind") not in {"runtime_migrated", "runtime_migrated_repair"}
         or value.get("execution_root") != str(execution_root)
         or value.get("execution_device") != status.st_dev
         or value.get("execution_inode") != status.st_ino
@@ -1502,13 +1554,29 @@ def _migrated_candidate_files(root: Path, execution_root: Path, value: dict[str,
         _fail("migrated runtime candidate files are invalid")
 
 
-def _validate_migration_roots(current: dict[str, Any], execution_root: Path) -> None:
+def _validate_migration_roots(
+    current: dict[str, Any], execution_root: Path, *, repair: bool = False
+) -> None:
     migration = current.get("migration")
     if not isinstance(migration, dict):
         _fail("prelaunch migration is absent")
     prior = Path(cast("str", migration.get("prior_execution_root")))
     if execution_root == prior:
         _fail("migrated execution root must differ from preserved prior root")
+    runtime = current.get("runtime")
+    if repair:
+        if not isinstance(runtime, dict) or runtime.get("kind") not in {
+            "runtime_migrated",
+            "runtime_migrated_repair",
+        }:
+            _fail("repair lacks a migrated runtime")
+        bad_root = (
+            runtime.get("execution_root")
+            if runtime.get("kind") == "runtime_migrated"
+            else runtime.get("bad_execution_root")
+        )
+        if execution_root == Path(cast("str", bad_root)):
+            _fail("repaired execution root must differ from bad migrated root")
     status = _private_directory(prior)
     if status.st_dev != migration.get("prior_execution_device") or status.st_ino != migration.get(
         "prior_execution_inode"
@@ -1516,8 +1584,137 @@ def _validate_migration_roots(current: dict[str, Any], execution_root: Path) -> 
         _fail("preserved prior execution root identity changed")
 
 
+def _validate_repair_incident(  # noqa: PLR0912, PLR0915
+    current: dict[str, Any],
+) -> dict[str, Any]:
+    migration = current.get("migration")
+    bad = current.get("runtime")
+    events = current.get("events")
+    if (
+        not isinstance(migration, dict)
+        or not isinstance(bad, dict)
+        or bad.get("kind") != "runtime_migrated"
+        or current.get("generation") != 1
+        or current.get("authorization") is not None
+        or not isinstance(events, list)
+        or not events
+        or events[-1].get("entry_hash") != bad.get("entry_hash")
+    ):
+        _fail("runtime repair is outside the exact incident state")
+    bad_root = Path(cast("str", bad.get("execution_root")))
+    if _runtime_attestation(Path(__file__).resolve().parents[2], bad_root) != bad:
+        _fail("bad migrated runtime local attestation changed")
+    _private_directory(bad_root)
+    if (bad_root / "agent-installation.json").exists():
+        _fail("bad migrated runtime already has an installation receipt")
+    if {path.name for path in bad_root.iterdir()} != {
+        "prior-agent-source.md",
+        "runtime",
+        "runtime-attestation.json",
+    }:
+        _fail("bad migrated runtime inventory is not exact")
+    runtime_dir = bad_root / "runtime"
+    extension_dir = runtime_dir / "extension"
+    if {path.name for path in runtime_dir.iterdir()} != {
+        "agent-source.md",
+        "custody-receipt.json",
+        "extension",
+    } or {path.name for path in extension_dir.iterdir()} != {"index.ts", "review-schema.ts"}:
+        _fail("bad migrated runtime nested inventory is not exact")
+    runtime_status = runtime_dir.stat(follow_symlinks=False)
+    extension_status = extension_dir.stat(follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(runtime_status.st_mode)
+        or runtime_status.st_uid != os.getuid()
+        or stat.S_IMODE(runtime_status.st_mode) != 0o500
+        or not stat.S_ISDIR(extension_status.st_mode)
+        or extension_status.st_uid != os.getuid()
+        or stat.S_IMODE(extension_status.st_mode) != 0o700
+    ):
+        _fail("bad migrated runtime nested identity changed")
+    bad_body = submit_v1._owned_file(
+        runtime_dir / "agent-source.md", max_bytes=_MAX_FILE, allowed_modes={0o400}
+    )
+    if _sha(bad_body) != bad.get("agent_source_sha256"):
+        _fail("bad migrated agent source changed")
+    marker = b"subagentOnlyExtensions:\n  - "
+    if bad_body.count(marker) != 1:
+        _fail("bad migrated agent extension marker is invalid")
+    extension_raw = bad_body.split(marker, 1)[1].split(b"\n", 1)[0]
+    try:
+        bad_extension = Path(extension_raw.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        raise GroundTruthRunError("bad migrated extension path is invalid") from exc
+    project_root = Path(__file__).resolve().parents[2]
+    historical_files, _profile_hash, _files_hash = _historical_runtime_profile(
+        project_root, cast("str", bad.get("production_profile_sha256"))
+    )
+    prompt = historical_files[f"{_PROFILE}/review-prompt-v1.md"].decode("utf-8")
+    if bad_body != _agent_body(bad_extension, prompt):
+        _fail("bad migrated agent body is not the exact staging-path incident")
+    expected_prefix = f".{bad_root.name}.runtime-staging-"
+    try:
+        staging_root = bad_extension.parents[2]
+    except IndexError as exc:
+        raise GroundTruthRunError("bad migrated staging path is invalid") from exc
+    if (
+        not bad_extension.is_absolute()
+        or bad_extension.name != "index.ts"
+        or bad_extension.parent.name != "extension"
+        or bad_extension.parent.parent.name != "runtime"
+        or staging_root.parent != bad_root.parent
+        or not staging_root.name.startswith(expected_prefix)
+        or not re.fullmatch(r"[a-z0-9_]{8}", staging_root.name.removeprefix(expected_prefix))
+        or staging_root.exists()
+        or staging_root.is_symlink()
+    ):
+        _fail("bad migrated staging path is not the exact absent owned prefix")
+    prior_root = Path(cast("str", migration.get("prior_execution_root")))
+    if _runtime_attestation(Path(__file__).resolve().parents[2], prior_root, allow_legacy=True).get(
+        "entry_hash"
+    ) != migration.get("prior_runtime_entry_hash"):
+        _fail("prior runtime attestation changed during repair")
+    prior_receipt, prior_raw = _json_raw(prior_root / "agent-installation.json", modes={0o400})
+    prior_archive = submit_v1._owned_file(
+        bad_root / "prior-agent-source.md", max_bytes=_MAX_FILE, allowed_modes={0o400}
+    )
+    output = Path(cast("str", prior_receipt.get("path")))
+    global_body = submit_v1._owned_file(output, max_bytes=_MAX_FILE, allowed_modes={0o400})
+    if (
+        set(prior_receipt)
+        != {
+            "schema_version",
+            "protocol",
+            "runtime_attestation_entry_hash",
+            "agent_name",
+            "path",
+            "sha256",
+            "bytes",
+            "resolver_census_sha256",
+            "runtime_identity",
+        }
+        or canonical_json(prior_receipt) != prior_raw
+        or prior_receipt.get("schema_version") != 1
+        or prior_receipt.get("protocol") != "ground-truth-native-agent-installation-v1"
+        or prior_receipt.get("agent_name") != _AGENT_NAME
+        or prior_receipt.get("runtime_attestation_entry_hash")
+        != migration.get("prior_runtime_entry_hash")
+        or _sha(prior_archive) != prior_receipt.get("sha256")
+        or global_body != bad_body
+    ):
+        _fail("runtime repair agent custody is not exact")
+    return {
+        "bad_root": bad_root,
+        "bad_body": bad_body,
+        "prior_root": prior_root,
+        "prior_receipt": prior_receipt,
+        "prior_archive": prior_archive,
+        "output": output,
+    }
+
+
 def _recover_migrated_runtime(
-    root: Path, ledger: Path, execution_root: Path
+    root: Path, ledger: Path, execution_root: Path, *, repair: bool = False
 ) -> dict[str, Any] | None:
     if not execution_root.exists():
         return None
@@ -1535,22 +1732,28 @@ def _recover_migrated_runtime(
     private = campaign_v1._private_root(ledger)
     with campaign_v1._ledger_lock(private):
         current = _extended_ledger(private, root)
-        _validate_migration_roots(current, execution_root)
+        _validate_migration_roots(current, execution_root, repair=repair)
         if current.get("runtime") != candidate:
             migration = current.get("migration")
             if (
                 not isinstance(migration, dict)
                 or current.get("generation") != 1
-                or current.get("runtime", {}).get("schema_version") != 1
                 or current.get("authorization") is not None
+                or (not repair and current.get("runtime", {}).get("schema_version") != 1)
+                or (repair and current.get("runtime", {}).get("kind") != "runtime_migrated")
             ):
                 _fail("migrated runtime candidate has no exact ledger transition")
-            _validate_migrated_event_candidate(current, candidate)
+            if repair:
+                _validate_repaired_event_candidate(current, candidate)
+            else:
+                _validate_migrated_event_candidate(current, candidate)
             events = private / "lane-events"
             if not events.exists():
                 events.mkdir(mode=0o700)
+            kind = "runtime_migrated_repair" if repair else "runtime_migrated"
+            identifier = "runtime-repair" if repair else "runtime"
             campaign_v1._publish(
-                events / f"{candidate['sequence']:06d}-runtime_migrated-runtime.json", candidate
+                events / f"{candidate['sequence']:06d}-{kind}-{identifier}.json", candidate
             )
             verified = _extended_ledger(private, root)
             if verified.get("runtime") != candidate:
@@ -1582,12 +1785,19 @@ def attest_runtime(  # noqa: PLR0912, PLR0915
     execution_root: Path,
     *,
     migrated: bool = False,
+    repair: bool = False,
 ) -> dict[str, Any]:
-    if migrated:
+    if migrated and repair:
+        _fail("runtime migration modes are mutually exclusive")
+    migrated_like = migrated or repair
+    if migrated_like:
         private = campaign_v1._private_root(ledger)
         with campaign_v1._ledger_lock(private):
-            _validate_migration_roots(_extended_ledger(private, root), execution_root)
-        recovered = _recover_migrated_runtime(root, ledger, execution_root)
+            current_for_root = _extended_ledger(private, root)
+            _validate_migration_roots(current_for_root, execution_root, repair=repair)
+            if repair and current_for_root.get("runtime", {}).get("kind") == "runtime_migrated":
+                _validate_repair_incident(current_for_root)
+        recovered = _recover_migrated_runtime(root, ledger, execution_root, repair=repair)
         if recovered is not None:
             return recovered
         build_root = _prepare_runtime_staging(execution_root)
@@ -1615,8 +1825,8 @@ def attest_runtime(  # noqa: PLR0912, PLR0915
         _fail("custody inventories drifted around runtime attestation")
     status = _private_directory(build_root, create=True)
     initial_entries = {path.name for path in build_root.iterdir()}
-    if (migrated and initial_entries != {".runtime-staging-owner.json"}) or (
-        not migrated and initial_entries
+    if (migrated_like and initial_entries != {".runtime-staging-owner.json"}) or (
+        not migrated_like and initial_entries
     ):
         _fail("execution root must be empty before attestation")
     identity = _runtime_identity(root)
@@ -1632,7 +1842,12 @@ def attest_runtime(  # noqa: PLR0912, PLR0915
     (extension_dir / "review-schema.ts").chmod(0o400)
     agent_source = runtime / "agent-source.md"
     prompt = profile.files[f"{_PROFILE}/review-prompt-v1.md"].decode("utf-8")
-    body = _agent_body(extension_dir / "index.ts", prompt)
+    agent_extension = (
+        execution_root / "runtime/extension/index.ts"
+        if migrated_like
+        else extension_dir / "index.ts"
+    )
+    body = _agent_body(agent_extension, prompt)
     agent_source.write_bytes(body)
     agent_source.chmod(0o400)
     custody_receipt = _custody_receipt_payload(
@@ -1708,24 +1923,47 @@ def attest_runtime(  # noqa: PLR0912, PLR0915
     private = campaign_v1._private_root(ledger)
     with campaign_v1._ledger_lock(private):
         current = _extended_ledger(private, root)
-        if migrated:
-            _validate_migration_roots(current, execution_root)
+        if migrated_like:
+            _validate_migration_roots(current, execution_root, repair=repair)
+            if repair:
+                _validate_repair_incident(current)
             migration = current.get("migration")
+            current_runtime = current.get("runtime")
             if (
                 not isinstance(migration, dict)
+                or not isinstance(current_runtime, dict)
                 or current.get("generation") != 1
-                or current.get("runtime", {}).get("schema_version") != 1
                 or current.get("authorization") is not None
                 or execution_root.exists()
+                or (not repair and current_runtime.get("schema_version") != 1)
+                or (repair and current_runtime.get("kind") != "runtime_migrated")
             ):
                 _fail("prelaunch migration is not ready for runtime attestation")
             fields = {
                 **entry_body,
-                "supersedes_entry_hash": migration["prior_runtime_entry_hash"],
+                "supersedes_entry_hash": (
+                    current_runtime["entry_hash"]
+                    if repair
+                    else migration["prior_runtime_entry_hash"]
+                ),
                 "migration_entry_hash": migration["entry_hash"],
             }
-            entry = _event_value(current, "runtime_migrated", fields)
-            _validate_migrated_event_candidate(current, entry)
+            if repair:
+                fields.update(
+                    {
+                        "bad_execution_root": current_runtime["execution_root"],
+                        "bad_production_profile_sha256": current_runtime[
+                            "production_profile_sha256"
+                        ],
+                        "bad_agent_source_sha256": current_runtime["agent_source_sha256"],
+                    }
+                )
+            kind = "runtime_migrated_repair" if repair else "runtime_migrated"
+            entry = _event_value(current, kind, fields)
+            if repair:
+                _validate_repaired_event_candidate(current, entry)
+            else:
+                _validate_migrated_event_candidate(current, entry)
             pending = build_root / "runtime-attestation.pending.json"
             _atomic(pending, entry)
             owner = build_root / ".runtime-staging-owner.json"
@@ -1751,8 +1989,9 @@ def attest_runtime(  # noqa: PLR0912, PLR0915
             events = private / "lane-events"
             if not events.exists():
                 events.mkdir(mode=0o700)
+            identifier = "runtime-repair" if repair else "runtime"
             campaign_v1._publish(
-                events / f"{entry['sequence']:06d}-runtime_migrated-runtime.json", entry
+                events / f"{entry['sequence']:06d}-{kind}-{identifier}.json", entry
             )
             verified = _extended_ledger(private, root)
             if verified.get("runtime") != entry:
@@ -1773,7 +2012,7 @@ def attest_runtime(  # noqa: PLR0912, PLR0915
             verified = _extended_ledger(private, root)
             if verified["runtime"] != entry:
                 _fail("runtime attestation publication did not become the ledger head")
-    if not migrated:
+    if not migrated_like:
         _atomic(execution_root / "runtime-attestation.json", entry)
     return {
         "runtime_attestation_entry_hash": entry["entry_hash"],
@@ -1825,7 +2064,7 @@ def _historical_runtime_profile(
     if not isinstance(files, dict):
         _fail("historical runtime profile shape is invalid")
     captured: dict[str, bytes] = {}
-    for required in (_EXTENSION, _EXTENSION_SCHEMA):
+    for required in (_EXTENSION, _EXTENSION_SCHEMA, f"{_PROFILE}/review-prompt-v1.md"):
         expected = files.get(required)
         actual = submit_v1._owned_file(root / required, max_bytes=_MAX_FILE, allowed_modes={0o644})
         if not isinstance(expected, str) or _sha(actual) != expected:
@@ -1874,6 +2113,19 @@ def _runtime_attestation(
     elif protocol == _MIGRATION_RUNTIME_PROTOCOL:
         expected_keys.update({"sequence", "kind", "supersedes_entry_hash", "migration_entry_hash"})
         domain = _MIGRATION_RUNTIME_DOMAIN
+    elif protocol == _MIGRATION_REPAIR_PROTOCOL:
+        expected_keys.update(
+            {
+                "sequence",
+                "kind",
+                "supersedes_entry_hash",
+                "migration_entry_hash",
+                "bad_execution_root",
+                "bad_production_profile_sha256",
+                "bad_agent_source_sha256",
+            }
+        )
+        domain = _MIGRATION_REPAIR_DOMAIN
     elif protocol != _RUNTIME_PROTOCOL:
         _fail("runtime attestation protocol is invalid")
     _strict_keys(value, expected_keys, "runtime attestation")
@@ -1882,7 +2134,10 @@ def _runtime_attestation(
     expected_profile = cast("str", value.get("production_profile_sha256"))
     historical = expected_profile != current_profile.checksum_sha256
     if historical:
-        if not legacy and protocol != _MIGRATION_RUNTIME_PROTOCOL:
+        if not legacy and protocol not in {
+            _MIGRATION_RUNTIME_PROTOCOL,
+            _MIGRATION_REPAIR_PROTOCOL,
+        }:
             _fail("historical runtime protocol is not eligible")
         profile_files, profile_checksum_sha256, profile_files_sha256 = _historical_runtime_profile(
             root, expected_profile
@@ -1936,13 +2191,23 @@ def _runtime_attestation(
         or not _DIGEST.fullmatch(cast("str", value["campaign_lanes_sha256"]))
         or value.get("entry_hash") != _entry_hash(domain, body)
         or (
-            protocol in {_RUNTIME_SUPERSESSION_PROTOCOL, _MIGRATION_RUNTIME_PROTOCOL}
+            protocol
+            in {
+                _RUNTIME_SUPERSESSION_PROTOCOL,
+                _MIGRATION_RUNTIME_PROTOCOL,
+                _MIGRATION_REPAIR_PROTOCOL,
+            }
             and not _DIGEST.fullmatch(str(value.get("supersedes_entry_hash", "")))
         )
         or (
-            protocol == _MIGRATION_RUNTIME_PROTOCOL
+            protocol in {_MIGRATION_RUNTIME_PROTOCOL, _MIGRATION_REPAIR_PROTOCOL}
             and (
-                value.get("kind") != "runtime_migrated"
+                value.get("kind")
+                != (
+                    "runtime_migrated"
+                    if protocol == _MIGRATION_RUNTIME_PROTOCOL
+                    else "runtime_migrated_repair"
+                )
                 or not isinstance(value.get("sequence"), int)
                 or not _DIGEST.fullmatch(str(value.get("migration_entry_hash", "")))
             )
@@ -2119,6 +2384,140 @@ def _migrated_native_agent(  # noqa: PLR0912, PLR0915
     return receipt
 
 
+def _repaired_native_agent(  # noqa: PLR0912, PLR0915
+    root: Path,
+    ledger: Path,
+    execution_root: Path,
+    output: Path,
+    attestation: dict[str, Any],
+    body: bytes,
+) -> dict[str, Any]:
+    private = campaign_v1._private_root(ledger)
+    with campaign_v1._ledger_lock(private):
+        current = _extended_ledger(private, root)
+        migration = current.get("migration")
+        if (
+            not isinstance(migration, dict)
+            or current.get("runtime") != attestation
+            or attestation.get("kind") != "runtime_migrated_repair"
+            or current.get("generation") != 1
+            or current.get("authorization") is not None
+        ):
+            _fail("repaired agent installation lacks exact ledger custody")
+        _validate_migration_roots(current, execution_root, repair=True)
+        bad_root = Path(cast("str", attestation.get("bad_execution_root")))
+        bad_body = submit_v1._owned_file(
+            bad_root / "runtime/agent-source.md", max_bytes=_MAX_FILE, allowed_modes={0o400}
+        )
+        if (
+            _sha(bad_body) != attestation.get("bad_agent_source_sha256")
+            or (bad_root / "agent-installation.json").exists()
+        ):
+            _fail("superseded migrated agent custody changed")
+        prior_root = Path(cast("str", migration["prior_execution_root"]))
+        prior_receipt, prior_raw = _json_raw(prior_root / "agent-installation.json", modes={0o400})
+        old = submit_v1._owned_file(
+            bad_root / "prior-agent-source.md", max_bytes=_MAX_FILE, allowed_modes={0o400}
+        )
+        if (
+            canonical_json(prior_receipt) != prior_raw
+            or _sha(old) != prior_receipt.get("sha256")
+            or prior_receipt.get("runtime_attestation_entry_hash")
+            != migration["prior_runtime_entry_hash"]
+            or prior_receipt.get("path") != str(output)
+        ):
+            _fail("original agent archive is not repair-bound")
+        new_expected = _sha(body)
+        bad_expected = _sha(bad_body)
+        global_body = submit_v1._owned_file(output, max_bytes=_MAX_FILE, allowed_modes={0o400})
+        if _sha(global_body) not in {bad_expected, new_expected}:
+            _fail("global agent is outside exact repair states")
+        archives = {
+            execution_root / "prior-agent-source.md": old,
+            execution_root / "superseded-agent-source.md": bad_body,
+        }
+        for path, expected in archives.items():
+            if not path.exists():
+                source = (
+                    bad_root / "prior-agent-source.md"
+                    if path.name == "prior-agent-source.md"
+                    else bad_root / "runtime/agent-source.md"
+                )
+                os.link(source, path)
+            archived = submit_v1._owned_file(path, max_bytes=_MAX_FILE, allowed_modes={0o400})
+            if archived != expected:
+                _fail("repaired agent archive changed")
+        archive_directory = os.open(execution_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(archive_directory)
+        finally:
+            os.close(archive_directory)
+        if global_body == bad_body:
+            temporary = output.parent / ".ground-truth-production-reviewer-v1.repairing"
+            try:
+                submit_v1._atomic_no_clobber(temporary, body, mode=0o400)
+            except submit_v1.SubmissionRejected:
+                if (
+                    submit_v1._owned_file(temporary, max_bytes=_MAX_FILE, allowed_modes={0o400})
+                    != body
+                ):
+                    _fail("repaired agent temporary bytes changed")
+            if (
+                submit_v1._owned_file(output, max_bytes=_MAX_FILE, allowed_modes={0o400})
+                != bad_body
+            ):
+                _fail("bad global agent changed during repair")
+            temporary.replace(output)
+            descriptor = os.open(output.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+    after = _runtime_identity(root)
+    candidates = _agent_candidates(after["resolver_census"])
+    effective = [
+        row
+        for row in after["resolver_census"]["effective"]
+        if isinstance(row, dict) and row.get("name") == _AGENT_NAME
+    ]
+    expected_extension = str(execution_root / "runtime/extension/index.ts")
+    if (
+        [row.get("filePath") for row in candidates] != [str(output)]
+        or len(effective) != 1
+        or effective[0].get("model") != _MODEL
+        or effective[0].get("thinking") != _THINKING
+        or effective[0].get("tools") != list(_TOOLS)
+        or effective[0].get("extensions") != []
+        or effective[0].get("subagentOnlyExtensions") != [expected_extension]
+    ):
+        _fail("repaired production agent is not the unique resolver definition")
+    receipt = {
+        "schema_version": 3,
+        "protocol": "ground-truth-native-agent-installation-migration-repair-v1",
+        "runtime_attestation_entry_hash": attestation["entry_hash"],
+        "agent_name": _AGENT_NAME,
+        "path": str(output),
+        "sha256": _sha(body),
+        "bytes": len(body),
+        "resolver_census_sha256": after["resolver_census_sha256"],
+        "runtime_identity": after,
+        "prior_runtime_attestation_entry_hash": migration["prior_runtime_entry_hash"],
+        "bad_runtime_attestation_entry_hash": attestation["supersedes_entry_hash"],
+        "prior_archive_path": str(execution_root / "prior-agent-source.md"),
+        "prior_archive_sha256": _sha(old),
+        "superseded_archive_path": str(execution_root / "superseded-agent-source.md"),
+        "superseded_archive_sha256": _sha(bad_body),
+    }
+    receipt_path = execution_root / "agent-installation.json"
+    if receipt_path.exists():
+        existing, _raw = _json_raw(receipt_path, modes={0o400})
+        if existing != receipt:
+            _fail("repaired agent installation receipt changed")
+    else:
+        _atomic(receipt_path, receipt)
+    return receipt
+
+
 def create_native_agent(
     root: Path,
     execution_root: Path,
@@ -2128,7 +2527,11 @@ def create_native_agent(
 ) -> dict[str, Any]:
     attestation = _runtime_attestation(root, execution_root)
     identity = _runtime_identity(root)
-    migrated = attestation.get("kind") == "runtime_migrated"
+    migrated = attestation.get("kind") in {
+        "runtime_migrated",
+        "runtime_migrated_repair",
+    }
+    repaired = attestation.get("kind") == "runtime_migrated_repair"
     if (not migrated and identity != attestation.get("runtime_identity")) or (
         migrated
         and _immutable_runtime_identity(identity)
@@ -2160,6 +2563,8 @@ def create_native_agent(
     if migrated:
         if ledger is None:
             _fail("migrated agent installation requires the exact ledger")
+        if repaired:
+            return _repaired_native_agent(root, ledger, execution_root, output, attestation, body)
         return _migrated_native_agent(root, ledger, execution_root, output, attestation, body)
     if output.exists() or output.is_symlink():
         _fail("agent output already exists")
@@ -2209,7 +2614,8 @@ def create_native_agent(
 def _installed_agent(root: Path, execution_root: Path) -> dict[str, Any]:
     attestation = _runtime_attestation(root, execution_root)
     receipt, raw_receipt = _json_raw(execution_root / "agent-installation.json", modes={0o400})
-    migrated = receipt.get("schema_version") == 2
+    migrated = receipt.get("schema_version") in {2, 3}
+    repaired = receipt.get("schema_version") == 3
     expected_keys = {
         "schema_version",
         "protocol",
@@ -2229,12 +2635,25 @@ def _installed_agent(root: Path, execution_root: Path) -> dict[str, Any]:
                 "prior_archive_sha256",
             }
         )
+    if repaired:
+        expected_keys.update(
+            {
+                "bad_runtime_attestation_entry_hash",
+                "superseded_archive_path",
+                "superseded_archive_sha256",
+            }
+        )
     _strict_keys(receipt, expected_keys, "agent installation")
     if (
         canonical_json(receipt) != raw_receipt
         or (
             migrated
-            and receipt.get("protocol") != "ground-truth-native-agent-installation-migration-v1"
+            and receipt.get("protocol")
+            != (
+                "ground-truth-native-agent-installation-migration-repair-v1"
+                if repaired
+                else "ground-truth-native-agent-installation-migration-v1"
+            )
         )
         or (
             not migrated
@@ -2286,6 +2705,17 @@ def _installed_agent(root: Path, execution_root: Path) -> dict[str, Any]:
             or not _DIGEST.fullmatch(str(receipt.get("prior_runtime_attestation_entry_hash", "")))
         ):
             _fail("migrated prior agent archive changed")
+    if repaired:
+        superseded = Path(cast("str", receipt.get("superseded_archive_path")))
+        superseded_raw = submit_v1._owned_file(
+            superseded, max_bytes=_MAX_FILE, allowed_modes={0o400}
+        )
+        if (
+            superseded != execution_root / "superseded-agent-source.md"
+            or _sha(superseded_raw) != receipt.get("superseded_archive_sha256")
+            or not _DIGEST.fullmatch(str(receipt.get("bad_runtime_attestation_entry_hash", "")))
+        ):
+            _fail("repaired superseded agent archive changed")
     return receipt
 
 
@@ -2571,7 +3001,7 @@ def authorize_migrated_canary(
         if (
             not isinstance(migration, dict)
             or current.get("runtime") != attestation
-            or attestation.get("kind") != "runtime_migrated"
+            or attestation.get("kind") not in {"runtime_migrated", "runtime_migrated_repair"}
             or current.get("authorization") is not None
             or current.get("generation") != 1
         ):
@@ -2663,6 +3093,11 @@ def _event_value(current: dict[str, Any], kind: str, fields: dict[str, Any]) -> 
     protocols = {
         "prelaunch_migration": (_MIGRATION_PROTOCOL, _MIGRATION_DOMAIN, 1),
         "runtime_migrated": (_MIGRATION_RUNTIME_PROTOCOL, _MIGRATION_RUNTIME_DOMAIN, 2),
+        "runtime_migrated_repair": (
+            _MIGRATION_REPAIR_PROTOCOL,
+            _MIGRATION_REPAIR_DOMAIN,
+            2,
+        ),
         "canary_reauthorized": (_MIGRATED_AUTH_PROTOCOL, _MIGRATED_AUTH_DOMAIN, 1),
     }
     protocol, domain, schema_version = protocols.get(
@@ -2734,6 +3169,56 @@ def _validate_migrated_event_candidate(current: dict[str, Any], candidate: dict[
         != {"review_launch": False, "adjudication": False, "canonical_import": False}
     ):
         _fail("migrated runtime candidate is invalid")
+    _parse_timestamp(candidate.get("attested_at"))
+    _validate_runtime_identity(candidate.get("runtime_identity"))
+
+
+def _validate_repaired_event_candidate(current: dict[str, Any], candidate: dict[str, Any]) -> None:
+    migration = current.get("migration")
+    runtime = current.get("runtime")
+    base = current.get("base")
+    fields = {
+        key: item
+        for key, item in candidate.items()
+        if key
+        not in {
+            "schema_version",
+            "protocol",
+            "sequence",
+            "kind",
+            "previous_hash",
+            "entry_hash",
+        }
+    }
+    if (
+        not isinstance(migration, dict)
+        or not isinstance(runtime, dict)
+        or not isinstance(base, dict)
+        or current.get("generation") != 1
+        or current.get("authorization") is not None
+        or runtime.get("kind") != "runtime_migrated"
+        or not current.get("events")
+        or current["events"][-1].get("entry_hash") != runtime.get("entry_hash")
+        or candidate != _event_value(current, "runtime_migrated_repair", fields)
+        or set(candidate) != _event_expected_keys("runtime_migrated_repair")
+        or candidate.get("migration_entry_hash") != migration.get("entry_hash")
+        or candidate.get("supersedes_entry_hash") != runtime.get("entry_hash")
+        or candidate.get("bad_execution_root") != runtime.get("execution_root")
+        or candidate.get("bad_production_profile_sha256")
+        != runtime.get("production_profile_sha256")
+        or candidate.get("bad_agent_source_sha256") != runtime.get("agent_source_sha256")
+        or candidate.get("campaign_id") != base.get("campaign_id")
+        or candidate.get("campaign_manifest_sha256") != base.get("campaign_manifest_sha256")
+        or candidate.get("campaign_lanes_sha256") != base.get("campaign_canary_lanes_sha256")
+        or candidate.get("source_bindings_sha256") != migration.get("source_bindings_sha256")
+        or candidate.get("packet_publication_entry_hash")
+        != base.get("packet_publication_entry_hash")
+        or candidate.get("execution_root")
+        in {migration.get("prior_execution_root"), runtime.get("execution_root")}
+        or candidate.get("authorizations")
+        != {"review_launch": False, "adjudication": False, "canonical_import": False}
+    ):
+        _fail("migrated runtime repair candidate is invalid")
     _parse_timestamp(candidate.get("attested_at"))
     _validate_runtime_identity(candidate.get("runtime_identity"))
 
@@ -4071,6 +4556,7 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     common.add_argument("--execution-root", type=Path, required=True)
     sub.add_parser("attest-runtime", parents=[common])
     sub.add_parser("attest-migrated-runtime", parents=[common])
+    sub.add_parser("attest-repaired-runtime", parents=[common])
     migration = sub.add_parser("authorize-prelaunch-migration")
     migration.add_argument("--campaign", type=Path, required=True)
     migration.add_argument("--bindings", type=Path, required=True)
@@ -4150,6 +4636,17 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0912
             args.packets,
             args.execution_root,
             migrated=True,
+        )
+    elif args.command == "attest-repaired-runtime":
+        result = attest_runtime(
+            root,
+            args.campaign,
+            args.bindings,
+            args.cache,
+            args.ledger_root,
+            args.packets,
+            args.execution_root,
+            repair=True,
         )
     elif args.command == "authorize-prelaunch-migration":
         result = authorize_prelaunch_migration(

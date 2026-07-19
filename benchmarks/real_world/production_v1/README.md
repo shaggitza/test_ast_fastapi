@@ -133,6 +133,11 @@ in a random private sibling staging directory and atomically published to a dist
 execution root; a crashed partial staging directory is inert and is never path-deleted or
 reused. Migrated agent installation authenticates and archives the exact prior global agent
 bytes before one exact atomic replacement, and is recoverable before its receipt publication.
+The observed preauthorization staging-path incident has one narrower repair transition: only
+when the bad migrated runtime is still the ledger head, the bad staging path is absent, the
+global agent equals the bad bytes, and no installation receipt or later event exists. It
+preserves both earlier roots, fully reattests custody into a third distinct root, archives the
+original and bad agent bytes, and permits only their exact replacement by the repaired bytes.
 One atomic generation-2 canary authorization restores both exact attempts without changing
 campaign attempt or reviewer identity. The old execution root is never deleted or reused.
 Any launch claim remains permanently nonretryable. Pilot-v2 bytes
