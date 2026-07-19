@@ -224,6 +224,164 @@ def test_exact_fifty_build_uses_250_commands_and_validates_aggregate(  # noqa: P
     assert selected["commands"] == 5
     assert selected["rank"] == 1
     assert selected["packets"] == 50
+
+    bindings_path = tmp_path / "fast-bindings.json"
+    bindings_path.write_bytes(bindings_raw)
+    bindings_path.chmod(0o400)
+    custody_path = tmp_path / "custody-receipt.json"
+    aggregate_inventory = packet._inventory(
+        staging,
+        limit=packet._MAX_AGGREGATE_PAYLOAD,
+        max_entries=packet._MAX_AGGREGATE_ENTRIES,
+    )
+    custody_value = {
+        "schema_version": 1,
+        "protocol": "ground-truth-runtime-custody-receipt-v1",
+        "campaign_id": campaign_value["id"],
+        "campaign_path": str(tmp_path / "campaign"),
+        "campaign_manifest_sha256": packet._sha(campaign_raw),
+        "source_bindings_path": str(bindings_path),
+        "source_bindings_sha256": packet._sha(bindings_raw),
+        "cache": {
+            "cache_root": str(cache),
+            "cache_device": 1,
+            "cache_inode": 1,
+            "inventory_sha256": "sha256:" + "1" * 64,
+            "inventory_path_count": 1,
+            "file_count": 1,
+            "disk_bytes": 1,
+            "content_sha256": "sha256:" + "2" * 64,
+        },
+        "ledger_root": str(tmp_path / "ledger"),
+        "packets": {
+            "packets_root": str(staging),
+            "packets_device": staging.stat().st_dev,
+            "packets_inode": staging.stat().st_ino,
+            "inventory_sha256": aggregate_inventory["sha256"],
+            "inventory_entries": aggregate_inventory["entries"],
+            "inventory_bytes": aggregate_inventory["bytes"],
+            "aggregate_manifest_sha256": packet._sha(
+                (staging / "aggregate-manifest.json").read_bytes()
+            ),
+            "aggregate_root_sha256": aggregate["aggregate_root_sha256"],
+            "publication_entry_hash": "sha256:" + "e" * 64,
+            "packet_count": 50,
+        },
+        "production_profile_sha256": packet._sha(profile.raw),
+        "production_files_sha256": packet._sha(canonical_json(profile.value["files"])),
+        "authorizations": {
+            "review_launch": False,
+            "adjudication": False,
+            "canonical_import": False,
+        },
+    }
+    custody_path.write_bytes(canonical_json(custody_value))
+    custody_path.chmod(0o400)
+    monkeypatch.setattr(packet, "_campaign", lambda *_args: (campaign_value, campaign_raw))
+    monkeypatch.setattr(packet, "_profile_by_hash", lambda *_args: profile)
+    monkeypatch.setattr(
+        source,
+        "validate_attested_source_inventory",
+        lambda *_args, **_kwargs: {"commands": 0},
+    )
+    monkeypatch.setattr(
+        source,
+        "_inventory",
+        lambda *_args: {
+            "inventory_sha256": "sha256:" + "1" * 64,
+            "inventory_path_count": 1,
+            "file_count": 1,
+            "disk_bytes": 1,
+        },
+    )
+    monkeypatch.setattr(
+        packet,
+        "_validate_publication_transition",
+        lambda *_args: {"entry_hash": "sha256:" + "e" * 64},
+    )
+    runtime_hash = "sha256:" + "f" * 64
+    (tmp_path / "ledger").mkdir()
+    authorization_path = tmp_path / "ledger" / packet._AUTH_FILE
+    authorization_path.write_bytes(canonical_json({"entry_hash": "sha256:" + "c" * 64}))
+    authorization_path.chmod(0o400)
+    minted = packet.attest_packet_selection(
+        ROOT,
+        tmp_path / "campaign",
+        bindings_path,
+        cache,
+        tmp_path / "ledger",
+        staging,
+        custody_path,
+        runtime_hash,
+        1,
+    )
+    assert minted["commands"] == 5
+    fast_build = packet._build_packet
+    monkeypatch.setattr(
+        packet,
+        "_build_packet",
+        lambda *_args, **_kwargs: pytest.fail("receipt verification invoked Git regeneration"),
+    )
+    verified = packet.validate_packet_selection_receipt(
+        ROOT,
+        tmp_path / "campaign",
+        bindings_path,
+        cache,
+        tmp_path / "ledger",
+        staging,
+        custody_path,
+        minted,
+        runtime_attestation_entry_hash=runtime_hash,
+    )
+    assert verified["commands"] == 0
+    staging.chmod(0o700)
+    with pytest.raises(packet.PacketV1Error, match="inventory"):
+        packet.validate_packet_selection_receipt(
+            ROOT,
+            tmp_path / "campaign",
+            bindings_path,
+            cache,
+            tmp_path / "ledger",
+            staging,
+            custody_path,
+            minted,
+            runtime_attestation_entry_hash=runtime_hash,
+        )
+    staging.chmod(0o500)
+    with pytest.raises(packet.PacketV1Error, match="shape"):
+        packet.validate_packet_selection_receipt(
+            ROOT,
+            tmp_path / "campaign",
+            bindings_path,
+            cache,
+            tmp_path / "ledger",
+            staging,
+            custody_path,
+            minted,
+            runtime_attestation_entry_hash="sha256:" + "0" * 64,
+        )
+    other_payload_for_fast = staging / packet._packet_name(records[1]) / "snapshot.diff"
+    fast_original = other_payload_for_fast.read_bytes()
+    other_payload_for_fast.chmod(0o600)
+    other_payload_for_fast.write_bytes(fast_original + b"fast-tamper")
+    other_payload_for_fast.chmod(0o400)
+    with pytest.raises(packet.PacketV1Error, match="inventory"):
+        packet.validate_packet_selection_receipt(
+            ROOT,
+            tmp_path / "campaign",
+            bindings_path,
+            cache,
+            tmp_path / "ledger",
+            staging,
+            custody_path,
+            minted,
+            runtime_attestation_entry_hash=runtime_hash,
+        )
+    other_payload_for_fast.chmod(0o600)
+    other_payload_for_fast.write_bytes(fast_original)
+    other_payload_for_fast.chmod(0o400)
+    monkeypatch.setattr(packet, "_build_packet", fast_build)
+
     with pytest.raises(packet.PacketV1Error, match="rank is invalid"):
         packet.validate_packet_selection(
             ROOT,

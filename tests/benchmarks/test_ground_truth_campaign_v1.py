@@ -280,6 +280,7 @@ def test_profile_checksums_cover_all_offline_files() -> None:
         "benchmarks/real_world/ground_truth_run_v1.py",
         "benchmarks/real_world/production_v1/runtime-policy-v1.json",
         "benchmarks/real_world/production_v1/runtime-attestation-schema-v1.json",
+        "benchmarks/real_world/production_v1/runtime-custody-receipt-schema-v1.json",
         "benchmarks/real_world/production_v1/review-canary-authorization-schema-v1.json",
         "benchmarks/real_world/production_v1/lane-event-schema-v1.json",
         "benchmarks/real_world/production_v1/session-audit-schema-v1.json",

@@ -124,6 +124,33 @@
       "title": "BoundRun",
       "type": "object"
     },
+    "FalseAuthority": {
+      "additionalProperties": false,
+      "properties": {
+        "adjudication": {
+          "const": false,
+          "title": "Adjudication",
+          "type": "boolean"
+        },
+        "canonical_import": {
+          "const": false,
+          "title": "Canonical Import",
+          "type": "boolean"
+        },
+        "review_launch": {
+          "const": false,
+          "title": "Review Launch",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "review_launch",
+        "adjudication",
+        "canonical_import"
+      ],
+      "title": "FalseAuthority",
+      "type": "object"
+    },
     "ResourceLimits": {
       "additionalProperties": false,
       "properties": {
@@ -159,6 +186,99 @@
         "max_output_bytes"
       ],
       "title": "ResourceLimits",
+      "type": "object"
+    },
+    "SelectionCustodyReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "aggregate_root_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Aggregate Root Sha256",
+          "type": "string"
+        },
+        "authorizations": {
+          "$ref": "#/$defs/FalseAuthority"
+        },
+        "cache_inventory_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Cache Inventory Sha256",
+          "type": "string"
+        },
+        "commands": {
+          "const": 5,
+          "title": "Commands",
+          "type": "integer"
+        },
+        "packet_inventory_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Packet Inventory Sha256",
+          "type": "string"
+        },
+        "packet_root_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Packet Root Sha256",
+          "type": "string"
+        },
+        "pr": {
+          "exclusiveMinimum": 0,
+          "title": "Pr",
+          "type": "integer"
+        },
+        "protocol": {
+          "const": "ground-truth-packet-selection-receipt-v1",
+          "title": "Protocol",
+          "type": "string"
+        },
+        "publication_entry_hash": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Publication Entry Hash",
+          "type": "string"
+        },
+        "rank": {
+          "maximum": 50,
+          "minimum": 1,
+          "title": "Rank",
+          "type": "integer"
+        },
+        "repository": {
+          "maxLength": 300,
+          "pattern": "^[^/\\s]+/[^/\\s]+$",
+          "title": "Repository",
+          "type": "string"
+        },
+        "runtime_attestation_entry_hash": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Runtime Attestation Entry Hash",
+          "type": "string"
+        },
+        "runtime_custody_receipt_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Runtime Custody Receipt Sha256",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "protocol",
+        "runtime_attestation_entry_hash",
+        "runtime_custody_receipt_sha256",
+        "rank",
+        "repository",
+        "pr",
+        "packet_root_sha256",
+        "aggregate_root_sha256",
+        "publication_entry_hash",
+        "cache_inventory_sha256",
+        "packet_inventory_sha256",
+        "commands",
+        "authorizations"
+      ],
+      "title": "SelectionCustodyReceipt",
       "type": "object"
     },
     "SnapshotBinding": {
@@ -348,10 +468,27 @@
         "run": {
           "$ref": "#/$defs/BoundRun"
         },
+        "runtime_attestation_entry_hash": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Runtime Attestation Entry Hash",
+          "type": "string"
+        },
+        "runtime_custody_receipt_path": {
+          "title": "Runtime Custody Receipt Path",
+          "type": "string"
+        },
+        "runtime_custody_receipt_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Runtime Custody Receipt Sha256",
+          "type": "string"
+        },
         "schema_version": {
           "const": 1,
           "title": "Schema Version",
           "type": "integer"
+        },
+        "selection_custody": {
+          "$ref": "#/$defs/SelectionCustodyReceipt"
         },
         "snapshots": {
           "$ref": "#/$defs/SnapshotBinding"
@@ -393,6 +530,10 @@
         "source_bindings_path",
         "ledger_root",
         "packets_root",
+        "runtime_attestation_entry_hash",
+        "runtime_custody_receipt_path",
+        "runtime_custody_receipt_sha256",
+        "selection_custody",
         "original_packet_root_sha256",
         "aggregate_root_sha256",
         "publication_entry_hash",

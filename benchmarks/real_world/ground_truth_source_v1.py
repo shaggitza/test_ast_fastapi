@@ -1126,6 +1126,72 @@ def build_source_bindings(
     return {"output": str(output), "sha256": _sha(canonical_json(value)), "records": 50}
 
 
+def validate_attested_source_inventory(
+    root: Path,
+    campaign_path: Path,
+    cache_path: Path,
+    binding_path: Path,
+    expected: dict[str, Any],
+) -> dict[str, Any]:
+    """Reauthenticate an attested source cache without invoking Git."""
+    campaign, campaign_raw = _campaign(root, campaign_path)
+    value, raw, opened = _read_json(binding_path, modes={0o400})
+    cache = value.get("cache")
+    records = value.get("records")
+    required = {
+        "source_bindings_sha256",
+        "campaign_manifest_sha256",
+        "cache_root",
+        "cache_device",
+        "cache_inode",
+        "inventory_sha256",
+        "inventory_path_count",
+        "file_count",
+        "disk_bytes",
+        "content_sha256",
+    }
+    if set(expected) != required or not isinstance(cache, dict) or not isinstance(records, list):
+        _fail("attested source custody shape is invalid")
+    current = binding_path.stat(follow_symlinks=False)
+    if (
+        canonical_json(value) != raw
+        or (opened.st_dev, opened.st_ino, opened.st_ctime_ns)
+        != (current.st_dev, current.st_ino, current.st_ctime_ns)
+        or expected["source_bindings_sha256"] != _sha(raw)
+        or expected["campaign_manifest_sha256"] != _sha(campaign_raw)
+        or value.get("campaign_id") != campaign.get("id")
+        or value.get("campaign_manifest_sha256") != _sha(campaign_raw)
+        or len(records) != 50
+        or expected["cache_root"] != str(cache_path)
+    ):
+        _fail("attested source identity changed")
+    inventory_before = _inventory(cache_path)
+    for key in ("inventory_sha256", "inventory_path_count", "file_count", "disk_bytes"):
+        if cache.get(key) != inventory_before.get(key) or cache.get(key) != expected[key]:
+            _fail("attested source cache binding changed")
+    root_identity = inventory_before["root_identity"]
+    if (
+        cache.get("device") != root_identity[0]
+        or cache.get("inode") != root_identity[1]
+        or cache.get("device") != expected["cache_device"]
+        or cache.get("inode") != expected["cache_inode"]
+        or cache.get("content_sha256") != expected["content_sha256"]
+    ):
+        _fail("attested source cache identity changed")
+    inventory_after = _inventory(cache_path)
+    if inventory_before != inventory_after:
+        _fail("cache inventory drifted around attested validation")
+    return {
+        "valid": True,
+        "sha256": _sha(raw),
+        "records": 50,
+        "commands": 0,
+        "inventory": inventory_after,
+        "content_sha256": cache["content_sha256"],
+        "live_launch_authorized": False,
+    }
+
+
 def validate_source_bindings(
     root: Path, campaign_path: Path, cache_path: Path, binding_path: Path
 ) -> dict[str, Any]:

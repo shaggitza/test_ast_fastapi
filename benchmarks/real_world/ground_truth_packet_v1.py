@@ -1861,6 +1861,313 @@ def finalize_packets(
     }
 
 
+def _runtime_custody_receipt(path: Path) -> tuple[dict[str, Any], bytes]:
+    value, raw, _ = _json(path, modes={0o400})
+    _strict(
+        value,
+        {
+            "schema_version",
+            "protocol",
+            "campaign_id",
+            "campaign_path",
+            "campaign_manifest_sha256",
+            "source_bindings_path",
+            "source_bindings_sha256",
+            "cache",
+            "ledger_root",
+            "packets",
+            "production_profile_sha256",
+            "production_files_sha256",
+            "authorizations",
+        },
+        "runtime custody receipt",
+    )
+    cache = value.get("cache")
+    packets = value.get("packets")
+    if not isinstance(cache, dict) or set(cache) != {
+        "cache_root",
+        "cache_device",
+        "cache_inode",
+        "inventory_sha256",
+        "inventory_path_count",
+        "file_count",
+        "disk_bytes",
+        "content_sha256",
+    }:
+        _fail("runtime custody source shape is invalid")
+    if not isinstance(packets, dict) or set(packets) != {
+        "packets_root",
+        "packets_device",
+        "packets_inode",
+        "inventory_sha256",
+        "inventory_entries",
+        "inventory_bytes",
+        "aggregate_manifest_sha256",
+        "aggregate_root_sha256",
+        "publication_entry_hash",
+        "packet_count",
+    }:
+        _fail("runtime custody packet shape is invalid")
+    if (
+        canonical_json(value) != raw
+        or value.get("schema_version") != 1
+        or value.get("protocol") != "ground-truth-runtime-custody-receipt-v1"
+        or value.get("authorizations")
+        != {"review_launch": False, "adjudication": False, "canonical_import": False}
+        or packets.get("packet_count") != 50
+    ):
+        _fail("runtime custody receipt is invalid")
+    return value, raw
+
+
+def _attested_selection_context(
+    root: Path,
+    campaign_path: Path,
+    bindings_path: Path,
+    cache: Path,
+    ledger_root: Path,
+    output: Path,
+    custody_path: Path,
+    rank: int,
+) -> tuple[
+    dict[str, Any], dict[str, Any], bytes, dict[str, Any], bytes, dict[str, Any], ProfileSnapshot
+]:
+    custody, custody_raw = _runtime_custody_receipt(custody_path)
+    profile = _profile_by_hash(root, cast("str", custody["production_profile_sha256"]))
+    campaign, campaign_raw = _campaign(root, campaign_path)
+    if (
+        custody["campaign_path"] != str(campaign_path)
+        or custody["source_bindings_path"] != str(bindings_path)
+        or custody["ledger_root"] != str(ledger_root)
+        or custody["cache"]["cache_root"] != str(cache)
+        or custody["packets"]["packets_root"] != str(output)
+        or custody["campaign_id"] != campaign["id"]
+        or custody["campaign_manifest_sha256"] != _sha(campaign_raw)
+        or custody["production_files_sha256"]
+        != _sha(canonical_json(cast("dict[str, str]", profile.value["files"])))
+    ):
+        _fail("runtime custody paths or profile changed")
+    source_v1.validate_attested_source_inventory(
+        root,
+        campaign_path,
+        cache,
+        bindings_path,
+        {
+            "source_bindings_sha256": custody["source_bindings_sha256"],
+            "campaign_manifest_sha256": custody["campaign_manifest_sha256"],
+            **custody["cache"],
+        },
+    )
+    bindings, bindings_raw, _ = source_v1._read_json(bindings_path, modes={0o400})
+    packet_inventory = _inventory(
+        output, limit=_MAX_AGGREGATE_PAYLOAD, max_entries=_MAX_AGGREGATE_ENTRIES
+    )
+    packet_status = output.stat(follow_symlinks=False)
+    packet_bound = custody["packets"]
+    if (
+        stat.S_IMODE(packet_status.st_mode) != 0o500
+        or packet_status.st_dev != packet_bound["packets_device"]
+        or packet_status.st_ino != packet_bound["packets_inode"]
+        or packet_inventory["sha256"] != packet_bound["inventory_sha256"]
+        or packet_inventory["entries"] != packet_bound["inventory_entries"]
+        or packet_inventory["bytes"] != packet_bound["inventory_bytes"]
+    ):
+        _fail("attested packet aggregate inventory changed")
+    aggregate, aggregate_raw, _ = _json(output / "aggregate-manifest.json", modes={0o400})
+    _validate_aggregate_header(aggregate)
+    if (
+        _sha(aggregate_raw) != packet_bound["aggregate_manifest_sha256"]
+        or aggregate.get("aggregate_root_sha256") != packet_bound["aggregate_root_sha256"]
+        or aggregate.get("campaign_manifest_sha256") != _sha(campaign_raw)
+        or aggregate.get("source_bindings_sha256") != _sha(bindings_raw)
+        or aggregate.get("packet_count") != 50
+        or aggregate.get("aggregate_root_sha256") != _aggregate_root(aggregate)
+    ):
+        _fail("attested aggregate manifest changed")
+    authorization, _, _ = _json(ledger_root / _AUTH_FILE, modes={0o400})
+    transition = _validate_publication_transition(
+        root, ledger_root, campaign, campaign_raw, bindings_raw, authorization, output
+    )
+    if transition["entry_hash"] != packet_bound["publication_entry_hash"]:
+        _fail("attested publication transition changed")
+    campaign_rows = [row for row in campaign["records"] if row.get("rank") == rank]
+    binding_rows = [row for row in bindings["records"] if row.get("rank") == rank]
+    aggregate_rows = [row for row in aggregate["packets"] if row.get("rank") == rank]
+    if len(campaign_rows) != 1 or len(binding_rows) != 1 or len(aggregate_rows) != 1:
+        _fail("selected attested rank is absent or duplicate")
+    selected = binding_rows[0]
+    row = aggregate_rows[0]
+    if any(
+        item.get("repository") != selected.get("repository") or item.get("pr") != selected.get("pr")
+        for item in (campaign_rows[0], row)
+    ):
+        _fail("selected attested identities disagree")
+    manifest = _validate_one_packet(
+        output / cast("str", row["directory"]), selected, _sha(bindings_raw), profile.files
+    )
+    if manifest["packet_root_sha256"] != row["packet_root_sha256"]:
+        _fail("selected attested packet root changed")
+    cache_final = source_v1._inventory(cache)
+    packet_final = _inventory(
+        output, limit=_MAX_AGGREGATE_PAYLOAD, max_entries=_MAX_AGGREGATE_ENTRIES
+    )
+    if (
+        cache_final["inventory_sha256"] != custody["cache"]["inventory_sha256"]
+        or cache_final["inventory_path_count"] != custody["cache"]["inventory_path_count"]
+        or cache_final["file_count"] != custody["cache"]["file_count"]
+        or cache_final["disk_bytes"] != custody["cache"]["disk_bytes"]
+        or packet_final != packet_inventory
+    ):
+        _fail("attested custody drifted during selection validation")
+    return (
+        custody,
+        {**row, "runtime_custody_receipt_sha256": _sha(custody_raw)},
+        campaign_raw,
+        bindings,
+        bindings_raw,
+        packet_inventory,
+        profile,
+    )
+
+
+def attest_packet_selection(
+    root: Path,
+    campaign_path: Path,
+    bindings_path: Path,
+    cache: Path,
+    ledger_root: Path,
+    output: Path,
+    custody_path: Path,
+    runtime_attestation_entry_hash: str,
+    rank: int,
+) -> dict[str, Any]:
+    if isinstance(rank, bool) or not isinstance(rank, int) or not 1 <= rank <= 50:
+        _fail("selected packet rank is invalid")
+    cache_before = source_v1._inventory(cache)
+    aggregate_before = _inventory(
+        output, limit=_MAX_AGGREGATE_PAYLOAD, max_entries=_MAX_AGGREGATE_ENTRIES
+    )
+    custody, row, _campaign_raw, bindings, bindings_raw, _inventory_before, profile = (
+        _attested_selection_context(
+            root, campaign_path, bindings_path, cache, ledger_root, output, custody_path, rank
+        )
+    )
+    selected = next(item for item in bindings["records"] if item["rank"] == rank)
+    expected = _validate_one_packet(
+        output / cast("str", row["directory"]), selected, _sha(bindings_raw), profile.files
+    )
+    deadline = time.monotonic() + _DEADLINE_SECONDS
+    with tempfile.TemporaryDirectory(
+        prefix="production-fast-selection-", dir=output.parent
+    ) as name:
+        budget = AggregateBudget(Path(name), _STAGING_LIMIT)
+        counter = [0]
+        regenerated, commands = _build_packet(
+            cache,
+            Path(name) / _packet_name(selected),
+            selected,
+            _sha(bindings_raw),
+            deadline,
+            budget,
+            profile.files,
+            counter,
+        )
+        if commands != 5 or counter[0] != 5 or regenerated != expected:
+            _fail("selected packet fast regeneration is invalid")
+    cache_after = source_v1._inventory(cache)
+    aggregate_after = _inventory(
+        output, limit=_MAX_AGGREGATE_PAYLOAD, max_entries=_MAX_AGGREGATE_ENTRIES
+    )
+    if cache_before != cache_after or aggregate_before != aggregate_after:
+        _fail("custody drifted around selected packet attestation")
+    receipt = {
+        "schema_version": 1,
+        "protocol": "ground-truth-packet-selection-receipt-v1",
+        "runtime_attestation_entry_hash": runtime_attestation_entry_hash,
+        "runtime_custody_receipt_sha256": row["runtime_custody_receipt_sha256"],
+        "rank": rank,
+        "repository": row["repository"],
+        "pr": row["pr"],
+        "packet_root_sha256": row["packet_root_sha256"],
+        "aggregate_root_sha256": custody["packets"]["aggregate_root_sha256"],
+        "publication_entry_hash": custody["packets"]["publication_entry_hash"],
+        "cache_inventory_sha256": custody["cache"]["inventory_sha256"],
+        "packet_inventory_sha256": custody["packets"]["inventory_sha256"],
+        "commands": 5,
+        "authorizations": {
+            "review_launch": False,
+            "adjudication": False,
+            "canonical_import": False,
+        },
+    }
+    return receipt
+
+
+def validate_packet_selection_receipt(
+    root: Path,
+    campaign_path: Path,
+    bindings_path: Path,
+    cache: Path,
+    ledger_root: Path,
+    output: Path,
+    custody_path: Path,
+    receipt: dict[str, Any],
+    *,
+    runtime_attestation_entry_hash: str,
+) -> dict[str, Any]:
+    expected_keys = {
+        "schema_version",
+        "protocol",
+        "runtime_attestation_entry_hash",
+        "runtime_custody_receipt_sha256",
+        "rank",
+        "repository",
+        "pr",
+        "packet_root_sha256",
+        "aggregate_root_sha256",
+        "publication_entry_hash",
+        "cache_inventory_sha256",
+        "packet_inventory_sha256",
+        "commands",
+        "authorizations",
+    }
+    if (
+        set(receipt) != expected_keys
+        or receipt.get("schema_version") != 1
+        or receipt.get("protocol") != "ground-truth-packet-selection-receipt-v1"
+        or receipt.get("runtime_attestation_entry_hash") != runtime_attestation_entry_hash
+    ):
+        _fail("packet selection receipt shape is invalid")
+    rank = receipt.get("rank")
+    if isinstance(rank, bool) or not isinstance(rank, int) or not 1 <= rank <= 50:
+        _fail("packet selection receipt rank is invalid")
+    custody, row, _campaign_raw, _bindings, _bindings_raw, _packet_inventory, _profile = (
+        _attested_selection_context(
+            root, campaign_path, bindings_path, cache, ledger_root, output, custody_path, rank
+        )
+    )
+    expected = {
+        **receipt,
+        "runtime_custody_receipt_sha256": row["runtime_custody_receipt_sha256"],
+        "repository": row["repository"],
+        "pr": row["pr"],
+        "packet_root_sha256": row["packet_root_sha256"],
+        "aggregate_root_sha256": custody["packets"]["aggregate_root_sha256"],
+        "publication_entry_hash": custody["packets"]["publication_entry_hash"],
+        "cache_inventory_sha256": custody["cache"]["inventory_sha256"],
+        "packet_inventory_sha256": custody["packets"]["inventory_sha256"],
+        "commands": 5,
+        "authorizations": {
+            "review_launch": False,
+            "adjudication": False,
+            "canonical_import": False,
+        },
+    }
+    if receipt != expected:
+        _fail("packet selection receipt binding changed")
+    return {**receipt, "valid": True, "commands": 0}
+
+
 def validate_packet_selection(
     root: Path,
     campaign_path: Path,

@@ -108,6 +108,12 @@
         "bytes"
       ],
       "type": "object"
+    },
+    "schema_version": {
+      "enum": [
+        1,
+        2
+      ]
     }
   },
   "$id": "https://example.invalid/ground-truth-production-v1/runtime-attestation-schema-v1.json",
@@ -142,6 +148,52 @@
         "required": [
           "supersedes_entry_hash"
         ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "schema_version": {
+            "const": 2
+          }
+        },
+        "required": [
+          "schema_version"
+        ]
+      },
+      "then": {
+        "required": [
+          "runtime_custody_receipt_path",
+          "runtime_custody_receipt_sha256"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "schema_version": {
+            "const": 1
+          }
+        },
+        "required": [
+          "schema_version"
+        ]
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "runtime_custody_receipt_path"
+              ]
+            },
+            {
+              "required": [
+                "runtime_custody_receipt_sha256"
+              ]
+            }
+          ]
+        }
       }
     }
   ],
@@ -207,6 +259,13 @@
         "ground-truth-runtime-attestation-v1",
         "ground-truth-runtime-attestation-supersession-v1"
       ]
+    },
+    "runtime_custody_receipt_path": {
+      "pattern": "^/",
+      "type": "string"
+    },
+    "runtime_custody_receipt_sha256": {
+      "$ref": "#/$defs/digest"
     },
     "runtime_identity": {
       "additionalProperties": false,

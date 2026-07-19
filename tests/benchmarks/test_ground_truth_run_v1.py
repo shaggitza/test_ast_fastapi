@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import inspect
 import json
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -249,16 +251,44 @@ def test_broker_readiness_rejects_dead_process_before_socket_check(
 
 
 def test_broker_socket_path_is_short_private_and_attempt_bound() -> None:
-    first = run._broker_socket_path(A)
-    second = run._broker_socket_path(B)
+    pr = 900_000_000 + os.getpid()
+    attempt_a = f"prod-v1-i149-rank001-pr{pr}-A"
+    attempt_b = f"prod-v1-i149-rank001-pr{pr}-B"
+    first = run._broker_socket_path(attempt_a)
+    second = run._broker_socket_path(attempt_b)
     assert first != second
     assert len(os.fsencode(first)) < 100
     first.touch()
     try:
         with pytest.raises(run.GroundTruthRunError, match="already exists"):
-            run._broker_socket_path(A)
+            run._broker_socket_path(attempt_a)
     finally:
         first.unlink(missing_ok=True)
+
+
+def test_fast_prepare_avoids_full_custody_and_receipt_publication_is_no_clobber(
+    tmp_path: Path,
+) -> None:
+    prepare_source = inspect.getsource(run.prepare_attempt)
+    attest_source = inspect.getsource(run.attest_runtime)
+    assert "_custody(" not in prepare_source
+    assert "source_inventory_before" in attest_source
+    assert "packet_inventory_before" in attest_source
+    assert "runtime_custody_receipt_sha256" in attest_source
+    assert '"schema_version": 2' in attest_source
+    assert "source_inventory_final" in attest_source
+    assert "packet_inventory_final" in attest_source
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    receipt = runtime / "custody-receipt.json"
+    value = {
+        "schema_version": 1,
+        "protocol": "ground-truth-runtime-custody-receipt-v1",
+    }
+    run._atomic(receipt, value)
+    assert stat.S_IMODE(receipt.stat().st_mode) == 0o400
+    with pytest.raises(run.GroundTruthRunError, match="already exists"):
+        run._atomic(receipt, value)
 
 
 def test_broker_process_limit_allows_bounded_evidence_child() -> None:
@@ -343,6 +373,24 @@ def test_ledger_rejects_incomplete_runtime_identity_and_unrelated_campaign_lane(
     _replace(ledger / "review-canary-authorization.json", auth)
     with pytest.raises(run.GroundTruthRunError, match="runtime attestation ledger"):
         run._extended_ledger(ledger, ROOT)
+
+
+def test_receipt_runtime_shape_survives_profile_rollover(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger, _ = _ledger(tmp_path, monkeypatch)
+    (ledger / "review-canary-authorization.json").unlink()
+    receipt_runtime = _runtime()
+    receipt_runtime["schema_version"] = 2
+    receipt_runtime["runtime_custody_receipt_path"] = (
+        "/private/execution/runtime/custody-receipt.json"
+    )
+    receipt_runtime["runtime_custody_receipt_sha256"] = "sha256:" + "a" * 64
+    body = {key: value for key, value in receipt_runtime.items() if key != "entry_hash"}
+    receipt_runtime["entry_hash"] = run._entry_hash(run._RUNTIME_DOMAIN, body)
+    _replace(ledger / "runtime-attestation.json", receipt_runtime)
+    state = run._extended_ledger(ledger, ROOT)
+    assert state["runtime"] == receipt_runtime
 
 
 def test_runtime_supersession_is_single_monotonic_no_authority_recovery(

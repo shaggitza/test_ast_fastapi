@@ -56,6 +56,7 @@ _SUBMIT_EXTENSION_SCHEMA: Final = (
 _RUN_MODULE: Final = "benchmarks/real_world/ground_truth_run_v1.py"
 _RUNTIME_POLICY: Final = f"{_PROFILE_DIR}/runtime-policy-v1.json"
 _RUNTIME_SCHEMA: Final = f"{_PROFILE_DIR}/runtime-attestation-schema-v1.json"
+_RUNTIME_CUSTODY_SCHEMA: Final = f"{_PROFILE_DIR}/runtime-custody-receipt-schema-v1.json"
 _REVIEW_AUTH_SCHEMA: Final = f"{_PROFILE_DIR}/review-canary-authorization-schema-v1.json"
 _LANE_EVENT_SCHEMA: Final = f"{_PROFILE_DIR}/lane-event-schema-v1.json"
 _SESSION_AUDIT_SCHEMA: Final = f"{_PROFILE_DIR}/session-audit-schema-v1.json"
@@ -196,6 +197,7 @@ def _authenticate_profile(root: Path) -> dict[str, Any]:
         _RUN_MODULE,
         _RUNTIME_POLICY,
         _RUNTIME_SCHEMA,
+        _RUNTIME_CUSTODY_SCHEMA,
         _REVIEW_AUTH_SCHEMA,
         _LANE_EVENT_SCHEMA,
         _SESSION_AUDIT_SCHEMA,

@@ -394,6 +394,50 @@ def test_build_and_validate_bindings_and_tamper(prepared: tuple[Any, ...]) -> No
         source.validate_source_bindings(Path.cwd(), campaign_path, cache, output)
 
 
+def test_attested_source_inventory_is_zero_git_and_rejects_tamper(
+    prepared: tuple[Any, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private, campaign_path, cache, _, _ = prepared
+    output = private / "bindings.json"
+    source.build_source_bindings(Path.cwd(), campaign_path, cache, output)
+    value = json.loads(output.read_bytes())
+    expected = {
+        "source_bindings_sha256": source._sha(output.read_bytes()),
+        "campaign_manifest_sha256": value["campaign_manifest_sha256"],
+        "cache_root": str(cache),
+        **{
+            key: value["cache"][{"cache_device": "device", "cache_inode": "inode"}.get(key, key)]
+            for key in (
+                "cache_device",
+                "cache_inode",
+                "inventory_sha256",
+                "inventory_path_count",
+                "file_count",
+                "disk_bytes",
+                "content_sha256",
+            )
+        },
+    }
+    monkeypatch.setattr(
+        source,
+        "validate_cache",
+        lambda *_args, **_kwargs: pytest.fail("fast validator invoked semantic Git path"),
+    )
+    result = source.validate_attested_source_inventory(
+        Path.cwd(), campaign_path, cache, output, expected
+    )
+    assert result["commands"] == 0
+    cache.chmod(0o700)
+    extra = cache / "unattested"
+    extra.write_bytes(b"tamper")
+    extra.chmod(0o400)
+    cache.chmod(0o500)
+    with pytest.raises(source.SourceV1Error, match=r"inventory|binding"):
+        source.validate_attested_source_inventory(
+            Path.cwd(), campaign_path, cache, output, expected
+        )
+
+
 def test_binding_publication_detects_concurrent_descendant_extra(
     prepared: tuple[Any, ...], monkeypatch: pytest.MonkeyPatch
 ) -> None:
