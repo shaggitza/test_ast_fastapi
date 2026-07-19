@@ -28,6 +28,7 @@ _SCHEMA: Final = f"{_PROFILE_DIR}/campaign-manifest-schema-v1.json"
 _README: Final = f"{_PROFILE_DIR}/README.md"
 _CHECKSUMS: Final = f"{_PROFILE_DIR}/checksums-v1.json"
 _PACKET_PHASE_CHECKSUMS: Final = f"{_PROFILE_DIR}/checksums-packet-v1.json"
+_SELECTION_PACKET_PHASE_CHECKSUMS: Final = f"{_PROFILE_DIR}/checksums-packet-selection-v1.json"
 _SELECTION_VALIDATION_POLICY: Final = f"{_PROFILE_DIR}/selection-validation-policy-v1.json"
 _MODULE: Final = "benchmarks/real_world/ground_truth_campaign_v1.py"
 _SOURCE_MODULE: Final = "benchmarks/real_world/ground_truth_source_v1.py"
@@ -60,6 +61,8 @@ _RUNTIME_CUSTODY_SCHEMA: Final = f"{_PROFILE_DIR}/runtime-custody-receipt-schema
 _REVIEW_AUTH_SCHEMA: Final = f"{_PROFILE_DIR}/review-canary-authorization-schema-v1.json"
 _LANE_EVENT_SCHEMA: Final = f"{_PROFILE_DIR}/lane-event-schema-v1.json"
 _SESSION_AUDIT_SCHEMA: Final = f"{_PROFILE_DIR}/session-audit-schema-v1.json"
+_PRELAUNCH_MIGRATION_POLICY: Final = f"{_PROFILE_DIR}/prelaunch-migration-policy-v1.json"
+_PRELAUNCH_MIGRATION_SCHEMA: Final = f"{_PROFILE_DIR}/prelaunch-migration-schema-v1.json"
 _MANIFEST: Final = "benchmarks/real_world/expansion/projects-50x50-v2.json"
 _LOCK: Final = "benchmarks/real_world/expansion/pr-lock-2500-v2.json"
 _LOCK_CHECKSUMS: Final = "benchmarks/real_world/expansion/checksums-50x50-v2.json"
@@ -201,7 +204,10 @@ def _authenticate_profile(root: Path) -> dict[str, Any]:
         _REVIEW_AUTH_SCHEMA,
         _LANE_EVENT_SCHEMA,
         _SESSION_AUDIT_SCHEMA,
+        _PRELAUNCH_MIGRATION_POLICY,
+        _PRELAUNCH_MIGRATION_SCHEMA,
         _PACKET_PHASE_CHECKSUMS,
+        _SELECTION_PACKET_PHASE_CHECKSUMS,
         _SELECTION_VALIDATION_POLICY,
     }
     if (

@@ -6,10 +6,10 @@
   "batch_claim_binding": "ordered-attempt-ids-and-zero-based-task-indices",
   "broker_subprocess": {
     "kind": "bounded-posix-spawn",
+    "model_launch": false,
     "rlimit_fsize_bytes": 5368709120,
     "rlimit_nofile": 256,
-    "rlimit_nproc_uid_wide": 512,
-    "model_launch": false
+    "rlimit_nproc_uid_wide": 512
   },
   "campaign_lane_binding": "sha256-of-ordered-exact-rank1-A-B-lane-key-attempt-reviewer-rows",
   "canary_lanes": [
@@ -25,9 +25,9 @@
     "fork-only",
     "off"
   ],
+  "max_broker_readiness_seconds": 900,
   "max_global_active": 3,
   "max_processes_per_lane": 1,
-  "max_broker_readiness_seconds": 900,
   "max_seconds": 1800,
   "max_submission_calls": 3,
   "max_tool_calls": 203,
@@ -41,6 +41,22 @@
   "parent_launch": "native-subagent-tool-only",
   "pi_coding_agent_version": "0.80.10",
   "pi_subagents_version": "0.35.1",
+  "prelaunch_custody_migration": {
+    "atomic_generation2_authorization": true,
+    "crashed_partial_staging_disposition": "inert-never-auto-deleted-or-reused",
+    "full_custody_before_transition": true,
+    "generation": 2,
+    "maximum": 1,
+    "migrated_agent_replacement": "exact-prior-authenticated-archived-atomic-recoverable",
+    "model_launch_count": 0,
+    "preserves_prior_execution_root": true,
+    "random_private_sibling_staging": true,
+    "requires_distinct_new_execution_root": true,
+    "requires_exact_rank1_a_b_operational_failures": true,
+    "requires_no_native_or_semantic_artifacts": true,
+    "same_ledger_genesis": true,
+    "staged_no_clobber_runtime_publication": true
+  },
   "prepare_runtime_reauthentication": [
     "before-binding",
     "before-broker-spawn",
@@ -54,12 +70,6 @@
     "network": false,
     "shell": false
   },
-  "runtime_custody_receipt": {
-    "full_source_and_250_packet_validation": true,
-    "mode": "0400",
-    "no_clobber": true,
-    "per_attempt_git_commands_after_selection_mint": 0
-  },
   "runtime_attestation_supersession": {
     "filename": "runtime-attestation-supersession-001.json",
     "grants_adjudication": false,
@@ -70,6 +80,12 @@
     "requires_initial_attestation": true,
     "requires_no_lane_events": true,
     "requires_no_review_authorization": true
+  },
+  "runtime_custody_receipt": {
+    "full_source_and_250_packet_validation": true,
+    "mode": "0400",
+    "no_clobber": true,
+    "per_attempt_git_commands_after_selection_mint": 0
   },
   "runtime_files": [
     "package.json",

@@ -124,7 +124,18 @@ only the exact bound rank using five Git commands while minting an immutable sel
 receipt. Repeated binding loads, broker submission, and recovery freshly verify complete
 inventories and the selected copied packet with zero additional custody Git commands;
 semantic evidence validation may still use bounded offline Git queries. A separately gated
-one-shot final full-custody audit remains required before canary sealing. Pilot-v2 bytes
+one-shot final full-custody audit remains required before canary sealing. Issue #232 additionally defines a one-shot same-ledger prelaunch custody migration for
+exact rank-1 A/B attempts that reached only `prepared` then orphan-reconciled
+`operational_failed`, with zero model/native/session/escrow evidence. It appends a false-
+authority migration binding the preserved prior execution identity after a fresh full
+source/50-packet custody validation. Its receipt-bearing runtime-v2 attestation is constructed
+in a random private sibling staging directory and atomically published to a distinct new
+execution root; a crashed partial staging directory is inert and is never path-deleted or
+reused. Migrated agent installation authenticates and archives the exact prior global agent
+bytes before one exact atomic replacement, and is recoverable before its receipt publication.
+One atomic generation-2 canary authorization restores both exact attempts without changing
+campaign attempt or reviewer identity. The old execution root is never deleted or reused.
+Any launch claim remains permanently nonretryable. Pilot-v2 bytes
 are a checksum-bound low-level parser/materializer
 dependency and are neither modified nor used for production authorization, custody, or
 publication.

@@ -76,6 +76,9 @@
         "entry_hash": {
           "$ref": "#/$defs/digest"
         },
+        "generation": {
+          "const": 2
+        },
         "kind": {
           "const": "prepared"
         },
@@ -156,6 +159,9 @@
         "entry_hash": {
           "$ref": "#/$defs/digest"
         },
+        "generation": {
+          "const": 2
+        },
         "kind": {
           "const": "launch_claimed"
         },
@@ -219,6 +225,9 @@
         },
         "entry_hash": {
           "$ref": "#/$defs/digest"
+        },
+        "generation": {
+          "const": 2
         },
         "kind": {
           "const": "native_result"
@@ -316,6 +325,9 @@
         "escrow_sha256": {
           "$ref": "#/$defs/digest"
         },
+        "generation": {
+          "const": 2
+        },
         "kind": {
           "const": "pending"
         },
@@ -377,6 +389,9 @@
         },
         "entry_hash": {
           "$ref": "#/$defs/digest"
+        },
+        "generation": {
+          "const": 2
         },
         "kind": {
           "const": "completed"
@@ -441,6 +456,9 @@
         "failed_at": {
           "type": "string"
         },
+        "generation": {
+          "const": 2
+        },
         "kind": {
           "const": "operational_failed"
         },
@@ -470,6 +488,372 @@
         "reason",
         "failed_at",
         "relaunch_authorized"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_ids": {
+          "items": {
+            "$ref": "#/$defs/attempt"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "authorizations": {
+          "additionalProperties": false,
+          "properties": {
+            "adjudication": {
+              "const": false
+            },
+            "canonical_import": {
+              "const": false
+            },
+            "review_launch": {
+              "const": false
+            }
+          },
+          "required": [
+            "review_launch",
+            "adjudication",
+            "canonical_import"
+          ],
+          "type": "object"
+        },
+        "campaign_manifest_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "entry_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "kind": {
+          "const": "prelaunch_migration"
+        },
+        "migrated_at": {
+          "type": "string"
+        },
+        "model_launch_count": {
+          "const": 0
+        },
+        "packet_publication_entry_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "previous_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "prior_authorization_entry_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "prior_event_count": {
+          "const": 4
+        },
+        "prior_events_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "prior_execution_device": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "prior_execution_inode": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "prior_execution_root": {
+          "pattern": "^/",
+          "type": "string"
+        },
+        "prior_runtime_entry_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "production_profile_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "protocol": {
+          "const": "ground-truth-prelaunch-custody-migration-v1"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "sequence": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "source_bindings_sha256": {
+          "$ref": "#/$defs/digest"
+        }
+      },
+      "required": [
+        "attempt_ids",
+        "authorizations",
+        "campaign_manifest_sha256",
+        "entry_hash",
+        "kind",
+        "migrated_at",
+        "model_launch_count",
+        "packet_publication_entry_hash",
+        "previous_hash",
+        "prior_authorization_entry_hash",
+        "prior_event_count",
+        "prior_events_sha256",
+        "prior_execution_device",
+        "prior_execution_inode",
+        "prior_execution_root",
+        "prior_runtime_entry_hash",
+        "production_profile_sha256",
+        "protocol",
+        "schema_version",
+        "sequence",
+        "source_bindings_sha256"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "agent_source_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "attested_at": {
+          "type": "string"
+        },
+        "authorizations": {
+          "additionalProperties": false,
+          "properties": {
+            "adjudication": {
+              "const": false
+            },
+            "canonical_import": {
+              "const": false
+            },
+            "review_launch": {
+              "const": false
+            }
+          },
+          "required": [
+            "review_launch",
+            "adjudication",
+            "canonical_import"
+          ],
+          "type": "object"
+        },
+        "campaign_id": {
+          "type": "string"
+        },
+        "campaign_lanes_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "campaign_manifest_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "entry_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "execution_device": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "execution_inode": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "execution_root": {
+          "pattern": "^/",
+          "type": "string"
+        },
+        "extension_schema_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "extension_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "kind": {
+          "const": "runtime_migrated"
+        },
+        "migration_entry_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "packet_publication_entry_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "previous_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "production_files_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "production_profile_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "protocol": {
+          "const": "ground-truth-runtime-attestation-migration-v1"
+        },
+        "runtime_custody_receipt_path": {
+          "pattern": "^/",
+          "type": "string"
+        },
+        "runtime_custody_receipt_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "runtime_identity": {
+          "type": "object"
+        },
+        "schema_version": {
+          "const": 2
+        },
+        "sequence": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "source_bindings_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "supersedes_entry_hash": {
+          "$ref": "#/$defs/digest"
+        }
+      },
+      "required": [
+        "schema_version",
+        "protocol",
+        "sequence",
+        "kind",
+        "previous_hash",
+        "entry_hash",
+        "campaign_manifest_sha256",
+        "campaign_lanes_sha256",
+        "source_bindings_sha256",
+        "packet_publication_entry_hash",
+        "runtime_custody_receipt_sha256",
+        "production_profile_sha256",
+        "production_files_sha256",
+        "extension_sha256",
+        "extension_schema_sha256",
+        "agent_source_sha256",
+        "supersedes_entry_hash",
+        "migration_entry_hash",
+        "campaign_id",
+        "runtime_custody_receipt_path",
+        "runtime_identity",
+        "execution_root",
+        "execution_device",
+        "execution_inode",
+        "attested_at",
+        "authorizations"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "agent_installation_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "attempt_ids": {
+          "items": {
+            "$ref": "#/$defs/attempt"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "authorizations": {
+          "additionalProperties": false,
+          "properties": {
+            "adjudication": {
+              "const": false
+            },
+            "canonical_import": {
+              "const": false
+            },
+            "review_launch": {
+              "const": true
+            }
+          },
+          "required": [
+            "review_launch",
+            "adjudication",
+            "canonical_import"
+          ],
+          "type": "object"
+        },
+        "campaign_id": {
+          "type": "string"
+        },
+        "campaign_manifest_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "entry_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "expires_at": {
+          "type": "string"
+        },
+        "generation": {
+          "const": 2
+        },
+        "issued_at": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "canary_reauthorized"
+        },
+        "lanes": {
+          "items": {
+            "type": "object"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "limits": {
+          "type": "object"
+        },
+        "migration_entry_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "previous_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "production_profile_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "protocol": {
+          "const": "ground-truth-review-canary-authorization-generation2-v1"
+        },
+        "runtime_attestation_entry_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "sequence": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "agent_installation_sha256",
+        "attempt_ids",
+        "authorizations",
+        "campaign_id",
+        "campaign_manifest_sha256",
+        "entry_hash",
+        "expires_at",
+        "generation",
+        "issued_at",
+        "kind",
+        "lanes",
+        "limits",
+        "migration_entry_hash",
+        "previous_hash",
+        "production_profile_sha256",
+        "protocol",
+        "runtime_attestation_entry_hash",
+        "schema_version",
+        "sequence"
       ],
       "type": "object"
     }

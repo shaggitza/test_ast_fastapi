@@ -1007,6 +1007,12 @@ def test_frozen_packet_profile_exact_hash_selection_and_unknown_rejection() -> N
     )
     historical = packet._historical_profile(ROOT)
     assert packet._profile_by_hash(ROOT, packet._sha(historical.raw)) == historical
+    selection_path = ROOT / packet._SELECTION_CHECKSUMS
+    assert packet._sha(selection_path.read_bytes()) == (
+        "sha256:a452313dea69828ef60a3e99e0d5cb2a3a0c7dba029f5f204e85a3ec1d34b9a8"
+    )
+    selection = packet._selection_profile(ROOT, packet._profile(ROOT))
+    assert packet._profile_by_hash(ROOT, packet._sha(selection.raw)) == selection
     assert historical.files[packet._MODULE] == (ROOT / packet._MODULE).read_bytes()
     with pytest.raises(packet.PacketV1Error, match="unknown production profile"):
         packet._profile_by_hash(ROOT, "sha256:" + "f" * 64)

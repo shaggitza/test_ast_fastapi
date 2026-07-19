@@ -192,6 +192,7 @@ class SelectionCustodyReceipt(_StrictModel):
 
 class SubmissionBinding(_StrictModel):
     schema_version: Literal[1]
+    generation: Literal[1, 2] = 1
     attempt_id: str
     capability: str
     packet_path: str
@@ -1187,7 +1188,8 @@ def _escrow_lock(artifact: Path) -> Iterator[None]:
 
 
 def _binding_sha(record: SubmissionBinding) -> str:
-    return _sha(canonical_json(record.model_dump(mode="json")))
+    excluded = {"generation"} if "generation" not in record.model_fields_set else set()
+    return _sha(canonical_json(record.model_dump(mode="json", exclude=excluded)))
 
 
 def _make_receipt(
@@ -1543,6 +1545,7 @@ def prepare_binding(  # noqa: PLR0912,PLR0915 - linear fail-closed preparation
     runtime_attestation_entry_hash: str,
     runtime_custody_receipt_path: Path,
     runtime_custody_receipt_sha256: str,
+    generation: Literal[1, 2] = 1,
     started_at: datetime | None = None,
 ) -> dict[str, object]:
     """Prepare one no-clobber reviewer-visible packet and private binding."""
@@ -1739,6 +1742,7 @@ def prepare_binding(  # noqa: PLR0912,PLR0915 - linear fail-closed preparation
         )
         record = SubmissionBinding(
             schema_version=1,
+            generation=generation,
             attempt_id=attempt_id,
             capability=secrets.token_hex(32),
             packet_path=str(final_packet),
