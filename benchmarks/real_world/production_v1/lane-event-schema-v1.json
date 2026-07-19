@@ -77,7 +77,10 @@
           "$ref": "#/$defs/digest"
         },
         "generation": {
-          "const": 2
+          "enum": [
+            2,
+            3
+          ]
         },
         "kind": {
           "const": "prepared"
@@ -160,7 +163,10 @@
           "$ref": "#/$defs/digest"
         },
         "generation": {
-          "const": 2
+          "enum": [
+            2,
+            3
+          ]
         },
         "kind": {
           "const": "launch_claimed"
@@ -227,7 +233,10 @@
           "$ref": "#/$defs/digest"
         },
         "generation": {
-          "const": 2
+          "enum": [
+            2,
+            3
+          ]
         },
         "kind": {
           "const": "native_result"
@@ -326,7 +335,10 @@
           "$ref": "#/$defs/digest"
         },
         "generation": {
-          "const": 2
+          "enum": [
+            2,
+            3
+          ]
         },
         "kind": {
           "const": "pending"
@@ -391,7 +403,10 @@
           "$ref": "#/$defs/digest"
         },
         "generation": {
-          "const": 2
+          "enum": [
+            2,
+            3
+          ]
         },
         "kind": {
           "const": "completed"
@@ -457,7 +472,10 @@
           "type": "string"
         },
         "generation": {
-          "const": 2
+          "enum": [
+            2,
+            3
+          ]
         },
         "kind": {
           "const": "operational_failed"
@@ -1000,6 +1018,219 @@
         "previous_hash",
         "production_profile_sha256",
         "protocol",
+        "runtime_attestation_entry_hash",
+        "schema_version",
+        "sequence"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "agent_installation_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "archive_bytes": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "archive_device": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "archive_entries": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "archive_inode": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "archive_inventory_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "archive_path": {
+          "pattern": "^/",
+          "type": "string"
+        },
+        "attempt_ids": {
+          "items": {
+            "$ref": "#/$defs/attempt"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "authorizations": {
+          "additionalProperties": false,
+          "properties": {
+            "adjudication": {
+              "const": false
+            },
+            "canonical_import": {
+              "const": false
+            },
+            "review_launch": {
+              "const": true
+            }
+          },
+          "required": [
+            "review_launch",
+            "adjudication",
+            "canonical_import"
+          ],
+          "type": "object"
+        },
+        "binding_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "broker_pid": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "broker_start_identity": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "broker_stderr_bytes": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "broker_stderr_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "broker_stdout_bytes": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "broker_stdout_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "campaign_id": {
+          "type": "string"
+        },
+        "campaign_manifest_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "entry_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "expires_at": {
+          "type": "string"
+        },
+        "failed_attempt_id": {
+          "pattern": "^prod-v1-i[0-9]{3}-rank[0-9]{3}-pr[0-9]+-[AB]$",
+          "type": "string"
+        },
+        "failure_entry_hash": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "generation": {
+          "const": 3
+        },
+        "issued_at": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "canary_prelaunch_recovery"
+        },
+        "lanes": {
+          "items": {
+            "type": "object"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "limits": {
+          "type": "object"
+        },
+        "model_launch_count": {
+          "const": 0
+        },
+        "prepared_entry_hash": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "previous_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "prior_authorization_entry_hash": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "prior_event_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "prior_events_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "production_profile_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "protocol": {
+          "const": "ground-truth-review-canary-prelaunch-recovery-v1"
+        },
+        "recovered_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "runtime_attestation_entry_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "sequence": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "agent_installation_sha256",
+        "archive_bytes",
+        "archive_device",
+        "archive_entries",
+        "archive_inode",
+        "archive_inventory_sha256",
+        "archive_path",
+        "attempt_ids",
+        "authorizations",
+        "binding_sha256",
+        "broker_pid",
+        "broker_start_identity",
+        "broker_stderr_bytes",
+        "broker_stderr_sha256",
+        "broker_stdout_bytes",
+        "broker_stdout_sha256",
+        "campaign_id",
+        "campaign_manifest_sha256",
+        "entry_hash",
+        "expires_at",
+        "failed_attempt_id",
+        "failure_entry_hash",
+        "generation",
+        "issued_at",
+        "kind",
+        "lanes",
+        "limits",
+        "model_launch_count",
+        "prepared_entry_hash",
+        "previous_hash",
+        "prior_authorization_entry_hash",
+        "prior_event_count",
+        "prior_events_sha256",
+        "production_profile_sha256",
+        "protocol",
+        "recovered_at",
         "runtime_attestation_entry_hash",
         "schema_version",
         "sequence"

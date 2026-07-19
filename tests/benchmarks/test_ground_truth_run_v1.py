@@ -1176,16 +1176,38 @@ def test_exact_prelaunch_migration_runtime_authorization_and_reset_flow(
         run._MIGRATION_RUNTIME_DOMAIN,
         schema_version=2,
     )
-    _special_event(
+    repaired_fields = {
+        **runtime_fields,
+        "execution_root": "/private/repaired",
+        "execution_device": 5,
+        "execution_inode": 6,
+        "runtime_custody_receipt_path": "/private/repaired/runtime/custody-receipt.json",
+        "supersedes_entry_hash": migrated_runtime["entry_hash"],
+        "bad_execution_root": runtime_fields["execution_root"],
+        "bad_production_profile_sha256": runtime_fields["production_profile_sha256"],
+        "bad_agent_source_sha256": runtime_fields["agent_source_sha256"],
+    }
+    repaired_runtime = _special_event(
         ledger,
         migrated_runtime["entry_hash"],
         7,
+        "runtime_migrated_repair",
+        "runtime-repair",
+        repaired_fields,
+        run._MIGRATION_REPAIR_PROTOCOL,
+        run._MIGRATION_REPAIR_DOMAIN,
+        schema_version=2,
+    )
+    _special_event(
+        ledger,
+        repaired_runtime["entry_hash"],
+        8,
         "canary_reauthorized",
         "canary",
         {
             "campaign_id": "campaign",
             "campaign_manifest_sha256": "sha256:" + "2" * 64,
-            "runtime_attestation_entry_hash": migrated_runtime["entry_hash"],
+            "runtime_attestation_entry_hash": repaired_runtime["entry_hash"],
             "agent_installation_sha256": "sha256:" + "d" * 64,
             "production_profile_sha256": "sha256:" + "a" * 64,
             "lanes": _authorization_lanes(),
@@ -1211,48 +1233,117 @@ def test_exact_prelaunch_migration_runtime_authorization_and_reset_flow(
     state = run._extended_ledger(ledger, ROOT)
     assert state["generation"] == 2
     assert state["states"] == {A: "authorized", B: "authorized"}
-    assert state["runtime"] == migrated_runtime
+    assert state["runtime"] == repaired_runtime
     _special_event(
         ledger,
         state["head"],
-        8,
-        "runtime_migrated",
-        "runtime",
-        runtime_fields,
-        run._MIGRATION_RUNTIME_PROTOCOL,
-        run._MIGRATION_RUNTIME_DOMAIN,
+        9,
+        "runtime_migrated_repair",
+        "runtime-repair",
+        repaired_fields,
+        run._MIGRATION_REPAIR_PROTOCOL,
+        run._MIGRATION_REPAIR_DOMAIN,
         schema_version=2,
     )
-    with pytest.raises(run.GroundTruthRunError, match="migrated runtime"):
+    with pytest.raises(run.GroundTruthRunError, match="repair"):
         run._extended_ledger(ledger, ROOT)
-    (ledger / "lane-events/000008-runtime_migrated-runtime.json").unlink()
+    (ledger / "lane-events/000009-runtime_migrated_repair-runtime-repair.json").unlink()
     prepared_generation2 = _prepared(A)
     prepared_generation2.update(
-        {"generation": 2, "runtime_attestation_entry_hash": migrated_runtime["entry_hash"]}
+        {"generation": 2, "runtime_attestation_entry_hash": repaired_runtime["entry_hash"]}
     )
     prepared2 = _special_event(
         ledger,
         state["head"],
-        8,
+        9,
         "prepared",
         A,
         prepared_generation2,
         "ground-truth-review-lane-event-v1",
         b"ground-truth-review-lane-event-v1\0",
     )
+    failed2 = _special_event(
+        ledger,
+        prepared2["entry_hash"],
+        10,
+        "operational_failed",
+        A,
+        {"generation": 2, **failure(A)},
+        "ground-truth-review-lane-event-v1",
+        b"ground-truth-review-lane-event-v1\0",
+    )
+    archive_summary = {
+        "archive_device": 1,
+        "archive_inode": 2,
+        "archive_inventory_sha256": "sha256:" + "1" * 64,
+        "archive_entries": 5,
+        "archive_bytes": 10,
+        "binding_sha256": prepared2["binding_sha256"],
+        "broker_pid": prepared2["broker_pid"],
+        "broker_start_identity": prepared2["broker_start_identity"],
+        "broker_stdout_sha256": "sha256:" + "2" * 64,
+        "broker_stdout_bytes": 0,
+        "broker_stderr_sha256": "sha256:" + "3" * 64,
+        "broker_stderr_bytes": 1,
+    }
+    monkeypatch.setattr(run, "_recovery_archive_summary", lambda _path, _attempt: archive_summary)
+    prior_events = run._extended_ledger(ledger, ROOT)["events"]
+    recovery = _special_event(
+        ledger,
+        failed2["entry_hash"],
+        11,
+        "canary_prelaunch_recovery",
+        "canary-recovery",
+        {
+            "campaign_id": "campaign",
+            "campaign_manifest_sha256": "sha256:" + "2" * 64,
+            "runtime_attestation_entry_hash": repaired_runtime["entry_hash"],
+            "prior_authorization_entry_hash": state["authorization"]["entry_hash"],
+            "agent_installation_sha256": "sha256:" + "d" * 64,
+            "production_profile_sha256": "sha256:" + "a" * 64,
+            "lanes": _authorization_lanes(),
+            "attempt_ids": sorted([A, B]),
+            "failed_attempt_id": A,
+            "prepared_entry_hash": prepared2["entry_hash"],
+            "failure_entry_hash": failed2["entry_hash"],
+            "prior_events_sha256": run._sha(canonical_json(prior_events)),
+            "prior_event_count": len(prior_events),
+            "archive_path": f"/private/repaired/prelaunch-failures/generation2/{A}",
+            **archive_summary,
+            "limits": {
+                "max_global_active": 3,
+                "max_processes_per_lane": 1,
+                "replacement_attempts": 0,
+            },
+            "model_launch_count": 0,
+            "issued_at": "2026-01-01T04:00:00Z",
+            "expires_at": "2026-01-02T04:00:00Z",
+            "recovered_at": "2026-01-01T04:00:00Z",
+            "authorizations": {
+                "review_launch": True,
+                "adjudication": False,
+                "canonical_import": False,
+            },
+            "generation": 3,
+        },
+        run._PRELAUNCH_RECOVERY_PROTOCOL,
+        run._PRELAUNCH_RECOVERY_DOMAIN,
+    )
+    recovered = run._extended_ledger(ledger, ROOT)
+    assert recovered["generation"] == 3
+    assert recovered["states"] == {A: "authorized", B: "authorized"}
+    prepared_generation3 = {**prepared_generation2, "generation": 3}
+    _special_event(
+        ledger,
+        recovery["entry_hash"],
+        12,
+        "prepared",
+        A,
+        prepared_generation3,
+        "ground-truth-review-lane-event-v1",
+        b"ground-truth-review-lane-event-v1\0",
+    )
     assert run._extended_ledger(ledger, ROOT)["states"][A] == "prepared"
-    with pytest.raises(run.GroundTruthRunError, match="prepared"):
-        _special_event(
-            ledger,
-            prepared2["entry_hash"],
-            9,
-            "prepared",
-            A,
-            prepared_generation2,
-            "ground-truth-review-lane-event-v1",
-            b"ground-truth-review-lane-event-v1\0",
-        )
-        run._extended_ledger(ledger, ROOT)
 
 
 def test_ledger_rejects_unrelated_runtime_hash_and_task_order(
@@ -1323,6 +1414,205 @@ def test_prepare_runtime_boundary_rejects_attestation_or_installation_drift(
     )
     with pytest.raises(run.GroundTruthRunError, match="drifted at lane boundary"):
         run._runtime_boundary(ROOT, tmp_path, current, attestation, installation)
+
+
+def _generation2_attempt(execution: Path) -> tuple[Path, dict[str, Any]]:
+    attempts = _private(execution / "attempts")
+    attempt = _private(attempts / A)
+    packet_dir = _private(attempt / "packet")
+    packet_dir.chmod(0o500)
+    _private(attempt / "escrow")
+    logs = _private(attempt / "logs")
+    stdout = logs / "broker.stdout"
+    stderr = logs / "broker.stderr"
+    stdout.write_bytes(b"")
+    stderr.write_bytes(b"attestation startup failure\n")
+    stdout.chmod(0o600)
+    stderr.chmod(0o600)
+    binding = attempt / "binding.json"
+    binding.write_bytes(b'{"bound":true}\n')
+    binding.chmod(0o400)
+    state = {
+        "schema_version": 1,
+        "generation": 2,
+        "attempt_id": A,
+        "rank": 1,
+        "lane": "A",
+        "packet": str(attempt / "packet"),
+        "binding": str(binding),
+        "binding_sha256": run._sha(binding.read_bytes()),
+        "broker_pid": 999_999_999,
+        "broker_start_identity": "1",
+        "socket": str(execution / "absent.sock"),
+        "registry": str(execution / "absent-registry.json"),
+        "deadline_unix_ms": 1,
+        "runtime_attestation_entry_hash": "sha256:" + "a" * 64,
+        "packet_root_sha256": "sha256:" + "b" * 64,
+        "reviewer": {"name": "reviewer", "version": "v1"},
+    }
+    _publish(attempt / "native-state.json", state)
+    slots = _private(execution / "slots")
+    lock = slots / ".lock"
+    lock.write_bytes(b"")
+    lock.chmod(0o600)
+    return attempt, state
+
+
+def test_generation3_prelaunch_recovery_archives_once_and_is_crash_resumable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    execution = _private(tmp_path / "execution")
+    attempt, state = _generation2_attempt(execution)
+    binding_sha = run._sha((attempt / "binding.json").read_bytes())
+    attestation = {
+        "entry_hash": "sha256:" + "a" * 64,
+        "kind": "runtime_migrated_repair",
+        "production_profile_sha256": "sha256:" + "c" * 64,
+        "execution_root": str(execution),
+    }
+    installation = {"runtime_attestation_entry_hash": attestation["entry_hash"]}
+    installation_sha = run._sha(canonical_json(installation))
+    lanes = _authorization_lanes()
+    authorization = {
+        "kind": "canary_reauthorized",
+        "entry_hash": "sha256:" + "d" * 64,
+        "agent_installation_sha256": installation_sha,
+        "lanes": lanes,
+    }
+    prepared = {
+        "kind": "prepared",
+        "attempt_id": A,
+        "generation": 2,
+        "entry_hash": "sha256:" + "e" * 64,
+        "binding_sha256": binding_sha,
+        "broker_pid": state["broker_pid"],
+        "broker_start_identity": state["broker_start_identity"],
+    }
+    failed = {
+        "kind": "operational_failed",
+        "attempt_id": A,
+        "generation": 2,
+        "entry_hash": "sha256:" + "f" * 64,
+        "reason": "never-launched broker exited",
+        "relaunch_authorized": False,
+    }
+    current: dict[str, Any] = {
+        "generation": 2,
+        "prelaunch_recovery": None,
+        "runtime": attestation,
+        "authorization": authorization,
+        "active": 0,
+        "launched_attempts": set(),
+        "native_results": {},
+        "states": {A: "operational_failed", B: "authorized"},
+        "events": [prepared, failed],
+    }
+    verified = {**current, "generation": 3, "states": {A: "authorized", B: "authorized"}}
+    appended: list[dict[str, Any]] = []
+    phase = 0
+
+    def ledger(*_args: object) -> dict[str, Any]:
+        return current if phase == 0 else verified
+
+    def append(*args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal phase
+        appended.append(cast("dict[str, Any]", args[-1]))
+        phase = 1
+        return {"entry_hash": "sha256:" + "1" * 64}
+
+    monkeypatch.setattr(run, "_runtime_attestation", lambda *_args: attestation)
+    monkeypatch.setattr(run, "_installed_agent", lambda *_args: installation)
+    monkeypatch.setattr(campaign, "_private_root", lambda path: path)
+    monkeypatch.setattr(campaign, "_ledger_lock", lambda _path: contextlib.nullcontext())
+    monkeypatch.setattr(run, "_extended_ledger", ledger)
+    monkeypatch.setattr(run, "_append_event_locked", append)
+    monkeypatch.setattr(
+        run,
+        "_campaign",
+        lambda *_args: (
+            {
+                "id": "campaign",
+                "lanes": [
+                    {"rank": 1, "lane": "A", **lanes[0]},
+                    {"rank": 1, "lane": "B", **lanes[1]},
+                ],
+            },
+            b"campaign\n",
+        ),
+    )
+    result = run.authorize_prelaunch_canary_recovery(
+        ROOT, tmp_path / "campaign.json", tmp_path / "ledger", execution
+    )
+    archive = execution / "prelaunch-failures/generation2" / A
+    assert result["generation"] == 3
+    assert not attempt.exists() and archive.is_dir()
+    assert (
+        appended[0]["archive_inventory_sha256"]
+        == run._recovery_archive_summary(archive, A)["archive_inventory_sha256"]
+    )
+    assert appended[0]["model_launch_count"] == 0
+
+    # A crash after rename but before append is resumable from the exact archive.
+    phase = 0
+    current["prelaunch_recovery"] = None
+    resumed = run.authorize_prelaunch_canary_recovery(
+        ROOT, tmp_path / "campaign.json", tmp_path / "ledger", execution
+    )
+    assert resumed["generation"] == 3 and archive.is_dir()
+    stderr = archive / "logs/broker.stderr"
+    stderr.chmod(0o644)
+    with pytest.raises(submit.GroundTruthSubmitError):
+        run._recovery_archive_summary(archive, A)
+    stderr.chmod(0o600)
+
+    phase = 0
+    current["prelaunch_recovery"] = {"already": True}
+    with pytest.raises(run.GroundTruthRunError, match="not eligible"):
+        run.authorize_prelaunch_canary_recovery(
+            ROOT, tmp_path / "campaign.json", tmp_path / "ledger", execution
+        )
+
+
+def test_generation3_prelaunch_recovery_rejects_launch_or_wrong_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    execution = _private(tmp_path / "execution")
+    _generation2_attempt(execution)
+    attestation = {"entry_hash": "sha256:" + "a" * 64, "kind": "runtime_migrated_repair"}
+    installation = {"runtime_attestation_entry_hash": attestation["entry_hash"]}
+    base: dict[str, Any] = {
+        "generation": 2,
+        "prelaunch_recovery": None,
+        "runtime": attestation,
+        "authorization": {"kind": "canary_reauthorized", "lanes": _authorization_lanes()},
+        "active": 0,
+        "native_results": {},
+        "states": {A: "operational_failed", B: "authorized"},
+        "events": [],
+    }
+    monkeypatch.setattr(run, "_runtime_attestation", lambda *_args: attestation)
+    monkeypatch.setattr(run, "_installed_agent", lambda *_args: installation)
+    monkeypatch.setattr(campaign, "_private_root", lambda path: path)
+    monkeypatch.setattr(campaign, "_ledger_lock", lambda _path: contextlib.nullcontext())
+    monkeypatch.setattr(
+        run,
+        "_campaign",
+        lambda *_args: ({"id": "campaign", "lanes": []}, b"campaign\n"),
+    )
+    for launched, states in [({A}, base["states"]), (set(), {A: "authorized", B: "authorized"})]:
+        monkeypatch.setattr(
+            run,
+            "_extended_ledger",
+            lambda *_args, launched=launched, states=states: {
+                **base,
+                "launched_attempts": launched,
+                "states": states,
+            },
+        )
+        with pytest.raises(run.GroundTruthRunError, match=r"not eligible|exact recoverable pair"):
+            run.authorize_prelaunch_canary_recovery(
+                ROOT, tmp_path / "campaign.json", tmp_path / "ledger", execution
+            )
 
 
 def test_slots_bind_owner_lane_and_broker(tmp_path: Path) -> None:
