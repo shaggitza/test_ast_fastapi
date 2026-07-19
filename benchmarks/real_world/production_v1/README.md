@@ -117,11 +117,15 @@ the 50 reviewer packets exposes only baseline/target regular files, a locally ge
 `snapshot.diff`, source-structure metadata for omitted symlinks/gitlinks, its
 manifest, and checksum-authenticated packet policy/schema. The remote diff hash and
 size remain metadata with `payload_present: false`; the local relation is always
-`not_compared`. Full campaign/runtime and final-audit validation regenerates all 50
-packets from the exact cache. Per-attempt preparation and broker recovery still verify
-every aggregate packet hash, mode, ordering, root, payload total, publication successor,
-and complete aggregate/cache inventory, but regenerate only the exact bound rank using
-five Git commands. Pilot-v2 bytes are a checksum-bound low-level parser/materializer
+`not_compared`. Full campaign runtime attestation regenerates all 50 packets from the exact cache and
+publishes a mode-0400 no-clobber custody receipt bound by the runtime ledger entry.
+Per-attempt preparation brackets complete aggregate/cache inventories and regenerates
+only the exact bound rank using five Git commands while minting an immutable selection
+receipt. Repeated binding loads, broker submission, and recovery freshly verify complete
+inventories and the selected copied packet with zero additional custody Git commands;
+semantic evidence validation may still use bounded offline Git queries. A separately gated
+one-shot final full-custody audit remains required before canary sealing. Pilot-v2 bytes
+are a checksum-bound low-level parser/materializer
 dependency and are neither modified nor used for production authorization, custody, or
 publication.
 
@@ -187,9 +191,11 @@ A second supersession or any supersession after authorization/activity fails clo
 Only the exact rank-1 A/B campaign lanes can receive the initial expiring canary
 authorization. Their ordered lane keys, attempt IDs, and reviewer identities are hashed
 into the runtime attestation and must match the authorization byte-for-byte. Each lane
-is single-process and nonreplaceable. Preparation repeatedly reauthenticates the full
-runtime/installation/ledger tuple under the ledger lock before binding publication,
-broker spawn, and the prepared event; drift fails closed and cleans the attempt.
+is single-process and nonreplaceable. Preparation repeatedly reauthenticates the exact runtime/installation/ledger tuple
+under the ledger lock before binding publication, broker spawn, and the prepared event;
+source and packet custody use the ledger-bound receipt, fresh complete inventories, and
+the one selected-rank receipt rather than repeating full campaign Git semantics. Drift
+fails closed and cleans the attempt.
 Preparation also enforces three global durable active slots, writes the inode-keyed
 private registry descriptor, and starts only the resource-bounded local broker.
 `native-launch-plan` validates the complete call against pinned Pi 0.35.1

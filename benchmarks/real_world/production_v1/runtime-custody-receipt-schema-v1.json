@@ -1,0 +1,65 @@
+{
+  "$defs": {
+    "digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "$id": "https://example.invalid/ground-truth-production-v1/runtime-custody-receipt-schema-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "authorizations": {
+      "const": {
+        "adjudication": false,
+        "canonical_import": false,
+        "review_launch": false
+      }
+    },
+    "cache": {
+      "additionalProperties": false,
+      "properties": {
+        "cache_device": {"minimum": 0, "type": "integer"},
+        "cache_inode": {"minimum": 1, "type": "integer"},
+        "cache_root": {"pattern": "^/", "type": "string"},
+        "content_sha256": {"$ref": "#/$defs/digest"},
+        "disk_bytes": {"minimum": 0, "type": "integer"},
+        "file_count": {"minimum": 1, "type": "integer"},
+        "inventory_path_count": {"minimum": 1, "type": "integer"},
+        "inventory_sha256": {"$ref": "#/$defs/digest"}
+      },
+      "required": ["cache_root", "cache_device", "cache_inode", "inventory_sha256", "inventory_path_count", "file_count", "disk_bytes", "content_sha256"],
+      "type": "object"
+    },
+    "campaign_id": {"minLength": 1, "type": "string"},
+    "campaign_manifest_sha256": {"$ref": "#/$defs/digest"},
+    "campaign_path": {"pattern": "^/", "type": "string"},
+    "ledger_root": {"pattern": "^/", "type": "string"},
+    "packets": {
+      "additionalProperties": false,
+      "properties": {
+        "aggregate_manifest_sha256": {"$ref": "#/$defs/digest"},
+        "aggregate_root_sha256": {"$ref": "#/$defs/digest"},
+        "inventory_bytes": {"minimum": 0, "type": "integer"},
+        "inventory_entries": {"minimum": 1, "type": "integer"},
+        "inventory_sha256": {"$ref": "#/$defs/digest"},
+        "packet_count": {"const": 50},
+        "packets_device": {"minimum": 0, "type": "integer"},
+        "packets_inode": {"minimum": 1, "type": "integer"},
+        "packets_root": {"pattern": "^/", "type": "string"},
+        "publication_entry_hash": {"$ref": "#/$defs/digest"}
+      },
+      "required": ["packets_root", "packets_device", "packets_inode", "inventory_sha256", "inventory_entries", "inventory_bytes", "aggregate_manifest_sha256", "aggregate_root_sha256", "publication_entry_hash", "packet_count"],
+      "type": "object"
+    },
+    "production_files_sha256": {"$ref": "#/$defs/digest"},
+    "production_profile_sha256": {"$ref": "#/$defs/digest"},
+    "protocol": {"const": "ground-truth-runtime-custody-receipt-v1"},
+    "schema_version": {"const": 1},
+    "source_bindings_path": {"pattern": "^/", "type": "string"},
+    "source_bindings_sha256": {"$ref": "#/$defs/digest"}
+  },
+  "required": ["schema_version", "protocol", "campaign_id", "campaign_path", "campaign_manifest_sha256", "source_bindings_path", "source_bindings_sha256", "cache", "ledger_root", "packets", "production_profile_sha256", "production_files_sha256", "authorizations"],
+  "title": "Ground truth production runtime custody receipt v1",
+  "type": "object"
+}

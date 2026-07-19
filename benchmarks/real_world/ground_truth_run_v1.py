@@ -149,7 +149,10 @@ def _json_raw(
 
 
 def _atomic(path: Path, value: dict[str, Any], *, mode: int = 0o400) -> None:
-    submit_v1._atomic_no_clobber(path, canonical_json(value), mode=mode)
+    try:
+        submit_v1._atomic_no_clobber(path, canonical_json(value), mode=mode)
+    except submit_v1.SubmissionRejected as exc:
+        raise GroundTruthRunError(f"publication already exists: {path.name}") from exc
 
 
 def _private_directory(path: Path, *, create: bool = False) -> os.stat_result:
@@ -210,6 +213,69 @@ def _custody(
         _fail("base packet gates are not false")
     profile = _profile(root)
     return campaign, campaign_raw, {"packet": packet, "source": source}, profile
+
+
+def _custody_receipt_payload(
+    campaign_path: Path,
+    campaign: dict[str, Any],
+    campaign_raw: bytes,
+    bindings: Path,
+    cache: Path,
+    ledger: Path,
+    packets: Path,
+    custody: dict[str, Any],
+    profile: submit_v1.ProfileSnapshot,
+    source_inventory: dict[str, Any],
+    packet_inventory: dict[str, Any],
+) -> dict[str, Any]:
+    source_value, source_raw, _ = source_v1._read_json(bindings, modes={0o400})
+    cache_summary = source_value.get("cache")
+    aggregate, aggregate_raw, _ = packet_v1._json(
+        packets / "aggregate-manifest.json", modes={0o400}
+    )
+    cache_status = cache.stat(follow_symlinks=False)
+    packet_status = packets.stat(follow_symlinks=False)
+    if not isinstance(cache_summary, dict) or _sha(source_raw) != custody["source"]["sha256"]:
+        _fail("source binding changed around custody receipt")
+    return {
+        "schema_version": 1,
+        "protocol": "ground-truth-runtime-custody-receipt-v1",
+        "campaign_id": campaign["id"],
+        "campaign_path": str(campaign_path),
+        "campaign_manifest_sha256": _sha(campaign_raw),
+        "source_bindings_path": str(bindings),
+        "source_bindings_sha256": _sha(source_raw),
+        "cache": {
+            "cache_root": str(cache),
+            "cache_device": cache_status.st_dev,
+            "cache_inode": cache_status.st_ino,
+            "inventory_sha256": source_inventory["inventory_sha256"],
+            "inventory_path_count": source_inventory["inventory_path_count"],
+            "file_count": source_inventory["file_count"],
+            "disk_bytes": source_inventory["disk_bytes"],
+            "content_sha256": cache_summary["content_sha256"],
+        },
+        "ledger_root": str(ledger),
+        "packets": {
+            "packets_root": str(packets),
+            "packets_device": packet_status.st_dev,
+            "packets_inode": packet_status.st_ino,
+            "inventory_sha256": packet_inventory["sha256"],
+            "inventory_entries": packet_inventory["entries"],
+            "inventory_bytes": packet_inventory["bytes"],
+            "aggregate_manifest_sha256": _sha(aggregate_raw),
+            "aggregate_root_sha256": aggregate["aggregate_root_sha256"],
+            "publication_entry_hash": custody["packet"]["publication_entry_hash"],
+            "packet_count": 50,
+        },
+        "production_profile_sha256": profile.checksum_sha256,
+        "production_files_sha256": profile.files_sha256,
+        "authorizations": {
+            "review_launch": False,
+            "adjudication": False,
+            "canonical_import": False,
+        },
+    }
 
 
 def _package_paths() -> tuple[Path, Path, Path, Path]:
@@ -728,6 +794,7 @@ def _validate_runtime_ledger_entry(
     raw: bytes,
     base: dict[str, Any],
     previous_hash: str,
+    current_profile_sha256: str,
     *,
     supersedes_entry_hash: str | None,
 ) -> None:
@@ -753,6 +820,10 @@ def _validate_runtime_ledger_entry(
         "previous_hash",
         "entry_hash",
     }
+    del current_profile_sha256
+    receipt_version = value.get("schema_version") == 2
+    if receipt_version:
+        expected_keys.update({"runtime_custody_receipt_path", "runtime_custody_receipt_sha256"})
     protocol = _RUNTIME_PROTOCOL
     domain = _RUNTIME_DOMAIN
     if supersedes_entry_hash is not None:
@@ -763,12 +834,20 @@ def _validate_runtime_ledger_entry(
     body = {key: item for key, item in value.items() if key != "entry_hash"}
     if (
         canonical_json(value) != raw
-        or value["schema_version"] != 1
+        or value["schema_version"] not in {1, 2}
         or value["protocol"] != protocol
         or value["campaign_id"] != base["campaign_id"]
         or value["campaign_manifest_sha256"] != base["campaign_manifest_sha256"]
         or value["campaign_lanes_sha256"] != base["campaign_canary_lanes_sha256"]
         or value["packet_publication_entry_hash"] != base["packet_publication_entry_hash"]
+        or (
+            receipt_version
+            and (
+                not isinstance(value.get("runtime_custody_receipt_path"), str)
+                or not Path(cast("str", value["runtime_custody_receipt_path"])).is_absolute()
+                or not _DIGEST.fullmatch(str(value.get("runtime_custody_receipt_sha256", "")))
+            )
+        )
         or value["authorizations"]
         != {"review_launch": False, "adjudication": False, "canonical_import": False}
         or value["previous_hash"] != previous_hash
@@ -798,6 +877,7 @@ def _extended_ledger(root: Path, repository_root: Path) -> dict[str, Any]:  # no
     if not base.get("packet_publication_present"):
         _fail("runtime requires packet publication")
     head = cast("str", base["entry_hash"])
+    current_profile_sha256 = _profile(repository_root).checksum_sha256
     runtime_path = root / _RUNTIME_FILE
     runtime: dict[str, Any] | None = None
     first_runtime: dict[str, Any] | None = None
@@ -808,6 +888,7 @@ def _extended_ledger(root: Path, repository_root: Path) -> dict[str, Any]:  # no
             raw,
             base,
             head,
+            current_profile_sha256,
             supersedes_entry_hash=None,
         )
         runtime = first_runtime
@@ -826,6 +907,7 @@ def _extended_ledger(root: Path, repository_root: Path) -> dict[str, Any]:  # no
             raw,
             base,
             head,
+            current_profile_sha256,
             supersedes_entry_hash=cast("str", first_runtime["entry_hash"]),
         )
         runtime = supersession
@@ -1145,9 +1227,26 @@ def attest_runtime(
     packets: Path,
     execution_root: Path,
 ) -> dict[str, Any]:
+    source_inventory_before = source_v1._inventory(cache)
+    packet_inventory_before = packet_v1._inventory(
+        packets,
+        limit=packet_v1._MAX_AGGREGATE_PAYLOAD,
+        max_entries=packet_v1._MAX_AGGREGATE_ENTRIES,
+    )
     campaign, campaign_raw, custody, profile = _custody(
         root, campaign_path, bindings, cache, ledger, packets
     )
+    source_inventory_after = source_v1._inventory(cache)
+    packet_inventory_after = packet_v1._inventory(
+        packets,
+        limit=packet_v1._MAX_AGGREGATE_PAYLOAD,
+        max_entries=packet_v1._MAX_AGGREGATE_ENTRIES,
+    )
+    if (
+        source_inventory_before != source_inventory_after
+        or packet_inventory_before != packet_inventory_after
+    ):
+        _fail("custody inventories drifted around runtime attestation")
     status = _private_directory(execution_root, create=True)
     if any(execution_root.iterdir()):
         _fail("execution root must be empty before attestation")
@@ -1167,9 +1266,41 @@ def attest_runtime(
     body = _agent_body(extension_dir / "index.ts", prompt)
     agent_source.write_bytes(body)
     agent_source.chmod(0o400)
+    custody_receipt = _custody_receipt_payload(
+        campaign_path,
+        campaign,
+        campaign_raw,
+        bindings,
+        cache,
+        ledger,
+        packets,
+        custody,
+        profile,
+        source_inventory_after,
+        packet_inventory_after,
+    )
+    custody_path = runtime / "custody-receipt.json"
+    _atomic(custody_path, custody_receipt)
+    custody_raw = submit_v1._owned_file(custody_path, max_bytes=_MAX_FILE, allowed_modes={0o400})
+    final_campaign, final_campaign_raw = _campaign(root, campaign_path)
+    _final_source, final_source_raw, _ = source_v1._read_json(bindings, modes={0o400})
+    source_inventory_final = source_v1._inventory(cache)
+    packet_inventory_final = packet_v1._inventory(
+        packets,
+        limit=packet_v1._MAX_AGGREGATE_PAYLOAD,
+        max_entries=packet_v1._MAX_AGGREGATE_ENTRIES,
+    )
+    if (
+        final_campaign != campaign
+        or final_campaign_raw != campaign_raw
+        or _sha(final_source_raw) != custody["source"]["sha256"]
+        or source_inventory_after != source_inventory_final
+        or packet_inventory_after != packet_inventory_final
+    ):
+        _fail("custody inventories drifted around receipt publication")
     runtime.chmod(0o500)
     entry_body = {
-        "schema_version": 1,
+        "schema_version": 2,
         "campaign_id": campaign["id"],
         "campaign_manifest_sha256": _sha(campaign_raw),
         "campaign_lanes_sha256": _sha(
@@ -1187,6 +1318,8 @@ def attest_runtime(
         ),
         "source_bindings_sha256": custody["source"]["sha256"],
         "packet_publication_entry_hash": custody["packet"]["publication_entry_hash"],
+        "runtime_custody_receipt_path": str(custody_path),
+        "runtime_custody_receipt_sha256": _sha(custody_raw),
         "production_profile_sha256": profile.checksum_sha256,
         "production_files_sha256": profile.files_sha256,
         "runtime_identity": identity,
@@ -1262,6 +1395,8 @@ def _runtime_attestation(root: Path, execution_root: Path) -> dict[str, Any]:
         "campaign_lanes_sha256",
         "source_bindings_sha256",
         "packet_publication_entry_hash",
+        "runtime_custody_receipt_path",
+        "runtime_custody_receipt_sha256",
         "production_profile_sha256",
         "production_files_sha256",
         "runtime_identity",
@@ -1297,10 +1432,12 @@ def _runtime_attestation(root: Path, execution_root: Path) -> dict[str, Any]:
     agent = submit_v1._owned_file(
         execution_root / "runtime/agent-source.md", max_bytes=_MAX_FILE, allowed_modes={0o400}
     )
+    custody_path = execution_root / "runtime/custody-receipt.json"
+    custody_raw = submit_v1._owned_file(custody_path, max_bytes=_MAX_FILE, allowed_modes={0o400})
     body = {key: item for key, item in value.items() if key != "entry_hash"}
     if (
         canonical_json(value) != raw
-        or value.get("schema_version") != 1
+        or value.get("schema_version") != 2
         or value.get("protocol") != protocol
         or value.get("execution_root") != str(execution_root)
         or value.get("execution_device") != status.st_dev
@@ -1314,6 +1451,8 @@ def _runtime_attestation(root: Path, execution_root: Path) -> dict[str, Any]:
         or value.get("extension_sha256") != _sha(extension)
         or value.get("extension_schema_sha256") != _sha(extension_schema)
         or value.get("agent_source_sha256") != _sha(agent)
+        or value.get("runtime_custody_receipt_path") != str(custody_path)
+        or value.get("runtime_custody_receipt_sha256") != _sha(custody_raw)
         or not isinstance(value.get("campaign_lanes_sha256"), str)
         or not _DIGEST.fullmatch(cast("str", value["campaign_lanes_sha256"]))
         or value.get("entry_hash") != _entry_hash(domain, body)
@@ -1706,8 +1845,30 @@ def _broker_limits() -> None:
     resource.setrlimit(resource.RLIMIT_NPROC, (512, 512))
 
 
-def serve_broker(socket_path: Path, binding: Path, deadline_ms: int) -> int:
+def serve_broker(
+    root: Path,
+    socket_path: Path,
+    binding: Path,
+    deadline_ms: int,
+    ledger: Path,
+    execution_root: Path,
+) -> int:
     _broker_limits()
+    attestation = _runtime_attestation(root, execution_root)
+    records = submit_v1.load_bindings(binding)
+    record = records.records[0]
+    private = campaign_v1._private_root(ledger)
+    with campaign_v1._ledger_lock(private):
+        current = _extended_ledger(private, root)
+        if (
+            current.get("runtime") != attestation
+            or record.runtime_attestation_entry_hash != attestation.get("entry_hash")
+            or record.runtime_custody_receipt_path
+            != attestation.get("runtime_custody_receipt_path")
+            or record.runtime_custody_receipt_sha256
+            != attestation.get("runtime_custody_receipt_sha256")
+        ):
+            _fail("broker binding differs from current runtime custody")
     return submit_v1.serve(
         socket_path, binding, timeout_seconds=_MAX_WALL, deadline_unix_ms=deadline_ms
     )
@@ -1825,7 +1986,6 @@ def prepare_attempt(  # noqa: PLR0915
 ) -> dict[str, Any]:
     if not _ATTEMPT.fullmatch(attempt_id):
         _fail("attempt id is invalid")
-    _custody(root, campaign_path, bindings, cache, ledger, packets)
     attestation = _runtime_attestation(root, execution_root)
     installation = _installed_agent(root, execution_root)
     private = campaign_v1._private_root(ledger)
@@ -1865,6 +2025,13 @@ def prepare_attempt(  # noqa: PLR0915
             lane,
             attempt_id,
             attempt,
+            runtime_attestation_entry_hash=cast("str", attestation["entry_hash"]),
+            runtime_custody_receipt_path=Path(
+                cast("str", attestation["runtime_custody_receipt_path"])
+            ),
+            runtime_custody_receipt_sha256=cast(
+                "str", attestation["runtime_custody_receipt_sha256"]
+            ),
             started_at=(now or _now()),
         )
         record = submit_v1.load_bindings(attempt / "binding.json").records[0]
@@ -1892,6 +2059,10 @@ def prepare_attempt(  # noqa: PLR0915
             str(socket_path),
             "--binding",
             str(attempt / "binding.json"),
+            "--ledger-root",
+            str(ledger),
+            "--execution-root",
+            str(execution_root),
             "--deadline-unix-ms",
             str(deadline_ms),
         ]
@@ -2887,7 +3058,7 @@ def reconcile(root: Path, ledger: Path, execution_root: Path) -> dict[str, Any]:
     return {"released_orphaned": released, "claimed_needs_attention": needs_attention}
 
 
-def _parser() -> argparse.ArgumentParser:
+def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -2937,6 +3108,8 @@ def _parser() -> argparse.ArgumentParser:
     broker = sub.add_parser("serve-broker", help=argparse.SUPPRESS)
     broker.add_argument("--socket", type=Path, required=True)
     broker.add_argument("--binding", type=Path, required=True)
+    broker.add_argument("--ledger-root", type=Path, required=True)
+    broker.add_argument("--execution-root", type=Path, required=True)
     broker.add_argument("--deadline-unix-ms", type=int, required=True)
     return parser
 
@@ -3008,7 +3181,14 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "validate-ledger":
         result = validate_runtime_ledger(args.ledger_root, root)
     elif args.command == "serve-broker":
-        return serve_broker(args.socket, args.binding, args.deadline_unix_ms)
+        return serve_broker(
+            root,
+            args.socket,
+            args.binding,
+            args.deadline_unix_ms,
+            args.ledger_root,
+            args.execution_root,
+        )
     else:  # pragma: no cover
         _fail("unsupported command")
     print(canonical_json(result).decode())

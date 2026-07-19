@@ -8,7 +8,6 @@ source and does not authorize native launch or canonical import.
 
 from __future__ import annotations
 
-import argparse
 import contextlib
 import fcntl
 import hashlib
@@ -168,6 +167,29 @@ class AuthenticatedInput(_StrictModel):
         return value
 
 
+class FalseAuthority(_StrictModel):
+    review_launch: Literal[False]
+    adjudication: Literal[False]
+    canonical_import: Literal[False]
+
+
+class SelectionCustodyReceipt(_StrictModel):
+    schema_version: Literal[1]
+    protocol: Literal["ground-truth-packet-selection-receipt-v1"]
+    runtime_attestation_entry_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    runtime_custody_receipt_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    rank: StrictInt = Field(ge=1, le=50)
+    repository: str = Field(pattern=r"^[^/\s]+/[^/\s]+$", max_length=300)
+    pr: StrictInt = Field(gt=0)
+    packet_root_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    aggregate_root_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    publication_entry_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    cache_inventory_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    packet_inventory_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    commands: Literal[5]
+    authorizations: FalseAuthority
+
+
 class SubmissionBinding(_StrictModel):
     schema_version: Literal[1]
     attempt_id: str
@@ -185,6 +207,10 @@ class SubmissionBinding(_StrictModel):
     source_bindings_path: str
     ledger_root: str
     packets_root: str
+    runtime_attestation_entry_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    runtime_custody_receipt_path: str
+    runtime_custody_receipt_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    selection_custody: SelectionCustodyReceipt
     original_packet_root_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     aggregate_root_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     publication_entry_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
@@ -230,6 +256,7 @@ class SubmissionBinding(_StrictModel):
         "source_bindings_path",
         "ledger_root",
         "packets_root",
+        "runtime_custody_receipt_path",
         "escrow_path",
         "cache_root",
     )
@@ -246,6 +273,16 @@ class SubmissionBinding(_StrictModel):
             raise ValueError("authenticated input names are incomplete or duplicate")
         if self.escrow_path in {self.packet_path, self.cache_root}:
             raise ValueError("escrow path must be distinct")
+        if (
+            self.selection_custody.runtime_attestation_entry_hash
+            != self.runtime_attestation_entry_hash
+            or self.selection_custody.runtime_custody_receipt_sha256
+            != self.runtime_custody_receipt_sha256
+            or self.selection_custody.rank != self.rank
+            or self.selection_custody.repository != self.repository
+            or self.selection_custody.pr != self.pr
+        ):
+            raise ValueError("selection custody differs from submission binding")
         return self
 
 
@@ -711,40 +748,36 @@ def _authenticate_record(  # noqa: PLR0912,PLR0915 - fail-closed authentication 
     ):
         _fail("production profile binding changed")
     try:
-        published = ground_truth_packet_v1.validate_packet_selection(
+        published = ground_truth_packet_v1.validate_packet_selection_receipt(
             project_root,
             Path(record.campaign_path),
             Path(record.source_bindings_path),
             Path(record.cache_root),
             Path(record.ledger_root),
             Path(record.packets_root),
-            record.rank,
-        )
-        source_result = ground_truth_source_v1.validate_source_bindings(
-            project_root,
-            Path(record.campaign_path),
-            Path(record.cache_root),
-            Path(record.source_bindings_path),
-        )
-        cache_summary = ground_truth_source_v1.validate_cache(
-            project_root,
-            Path(record.campaign_path),
-            Path(record.cache_root),
+            Path(record.runtime_custody_receipt_path),
+            record.selection_custody.model_dump(mode="json"),
+            runtime_attestation_entry_hash=record.runtime_attestation_entry_hash,
         )
     except (ground_truth_packet_v1.PacketV1Error, ground_truth_source_v1.SourceV1Error) as exc:
         raise GroundTruthSubmitError(
             "production source or packet publication authentication failed"
         ) from exc
+    custody_raw = _owned_file(
+        Path(record.runtime_custody_receipt_path),
+        max_bytes=_MAX_BINDING_BYTES,
+        allowed_modes={0o400},
+    )
     if (
-        published.get("rank") != record.rank
+        published.get("commands") != 0
+        or published.get("rank") != record.rank
         or published.get("repository") != record.repository
         or published.get("pr") != record.pr
         or published.get("aggregate_root_sha256") != record.aggregate_root_sha256
         or published.get("publication_entry_hash") != record.publication_entry_hash
-        or source_result.get("sha256") != record.source_bindings_sha256
-        or cache_summary.get("cache_device") != record.cache_device
-        or cache_summary.get("cache_inode") != record.cache_inode
-        or cache_summary.get("inventory_sha256") != record.cache_inventory_sha256
+        or _sha(custody_raw) != record.runtime_custody_receipt_sha256
+        or published.get("runtime_attestation_entry_hash") != record.runtime_attestation_entry_hash
+        or published.get("cache_inventory_sha256") != record.cache_inventory_sha256
     ):
         _fail("production source or publication binding changed")
     original = Path(record.original_packet_path)
@@ -1507,6 +1540,9 @@ def prepare_binding(  # noqa: PLR0912,PLR0915 - linear fail-closed preparation
     attempt_id: str,
     attempt_root: Path,
     *,
+    runtime_attestation_entry_hash: str,
+    runtime_custody_receipt_path: Path,
+    runtime_custody_receipt_sha256: str,
     started_at: datetime | None = None,
 ) -> dict[str, object]:
     """Prepare one no-clobber reviewer-visible packet and private binding."""
@@ -1549,17 +1585,23 @@ def prepare_binding(  # noqa: PLR0912,PLR0915 - linear fail-closed preparation
         or not isinstance(lane_reviewer.get("version"), str)
     ):
         _fail("campaign lane reviewer is invalid")
-    published = ground_truth_packet_v1.validate_packet_selection(
+    custody_raw = _owned_file(
+        runtime_custody_receipt_path,
+        max_bytes=_MAX_BINDING_BYTES,
+        allowed_modes={0o400},
+    )
+    if _sha(custody_raw) != runtime_custody_receipt_sha256:
+        _fail("runtime custody receipt differs from attestation")
+    published = ground_truth_packet_v1.attest_packet_selection(
         root,
         campaign_path,
         source_bindings_path,
         cache,
         ledger_root,
         packets_root,
+        runtime_custody_receipt_path,
+        runtime_attestation_entry_hash,
         rank,
-    )
-    source_authenticated = ground_truth_source_v1.validate_source_bindings(
-        root, campaign_path, cache, source_bindings_path
     )
     aggregate_raw = _owned_file(
         packets_root / "aggregate-manifest.json",
@@ -1584,8 +1626,8 @@ def prepare_binding(  # noqa: PLR0912,PLR0915 - linear fail-closed preparation
     source_value, source_raw, _ = ground_truth_source_v1._read_json(
         source_bindings_path, modes={0o400}
     )
-    if source_authenticated.get("sha256") != _sha(source_raw):
-        _fail("source bindings changed after authenticated validation")
+    if published.get("runtime_custody_receipt_sha256") != _sha(custody_raw):
+        _fail("source bindings changed after attested validation")
     source_rows = source_value.get("records")
     if not isinstance(source_rows, list):
         _fail("source binding records are invalid")
@@ -1684,7 +1726,10 @@ def prepare_binding(  # noqa: PLR0912,PLR0915 - linear fail-closed preparation
             )
             for name, raw in policy_raw.items()
         )
-        cache_summary = ground_truth_source_v1.validate_cache(root, campaign_path, cache)
+        custody_value = _strict_json(custody_raw, "runtime custody receipt")
+        cache_summary = custody_value.get("cache")
+        if not isinstance(cache_summary, dict):
+            _fail("runtime custody cache summary is invalid")
         start = (started_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
         packet_status = packet.stat(follow_symlinks=False)
         reviewer = Actor(
@@ -1709,6 +1754,10 @@ def prepare_binding(  # noqa: PLR0912,PLR0915 - linear fail-closed preparation
             source_bindings_path=str(source_bindings_path),
             ledger_root=str(ledger_root),
             packets_root=str(packets_root),
+            runtime_attestation_entry_hash=runtime_attestation_entry_hash,
+            runtime_custody_receipt_path=str(runtime_custody_receipt_path),
+            runtime_custody_receipt_sha256=runtime_custody_receipt_sha256,
+            selection_custody=SelectionCustodyReceipt.model_validate(published),
             original_packet_root_sha256=cast("str", row["packet_root_sha256"]),
             aggregate_root_sha256=cast("str", published["aggregate_root_sha256"]),
             publication_entry_hash=cast("str", published["publication_entry_hash"]),
@@ -1755,26 +1804,24 @@ def prepare_binding(  # noqa: PLR0912,PLR0915 - linear fail-closed preparation
         )
         binding_raw = canonical_json(bindings.model_dump(mode="json"))
         boundary_profile = _profile_snapshot(root)
-        boundary_published = ground_truth_packet_v1.validate_packet_selection(
+        boundary_published = ground_truth_packet_v1.validate_packet_selection_receipt(
             root,
             campaign_path,
             source_bindings_path,
             cache,
             ledger_root,
             packets_root,
-            rank,
+            runtime_custody_receipt_path,
+            published,
+            runtime_attestation_entry_hash=runtime_attestation_entry_hash,
         )
-        boundary_source = ground_truth_source_v1.validate_source_bindings(
-            root, campaign_path, cache, source_bindings_path
-        )
-        boundary_cache = ground_truth_source_v1.validate_cache(root, campaign_path, cache)
         if (
             not _same_profile(profile, boundary_profile)
-            or boundary_published != published
-            or boundary_source.get("sha256") != _sha(source_raw)
-            or boundary_cache.get("cache_device") != cache_summary.get("cache_device")
-            or boundary_cache.get("cache_inode") != cache_summary.get("cache_inode")
-            or boundary_cache.get("inventory_sha256") != cache_summary.get("inventory_sha256")
+            or boundary_published.get("commands") != 0
+            or boundary_published.get("rank") != published.get("rank")
+            or boundary_published.get("runtime_attestation_entry_hash")
+            != runtime_attestation_entry_hash
+            or _sha(source_raw) != record.source_bindings_sha256
             or _packet_inventory(packet) != record.packet_inventory_sha256
         ):
             _fail("production profile, source, cache, or packet drifted before binding publication")
@@ -1798,69 +1845,9 @@ def prepare_binding(  # noqa: PLR0912,PLR0915 - linear fail-closed preparation
     }
 
 
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--serve", action="store_true")
-    parser.add_argument("--prepare-binding", action="store_true")
-    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
-    parser.add_argument("--campaign", type=Path)
-    parser.add_argument("--source-bindings", type=Path)
-    parser.add_argument("--cache", type=Path)
-    parser.add_argument("--ledger-root", type=Path)
-    parser.add_argument("--packets-root", type=Path)
-    parser.add_argument("--rank", type=int)
-    parser.add_argument("--lane", choices=("A", "B"))
-    parser.add_argument("--attempt-id")
-    parser.add_argument("--attempt-root", type=Path)
-    parser.add_argument("--socket", type=Path)
-    parser.add_argument("--bindings", type=Path)
-    parser.add_argument("--timeout-seconds", type=int, default=300)
-    parser.add_argument("--deadline-unix-ms", type=int)
-    return parser
-
-
-def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
-    if args.prepare_binding:
-        required = (
-            args.campaign,
-            args.source_bindings,
-            args.cache,
-            args.ledger_root,
-            args.packets_root,
-            args.rank,
-            args.lane,
-            args.attempt_id,
-            args.attempt_root,
-        )
-        if any(value is None for value in required):
-            _fail("production binding preparation arguments are incomplete")
-        result = prepare_binding(
-            args.root,
-            args.campaign,
-            args.source_bindings,
-            args.cache,
-            args.ledger_root,
-            args.packets_root,
-            args.rank,
-            args.lane,
-            args.attempt_id,
-            args.attempt_root,
-        )
-        print(canonical_json(result).decode())
-        return 0
-    if not args.serve or args.socket is None or args.bindings is None:
-        _fail("--serve, --socket, and --bindings are required")
-    if args.timeout_seconds <= 0 or args.timeout_seconds > 1800:
-        _fail("timeout is out of range")
-    if args.deadline_unix_ms is not None and args.deadline_unix_ms <= 0:
-        _fail("deadline is out of range")
-    return serve(
-        args.socket,
-        args.bindings,
-        timeout_seconds=args.timeout_seconds,
-        deadline_unix_ms=args.deadline_unix_ms,
-    )
+def main(argv: list[str] | None = None) -> NoReturn:
+    del argv
+    _fail("direct submission CLI is disabled; use the attested runtime broker")
 
 
 if __name__ == "__main__":  # pragma: no cover

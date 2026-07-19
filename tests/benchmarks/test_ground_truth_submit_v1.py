@@ -42,17 +42,37 @@ END = datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc)
 
 @pytest.fixture(autouse=True)
 def _production_authentication(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        production_packet,
-        "validate_packet_selection",
-        lambda *_args, **_kwargs: {
-            "rank": 1,
+    def verify_selection(*args: Any, **_kwargs: Any) -> dict[str, Any]:
+        receipt = cast("dict[str, Any]", args[-1])
+        return {**receipt, "valid": True, "commands": 0}
+
+    monkeypatch.setattr(production_packet, "validate_packet_selection_receipt", verify_selection)
+
+    def attest_selection(*args: Any, **_kwargs: Any) -> dict[str, Any]:
+        aggregate = json.loads((cast("Path", args[5]) / "aggregate-manifest.json").read_bytes())
+        row = aggregate["packets"][0]
+        return {
+            "schema_version": 1,
+            "protocol": "ground-truth-packet-selection-receipt-v1",
+            "runtime_attestation_entry_hash": cast("str", args[7]),
+            "runtime_custody_receipt_sha256": _sha(cast("Path", args[6]).read_bytes()),
+            "rank": cast("int", args[8]),
             "repository": "owner/repo",
             "pr": 7,
+            "packet_root_sha256": row["packet_root_sha256"],
             "aggregate_root_sha256": "sha256:" + "a" * 64,
             "publication_entry_hash": "sha256:" + "b" * 64,
-        },
-    )
+            "cache_inventory_sha256": "sha256:" + "d" * 64,
+            "packet_inventory_sha256": "sha256:" + "8" * 64,
+            "commands": 5,
+            "authorizations": {
+                "review_launch": False,
+                "adjudication": False,
+                "canonical_import": False,
+            },
+        }
+
+    monkeypatch.setattr(production_packet, "attest_packet_selection", attest_selection)
     monkeypatch.setattr(
         production_source,
         "validate_source_bindings",
@@ -110,7 +130,7 @@ def _payload(path: Path, relative: str, raw: bytes) -> dict[str, object]:
 
 def _prepare_binding_inputs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> tuple[Path, Path, Path, Path, Path]:
+) -> tuple[Path, Path, Path, Path, Path, Path]:
     seed = _packet_and_record(tmp_path / "seed")
     packets_root = _private(tmp_path / "published")
     original = packets_root / "rank-001"
@@ -198,7 +218,14 @@ def _prepare_binding_inputs(
 
     monkeypatch.setattr(campaign, "_json", campaign_json)
     monkeypatch.setattr(campaign, "validate_manifest", lambda *_args, **_kwargs: None)
-    return campaign_path, source_bindings, Path(seed.cache_root), ledger, packets_root
+    return (
+        campaign_path,
+        source_bindings,
+        Path(seed.cache_root),
+        ledger,
+        packets_root,
+        Path(seed.runtime_custody_receipt_path),
+    )
 
 
 def _packet_and_record(
@@ -315,6 +342,41 @@ def _packet_and_record(
     status = packet.stat()
     cache_status = cache.stat()
     profile = submit._profile_snapshot(Path(__file__).resolve().parents[2])
+    runtime_hash = "sha256:" + "e" * 64
+    custody_path = tmp_path / "runtime-custody.json"
+    custody_path.write_bytes(
+        canonical_json(
+            {
+                "cache": {
+                    "cache_device": cache_status.st_dev,
+                    "cache_inode": cache_status.st_ino,
+                    "inventory_sha256": "sha256:" + "d" * 64,
+                }
+            }
+        )
+    )
+    custody_path.chmod(0o400)
+    custody_hash = _sha(custody_path.read_bytes())
+    selection = submit.SelectionCustodyReceipt(
+        schema_version=1,
+        protocol="ground-truth-packet-selection-receipt-v1",
+        runtime_attestation_entry_hash=runtime_hash,
+        runtime_custody_receipt_sha256=custody_hash,
+        rank=1,
+        repository="owner/repo",
+        pr=7,
+        packet_root_sha256=cast("str", manifest["packet_root_sha256"]),
+        aggregate_root_sha256="sha256:" + "a" * 64,
+        publication_entry_hash="sha256:" + "b" * 64,
+        cache_inventory_sha256="sha256:" + "d" * 64,
+        packet_inventory_sha256="sha256:" + "8" * 64,
+        commands=5,
+        authorizations=submit.FalseAuthority(
+            review_launch=False,
+            adjudication=False,
+            canonical_import=False,
+        ),
+    )
     return submit.SubmissionBinding(
         schema_version=1,
         attempt_id="attempt-1",
@@ -332,6 +394,10 @@ def _packet_and_record(
         source_bindings_path=str(tmp_path / "source-bindings.json"),
         ledger_root=str(tmp_path / "ledger"),
         packets_root=str(tmp_path),
+        runtime_attestation_entry_hash=runtime_hash,
+        runtime_custody_receipt_path=str(custody_path.resolve()),
+        runtime_custody_receipt_sha256=custody_hash,
+        selection_custody=selection,
         original_packet_root_sha256=cast("str", manifest["packet_root_sha256"]),
         aggregate_root_sha256="sha256:" + "a" * 64,
         publication_entry_hash="sha256:" + "b" * 64,
@@ -657,8 +723,8 @@ def test_noncooperating_sidecar_race_preserves_raced_file(
 def test_prepare_binding_binds_exact_lanes_corpus_and_policy_digests(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    campaign_path, source_bindings, cache, ledger, packets_root = _prepare_binding_inputs(
-        tmp_path, monkeypatch
+    campaign_path, source_bindings, cache, ledger, packets_root, custody_path = (
+        _prepare_binding_inputs(tmp_path, monkeypatch)
     )
     attempts = _private(tmp_path / "attempts")
     root = Path(__file__).resolve().parents[2]
@@ -677,6 +743,9 @@ def test_prepare_binding_binds_exact_lanes_corpus_and_policy_digests(
             cast("Any", lane),
             f"prod-v1-i149-rank001-pr7-{lane}",
             attempt,
+            runtime_attestation_entry_hash="sha256:" + "e" * 64,
+            runtime_custody_receipt_path=custody_path,
+            runtime_custody_receipt_sha256=_sha(custody_path.read_bytes()),
             started_at=START,
         )
         assert result["live_launch_authorized"] is False
@@ -706,6 +775,9 @@ def test_prepare_binding_binds_exact_lanes_corpus_and_policy_digests(
             "A",
             "prod-v1-i149-rank001-pr8-A",
             attempts / "wrong-attempt",
+            runtime_attestation_entry_hash="sha256:" + "e" * 64,
+            runtime_custody_receipt_path=custody_path,
+            runtime_custody_receipt_sha256=_sha(custody_path.read_bytes()),
             started_at=START,
         )
     for record in records:
@@ -719,8 +791,8 @@ def test_prepare_binding_binds_exact_lanes_corpus_and_policy_digests(
 def test_prepare_binding_policy_drift_fails_without_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    campaign_path, source_bindings, cache, ledger, packets_root = _prepare_binding_inputs(
-        tmp_path / "inputs", monkeypatch
+    campaign_path, source_bindings, cache, ledger, packets_root, custody_path = (
+        _prepare_binding_inputs(tmp_path / "inputs", monkeypatch)
     )
     repository_root = Path(__file__).resolve().parents[2]
     profile_root = tmp_path / "profile-root"
@@ -759,6 +831,9 @@ def test_prepare_binding_policy_drift_fails_without_publication(
             "A",
             "prod-v1-i149-rank001-pr7-A",
             attempt,
+            runtime_attestation_entry_hash="sha256:" + "e" * 64,
+            runtime_custody_receipt_path=custody_path,
+            runtime_custody_receipt_sha256=_sha(custody_path.read_bytes()),
             started_at=START,
         )
     assert not attempt.exists()
@@ -773,29 +848,34 @@ def test_broker_authentication_uses_exact_selected_rank_validator(
     ranks: list[int] = []
 
     def selected(*args: Any, **_kwargs: Any) -> dict[str, Any]:
-        ranks.append(cast("int", args[-1]))
-        return {
-            "rank": record.rank,
-            "repository": record.repository,
-            "pr": record.pr,
-            "aggregate_root_sha256": record.aggregate_root_sha256,
-            "publication_entry_hash": record.publication_entry_hash,
-            "commands": 5,
-        }
+        receipt = cast("dict[str, Any]", args[-1])
+        ranks.append(cast("int", receipt["rank"]))
+        return {**receipt, "valid": True, "commands": 0}
 
-    monkeypatch.setattr(production_packet, "validate_packet_selection", selected)
-    assert submit.load_bindings(binding).records[0].rank == 1
-    assert ranks == [1]
+    monkeypatch.setattr(production_packet, "validate_packet_selection_receipt", selected)
     monkeypatch.setattr(
         production_packet,
         "validate_packet_selection",
+        lambda *_args, **_kwargs: pytest.fail("repeated load invoked five-Git validator"),
+    )
+    monkeypatch.setattr(
+        production_source,
+        "validate_cache",
+        lambda *_args, **_kwargs: pytest.fail("repeated load invoked semantic source Git"),
+    )
+    assert submit.load_bindings(binding).records[0].rank == 1
+    assert submit.load_bindings(binding).records[0].rank == 1
+    assert ranks == [1, 1]
+    monkeypatch.setattr(
+        production_packet,
+        "validate_packet_selection_receipt",
         lambda *_args, **_kwargs: {
+            **record.selection_custody.model_dump(mode="json"),
             "rank": 2,
             "repository": "other/repo",
             "pr": 99,
-            "aggregate_root_sha256": record.aggregate_root_sha256,
-            "publication_entry_hash": record.publication_entry_hash,
-            "commands": 5,
+            "commands": 0,
+            "valid": True,
         },
     )
     with pytest.raises(submit.GroundTruthSubmitError, match="publication binding changed"):
@@ -848,6 +928,11 @@ def test_binding_loader_rejects_modes_identity_manifest_and_incomplete_recovery(
     Path(record.escrow_path).write_text("orphan")
     with pytest.raises(submit.GroundTruthSubmitError, match="recovery state is incomplete"):
         submit.load_bindings(binding)
+
+
+def test_direct_submission_cli_is_disabled() -> None:
+    with pytest.raises(submit.GroundTruthSubmitError, match="direct submission CLI is disabled"):
+        submit.main(["--serve"])
 
 
 def test_strict_json_and_diagnostics_are_bounded_and_separate_protocol_capability(
