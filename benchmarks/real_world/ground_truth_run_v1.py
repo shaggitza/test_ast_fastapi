@@ -1551,9 +1551,15 @@ def _extended_ledger(root: Path, repository_root: Path) -> dict[str, Any]:  # no
                     or pending_events
                     or event["model_launch_count"] != 0
                     or any(event[key] != summary[key] for key in summary)
-                    or event["binding_sha256"] != failed_rows[-2]["binding_sha256"]
-                    or event["broker_pid"] != failed_rows[-2]["broker_pid"]
-                    or event["broker_start_identity"] != failed_rows[-2]["broker_start_identity"]
+                    or (
+                        post_readiness_failure
+                        and (
+                            event["binding_sha256"] != generation2_failed_rows[0]["binding_sha256"]
+                            or event["broker_pid"] != generation2_failed_rows[0]["broker_pid"]
+                            or event["broker_start_identity"]
+                            != generation2_failed_rows[0]["broker_start_identity"]
+                        )
+                    )
                     or event["limits"]
                     != {
                         "max_global_active": 3,
