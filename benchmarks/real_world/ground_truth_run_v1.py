@@ -72,8 +72,10 @@ _NATIVE_RUN = re.compile(r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$|^[0-9a-
 _SESSION_ID = re.compile(r"^[0-9A-Za-z_-]{8,128}$")
 _EVENT_ID = re.compile(r"^[0-9A-Za-z_-]{1,128}$")
 _TASK_TEXT: Final = (
-    "Perform the assigned blind review. Follow the exact packet policy, submit through "
-    "submit_blind_review, then emit only SUBMISSION_COMPLETE."
+    "Perform the assigned blind review. Follow the exact packet policy and submit through "
+    "submit_blind_review. Emit only SUBMISSION_COMPLETE after the tool returns ok=true with "
+    "code=SUBMITTED. After a terminal tool error emit only SUBMISSION_FAILED; never claim "
+    "completion without accepted escrow."
 )
 _CORRECTABLE = {"DRAFT_INVALID", "EVIDENCE_INVALID"}
 _ZERO = "sha256:" + "0" * 64
