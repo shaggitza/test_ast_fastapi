@@ -1268,8 +1268,11 @@ def _validate_final_recovery_binding(
     binding = archive / "binding.json"
     raw_before = submit_v1._owned_file(binding, max_bytes=_MAX_FILE, allowed_modes={0o400})
     try:
-        record = submit_v1.SubmissionBinding.model_validate_json(raw_before)
-        canonical = canonical_json(record.model_dump(mode="json"))
+        document = submit_v1.SubmissionBindings.model_validate_json(raw_before)
+        canonical = canonical_json(document.model_dump(mode="json"))
+        if len(document.records) != 1:
+            _fail("final prelaunch recovery binding document cardinality is invalid")
+        record = document.records[0]
     except (ValueError, TypeError, UnicodeError, RecursionError, MemoryError) as exc:
         raise GroundTruthRunError("final prelaunch recovery binding is invalid") from exc
     raw_after = submit_v1._owned_file(binding, max_bytes=_MAX_FILE, allowed_modes={0o400})
