@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
 import fcntl
 import hashlib
 import json
@@ -63,7 +64,7 @@ _RUNTIME_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _ATTEMPT = re.compile(r"^prod-v1-i[0-9]{3}-rank[0-9]{3}-pr[0-9]+-[AB]$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _EVENT_FILE = re.compile(
-    r"^([0-9]{6})-(prepared|launch_claimed|native_result|pending|completed|operational_failed|prelaunch_migration|runtime_migrated|runtime_migrated_repair|canary_reauthorized)-([A-Za-z0-9_-]+)\.json$"
+    r"^([0-9]{6})-(prepared|launch_claimed|native_result|pending|completed|operational_failed|prelaunch_migration|runtime_migrated|runtime_migrated_repair|canary_reauthorized|canary_prelaunch_recovery)-([A-Za-z0-9_-]+)\.json$"
 )
 _NATIVE_RUN = re.compile(r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$|^[0-9a-f]{8,64}$")
 _SESSION_ID = re.compile(r"^[0-9A-Za-z_-]{8,128}$")
@@ -84,10 +85,12 @@ _MIGRATION_PROTOCOL: Final = "ground-truth-prelaunch-custody-migration-v1"
 _MIGRATION_RUNTIME_PROTOCOL: Final = "ground-truth-runtime-attestation-migration-v1"
 _MIGRATED_AUTH_PROTOCOL: Final = "ground-truth-review-canary-authorization-generation2-v1"
 _MIGRATION_REPAIR_PROTOCOL: Final = "ground-truth-runtime-attestation-migration-repair-v1"
+_PRELAUNCH_RECOVERY_PROTOCOL: Final = "ground-truth-review-canary-prelaunch-recovery-v1"
 _MIGRATION_DOMAIN: Final = b"ground-truth-prelaunch-custody-migration-v1\0"
 _MIGRATION_RUNTIME_DOMAIN: Final = b"ground-truth-runtime-attestation-migration-v1\0"
 _MIGRATED_AUTH_DOMAIN: Final = b"ground-truth-review-canary-authorization-generation2-v1\0"
 _MIGRATION_REPAIR_DOMAIN: Final = b"ground-truth-runtime-attestation-migration-repair-v1\0"
+_PRELAUNCH_RECOVERY_DOMAIN: Final = b"ground-truth-review-canary-prelaunch-recovery-v1\0"
 
 
 class GroundTruthRunError(RuntimeError):
@@ -872,6 +875,41 @@ def _event_expected_keys(kind: str) -> set[str]:
             "migration_entry_hash",
             "generation",
         },
+        "canary_prelaunch_recovery": {
+            "campaign_id",
+            "campaign_manifest_sha256",
+            "runtime_attestation_entry_hash",
+            "prior_authorization_entry_hash",
+            "agent_installation_sha256",
+            "production_profile_sha256",
+            "lanes",
+            "attempt_ids",
+            "failed_attempt_id",
+            "prepared_entry_hash",
+            "failure_entry_hash",
+            "prior_events_sha256",
+            "prior_event_count",
+            "archive_path",
+            "archive_device",
+            "archive_inode",
+            "archive_inventory_sha256",
+            "archive_entries",
+            "archive_bytes",
+            "binding_sha256",
+            "broker_pid",
+            "broker_start_identity",
+            "broker_stdout_sha256",
+            "broker_stdout_bytes",
+            "broker_stderr_sha256",
+            "broker_stderr_bytes",
+            "limits",
+            "model_launch_count",
+            "issued_at",
+            "expires_at",
+            "recovered_at",
+            "authorizations",
+            "generation",
+        },
     }
     try:
         return common | specific[kind]
@@ -960,6 +998,132 @@ def _validate_runtime_ledger_entry(
         if not isinstance(value[key], str) or not _DIGEST.fullmatch(value[key]):
             _fail("runtime attestation digest is invalid")
     _validate_runtime_identity(value["runtime_identity"])
+
+
+def _rename_directory_noreplace(source: Path, target: Path) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = libc.renameat2
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    if renameat2(-100, os.fsencode(source), -100, os.fsencode(target), 1) != 0:
+        error = ctypes.get_errno()
+        raise GroundTruthRunError(f"prelaunch archive rename failed: {os.strerror(error)}")
+
+
+def _native_state_at(path: Path, attempt_id: str) -> dict[str, Any]:
+    if not _ATTEMPT.fullmatch(attempt_id):
+        _fail("attempt id is invalid")
+    value, raw = _json_raw(path, modes={0o400})
+    state_keys = {
+        "schema_version",
+        "attempt_id",
+        "rank",
+        "lane",
+        "packet",
+        "binding",
+        "binding_sha256",
+        "broker_pid",
+        "broker_start_identity",
+        "socket",
+        "registry",
+        "deadline_unix_ms",
+        "runtime_attestation_entry_hash",
+        "packet_root_sha256",
+        "reviewer",
+    }
+    if "generation" in value:
+        state_keys.add("generation")
+    _strict_keys(value, state_keys, "native state")
+    if (
+        canonical_json(value) != raw
+        or value["schema_version"] != 1
+        or value.get("generation", 1) not in {1, 2, 3}
+        or value["attempt_id"] != attempt_id
+        or value["lane"] != attempt_id[-1]
+        or not isinstance(value["broker_pid"], int)
+        or not isinstance(value["broker_start_identity"], str)
+        or not isinstance(value["deadline_unix_ms"], int)
+        or not _DIGEST.fullmatch(str(value["binding_sha256"]))
+        or not _DIGEST.fullmatch(str(value["packet_root_sha256"]))
+    ):
+        _fail("native state identity is invalid")
+    return value
+
+
+def _recovery_archive_summary(path: Path, attempt_id: str) -> dict[str, Any]:
+    status = _private_directory(path)
+    if {item.name for item in path.iterdir()} != {
+        "binding.json",
+        "escrow",
+        "logs",
+        "native-state.json",
+        "packet",
+    }:
+        _fail("prelaunch recovery archive inventory is not exact")
+    escrow = path / "escrow"
+    logs = path / "logs"
+    _private_directory(escrow)
+    _private_directory(logs)
+    if any(escrow.iterdir()) or {item.name for item in logs.iterdir()} != {
+        "broker.stderr",
+        "broker.stdout",
+    }:
+        _fail("prelaunch recovery archive escrow or logs are invalid")
+    packet_status = (path / "packet").stat(follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(packet_status.st_mode)
+        or packet_status.st_uid != os.getuid()
+        or stat.S_IMODE(packet_status.st_mode) != 0o500
+    ):
+        _fail("prelaunch recovery packet identity is invalid")
+    binding_raw = submit_v1._owned_file(
+        path / "binding.json", max_bytes=_MAX_FILE, allowed_modes={0o400}
+    )
+    state = _native_state_at(path / "native-state.json", attempt_id)
+    socket_path = Path(cast("str", state["socket"]))
+    registry_path = Path(cast("str", state["registry"]))
+    if (
+        not isinstance(state["broker_pid"], int)
+        or state["broker_pid"] <= 0
+        or not isinstance(state["broker_start_identity"], str)
+        or _same_process(state["broker_pid"], state["broker_start_identity"])
+        or socket_path.exists()
+        or socket_path.is_symlink()
+        or registry_path.exists()
+        or registry_path.is_symlink()
+    ):
+        _fail("prelaunch recovery broker is not exactly dead")
+    stdout = submit_v1._owned_file(
+        logs / "broker.stdout", max_bytes=_MAX_FILE, allowed_modes={0o600}
+    )
+    stderr = submit_v1._owned_file(
+        logs / "broker.stderr", max_bytes=_MAX_FILE, allowed_modes={0o600}
+    )
+    inventory = packet_v1._inventory(
+        path,
+        limit=packet_v1._MAX_AGGREGATE_PAYLOAD,
+        max_entries=packet_v1._MAX_AGGREGATE_ENTRIES,
+    )
+    return {
+        "archive_device": status.st_dev,
+        "archive_inode": status.st_ino,
+        "archive_inventory_sha256": inventory["sha256"],
+        "archive_entries": inventory["entries"],
+        "archive_bytes": inventory["bytes"],
+        "binding_sha256": _sha(binding_raw),
+        "broker_pid": state["broker_pid"],
+        "broker_start_identity": state["broker_start_identity"],
+        "broker_stdout_sha256": _sha(stdout),
+        "broker_stdout_bytes": len(stdout),
+        "broker_stderr_sha256": _sha(stderr),
+        "broker_stderr_bytes": len(stderr),
+    }
 
 
 def _extended_ledger(root: Path, repository_root: Path) -> dict[str, Any]:  # noqa: PLR0912,PLR0915
@@ -1082,8 +1246,10 @@ def _extended_ledger(root: Path, repository_root: Path) -> dict[str, Any]:  # no
     events: list[dict[str, Any]] = []
     migration: dict[str, Any] | None = None
     repair: dict[str, Any] | None = None
+    prelaunch_recovery: dict[str, Any] | None = None
     generation = 1
     generation2_attempts: set[str] = set()
+    generation3_attempts: set[str] = set()
     launched_attempts: set[str] = set()
     if events_dir.exists():
         _private_directory(events_dir)
@@ -1095,7 +1261,9 @@ def _extended_ledger(root: Path, repository_root: Path) -> dict[str, Any]:  # no
             event, raw = _json_raw(path, modes={0o400})
             kind = cast("str", event.get("kind"))
             expected_event_keys = _event_expected_keys(kind)
-            if kind != "canary_reauthorized" and event.get("generation") == 2:
+            if kind not in {"canary_reauthorized", "canary_prelaunch_recovery"} and event.get(
+                "generation"
+            ) in {2, 3}:
                 expected_event_keys.add("generation")
             _strict_keys(event, expected_event_keys, "lane event")
             body = {key: value for key, value in event.items() if key != "entry_hash"}
@@ -1108,6 +1276,10 @@ def _extended_ledger(root: Path, repository_root: Path) -> dict[str, Any]:  # no
                     _MIGRATION_REPAIR_DOMAIN,
                 ),
                 "canary_reauthorized": (_MIGRATED_AUTH_PROTOCOL, _MIGRATED_AUTH_DOMAIN),
+                "canary_prelaunch_recovery": (
+                    _PRELAUNCH_RECOVERY_PROTOCOL,
+                    _PRELAUNCH_RECOVERY_DOMAIN,
+                ),
             }
             event_protocol, event_domain = special.get(
                 kind, ("ground-truth-review-lane-event-v1", b"ground-truth-review-lane-event-v1\0")
@@ -1256,6 +1428,88 @@ def _extended_ledger(root: Path, repository_root: Path) -> dict[str, Any]:  # no
                 for attempt in authorized:
                     states[attempt] = "authorized"
                 generation = 2
+            elif kind == "canary_prelaunch_recovery":
+                if not isinstance(runtime, dict):
+                    _fail("generation3 prelaunch recovery lacks runtime")
+                failed = event["failed_attempt_id"]
+                failed_rows = [row for row in events if row.get("attempt_id") == failed]
+                operational = [
+                    item for item, state in states.items() if state == "operational_failed"
+                ]
+                archive = Path(cast("str", event["archive_path"]))
+                expected_archive = (
+                    Path(cast("str", runtime["execution_root"]))
+                    / "prelaunch-failures"
+                    / "generation2"
+                    / failed
+                )
+                if archive != expected_archive:
+                    _fail("generation3 prelaunch recovery archive path is invalid")
+                summary = _recovery_archive_summary(archive, failed)
+                if (
+                    identifier != "canary-recovery"
+                    or prelaunch_recovery is not None
+                    or generation != 2
+                    or migration is None
+                    or runtime is None
+                    or runtime.get("kind") != "runtime_migrated_repair"
+                    or authorization is None
+                    or authorization.get("kind") != "canary_reauthorized"
+                    or event["generation"] != 3
+                    or event["runtime_attestation_entry_hash"] != runtime["entry_hash"]
+                    or event["prior_authorization_entry_hash"] != authorization["entry_hash"]
+                    or event["campaign_id"] != base["campaign_id"]
+                    or event["campaign_manifest_sha256"] != base["campaign_manifest_sha256"]
+                    or event["production_profile_sha256"] != runtime["production_profile_sha256"]
+                    or event["agent_installation_sha256"]
+                    != authorization["agent_installation_sha256"]
+                    or event["lanes"] != base["campaign_canary_lanes"]
+                    or event["attempt_ids"] != sorted(authorized)
+                    or set(event["attempt_ids"]) != _authorized_attempts(event)
+                    or operational != [failed]
+                    or states.get(failed) != "operational_failed"
+                    or any(
+                        states.get(item) != "authorized" for item in authorized if item != failed
+                    )
+                    or [row["kind"] for row in failed_rows[-2:]]
+                    != ["prepared", "operational_failed"]
+                    or failed_rows[-1].get("reason") != "never-launched broker exited"
+                    or failed_rows[-1].get("relaunch_authorized") is not False
+                    or event["prepared_entry_hash"] != failed_rows[-2]["entry_hash"]
+                    or event["failure_entry_hash"] != failed_rows[-1]["entry_hash"]
+                    or event["prior_events_sha256"] != _sha(canonical_json(events))
+                    or event["prior_event_count"] != len(events)
+                    or launched_attempts
+                    or native_results
+                    or pending_events
+                    or event["model_launch_count"] != 0
+                    or any(event[key] != summary[key] for key in summary)
+                    or event["binding_sha256"] != failed_rows[-2]["binding_sha256"]
+                    or event["broker_pid"] != failed_rows[-2]["broker_pid"]
+                    or event["broker_start_identity"] != failed_rows[-2]["broker_start_identity"]
+                    or event["limits"]
+                    != {
+                        "max_global_active": 3,
+                        "max_processes_per_lane": 1,
+                        "replacement_attempts": 0,
+                    }
+                    or event["authorizations"]
+                    != {"review_launch": True, "adjudication": False, "canonical_import": False}
+                ):
+                    _fail("generation3 prelaunch recovery is invalid")
+                issued = _parse_timestamp(event["issued_at"])
+                expires = _parse_timestamp(event["expires_at"])
+                recovered_at = _parse_timestamp(event["recovered_at"])
+                if expires - issued != timedelta(hours=24) or not issued <= recovered_at <= expires:
+                    _fail("generation3 prelaunch recovery interval is invalid")
+                authorization = event
+                authorized = _authorized_attempts(event)
+                authorized_rows = {row["attempt_id"]: row for row in event["lanes"]}
+                generation3_attempts.update(authorized)
+                for attempt in authorized:
+                    states[attempt] = "authorized"
+                prelaunch_recovery = event
+                generation = 3
             elif kind == "launch_claimed":
                 batch = event["batch_id"]
                 attempts = event["attempt_ids"]
@@ -1292,7 +1546,7 @@ def _extended_ledger(root: Path, repository_root: Path) -> dict[str, Any]:  # no
                 if kind == "prepared":
                     if (
                         (generation == 1 and previous is not None)
-                        or (generation == 2 and previous != "authorized")
+                        or (generation in {2, 3} and previous != "authorized")
                         or event.get("generation", 1) != generation
                         or event["rank"] != 1
                         or event["lane"] != attempt[-1]
@@ -1430,8 +1684,10 @@ def _extended_ledger(root: Path, repository_root: Path) -> dict[str, Any]:  # no
         "runtime_superseded": runtime_superseded,
         "migration": migration,
         "repair": repair,
+        "prelaunch_recovery": prelaunch_recovery,
         "generation": generation,
         "generation2_attempts": generation2_attempts,
+        "generation3_attempts": generation3_attempts,
         "authorization": authorization,
         "events": events,
         "states": states,
@@ -1439,6 +1695,7 @@ def _extended_ledger(root: Path, repository_root: Path) -> dict[str, Any]:  # no
         "batch_events": batch_events,
         "batch_native_runs": batch_native_runs,
         "native_results": native_results,
+        "launched_attempts": launched_attempts,
         "active": active,
         "head": head,
     }
@@ -3055,6 +3312,178 @@ def authorize_migrated_canary(
     return {"entry_hash": auth["entry_hash"], "generation": 2, "lanes": selected}
 
 
+def authorize_prelaunch_canary_recovery(  # noqa: PLR0912, PLR0915
+    root: Path,
+    campaign_path: Path,
+    ledger: Path,
+    execution_root: Path,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    campaign, campaign_raw = _campaign(root, campaign_path)
+    attestation = _runtime_attestation(root, execution_root)
+    installation = _installed_agent(root, execution_root)
+    private = campaign_v1._private_root(ledger)
+    with campaign_v1._ledger_lock(private):
+        current = _extended_ledger(private, root)
+        fresh_attestation = _runtime_attestation(root, execution_root)
+        fresh_installation = _installed_agent(root, execution_root)
+        if fresh_attestation != attestation or fresh_installation != installation:
+            _fail("runtime or agent drifted before generation3 recovery")
+        authorization = current.get("authorization")
+        states = current.get("states")
+        if (
+            current.get("generation") != 2
+            or current.get("prelaunch_recovery") is not None
+            or current.get("runtime") != attestation
+            or attestation.get("kind") != "runtime_migrated_repair"
+            or not isinstance(authorization, dict)
+            or authorization.get("kind") != "canary_reauthorized"
+            or current.get("active") != 0
+            or current.get("launched_attempts")
+            or current.get("native_results")
+            or not isinstance(states, dict)
+        ):
+            _fail("ledger is not eligible for generation3 prelaunch recovery")
+        authorized = sorted(_authorized_attempts(authorization))
+        failed = [item for item in authorized if states.get(item) == "operational_failed"]
+        untouched = [item for item in authorized if states.get(item) == "authorized"]
+        if len(failed) != 1 or len(untouched) != 1:
+            _fail("generation2 lane states are not the exact recoverable pair")
+        failed_attempt = failed[0]
+        rows = [row for row in current["events"] if row.get("attempt_id") == failed_attempt]
+        if (
+            [row["kind"] for row in rows[-2:]] != ["prepared", "operational_failed"]
+            or rows[-1].get("reason") != "never-launched broker exited"
+            or rows[-1].get("relaunch_authorized") is not False
+            or rows[-2].get("generation") != 2
+            or rows[-1].get("generation") != 2
+            or installation.get("runtime_attestation_entry_hash") != attestation["entry_hash"]
+            or authorization.get("agent_installation_sha256") != _sha(canonical_json(installation))
+        ):
+            _fail("generation2 failure evidence is not exact")
+        slots = execution_root / "slots"
+        _private_directory(slots)
+        if {item.name for item in slots.iterdir()} != {".lock"}:
+            _fail("generation2 recovery slots are not empty")
+        lock_status = (slots / ".lock").stat(follow_symlinks=False)
+        if (
+            not stat.S_ISREG(lock_status.st_mode)
+            or lock_status.st_uid != os.getuid()
+            or stat.S_IMODE(lock_status.st_mode) != 0o600
+            or lock_status.st_size != 0
+        ):
+            _fail("generation2 recovery slot lock is invalid")
+        attempts_root = execution_root / "attempts"
+        _private_directory(attempts_root)
+        source_attempt = attempts_root / failed_attempt
+        untouched_attempt = attempts_root / untouched[0]
+        if untouched_attempt.exists() or untouched_attempt.is_symlink():
+            _fail("untouched generation2 lane unexpectedly has an attempt directory")
+        failures = execution_root / "prelaunch-failures"
+        generation_dir = failures / "generation2"
+        archive = generation_dir / failed_attempt
+        if not failures.exists():
+            failures.mkdir(mode=0o700)
+            descriptor = os.open(execution_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        _private_directory(failures)
+        if {item.name for item in failures.iterdir()} not in (set(), {"generation2"}):
+            _fail("prelaunch failure archive root is invalid")
+        if not generation_dir.exists():
+            generation_dir.mkdir(mode=0o700)
+            descriptor = os.open(failures, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        _private_directory(generation_dir)
+        if {item.name for item in generation_dir.iterdir()} not in (set(), {failed_attempt}):
+            _fail("generation2 failure archive inventory is invalid")
+        if source_attempt.exists() and not archive.exists():
+            _recovery_archive_summary(source_attempt, failed_attempt)
+            _fsync_tree(source_attempt)
+            _rename_directory_noreplace(source_attempt, archive)
+            for directory_path in (attempts_root, generation_dir):
+                descriptor = os.open(directory_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+        elif source_attempt.exists() or not archive.exists():
+            _fail("generation2 attempt archive recovery state is invalid")
+        summary = _recovery_archive_summary(archive, failed_attempt)
+        _fsync_tree(archive)
+        native_state = _native_state_at(archive / "native-state.json", failed_attempt)
+        if (
+            summary["binding_sha256"] != rows[-2]["binding_sha256"]
+            or summary["broker_pid"] != rows[-2]["broker_pid"]
+            or summary["broker_start_identity"] != rows[-2]["broker_start_identity"]
+            or native_state.get("generation") != 2
+        ):
+            _fail("archived generation2 attempt differs from ledger")
+        selected = [
+            {
+                "lane_key": row["lane_key"],
+                "attempt_id": row["attempt_id"],
+                "reviewer": row["reviewer"],
+            }
+            for row in campaign["lanes"]
+            if row["rank"] == 1 and row["lane"] in {"A", "B"}
+        ]
+        if selected != authorization.get("lanes"):
+            _fail("recovered canary lanes differ from generation2 authorization")
+        issued = (now or _now()).astimezone(timezone.utc).replace(microsecond=0)
+        event = _append_event_locked(
+            private,
+            root,
+            current,
+            "canary-recovery",
+            "canary_prelaunch_recovery",
+            {
+                "campaign_id": campaign["id"],
+                "campaign_manifest_sha256": _sha(campaign_raw),
+                "runtime_attestation_entry_hash": attestation["entry_hash"],
+                "prior_authorization_entry_hash": authorization["entry_hash"],
+                "agent_installation_sha256": _sha(canonical_json(installation)),
+                "production_profile_sha256": attestation["production_profile_sha256"],
+                "lanes": selected,
+                "attempt_ids": authorized,
+                "failed_attempt_id": failed_attempt,
+                "prepared_entry_hash": rows[-2]["entry_hash"],
+                "failure_entry_hash": rows[-1]["entry_hash"],
+                "prior_events_sha256": _sha(canonical_json(current["events"])),
+                "prior_event_count": len(current["events"]),
+                "archive_path": str(archive),
+                **summary,
+                "limits": {
+                    "max_global_active": 3,
+                    "max_processes_per_lane": 1,
+                    "replacement_attempts": 0,
+                },
+                "model_launch_count": 0,
+                "issued_at": _timestamp(issued),
+                "expires_at": _timestamp(issued + timedelta(hours=24)),
+                "recovered_at": _timestamp(issued),
+                "authorizations": {
+                    "review_launch": True,
+                    "adjudication": False,
+                    "canonical_import": False,
+                },
+                "generation": 3,
+            },
+        )
+        verified = _extended_ledger(private, root)
+        if verified.get("generation") != 3 or any(
+            verified["states"].get(item) != "authorized" for item in authorized
+        ):
+            _fail("generation3 prelaunch recovery did not become atomic ledger state")
+    return {"entry_hash": event["entry_hash"], "generation": 3, "lanes": selected}
+
+
 def _authorization(current: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
     value = current.get("authorization")
     if not isinstance(value, dict):
@@ -3104,13 +3533,18 @@ def _event_value(current: dict[str, Any], kind: str, fields: dict[str, Any]) -> 
             2,
         ),
         "canary_reauthorized": (_MIGRATED_AUTH_PROTOCOL, _MIGRATED_AUTH_DOMAIN, 1),
+        "canary_prelaunch_recovery": (
+            _PRELAUNCH_RECOVERY_PROTOCOL,
+            _PRELAUNCH_RECOVERY_DOMAIN,
+            1,
+        ),
     }
     protocol, domain, schema_version = protocols.get(
         kind, ("ground-truth-review-lane-event-v1", b"ground-truth-review-lane-event-v1\0", 1)
     )
     generation_field = (
-        {"generation": 2}
-        if current.get("generation") == 2
+        {"generation": current["generation"]}
+        if current.get("generation") in {2, 3}
         and kind
         in {
             "prepared",
@@ -3518,7 +3952,7 @@ def prepare_attempt(  # noqa: PLR0915
             runtime_custody_receipt_sha256=cast(
                 "str", attestation["runtime_custody_receipt_sha256"]
             ),
-            generation=cast("Literal[1, 2]", current.get("generation", 1)),
+            generation=cast("Literal[1, 2, 3]", current.get("generation", 1)),
             started_at=(now or _now()),
         )
         record = submit_v1.load_bindings(attempt / "binding.json").records[0]
@@ -3646,45 +4080,9 @@ def prepare_attempt(  # noqa: PLR0915
 
 
 def _state(execution_root: Path, attempt_id: str) -> dict[str, Any]:
-    if not _ATTEMPT.fullmatch(attempt_id):
-        _fail("attempt id is invalid")
-    value, raw = _json_raw(
-        execution_root / "attempts" / attempt_id / "native-state.json", modes={0o400}
+    return _native_state_at(
+        execution_root / "attempts" / attempt_id / "native-state.json", attempt_id
     )
-    state_keys = {
-        "schema_version",
-        "attempt_id",
-        "rank",
-        "lane",
-        "packet",
-        "binding",
-        "binding_sha256",
-        "broker_pid",
-        "broker_start_identity",
-        "socket",
-        "registry",
-        "deadline_unix_ms",
-        "runtime_attestation_entry_hash",
-        "packet_root_sha256",
-        "reviewer",
-    }
-    if "generation" in value:
-        state_keys.add("generation")
-    _strict_keys(value, state_keys, "native state")
-    if (
-        canonical_json(value) != raw
-        or value["schema_version"] != 1
-        or value.get("generation", 1) not in {1, 2}
-        or value["attempt_id"] != attempt_id
-        or value["lane"] != attempt_id[-1]
-        or not isinstance(value["broker_pid"], int)
-        or not isinstance(value["broker_start_identity"], str)
-        or not isinstance(value["deadline_unix_ms"], int)
-        or not _DIGEST.fullmatch(str(value["binding_sha256"]))
-        or not _DIGEST.fullmatch(str(value["packet_root_sha256"]))
-    ):
-        _fail("native state identity is invalid")
-    return value
 
 
 def _validate_native_plan_schema(root: Path, plan: dict[str, Any]) -> str:
@@ -4573,6 +4971,10 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     migrated_auth.add_argument("--campaign", type=Path, required=True)
     migrated_auth.add_argument("--ledger-root", type=Path, required=True)
     migrated_auth.add_argument("--execution-root", type=Path, required=True)
+    recovery = sub.add_parser("authorize-prelaunch-canary-recovery")
+    recovery.add_argument("--campaign", type=Path, required=True)
+    recovery.add_argument("--ledger-root", type=Path, required=True)
+    recovery.add_argument("--execution-root", type=Path, required=True)
     create = sub.add_parser("create-native-agent")
     create.add_argument("--execution-root", type=Path, required=True)
     create.add_argument("--output", type=Path, required=True)
@@ -4665,6 +5067,13 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0912
         )
     elif args.command == "authorize-migrated-canary":
         result = authorize_migrated_canary(
+            root,
+            args.campaign,
+            args.ledger_root,
+            args.execution_root,
+        )
+    elif args.command == "authorize-prelaunch-canary-recovery":
+        result = authorize_prelaunch_canary_recovery(
             root,
             args.campaign,
             args.ledger_root,

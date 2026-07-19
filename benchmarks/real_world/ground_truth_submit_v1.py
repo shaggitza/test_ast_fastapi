@@ -192,7 +192,7 @@ class SelectionCustodyReceipt(_StrictModel):
 
 class SubmissionBinding(_StrictModel):
     schema_version: Literal[1]
-    generation: Literal[1, 2] = 1
+    generation: Literal[1, 2, 3] = 1
     attempt_id: str
     capability: str
     packet_path: str
@@ -1545,7 +1545,7 @@ def prepare_binding(  # noqa: PLR0912,PLR0915 - linear fail-closed preparation
     runtime_attestation_entry_hash: str,
     runtime_custody_receipt_path: Path,
     runtime_custody_receipt_sha256: str,
-    generation: Literal[1, 2] = 1,
+    generation: Literal[1, 2, 3] = 1,
     started_at: datetime | None = None,
 ) -> dict[str, object]:
     """Prepare one no-clobber reviewer-visible packet and private binding."""

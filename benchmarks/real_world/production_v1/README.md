@@ -139,8 +139,12 @@ global agent equals the bad bytes, and no installation receipt or later event ex
 preserves both earlier roots, fully reattests custody into a third distinct root, archives the
 original and bad agent bytes, and permits only their exact replacement by the repaired bytes.
 One atomic generation-2 canary authorization restores both exact attempts without changing
-campaign attempt or reviewer identity. The old execution root is never deleted or reused.
-Any launch claim remains permanently nonretryable. Pilot-v2 bytes
+campaign attempt or reviewer identity. If exactly one generation-2 broker then fails before
+any launch claim while the other lane remains untouched, one final generation-3 recovery
+atomically archives the failed attempt directory under `prelaunch-failures/generation2/`,
+binds its full inventory/log/broker evidence, and renews only the same exact A/B authorization.
+The old execution roots and archived attempt are never deleted or reused. Any launch claim
+remains permanently nonretryable. Pilot-v2 bytes
 are a checksum-bound low-level parser/materializer
 dependency and are neither modified nor used for production authorization, custody, or
 publication.
