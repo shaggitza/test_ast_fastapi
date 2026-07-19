@@ -75,6 +75,7 @@ _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _PROFILE_CHECKSUMS = "benchmarks/real_world/production_v1/checksums-v1.json"
+_ACTIVE_CANARY_CHECKSUMS = "benchmarks/real_world/production_v1/checksums-active-canary-v1.json"
 _INPUT_NAMES = {
     "packet_manifest",
     "source_structure",
@@ -484,6 +485,38 @@ def _profile_snapshot(root: Path) -> ProfileSnapshot:
     )
 
 
+def _record_profile_is_authenticated(
+    root: Path, current: ProfileSnapshot, checksum_sha256: str, files_sha256: str
+) -> bool:
+    if current.checksum_sha256 == checksum_sha256 and current.files_sha256 == files_sha256:
+        return True
+    expected = current.digests.get(_ACTIVE_CANARY_CHECKSUMS)
+    if not isinstance(expected, str):
+        return False
+    raw = _owned_file(
+        root / _ACTIVE_CANARY_CHECKSUMS,
+        max_bytes=_MAX_AUTHENTICATED_FILE_BYTES,
+        allowed_modes={0o644},
+    )
+    value = _strict_json(raw, "active canary checksum profile")
+    files = value.get("files")
+    if (
+        _sha(raw) != expected
+        or not isinstance(files, dict)
+        or not files
+        or any(
+            not isinstance(relative, str)
+            or not isinstance(digest, str)
+            or not _DIGEST.fullmatch(digest)
+            for relative, digest in files.items()
+        )
+    ):
+        _fail("active canary checksum profile is invalid")
+    return checksum_sha256 == _sha(raw) and files_sha256 == _sha(
+        canonical_json(dict(sorted(files.items())))
+    )
+
+
 def _same_profile(left: ProfileSnapshot, right: ProfileSnapshot) -> bool:
     return (
         left.checksum_raw == right.checksum_raw
@@ -743,9 +776,11 @@ def _authenticate_record(  # noqa: PLR0912,PLR0915 - fail-closed authentication 
 
     project_root = Path(__file__).resolve().parents[2]
     profile = _profile_snapshot(project_root)
-    if (
-        profile.checksum_sha256 != record.profile_checksum_sha256
-        or profile.files_sha256 != record.profile_files_sha256
+    if not _record_profile_is_authenticated(
+        project_root,
+        profile,
+        record.profile_checksum_sha256,
+        record.profile_files_sha256,
     ):
         _fail("production profile binding changed")
     try:
