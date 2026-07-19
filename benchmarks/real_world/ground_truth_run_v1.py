@@ -4914,12 +4914,19 @@ def _validate_session_layout(session: Path, native_run_id: str, task_index: int)
         relative = resolved.relative_to(session_root)
     except ValueError as exc:
         raise GroundTruthRunError("session path is outside authenticated Pi session root") from exc
+    parts = relative.parts
+    prefix: tuple[str, ...]
+    if len(parts) == 4:
+        prefix, run_index = parts[:1], 1
+    elif len(parts) == 5:
+        prefix, run_index = parts[:2], 2
+    else:
+        _fail("session path does not match claimed native batch task")
     if (
-        len(relative.parts) != 4
-        or relative.parts[1] != native_run_id
-        or relative.parts[2] != f"run-{task_index}"
-        or relative.parts[3] != "session.jsonl"
-        or not relative.parts[0]
+        any(not item or item in {".", ".."} for item in prefix)
+        or parts[run_index] != native_run_id
+        or parts[run_index + 1] != f"run-{task_index}"
+        or parts[run_index + 2] != "session.jsonl"
     ):
         _fail("session path does not match claimed native batch task")
 
