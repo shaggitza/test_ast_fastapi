@@ -10,7 +10,7 @@
     "benchmarks/real_world/production_v1/assignments-v1.json": "sha256:93daeb3aa957737a24b48345e753201f616cd9fefd968ee593461896a41e5f87",
     "benchmarks/real_world/production_v1/campaign-manifest-schema-v1.json": "sha256:28ffac7ec5fc52774fee4eb78c62eb91f0daf799feec9e9ab9e20af3f1629be4",
     "benchmarks/real_world/production_v1/campaign-policy-v1.json": "sha256:49dde2c0a0b1d38586f0219af0bc3cfeb484672ab28f749d487eff783050a630",
-    "benchmarks/real_world/production_v1/checksums-final-prelaunch-recovery-v1.json": "sha256:12933be3b9af5aef2dd7157d864fcb6467cdb3c315662452d6cb8097f511bc74",
+    "benchmarks/real_world/production_v1/checksums-final-prelaunch-recovery-v1.json": "sha256:57e77d733b4e58f6baafccd526e0e512e4dcc2894b676813134d842d78e87217",
     "benchmarks/real_world/production_v1/checksums-packet-selection-v1.json": "sha256:a452313dea69828ef60a3e99e0d5cb2a3a0c7dba029f5f204e85a3ec1d34b9a8",
     "benchmarks/real_world/production_v1/checksums-packet-v1.json": "sha256:4f1ffa49a7c864a71fb7ad76a1c44cdf129935e46e83bf943b8b7ee9193d8e50",
     "benchmarks/real_world/production_v1/checksums-runtime-migration-v1.json": "sha256:57b3fc45aa727a5a643c6b01bb084e878025ca244b6c8c8ab0250a702c1bea35",
