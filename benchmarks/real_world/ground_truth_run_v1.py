@@ -4084,8 +4084,14 @@ def prepare_attempt(  # noqa: PLR0915
             "--deadline-unix-ms",
             str(deadline_ms),
         ]
+        node_path = cast(
+            "str", fresh_attestation["runtime_identity"]["resolver_execution"]["node_path"]
+        )
+        node_parent = str(Path(node_path).parent)
+        if not Path(node_path).is_absolute() or node_parent not in {"/usr/local/bin", "/usr/bin"}:
+            _fail("attested broker Node path is invalid")
         env = {
-            "PATH": "/usr/bin:/bin",
+            "PATH": f"{node_parent}:/usr/bin:/bin",
             "HOME": str(Path.home()),
             "PYTHONPATH": str(root),
             "LANG": "C",
