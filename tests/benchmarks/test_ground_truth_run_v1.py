@@ -225,7 +225,9 @@ def test_broker_process_limit_allows_bounded_evidence_child() -> None:
     script = (
         "import subprocess; "
         "from benchmarks.real_world.ground_truth_run_v1 import _broker_limits; "
-        "_broker_limits(); subprocess.run(['/bin/true'], check=True)"
+        "_broker_limits(); "
+        "subprocess.run(['/usr/bin/prlimit','--fsize=5368709120','--nofile=256',"
+        "'--nproc=512','--','/bin/true'], check=True)"
     )
     subprocess.run([sys.executable, "-c", script], check=True, cwd=ROOT)
 

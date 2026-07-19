@@ -6,7 +6,9 @@
   "batch_claim_binding": "ordered-attempt-ids-and-zero-based-task-indices",
   "broker_subprocess": {
     "kind": "bounded-posix-spawn",
-    "rlimit_nproc_uid_wide": 256,
+    "rlimit_fsize_bytes": 5368709120,
+    "rlimit_nofile": 256,
+    "rlimit_nproc_uid_wide": 512,
     "model_launch": false
   },
   "campaign_lane_binding": "sha256-of-ordered-exact-rank1-A-B-lane-key-attempt-reviewer-rows",
