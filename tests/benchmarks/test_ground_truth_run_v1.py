@@ -1286,7 +1286,11 @@ def test_exact_prelaunch_migration_runtime_authorization_and_reset_flow(
         "broker_stderr_sha256": "sha256:" + "3" * 64,
         "broker_stderr_bytes": 1,
     }
-    monkeypatch.setattr(run, "_recovery_archive_summary", lambda _path, _attempt: archive_summary)
+    monkeypatch.setattr(
+        run,
+        "_recovery_archive_summary",
+        lambda _path, _attempt, **_kwargs: archive_summary,
+    )
     prior_events = run._extended_ledger(ledger, ROOT)["events"]
     recovery = _special_event(
         ledger,

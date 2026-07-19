@@ -1057,15 +1057,37 @@ def _native_state_at(path: Path, attempt_id: str) -> dict[str, Any]:
     return value
 
 
-def _recovery_archive_summary(path: Path, attempt_id: str) -> dict[str, Any]:
+def _require_no_live_broker_for_binding(binding: Path) -> None:
+    needle = os.fsencode(str(binding))
+    for process in Path("/proc").iterdir():
+        if not process.name.isdigit():
+            continue
+        try:
+            status = process.stat(follow_symlinks=False)
+            if status.st_uid != os.getuid():
+                continue
+            command = (process / "cmdline").read_bytes().split(b"\0")
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            continue
+        if (
+            needle in command
+            and b"serve-broker" in command
+            and any(part.endswith(b"ground_truth_run_v1.py") or part == b"-m" for part in command)
+        ):
+            _fail("pre-readiness broker process is still alive")
+
+
+def _recovery_archive_summary(
+    path: Path, attempt_id: str, *, allow_missing_state: bool = False
+) -> dict[str, Any]:
     status = _private_directory(path)
-    if {item.name for item in path.iterdir()} != {
-        "binding.json",
-        "escrow",
-        "logs",
-        "native-state.json",
-        "packet",
-    }:
+    expected_entries = {"binding.json", "escrow", "logs", "packet"}
+    state_path = path / "native-state.json"
+    if state_path.exists():
+        expected_entries.add("native-state.json")
+    elif not allow_missing_state:
+        _fail("prelaunch recovery native state is absent")
+    if {item.name for item in path.iterdir()} != expected_entries:
         _fail("prelaunch recovery archive inventory is not exact")
     escrow = path / "escrow"
     logs = path / "logs"
@@ -1086,20 +1108,49 @@ def _recovery_archive_summary(path: Path, attempt_id: str) -> dict[str, Any]:
     binding_raw = submit_v1._owned_file(
         path / "binding.json", max_bytes=_MAX_FILE, allowed_modes={0o400}
     )
-    state = _native_state_at(path / "native-state.json", attempt_id)
-    socket_path = Path(cast("str", state["socket"]))
-    registry_path = Path(cast("str", state["registry"]))
-    if (
-        not isinstance(state["broker_pid"], int)
-        or state["broker_pid"] <= 0
-        or not isinstance(state["broker_start_identity"], str)
-        or _same_process(state["broker_pid"], state["broker_start_identity"])
-        or socket_path.exists()
-        or socket_path.is_symlink()
-        or registry_path.exists()
-        or registry_path.is_symlink()
-    ):
-        _fail("prelaunch recovery broker is not exactly dead")
+    if state_path.exists():
+        state = _native_state_at(state_path, attempt_id)
+        socket_path = Path(cast("str", state["socket"]))
+        registry_path = Path(cast("str", state["registry"]))
+        if (
+            not isinstance(state["broker_pid"], int)
+            or state["broker_pid"] <= 0
+            or not isinstance(state["broker_start_identity"], str)
+            or _same_process(state["broker_pid"], state["broker_start_identity"])
+            or socket_path.exists()
+            or socket_path.is_symlink()
+            or registry_path.exists()
+            or registry_path.is_symlink()
+        ):
+            _fail("prelaunch recovery broker is not exactly dead")
+    else:
+        binding_path = path / "binding.json"
+        _require_no_live_broker_for_binding(binding_path)
+        runtime_root = Path(f"/tmp/ground-truth-review-v1-{os.getuid()}")
+        socket_path = (
+            runtime_root
+            / "sockets"
+            / (hashlib.sha256(attempt_id.encode()).hexdigest()[:24] + ".sock")
+        )
+        packet_identity = (path / "packet").stat(follow_symlinks=False)
+        registry_path = (
+            runtime_root
+            / "registry"
+            / (
+                hashlib.sha256(
+                    f"{packet_identity.st_dev}:{packet_identity.st_ino}".encode()
+                ).hexdigest()
+                + ".json"
+            )
+        )
+        if (
+            socket_path.exists()
+            or socket_path.is_symlink()
+            or registry_path.exists()
+            or registry_path.is_symlink()
+        ):
+            _fail("pre-readiness broker socket or registry remains")
+        state = {"broker_pid": 0, "broker_start_identity": "pre-readiness-unpublished"}
     stdout = submit_v1._owned_file(
         logs / "broker.stdout", max_bytes=_MAX_FILE, allowed_modes={0o600}
     )
@@ -1454,7 +1505,11 @@ def _extended_ledger(root: Path, repository_root: Path) -> dict[str, Any]:  # no
                 )
                 if archive != expected_archive:
                     _fail("generation3 prelaunch recovery archive path is invalid")
-                summary = _recovery_archive_summary(archive, failed)
+                summary = _recovery_archive_summary(
+                    archive,
+                    failed,
+                    allow_missing_state=event["prepared_entry_hash"] == _ZERO_HASH,
+                )
                 if (
                     identifier != "canary-recovery"
                     or prelaunch_recovery is not None
@@ -3422,7 +3477,9 @@ def authorize_prelaunch_canary_recovery(  # noqa: PLR0912, PLR0915
         if {item.name for item in generation_dir.iterdir()} not in (set(), {failed_attempt}):
             _fail("generation2 failure archive inventory is invalid")
         if source_attempt.exists() and not archive.exists():
-            _recovery_archive_summary(source_attempt, failed_attempt)
+            _recovery_archive_summary(
+                source_attempt, failed_attempt, allow_missing_state=pre_readiness_failure
+            )
             _fsync_tree(source_attempt)
             _rename_directory_noreplace(source_attempt, archive)
             for directory_path in (attempts_root, generation_dir):
@@ -3433,23 +3490,27 @@ def authorize_prelaunch_canary_recovery(  # noqa: PLR0912, PLR0915
                     os.close(descriptor)
         elif source_attempt.exists() or not archive.exists():
             _fail("generation2 attempt archive recovery state is invalid")
-        summary = _recovery_archive_summary(archive, failed_attempt)
+        summary = _recovery_archive_summary(
+            archive, failed_attempt, allow_missing_state=pre_readiness_failure
+        )
         _fsync_tree(archive)
-        native_state = _native_state_at(archive / "native-state.json", failed_attempt)
+        native_state = (
+            _native_state_at(archive / "native-state.json", failed_attempt)
+            if post_readiness_failure
+            else None
+        )
         if (
-            native_state.get("generation") != 2
-            or native_state.get("runtime_attestation_entry_hash") != attestation["entry_hash"]
-            or summary["binding_sha256"] != native_state.get("binding_sha256")
-            or (
-                post_readiness_failure
-                and (
-                    summary["binding_sha256"] != generation2_rows[0]["binding_sha256"]
-                    or summary["broker_pid"] != generation2_rows[0]["broker_pid"]
-                    or summary["broker_start_identity"]
-                    != generation2_rows[0]["broker_start_identity"]
-                )
+            post_readiness_failure
+            and (
+                not isinstance(native_state, dict)
+                or native_state.get("generation") != 2
+                or native_state.get("runtime_attestation_entry_hash") != attestation["entry_hash"]
+                or summary["binding_sha256"] != native_state.get("binding_sha256")
+                or summary["binding_sha256"] != generation2_rows[0]["binding_sha256"]
+                or summary["broker_pid"] != generation2_rows[0]["broker_pid"]
+                or summary["broker_start_identity"] != generation2_rows[0]["broker_start_identity"]
             )
-        ):
+        ) or (pre_readiness_failure and (summary["broker_pid"] != 0 or native_state is not None)):
             _fail("archived generation2 attempt differs from ledger")
         selected = [
             {
