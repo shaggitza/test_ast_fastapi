@@ -4798,28 +4798,33 @@ def native_launch_plan(
                 time.time() * 1000
             ):
                 _fail("prepared broker is not live")
-            packet = Path(cast("str", state["packet"])).resolve(strict=True)
-            status = packet.stat(follow_symlinks=False)
-            record = submit_v1.load_bindings(Path(cast("str", state["binding"]))).records[0]
-            if status.st_dev != record.packet_device or status.st_ino != record.packet_inode:
-                _fail("prepared cwd identity changed")
             states[attempt_id] = state
-            tasks.append(
-                {
-                    "agent": _AGENT_NAME,
-                    "task": _TASK_TEXT,
-                    "cwd": str(packet),
-                    "model": _MODEL,
-                    "output": False,
-                    "progress": False,
-                    "acceptance": False,
-                    "toolBudget": {
-                        "soft": 200,
-                        "hard": 203,
-                        "block": ["read", "grep", "find", "ls"],
-                    },
-                }
-            )
+    # Binding authentication validates the publication ledger and therefore must
+    # run outside its non-reentrant lock. The second locked boundary below
+    # rechecks every lane and broker before atomically claiming the batch.
+    for attempt_id in attempt_ids:
+        state = states[attempt_id]
+        packet = Path(cast("str", state["packet"])).resolve(strict=True)
+        status = packet.stat(follow_symlinks=False)
+        record = submit_v1.load_bindings(Path(cast("str", state["binding"]))).records[0]
+        if status.st_dev != record.packet_device or status.st_ino != record.packet_inode:
+            _fail("prepared cwd identity changed")
+        tasks.append(
+            {
+                "agent": _AGENT_NAME,
+                "task": _TASK_TEXT,
+                "cwd": str(packet),
+                "model": _MODEL,
+                "output": False,
+                "progress": False,
+                "acceptance": False,
+                "toolBudget": {
+                    "soft": 200,
+                    "hard": 203,
+                    "block": ["read", "grep", "find", "ls"],
+                },
+            }
+        )
     plan = {
         "tasks": tasks,
         "context": "fresh",
