@@ -33,6 +33,7 @@
   "max_tool_calls": 203,
   "model": "openai-codex/gpt-5.6-luna",
   "native_agent_discovery_layout": "flat-user-root-exact-path",
+  "native_agent_discovery_drift": "unrelated-agent-additions-allowed-target-path-content-model-tools-and-extension-remain-exact",
   "native_agent_discovery_path": "~/.pi/agent/agents/ground-truth-production-reviewer-v1.md",
   "native_agent_name": "ground-truth-production-reviewer-v1",
   "native_plan_validation": "pinned-SubagentParams-Value.Check-before-atomic-batch-claim",
