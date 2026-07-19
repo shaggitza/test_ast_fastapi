@@ -1804,6 +1804,29 @@ subagentOnlyExtensions:
     return text.encode()
 
 
+def _legacy_runtime_profile(root: Path, expected_sha256: str) -> tuple[dict[str, bytes], str, str]:
+    current = _profile(root)
+    relative = packet_v1._SELECTION_CHECKSUMS
+    raw = current.files.get(relative)
+    if raw is None or _sha(raw) != expected_sha256:
+        _fail("legacy runtime profile is not current-profile authenticated")
+    try:
+        value = json.loads(raw, object_pairs_hook=_unique, parse_constant=_constant)
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError, RecursionError) as exc:
+        raise GroundTruthRunError("legacy runtime profile is invalid") from exc
+    files = value.get("files") if isinstance(value, dict) else None
+    if canonical_json(value) != raw or not isinstance(files, dict):
+        _fail("legacy runtime profile is not canonical")
+    captured: dict[str, bytes] = {}
+    for required in (_EXTENSION, _EXTENSION_SCHEMA):
+        expected = files.get(required)
+        actual = submit_v1._owned_file(root / required, max_bytes=_MAX_FILE, allowed_modes={0o644})
+        if not isinstance(expected, str) or _sha(actual) != expected:
+            _fail("legacy runtime dependency changed")
+        captured[required] = actual
+    return captured, _sha(raw), _sha(canonical_json(cast("dict[str, str]", files)))
+
+
 def _runtime_attestation(
     root: Path, execution_root: Path, *, allow_legacy: bool = False
 ) -> dict[str, Any]:
@@ -1849,13 +1872,8 @@ def _runtime_attestation(
     _strict_keys(value, expected_keys, "runtime attestation")
     status = execution_root.stat(follow_symlinks=False)
     if legacy:
-        legacy_profile = packet_v1._profile_by_hash(
+        profile_files, profile_checksum_sha256, profile_files_sha256 = _legacy_runtime_profile(
             root, cast("str", value.get("production_profile_sha256"))
-        )
-        profile_files = legacy_profile.files
-        profile_checksum_sha256 = _sha(legacy_profile.raw)
-        profile_files_sha256 = _sha(
-            canonical_json(cast("dict[str, str]", legacy_profile.value["files"]))
         )
     else:
         current_profile = _profile(root)
