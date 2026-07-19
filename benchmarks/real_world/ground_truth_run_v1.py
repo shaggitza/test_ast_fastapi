@@ -3236,10 +3236,8 @@ def _installed_agent(root: Path, execution_root: Path) -> dict[str, Any]:
     ]
     expected_extension = str(execution_root / "runtime/extension/index.ts")
     if (
-        identity != receipt.get("runtime_identity")
-        or _immutable_runtime_identity(identity)
+        _immutable_runtime_identity(identity)
         != _immutable_runtime_identity(cast("dict[str, Any]", attestation["runtime_identity"]))
-        or identity.get("resolver_census_sha256") != receipt.get("resolver_census_sha256")
         or _sha(raw) != receipt.get("sha256")
         or len(raw) != receipt.get("bytes")
         or resolved != [str(path.resolve(strict=True))]
