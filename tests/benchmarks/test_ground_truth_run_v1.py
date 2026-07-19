@@ -433,6 +433,15 @@ def test_ledger_rejects_incomplete_runtime_identity_and_unrelated_campaign_lane(
         run._extended_ledger(ledger, ROOT)
 
 
+def test_historical_runtime_profiles_are_exactly_current_authenticated() -> None:
+    for relative in (packet._SELECTION_CHECKSUMS, run._RUNTIME_MIGRATION_CHECKSUMS):
+        raw = (ROOT / relative).read_bytes()
+        files, profile_hash, files_hash = run._historical_runtime_profile(ROOT, run._sha(raw))
+        assert set(files) == {run._EXTENSION, run._EXTENSION_SCHEMA}
+        assert profile_hash == run._sha(raw)
+        assert files_hash.startswith("sha256:")
+
+
 def test_receipt_runtime_shape_survives_profile_rollover(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

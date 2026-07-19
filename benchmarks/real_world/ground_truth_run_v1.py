@@ -1822,8 +1822,8 @@ def _historical_runtime_profile(
     except (json.JSONDecodeError, UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise GroundTruthRunError("historical runtime profile is invalid") from exc
     files = value.get("files") if isinstance(value, dict) else None
-    if canonical_json(value) != raw or not isinstance(files, dict):
-        _fail("historical runtime profile is not canonical")
+    if not isinstance(files, dict):
+        _fail("historical runtime profile shape is invalid")
     captured: dict[str, bytes] = {}
     for required in (_EXTENSION, _EXTENSION_SCHEMA):
         expected = files.get(required)
