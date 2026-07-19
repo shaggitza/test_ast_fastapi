@@ -63,6 +63,7 @@ _MAX_OUTPUT: Final = 2 * 1024 * 1024
 _RUNTIME_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _ATTEMPT = re.compile(r"^prod-v1-i[0-9]{3}-rank[0-9]{3}-pr[0-9]+-[AB]$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+_ZERO_HASH: Final = "sha256:" + "0" * 64
 _EVENT_FILE = re.compile(
     r"^([0-9]{6})-(prepared|launch_claimed|native_result|pending|completed|operational_failed|prelaunch_migration|runtime_migrated|runtime_migrated_repair|canary_reauthorized|canary_prelaunch_recovery)-([A-Za-z0-9_-]+)\.json$"
 )
@@ -1433,6 +1434,14 @@ def _extended_ledger(root: Path, repository_root: Path) -> dict[str, Any]:  # no
                     _fail("generation3 prelaunch recovery lacks runtime")
                 failed = event["failed_attempt_id"]
                 failed_rows = [row for row in events if row.get("attempt_id") == failed]
+                generation2_failed_rows = [row for row in failed_rows if row.get("generation") == 2]
+                pre_readiness_failure = [row["kind"] for row in generation2_failed_rows] == [
+                    "operational_failed"
+                ] and generation2_failed_rows[-1].get("reason") == "broker failed before readiness"
+                post_readiness_failure = [row["kind"] for row in generation2_failed_rows] == [
+                    "prepared",
+                    "operational_failed",
+                ] and generation2_failed_rows[-1].get("reason") == "never-launched broker exited"
                 operational = [
                     item for item, state in states.items() if state == "operational_failed"
                 ]
@@ -1471,12 +1480,15 @@ def _extended_ledger(root: Path, repository_root: Path) -> dict[str, Any]:  # no
                     or any(
                         states.get(item) != "authorized" for item in authorized if item != failed
                     )
-                    or [row["kind"] for row in failed_rows[-2:]]
-                    != ["prepared", "operational_failed"]
-                    or failed_rows[-1].get("reason") != "never-launched broker exited"
-                    or failed_rows[-1].get("relaunch_authorized") is not False
-                    or event["prepared_entry_hash"] != failed_rows[-2]["entry_hash"]
-                    or event["failure_entry_hash"] != failed_rows[-1]["entry_hash"]
+                    or not (pre_readiness_failure or post_readiness_failure)
+                    or generation2_failed_rows[-1].get("relaunch_authorized") is not False
+                    or event["prepared_entry_hash"]
+                    != (
+                        generation2_failed_rows[0]["entry_hash"]
+                        if post_readiness_failure
+                        else _ZERO_HASH
+                    )
+                    or event["failure_entry_hash"] != generation2_failed_rows[-1]["entry_hash"]
                     or event["prior_events_sha256"] != _sha(canonical_json(events))
                     or event["prior_event_count"] != len(events)
                     or launched_attempts
@@ -3352,12 +3364,18 @@ def authorize_prelaunch_canary_recovery(  # noqa: PLR0912, PLR0915
             _fail("generation2 lane states are not the exact recoverable pair")
         failed_attempt = failed[0]
         rows = [row for row in current["events"] if row.get("attempt_id") == failed_attempt]
+        generation2_rows = [row for row in rows if row.get("generation") == 2]
+        pre_readiness_failure = [row["kind"] for row in generation2_rows] == [
+            "operational_failed"
+        ] and generation2_rows[-1].get("reason") == "broker failed before readiness"
+        post_readiness_failure = [row["kind"] for row in generation2_rows] == [
+            "prepared",
+            "operational_failed",
+        ] and generation2_rows[-1].get("reason") == "never-launched broker exited"
         if (
-            [row["kind"] for row in rows[-2:]] != ["prepared", "operational_failed"]
-            or rows[-1].get("reason") != "never-launched broker exited"
-            or rows[-1].get("relaunch_authorized") is not False
-            or rows[-2].get("generation") != 2
-            or rows[-1].get("generation") != 2
+            not (pre_readiness_failure or post_readiness_failure)
+            or generation2_rows[-1].get("relaunch_authorized") is not False
+            or any(row.get("generation") != 2 for row in generation2_rows)
             or installation.get("runtime_attestation_entry_hash") != attestation["entry_hash"]
             or authorization.get("agent_installation_sha256") != _sha(canonical_json(installation))
         ):
@@ -3419,10 +3437,18 @@ def authorize_prelaunch_canary_recovery(  # noqa: PLR0912, PLR0915
         _fsync_tree(archive)
         native_state = _native_state_at(archive / "native-state.json", failed_attempt)
         if (
-            summary["binding_sha256"] != rows[-2]["binding_sha256"]
-            or summary["broker_pid"] != rows[-2]["broker_pid"]
-            or summary["broker_start_identity"] != rows[-2]["broker_start_identity"]
-            or native_state.get("generation") != 2
+            native_state.get("generation") != 2
+            or native_state.get("runtime_attestation_entry_hash") != attestation["entry_hash"]
+            or summary["binding_sha256"] != native_state.get("binding_sha256")
+            or (
+                post_readiness_failure
+                and (
+                    summary["binding_sha256"] != generation2_rows[0]["binding_sha256"]
+                    or summary["broker_pid"] != generation2_rows[0]["broker_pid"]
+                    or summary["broker_start_identity"]
+                    != generation2_rows[0]["broker_start_identity"]
+                )
+            )
         ):
             _fail("archived generation2 attempt differs from ledger")
         selected = [
@@ -3453,8 +3479,10 @@ def authorize_prelaunch_canary_recovery(  # noqa: PLR0912, PLR0915
                 "lanes": selected,
                 "attempt_ids": authorized,
                 "failed_attempt_id": failed_attempt,
-                "prepared_entry_hash": rows[-2]["entry_hash"],
-                "failure_entry_hash": rows[-1]["entry_hash"],
+                "prepared_entry_hash": (
+                    generation2_rows[0]["entry_hash"] if post_readiness_failure else _ZERO_HASH
+                ),
+                "failure_entry_hash": generation2_rows[-1]["entry_hash"],
                 "prior_events_sha256": _sha(canonical_json(current["events"])),
                 "prior_event_count": len(current["events"]),
                 "archive_path": str(archive),
