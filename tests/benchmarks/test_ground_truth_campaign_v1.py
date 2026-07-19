@@ -286,6 +286,7 @@ def test_profile_checksums_cover_all_offline_files() -> None:
         "benchmarks/real_world/production_v1/session-audit-schema-v1.json",
         "benchmarks/real_world/production_v1/checksums-packet-v1.json",
         "benchmarks/real_world/production_v1/checksums-packet-selection-v1.json",
+        "benchmarks/real_world/production_v1/checksums-runtime-migration-v1.json",
         "benchmarks/real_world/production_v1/prelaunch-migration-policy-v1.json",
         "benchmarks/real_world/production_v1/prelaunch-migration-schema-v1.json",
         "benchmarks/real_world/production_v1/selection-validation-policy-v1.json",

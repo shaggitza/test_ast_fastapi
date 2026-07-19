@@ -39,6 +39,7 @@ if TYPE_CHECKING:
 
 _PROFILE: Final = "benchmarks/real_world/production_v1"
 _RUNTIME_POLICY: Final = f"{_PROFILE}/runtime-policy-v1.json"
+_RUNTIME_MIGRATION_CHECKSUMS: Final = f"{_PROFILE}/checksums-runtime-migration-v1.json"
 _RUNTIME_SCHEMA: Final = f"{_PROFILE}/runtime-attestation-schema-v1.json"
 _AUTH_SCHEMA: Final = f"{_PROFILE}/review-canary-authorization-schema-v1.json"
 _EVENT_SCHEMA: Final = f"{_PROFILE}/lane-event-schema-v1.json"
@@ -1804,25 +1805,31 @@ subagentOnlyExtensions:
     return text.encode()
 
 
-def _legacy_runtime_profile(root: Path, expected_sha256: str) -> tuple[dict[str, bytes], str, str]:
+def _historical_runtime_profile(
+    root: Path, expected_sha256: str
+) -> tuple[dict[str, bytes], str, str]:
     current = _profile(root)
-    relative = packet_v1._SELECTION_CHECKSUMS
-    raw = current.files.get(relative)
-    if raw is None or _sha(raw) != expected_sha256:
-        _fail("legacy runtime profile is not current-profile authenticated")
+    matches = [
+        raw
+        for relative in (packet_v1._SELECTION_CHECKSUMS, _RUNTIME_MIGRATION_CHECKSUMS)
+        if (raw := current.files.get(relative)) is not None and _sha(raw) == expected_sha256
+    ]
+    if len(matches) != 1:
+        _fail("historical runtime profile is not uniquely current-profile authenticated")
+    raw = matches[0]
     try:
         value = json.loads(raw, object_pairs_hook=_unique, parse_constant=_constant)
     except (json.JSONDecodeError, UnicodeDecodeError, ValueError, RecursionError) as exc:
-        raise GroundTruthRunError("legacy runtime profile is invalid") from exc
+        raise GroundTruthRunError("historical runtime profile is invalid") from exc
     files = value.get("files") if isinstance(value, dict) else None
     if canonical_json(value) != raw or not isinstance(files, dict):
-        _fail("legacy runtime profile is not canonical")
+        _fail("historical runtime profile is not canonical")
     captured: dict[str, bytes] = {}
     for required in (_EXTENSION, _EXTENSION_SCHEMA):
         expected = files.get(required)
         actual = submit_v1._owned_file(root / required, max_bytes=_MAX_FILE, allowed_modes={0o644})
         if not isinstance(expected, str) or _sha(actual) != expected:
-            _fail("legacy runtime dependency changed")
+            _fail("historical runtime dependency changed")
         captured[required] = actual
     return captured, _sha(raw), _sha(canonical_json(cast("dict[str, str]", files)))
 
@@ -1871,12 +1878,16 @@ def _runtime_attestation(
         _fail("runtime attestation protocol is invalid")
     _strict_keys(value, expected_keys, "runtime attestation")
     status = execution_root.stat(follow_symlinks=False)
-    if legacy:
-        profile_files, profile_checksum_sha256, profile_files_sha256 = _legacy_runtime_profile(
-            root, cast("str", value.get("production_profile_sha256"))
+    current_profile = _profile(root)
+    expected_profile = cast("str", value.get("production_profile_sha256"))
+    historical = expected_profile != current_profile.checksum_sha256
+    if historical:
+        if not legacy and protocol != _MIGRATION_RUNTIME_PROTOCOL:
+            _fail("historical runtime protocol is not eligible")
+        profile_files, profile_checksum_sha256, profile_files_sha256 = _historical_runtime_profile(
+            root, expected_profile
         )
     else:
-        current_profile = _profile(root)
         profile_files = current_profile.files
         profile_checksum_sha256 = current_profile.checksum_sha256
         profile_files_sha256 = current_profile.files_sha256
