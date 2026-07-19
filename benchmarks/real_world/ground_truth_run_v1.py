@@ -1683,12 +1683,12 @@ def _registry(packet: Path, record: submit_v1.SubmissionBinding, socket_path: Pa
 def _broker_limits() -> None:
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     resource.setrlimit(resource.RLIMIT_AS, (_MAX_RSS, _MAX_RSS))
-    resource.setrlimit(resource.RLIMIT_FSIZE, (_MAX_OUTPUT, _MAX_OUTPUT))
-    resource.setrlimit(resource.RLIMIT_NOFILE, (128, 128))
-    # RLIMIT_NPROC is UID-wide and counts threads, including the parent Pi
-    # process. Keep a finite ceiling while leaving room for authenticated Git
-    # evidence subprocesses on the supervisor account.
-    resource.setrlimit(resource.RLIMIT_NPROC, (256, 256))
+    # The broker performs nested, independently bounded source/cache evidence
+    # validation. Its ceiling must not be lower than those child prlimit values.
+    resource.setrlimit(resource.RLIMIT_FSIZE, (5 * 1024 * 1024 * 1024,) * 2)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
+    # RLIMIT_NPROC is UID-wide and counts threads, including the parent Pi.
+    resource.setrlimit(resource.RLIMIT_NPROC, (512, 512))
 
 
 def serve_broker(socket_path: Path, binding: Path, deadline_ms: int) -> int:
