@@ -437,7 +437,11 @@ def test_historical_runtime_profiles_are_exactly_current_authenticated() -> None
     for relative in (packet._SELECTION_CHECKSUMS, run._RUNTIME_MIGRATION_CHECKSUMS):
         raw = (ROOT / relative).read_bytes()
         files, profile_hash, files_hash = run._historical_runtime_profile(ROOT, run._sha(raw))
-        assert set(files) == {run._EXTENSION, run._EXTENSION_SCHEMA}
+        assert set(files) == {
+            run._EXTENSION,
+            run._EXTENSION_SCHEMA,
+            f"{run._PROFILE}/review-prompt-v1.md",
+        }
         assert profile_hash == run._sha(raw)
         assert files_hash.startswith("sha256:")
 
@@ -702,6 +706,16 @@ def test_prelaunch_migration_rejects_pid_or_artifact_evidence(
         )
 
 
+def test_migrated_agent_body_uses_final_root_not_random_staging(tmp_path: Path) -> None:
+    parent = _private(tmp_path / "private")
+    final = parent / "repaired-execution"
+    staging = run._prepare_runtime_staging(final)
+    final_extension = final / "runtime/extension/index.ts"
+    body = run._agent_body(final_extension, "Review exactly.")
+    assert str(final_extension).encode() in body
+    assert str(staging).encode() not in body
+
+
 def test_random_runtime_staging_leaves_crashed_partial_inert(tmp_path: Path) -> None:
     parent = _private(tmp_path / "private")
     final = parent / "new-execution"
@@ -788,6 +802,89 @@ def test_migrated_runtime_recovers_pending_local_and_ledger_boundaries(
     assert not pending.exists()
     if not ledger_already_published:
         assert (ledger / "lane-events/000001-runtime_migrated-runtime.json").exists()
+
+
+def test_repaired_agent_replaces_only_bad_bytes_and_recovers_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = _private(tmp_path / "ledger")
+    prior = _private(tmp_path / "prior")
+    bad = _private(tmp_path / "bad")
+    repaired = _private(tmp_path / "repaired")
+    output_root = _private(tmp_path / "agents")
+    output = output_root / "ground-truth-production-reviewer-v1.md"
+    bad_body = b"bad migrated agent\n"
+    repaired_body = b"repaired agent\n"
+    output.write_bytes(bad_body)
+    output.chmod(0o400)
+    bad_runtime = _private(bad / "runtime")
+    (bad_runtime / "agent-source.md").write_bytes(bad_body)
+    (bad_runtime / "agent-source.md").chmod(0o400)
+    old = b"old exact agent\n"
+    (bad / "prior-agent-source.md").write_bytes(old)
+    (bad / "prior-agent-source.md").chmod(0o400)
+    repaired_runtime = _private(repaired / "runtime")
+    (repaired_runtime / "agent-source.md").write_bytes(repaired_body)
+    (repaired_runtime / "agent-source.md").chmod(0o400)
+    prior_receipt = {
+        "runtime_attestation_entry_hash": "sha256:" + "1" * 64,
+        "path": str(output),
+        "sha256": run._sha(old),
+    }
+    _publish(prior / "agent-installation.json", prior_receipt)
+    prior_status = prior.stat()
+    attestation: dict[str, Any] = {
+        "kind": "runtime_migrated_repair",
+        "entry_hash": "sha256:" + "3" * 64,
+        "supersedes_entry_hash": "sha256:" + "2" * 64,
+        "bad_execution_root": str(bad),
+        "bad_agent_source_sha256": run._sha(bad_body),
+    }
+    migration = {
+        "prior_runtime_entry_hash": "sha256:" + "1" * 64,
+        "prior_execution_root": str(prior),
+        "prior_execution_device": prior_status.st_dev,
+        "prior_execution_inode": prior_status.st_ino,
+    }
+    current = {
+        "migration": migration,
+        "runtime": attestation,
+        "generation": 1,
+        "authorization": None,
+    }
+    identity = {
+        "roots": [{"kind": "user-old", "path": str(output_root)}],
+        "resolver_census_sha256": "sha256:" + "4" * 64,
+        "resolver_census": {
+            "builtin": [],
+            "package": [],
+            "project": [],
+            "user": [{"name": run._AGENT_NAME, "filePath": str(output)}],
+            "effective": [
+                {
+                    "name": run._AGENT_NAME,
+                    "model": run._MODEL,
+                    "thinking": run._THINKING,
+                    "tools": list(run._TOOLS),
+                    "extensions": [],
+                    "subagentOnlyExtensions": [str(repaired / "runtime/extension/index.ts")],
+                }
+            ],
+        },
+    }
+    attestation["runtime_identity"] = identity
+    monkeypatch.setattr(campaign, "_private_root", lambda path: path)
+    monkeypatch.setattr(campaign, "_ledger_lock", lambda _path: contextlib.nullcontext())
+    monkeypatch.setattr(run, "_extended_ledger", lambda *_args: current)
+    monkeypatch.setattr(run, "_runtime_attestation", lambda *_args, **_kwargs: attestation)
+    monkeypatch.setattr(run, "_runtime_identity", lambda *_args: identity)
+    first = run.create_native_agent(ROOT, repaired, output, ledger=ledger)
+    second = run.create_native_agent(ROOT, repaired, output, ledger=ledger)
+    assert first == second
+    assert output.read_bytes() == repaired_body
+    assert (repaired / "prior-agent-source.md").read_bytes() == old
+    assert (repaired / "superseded-agent-source.md").read_bytes() == bad_body
+    assert first["schema_version"] == 3
 
 
 def test_migrated_agent_replaces_exact_prior_and_recovers_receipt(
@@ -882,6 +979,121 @@ def test_migrated_agent_replaces_exact_prior_and_recovers_receipt(
     assert output.read_bytes() == new_body
     assert (new / "prior-agent-source.md").read_bytes() == old
     assert first["schema_version"] == 2
+
+
+def test_runtime_repair_incident_requires_exact_bad_global_and_absent_staging(
+    tmp_path: Path,
+) -> None:
+    parent = _private(tmp_path / "private")
+    prior = _private(parent / "prior")
+    bad = _private(parent / "bad")
+    runtime_dir = _private(bad / "runtime")
+    staging = parent / f".{bad.name}.runtime-staging-deadbeef"
+    bad_body = run._agent_body(staging / "runtime/extension/index.ts", "Review exactly.")
+    agent_source = runtime_dir / "agent-source.md"
+    agent_source.write_bytes(bad_body)
+    agent_source.chmod(0o400)
+    (bad / "runtime-attestation.json").write_bytes(b"{}\n")
+    (bad / "runtime-attestation.json").chmod(0o400)
+    output_root = _private(parent / "agents")
+    output = output_root / "ground-truth-production-reviewer-v1.md"
+    output.write_bytes(bad_body)
+    output.chmod(0o400)
+    old = b"old exact agent\n"
+    old_archive = bad / "prior-agent-source.md"
+    old_archive.write_bytes(old)
+    old_archive.chmod(0o400)
+    prior_receipt = {
+        "runtime_attestation_entry_hash": "sha256:" + "1" * 64,
+        "path": str(output),
+        "sha256": run._sha(old),
+    }
+    _publish(prior / "agent-installation.json", prior_receipt)
+    runtime = {
+        "kind": "runtime_migrated",
+        "entry_hash": "sha256:" + "2" * 64,
+        "execution_root": str(bad),
+        "agent_source_sha256": run._sha(bad_body),
+    }
+    current = {
+        "migration": {
+            "prior_execution_root": str(prior),
+            "prior_runtime_entry_hash": "sha256:" + "1" * 64,
+        },
+        "runtime": runtime,
+        "events": [runtime],
+        "generation": 1,
+        "authorization": None,
+    }
+    with pytest.raises(run.GroundTruthRunError, match="protocol"):
+        run._validate_repair_incident(current)
+
+
+def test_runtime_repair_candidate_is_one_shot_and_head_bound() -> None:
+    migration = {
+        "entry_hash": "sha256:" + "a" * 64,
+        "source_bindings_sha256": "sha256:" + "3" * 64,
+        "prior_execution_root": "/private/prior",
+    }
+    bad = {
+        "schema_version": 2,
+        "kind": "runtime_migrated",
+        "entry_hash": "sha256:" + "b" * 64,
+        "execution_root": "/private/bad",
+        "production_profile_sha256": "sha256:" + "c" * 64,
+        "agent_source_sha256": "sha256:" + "d" * 64,
+    }
+    current = {
+        "migration": migration,
+        "runtime": bad,
+        "base": {
+            "campaign_id": "campaign",
+            "campaign_manifest_sha256": "sha256:" + "2" * 64,
+            "campaign_canary_lanes_sha256": run._sha(canonical_json(_authorization_lanes())),
+            "packet_publication_entry_hash": "sha256:" + "4" * 64,
+        },
+        "events": [bad],
+        "head": bad["entry_hash"],
+        "generation": 1,
+        "authorization": None,
+    }
+    fields = {
+        "campaign_id": "campaign",
+        "campaign_manifest_sha256": "sha256:" + "2" * 64,
+        "campaign_lanes_sha256": run._sha(canonical_json(_authorization_lanes())),
+        "source_bindings_sha256": "sha256:" + "3" * 64,
+        "packet_publication_entry_hash": "sha256:" + "4" * 64,
+        "runtime_custody_receipt_path": "/private/repaired/runtime/custody-receipt.json",
+        "runtime_custody_receipt_sha256": "sha256:" + "5" * 64,
+        "production_profile_sha256": "sha256:" + "6" * 64,
+        "production_files_sha256": "sha256:" + "7" * 64,
+        "runtime_identity": _runtime()["runtime_identity"],
+        "extension_sha256": "sha256:" + "8" * 64,
+        "extension_schema_sha256": "sha256:" + "9" * 64,
+        "agent_source_sha256": "sha256:" + "0" * 64,
+        "execution_root": "/private/repaired",
+        "execution_device": 5,
+        "execution_inode": 6,
+        "attested_at": "2026-01-01T04:00:00Z",
+        "authorizations": {
+            "review_launch": False,
+            "adjudication": False,
+            "canonical_import": False,
+        },
+        "supersedes_entry_hash": bad["entry_hash"],
+        "migration_entry_hash": migration["entry_hash"],
+        "bad_execution_root": bad["execution_root"],
+        "bad_production_profile_sha256": bad["production_profile_sha256"],
+        "bad_agent_source_sha256": bad["agent_source_sha256"],
+    }
+    candidate = run._event_value(current, "runtime_migrated_repair", fields)
+    run._validate_repaired_event_candidate(current, candidate)
+    altered = dict(current, events=[bad, {"entry_hash": "sha256:" + "e" * 64}])
+    with pytest.raises(run.GroundTruthRunError, match="repair candidate"):
+        run._validate_repaired_event_candidate(altered, candidate)
+    repeated = dict(current, runtime={**bad, "kind": "runtime_migrated_repair"})
+    with pytest.raises(run.GroundTruthRunError, match="repair candidate"):
+        run._validate_repaired_event_candidate(repeated, candidate)
 
 
 def test_exact_prelaunch_migration_runtime_authorization_and_reset_flow(

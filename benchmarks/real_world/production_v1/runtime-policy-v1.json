@@ -57,6 +57,19 @@
     "same_ledger_genesis": true,
     "staged_no_clobber_runtime_publication": true
   },
+  "migrated_runtime_repair": {
+    "authorizations_remain_false": true,
+    "bad_global_agent_must_match_superseded_runtime": true,
+    "maximum": 1,
+    "preserves_bad_and_prior_execution_roots": true,
+    "requires_absent_bad_staging_path": true,
+    "requires_bad_runtime_as_current_head": true,
+    "requires_generation1_without_authorization": true,
+    "requires_no_bad_installation_receipt": true,
+    "requires_no_events_after_bad_runtime": true,
+    "requires_profile_freeze_before_live_repair": true,
+    "requires_distinct_repaired_execution_root": true
+  },
   "prepare_runtime_reauthentication": [
     "before-binding",
     "before-broker-spawn",
