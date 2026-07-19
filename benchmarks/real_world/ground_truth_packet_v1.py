@@ -1861,6 +1861,128 @@ def finalize_packets(
     }
 
 
+def validate_packet_selection(
+    root: Path,
+    campaign_path: Path,
+    bindings_path: Path,
+    cache: Path,
+    ledger_root: Path,
+    output: Path,
+    rank: int,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Validate the complete publication and regenerate one exact ranked packet."""
+    if isinstance(rank, bool) or not isinstance(rank, int) or not 1 <= rank <= 50:
+        _fail("selected packet rank is invalid")
+    aggregate, _, _ = _json(output / "aggregate-manifest.json", modes={0o400})
+    publication = aggregate.get("publication_timestamp")
+    if not isinstance(publication, str):
+        _fail("aggregate publication timestamp is invalid")
+    (
+        receipt,
+        campaign,
+        campaign_raw,
+        bindings,
+        bindings_raw,
+        cache_summary,
+        profile,
+        _ledger,
+    ) = _receipt(
+        root,
+        campaign_path,
+        bindings_path,
+        cache,
+        ledger_root,
+        output,
+        require_unused=False,
+        allow_expired=True,
+        publication_timestamp=publication,
+        now=now,
+    )
+    campaign_matches = [row for row in campaign["records"] if row.get("rank") == rank]
+    binding_matches = [row for row in bindings["records"] if row.get("rank") == rank]
+    if len(campaign_matches) != 1 or len(binding_matches) != 1:
+        _fail("selected packet rank is absent or duplicate")
+    selected_campaign = campaign_matches[0]
+    selected = binding_matches[0]
+    if selected.get("repository") != selected_campaign.get("repository") or selected.get(
+        "pr"
+    ) != selected_campaign.get("pr"):
+        _fail("selected packet campaign and binding disagree")
+    aggregate_before = _inventory(
+        output, limit=_MAX_AGGREGATE_PAYLOAD, max_entries=_MAX_AGGREGATE_ENTRIES
+    )
+    cache_before = source_v1._inventory(cache)
+    result = _validate_published(
+        campaign,
+        campaign_raw,
+        bindings,
+        bindings_raw,
+        cache,
+        output,
+        receipt,
+        profile,
+        regenerate=False,
+    )
+    expected = _validate_one_packet(
+        output / _packet_name(selected), selected, _sha(bindings_raw), profile.files
+    )
+    deadline = time.monotonic() + _DEADLINE_SECONDS
+    with tempfile.TemporaryDirectory(
+        prefix="production-packet-selection-regenerate-", dir=output.parent
+    ) as name:
+        regeneration = Path(name)
+        budget = AggregateBudget(regeneration, _STAGING_LIMIT)
+        counter = [0]
+        regenerated, commands = _build_packet(
+            cache,
+            regeneration / _packet_name(selected),
+            selected,
+            _sha(bindings_raw),
+            deadline,
+            budget,
+            profile.files,
+            counter,
+        )
+        if commands != 5 or counter[0] != 5:
+            _fail("selected packet regeneration command cardinality is invalid")
+        if regenerated != expected:
+            _fail("selected packet differs from exact Git regeneration")
+    _reauthenticate_boundary(
+        root,
+        campaign_path,
+        bindings_path,
+        cache,
+        profile,
+        bindings,
+        bindings_raw,
+        cache_summary,
+        cache_before,
+    )
+    aggregate_after = _inventory(
+        output, limit=_MAX_AGGREGATE_PAYLOAD, max_entries=_MAX_AGGREGATE_ENTRIES
+    )
+    if aggregate_before != aggregate_after:
+        _fail("complete packet aggregate drifted around selected validation")
+    transition = _validate_publication_transition(
+        root, ledger_root, campaign, campaign_raw, bindings_raw, receipt, output
+    )
+    return {
+        "valid": True,
+        "rank": rank,
+        "repository": selected["repository"],
+        "pr": selected["pr"],
+        "commands": 5,
+        "packets": 50,
+        "aggregate_root_sha256": result["aggregate_root_sha256"],
+        "publication_timestamp": result["publication_timestamp"],
+        "publication_entry_hash": transition["entry_hash"],
+        "live_launch_authorized": False,
+        "canonical_import_authorized": False,
+    }
+
+
 def validate_packets(
     root: Path,
     campaign_path: Path,
@@ -1942,6 +2064,7 @@ def _parser() -> argparse.ArgumentParser:
         "build-packets",
         "finalize-packets",
         "validate-packets",
+        "validate-packet-selection",
     ):
         command = sub.add_parser(name)
         command.add_argument("--campaign", type=Path, required=True)
@@ -1952,6 +2075,8 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--output-root", type=Path, required=True)
         else:
             command.add_argument("--output", type=Path, required=True)
+        if name == "validate-packet-selection":
+            command.add_argument("--rank", type=int, required=True)
     return parser
 
 
@@ -1969,6 +2094,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.command == "finalize-packets":
         result = finalize_packets(
             root, args.campaign, args.bindings, args.cache, args.ledger_root, args.output
+        )
+    elif args.command == "validate-packet-selection":
+        result = validate_packet_selection(
+            root,
+            args.campaign,
+            args.bindings,
+            args.cache,
+            args.ledger_root,
+            args.output,
+            args.rank,
         )
     else:
         result = validate_packets(

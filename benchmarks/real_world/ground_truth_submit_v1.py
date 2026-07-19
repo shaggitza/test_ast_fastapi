@@ -200,6 +200,7 @@ class SubmissionBinding(_StrictModel):
     corpus_id: str = Field(min_length=1, max_length=300)
     repository: str = Field(pattern=r"^[^/\s]+/[^/\s]+$", max_length=300)
     pr: StrictInt = Field(gt=0)
+    rank: StrictInt = Field(ge=1, le=50)
     lane: Literal["A", "B"]
     snapshots: SnapshotBinding
     baseline_tree: str = Field(pattern=r"^[0-9a-f]{40}$")
@@ -710,13 +711,14 @@ def _authenticate_record(  # noqa: PLR0912,PLR0915 - fail-closed authentication 
     ):
         _fail("production profile binding changed")
     try:
-        published = ground_truth_packet_v1.validate_packets(
+        published = ground_truth_packet_v1.validate_packet_selection(
             project_root,
             Path(record.campaign_path),
             Path(record.source_bindings_path),
             Path(record.cache_root),
             Path(record.ledger_root),
             Path(record.packets_root),
+            record.rank,
         )
         source_result = ground_truth_source_v1.validate_source_bindings(
             project_root,
@@ -734,7 +736,10 @@ def _authenticate_record(  # noqa: PLR0912,PLR0915 - fail-closed authentication 
             "production source or packet publication authentication failed"
         ) from exc
     if (
-        published.get("aggregate_root_sha256") != record.aggregate_root_sha256
+        published.get("rank") != record.rank
+        or published.get("repository") != record.repository
+        or published.get("pr") != record.pr
+        or published.get("aggregate_root_sha256") != record.aggregate_root_sha256
         or published.get("publication_entry_hash") != record.publication_entry_hash
         or source_result.get("sha256") != record.source_bindings_sha256
         or cache_summary.get("cache_device") != record.cache_device
@@ -1544,8 +1549,14 @@ def prepare_binding(  # noqa: PLR0912,PLR0915 - linear fail-closed preparation
         or not isinstance(lane_reviewer.get("version"), str)
     ):
         _fail("campaign lane reviewer is invalid")
-    published = ground_truth_packet_v1.validate_packets(
-        root, campaign_path, source_bindings_path, cache, ledger_root, packets_root
+    published = ground_truth_packet_v1.validate_packet_selection(
+        root,
+        campaign_path,
+        source_bindings_path,
+        cache,
+        ledger_root,
+        packets_root,
+        rank,
     )
     source_authenticated = ground_truth_source_v1.validate_source_bindings(
         root, campaign_path, cache, source_bindings_path
@@ -1713,6 +1724,7 @@ def prepare_binding(  # noqa: PLR0912,PLR0915 - linear fail-closed preparation
             corpus_id="oss-expansion-50x50-lock-v2",
             repository=cast("str", source_record["repository"]),
             pr=cast("int", source_record["pr"]),
+            rank=rank,
             lane=lane,
             snapshots=SnapshotBinding(
                 baseline_commit=cast("str", source_record["baseline_commit"]),
@@ -1743,8 +1755,14 @@ def prepare_binding(  # noqa: PLR0912,PLR0915 - linear fail-closed preparation
         )
         binding_raw = canonical_json(bindings.model_dump(mode="json"))
         boundary_profile = _profile_snapshot(root)
-        boundary_published = ground_truth_packet_v1.validate_packets(
-            root, campaign_path, source_bindings_path, cache, ledger_root, packets_root
+        boundary_published = ground_truth_packet_v1.validate_packet_selection(
+            root,
+            campaign_path,
+            source_bindings_path,
+            cache,
+            ledger_root,
+            packets_root,
+            rank,
         )
         boundary_source = ground_truth_source_v1.validate_source_bindings(
             root, campaign_path, cache, source_bindings_path

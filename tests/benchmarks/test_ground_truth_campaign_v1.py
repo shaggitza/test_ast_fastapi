@@ -284,6 +284,7 @@ def test_profile_checksums_cover_all_offline_files() -> None:
         "benchmarks/real_world/production_v1/lane-event-schema-v1.json",
         "benchmarks/real_world/production_v1/session-audit-schema-v1.json",
         "benchmarks/real_world/production_v1/checksums-packet-v1.json",
+        "benchmarks/real_world/production_v1/selection-validation-policy-v1.json",
     }
     for relative, expected in profile["files"].items():
         actual = "sha256:" + hashlib.sha256((ROOT / relative).read_bytes()).hexdigest()

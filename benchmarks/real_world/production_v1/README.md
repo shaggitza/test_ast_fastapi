@@ -117,9 +117,13 @@ the 50 reviewer packets exposes only baseline/target regular files, a locally ge
 `snapshot.diff`, source-structure metadata for omitted symlinks/gitlinks, its
 manifest, and checksum-authenticated packet policy/schema. The remote diff hash and
 size remain metadata with `payload_present: false`; the local relation is always
-`not_compared`. Validation regenerates all 50 packets from the exact cache. Pilot-v2
-bytes are a checksum-bound low-level parser/materializer dependency and are neither
-modified nor used for production authorization, custody, or publication.
+`not_compared`. Full campaign/runtime and final-audit validation regenerates all 50
+packets from the exact cache. Per-attempt preparation and broker recovery still verify
+every aggregate packet hash, mode, ordering, root, payload total, publication successor,
+and complete aggregate/cache inventory, but regenerate only the exact bound rank using
+five Git commands. Pilot-v2 bytes are a checksum-bound low-level parser/materializer
+dependency and are neither modified nor used for production authorization, custody, or
+publication.
 
 ```console
 python -m benchmarks.real_world.ground_truth_packet_v1 authorize-packets \
