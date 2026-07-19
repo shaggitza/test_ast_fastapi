@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 _PROFILE: Final = "benchmarks/real_world/production_v1"
 _RUNTIME_POLICY: Final = f"{_PROFILE}/runtime-policy-v1.json"
 _RUNTIME_MIGRATION_CHECKSUMS: Final = f"{_PROFILE}/checksums-runtime-migration-v1.json"
+_RUNTIME_REPAIR_CHECKSUMS: Final = f"{_PROFILE}/checksums-runtime-repair-v1.json"
 _RUNTIME_SCHEMA: Final = f"{_PROFILE}/runtime-attestation-schema-v1.json"
 _AUTH_SCHEMA: Final = f"{_PROFILE}/review-canary-authorization-schema-v1.json"
 _EVENT_SCHEMA: Final = f"{_PROFILE}/lane-event-schema-v1.json"
@@ -2050,7 +2051,11 @@ def _historical_runtime_profile(
     current = _profile(root)
     matches = [
         raw
-        for relative in (packet_v1._SELECTION_CHECKSUMS, _RUNTIME_MIGRATION_CHECKSUMS)
+        for relative in (
+            packet_v1._SELECTION_CHECKSUMS,
+            _RUNTIME_MIGRATION_CHECKSUMS,
+            _RUNTIME_REPAIR_CHECKSUMS,
+        )
         if (raw := current.files.get(relative)) is not None and _sha(raw) == expected_sha256
     ]
     if len(matches) != 1:

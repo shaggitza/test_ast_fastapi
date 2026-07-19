@@ -434,7 +434,11 @@ def test_ledger_rejects_incomplete_runtime_identity_and_unrelated_campaign_lane(
 
 
 def test_historical_runtime_profiles_are_exactly_current_authenticated() -> None:
-    for relative in (packet._SELECTION_CHECKSUMS, run._RUNTIME_MIGRATION_CHECKSUMS):
+    for relative in (
+        packet._SELECTION_CHECKSUMS,
+        run._RUNTIME_MIGRATION_CHECKSUMS,
+        run._RUNTIME_REPAIR_CHECKSUMS,
+    ):
         raw = (ROOT / relative).read_bytes()
         files, profile_hash, files_hash = run._historical_runtime_profile(ROOT, run._sha(raw))
         assert set(files) == {
