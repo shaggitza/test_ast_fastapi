@@ -1991,11 +1991,27 @@ def _migrated_native_agent(  # noqa: PLR0912, PLR0915
         _validate_migration_roots(current, execution_root)
         prior_root = Path(cast("str", migration["prior_execution_root"]))
         prior_attestation = _runtime_attestation(root, prior_root, allow_legacy=True)
-        prior_receipt, _prior_raw = _json_raw(prior_root / "agent-installation.json", modes={0o400})
+        prior_receipt, prior_raw = _json_raw(prior_root / "agent-installation.json", modes={0o400})
         if (
-            prior_attestation.get("entry_hash") != migration["prior_runtime_entry_hash"]
+            set(prior_receipt)
+            != {
+                "schema_version",
+                "protocol",
+                "runtime_attestation_entry_hash",
+                "agent_name",
+                "path",
+                "sha256",
+                "bytes",
+                "resolver_census_sha256",
+                "runtime_identity",
+            }
+            or canonical_json(prior_receipt) != prior_raw
+            or prior_receipt.get("schema_version") != 1
+            or prior_receipt.get("protocol") != "ground-truth-native-agent-installation-v1"
+            or prior_attestation.get("entry_hash") != migration["prior_runtime_entry_hash"]
             or prior_receipt.get("runtime_attestation_entry_hash")
             != migration["prior_runtime_entry_hash"]
+            or prior_receipt.get("agent_name") != _AGENT_NAME
             or prior_receipt.get("path") != str(output)
         ):
             _fail("prior agent installation is not migration-bound")
@@ -2004,7 +2020,22 @@ def _migrated_native_agent(  # noqa: PLR0912, PLR0915
         new_expected = _sha(body)
         output_raw = submit_v1._owned_file(output, max_bytes=_MAX_FILE, allowed_modes={0o400})
         if _sha(output_raw) == old_expected:
-            _installed_agent(root, prior_root)
+            prior_identity = _runtime_identity(root)
+            prior_candidates = _agent_candidates(prior_identity["resolver_census"])
+            prior_effective = [
+                row
+                for row in prior_identity["resolver_census"]["effective"]
+                if isinstance(row, dict) and row.get("name") == _AGENT_NAME
+            ]
+            if (
+                prior_identity.get("resolver_census_sha256")
+                != prior_receipt.get("resolver_census_sha256")
+                or [row.get("filePath") for row in prior_candidates] != [str(output)]
+                or len(prior_effective) != 1
+                or prior_effective[0].get("subagentOnlyExtensions")
+                != [str(prior_root / "runtime/extension/index.ts")]
+            ):
+                _fail("prior agent resolver identity changed")
             with contextlib.suppress(FileExistsError):
                 os.link(output, archive)
             archive_directory = os.open(archive.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))

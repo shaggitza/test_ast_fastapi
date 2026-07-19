@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from benchmarks.real_world import ground_truth_campaign_v1 as campaign
@@ -811,10 +811,15 @@ def test_migrated_agent_replaces_exact_prior_and_recovers_receipt(
         "kind": "runtime_migrated",
     }
     prior_receipt = {
+        "schema_version": 1,
+        "protocol": "ground-truth-native-agent-installation-v1",
         "runtime_attestation_entry_hash": prior_attestation["entry_hash"],
+        "agent_name": run._AGENT_NAME,
         "path": str(output),
         "sha256": run._sha(old),
         "bytes": len(old),
+        "resolver_census_sha256": "sha256:" + "4" * 64,
+        "runtime_identity": {},
     }
     _publish(prior / "agent-installation.json", prior_receipt)
     prior_status = prior.stat()
@@ -861,7 +866,16 @@ def test_migrated_agent_replaces_exact_prior_and_recovers_receipt(
     )
     monkeypatch.setattr(run, "_installed_agent", lambda *_args: prior_receipt)
     new_attestation["runtime_identity"] = identity
-    monkeypatch.setattr(run, "_runtime_identity", lambda *_args: identity)
+
+    def runtime_identity(*_args: object) -> dict[str, Any]:
+        value = json.loads(json.dumps(identity))
+        extension_root = prior if output.read_bytes() == old else new
+        value["resolver_census"]["effective"][0]["subagentOnlyExtensions"] = [
+            str(extension_root / "runtime/extension/index.ts")
+        ]
+        return cast("dict[str, Any]", value)
+
+    monkeypatch.setattr(run, "_runtime_identity", runtime_identity)
     first = run.create_native_agent(ROOT, new, output, ledger=ledger)
     second = run.create_native_agent(ROOT, new, output, ledger=ledger)
     assert first == second
