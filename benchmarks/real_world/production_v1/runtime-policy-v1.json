@@ -80,6 +80,15 @@
     "requires_exact_one_failed_and_one_untouched_lane": true,
     "requires_no_launch_claim_or_native_semantic_artifacts": true
   },
+  "final_prelaunch_canary_recovery": {
+    "archive_layout": "<execution-root>/prelaunch-failures/generation3/<attempt-id>",
+    "atomic_generation4_authorization": true,
+    "maximum": 1,
+    "model_launch_count": 0,
+    "requires_exact_generation3_pre_readiness_failure": true,
+    "requires_no_launch_native_pending_session_or_escrow": true,
+    "terminal": true
+  },
   "prepare_runtime_reauthentication": [
     "before-binding",
     "before-broker-spawn",

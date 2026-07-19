@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import fcntl
 import inspect
 import json
 import os
@@ -19,6 +20,9 @@ from benchmarks.real_world import ground_truth_run_v1 as run
 from benchmarks.real_world import ground_truth_source_v1 as source
 from benchmarks.real_world import ground_truth_submit_v1 as submit
 from benchmarks.real_world.ground_truth_v2.schema import canonical_json
+from tests.benchmarks.test_ground_truth_submit_v1 import (
+    _packet_and_record as _submit_packet_and_record,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 BASE = "sha256:" + "1" * 64
@@ -1286,11 +1290,20 @@ def test_exact_prelaunch_migration_runtime_authorization_and_reset_flow(
         "broker_stderr_sha256": "sha256:" + "3" * 64,
         "broker_stderr_bytes": 1,
     }
-    monkeypatch.setattr(
-        run,
-        "_recovery_archive_summary",
-        lambda _path, _attempt, **_kwargs: archive_summary,
-    )
+
+    def replay_archive_summary(path: Path, _attempt: str, **kwargs: bool) -> dict[str, Any]:
+        assert kwargs.get("historical_replay") is True
+        if "generation3" in str(path):
+            return {
+                **archive_summary,
+                "broker_pid": 0,
+                "broker_start_identity": "pre-readiness-unpublished",
+            }
+        return archive_summary
+
+    monkeypatch.setattr(run, "_validate_final_recovery_binding", lambda *_args: None)
+    monkeypatch.setattr(run, "_recovery_archive_summary", replay_archive_summary)
+    monkeypatch.setattr(run, "_require_no_live_broker_for_binding", pytest.fail)
     prior_events = run._extended_ledger(ledger, ROOT)["events"]
     recovery = _special_event(
         ledger,
@@ -1336,14 +1349,79 @@ def test_exact_prelaunch_migration_runtime_authorization_and_reset_flow(
     recovered = run._extended_ledger(ledger, ROOT)
     assert recovered["generation"] == 3
     assert recovered["states"] == {A: "authorized", B: "authorized"}
-    prepared_generation3 = {**prepared_generation2, "generation": 3}
-    _special_event(
+    failed3 = _special_event(
         ledger,
         recovery["entry_hash"],
         12,
+        "operational_failed",
+        A,
+        {
+            "generation": 3,
+            "attempt_id": A,
+            "reason": "broker failed before readiness",
+            "failed_at": "2026-01-01T05:00:00Z",
+            "relaunch_authorized": False,
+        },
+        "ground-truth-review-lane-event-v1",
+        b"ground-truth-review-lane-event-v1\0",
+    )
+    prior_events = run._extended_ledger(ledger, ROOT)["events"]
+    final_recovery = _special_event(
+        ledger,
+        failed3["entry_hash"],
+        13,
+        "canary_final_prelaunch_recovery",
+        "canary-final-recovery",
+        {
+            "campaign_id": "campaign",
+            "campaign_manifest_sha256": "sha256:" + "2" * 64,
+            "runtime_attestation_entry_hash": repaired_runtime["entry_hash"],
+            "prior_authorization_entry_hash": recovery["entry_hash"],
+            "agent_installation_sha256": "sha256:" + "d" * 64,
+            "production_profile_sha256": "sha256:" + "a" * 64,
+            "lanes": _authorization_lanes(),
+            "attempt_ids": sorted([A, B]),
+            "failed_attempt_id": A,
+            "prepared_entry_hash": run._ZERO_HASH,
+            "failure_entry_hash": failed3["entry_hash"],
+            "prior_events_sha256": run._sha(canonical_json(prior_events)),
+            "prior_event_count": len(prior_events),
+            "archive_path": f"/private/repaired/prelaunch-failures/generation3/{A}",
+            **{
+                **archive_summary,
+                "broker_pid": 0,
+                "broker_start_identity": "pre-readiness-unpublished",
+            },
+            "limits": {
+                "max_global_active": 3,
+                "max_processes_per_lane": 1,
+                "replacement_attempts": 0,
+            },
+            "model_launch_count": 0,
+            "issued_at": "2026-01-01T05:00:00Z",
+            "expires_at": "2026-01-02T05:00:00Z",
+            "recovered_at": "2026-01-01T05:00:00Z",
+            "authorizations": {
+                "review_launch": True,
+                "adjudication": False,
+                "canonical_import": False,
+            },
+            "generation": 4,
+        },
+        run._FINAL_PRELAUNCH_RECOVERY_PROTOCOL,
+        run._FINAL_PRELAUNCH_RECOVERY_DOMAIN,
+    )
+    recovered4 = run._extended_ledger(ledger, ROOT)
+    assert recovered4["generation"] == 4
+    assert recovered4["states"] == {A: "authorized", B: "authorized"}
+    prepared_generation4 = {**prepared_generation2, "generation": 4}
+    _special_event(
+        ledger,
+        final_recovery["entry_hash"],
+        14,
         "prepared",
         A,
-        prepared_generation3,
+        prepared_generation4,
         "ground-truth-review-lane-event-v1",
         b"ground-truth-review-lane-event-v1\0",
     )
@@ -1403,7 +1481,10 @@ def test_prepare_runtime_boundary_rejects_attestation_or_installation_drift(
     }
     current = {
         "runtime": attestation,
-        "authorization": {"runtime_attestation_entry_hash": attestation["entry_hash"]},
+        "authorization": {
+            "runtime_attestation_entry_hash": attestation["entry_hash"],
+            "agent_installation_sha256": run._sha(canonical_json(installation)),
+        },
     }
     monkeypatch.setattr(run, "_runtime_attestation", lambda *_: dict(attestation))
     monkeypatch.setattr(run, "_installed_agent", lambda *_: dict(installation))
@@ -1617,6 +1698,318 @@ def test_generation3_prelaunch_recovery_rejects_launch_or_wrong_pair(
             run.authorize_prelaunch_canary_recovery(
                 ROOT, tmp_path / "campaign.json", tmp_path / "ledger", execution
             )
+
+
+def test_terminal_generation4_prelaunch_recovery_is_exact_and_crash_resumable(  # noqa: PLR0915
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    execution = _private(tmp_path / "execution")
+    attempt, _ = _generation2_attempt(execution)
+    (attempt / "native-state.json").unlink()
+    failures = _private(execution / "prelaunch-failures")
+    _private(_private(failures / "generation2") / A)
+    attestation = {
+        "entry_hash": "sha256:" + "a" * 64,
+        "kind": "runtime_migrated_repair",
+        "production_profile_sha256": "sha256:" + "c" * 64,
+        "execution_root": str(execution),
+    }
+    installation = {"runtime_attestation_entry_hash": attestation["entry_hash"]}
+    lanes = _authorization_lanes()
+    authorization = {
+        "kind": "canary_prelaunch_recovery",
+        "entry_hash": "sha256:" + "d" * 64,
+        "agent_installation_sha256": run._sha(canonical_json(installation)),
+        "lanes": lanes,
+    }
+    failed = {
+        "kind": "operational_failed",
+        "attempt_id": A,
+        "generation": 3,
+        "entry_hash": "sha256:" + "f" * 64,
+        "reason": "broker failed before readiness",
+        "relaunch_authorized": False,
+    }
+    current: dict[str, Any] = {
+        "generation": 3,
+        "prelaunch_recovery": authorization,
+        "final_prelaunch_recovery": None,
+        "runtime": attestation,
+        "authorization": authorization,
+        "active": 0,
+        "launched_attempts": set(),
+        "native_results": {},
+        "states": {A: "operational_failed", B: "authorized"},
+        "events": [failed],
+    }
+    verified = {**current, "generation": 4, "states": {A: "authorized", B: "authorized"}}
+    appended: list[dict[str, Any]] = []
+    broker_checks: list[Path] = []
+    publication_lock_checks: list[bool] = []
+    phase = 0
+
+    def ledger(*_args: object) -> dict[str, Any]:
+        return current if phase == 0 else verified
+
+    def append(*args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal phase
+        descriptor = os.open(execution / "slots/.lock", os.O_RDWR)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            publication_lock_checks.append(True)
+        finally:
+            os.close(descriptor)
+        appended.append(cast("dict[str, Any]", args[-1]))
+        phase = 1
+        return {"entry_hash": "sha256:" + "1" * 64}
+
+    monkeypatch.setattr(run, "_runtime_attestation", lambda *_args: attestation)
+    monkeypatch.setattr(run, "_installed_agent", lambda *_args: installation)
+    monkeypatch.setattr(campaign, "_private_root", lambda path: path)
+    monkeypatch.setattr(campaign, "_ledger_lock", lambda _path: contextlib.nullcontext())
+    monkeypatch.setattr(run, "_extended_ledger", ledger)
+
+    def record_broker_check(path: Path) -> None:
+        broker_checks.append(path)
+
+    monkeypatch.setattr(run, "_append_event_locked", append)
+    monkeypatch.setattr(run, "_validate_final_recovery_binding", lambda *_args: None)
+    monkeypatch.setattr(run, "_require_no_live_broker_for_binding", record_broker_check)
+    monkeypatch.setattr(
+        run,
+        "_campaign",
+        lambda *_args: (
+            {
+                "id": "campaign",
+                "lanes": [
+                    {"rank": 1, "lane": "A", **lanes[0]},
+                    {"rank": 1, "lane": "B", **lanes[1]},
+                ],
+            },
+            b"campaign\n",
+        ),
+    )
+    installation_calls = 0
+
+    def drift_at_publication(*_args: object) -> dict[str, Any]:
+        nonlocal installation_calls
+        installation_calls += 1
+        if installation_calls >= 3:
+            return {**installation, "unexpected_drift": True}
+        return installation
+
+    monkeypatch.setattr(run, "_installed_agent", drift_at_publication)
+    with pytest.raises(run.GroundTruthRunError, match="drifted before final recovery publication"):
+        run.authorize_final_prelaunch_canary_recovery(
+            ROOT, tmp_path / "campaign.json", tmp_path / "ledger", execution
+        )
+    assert not appended
+    monkeypatch.setattr(run, "_installed_agent", lambda *_args: installation)
+
+    result = run.authorize_final_prelaunch_canary_recovery(
+        ROOT, tmp_path / "campaign.json", tmp_path / "ledger", execution
+    )
+    archive = execution / "prelaunch-failures/generation3" / A
+    assert result["generation"] == 4
+    assert not attempt.exists() and archive.is_dir()
+    assert appended[0]["broker_pid"] == 0
+    assert appended[0]["prepared_entry_hash"] == run._ZERO_HASH
+    assert appended[0]["model_launch_count"] == 0
+    source_binding = attempt / "binding.json"
+    archive_binding = archive / "binding.json"
+    assert broker_checks == [
+        source_binding,
+        source_binding,
+        source_binding,
+        archive_binding,
+        archive_binding,
+    ]
+    assert publication_lock_checks == [True]
+
+    phase = 0
+    resumed = run.authorize_final_prelaunch_canary_recovery(
+        ROOT, tmp_path / "campaign.json", tmp_path / "ledger", execution
+    )
+    assert resumed["generation"] == 4 and archive.is_dir()
+
+    phase = 0
+    current["launched_attempts"] = {A}
+    with pytest.raises(run.GroundTruthRunError, match="not eligible"):
+        run.authorize_final_prelaunch_canary_recovery(
+            ROOT, tmp_path / "campaign.json", tmp_path / "ledger", execution
+        )
+
+
+def test_final_recovery_binding_requires_exact_frozen_generation3_identity(
+    tmp_path: Path,
+) -> None:
+    archive = _private(tmp_path / "archive")
+    runtime_hash = "sha256:" + "a" * 64
+    profile_checksum, profile_files = run._final_recovery_profile_identity(ROOT)
+    original = _submit_packet_and_record(tmp_path)
+    selection = original.selection_custody.model_copy(
+        update={"runtime_attestation_entry_hash": runtime_hash}
+    )
+    record = original.model_copy(
+        update={
+            "generation": 3,
+            "attempt_id": A,
+            "runtime_attestation_entry_hash": runtime_hash,
+            "selection_custody": selection,
+            "profile_checksum_sha256": profile_checksum,
+            "profile_files_sha256": profile_files,
+        }
+    )
+    binding = archive / "binding.json"
+    binding.write_bytes(canonical_json(record.model_dump(mode="json")))
+    binding.chmod(0o400)
+    digest = run._sha(binding.read_bytes())
+    run._validate_final_recovery_binding(ROOT, archive, A, runtime_hash, digest)
+
+    generation4 = record.model_copy(update={"generation": 4})
+    binding.chmod(0o600)
+    binding.write_bytes(canonical_json(generation4.model_dump(mode="json")))
+    binding.chmod(0o400)
+    with pytest.raises(run.GroundTruthRunError, match="exact generation3 lane"):
+        run._validate_final_recovery_binding(
+            ROOT, archive, A, runtime_hash, run._sha(binding.read_bytes())
+        )
+
+
+def test_historical_recovery_replay_ignores_live_reused_attempt_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive, _ = _generation2_attempt(tmp_path)
+    (archive / "native-state.json").unlink()
+    unrelated_live_socket = tmp_path / "generation4.sock"
+    unrelated_live_socket.write_bytes(b"live generation4")
+    monkeypatch.setattr(run, "_require_no_live_broker_for_binding", pytest.fail)
+    monkeypatch.setattr(run, "_same_process", pytest.fail)
+
+    summary = run._recovery_archive_summary(
+        archive,
+        A,
+        allow_missing_state=True,
+        historical_replay=True,
+    )
+    assert summary["broker_pid"] == 0
+    assert unrelated_live_socket.exists()
+
+
+def test_broker_path_uses_exact_attested_node_parent() -> None:
+    attestation = {"runtime_identity": {"resolver_execution": {"node_path": "/usr/local/bin/node"}}}
+    assert run._attested_broker_path(attestation) == "/usr/local/bin:/usr/bin:/bin"
+    attestation["runtime_identity"]["resolver_execution"]["node_path"] = "/tmp/node"
+    with pytest.raises(run.GroundTruthRunError, match="Node path is invalid"):
+        run._attested_broker_path(attestation)
+
+
+def test_stale_prepare_authority_is_rejected_and_its_attempt_is_removed(tmp_path: Path) -> None:
+    old_hash = "sha256:" + "1" * 64
+    old = {
+        "generation": 3,
+        "authorization": {"entry_hash": old_hash},
+        "states": {A: "authorized"},
+    }
+    assert run._lane_authority_matches(old, A, 3, old_hash, "authorized")
+    transitioned = {
+        "generation": 4,
+        "authorization": {"entry_hash": "sha256:" + "2" * 64},
+        "states": {A: "authorized"},
+    }
+    with pytest.raises(run._LaneAuthorityChanged, match="authorization changed"):
+        run._require_lane_authority(transitioned, A, 3, old_hash, "authorized")
+
+    attempts = _private(tmp_path / "attempts")
+    attempt = _private(attempts / A)
+    payload = attempt / "binding.json"
+    payload.write_bytes(b"stale\n")
+    payload.chmod(0o400)
+    run._remove_stale_attempt(attempt, attempts)
+    assert not attempt.exists()
+
+
+def test_prepare_attempt_cannot_cross_authorization_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    execution = _private(tmp_path / "execution")
+    old_hash = "sha256:" + "1" * 64
+    new_hash = "sha256:" + "2" * 64
+    lane = {"lane_key": "rank001-A", "attempt_id": A, "reviewer": {}}
+    old = {
+        "generation": 3,
+        "authorization": {"entry_hash": old_hash, "lanes": [lane]},
+        "states": {A: "authorized"},
+    }
+    transitioned = {
+        "generation": 4,
+        "authorization": {"entry_hash": new_hash, "lanes": [lane]},
+        "states": {A: "authorized"},
+    }
+    states = iter([old, transitioned, transitioned])
+    attestation = {
+        "entry_hash": "sha256:" + "3" * 64,
+        "runtime_custody_receipt_path": str(tmp_path / "receipt.json"),
+        "runtime_custody_receipt_sha256": "sha256:" + "4" * 64,
+    }
+    installation: dict[str, Any] = {}
+    monkeypatch.setattr(run, "_runtime_attestation", lambda *_args: attestation)
+    monkeypatch.setattr(run, "_installed_agent", lambda *_args: installation)
+    monkeypatch.setattr(campaign, "_private_root", lambda path: path)
+    monkeypatch.setattr(campaign, "_ledger_lock", lambda _path: contextlib.nullcontext())
+    monkeypatch.setattr(run, "_extended_ledger", lambda *_args: next(states))
+    monkeypatch.setattr(run, "_authorization", lambda current, _now=None: current["authorization"])
+    monkeypatch.setattr(run, "_runtime_boundary", lambda *_args: (attestation, installation))
+    monkeypatch.setattr(
+        run,
+        "_campaign",
+        lambda *_args: (
+            {"lanes": [{"attempt_id": A, "rank": 1, "lane": "A"}]},
+            b"campaign\n",
+        ),
+    )
+    monkeypatch.setattr(submit, "prepare_binding", pytest.fail)
+    monkeypatch.setattr(run, "_operational_failure", pytest.fail)
+
+    with pytest.raises(run._LaneAuthorityChanged, match="authorization changed"):
+        run.prepare_attempt(
+            ROOT,
+            tmp_path / "campaign.json",
+            tmp_path / "bindings.json",
+            tmp_path / "cache.git",
+            tmp_path / "ledger",
+            tmp_path / "packets",
+            execution,
+            rank=1,
+            lane="A",
+            attempt_id=A,
+        )
+    assert not (execution / "attempts" / A).exists()
+    assert {path.name for path in (execution / "slots").iterdir()} == {".lock"}
+
+
+def test_runtime_boundary_binds_authorized_agent_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attestation = {"entry_hash": "sha256:" + "1" * 64}
+    installation = {"runtime_attestation_entry_hash": attestation["entry_hash"]}
+    current = {
+        "runtime": attestation,
+        "authorization": {
+            "runtime_attestation_entry_hash": attestation["entry_hash"],
+            "agent_installation_sha256": run._sha(canonical_json(installation)),
+        },
+    }
+    monkeypatch.setattr(run, "_runtime_attestation", lambda *_args: attestation)
+    monkeypatch.setattr(run, "_installed_agent", lambda *_args: installation)
+    assert run._runtime_boundary(ROOT, ROOT, current, attestation, installation) == (
+        attestation,
+        installation,
+    )
+    current["authorization"]["agent_installation_sha256"] = "sha256:" + "f" * 64
+    with pytest.raises(run.GroundTruthRunError, match="installation drifted"):
+        run._runtime_boundary(ROOT, ROOT, current, attestation, installation)
 
 
 def test_slots_bind_owner_lane_and_broker(tmp_path: Path) -> None:
