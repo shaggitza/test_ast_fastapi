@@ -1861,13 +1861,20 @@ def test_final_recovery_binding_requires_exact_frozen_generation3_identity(
             "profile_files_sha256": profile_files,
         }
     )
+    document = submit.SubmissionBindings(
+        schema_version=1,
+        protocol="ground-truth-review-submit-v1",
+        records=(record,),
+    )
     binding = archive / "binding.json"
-    binding.write_bytes(canonical_json(record.model_dump(mode="json")))
+    binding.write_bytes(canonical_json(document.model_dump(mode="json")))
     binding.chmod(0o400)
     digest = run._sha(binding.read_bytes())
     run._validate_final_recovery_binding(ROOT, archive, A, runtime_hash, digest)
 
-    generation4 = record.model_copy(update={"generation": 4})
+    generation4 = document.model_copy(
+        update={"records": (record.model_copy(update={"generation": 4}),)}
+    )
     binding.chmod(0o600)
     binding.write_bytes(canonical_json(generation4.model_dump(mode="json")))
     binding.chmod(0o400)
