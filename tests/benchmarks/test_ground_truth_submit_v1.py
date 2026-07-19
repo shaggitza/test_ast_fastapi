@@ -900,6 +900,22 @@ def test_broker_authentication_uses_exact_selected_rank_validator(
         submit.load_bindings(binding)
 
 
+def test_generation_four_binding_is_explicitly_supported(tmp_path: Path) -> None:
+    record = _packet_and_record(tmp_path).model_copy(update={"generation": 4})
+    binding = tmp_path / "generation4-bindings.json"
+    binding.write_bytes(
+        canonical_json(
+            {
+                "schema_version": 1,
+                "protocol": "ground-truth-review-submit-v1",
+                "records": [record.model_dump(mode="json")],
+            }
+        )
+    )
+    binding.chmod(0o400)
+    assert submit.load_bindings(binding).records[0].generation == 4
+
+
 def test_historical_binding_without_generation_defaults_to_generation_one(tmp_path: Path) -> None:
     record = _packet_and_record(tmp_path)
     binding = tmp_path / "historical-bindings.json"

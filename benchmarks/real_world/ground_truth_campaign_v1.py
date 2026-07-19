@@ -31,6 +31,7 @@ _PACKET_PHASE_CHECKSUMS: Final = f"{_PROFILE_DIR}/checksums-packet-v1.json"
 _SELECTION_PACKET_PHASE_CHECKSUMS: Final = f"{_PROFILE_DIR}/checksums-packet-selection-v1.json"
 _RUNTIME_MIGRATION_CHECKSUMS: Final = f"{_PROFILE_DIR}/checksums-runtime-migration-v1.json"
 _RUNTIME_REPAIR_CHECKSUMS: Final = f"{_PROFILE_DIR}/checksums-runtime-repair-v1.json"
+_FINAL_RECOVERY_CHECKSUMS: Final = f"{_PROFILE_DIR}/checksums-final-prelaunch-recovery-v1.json"
 _SELECTION_VALIDATION_POLICY: Final = f"{_PROFILE_DIR}/selection-validation-policy-v1.json"
 _MODULE: Final = "benchmarks/real_world/ground_truth_campaign_v1.py"
 _SOURCE_MODULE: Final = "benchmarks/real_world/ground_truth_source_v1.py"
@@ -212,6 +213,7 @@ def _authenticate_profile(root: Path) -> dict[str, Any]:
         _SELECTION_PACKET_PHASE_CHECKSUMS,
         _RUNTIME_MIGRATION_CHECKSUMS,
         _RUNTIME_REPAIR_CHECKSUMS,
+        _FINAL_RECOVERY_CHECKSUMS,
         _SELECTION_VALIDATION_POLICY,
     }
     if (
