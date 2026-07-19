@@ -14,7 +14,9 @@ from typing import Any
 
 import pytest
 from benchmarks.real_world import ground_truth_campaign_v1 as campaign
+from benchmarks.real_world import ground_truth_packet_v1 as packet
 from benchmarks.real_world import ground_truth_run_v1 as run
+from benchmarks.real_world import ground_truth_source_v1 as source
 from benchmarks.real_world import ground_truth_submit_v1 as submit
 from benchmarks.real_world.ground_truth_v2.schema import canonical_json
 
@@ -28,6 +30,37 @@ def _private(path: Path) -> Path:
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.chmod(0o700)
     return path
+
+
+def _mock_migration_custody(monkeypatch: pytest.MonkeyPatch, source_sha256: str) -> None:
+    profile = submit.ProfileSnapshot(
+        checksum_raw=b"{}\n",
+        checksum_sha256="sha256:" + "a" * 64,
+        files={},
+        digests={},
+        files_sha256="sha256:" + "b" * 64,
+    )
+    monkeypatch.setattr(source, "_inventory", lambda *_args: {"stable": "source"})
+    monkeypatch.setattr(packet, "_inventory", lambda *_args, **_kwargs: {"stable": "packet"})
+    monkeypatch.setattr(
+        run,
+        "_custody",
+        lambda *_args: (
+            {
+                "id": "campaign",
+                "lanes": [
+                    {"rank": 1, "attempt_id": A},
+                    {"rank": 1, "attempt_id": B},
+                ],
+            },
+            b"campaign\n",
+            {
+                "source": {"sha256": source_sha256},
+                "packet": {"publication_entry_hash": "sha256:" + "4" * 64},
+            },
+            profile,
+        ),
+    )
 
 
 def _publish(path: Path, value: dict[str, Any]) -> None:
@@ -154,6 +187,31 @@ def _event(
         "previous_hash": previous,
     }
     value = {**body, "entry_hash": run._entry_hash(b"ground-truth-review-lane-event-v1\0", body)}
+    _publish(ledger / "lane-events" / f"{sequence:06d}-{kind}-{identifier}.json", value)
+    return value
+
+
+def _special_event(
+    ledger: Path,
+    previous: str,
+    sequence: int,
+    kind: str,
+    identifier: str,
+    fields: dict[str, Any],
+    protocol: str,
+    domain: bytes,
+    *,
+    schema_version: int = 1,
+) -> dict[str, Any]:
+    body = {
+        "schema_version": schema_version,
+        "protocol": protocol,
+        "sequence": sequence,
+        "kind": kind,
+        **fields,
+        "previous_hash": previous,
+    }
+    value = {**body, "entry_hash": run._entry_hash(domain, body)}
     _publish(ledger / "lane-events" / f"{sequence:06d}-{kind}-{identifier}.json", value)
     return value
 
@@ -476,6 +534,485 @@ def test_strict_complete_ledger_chain_and_lost_plan_claim(
     # A claimed batch cannot be launched/prepared again after output loss.
     _event(ledger, e3["entry_hash"], 4, "prepared", A, _prepared(A))
     with pytest.raises(run.GroundTruthRunError):
+        run._extended_ledger(ledger, ROOT)
+
+
+def test_prelaunch_migration_rejects_unattested_execution_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    supplied = _private(tmp_path / "supplied-execution")
+    ledger = _private(tmp_path / "ledger")
+    bindings = tmp_path / "source-bindings.json"
+    bindings.write_bytes(canonical_json({"records": []}))
+    bindings.chmod(0o400)
+    runtime = _runtime()
+    runtime["source_bindings_sha256"] = run._sha(bindings.read_bytes())
+    runtime_body = {key: value for key, value in runtime.items() if key != "entry_hash"}
+    runtime["entry_hash"] = run._entry_hash(run._RUNTIME_DOMAIN, runtime_body)
+    authorization = _auth(runtime)
+    current: dict[str, Any] = {
+        "migration": None,
+        "runtime_superseded": False,
+        "runtime": runtime,
+        "authorization": authorization,
+        "active": 0,
+        "events": [],
+        "states": {},
+        "base": {"packet_publication_entry_hash": "sha256:" + "4" * 64},
+    }
+    _mock_migration_custody(monkeypatch, run._sha(bindings.read_bytes()))
+    monkeypatch.setattr(
+        run,
+        "_campaign",
+        lambda *_args: (
+            {
+                "id": "campaign",
+                "lanes": [
+                    {"rank": 1, "attempt_id": A},
+                    {"rank": 1, "attempt_id": B},
+                ],
+            },
+            b"campaign\n",
+        ),
+    )
+    monkeypatch.setattr(campaign, "_private_root", lambda path: path)
+    monkeypatch.setattr(campaign, "_ledger_lock", lambda _path: contextlib.nullcontext())
+    monkeypatch.setattr(run, "_extended_ledger", lambda *_args: current)
+    with pytest.raises(run.GroundTruthRunError, match="differs from prior runtime"):
+        run.authorize_prelaunch_migration(
+            ROOT,
+            tmp_path / "campaign.json",
+            bindings,
+            tmp_path / "cache",
+            ledger,
+            tmp_path / "packets",
+            supplied,
+        )
+
+
+@pytest.mark.parametrize("tamper", ["pid", "artifact"])
+def test_prelaunch_migration_rejects_pid_or_artifact_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tamper: str
+) -> None:
+    execution = _private(tmp_path / "execution")
+    ledger = _private(tmp_path / "ledger")
+    bindings = tmp_path / "source-bindings.json"
+    bindings.write_bytes(canonical_json({"records": []}))
+    bindings.chmod(0o400)
+    runtime = _runtime()
+    status = execution.stat()
+    runtime.update(
+        {
+            "source_bindings_sha256": run._sha(bindings.read_bytes()),
+            "execution_root": str(execution),
+            "execution_device": status.st_dev,
+            "execution_inode": status.st_ino,
+        }
+    )
+    runtime_body = {key: value for key, value in runtime.items() if key != "entry_hash"}
+    runtime["entry_hash"] = run._entry_hash(run._RUNTIME_DOMAIN, runtime_body)
+    authorization = _auth(runtime)
+    events: list[dict[str, Any]] = []
+    states: dict[str, str] = {}
+    _private(execution / "attempts")
+    for attempt in (A, B):
+        prepared = {
+            "kind": "prepared",
+            "attempt_id": attempt,
+            "broker_pid": 101,
+            "broker_start_identity": "start",
+        }
+        failed = {
+            "kind": "operational_failed",
+            "attempt_id": attempt,
+            "reason": "never-launched broker exited",
+        }
+        events.extend([prepared, failed])
+        states[attempt] = "operational_failed"
+        attempt_root = _private(execution / "attempts" / attempt)
+        for directory in ("escrow", "logs"):
+            _private(attempt_root / directory)
+        packet_dir = _private(attempt_root / "packet")
+        packet_dir.chmod(0o500)
+        for name in ("binding.json", "native-state.json"):
+            path = attempt_root / name
+            path.write_text("{}\n")
+            path.chmod(0o400)
+        for name in ("broker.stderr", "broker.stdout"):
+            path = attempt_root / "logs" / name
+            path.write_text("")
+            path.chmod(0o600)
+    if tamper == "artifact":
+        (execution / "attempts" / A / "session.jsonl").write_text("forbidden\n")
+    current = {
+        "migration": None,
+        "runtime_superseded": False,
+        "runtime": runtime,
+        "authorization": authorization,
+        "active": 0,
+        "events": events,
+        "states": states,
+        "base": {"packet_publication_entry_hash": "sha256:" + "4" * 64},
+    }
+    _mock_migration_custody(monkeypatch, run._sha(bindings.read_bytes()))
+    monkeypatch.setattr(
+        run,
+        "_campaign",
+        lambda *_args: (
+            {
+                "id": "campaign",
+                "lanes": [{"rank": 1, "attempt_id": A}, {"rank": 1, "attempt_id": B}],
+            },
+            b"campaign\n",
+        ),
+    )
+    monkeypatch.setattr(campaign, "_private_root", lambda path: path)
+    monkeypatch.setattr(campaign, "_ledger_lock", lambda _path: contextlib.nullcontext())
+    monkeypatch.setattr(run, "_extended_ledger", lambda *_args: current)
+    monkeypatch.setattr(run, "_same_process", lambda *_args: False)
+    monkeypatch.setattr(
+        run,
+        "_state",
+        lambda _root, attempt: {
+            "broker_pid": 202 if tamper == "pid" and attempt == A else 101,
+            "broker_start_identity": "start",
+            "socket": str(tmp_path / f"{attempt}.sock"),
+            "registry": str(tmp_path / f"{attempt}.registry"),
+        },
+    )
+    expected = "broker state" if tamper == "pid" else "attempt inventory"
+    with pytest.raises(run.GroundTruthRunError, match=expected):
+        run.authorize_prelaunch_migration(
+            ROOT,
+            tmp_path / "campaign.json",
+            bindings,
+            tmp_path / "cache",
+            ledger,
+            tmp_path / "packets",
+            execution,
+        )
+
+
+def test_random_runtime_staging_leaves_crashed_partial_inert(tmp_path: Path) -> None:
+    parent = _private(tmp_path / "private")
+    final = parent / "new-execution"
+    first = run._prepare_runtime_staging(final)
+    second = run._prepare_runtime_staging(final)
+    assert first != second
+    assert first.exists() and second.exists()
+    assert (first / ".runtime-staging-owner.json").is_file()
+    assert (second / ".runtime-staging-owner.json").is_file()
+    assert not final.exists()
+
+
+@pytest.mark.parametrize("ledger_already_published", [False, True])
+def test_migrated_runtime_recovers_pending_local_and_ledger_boundaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ledger_already_published: bool,
+) -> None:
+    ledger = _private(tmp_path / "ledger")
+    final = _private(tmp_path / "new-execution")
+    prior = _private(tmp_path / "prior-execution")
+    prior_status = prior.stat()
+    prior_runtime = _runtime()
+    migration = {
+        "entry_hash": "sha256:" + "a" * 64,
+        "prior_runtime_entry_hash": prior_runtime["entry_hash"],
+        "prior_execution_root": str(prior),
+        "prior_execution_device": prior_status.st_dev,
+        "prior_execution_inode": prior_status.st_ino,
+        "source_bindings_sha256": prior_runtime["source_bindings_sha256"],
+        "production_profile_sha256": "sha256:" + "d" * 64,
+    }
+    current: dict[str, Any] = {
+        "events": [],
+        "head": migration["entry_hash"],
+        "migration": migration,
+        "generation": 1,
+        "runtime": prior_runtime,
+        "authorization": None,
+        "base": {
+            "campaign_id": "campaign",
+            "campaign_manifest_sha256": "sha256:" + "2" * 64,
+            "campaign_canary_lanes_sha256": prior_runtime["campaign_lanes_sha256"],
+            "packet_publication_entry_hash": "sha256:" + "4" * 64,
+        },
+    }
+    fields = {
+        **{
+            key: value
+            for key, value in prior_runtime.items()
+            if key not in {"schema_version", "protocol", "previous_hash", "entry_hash"}
+        },
+        "execution_root": str(final),
+        "execution_device": final.stat().st_dev,
+        "execution_inode": final.stat().st_ino,
+        "production_profile_sha256": migration["production_profile_sha256"],
+        "migration_entry_hash": migration["entry_hash"],
+        "supersedes_entry_hash": prior_runtime["entry_hash"],
+        "runtime_custody_receipt_path": str(final / "runtime/custody-receipt.json"),
+        "runtime_custody_receipt_sha256": "sha256:" + "e" * 64,
+    }
+    candidate = run._event_value(current, "runtime_migrated", fields)
+    pending = final / "runtime-attestation.pending.json"
+    pending.write_bytes(canonical_json(candidate))
+    pending.chmod(0o400)
+    if ledger_already_published:
+        current = {**current, "runtime": candidate, "head": candidate["entry_hash"]}
+    if not ledger_already_published:
+        tampered = {**candidate, "entry_hash": "sha256:" + "f" * 64}
+        with pytest.raises(run.GroundTruthRunError, match="candidate"):
+            run._validate_migrated_event_candidate(current, tampered)
+    monkeypatch.setattr(run, "_migrated_candidate_files", lambda *_args: None)
+    monkeypatch.setattr(campaign, "_private_root", lambda path: path)
+    monkeypatch.setattr(campaign, "_ledger_lock", lambda _path: contextlib.nullcontext())
+
+    def extended(*_args: Any) -> dict[str, Any]:
+        event = ledger / f"lane-events/{candidate['sequence']:06d}-runtime_migrated-runtime.json"
+        return {**current, "runtime": candidate} if event.exists() else current
+
+    monkeypatch.setattr(run, "_extended_ledger", extended)
+    recovered = run._recover_migrated_runtime(ROOT, ledger, final)
+    assert recovered is not None
+    assert (final / "runtime-attestation.json").read_bytes() == canonical_json(candidate)
+    assert not pending.exists()
+    if not ledger_already_published:
+        assert (ledger / "lane-events/000001-runtime_migrated-runtime.json").exists()
+
+
+def test_migrated_agent_replaces_exact_prior_and_recovers_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = _private(tmp_path / "ledger")
+    prior = _private(tmp_path / "prior")
+    new = _private(tmp_path / "new")
+    output_root = _private(tmp_path / "agents")
+    output = output_root / "ground-truth-production-reviewer-v1.md"
+    old = b"old exact agent\n"
+    new_body = b"new exact agent\n"
+    output.write_bytes(old)
+    output.chmod(0o400)
+    source = _private(new / "runtime") / "agent-source.md"
+    source.write_bytes(new_body)
+    source.chmod(0o400)
+    prior_attestation = {"entry_hash": "sha256:" + "1" * 64}
+    new_attestation: dict[str, Any] = {
+        "entry_hash": "sha256:" + "2" * 64,
+        "kind": "runtime_migrated",
+    }
+    prior_receipt = {
+        "runtime_attestation_entry_hash": prior_attestation["entry_hash"],
+        "path": str(output),
+        "sha256": run._sha(old),
+        "bytes": len(old),
+    }
+    _publish(prior / "agent-installation.json", prior_receipt)
+    prior_status = prior.stat()
+    migration = {
+        "entry_hash": "sha256:" + "3" * 64,
+        "prior_runtime_entry_hash": prior_attestation["entry_hash"],
+        "prior_execution_root": str(prior),
+        "prior_execution_device": prior_status.st_dev,
+        "prior_execution_inode": prior_status.st_ino,
+    }
+    current = {
+        "migration": migration,
+        "runtime": new_attestation,
+        "generation": 1,
+        "authorization": None,
+    }
+    identity = {
+        "roots": [{"kind": "user-old", "path": str(output_root)}],
+        "resolver_census_sha256": "sha256:" + "4" * 64,
+        "resolver_census": {
+            "builtin": [],
+            "package": [],
+            "project": [],
+            "user": [{"name": run._AGENT_NAME, "filePath": str(output)}],
+            "effective": [
+                {
+                    "name": run._AGENT_NAME,
+                    "model": run._MODEL,
+                    "thinking": run._THINKING,
+                    "tools": list(run._TOOLS),
+                    "extensions": [],
+                    "subagentOnlyExtensions": [str(new / "runtime/extension/index.ts")],
+                }
+            ],
+        },
+    }
+    monkeypatch.setattr(campaign, "_private_root", lambda path: path)
+    monkeypatch.setattr(campaign, "_ledger_lock", lambda _path: contextlib.nullcontext())
+    monkeypatch.setattr(run, "_extended_ledger", lambda *_args: current)
+    monkeypatch.setattr(
+        run,
+        "_runtime_attestation",
+        lambda _root, path, **_kwargs: prior_attestation if path == prior else new_attestation,
+    )
+    monkeypatch.setattr(run, "_installed_agent", lambda *_args: prior_receipt)
+    new_attestation["runtime_identity"] = identity
+    monkeypatch.setattr(run, "_runtime_identity", lambda *_args: identity)
+    first = run.create_native_agent(ROOT, new, output, ledger=ledger)
+    second = run.create_native_agent(ROOT, new, output, ledger=ledger)
+    assert first == second
+    assert output.read_bytes() == new_body
+    assert (new / "prior-agent-source.md").read_bytes() == old
+    assert first["schema_version"] == 2
+
+
+def test_exact_prelaunch_migration_runtime_authorization_and_reset_flow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger, auth = _ledger(tmp_path, monkeypatch)
+    e1 = _event(ledger, auth["entry_hash"], 1, "prepared", A, _prepared(A))
+    e2 = _event(ledger, e1["entry_hash"], 2, "prepared", B, _prepared(B))
+
+    def failure(attempt: str) -> dict[str, Any]:
+        return {
+            "attempt_id": attempt,
+            "reason": "never-launched broker exited",
+            "failed_at": "2026-01-01T02:00:00Z",
+            "relaunch_authorized": False,
+        }
+
+    e3 = _event(ledger, e2["entry_hash"], 3, "operational_failed", A, failure(A))
+    e4 = _event(ledger, e3["entry_hash"], 4, "operational_failed", B, failure(B))
+    prior = [e1, e2, e3, e4]
+    migration = _special_event(
+        ledger,
+        e4["entry_hash"],
+        5,
+        "prelaunch_migration",
+        "prelaunch",
+        {
+            "prior_runtime_entry_hash": _runtime()["entry_hash"],
+            "prior_execution_root": _runtime()["execution_root"],
+            "prior_execution_device": _runtime()["execution_device"],
+            "prior_execution_inode": _runtime()["execution_inode"],
+            "prior_authorization_entry_hash": auth["entry_hash"],
+            "prior_events_sha256": run._sha(canonical_json(prior)),
+            "prior_event_count": 4,
+            "campaign_manifest_sha256": "sha256:" + "2" * 64,
+            "source_bindings_sha256": "sha256:" + "3" * 64,
+            "packet_publication_entry_hash": "sha256:" + "4" * 64,
+            "production_profile_sha256": "sha256:" + "a" * 64,
+            "attempt_ids": sorted([A, B]),
+            "model_launch_count": 0,
+            "migrated_at": "2026-01-01T03:00:00Z",
+            "authorizations": {
+                "review_launch": False,
+                "adjudication": False,
+                "canonical_import": False,
+            },
+        },
+        run._MIGRATION_PROTOCOL,
+        run._MIGRATION_DOMAIN,
+    )
+    runtime_fields = {
+        key: value
+        for key, value in _runtime().items()
+        if key not in {"schema_version", "protocol", "previous_hash", "entry_hash"}
+    }
+    runtime_fields.update(
+        {
+            "production_profile_sha256": "sha256:" + "a" * 64,
+            "execution_root": "/private/new",
+            "execution_device": 3,
+            "execution_inode": 4,
+            "runtime_custody_receipt_path": "/private/new/runtime/custody-receipt.json",
+            "runtime_custody_receipt_sha256": "sha256:" + "c" * 64,
+            "supersedes_entry_hash": _runtime()["entry_hash"],
+            "migration_entry_hash": migration["entry_hash"],
+        }
+    )
+    migrated_runtime = _special_event(
+        ledger,
+        migration["entry_hash"],
+        6,
+        "runtime_migrated",
+        "runtime",
+        runtime_fields,
+        run._MIGRATION_RUNTIME_PROTOCOL,
+        run._MIGRATION_RUNTIME_DOMAIN,
+        schema_version=2,
+    )
+    _special_event(
+        ledger,
+        migrated_runtime["entry_hash"],
+        7,
+        "canary_reauthorized",
+        "canary",
+        {
+            "campaign_id": "campaign",
+            "campaign_manifest_sha256": "sha256:" + "2" * 64,
+            "runtime_attestation_entry_hash": migrated_runtime["entry_hash"],
+            "agent_installation_sha256": "sha256:" + "d" * 64,
+            "production_profile_sha256": "sha256:" + "a" * 64,
+            "lanes": _authorization_lanes(),
+            "attempt_ids": sorted([A, B]),
+            "limits": {
+                "max_global_active": 3,
+                "max_processes_per_lane": 1,
+                "replacement_attempts": 0,
+            },
+            "issued_at": "2026-01-01T03:00:00Z",
+            "expires_at": "2026-01-02T03:00:00Z",
+            "authorizations": {
+                "review_launch": True,
+                "adjudication": False,
+                "canonical_import": False,
+            },
+            "migration_entry_hash": migration["entry_hash"],
+            "generation": 2,
+        },
+        run._MIGRATED_AUTH_PROTOCOL,
+        run._MIGRATED_AUTH_DOMAIN,
+    )
+    state = run._extended_ledger(ledger, ROOT)
+    assert state["generation"] == 2
+    assert state["states"] == {A: "authorized", B: "authorized"}
+    assert state["runtime"] == migrated_runtime
+    _special_event(
+        ledger,
+        state["head"],
+        8,
+        "runtime_migrated",
+        "runtime",
+        runtime_fields,
+        run._MIGRATION_RUNTIME_PROTOCOL,
+        run._MIGRATION_RUNTIME_DOMAIN,
+        schema_version=2,
+    )
+    with pytest.raises(run.GroundTruthRunError, match="migrated runtime"):
+        run._extended_ledger(ledger, ROOT)
+    (ledger / "lane-events/000008-runtime_migrated-runtime.json").unlink()
+    prepared_generation2 = _prepared(A)
+    prepared_generation2.update(
+        {"generation": 2, "runtime_attestation_entry_hash": migrated_runtime["entry_hash"]}
+    )
+    prepared2 = _special_event(
+        ledger,
+        state["head"],
+        8,
+        "prepared",
+        A,
+        prepared_generation2,
+        "ground-truth-review-lane-event-v1",
+        b"ground-truth-review-lane-event-v1\0",
+    )
+    assert run._extended_ledger(ledger, ROOT)["states"][A] == "prepared"
+    with pytest.raises(run.GroundTruthRunError, match="prepared"):
+        _special_event(
+            ledger,
+            prepared2["entry_hash"],
+            9,
+            "prepared",
+            A,
+            prepared_generation2,
+            "ground-truth-review-lane-event-v1",
+            b"ground-truth-review-lane-event-v1\0",
+        )
         run._extended_ledger(ledger, ROOT)
 
 
@@ -897,6 +1434,7 @@ def test_runtime_schemas_are_strict_and_checksums_match() -> None:
         "review-canary-authorization-schema-v1.json",
         "lane-event-schema-v1.json",
         "session-audit-schema-v1.json",
+        "prelaunch-migration-schema-v1.json",
     ):
         schema = json.loads((ROOT / "benchmarks/real_world/production_v1" / name).read_bytes())
         assert schema.get("additionalProperties") is False or "oneOf" in schema

@@ -379,6 +379,7 @@ def _packet_and_record(
     )
     return submit.SubmissionBinding(
         schema_version=1,
+        generation=1,
         attempt_id="attempt-1",
         capability="b" * 64,
         packet_path=str(packet),
@@ -637,6 +638,23 @@ def test_escrow_idempotent_recovery_and_altered_artifact_fail_closed(
         submit.recover_submission(record)
 
 
+def test_legacy_binding_without_generation_preserves_sidecar_recovery_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(submit, "_evidence_validator", lambda _record: FakeEvidence())
+    current = _packet_and_record(tmp_path)
+    payload = current.model_dump(mode="json")
+    payload.pop("generation")
+    legacy = submit.SubmissionBinding.model_validate(payload)
+    assert "generation" not in legacy.model_fields_set
+    assert submit._binding_sha(legacy) == _sha(canonical_json(payload))
+    first = submit.escrow_submission(
+        _negative(), legacy, validator=FakeEvidence(), clock=lambda: END
+    )
+    recovered = submit.recover_submission(legacy)
+    assert recovered == first
+
+
 def test_recovery_uses_fresh_validator_and_brackets_custody(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -880,6 +898,20 @@ def test_broker_authentication_uses_exact_selected_rank_validator(
     )
     with pytest.raises(submit.GroundTruthSubmitError, match="publication binding changed"):
         submit.load_bindings(binding)
+
+
+def test_historical_binding_without_generation_defaults_to_generation_one(tmp_path: Path) -> None:
+    record = _packet_and_record(tmp_path)
+    binding = tmp_path / "historical-bindings.json"
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "protocol": "ground-truth-review-submit-v1",
+        "records": [record.model_dump(mode="json")],
+    }
+    payload["records"][0].pop("generation")
+    binding.write_bytes(canonical_json(payload))
+    binding.chmod(0o400)
+    assert submit.load_bindings(binding).records[0].generation == 1
 
 
 def test_binding_loader_reauthenticates_packet_policies_and_recovery_state(tmp_path: Path) -> None:
@@ -1158,6 +1190,10 @@ def test_real_git_evidence_validator_integration(
     shutil.rmtree(cache)
     subprocess.run(["git", "clone", "--bare", "-q", str(work), str(cache)], check=True)
     _git(cache, "config", "remote.origin.url", f"https://github.com/{record.repository}.git")
+    cache_status = cache.stat(follow_symlinks=False)
+    record = record.model_copy(
+        update={"cache_device": cache_status.st_dev, "cache_inode": cache_status.st_ino}
+    )
 
     def bounded_runner(repository: Path, args: Sequence[str]) -> bytes:
         result = subprocess.run(

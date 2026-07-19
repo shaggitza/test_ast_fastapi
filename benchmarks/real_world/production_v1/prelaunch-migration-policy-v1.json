@@ -1,0 +1,23 @@
+{
+  "adjudication_authorized": false,
+  "atomic_generation2_authorization": true,
+  "canonical_import_authorized": false,
+  "crashed_partial_staging_disposition": "inert-never-auto-deleted-or-reused",
+  "full_custody_before_transition": true,
+  "generation": 2,
+  "id": "ground-truth-prelaunch-custody-migration-v1",
+  "max_migrations": 1,
+  "migrated_agent_replacement": "exact-prior-authenticated-archived-atomic-recoverable",
+  "model_launch_count": 0,
+  "new_execution_root_required": true,
+  "preserve_prior_execution_root": true,
+  "random_private_sibling_staging": true,
+  "required_prior_lane_kinds": [
+    "prepared",
+    "operational_failed"
+  ],
+  "required_prior_runtime_schema_version": 1,
+  "schema_version": 1,
+  "sealing_authorized": false,
+  "staged_no_clobber_runtime_publication": true
+}

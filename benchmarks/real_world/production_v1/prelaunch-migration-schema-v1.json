@@ -1,0 +1,136 @@
+{
+  "$defs": {
+    "attempt": {
+      "pattern": "^prod-v1-i[0-9]{3}-rank[0-9]{3}-pr[0-9]+-[AB]$",
+      "type": "string"
+    },
+    "digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "falseAuthority": {
+      "additionalProperties": false,
+      "properties": {
+        "adjudication": {
+          "const": false
+        },
+        "canonical_import": {
+          "const": false
+        },
+        "review_launch": {
+          "const": false
+        }
+      },
+      "required": [
+        "review_launch",
+        "adjudication",
+        "canonical_import"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://example.invalid/ground-truth-production-v1/prelaunch-migration-schema-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "attempt_ids": {
+      "items": {
+        "$ref": "#/$defs/attempt"
+      },
+      "maxItems": 2,
+      "minItems": 2,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "authorizations": {
+      "$ref": "#/$defs/falseAuthority"
+    },
+    "campaign_manifest_sha256": {
+      "$ref": "#/$defs/digest"
+    },
+    "entry_hash": {
+      "$ref": "#/$defs/digest"
+    },
+    "kind": {
+      "const": "prelaunch_migration"
+    },
+    "migrated_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "model_launch_count": {
+      "const": 0
+    },
+    "packet_publication_entry_hash": {
+      "$ref": "#/$defs/digest"
+    },
+    "previous_hash": {
+      "$ref": "#/$defs/digest"
+    },
+    "prior_authorization_entry_hash": {
+      "$ref": "#/$defs/digest"
+    },
+    "prior_event_count": {
+      "const": 4
+    },
+    "prior_events_sha256": {
+      "$ref": "#/$defs/digest"
+    },
+    "prior_execution_device": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "prior_execution_inode": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "prior_execution_root": {
+      "pattern": "^/",
+      "type": "string"
+    },
+    "prior_runtime_entry_hash": {
+      "$ref": "#/$defs/digest"
+    },
+    "production_profile_sha256": {
+      "$ref": "#/$defs/digest"
+    },
+    "protocol": {
+      "const": "ground-truth-prelaunch-custody-migration-v1"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "sequence": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "source_bindings_sha256": {
+      "$ref": "#/$defs/digest"
+    }
+  },
+  "required": [
+    "attempt_ids",
+    "authorizations",
+    "campaign_manifest_sha256",
+    "entry_hash",
+    "kind",
+    "migrated_at",
+    "model_launch_count",
+    "packet_publication_entry_hash",
+    "previous_hash",
+    "prior_authorization_entry_hash",
+    "prior_event_count",
+    "prior_events_sha256",
+    "prior_execution_device",
+    "prior_execution_inode",
+    "prior_execution_root",
+    "prior_runtime_entry_hash",
+    "production_profile_sha256",
+    "protocol",
+    "schema_version",
+    "sequence",
+    "source_bindings_sha256"
+  ],
+  "title": "Ground truth production prelaunch custody migration v1",
+  "type": "object"
+}

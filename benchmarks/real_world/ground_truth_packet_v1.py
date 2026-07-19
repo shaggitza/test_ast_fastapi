@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 _PROFILE_DIR: Final = "benchmarks/real_world/production_v1"
 _CHECKSUMS: Final = f"{_PROFILE_DIR}/checksums-v1.json"
 _HISTORICAL_CHECKSUMS: Final = f"{_PROFILE_DIR}/checksums-packet-v1.json"
+_SELECTION_CHECKSUMS: Final = f"{_PROFILE_DIR}/checksums-packet-selection-v1.json"
 _POLICY: Final = f"{_PROFILE_DIR}/packet-policy-v1.json"
 _SCHEMA: Final = f"{_PROFILE_DIR}/packet-manifest-schema-v1.json"
 _AUTH_SCHEMA: Final = f"{_PROFILE_DIR}/packet-authorization-schema-v1.json"
@@ -290,6 +291,21 @@ def _historical_profile(root: Path, current: ProfileSnapshot | None = None) -> P
     return historical
 
 
+def _selection_profile(root: Path, current: ProfileSnapshot) -> ProfileSnapshot:
+    expected = current.value.get("files", {}).get(_SELECTION_CHECKSUMS)
+    if not isinstance(expected, str) or not _DIGEST.fullmatch(expected):
+        _fail("selection packet profile is absent from current production profile")
+    profile = _load_profile(root, _SELECTION_CHECKSUMS, historical=True)
+    current_module = current.value.get("files", {}).get(_MODULE)
+    if (
+        _sha(profile.raw) != expected
+        or not isinstance(current_module, str)
+        or _sha(profile.files[_MODULE]) != current_module
+    ):
+        _fail("selection packet profile is not current-profile authenticated")
+    return profile
+
+
 def _profile_by_hash(root: Path, expected_sha256: str) -> ProfileSnapshot:
     if not _DIGEST.fullmatch(expected_sha256):
         _fail("packet authorization profile digest is invalid")
@@ -299,6 +315,9 @@ def _profile_by_hash(root: Path, expected_sha256: str) -> ProfileSnapshot:
     historical = _historical_profile(root, current)
     if _sha(historical.raw) == expected_sha256:
         return historical
+    selection = _selection_profile(root, current)
+    if _sha(selection.raw) == expected_sha256:
+        return selection
     _fail("packet authorization references an unknown production profile")
 
 

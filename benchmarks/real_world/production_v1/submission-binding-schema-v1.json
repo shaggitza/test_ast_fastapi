@@ -370,6 +370,15 @@
           "title": "Escrow Path",
           "type": "string"
         },
+        "generation": {
+          "default": 1,
+          "enum": [
+            1,
+            2
+          ],
+          "title": "Generation",
+          "type": "integer"
+        },
         "lane": {
           "enum": [
             "A",
