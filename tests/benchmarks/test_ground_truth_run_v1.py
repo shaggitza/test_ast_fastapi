@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -219,6 +220,32 @@ def test_actual_resolver_resolves_exact_flat_user_agent_path(
     assert "resolver-nested-fixture" in user_names
     assert execution["network_authorized"] is False
     assert execution["shell"] is False
+
+
+def test_broker_readiness_budget_is_bounded_and_below_attempt_deadline() -> None:
+    policy = json.loads(
+        (ROOT / "benchmarks/real_world/production_v1/runtime-policy-v1.json").read_bytes()
+    )
+    assert run._BROKER_READY_SECONDS == policy["max_broker_readiness_seconds"] == 900
+    assert run._BROKER_READY_SECONDS < run._MAX_WALL
+
+
+def test_zombie_broker_is_not_same_process() -> None:
+    process = subprocess.Popen(["/bin/sleep", "0.05"], start_new_session=True)
+    identity = run._proc_identity(process.pid)
+    try:
+        time.sleep(0.1)
+        assert run._same_process(process.pid, identity) is False
+    finally:
+        process.wait()
+
+
+def test_broker_readiness_rejects_dead_process_before_socket_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(run, "_same_process", lambda *_args: False)
+    with pytest.raises(run.GroundTruthRunError, match="failed before readiness"):
+        run._wait_socket(tmp_path / "stale.sock", 123, "identity")
 
 
 def test_broker_socket_path_is_short_private_and_attempt_bound() -> None:

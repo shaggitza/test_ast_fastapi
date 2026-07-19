@@ -51,6 +51,7 @@ _THINKING: Final = "medium"
 _TOOLS: Final = ("read", "grep", "find", "ls", "submit_blind_review")
 _MAX_ACTIVE: Final = 3
 _MAX_WALL: Final = 1800
+_BROKER_READY_SECONDS: Final = 900
 _MAX_FILE: Final = 64 * 1024 * 1024
 _MAX_SESSION: Final = 64 * 1024 * 1024
 _MAX_RSS: Final = 4 * 1024 * 1024 * 1024
@@ -1633,8 +1634,8 @@ def _proc_identity(pid: int) -> str:
         raise GroundTruthRunError("broker process identity is unavailable") from exc
     closing = raw.rfind(")")
     fields = raw[closing + 2 :].split() if closing >= 0 else []
-    if len(fields) < 20 or not fields[19].isdigit():
-        _fail("broker process identity is invalid")
+    if len(fields) < 20 or fields[0] in {"Z", "X", "x"} or not fields[19].isdigit():
+        _fail("broker process identity is invalid or terminal")
     return fields[19]
 
 
@@ -1713,8 +1714,12 @@ def serve_broker(socket_path: Path, binding: Path, deadline_ms: int) -> int:
 
 
 def _wait_socket(path: Path, pid: int, identity: str) -> None:
-    deadline = time.monotonic() + 5
+    # Broker readiness includes full offline reauthentication of the 50-packet
+    # publication and exact cache before exposing the socket.
+    deadline = time.monotonic() + _BROKER_READY_SECONDS
     while time.monotonic() < deadline:
+        if not _same_process(pid, identity):
+            _fail("broker failed before readiness")
         if path.exists():
             status = path.lstat()
             if (
@@ -1722,10 +1727,10 @@ def _wait_socket(path: Path, pid: int, identity: str) -> None:
                 and status.st_uid == os.getuid()
                 and stat.S_IMODE(status.st_mode) == 0o600
             ):
+                if not _same_process(pid, identity):
+                    _fail("broker failed after socket publication")
                 return
             _fail("broker socket is unsafe")
-        if not _same_process(pid, identity):
-            _fail("broker failed before readiness")
         time.sleep(0.01)
     _fail("broker readiness timeout")
 

@@ -27,6 +27,7 @@
   ],
   "max_global_active": 3,
   "max_processes_per_lane": 1,
+  "max_broker_readiness_seconds": 900,
   "max_seconds": 1800,
   "max_submission_calls": 3,
   "max_tool_calls": 203,
