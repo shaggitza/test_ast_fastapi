@@ -3,6 +3,7 @@ Unit tests for output formatters.
 """
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -366,6 +367,7 @@ class TestHtmlFormatter:
         assert 'data-call-path-fit' in output
         assert 'Show linear tracebacks (1 paths)' in output
         assert 'data-call-path-detail="affected-call-path-1-n2"' in output
+        assert output.count("<text ") == output.count("</text>")
         # The duplicate raw handler is normalized in the graph view.
         assert output.count("routers.items.get_items") == 1
 
@@ -520,6 +522,42 @@ class TestHtmlFormatter:
         assert ".method-badge" in output
         assert ".hover-tooltip" in output  # Hover functionality CSS
 
+    def test_html_has_ten_persistent_offline_themes(self) -> None:
+        """Emit one data view with ten allow-listed standalone visual themes."""
+        report = AnalysisReport(
+            app_path="/app",
+            diff_source="test.diff",
+            total_endpoints=0,
+            affected_endpoints=[],
+        )
+
+        output = HtmlFormatter().format(report)
+        theme_ids = re.findall(r'<option value="([a-z-]+)">', output)
+
+        assert theme_ids == [
+            "harbor",
+            "obsidian",
+            "terminal",
+            "parchment",
+            "blueprint",
+            "forest",
+            "ember",
+            "lavender",
+            "monochrome",
+            "rose-quartz",
+        ]
+        assert '<html lang="en" data-theme="harbor">' in output
+        assert 'data-theme-select' in output
+        assert 'fastapi-endpoint-detector.theme.v1' in output
+        assert output.count('html[data-theme="') == 10
+        assert "@media (prefers-reduced-motion: reduce)" in output
+        assert "@media print" in output
+        assert "html[data-theme] { color-scheme: light;" in output
+        assert "[data-call-path-reset]" in output
+        assert "reference.blur()" not in output
+        assert "<link" not in output
+        assert "<script src=" not in output
+
     def test_html_has_hover_tooltip(self) -> None:
         """Test that HTML output includes hover tooltip structure."""
         handler = HandlerInfo(
@@ -553,8 +591,10 @@ class TestHtmlFormatter:
 
         # Should contain code-ref class for hover functionality
         assert "code-ref" in output
-        # Should contain hover-tooltip class
+        # Should contain a keyboard-reachable tooltip.
         assert "hover-tooltip" in output
+        assert 'class="code-ref" tabindex="0" aria-describedby="code-preview-1"' in output
+        assert 'role="tooltip"' in output
 
     def test_format_endpoints_table(self) -> None:
         """Test formatting endpoints as an HTML table."""
@@ -564,19 +604,23 @@ class TestHtmlFormatter:
             file_path=Path("/app/routers/users.py"),
             line_number=10,
         )
-        endpoint = Endpoint(
-            path="/api/users",
-            methods=[EndpointMethod.GET],
-            handler=handler,
-        )
+        endpoints = [
+            Endpoint(path="/api/users", methods=[EndpointMethod.GET], handler=handler),
+            Endpoint(path="/trace", methods=[EndpointMethod.TRACE], handler=handler),
+            Endpoint(path="/ws", methods=[EndpointMethod.WEBSOCKET], handler=handler),
+        ]
 
         formatter = HtmlFormatter()
-        output = formatter.format_endpoints([endpoint])
+        output = formatter.format_endpoints(endpoints)
 
         assert "<table>" in output
-        assert "<th>Method(s)</th>" in output
-        assert "<th>Path</th>" in output
+        assert '<th scope="col">Method(s)</th>' in output
+        assert '<th scope="col">Path</th>' in output
+        assert '<caption class="sr-only">Discovered FastAPI endpoints</caption>' in output
         assert "method-GET" in output
+        assert "method-TRACE" in output
+        assert "method-WEBSOCKET" in output
+        assert ".method-CUSTOM { background:" in output
         assert "/api/users" in output
 
 
