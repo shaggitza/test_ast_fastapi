@@ -5,10 +5,32 @@ HTML output formatter with interactive features.
 import html
 import re
 from pathlib import Path
+from typing import TypedDict
 
 from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointInventory
-from fastapi_endpoint_detector.models.report import AnalysisReport, ConfidenceLevel
+from fastapi_endpoint_detector.models.report import (
+    AffectedEndpoint,
+    AnalysisReport,
+    CallStackFrame,
+    CodeReference,
+    ConfidenceLevel,
+)
 from fastapi_endpoint_detector.output.formatters import BaseFormatter, register_formatter
+
+
+class _CallPathNode(TypedDict):
+    """Normalized, renderer-only data for one static call-path node."""
+
+    node_id: str
+    role: str
+    role_label: str
+    function_name: str
+    file_path: str
+    display_path: str
+    line_number: int
+    end_line_number: int | None
+    source_context: str
+    label: str
 
 
 @register_formatter("html")
@@ -38,7 +60,7 @@ class HtmlFormatter(BaseFormatter):
                     self._file_cache[file_path] = path.read_text(encoding="utf-8").splitlines()
                 else:
                     self._file_cache[file_path] = []
-            except (OSError, UnicodeDecodeError):
+            except (OSError, UnicodeDecodeError, ValueError):
                 self._file_cache[file_path] = []
         return self._file_cache[file_path]
 
@@ -159,6 +181,268 @@ class HtmlFormatter(BaseFormatter):
             ConfidenceLevel.LOW: "🟢",
         }
         return emojis.get(confidence, "⚪")
+
+    def _display_file_path(self, file_path: str, app_path: str) -> str:
+        """Return a portable, non-absolute path for the graph labels."""
+        path = Path(file_path)
+        try:
+            candidate = path.resolve(strict=False)
+            root = Path(app_path).resolve(strict=False)
+            if candidate != root:
+                return str(candidate.relative_to(root))
+        except (OSError, ValueError):
+            pass
+
+        if path.is_absolute():
+            return path.name or str(path)
+        return str(path)
+
+    @staticmethod
+    def _same_file(left: str, right: str) -> bool:
+        """Compare report paths while tolerating relative/absolute spellings."""
+        try:
+            return Path(left).resolve(strict=False) == Path(right).resolve(strict=False)
+        except OSError:
+            return left == right
+
+    def _call_path_nodes(
+        self,
+        call_stack: list[CallStackFrame],
+        app_path: str,
+        view_id: str,
+        path_index: int,
+    ) -> list[_CallPathNode]:
+        """Normalize a report path for safe, deterministic HTML rendering."""
+        frames: list[CallStackFrame] = []
+        for index, frame in enumerate(call_stack):
+            # The mapper adds an endpoint marker before mypy's stack, which can
+            # itself begin with the same handler. Keep one contextual node.
+            if (
+                index == 1
+                and frames
+                and call_stack[0].function_name.startswith("[ENDPOINT]")
+                and self._same_file(frame.file_path, frames[0].file_path)
+                and frame.line_number == frames[0].line_number
+            ):
+                continue
+            frames.append(frame)
+
+        nodes: list[_CallPathNode] = []
+        role_labels = {
+            "endpoint": "Endpoint handler",
+            "intermediate": "Static reachable frame",
+            "changed": "Changed source location",
+        }
+        for index, frame in enumerate(frames):
+            line_range = self._parse_line_range(frame.code_context)
+            start_line = line_range[0] if line_range else frame.line_number
+            end_line = line_range[1] if line_range else None
+            role = (
+                "endpoint"
+                if index == 0
+                else "changed"
+                if index == len(frames) - 1
+                else "intermediate"
+            )
+            display_path = self._display_file_path(frame.file_path, app_path)
+            location = f"{display_path}:{start_line}"
+            if end_line and end_line > start_line:
+                location = f"{display_path}:{start_line}-{end_line}"
+            function_name = frame.function_name or "unknown"
+            nodes.append(
+                {
+                    "node_id": f"{view_id}-p{path_index}-n{index}",
+                    "role": role,
+                    "role_label": role_labels[role],
+                    "function_name": function_name,
+                    "file_path": frame.file_path,
+                    "display_path": display_path,
+                    "line_number": start_line,
+                    "end_line_number": end_line,
+                    "source_context": frame.code_context
+                    or "Source context unavailable in report.",
+                    "label": f"{function_name} ({location})",
+                }
+            )
+        return nodes
+
+    def _format_call_path_fallback(self, affected: AffectedEndpoint, view_id: str) -> str:
+        """Render evidence locations when no static call path was recorded."""
+        endpoint = affected.endpoint
+        evidence = affected.effect_evidence
+        references: list[CodeReference] = []
+        for item in evidence:
+            reference = item.changed_location
+            if reference not in references:
+                references.append(reference)
+
+        lines = [
+            f'<section class="call-path-view call-path-fallback" id="{html.escape(view_id)}">',
+            "<h4>Static call paths</h4>",
+            '<p><strong>No static call path available.</strong> '
+            "The evidence locations below are shown without fabricating intermediate frames.</p>",
+        ]
+        if references:
+            lines.append('<ul class="call-path-fallback-list">')
+            for reference in references:
+                label = reference.symbol or "Changed/evidence location"
+                location = self._format_code_ref(
+                    reference.file_path,
+                    reference.line_number,
+                    f"{label} ({Path(reference.file_path).name}:{reference.line_number})",
+                    reference.end_line_number,
+                )
+                lines.append(
+                    f"<li><span class=\"call-path-role call-path-role-changed\">"
+                    f"Evidence location</span> {location}</li>"
+                )
+            lines.append("</ul>")
+        else:
+            lines.append("<p>There are no embedded changed-source locations for this result.</p>")
+
+        handler = endpoint.handler
+        direct_references = [
+            reference
+            for reference in references
+            if self._same_file(reference.file_path, str(handler.file_path))
+            and handler.line_number
+            <= reference.line_number
+            <= (handler.end_line_number or handler.line_number)
+        ]
+        if direct_references:
+            reference = direct_references[0]
+            location = self._format_code_ref(
+                reference.file_path,
+                reference.line_number,
+                f"changed evidence ({Path(reference.file_path).name}:{reference.line_number})",
+                reference.end_line_number,
+            )
+            lines.append(
+                '<div class="call-path-direct-edge" aria-label="Direct handler change evidence">'
+                '<span class="call-path-role call-path-role-endpoint">Endpoint handler</span>'
+                '<span class="call-path-direct-arrow" aria-hidden="true">→</span>'
+                '<span class="call-path-role call-path-role-changed">Changed evidence</span> '
+                f"{location}</div>"
+            )
+            lines.append(
+                '<p class="call-path-direct-note"><strong>Direct handler change.</strong> '
+                "No intermediate static path is inferred.</p>"
+            )
+        lines.append("</section>")
+        return "\n".join(lines)
+
+    def _format_call_path_view(
+        self, affected: AffectedEndpoint, app_path: str, view_id: str
+    ) -> str:
+        """Render an interactive, dependency-free view of static call paths."""
+        call_stacks = affected.call_stacks
+        if not call_stacks:
+            return self._format_call_path_fallback(affected, view_id)
+
+        path_groups = [
+            self._call_path_nodes(stack, app_path, view_id, path_index)
+            for path_index, stack in enumerate(call_stacks, 1)
+        ]
+        marker_id = f"{view_id}-arrow"
+        lines = [
+            f'<section class="call-path-view" id="{html.escape(view_id)}" '
+            "data-call-path-view>",
+            '<div class="call-path-toolbar">',
+            '<div><h4>Static call paths</h4>'
+            '<p class="call-path-semantics">Endpoint handler → statically reachable frame '
+            "→ changed source location. This is static evidence, not runtime execution.</p></div>",
+            f'<label for="{html.escape(view_id)}-search">Search paths and nodes '
+            f'<input id="{html.escape(view_id)}-search" type="search" '
+            'data-call-path-search placeholder="function, file, or source text"></label>',
+            '<button type="button" data-call-path-reset>Reset</button>',
+            "</div>",
+            '<div class="call-path-legend" aria-label="Call path legend">'
+            '<span class="call-path-role call-path-role-endpoint">Endpoint handler</span>'
+            '<span class="call-path-role call-path-role-intermediate">Static reachable frame</span>'
+            '<span class="call-path-role call-path-role-changed">Changed source location</span>'
+            "</div>",
+            '<div class="call-path-groups">',
+        ]
+
+        for path_index, nodes in enumerate(path_groups, 1):
+            path_count = len(path_groups)
+            open_attribute = " open" if path_count == 1 else ""
+            lines.append(
+                f'<details class="call-path-path" data-call-path-path '
+                f'data-path-index="{path_index}"{open_attribute}>'
+            )
+            lines.append(
+                f"<summary>Path {path_index} of {path_count}"
+                " <span class=\"call-path-summary-hint\">(expand to inspect)</span></summary>"
+            )
+            graph_height = max(128, 80 + len(nodes) * 88)
+            lines.append(
+                f'<svg class="call-path-svg" viewBox="0 0 860 {graph_height}" '
+                f'role="img" aria-label="Static call path {path_index} of {path_count}">'
+                f'<defs><marker id="{html.escape(marker_id)}" markerWidth="8" markerHeight="8" '
+                'refX="6" refY="3" orient="auto" markerUnits="strokeWidth">'
+                '<path d="M0,0 L0,6 L6,3 z" class="call-path-arrow"></path></marker></defs>'
+            )
+            for node_index, node in enumerate(nodes):
+                y = 20 + node_index * 88
+                if node_index < len(nodes) - 1:
+                    next_y = 20 + (node_index + 1) * 88
+                    lines.append(
+                        f'<line class="call-path-edge" x1="430" y1="{y + 64}" '
+                        f'x2="430" y2="{next_y}" marker-end="url(#{html.escape(marker_id)})"></line>'
+                    )
+                escaped_id = html.escape(node["node_id"])
+                escaped_label = html.escape(node["label"])
+                lines.append(
+                    f'<g class="call-path-node call-path-node-{node["role"]}" '
+                    f'data-call-path-node="{escaped_id}" role="button" tabindex="0" '
+                    f'aria-label="{html.escape(node["role_label"] + ": " + node["label"])}">'
+                    f'<title>{escaped_label}</title>'
+                    f'<rect x="55" y="{y}" width="750" height="64" rx="8"></rect>'
+                    f'<text class="call-path-node-role" x="75" y="{y + 21}">'
+                    f'{html.escape(node["role_label"])}</text>'
+                    f'<text class="call-path-node-label" x="75" y="{y + 44}">'
+                    f'{html.escape(node["function_name"])} · {html.escape(node["display_path"])}:'
+                    f'{node["line_number"]}</text></g>'
+                )
+            lines.append("</svg>")
+            lines.append('<ol class="call-path-text" aria-label="Ordered static call path">')
+            for node in nodes:
+                escaped_id = html.escape(node["node_id"])
+                lines.append(
+                    f'<li><button type="button" class="call-path-text-node '
+                    f'call-path-node-{node["role"]}" data-call-path-node="{escaped_id}">'
+                    f'<span class="call-path-role">{html.escape(node["role_label"])}</span> '
+                    f'<strong>{html.escape(node["function_name"])}</strong> '
+                    f'<code>{html.escape(node["display_path"])}:{node["line_number"]}</code>'
+                    "</button></li>"
+                )
+            lines.append("</ol>")
+            lines.append("</details>")
+
+        lines.extend(
+            [
+                "</div>",
+                '<p class="call-path-no-match" data-call-path-no-match hidden>'
+                "No paths or nodes match the search.</p>",
+                '<aside class="call-path-details" data-call-path-details aria-live="polite">',
+                '<p data-call-path-default>Select a node to inspect its source-backed details.</p>',
+            ]
+        )
+        for nodes in path_groups:
+            for node in nodes:
+                lines.append(
+                    f'<div data-call-path-detail="{html.escape(node["node_id"])}" hidden>'
+                    f'<h4>{html.escape(node["role_label"])}: '
+                    f'{html.escape(node["function_name"])}</h4>'
+                    f'<p><code>{html.escape(node["display_path"])}:{node["line_number"]}'
+                    f'{("-" + str(node["end_line_number"])) if node["end_line_number"] else ""}'
+                    "</code></p>"
+                    f'<pre class="call-path-source">{html.escape(node["source_context"])}</pre>'
+                    "</div>"
+                )
+        lines.extend(["</aside>", "</section>"])
+        return "\n".join(lines)
 
     def _get_html_template(self) -> str:
         """Get the HTML template with inline CSS."""
@@ -437,12 +721,381 @@ class HtmlFormatter(BaseFormatter):
             border-radius: 3px;
             font-size: 0.9em;
         }
+
+        .call-path-view {
+            margin-top: 16px;
+            padding: 14px;
+            border: 1px solid #d9e2ec;
+            border-radius: 6px;
+            background: #fbfdff;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+
+        .call-path-toolbar {
+            display: flex;
+            align-items: flex-end;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .call-path-toolbar h4 {
+            margin: 0;
+            color: #2c3e50;
+        }
+
+        .call-path-semantics {
+            margin: 2px 0 0;
+            color: #52606d;
+            font-size: 0.9em;
+        }
+
+        .call-path-toolbar label {
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+            color: #52606d;
+            font-size: 0.85em;
+        }
+
+        .call-path-toolbar input {
+            min-width: 240px;
+            padding: 6px 8px;
+            border: 1px solid #bcccdc;
+            border-radius: 4px;
+            font: inherit;
+        }
+
+        .call-path-toolbar button {
+            padding: 6px 10px;
+            border: 1px solid #829ab1;
+            border-radius: 4px;
+            background: white;
+            color: #243b53;
+            cursor: pointer;
+        }
+
+        .call-path-toolbar button:hover,
+        .call-path-toolbar button:focus-visible {
+            background: #e3f2fd;
+        }
+
+        .call-path-legend {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin: 12px 0 8px;
+        }
+
+        .call-path-role {
+            display: inline-block;
+            padding: 2px 7px;
+            border-radius: 10px;
+            font-size: 0.78em;
+            font-weight: 600;
+        }
+
+        .call-path-role-endpoint,
+        .call-path-node-endpoint rect {
+            background: #dbeafe;
+            fill: #dbeafe;
+            color: #1e3a8a;
+        }
+
+        .call-path-role-intermediate,
+        .call-path-node-intermediate rect {
+            background: #fef3c7;
+            fill: #fef3c7;
+            color: #92400e;
+        }
+
+        .call-path-role-changed,
+        .call-path-node-changed rect {
+            background: #dcfce7;
+            fill: #dcfce7;
+            color: #166534;
+        }
+
+        .call-path-groups {
+            display: grid;
+            gap: 8px;
+        }
+
+        .call-path-path {
+            border: 1px solid #d9e2ec;
+            border-radius: 5px;
+            background: white;
+            overflow: hidden;
+        }
+
+        .call-path-path summary {
+            padding: 9px 12px;
+            color: #243b53;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .call-path-path summary:focus-visible,
+        .call-path-node:focus-visible,
+        .call-path-text-node:focus-visible {
+            outline: 3px solid #63b3ed;
+            outline-offset: 2px;
+        }
+
+        .call-path-summary-hint {
+            color: #829ab1;
+            font-size: 0.82em;
+            font-weight: 400;
+        }
+
+        .call-path-svg {
+            display: block;
+            width: 100%;
+            min-height: 140px;
+            padding: 4px 8px;
+            background: #f8fafc;
+        }
+
+        .call-path-edge {
+            stroke: #829ab1;
+            stroke-width: 2;
+        }
+
+        .call-path-arrow {
+            fill: #829ab1;
+        }
+
+        .call-path-node {
+            cursor: pointer;
+        }
+
+        .call-path-node rect {
+            stroke: #829ab1;
+            stroke-width: 1.5;
+        }
+
+        .call-path-node:hover rect,
+        .call-path-node-selected rect {
+            stroke: #1976d2;
+            stroke-width: 3;
+        }
+
+        .call-path-node-role {
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        .call-path-node-label {
+            fill: #243b53;
+            font-family: "Courier New", monospace;
+            font-size: 14px;
+        }
+
+        .call-path-text {
+            margin: 0;
+            padding: 8px 28px 12px 38px;
+            background: #f8fafc;
+        }
+
+        .call-path-text-node {
+            width: 100%;
+            padding: 6px;
+            border: 0;
+            border-bottom: 1px solid #e4e7eb;
+            background: transparent;
+            color: #243b53;
+            text-align: left;
+            cursor: pointer;
+            font: inherit;
+        }
+
+        .call-path-text-node:hover,
+        .call-path-text-node.call-path-node-selected {
+            background: #e3f2fd;
+        }
+
+        .call-path-text-node code {
+            margin-left: 5px;
+        }
+
+        .call-path-node-muted {
+            opacity: 0.35;
+        }
+
+        .call-path-details {
+            margin-top: 10px;
+            padding: 10px;
+            border-left: 4px solid #90cdf4;
+            background: #f0f7ff;
+        }
+
+        .call-path-details h4 {
+            margin: 0 0 4px;
+            color: #2c3e50;
+        }
+
+        .call-path-details p {
+            margin: 4px 0 8px;
+        }
+
+        .call-path-source {
+            max-height: 260px;
+            overflow: auto;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            font-family: "Courier New", Consolas, Monaco, monospace;
+            font-size: 0.85em;
+            line-height: 1.4;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 8px;
+            border-radius: 3px;
+        }
+
+        .call-path-no-match {
+            margin: 10px 0 0;
+            color: #7b341e;
+        }
+
+        .call-path-fallback {
+            background: #fffaf0;
+            border-color: #f6ad55;
+        }
+
+        .call-path-fallback-list {
+            margin: 8px 0 0 22px;
+        }
+
+        .call-path-fallback-list li {
+            margin: 5px 0;
+        }
+
+        .call-path-direct-edge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-top: 10px;
+            padding: 8px;
+            border: 1px dashed #f6ad55;
+            background: #fffaf0;
+        }
+
+        .call-path-direct-arrow {
+            color: #c05621;
+            font-size: 1.2em;
+            font-weight: 700;
+        }
+
+        .call-path-direct-note {
+            color: #7b341e;
+        }
+
+        @media (max-width: 700px) {
+            .call-path-toolbar {
+                align-items: stretch;
+            }
+
+            .call-path-toolbar input {
+                min-width: 0;
+                width: 100%;
+            }
+        }
     </style>
 </head>
 <body>
     <div class="container">
 {CONTENT}
     </div>
+    <script>
+    (function () {
+        "use strict";
+
+        document.querySelectorAll("[data-call-path-view]").forEach(function (view) {
+            var search = view.querySelector("[data-call-path-search]");
+            var reset = view.querySelector("[data-call-path-reset]");
+            var paths = Array.from(view.querySelectorAll("[data-call-path-path]"));
+            var nodes = Array.from(view.querySelectorAll("[data-call-path-node]"));
+            var details = Array.from(view.querySelectorAll("[data-call-path-detail]"));
+            var defaultDetails = view.querySelector("[data-call-path-default]");
+            var noMatch = view.querySelector("[data-call-path-no-match]");
+
+            function selectNode(nodeId) {
+                nodes.forEach(function (node) {
+                    node.classList.toggle(
+                        "call-path-node-selected",
+                        node.getAttribute("data-call-path-node") === nodeId
+                    );
+                });
+                details.forEach(function (detail) {
+                    var selected = detail.getAttribute("data-call-path-detail") === nodeId;
+                    detail.hidden = !selected;
+                });
+                if (defaultDetails) {
+                    defaultDetails.hidden = Boolean(nodeId);
+                }
+            }
+
+            function filterPaths() {
+                var query = search ? search.value.trim().toLowerCase() : "";
+                var visible = 0;
+                paths.forEach(function (path) {
+                    var pathText = (path.textContent || "").toLowerCase();
+                    var matches = !query || pathText.indexOf(query) !== -1;
+                    path.hidden = !matches;
+                    if (matches) {
+                        visible += 1;
+                        if (query) {
+                            path.open = true;
+                        }
+                    }
+                    path.querySelectorAll("[data-call-path-node]").forEach(function (node) {
+                        var nodeText = (node.textContent || "").toLowerCase();
+                        node.classList.toggle(
+                            "call-path-node-muted",
+                            Boolean(query) && nodeText.indexOf(query) === -1
+                        );
+                    });
+                });
+                if (noMatch) {
+                    noMatch.hidden = visible !== 0;
+                }
+            }
+
+            nodes.forEach(function (node) {
+                node.addEventListener("click", function () {
+                    selectNode(node.getAttribute("data-call-path-node"));
+                });
+                node.addEventListener("keydown", function (event) {
+                    if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        selectNode(node.getAttribute("data-call-path-node"));
+                    }
+                });
+            });
+            if (search) {
+                search.addEventListener("input", filterPaths);
+            }
+            if (reset) {
+                reset.addEventListener("click", function () {
+                    if (search) {
+                        search.value = "";
+                    }
+                    paths.forEach(function (path) {
+                        path.hidden = false;
+                        path.open = paths.length === 1;
+                    });
+                    nodes.forEach(function (node) {
+                        node.classList.remove("call-path-node-muted");
+                    });
+                    if (noMatch) {
+                        noMatch.hidden = true;
+                    }
+                    selectNode(null);
+                });
+            }
+        });
+    }());
+    </script>
 </body>
 </html>
 """
@@ -584,6 +1237,7 @@ class HtmlFormatter(BaseFormatter):
         content_lines.append("</div>")
 
         # Affected endpoints
+        call_path_index = 0
         if report.affected_endpoints:
             content_lines.append("<h2>Affected Endpoints</h2>")
 
@@ -599,6 +1253,7 @@ class HtmlFormatter(BaseFormatter):
                 )
 
                 for ae in endpoints:
+                    call_path_index += 1
                     ep = ae.endpoint
                     confidence_class = self._confidence_color(ae.confidence)
 
@@ -742,6 +1397,13 @@ class HtmlFormatter(BaseFormatter):
 
                         content_lines.append("</div>")
 
+                    content_lines.append(
+                        self._format_call_path_view(
+                            ae,
+                            report.app_path,
+                            f"affected-call-path-{call_path_index}",
+                        )
+                    )
                     content_lines.append("</div>")  # end endpoint-card
         else:
             content_lines.append('<div class="no-endpoints">')
@@ -759,6 +1421,7 @@ class HtmlFormatter(BaseFormatter):
                 "<p><em>Retained for inspection; not selected by the legacy threshold.</em></p>"
             )
             for candidate in additional:
+                call_path_index += 1
                 endpoint = candidate.endpoint
                 methods = ", ".join(method.value for method in endpoint.methods)
                 content_lines.append('<div class="endpoint-card confidence-low">')
@@ -814,6 +1477,13 @@ class HtmlFormatter(BaseFormatter):
                         "Potential cross-request coupling:</span> exact added producer "
                         f"callsite; {html.escape(coupling.strength.value)}; LOW-only</div>"
                     )
+                content_lines.append(
+                    self._format_call_path_view(
+                        candidate,
+                        report.app_path,
+                        f"candidate-call-path-{call_path_index}",
+                    )
+                )
                 content_lines.append("</div>")
 
         # Orphan changes

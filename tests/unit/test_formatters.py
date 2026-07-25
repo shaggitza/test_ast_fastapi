@@ -19,6 +19,7 @@ from fastapi_endpoint_detector.models.endpoint import (
 from fastapi_endpoint_detector.models.report import (
     AffectedEndpoint,
     AnalysisReport,
+    CallStackFrame,
     ChangeEffectKind,
     CodeReference,
     ConfidenceLevel,
@@ -296,6 +297,200 @@ class TestHtmlFormatter:
         assert "/api/users" in output
         assert "get_users" in output
         assert "Direct change" in output
+
+    def test_html_renders_static_call_path_graph_and_text_fallback(self) -> None:
+        """Render path topology without implying runtime execution."""
+        handler = HandlerInfo(
+            name="get_items",
+            module="routers.items",
+            file_path=Path("/app/routers/items.py"),
+            line_number=10,
+        )
+        endpoint = Endpoint(path="/items", methods=[EndpointMethod.GET], handler=handler)
+        affected = AffectedEndpoint(
+            endpoint=endpoint,
+            confidence=ConfidenceLevel.HIGH,
+            reason="Typed dependency path",
+            call_stacks=[
+                [
+                    CallStackFrame(
+                        file_path="/app/routers/items.py",
+                        line_number=10,
+                        function_name="[ENDPOINT] GET /items",
+                        code_context="def get_items():",
+                    ),
+                    # The mapper can include the handler again in mypy's raw stack.
+                    CallStackFrame(
+                        file_path="/app/routers/items.py",
+                        line_number=10,
+                        function_name="routers.items.get_items",
+                    ),
+                    CallStackFrame(
+                        file_path="/app/services/items.py",
+                        line_number=22,
+                        function_name="services.items.load_items",
+                        code_context="return repository.fetch()",
+                    ),
+                    CallStackFrame(
+                        file_path="/app/repository.py",
+                        line_number=42,
+                        function_name="repository.fetch",
+                        code_context="return rows",
+                    ),
+                ]
+            ],
+        )
+        report = AnalysisReport(
+            app_path="/app",
+            diff_source="test.diff",
+            total_endpoints=1,
+            affected_endpoints=[affected],
+        )
+
+        output = HtmlFormatter().format(report)
+
+        assert 'class="call-path-view"' in output
+        assert 'class="call-path-svg"' in output
+        assert "Path 1 of 1" in output
+        assert "Endpoint handler → statically reachable frame" in output
+        assert "services.items.load_items" in output
+        assert "repository.fetch" in output
+        assert 'class="call-path-text"' in output
+        assert 'data-call-path-detail="affected-call-path-1-p1-n2"' in output
+        # The duplicate raw handler is normalized in the graph view.
+        assert output.count("routers.items.get_items") == 1
+
+    def test_html_keeps_multiple_call_paths_separate(self) -> None:
+        """Do not merge contextual paths that share a function or file."""
+        handler = HandlerInfo(
+            name="route",
+            module="main",
+            file_path=Path("/app/main.py"),
+            line_number=3,
+        )
+        endpoint = Endpoint(path="/items", methods=[EndpointMethod.GET], handler=handler)
+        def stack(file_path: str, line_number: int, function_name: str) -> CallStackFrame:
+            return CallStackFrame(
+                file_path=file_path,
+                line_number=line_number,
+                function_name=function_name,
+            )
+        affected = AffectedEndpoint(
+            endpoint=endpoint,
+            confidence=ConfidenceLevel.MEDIUM,
+            reason="Two static paths",
+            call_stacks=[
+                [
+                    stack("/app/main.py", 3, "route"),
+                    stack("/app/shared.py", 8, "shared.load"),
+                ],
+                [
+                    stack("/app/main.py", 3, "route"),
+                    stack("/app/shared.py", 19, "shared.load"),
+                ],
+            ],
+        )
+        report = AnalysisReport(
+            app_path="/app",
+            diff_source="test.diff",
+            total_endpoints=1,
+            affected_endpoints=[affected],
+        )
+
+        output = HtmlFormatter().format(report)
+
+        assert "Path 1 of 2" in output
+        assert "Path 2 of 2" in output
+        assert output.count('class="call-path-path"') == 2
+        assert "shared.py:8" in output
+        assert "shared.py:19" in output
+
+    def test_html_renders_no_path_evidence_fallback(self) -> None:
+        """Explain missing paths rather than inventing intermediate frames."""
+        handler = HandlerInfo(
+            name="route",
+            module="main",
+            file_path=Path("/app/main.py"),
+            line_number=3,
+        )
+        candidate = AffectedEndpoint(
+            endpoint=Endpoint(path="/items", methods=[EndpointMethod.GET], handler=handler),
+            confidence=ConfidenceLevel.LOW,
+            reason="Direct source evidence",
+            effect_evidence=[
+                EffectEvidence(
+                    producer=EvidenceProducer.DATA_FLOW,
+                    status=EvidenceStatus.CONDITIONAL,
+                    effect=ChangeEffectKind.ARGUMENT_MUTATION_ISOLATED,
+                    disposition=EffectDisposition.NOT_OBSERVED_BY_CALLER,
+                    summary="The changed handler is not read by its caller.",
+                    changed_location=CodeReference(
+                        file_path="/app/main.py",
+                        line_number=3,
+                    ),
+                )
+            ],
+        )
+        report = AnalysisReport(
+            app_path="/app",
+            diff_source="test.diff",
+            total_endpoints=1,
+            candidate_endpoints=[candidate],
+        )
+
+        output = HtmlFormatter().format(report)
+
+        assert "No static call path available." in output
+        assert "Evidence location" in output
+        assert "Direct handler change." in output
+        assert "call-path-direct-edge" in output
+        assert "No intermediate static path is inferred." in output
+        assert 'class="call-path-node-intermediate"' not in output
+
+    def test_html_escapes_call_path_source_and_is_deterministic(self) -> None:
+        """Source-derived graph values cannot escape the standalone report."""
+        handler = HandlerInfo(
+            name="<handler>",
+            module="main",
+            file_path=Path("/app/main.py"),
+            line_number=3,
+        )
+        endpoint = Endpoint(path="/items", methods=[EndpointMethod.GET], handler=handler)
+        affected = AffectedEndpoint(
+            endpoint=endpoint,
+            confidence=ConfidenceLevel.HIGH,
+            reason="<reason>",
+            call_stacks=[
+                [
+                    CallStackFrame(
+                        file_path="/app/main.py",
+                        line_number=3,
+                        function_name="</script><script>alert(1)</script>",
+                        code_context="</script><img src=x onerror=alert(1)>",
+                    ),
+                    CallStackFrame(
+                        file_path="/app/service.py",
+                        line_number=9,
+                        function_name="changed",
+                        code_context="return '<unsafe>'",
+                    ),
+                ]
+            ],
+        )
+        report = AnalysisReport(
+            app_path="/app",
+            diff_source="test.diff",
+            total_endpoints=1,
+            affected_endpoints=[affected],
+        )
+
+        formatter = HtmlFormatter()
+        output = formatter.format(report)
+
+        assert "&lt;/script&gt;&lt;script&gt;alert(1)&lt;/script&gt;" in output
+        assert "&lt;img src=x onerror=alert(1)&gt;" in output
+        assert "</script><script>alert(1)</script>" not in output
+        assert output == formatter.format(report)
 
     def test_html_has_css_styling(self) -> None:
         """Test that HTML output includes CSS styling."""
