@@ -351,12 +351,13 @@ class TestHtmlFormatter:
 
         assert 'class="call-path-view"' in output
         assert 'class="call-path-svg"' in output
-        assert "Path 1 of 1" in output
-        assert "Endpoint handler → statically reachable frame" in output
+        assert "1 static paths" in output
+        assert "3 shared nodes" in output
+        assert "endpoint handler → shared/intermediate logic" in output
         assert "services.items.load_items" in output
         assert "repository.fetch" in output
         assert 'class="call-path-text"' in output
-        assert 'data-call-path-detail="affected-call-path-1-p1-n2"' in output
+        assert 'data-call-path-detail="affected-call-path-1-n2"' in output
         # The duplicate raw handler is normalized in the graph view.
         assert output.count("routers.items.get_items") == 1
 
@@ -399,9 +400,11 @@ class TestHtmlFormatter:
 
         output = HtmlFormatter().format(report)
 
-        assert "Path 1 of 2" in output
-        assert "Path 2 of 2" in output
-        assert output.count('class="call-path-path"') == 2
+        assert "2 static paths" in output
+        assert "3 shared nodes" in output
+        assert "shared by all 2 paths" in output
+        assert "call-path-node-fork" in output
+        assert "Path 1 of 2" not in output
         assert "shared.py:8" in output
         assert "shared.py:19" in output
 

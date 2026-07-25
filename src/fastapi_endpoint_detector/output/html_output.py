@@ -4,8 +4,8 @@ HTML output formatter with interactive features.
 
 import html
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TypedDict
 
 from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointInventory
 from fastapi_endpoint_detector.models.report import (
@@ -18,10 +18,10 @@ from fastapi_endpoint_detector.models.report import (
 from fastapi_endpoint_detector.output.formatters import BaseFormatter, register_formatter
 
 
-class _CallPathNode(TypedDict):
-    """Normalized, renderer-only data for one static call-path node."""
+@dataclass(frozen=True)
+class _CallPathLocation:
+    """A normalized source location used as a graph node identity."""
 
-    node_id: str
     role: str
     role_label: str
     function_name: str
@@ -30,7 +30,39 @@ class _CallPathNode(TypedDict):
     line_number: int
     end_line_number: int | None
     source_context: str
-    label: str
+
+    @property
+    def identity(self) -> tuple[str, str, int, int, str]:
+        """Return a contextual identity, never just a function or basename."""
+        return (
+            self.role,
+            self.file_path,
+            self.line_number,
+            self.end_line_number or 0,
+            self.function_name,
+        )
+
+    @property
+    def label(self) -> str:
+        """Return the full node label for details and accessibility."""
+        location = f"{self.display_path}:{self.line_number}"
+        if self.end_line_number and self.end_line_number > self.line_number:
+            location = f"{self.display_path}:{self.line_number}-{self.end_line_number}"
+        return f"{self.function_name} ({location})"
+
+
+@dataclass
+class _CallPathGraphNode:
+    """A shared node in the condensed many-to-many call-path graph."""
+
+    node_id: str
+    location: _CallPathLocation
+    path_indexes: set[int] = field(default_factory=set)
+    incoming: set[str] = field(default_factory=set)
+    outgoing: set[str] = field(default_factory=set)
+    layer: int = 0
+    x: int = 0
+    y: int = 0
 
 
 @register_formatter("html")
@@ -205,14 +237,10 @@ class HtmlFormatter(BaseFormatter):
         except OSError:
             return left == right
 
-    def _call_path_nodes(
-        self,
-        call_stack: list[CallStackFrame],
-        app_path: str,
-        view_id: str,
-        path_index: int,
-    ) -> list[_CallPathNode]:
-        """Normalize a report path for safe, deterministic HTML rendering."""
+    def _normalize_call_path(
+        self, call_stack: list[CallStackFrame], app_path: str
+    ) -> list[_CallPathLocation]:
+        """Normalize a path while retaining source context and semantic roles."""
         frames: list[CallStackFrame] = []
         for index, frame in enumerate(call_stack):
             # The mapper adds an endpoint marker before mypy's stack, which can
@@ -227,12 +255,12 @@ class HtmlFormatter(BaseFormatter):
                 continue
             frames.append(frame)
 
-        nodes: list[_CallPathNode] = []
         role_labels = {
             "endpoint": "Endpoint handler",
             "intermediate": "Static reachable frame",
             "changed": "Changed source location",
         }
+        locations: list[_CallPathLocation] = []
         for index, frame in enumerate(frames):
             line_range = self._parse_line_range(frame.code_context)
             start_line = line_range[0] if line_range else frame.line_number
@@ -244,27 +272,107 @@ class HtmlFormatter(BaseFormatter):
                 if index == len(frames) - 1
                 else "intermediate"
             )
-            display_path = self._display_file_path(frame.file_path, app_path)
-            location = f"{display_path}:{start_line}"
-            if end_line and end_line > start_line:
-                location = f"{display_path}:{start_line}-{end_line}"
-            function_name = frame.function_name or "unknown"
-            nodes.append(
-                {
-                    "node_id": f"{view_id}-p{path_index}-n{index}",
-                    "role": role,
-                    "role_label": role_labels[role],
-                    "function_name": function_name,
-                    "file_path": frame.file_path,
-                    "display_path": display_path,
-                    "line_number": start_line,
-                    "end_line_number": end_line,
-                    "source_context": frame.code_context
+            locations.append(
+                _CallPathLocation(
+                    role=role,
+                    role_label=role_labels[role],
+                    function_name=frame.function_name or "unknown",
+                    file_path=frame.file_path,
+                    display_path=self._display_file_path(frame.file_path, app_path),
+                    line_number=start_line,
+                    end_line_number=end_line,
+                    source_context=frame.code_context
                     or "Source context unavailable in report.",
-                    "label": f"{function_name} ({location})",
-                }
+                )
             )
-        return nodes
+        return locations
+
+    def _build_call_path_graph(
+        self,
+        call_stacks: list[list[CallStackFrame]],
+        app_path: str,
+        view_id: str,
+    ) -> tuple[list[_CallPathGraphNode], set[tuple[str, str]]]:
+        """Condense all paths into shared nodes and many-to-many edges."""
+        nodes_by_identity: dict[tuple[str, str, int, int, str], _CallPathGraphNode] = {}
+        edges: set[tuple[str, str]] = set()
+        paths: list[list[_CallPathLocation]] = [
+            self._normalize_call_path(stack, app_path) for stack in call_stacks
+        ]
+
+        for path_index, locations in enumerate(paths, 1):
+            previous: _CallPathGraphNode | None = None
+            for depth, location in enumerate(locations):
+                node = nodes_by_identity.get(location.identity)
+                if node is None:
+                    node = _CallPathGraphNode(
+                        node_id=f"{view_id}-n{len(nodes_by_identity) + 1}",
+                        location=location,
+                        layer=depth,
+                    )
+                    nodes_by_identity[location.identity] = node
+                node.path_indexes.add(path_index)
+                node.layer = max(node.layer, depth)
+                if previous is not None and previous.node_id != node.node_id:
+                    edge = (previous.node_id, node.node_id)
+                    if edge not in edges:
+                        edges.add(edge)
+                        previous.outgoing.add(node.node_id)
+                        node.incoming.add(previous.node_id)
+                previous = node
+
+        # Shared nodes can occur at different depths on different paths. Push
+        # targets rightward until ordinary forward edges have a stable layout.
+        node_by_id = {node.node_id: node for node in nodes_by_identity.values()}
+        for _ in range(max(1, len(node_by_id))):
+            changed = False
+            for source_id, target_id in sorted(edges):
+                source = node_by_id[source_id]
+                target = node_by_id[target_id]
+                if target.layer <= source.layer and source.layer < len(node_by_id) - 1:
+                    target.layer = source.layer + 1
+                    changed = True
+            if not changed:
+                break
+
+        layers: dict[int, list[_CallPathGraphNode]] = {}
+        for node in node_by_id.values():
+            layers.setdefault(node.layer, []).append(node)
+        for layer, members in layers.items():
+            for index, node in enumerate(sorted(members, key=lambda item: item.node_id)):
+                node.x = 40 + layer * 270
+                node.y = 72 + index * 120
+
+        max_layer = max((node.layer for node in node_by_id.values()), default=0)
+        max_nodes_in_layer = max((len(members) for members in layers.values()), default=1)
+        # The SVG is horizontally scrollable for deep graphs but remains compact
+        # when many paths collapse into a few shared nodes.
+        self._last_graph_dimensions = (
+            max(920, 80 + (max_layer + 1) * 270),
+            max(250, 145 + max_nodes_in_layer * 120),
+        )
+        return sorted(node_by_id.values(), key=lambda node: (node.layer, node.y, node.node_id)), edges
+
+    @staticmethod
+    def _svg_text(value: str, limit: int = 35) -> str:
+        """Shorten SVG labels while keeping full values in the details pane."""
+        flattened = " ".join(value.split())
+        if len(flattened) <= limit:
+            return flattened
+        return f"{flattened[: limit - 1]}…"
+
+    @staticmethod
+    def _path_membership(path_indexes: set[int], path_count: int) -> str:
+        """Explain whether a node is common or belongs to a small branch."""
+        ordered = sorted(path_indexes)
+        if len(ordered) == path_count:
+            return f"shared by all {path_count} paths"
+        if len(ordered) == 1:
+            return f"only path {ordered[0]}"
+        if len(ordered) <= 8:
+            return f"shared by {len(ordered)} paths ({', '.join(str(item) for item in ordered)})"
+        sample = ", ".join(str(item) for item in ordered[:8])
+        return f"shared by {len(ordered)} paths (for example {sample}, …)"
 
     def _format_call_path_fallback(self, affected: AffectedEndpoint, view_id: str) -> str:
         """Render evidence locations when no static call path was recorded."""
@@ -334,113 +442,142 @@ class HtmlFormatter(BaseFormatter):
     def _format_call_path_view(
         self, affected: AffectedEndpoint, app_path: str, view_id: str
     ) -> str:
-        """Render an interactive, dependency-free view of static call paths."""
+        """Render one condensed, interactive many-to-many call-path graph."""
         call_stacks = affected.call_stacks
         if not call_stacks:
             return self._format_call_path_fallback(affected, view_id)
 
-        path_groups = [
-            self._call_path_nodes(stack, app_path, view_id, path_index)
-            for path_index, stack in enumerate(call_stacks, 1)
-        ]
+        nodes, edges = self._build_call_path_graph(call_stacks, app_path, view_id)
+        node_by_id = {node.node_id: node for node in nodes}
+        width, height = getattr(self, "_last_graph_dimensions", (920, 250))
         marker_id = f"{view_id}-arrow"
+        fork_count = sum(len(node.outgoing) > 1 for node in nodes)
+        merge_count = sum(len(node.incoming) > 1 for node in nodes)
+        path_count = len(call_stacks)
         lines = [
             f'<section class="call-path-view" id="{html.escape(view_id)}" '
             "data-call-path-view>",
             '<div class="call-path-toolbar">',
-            '<div><h4>Static call paths</h4>'
-            '<p class="call-path-semantics">Endpoint handler → statically reachable frame '
-            "→ changed source location. This is static evidence, not runtime execution.</p></div>",
-            f'<label for="{html.escape(view_id)}-search">Search paths and nodes '
+            '<div><h4>Condensed static call graph</h4>'
+            '<p class="call-path-semantics">Arrows show static reachability: endpoint handler '
+            "→ shared/intermediate logic → changed source location. This is not runtime execution.</p></div>",
+            f'<label for="{html.escape(view_id)}-search">Search nodes '
             f'<input id="{html.escape(view_id)}-search" type="search" '
             'data-call-path-search placeholder="function, file, or source text"></label>',
             '<button type="button" data-call-path-reset>Reset</button>',
             "</div>",
-            '<div class="call-path-legend" aria-label="Call path legend">'
-            '<span class="call-path-role call-path-role-endpoint">Endpoint handler</span>'
-            '<span class="call-path-role call-path-role-intermediate">Static reachable frame</span>'
-            '<span class="call-path-role call-path-role-changed">Changed source location</span>'
-            "</div>",
-            '<div class="call-path-groups">',
+            '<div class="call-path-summary">',
+            f'<strong>{path_count} static paths</strong> condensed into '
+            f'<strong>{len(nodes)} shared nodes</strong> and <strong>{len(edges)} connections</strong>.',
         ]
-
-        for path_index, nodes in enumerate(path_groups, 1):
-            path_count = len(path_groups)
-            open_attribute = " open" if path_count == 1 else ""
+        if fork_count or merge_count:
             lines.append(
-                f'<details class="call-path-path" data-call-path-path '
-                f'data-path-index="{path_index}"{open_attribute}>'
+                f" <span class=\"call-path-branch-summary\">"
+                f"{fork_count} fork(s), {merge_count} merge point(s)</span>"
             )
-            lines.append(
-                f"<summary>Path {path_index} of {path_count}"
-                " <span class=\"call-path-summary-hint\">(expand to inspect)</span></summary>"
-            )
-            graph_height = max(128, 80 + len(nodes) * 88)
-            lines.append(
-                f'<svg class="call-path-svg" viewBox="0 0 860 {graph_height}" '
-                f'role="img" aria-label="Static call path {path_index} of {path_count}">'
-                f'<defs><marker id="{html.escape(marker_id)}" markerWidth="8" markerHeight="8" '
-                'refX="6" refY="3" orient="auto" markerUnits="strokeWidth">'
-                '<path d="M0,0 L0,6 L6,3 z" class="call-path-arrow"></path></marker></defs>'
-            )
-            for node_index, node in enumerate(nodes):
-                y = 20 + node_index * 88
-                if node_index < len(nodes) - 1:
-                    next_y = 20 + (node_index + 1) * 88
-                    lines.append(
-                        f'<line class="call-path-edge" x1="430" y1="{y + 64}" '
-                        f'x2="430" y2="{next_y}" marker-end="url(#{html.escape(marker_id)})"></line>'
-                    )
-                escaped_id = html.escape(node["node_id"])
-                escaped_label = html.escape(node["label"])
-                lines.append(
-                    f'<g class="call-path-node call-path-node-{node["role"]}" '
-                    f'data-call-path-node="{escaped_id}" role="button" tabindex="0" '
-                    f'aria-label="{html.escape(node["role_label"] + ": " + node["label"])}">'
-                    f'<title>{escaped_label}</title>'
-                    f'<rect x="55" y="{y}" width="750" height="64" rx="8"></rect>'
-                    f'<text class="call-path-node-role" x="75" y="{y + 21}">'
-                    f'{html.escape(node["role_label"])}</text>'
-                    f'<text class="call-path-node-label" x="75" y="{y + 44}">'
-                    f'{html.escape(node["function_name"])} · {html.escape(node["display_path"])}:'
-                    f'{node["line_number"]}</text></g>'
-                )
-            lines.append("</svg>")
-            lines.append('<ol class="call-path-text" aria-label="Ordered static call path">')
-            for node in nodes:
-                escaped_id = html.escape(node["node_id"])
-                lines.append(
-                    f'<li><button type="button" class="call-path-text-node '
-                    f'call-path-node-{node["role"]}" data-call-path-node="{escaped_id}">'
-                    f'<span class="call-path-role">{html.escape(node["role_label"])}</span> '
-                    f'<strong>{html.escape(node["function_name"])}</strong> '
-                    f'<code>{html.escape(node["display_path"])}:{node["line_number"]}</code>'
-                    "</button></li>"
-                )
-            lines.append("</ol>")
-            lines.append("</details>")
-
         lines.extend(
             [
                 "</div>",
-                '<p class="call-path-no-match" data-call-path-no-match hidden>'
-                "No paths or nodes match the search.</p>",
-                '<aside class="call-path-details" data-call-path-details aria-live="polite">',
-                '<p data-call-path-default>Select a node to inspect its source-backed details.</p>',
+                '<div class="call-path-legend" aria-label="Call graph legend">'
+                '<span class="call-path-role call-path-role-endpoint">Endpoint handler</span>'
+                '<span class="call-path-role call-path-role-intermediate">Shared/intermediate logic</span>'
+                '<span class="call-path-role call-path-role-changed">Changed source location</span>'
+                "</div>",
+                '<div class="call-path-canvas">',
+                f'<svg class="call-path-svg" viewBox="0 0 {width} {height}" '
+                'role="img" aria-label="Condensed many-to-many static call graph">'
+                f'<defs><marker id="{html.escape(marker_id)}" markerWidth="8" markerHeight="8" '
+                'refX="7" refY="3" orient="auto" markerUnits="strokeWidth">'
+                '<path d="M0,0 L0,6 L7,3 z" class="call-path-arrow"></path></marker></defs>',
             ]
         )
-        for nodes in path_groups:
-            for node in nodes:
-                lines.append(
-                    f'<div data-call-path-detail="{html.escape(node["node_id"])}" hidden>'
-                    f'<h4>{html.escape(node["role_label"])}: '
-                    f'{html.escape(node["function_name"])}</h4>'
-                    f'<p><code>{html.escape(node["display_path"])}:{node["line_number"]}'
-                    f'{("-" + str(node["end_line_number"])) if node["end_line_number"] else ""}'
-                    "</code></p>"
-                    f'<pre class="call-path-source">{html.escape(node["source_context"])}</pre>'
-                    "</div>"
-                )
+        for source_id, target_id in sorted(edges):
+            source = node_by_id[source_id]
+            target = node_by_id[target_id]
+            start_x = source.x + 225
+            start_y = source.y + 38
+            end_x = target.x
+            end_y = target.y + 38
+            middle_x = (start_x + end_x) // 2
+            lines.append(
+                f'<path class="call-path-edge" data-call-path-edge-source="{html.escape(source_id)}" '
+                f'data-call-path-edge-target="{html.escape(target_id)}" '
+                f'd="M {start_x} {start_y} C {middle_x} {start_y}, {middle_x} {end_y}, '
+                f'{end_x} {end_y}" marker-end="url(#{html.escape(marker_id)})"></path>'
+            )
+        for node in nodes:
+            location = node.location
+            extra_classes = []
+            if len(node.outgoing) > 1:
+                extra_classes.append("call-path-node-fork")
+            if len(node.incoming) > 1:
+                extra_classes.append("call-path-node-merge")
+            classes = " ".join(extra_classes)
+            shared_text = self._path_membership(node.path_indexes, path_count)
+            branch_text = ""
+            if len(node.outgoing) > 1:
+                branch_text = f" · {len(node.outgoing)} branches"
+            elif len(node.incoming) > 1:
+                branch_text = f" · {len(node.incoming)} incoming"
+            node_id = html.escape(node.node_id)
+            lines.append(
+                f'<g class="call-path-node call-path-node-{location.role} {classes}" '
+                f'data-call-path-node="{node_id}" role="button" tabindex="0" '
+                f'aria-label="{html.escape(location.role_label + ": " + location.label)}">'
+                f'<title>{html.escape(location.label + "; " + shared_text)}</title>'
+                f'<rect x="{node.x}" y="{node.y}" width="225" height="76" rx="8"></rect>'
+                f'<text class="call-path-node-role" x="{node.x + 12}" y="{node.y + 20}">'
+                f'{html.escape(location.role_label)}</text>'
+                f'<text class="call-path-node-label" x="{node.x + 12}" y="{node.y + 42}">'
+                f'{html.escape(self._svg_text(location.function_name))}</text>'
+                f'<text class="call-path-node-meta" x="{node.x + 12}" y="{node.y + 62}">'
+                f'{html.escape(self._svg_text(location.display_path + ":" + str(location.line_number), 31))}'
+                f'{html.escape(branch_text)}</text></g>'
+            )
+        lines.extend(["</svg>", "</div>"])
+        lines.append('<ol class="call-path-text" aria-label="Shared graph nodes">')
+        for node in nodes:
+            location = node.location
+            shared_text = self._path_membership(node.path_indexes, path_count)
+            lines.append(
+                f'<li><button type="button" class="call-path-text-node '
+                f'call-path-node-{location.role}" data-call-path-node="{html.escape(node.node_id)}">'
+                f'<span class="call-path-role">{html.escape(location.role_label)}</span> '
+                f'<strong>{html.escape(location.function_name)}</strong> '
+                f'<code>{html.escape(location.display_path)}:{location.line_number}</code> '
+                f'<small>{html.escape(shared_text)} · '
+                f'{len(node.incoming)} in / {len(node.outgoing)} out</small></button></li>'
+            )
+        lines.append("</ol>")
+        lines.extend(
+            [
+                '<p class="call-path-no-match" data-call-path-no-match hidden>'
+                "No nodes match the search.</p>",
+                '<aside class="call-path-details" data-call-path-details aria-live="polite">',
+                '<p data-call-path-default>Select a node to inspect its source and connections.</p>',
+            ]
+        )
+        for node in nodes:
+            location = node.location
+            incoming = ", ".join(
+                node_by_id[item].location.function_name for item in sorted(node.incoming)
+            ) or "none"
+            outgoing = ", ".join(
+                node_by_id[item].location.function_name for item in sorted(node.outgoing)
+            ) or "none"
+            lines.append(
+                f'<div data-call-path-detail="{html.escape(node.node_id)}" hidden>'
+                f'<h4>{html.escape(location.role_label)}: '
+                f'{html.escape(location.function_name)}</h4>'
+                f'<p><code>{html.escape(location.display_path)}:{location.line_number}'
+                f'{("-" + str(location.end_line_number)) if location.end_line_number else ""}'
+                f"</code> · {html.escape(self._path_membership(node.path_indexes, path_count))}; "
+                f"{len(node.incoming)} incoming / {len(node.outgoing)} outgoing</p>"
+                f'<p><strong>Incoming:</strong> {html.escape(incoming)}<br>'
+                f'<strong>Outgoing:</strong> {html.escape(outgoing)}</p>'
+                f'<pre class="call-path-source">{html.escape(location.source_context)}</pre>'
+                "</div>"
+            )
         lines.extend(["</aside>", "</section>"])
         return "\n".join(lines)
 
@@ -646,6 +783,17 @@ class HtmlFormatter(BaseFormatter):
             font-size: 0.9em;
         }
 
+        .legacy-call-stack summary {
+            color: #52606d;
+            cursor: pointer;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            font-weight: 600;
+        }
+
+        .legacy-call-stack[open] summary {
+            margin-bottom: 10px;
+        }
+
         .dependency-chain {
             background: #e8f4f8;
             padding: 8px;
@@ -779,6 +927,20 @@ class HtmlFormatter(BaseFormatter):
             background: #e3f2fd;
         }
 
+        .call-path-summary {
+            margin-top: 10px;
+            padding: 8px 10px;
+            border-left: 4px solid #63b3ed;
+            background: #ebf8ff;
+            color: #243b53;
+        }
+
+        .call-path-branch-summary {
+            margin-left: 8px;
+            color: #7b341e;
+            font-weight: 600;
+        }
+
         .call-path-legend {
             display: flex;
             gap: 8px;
@@ -815,49 +977,36 @@ class HtmlFormatter(BaseFormatter):
             color: #166534;
         }
 
-        .call-path-groups {
-            display: grid;
-            gap: 8px;
-        }
-
-        .call-path-path {
-            border: 1px solid #d9e2ec;
-            border-radius: 5px;
-            background: white;
-            overflow: hidden;
-        }
-
-        .call-path-path summary {
-            padding: 9px 12px;
-            color: #243b53;
-            font-weight: 600;
-            cursor: pointer;
-        }
-
-        .call-path-path summary:focus-visible,
         .call-path-node:focus-visible,
         .call-path-text-node:focus-visible {
             outline: 3px solid #63b3ed;
             outline-offset: 2px;
         }
 
-        .call-path-summary-hint {
-            color: #829ab1;
-            font-size: 0.82em;
-            font-weight: 400;
+        .call-path-canvas {
+            width: 100%;
+            overflow-x: auto;
+            background: #f8fafc;
         }
 
         .call-path-svg {
             display: block;
             width: 100%;
-            min-height: 140px;
+            min-width: 920px;
+            min-height: 250px;
             padding: 4px 8px;
             background: #f8fafc;
         }
 
         .call-path-edge {
+            fill: none;
             stroke: #829ab1;
             stroke-width: 2;
+            transition: opacity 0.15s;
+        }
+
+        .call-path-edge-muted {
+            opacity: 0.12;
         }
 
         .call-path-arrow {
@@ -871,6 +1020,16 @@ class HtmlFormatter(BaseFormatter):
         .call-path-node rect {
             stroke: #829ab1;
             stroke-width: 1.5;
+        }
+
+        .call-path-node-fork rect {
+            stroke: #c05621;
+            stroke-width: 2.5;
+        }
+
+        .call-path-node-merge rect {
+            stroke: #805ad5;
+            stroke-width: 2.5;
         }
 
         .call-path-node:hover rect,
@@ -888,6 +1047,24 @@ class HtmlFormatter(BaseFormatter):
             fill: #243b53;
             font-family: "Courier New", monospace;
             font-size: 14px;
+        }
+
+        .call-path-node-meta {
+            fill: #52606d;
+            font-family: "Courier New", monospace;
+            font-size: 11px;
+        }
+
+        .call-path-node-endpoint .call-path-node-role {
+            fill: #1e3a8a;
+        }
+
+        .call-path-node-intermediate .call-path-node-role {
+            fill: #92400e;
+        }
+
+        .call-path-node-changed .call-path-node-role {
+            fill: #166534;
         }
 
         .call-path-text {
@@ -915,6 +1092,11 @@ class HtmlFormatter(BaseFormatter):
 
         .call-path-text-node code {
             margin-left: 5px;
+        }
+
+        .call-path-text-node small {
+            margin-left: 5px;
+            color: #627d98;
         }
 
         .call-path-node-muted {
@@ -1013,11 +1195,25 @@ class HtmlFormatter(BaseFormatter):
         document.querySelectorAll("[data-call-path-view]").forEach(function (view) {
             var search = view.querySelector("[data-call-path-search]");
             var reset = view.querySelector("[data-call-path-reset]");
-            var paths = Array.from(view.querySelectorAll("[data-call-path-path]"));
             var nodes = Array.from(view.querySelectorAll("[data-call-path-node]"));
             var details = Array.from(view.querySelectorAll("[data-call-path-detail]"));
+            var edges = Array.from(view.querySelectorAll("[data-call-path-edge-source]"));
             var defaultDetails = view.querySelector("[data-call-path-default]");
             var noMatch = view.querySelector("[data-call-path-no-match]");
+
+            function nodeMatches(nodeId, query) {
+                var matchingNodes = nodes.filter(function (node) {
+                    return node.getAttribute("data-call-path-node") === nodeId;
+                });
+                var detail = details.find(function (item) {
+                    return item.getAttribute("data-call-path-detail") === nodeId;
+                });
+                var nodeText = matchingNodes.map(function (node) {
+                    return node.textContent || "";
+                }).join(" ");
+                var detailText = detail ? detail.textContent || "" : "";
+                return (nodeText + " " + detailText).toLowerCase().indexOf(query) !== -1;
+            }
 
             function selectNode(nodeId) {
                 nodes.forEach(function (node) {
@@ -1035,29 +1231,31 @@ class HtmlFormatter(BaseFormatter):
                 }
             }
 
-            function filterPaths() {
+            function filterGraph() {
                 var query = search ? search.value.trim().toLowerCase() : "";
-                var visible = 0;
-                paths.forEach(function (path) {
-                    var pathText = (path.textContent || "").toLowerCase();
-                    var matches = !query || pathText.indexOf(query) !== -1;
-                    path.hidden = !matches;
-                    if (matches) {
-                        visible += 1;
-                        if (query) {
-                            path.open = true;
-                        }
+                var matchingIds = new Set();
+                var allIds = new Set(nodes.map(function (node) {
+                    return node.getAttribute("data-call-path-node");
+                }));
+                allIds.forEach(function (nodeId) {
+                    if (!query || nodeMatches(nodeId, query)) {
+                        matchingIds.add(nodeId);
                     }
-                    path.querySelectorAll("[data-call-path-node]").forEach(function (node) {
-                        var nodeText = (node.textContent || "").toLowerCase();
-                        node.classList.toggle(
-                            "call-path-node-muted",
-                            Boolean(query) && nodeText.indexOf(query) === -1
-                        );
-                    });
+                });
+                nodes.forEach(function (node) {
+                    var nodeId = node.getAttribute("data-call-path-node");
+                    node.classList.toggle("call-path-node-muted", !matchingIds.has(nodeId));
+                });
+                edges.forEach(function (edge) {
+                    var source = edge.getAttribute("data-call-path-edge-source");
+                    var target = edge.getAttribute("data-call-path-edge-target");
+                    edge.classList.toggle(
+                        "call-path-edge-muted",
+                        !matchingIds.has(source) || !matchingIds.has(target)
+                    );
                 });
                 if (noMatch) {
-                    noMatch.hidden = visible !== 0;
+                    noMatch.hidden = matchingIds.size !== 0;
                 }
             }
 
@@ -1073,19 +1271,18 @@ class HtmlFormatter(BaseFormatter):
                 });
             });
             if (search) {
-                search.addEventListener("input", filterPaths);
+                search.addEventListener("input", filterGraph);
             }
             if (reset) {
                 reset.addEventListener("click", function () {
                     if (search) {
                         search.value = "";
                     }
-                    paths.forEach(function (path) {
-                        path.hidden = false;
-                        path.open = paths.length === 1;
-                    });
                     nodes.forEach(function (node) {
                         node.classList.remove("call-path-node-muted");
+                    });
+                    edges.forEach(function (edge) {
+                        edge.classList.remove("call-path-edge-muted");
                     });
                     if (noMatch) {
                         noMatch.hidden = true;
@@ -1353,23 +1550,22 @@ class HtmlFormatter(BaseFormatter):
                             f"</div>"
                         )
 
-                    # Call stack with hover on each frame
+                    # Keep the verbose traceback as an optional diagnostic fallback.
+                    # The condensed graph below is the primary way to inspect many paths.
                     if ae.call_stacks:
-                        content_lines.append('<div class="call-stack">')
-                        content_lines.append("<strong>Call Stack:</strong><br>")
-
+                        content_lines.append(
+                            '<details class="call-stack legacy-call-stack">'
+                            f"<summary>Show linear tracebacks ({len(ae.call_stacks)} paths)</summary>"
+                        )
                         for stack_idx, call_stack in enumerate(ae.call_stacks, 1):
-                            # Header for multiple paths
                             if len(ae.call_stacks) > 1:
                                 content_lines.append(
-                                    f"<div class='stack-path'><em>Path {stack_idx} of {len(ae.call_stacks)}:</em></div>"
+                                    f"<div class='stack-path'><em>Linear path {stack_idx} of "
+                                    f"{len(ae.call_stacks)}:</em></div>"
                                 )
 
                             for frame in call_stack:
-                                # Extract line range from code_context if present
-                                # Code context uses '[lines X-Y]' notation for grouped consecutive lines
                                 line_range = self._parse_line_range(frame.code_context)
-
                                 if line_range:
                                     start_line, end_line = line_range
                                 else:
@@ -1382,7 +1578,6 @@ class HtmlFormatter(BaseFormatter):
                                     end_line if end_line > start_line else None,
                                     frame.function_name,
                                 )
-
                                 frame_ref = self._format_code_ref(
                                     frame.file_path,
                                     start_line,
@@ -1390,12 +1585,9 @@ class HtmlFormatter(BaseFormatter):
                                     end_line,
                                 )
                                 content_lines.append(f"{frame_ref}<br>")
-
-                            # Add spacing between paths
                             if stack_idx < len(ae.call_stacks):
                                 content_lines.append("<br>")
-
-                        content_lines.append("</div>")
+                        content_lines.append("</details>")
 
                     content_lines.append(
                         self._format_call_path_view(
