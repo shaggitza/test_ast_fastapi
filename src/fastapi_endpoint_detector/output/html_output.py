@@ -65,6 +65,13 @@ class _CallPathGraphNode:
     y: int = 0
 
 
+_CALL_PATH_NODE_WIDTH = 260
+_CALL_PATH_NODE_HEIGHT = 104
+_CALL_PATH_LAYER_STEP = 320
+_CALL_PATH_ROW_STEP = 140
+_CALL_PATH_GRAPH_TOP = 72
+
+
 @register_formatter("html")
 class HtmlFormatter(BaseFormatter):
     """
@@ -340,16 +347,16 @@ class HtmlFormatter(BaseFormatter):
             layers.setdefault(node.layer, []).append(node)
         for layer, members in layers.items():
             for index, node in enumerate(sorted(members, key=lambda item: item.node_id)):
-                node.x = 40 + layer * 270
-                node.y = 72 + index * 120
+                node.x = 40 + layer * _CALL_PATH_LAYER_STEP
+                node.y = _CALL_PATH_GRAPH_TOP + index * _CALL_PATH_ROW_STEP
 
         max_layer = max((node.layer for node in node_by_id.values()), default=0)
         max_nodes_in_layer = max((len(members) for members in layers.values()), default=1)
         # The SVG is horizontally scrollable for deep graphs but remains compact
         # when many paths collapse into a few shared nodes.
         self._last_graph_dimensions = (
-            max(920, 80 + (max_layer + 1) * 270),
-            max(250, 145 + max_nodes_in_layer * 120),
+            max(1050, 100 + (max_layer + 1) * _CALL_PATH_LAYER_STEP),
+            max(300, 145 + max_nodes_in_layer * _CALL_PATH_ROW_STEP),
         )
         return sorted(node_by_id.values(), key=lambda node: (node.layer, node.y, node.node_id)), edges
 
@@ -502,7 +509,7 @@ class HtmlFormatter(BaseFormatter):
 
         nodes, edges = self._build_call_path_graph(call_stacks, app_path, view_id)
         node_by_id = {node.node_id: node for node in nodes}
-        width, height = getattr(self, "_last_graph_dimensions", (920, 250))
+        width, height = getattr(self, "_last_graph_dimensions", (1050, 300))
         marker_id = f"{view_id}-arrow"
         fork_count = sum(len(node.outgoing) > 1 for node in nodes)
         merge_count = sum(len(node.incoming) > 1 for node in nodes)
@@ -543,7 +550,7 @@ class HtmlFormatter(BaseFormatter):
                 "</div>",
                 '<div class="call-path-canvas" data-call-path-viewport>',
                 f'<svg class="call-path-svg" viewBox="0 0 '
-                f'{min(max(width, 920), 1400)} {min(max(height, 300), 620)}" '
+                f'{min(max(width, 1050), 1400)} {min(max(height, 300), 620)}" '
                 f'data-graph-width="{width}" data-graph-height="{height}" '
                 'data-call-path-svg role="img" aria-label="Condensed many-to-many static call graph">'
                 f'<defs><marker id="{html.escape(marker_id)}" markerWidth="8" markerHeight="8" '
@@ -555,10 +562,10 @@ class HtmlFormatter(BaseFormatter):
         for source_id, target_id in sorted(edges):
             source = node_by_id[source_id]
             target = node_by_id[target_id]
-            start_x = source.x + 225
-            start_y = source.y + 38
+            start_x = source.x + _CALL_PATH_NODE_WIDTH
+            start_y = source.y + _CALL_PATH_NODE_HEIGHT // 2
             end_x = target.x
-            end_y = target.y + 38
+            end_y = target.y + _CALL_PATH_NODE_HEIGHT // 2
             middle_x = (start_x + end_x) // 2
             lines.append(
                 f'<path class="call-path-edge" data-call-path-edge-source="{html.escape(source_id)}" '
@@ -586,14 +593,16 @@ class HtmlFormatter(BaseFormatter):
                 f'data-call-path-node="{node_id}" role="button" tabindex="0" '
                 f'aria-label="{html.escape(location.role_label + ": " + location.label)}">'
                 f'<title>{html.escape(location.label + "; " + shared_text)}</title>'
-                f'<rect x="{node.x}" y="{node.y}" width="225" height="76" rx="8"></rect>'
+                f'<rect x="{node.x}" y="{node.y}" width="{_CALL_PATH_NODE_WIDTH}" '
+                f'height="{_CALL_PATH_NODE_HEIGHT}" rx="8"></rect>'
                 f'<text class="call-path-node-role" x="{node.x + 12}" y="{node.y + 20}">'
                 f'{html.escape(location.role_label)}</text>'
-                f'<text class="call-path-node-label" x="{node.x + 12}" y="{node.y + 42}">'
-                f'{html.escape(self._svg_text(location.function_name))}</text>'
-                f'<text class="call-path-node-meta" x="{node.x + 12}" y="{node.y + 62}">'
-                f'{html.escape(self._svg_text(location.display_path + ":" + str(location.line_number), 31))}'
-                f'{html.escape(branch_text)}</text></g>'
+                f'<text class="call-path-node-label" x="{node.x + 12}" y="{node.y + 43}">'
+                f'{html.escape(self._svg_text(location.function_name, 37))}</text>'
+                f'<text class="call-path-node-meta" x="{node.x + 12}" y="{node.y + 66}">'
+                f'{html.escape(self._svg_text(location.display_path + ":" + str(location.line_number), 36))}'
+                f'<text class="call-path-node-meta" x="{node.x + 12}" y="{node.y + 86}">'
+                f'{html.escape(self._svg_text(shared_text + branch_text, 36))}</text></g>'
             )
         lines.append("</g>")
         lines.append("</svg>")
