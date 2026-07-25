@@ -356,7 +356,15 @@ class TestHtmlFormatter:
         assert "endpoint handler → shared/intermediate logic" in output
         assert "services.items.load_items" in output
         assert "repository.fetch" in output
-        assert 'class="call-path-text"' in output
+        assert 'class="call-tree-panel"' in output
+        assert '<details class="call-tree-panel">' in output  # collapsed by default
+        assert 'data-call-tree-expand' in output
+        assert 'data-call-tree-collapse' in output
+        assert 'data-call-path-stage' in output
+        assert 'data-call-path-zoom-in' in output
+        assert 'data-call-path-zoom-out' in output
+        assert 'data-call-path-fit' in output
+        assert 'Show linear tracebacks (1 paths)' in output
         assert 'data-call-path-detail="affected-call-path-1-n2"' in output
         # The duplicate raw handler is normalized in the graph view.
         assert output.count("routers.items.get_items") == 1

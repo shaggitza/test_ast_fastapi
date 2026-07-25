@@ -374,6 +374,59 @@ class HtmlFormatter(BaseFormatter):
         sample = ", ".join(str(item) for item in ordered[:8])
         return f"shared by {len(ordered)} paths (for example {sample}, …)"
 
+    def _render_call_tree_node(
+        self,
+        node_id: str,
+        node_by_id: dict[str, _CallPathGraphNode],
+        path_count: int,
+        visited: set[str],
+    ) -> str:
+        """Render one collapsed PyInstrument-style node in the text tree."""
+        node = node_by_id[node_id]
+        location = node.location
+        membership = self._path_membership(node.path_indexes, path_count)
+        children = sorted(
+            node.outgoing,
+            key=lambda child_id: (
+                node_by_id[child_id].layer,
+                node_by_id[child_id].y,
+                child_id,
+            ),
+        )
+        node_markup = (
+            f'<span class="call-path-role call-path-role-{location.role}">'
+            f"{html.escape(location.role_label)}</span> "
+            f"<strong>{html.escape(location.function_name)}</strong> "
+            f'<code>{html.escape(location.display_path)}:{location.line_number}</code> '
+            f'<small>{html.escape(membership)} · {len(node.outgoing)} child(s)</small>'
+        )
+        escaped_id = html.escape(node_id)
+        if node_id in visited:
+            return (
+                f'<li><button type="button" class="call-tree-shared-ref" '
+                f'data-call-path-node="{escaped_id}">↗ {node_markup}</button></li>'
+            )
+        visited.add(node_id)
+        if not children:
+            return (
+                f'<li><button type="button" class="call-tree-leaf call-path-node-'
+                f'{location.role}" data-call-path-node="{escaped_id}">'
+                f'<span class="call-tree-caret" aria-hidden="true"> </span>{node_markup}'
+                "</button></li>"
+            )
+        children_markup = "".join(
+            self._render_call_tree_node(child_id, node_by_id, path_count, visited)
+            for child_id in children
+        )
+        return (
+            '<li><details class="call-tree-node">'
+            f'<summary class="call-tree-summary call-path-node-{location.role}" '
+            f'data-call-path-node="{escaped_id}">'
+            f'<span class="call-tree-caret" aria-hidden="true">&gt;</span>{node_markup}</summary>'
+            f'<ol class="call-tree-children">{children_markup}</ol>'
+            "</details></li>"
+        )
+
     def _format_call_path_fallback(self, affected: AffectedEndpoint, view_id: str) -> str:
         """Render evidence locations when no static call path was recorded."""
         endpoint = affected.endpoint
@@ -465,6 +518,11 @@ class HtmlFormatter(BaseFormatter):
             f'<input id="{html.escape(view_id)}-search" type="search" '
             'data-call-path-search placeholder="function, file, or source text"></label>',
             '<button type="button" data-call-path-reset>Reset</button>',
+            '<div class="call-path-zoom-controls" aria-label="Graph navigation">'
+            '<button type="button" data-call-path-zoom-out aria-label="Zoom out">-</button>'
+            '<span data-call-path-zoom-label>100%</span>'
+            '<button type="button" data-call-path-zoom-in aria-label="Zoom in">+</button>'
+            '<button type="button" data-call-path-fit>Fit</button></div>',
             "</div>",
             '<div class="call-path-summary">',
             f'<strong>{path_count} static paths</strong> condensed into '
@@ -483,12 +541,15 @@ class HtmlFormatter(BaseFormatter):
                 '<span class="call-path-role call-path-role-intermediate">Shared/intermediate logic</span>'
                 '<span class="call-path-role call-path-role-changed">Changed source location</span>'
                 "</div>",
-                '<div class="call-path-canvas">',
-                f'<svg class="call-path-svg" viewBox="0 0 {width} {height}" '
-                'role="img" aria-label="Condensed many-to-many static call graph">'
+                '<div class="call-path-canvas" data-call-path-viewport>',
+                f'<svg class="call-path-svg" viewBox="0 0 '
+                f'{min(max(width, 920), 1400)} {min(max(height, 300), 620)}" '
+                f'data-graph-width="{width}" data-graph-height="{height}" '
+                'data-call-path-svg role="img" aria-label="Condensed many-to-many static call graph">'
                 f'<defs><marker id="{html.escape(marker_id)}" markerWidth="8" markerHeight="8" '
                 'refX="7" refY="3" orient="auto" markerUnits="strokeWidth">'
-                '<path d="M0,0 L0,6 L7,3 z" class="call-path-arrow"></path></marker></defs>',
+                '<path d="M0,0 L0,6 L7,3 z" class="call-path-arrow"></path></marker></defs>'
+                '<g data-call-path-stage>',
             ]
         )
         for source_id, target_id in sorted(edges):
@@ -534,21 +595,30 @@ class HtmlFormatter(BaseFormatter):
                 f'{html.escape(self._svg_text(location.display_path + ":" + str(location.line_number), 31))}'
                 f'{html.escape(branch_text)}</text></g>'
             )
-        lines.extend(["</svg>", "</div>"])
-        lines.append('<ol class="call-path-text" aria-label="Shared graph nodes">')
-        for node in nodes:
-            location = node.location
-            shared_text = self._path_membership(node.path_indexes, path_count)
-            lines.append(
-                f'<li><button type="button" class="call-path-text-node '
-                f'call-path-node-{location.role}" data-call-path-node="{html.escape(node.node_id)}">'
-                f'<span class="call-path-role">{html.escape(location.role_label)}</span> '
-                f'<strong>{html.escape(location.function_name)}</strong> '
-                f'<code>{html.escape(location.display_path)}:{location.line_number}</code> '
-                f'<small>{html.escape(shared_text)} · '
-                f'{len(node.incoming)} in / {len(node.outgoing)} out</small></button></li>'
-            )
-        lines.append("</ol>")
+        lines.append("</g>")
+        lines.append("</svg>")
+        lines.append("</div>")
+        roots = sorted(
+            (node for node in nodes if not node.incoming),
+            key=lambda node: (node.layer, node.y, node.node_id),
+        ) or nodes[:1]
+        lines.extend(
+            [
+                '<details class="call-tree-panel">',
+                '<summary class="call-tree-panel-summary">'
+                '<span class="call-tree-caret" aria-hidden="true">&gt;</span>'
+                f"Condensed call stack ({len(nodes)} shared nodes)</summary>",
+                '<div class="call-tree-toolbar">'
+                '<button type="button" data-call-tree-expand>Expand all</button>'
+                '<button type="button" data-call-tree-collapse>Collapse all</button>'
+                "</div>",
+                '<ol class="call-tree-root" aria-label="Condensed shared call stack">',
+            ]
+        )
+        visited: set[str] = set()
+        for root in roots:
+            lines.append(self._render_call_tree_node(root.node_id, node_by_id, path_count, visited))
+        lines.extend(["</ol>", "</details>"])
         lines.extend(
             [
                 '<p class="call-path-no-match" data-call-path-no-match hidden>'
@@ -927,6 +997,21 @@ class HtmlFormatter(BaseFormatter):
             background: #e3f2fd;
         }
 
+        .call-path-zoom-controls {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            margin-left: auto;
+        }
+
+        .call-path-zoom-controls span {
+            min-width: 42px;
+            color: #52606d;
+            font-family: "Courier New", monospace;
+            font-size: 0.85em;
+            text-align: center;
+        }
+
         .call-path-summary {
             margin-top: 10px;
             padding: 8px 10px;
@@ -985,17 +1070,25 @@ class HtmlFormatter(BaseFormatter):
 
         .call-path-canvas {
             width: 100%;
-            overflow-x: auto;
+            overflow: hidden;
             background: #f8fafc;
         }
 
         .call-path-svg {
             display: block;
             width: 100%;
-            min-width: 920px;
-            min-height: 250px;
+            height: 620px;
+            max-height: 70vh;
+            min-height: 300px;
             padding: 4px 8px;
             background: #f8fafc;
+            cursor: grab;
+            touch-action: none;
+            user-select: none;
+        }
+
+        .call-path-svg.call-path-panning {
+            cursor: grabbing;
         }
 
         .call-path-edge {
@@ -1099,6 +1192,120 @@ class HtmlFormatter(BaseFormatter):
             color: #627d98;
         }
 
+        .call-tree-panel {
+            margin-top: 12px;
+            border: 1px solid #d9e2ec;
+            border-radius: 5px;
+            background: #fff;
+        }
+
+        .call-tree-panel > summary {
+            padding: 10px 12px;
+            color: #243b53;
+            cursor: pointer;
+            font-weight: 600;
+            list-style: none;
+        }
+
+        .call-tree-panel > summary::-webkit-details-marker,
+        .call-tree-node > summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .call-tree-panel > summary:focus-visible,
+        .call-tree-summary:focus-visible,
+        .call-tree-leaf:focus-visible,
+        .call-tree-shared-ref:focus-visible {
+            outline: 3px solid #63b3ed;
+            outline-offset: 2px;
+        }
+
+        .call-tree-caret {
+            display: inline-block;
+            width: 16px;
+            margin-right: 3px;
+            color: #52606d;
+            font-size: 1.2em;
+            line-height: 1;
+            text-align: center;
+            transition: transform 0.15s ease;
+        }
+
+        .call-tree-panel[open] > summary .call-tree-caret,
+        .call-tree-node[open] > .call-tree-summary .call-tree-caret {
+            transform: rotate(90deg);
+        }
+
+        .call-tree-toolbar {
+            display: flex;
+            gap: 6px;
+            padding: 6px 12px;
+            border-top: 1px solid #edf2f7;
+            border-bottom: 1px solid #edf2f7;
+            background: #f8fafc;
+        }
+
+        .call-tree-toolbar button {
+            padding: 4px 8px;
+            border: 1px solid #bcccdc;
+            border-radius: 4px;
+            background: white;
+            color: #243b53;
+            cursor: pointer;
+        }
+
+        .call-tree-root,
+        .call-tree-children {
+            margin: 0;
+            padding: 0;
+            list-style: none;
+        }
+
+        .call-tree-children {
+            margin-left: 24px;
+            border-left: 1px solid #d9e2ec;
+        }
+
+        .call-tree-summary,
+        .call-tree-leaf,
+        .call-tree-shared-ref {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            width: 100%;
+            padding: 7px 12px;
+            border: 0;
+            border-bottom: 1px solid #edf2f7;
+            background: transparent;
+            color: #243b53;
+            font: inherit;
+            text-align: left;
+            cursor: pointer;
+        }
+
+        .call-tree-summary:hover,
+        .call-tree-leaf:hover,
+        .call-tree-shared-ref:hover,
+        .call-tree-summary.call-path-node-selected,
+        .call-tree-leaf.call-path-node-selected,
+        .call-tree-shared-ref.call-path-node-selected {
+            background: #e3f2fd;
+        }
+
+        .call-tree-summary code,
+        .call-tree-leaf code,
+        .call-tree-shared-ref code {
+            margin-left: 4px;
+        }
+
+        .call-tree-summary small,
+        .call-tree-leaf small,
+        .call-tree-shared-ref small {
+            margin-left: auto;
+            color: #627d98;
+            font-size: 0.82em;
+        }
+
         .call-path-node-muted {
             opacity: 0.35;
         }
@@ -1200,6 +1407,85 @@ class HtmlFormatter(BaseFormatter):
             var edges = Array.from(view.querySelectorAll("[data-call-path-edge-source]"));
             var defaultDetails = view.querySelector("[data-call-path-default]");
             var noMatch = view.querySelector("[data-call-path-no-match]");
+            var svg = view.querySelector("[data-call-path-svg]");
+            var stage = view.querySelector("[data-call-path-stage]");
+            var zoomLabel = view.querySelector("[data-call-path-zoom-label]");
+            var zoomIn = view.querySelector("[data-call-path-zoom-in]");
+            var zoomOut = view.querySelector("[data-call-path-zoom-out]");
+            var fit = view.querySelector("[data-call-path-fit]");
+            var treeBranches = Array.from(view.querySelectorAll(".call-tree-node"));
+            var treeExpand = view.querySelector("[data-call-tree-expand]");
+            var treeCollapse = view.querySelector("[data-call-tree-collapse]");
+            var graphScale = 1;
+            var graphX = 0;
+            var graphY = 0;
+            var graphWidth = svg ? Number(svg.getAttribute("data-graph-width")) : 920;
+            var graphHeight = svg ? Number(svg.getAttribute("data-graph-height")) : 300;
+
+            function updateGraphTransform() {
+                if (stage) {
+                    stage.setAttribute(
+                        "transform",
+                        "translate(" + graphX + " " + graphY + ") scale(" + graphScale + ")"
+                    );
+                }
+                if (zoomLabel) {
+                    zoomLabel.textContent = Math.round(graphScale * 100) + "%";
+                }
+            }
+
+            function viewBoxPoint(event) {
+                if (!svg) {
+                    return { x: 0, y: 0 };
+                }
+                var rect = svg.getBoundingClientRect();
+                var viewBox = svg.viewBox.baseVal;
+                return {
+                    x: (event.clientX - rect.left) * viewBox.width / rect.width,
+                    y: (event.clientY - rect.top) * viewBox.height / rect.height
+                };
+            }
+
+            function zoomAt(factor, point) {
+                if (!svg) {
+                    return;
+                }
+                var nextScale = Math.max(0.35, Math.min(3, graphScale * factor));
+                var contentX = (point.x - graphX) / graphScale;
+                var contentY = (point.y - graphY) / graphScale;
+                graphScale = nextScale;
+                graphX = point.x - contentX * graphScale;
+                graphY = point.y - contentY * graphScale;
+                updateGraphTransform();
+            }
+
+            function fitGraph() {
+                if (!svg) {
+                    return;
+                }
+                var viewBox = svg.viewBox.baseVal;
+                graphScale = Math.max(
+                    0.35,
+                    Math.min(1, viewBox.width / graphWidth, viewBox.height / graphHeight)
+                );
+                graphX = (viewBox.width - graphWidth * graphScale) / 2;
+                graphY = (viewBox.height - graphHeight * graphScale) / 2;
+                updateGraphTransform();
+            }
+
+            function initialGraphView() {
+                if (!svg) {
+                    return;
+                }
+                var viewBox = svg.viewBox.baseVal;
+                graphScale = Math.max(
+                    0.65,
+                    Math.min(1, viewBox.width / graphWidth, viewBox.height / graphHeight)
+                );
+                graphX = 24;
+                graphY = (viewBox.height - graphHeight * graphScale) / 2;
+                updateGraphTransform();
+            }
 
             function nodeMatches(nodeId, query) {
                 var matchingNodes = nodes.filter(function (node) {
@@ -1273,6 +1559,75 @@ class HtmlFormatter(BaseFormatter):
             if (search) {
                 search.addEventListener("input", filterGraph);
             }
+            if (zoomIn) {
+                zoomIn.addEventListener("click", function () {
+                    if (svg) {
+                        zoomAt(1.25, { x: svg.viewBox.baseVal.width / 2, y: svg.viewBox.baseVal.height / 2 });
+                    }
+                });
+            }
+            if (zoomOut) {
+                zoomOut.addEventListener("click", function () {
+                    if (svg) {
+                        zoomAt(0.8, { x: svg.viewBox.baseVal.width / 2, y: svg.viewBox.baseVal.height / 2 });
+                    }
+                });
+            }
+            if (fit) {
+                fit.addEventListener("click", fitGraph);
+            }
+            if (svg && stage) {
+                var dragging = false;
+                var lastPoint = null;
+                svg.addEventListener("wheel", function (event) {
+                    event.preventDefault();
+                    zoomAt(event.deltaY < 0 ? 1.15 : 0.87, viewBoxPoint(event));
+                }, { passive: false });
+                svg.addEventListener("pointerdown", function (event) {
+                    if (event.button !== 0) {
+                        return;
+                    }
+                    dragging = true;
+                    lastPoint = viewBoxPoint(event);
+                    svg.classList.add("call-path-panning");
+                    svg.setPointerCapture(event.pointerId);
+                });
+                svg.addEventListener("pointermove", function (event) {
+                    if (!dragging || !lastPoint) {
+                        return;
+                    }
+                    var currentPoint = viewBoxPoint(event);
+                    graphX += currentPoint.x - lastPoint.x;
+                    graphY += currentPoint.y - lastPoint.y;
+                    lastPoint = currentPoint;
+                    updateGraphTransform();
+                });
+                svg.addEventListener("pointerup", function (event) {
+                    dragging = false;
+                    lastPoint = null;
+                    svg.classList.remove("call-path-panning");
+                    svg.releasePointerCapture(event.pointerId);
+                });
+                svg.addEventListener("pointercancel", function () {
+                    dragging = false;
+                    lastPoint = null;
+                    svg.classList.remove("call-path-panning");
+                });
+            }
+            if (treeExpand) {
+                treeExpand.addEventListener("click", function () {
+                    treeBranches.forEach(function (branch) {
+                        branch.open = true;
+                    });
+                });
+            }
+            if (treeCollapse) {
+                treeCollapse.addEventListener("click", function () {
+                    treeBranches.forEach(function (branch) {
+                        branch.open = false;
+                    });
+                });
+            }
             if (reset) {
                 reset.addEventListener("click", function () {
                     if (search) {
@@ -1288,8 +1643,10 @@ class HtmlFormatter(BaseFormatter):
                         noMatch.hidden = true;
                     }
                     selectNode(null);
+                    initialGraphView();
                 });
             }
+            initialGraphView();
         });
     }());
     </script>
