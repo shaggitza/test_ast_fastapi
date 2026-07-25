@@ -43,12 +43,27 @@ class _CallPathLocation:
         )
 
     @property
+    def display_name(self) -> str:
+        """Return a compact symbol without its module/import qualification."""
+        value = " ".join(self.function_name.split()) or "unknown"
+        if value.startswith("[ENDPOINT]"):
+            endpoint_label = value.removeprefix("[ENDPOINT]").strip()
+            return endpoint_label or "endpoint"
+        value = value.rsplit(":", 1)[-1]
+        parts = [part for part in value.split(".") if part and part != "<locals>"]
+        if not parts:
+            return "unknown"
+        if len(parts) >= 2 and (parts[-2][:1].isupper() or parts[-1] == "__call__"):
+            return ".".join(parts[-2:])
+        return parts[-1]
+
+    @property
     def label(self) -> str:
-        """Return the full node label for details and accessibility."""
+        """Return a compact node label for details and accessibility."""
         location = f"{self.display_path}:{self.line_number}"
         if self.end_line_number and self.end_line_number > self.line_number:
             location = f"{self.display_path}:{self.line_number}-{self.end_line_number}"
-        return f"{self.function_name} ({location})"
+        return f"{self.display_name} ({location})"
 
 
 @dataclass
@@ -61,16 +76,18 @@ class _CallPathGraphNode:
     incoming: set[str] = field(default_factory=set)
     outgoing: set[str] = field(default_factory=set)
     layer: int = 0
+    order: int = 0
     x: int = 0
     y: int = 0
 
 
-_CALL_PATH_NODE_WIDTH = 260
+_CALL_PATH_NODE_WIDTH = 220
 _CALL_PATH_NODE_HEIGHT = 104
-_CALL_PATH_LAYER_STEP = 320
-_CALL_PATH_ROW_STEP = 140
+_CALL_PATH_LAYER_STEP = 280
+_CALL_PATH_ROW_STEP = 132
 _CALL_PATH_GRAPH_TOP = 72
 _THEME_STORAGE_KEY = "fastapi-endpoint-detector.theme.v1"
+_DEFAULT_HTML_THEME = "ember"
 _HTML_THEMES = (
     ("harbor", "Harbor"),
     ("obsidian", "Obsidian"),
@@ -259,7 +276,10 @@ class HtmlFormatter(BaseFormatter):
             return left == right
 
     def _normalize_call_path(
-        self, call_stack: list[CallStackFrame], app_path: str
+        self,
+        call_stack: list[CallStackFrame],
+        app_path: str,
+        endpoint_handler_name: str,
     ) -> list[_CallPathLocation]:
         """Normalize a path while retaining source context and semantic roles."""
         frames: list[CallStackFrame] = []
@@ -273,6 +293,8 @@ class HtmlFormatter(BaseFormatter):
                 and self._same_file(frame.file_path, frames[0].file_path)
                 and frame.line_number == frames[0].line_number
             ):
+                # Prefer the real handler symbol over the synthetic route marker.
+                frames[0] = frame
                 continue
             frames.append(frame)
 
@@ -293,11 +315,14 @@ class HtmlFormatter(BaseFormatter):
                 if index == len(frames) - 1
                 else "intermediate"
             )
+            function_name = frame.function_name or "unknown"
+            if index == 0 and function_name.startswith("[ENDPOINT]"):
+                function_name = endpoint_handler_name or function_name
             locations.append(
                 _CallPathLocation(
                     role=role,
                     role_label=role_labels[role],
-                    function_name=frame.function_name or "unknown",
+                    function_name=function_name,
                     file_path=frame.file_path,
                     display_path=self._display_file_path(frame.file_path, app_path),
                     line_number=start_line,
@@ -313,12 +338,14 @@ class HtmlFormatter(BaseFormatter):
         call_stacks: list[list[CallStackFrame]],
         app_path: str,
         view_id: str,
+        endpoint_handler_name: str,
     ) -> tuple[list[_CallPathGraphNode], set[tuple[str, str]]]:
         """Condense all paths into shared nodes and many-to-many edges."""
         nodes_by_identity: dict[tuple[str, str, int, int, str], _CallPathGraphNode] = {}
         edges: set[tuple[str, str]] = set()
         paths: list[list[_CallPathLocation]] = [
-            self._normalize_call_path(stack, app_path) for stack in call_stacks
+            self._normalize_call_path(stack, app_path, endpoint_handler_name)
+            for stack in call_stacks
         ]
 
         for path_index, locations in enumerate(paths, 1):
@@ -361,6 +388,7 @@ class HtmlFormatter(BaseFormatter):
             layers.setdefault(node.layer, []).append(node)
         for layer, members in layers.items():
             for index, node in enumerate(sorted(members, key=lambda item: item.node_id)):
+                node.order = index
                 node.x = 40 + layer * _CALL_PATH_LAYER_STEP
                 node.y = _CALL_PATH_GRAPH_TOP + index * _CALL_PATH_ROW_STEP
 
@@ -417,8 +445,8 @@ class HtmlFormatter(BaseFormatter):
         node_markup = (
             f'<span class="call-path-role call-path-role-{location.role}">'
             f"{html.escape(location.role_label)}</span> "
-            f"<strong>{html.escape(location.function_name)}</strong> "
-            f'<code>{html.escape(location.display_path)}:{location.line_number}</code> '
+            f"<strong>{html.escape(location.display_name)}</strong> "
+            f'<code>{html.escape(Path(location.display_path).name)}:{location.line_number}</code> '
             f'<small>{html.escape(membership)} · {len(node.outgoing)} child(s)</small>'
         )
         escaped_id = html.escape(node_id)
@@ -521,10 +549,17 @@ class HtmlFormatter(BaseFormatter):
         if not call_stacks:
             return self._format_call_path_fallback(affected, view_id)
 
-        nodes, edges = self._build_call_path_graph(call_stacks, app_path, view_id)
+        nodes, edges = self._build_call_path_graph(
+            call_stacks,
+            app_path,
+            view_id,
+            affected.endpoint.handler.name,
+        )
         node_by_id = {node.node_id: node for node in nodes}
         width, height = getattr(self, "_last_graph_dimensions", (1050, 300))
         marker_id = f"{view_id}-arrow"
+        graph_title_id = f"{view_id}-graph-title"
+        graph_desc_id = f"{view_id}-graph-desc"
         fork_count = sum(len(node.outgoing) > 1 for node in nodes)
         merge_count = sum(len(node.incoming) > 1 for node in nodes)
         path_count = len(call_stacks)
@@ -538,12 +573,21 @@ class HtmlFormatter(BaseFormatter):
             f'<label for="{html.escape(view_id)}-search">Search nodes '
             f'<input id="{html.escape(view_id)}-search" type="search" '
             'data-call-path-search placeholder="function, file, or source text"></label>',
-            '<button type="button" data-call-path-reset>Reset</button>',
+            f'<label for="{html.escape(view_id)}-layout">Graph type '
+            f'<select id="{html.escape(view_id)}-layout" data-call-path-layout>'
+            '<option value="flow-lr">Flow</option>'
+            '<option value="flow-tb">Top-down</option>'
+            '<option value="radial">Radial</option>'
+            '<option value="files">File groups</option>'
+            "</select></label>",
+            '<button type="button" data-call-path-reset>Reset view</button>',
             '<div class="call-path-zoom-controls" aria-label="Graph navigation">'
             '<button type="button" data-call-path-zoom-out aria-label="Zoom out">-</button>'
             '<span data-call-path-zoom-label>100%</span>'
             '<button type="button" data-call-path-zoom-in aria-label="Zoom in">+</button>'
-            '<button type="button" data-call-path-fit>Fit</button></div>',
+            '<button type="button" data-call-path-fit>Fit</button>'
+            '<button type="button" data-call-path-touch-pan aria-pressed="false" '
+            'title="Enable two-axis touch panning">Touch pan</button></div>',
             "</div>",
             '<div class="call-path-summary">',
             f'<strong>{path_count} static paths</strong> condensed into '
@@ -561,16 +605,26 @@ class HtmlFormatter(BaseFormatter):
                 '<span class="call-path-role call-path-role-endpoint">Endpoint handler</span>'
                 '<span class="call-path-role call-path-role-intermediate">Shared/intermediate logic</span>'
                 '<span class="call-path-role call-path-role-changed">Changed source location</span>'
+                '<span class="call-path-topology-key call-path-topology-key-fork">Fork</span>'
+                '<span class="call-path-topology-key call-path-topology-key-merge">Merge</span>'
                 "</div>",
+                '<output class="call-path-layout-status" data-call-path-layout-status '
+                'aria-live="polite">Flow layout · layers read left to right</output>',
+                '<p class="call-path-gesture-hint">Drag to pan · Ctrl/⌘ + wheel to zoom · '
+                'arrow keys pan when the canvas is focused</p>',
                 '<div class="call-path-canvas" data-call-path-viewport>',
-                f'<svg class="call-path-svg" viewBox="0 0 '
-                f'{min(max(width, 1050), 1400)} {min(max(height, 300), 620)}" '
+                f'<svg class="call-path-svg" width="{width}" height="{height}" '
+                f'viewBox="0 0 {width} {height}" '
                 f'data-graph-width="{width}" data-graph-height="{height}" '
-                'data-call-path-svg role="img" aria-label="Condensed many-to-many static call graph">'
+                f'data-call-path-svg role="group" tabindex="0" '
+                f'aria-labelledby="{html.escape(graph_title_id)} {html.escape(graph_desc_id)}">'
+                f'<title id="{html.escape(graph_title_id)}">Condensed static call graph</title>'
+                f'<desc id="{html.escape(graph_desc_id)}">Selectable layouts preserve the same '
+                'static reachability nodes and directed connections.</desc>'
                 f'<defs><marker id="{html.escape(marker_id)}" markerWidth="8" markerHeight="8" '
                 'refX="7" refY="3" orient="auto" markerUnits="strokeWidth">'
                 '<path d="M0,0 L0,6 L7,3 z" class="call-path-arrow"></path></marker></defs>'
-                '<g data-call-path-stage>',
+                '<g data-call-path-stage><g data-call-path-clusters></g>',
             ]
         )
         for source_id, target_id in sorted(edges):
@@ -596,28 +650,58 @@ class HtmlFormatter(BaseFormatter):
                 extra_classes.append("call-path-node-merge")
             classes = " ".join(extra_classes)
             shared_text = self._path_membership(node.path_indexes, path_count)
-            branch_text = ""
+            topology_parts = []
             if len(node.outgoing) > 1:
-                branch_text = f" · {len(node.outgoing)} branches"
-            elif len(node.incoming) > 1:
-                branch_text = f" · {len(node.incoming)} incoming"
+                topology_parts.append(f"{len(node.outgoing)} branches")
+            if len(node.incoming) > 1:
+                topology_parts.append(f"{len(node.incoming)} incoming")
+            topology_text = " · ".join(topology_parts)
+            membership_text = shared_text
+            if topology_text:
+                membership_text = f"{shared_text} · {topology_text}"
             node_id = html.escape(node.node_id)
+            file_label = Path(location.display_path).name
+            search_text = f"{location.function_name} {location.display_path}"
+            aria_label = (
+                f"{location.role_label}: {location.display_name}; qualified symbol "
+                f"{location.function_name}; {location.display_path}:{location.line_number}; "
+                f"{membership_text}"
+            )
+            topology_markers = ""
+            if len(node.outgoing) > 1:
+                topology_markers += (
+                    f'<circle class="call-path-topology-fork" '
+                    f'cx="{_CALL_PATH_NODE_WIDTH - 14}" cy="14" r="5"></circle>'
+                )
+            if len(node.incoming) > 1:
+                merge_x = _CALL_PATH_NODE_WIDTH - 35
+                topology_markers += (
+                    f'<rect class="call-path-topology-merge" x="{merge_x}" y="9" '
+                    f'width="10" height="10" transform="rotate(45 '
+                    f'{merge_x + 5} 14)"></rect>'
+                )
             lines.append(
                 f'<g class="call-path-node call-path-node-{location.role} {classes}" '
-                f'data-call-path-node="{node_id}" role="button" tabindex="0" '
-                f'aria-label="{html.escape(location.role_label + ": " + location.label)}">'
-                f'<title>{html.escape(location.label + "; " + shared_text)}</title>'
-                f'<rect x="{node.x}" y="{node.y}" width="{_CALL_PATH_NODE_WIDTH}" '
+                f'data-call-path-node="{node_id}" data-call-path-layer="{node.layer}" '
+                f'data-call-path-order="{node.order}" '
+                f'data-call-path-file="{html.escape(location.file_path)}" '
+                f'data-call-path-file-label="{html.escape(location.display_path)}" '
+                f'data-call-path-search-text="{html.escape(search_text)}" '
+                f'transform="translate({node.x} {node.y})" role="button" tabindex="0" '
+                f'aria-pressed="false" aria-label="{html.escape(aria_label)}">'
+                f'<title>{html.escape(location.label + "; " + membership_text)}</title>'
+                f'<rect x="0" y="0" width="{_CALL_PATH_NODE_WIDTH}" '
                 f'height="{_CALL_PATH_NODE_HEIGHT}" rx="8"></rect>'
-                f'<text class="call-path-node-role" x="{node.x + 12}" y="{node.y + 20}">'
+                f"{topology_markers}"
+                '<text class="call-path-node-role" x="12" y="20">'
                 f'{html.escape(location.role_label)}</text>'
-                f'<text class="call-path-node-label" x="{node.x + 12}" y="{node.y + 43}">'
-                f'{html.escape(self._svg_text(location.function_name, 37))}</text>'
-                f'<text class="call-path-node-meta" x="{node.x + 12}" y="{node.y + 66}">'
-                f'{html.escape(self._svg_text(location.display_path + ":" + str(location.line_number), 36))}'
+                '<text class="call-path-node-label" x="12" y="45">'
+                f'{html.escape(self._svg_text(location.display_name, 22))}</text>'
+                '<text class="call-path-node-meta" x="12" y="67">'
+                f'{html.escape(self._svg_text(file_label + ":" + str(location.line_number), 28))}'
                 "</text>"
-                f'<text class="call-path-node-meta" x="{node.x + 12}" y="{node.y + 86}">'
-                f'{html.escape(self._svg_text(shared_text + branch_text, 36))}</text></g>'
+                '<text class="call-path-node-meta" x="12" y="88">'
+                f'{html.escape(self._svg_text(membership_text, 31))}</text></g>'
             )
         lines.append("</g>")
         lines.append("</svg>")
@@ -654,15 +738,23 @@ class HtmlFormatter(BaseFormatter):
         for node in nodes:
             location = node.location
             incoming = ", ".join(
-                node_by_id[item].location.function_name for item in sorted(node.incoming)
+                f"{node_by_id[item].location.display_name} "
+                f"({node_by_id[item].location.display_path}:"
+                f"{node_by_id[item].location.line_number})"
+                for item in sorted(node.incoming)
             ) or "none"
             outgoing = ", ".join(
-                node_by_id[item].location.function_name for item in sorted(node.outgoing)
+                f"{node_by_id[item].location.display_name} "
+                f"({node_by_id[item].location.display_path}:"
+                f"{node_by_id[item].location.line_number})"
+                for item in sorted(node.outgoing)
             ) or "none"
             lines.append(
                 f'<div data-call-path-detail="{html.escape(node.node_id)}" hidden>'
                 f'<h4>{html.escape(location.role_label)}: '
-                f'{html.escape(location.function_name)}</h4>'
+                f'{html.escape(location.display_name)}</h4>'
+                f'<span class="sr-only">Qualified symbol: '
+                f'{html.escape(location.function_name)}.</span>'
                 f'<p><code>{html.escape(location.display_path)}:{location.line_number}'
                 f'{("-" + str(location.end_line_number)) if location.end_line_number else ""}'
                 f"</code> · {html.escape(self._path_membership(node.path_indexes, path_count))}; "
@@ -679,14 +771,16 @@ class HtmlFormatter(BaseFormatter):
     def _theme_options() -> str:
         """Render the allow-listed visual themes for the standalone report."""
         return "".join(
-            f'<option value="{theme_id}">{html.escape(label)}</option>'
+            f'<option value="{theme_id}"'
+            f'{" selected" if theme_id == _DEFAULT_HTML_THEME else ""}>'
+            f"{html.escape(label)}</option>"
             for theme_id, label in _HTML_THEMES
         )
 
     def _get_html_template(self) -> str:
         """Get the standalone HTML shell, theme system, and interactions."""
         template = """<!DOCTYPE html>
-<html lang="en" data-theme="harbor">
+<html lang="en" data-theme="{DEFAULT_THEME}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -695,6 +789,7 @@ class HtmlFormatter(BaseFormatter):
     <script>
     (function () {
         "use strict";
+        document.documentElement.classList.add("js");
         try {
             var themeMeta = document.querySelector('meta[name="report-theme-ids"]');
             var allowed = themeMeta ? themeMeta.content.split(",") : [];
@@ -1475,38 +1570,56 @@ class HtmlFormatter(BaseFormatter):
         .call-path-toolbar h4 { margin: 0; font-size: 1.05rem; }
         .call-path-semantics { margin: 4px 0 0; color: var(--muted); font-size: 0.86rem; }
         .call-path-toolbar label { display: grid; gap: 4px; color: var(--muted); font-size: 0.76rem; font-weight: 750; letter-spacing: 0.04em; }
-        .call-path-toolbar input { min-width: min(260px, 100%); min-height: 40px; padding: 7px 10px; color: var(--text); background: var(--surface-raised); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); font: inherit; }
+        .call-path-toolbar input, .call-path-toolbar select { min-width: min(220px, 100%); min-height: 40px; padding: 7px 10px; color: var(--text); background: var(--surface-raised); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); font: inherit; }
         button { min-height: 38px; padding: 6px 11px; color: var(--text); background: var(--surface-raised); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); font: 700 0.84rem var(--font-ui); cursor: pointer; }
         button:hover { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
         .call-path-zoom-controls { display: flex; align-items: center; gap: 5px; margin-left: auto; }
         .call-path-zoom-controls span { min-width: 48px; color: var(--muted); font: 0.8rem var(--font-code); text-align: center; }
+        .call-path-touch-pan [data-call-path-touch-pan] { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
         .call-path-summary { margin-top: 13px; padding: 10px 12px; color: var(--info); background: var(--info-soft); border-left: 4px solid var(--info); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+        .call-path-layout-status { display: block; margin: 10px 0 2px; color: var(--heading); font: 750 0.82rem var(--font-ui); }
+        .call-path-gesture-hint { margin: 0 0 9px; color: var(--muted); font-size: 0.76rem; }
         .call-path-branch-summary { margin-left: 8px; color: var(--warning); font-weight: 800; }
         .call-path-legend { display: flex; gap: 7px; flex-wrap: wrap; margin: 13px 0 9px; }
         .call-path-role { display: inline-flex; align-items: center; padding: 3px 8px; border-radius: 999px; font-size: 0.73rem; font-weight: 800; }
         .call-path-role-endpoint { color: var(--graph-endpoint-fg); background: var(--graph-endpoint-bg); }
         .call-path-role-intermediate { color: var(--graph-intermediate-fg); background: var(--graph-intermediate-bg); }
         .call-path-role-changed { color: var(--graph-changed-fg); background: var(--graph-changed-bg); }
-        .call-path-node-endpoint rect { fill: var(--graph-endpoint-bg); }
-        .call-path-node-intermediate rect { fill: var(--graph-intermediate-bg); }
-        .call-path-node-changed rect { fill: var(--graph-changed-bg); }
+        .call-path-node-endpoint > rect:first-of-type { fill: var(--graph-endpoint-bg); }
+        .call-path-node-intermediate > rect:first-of-type { fill: var(--graph-intermediate-bg); }
+        .call-path-node-changed > rect:first-of-type { fill: var(--graph-changed-bg); }
         .call-path-node-endpoint .call-path-node-role { fill: var(--graph-endpoint-fg); }
         .call-path-node-intermediate .call-path-node-role { fill: var(--graph-intermediate-fg); }
         .call-path-node-changed .call-path-node-role { fill: var(--graph-changed-fg); }
-        .call-path-canvas { width: 100%; overflow: hidden; background: var(--graph-bg); border: 1px solid var(--border); border-radius: var(--radius-sm); }
-        .call-path-svg { display: block; width: 100%; height: 620px; min-height: 300px; max-height: 70vh; padding: 5px; background: var(--graph-bg); cursor: grab; touch-action: pan-y; user-select: none; }
+        .call-path-canvas { width: 100%; overflow: auto; background: var(--graph-bg); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+        .call-path-svg { display: block; width: auto; min-width: 100%; height: auto; min-height: 300px; padding: 5px; background: var(--graph-bg); cursor: grab; touch-action: pan-y; user-select: none; }
+        html.js .call-path-canvas { overflow: hidden; }
+        html.js .call-path-svg { width: 100%; height: 620px; max-height: 70vh; }
+        .call-path-view.call-path-touch-pan .call-path-svg { touch-action: none; }
         .call-path-svg.call-path-panning { cursor: grabbing; }
-        .call-path-edge { fill: none; stroke: var(--graph-edge); stroke-width: 2; transition: opacity 150ms ease; }
+        .call-path-edge { fill: none; stroke: var(--graph-edge); stroke-width: 2; transition: opacity 150ms ease, stroke-width 150ms ease; }
         .call-path-arrow { fill: var(--graph-edge); }
         .call-path-edge-muted { opacity: 0.12; }
+        .call-path-edge-selected { stroke: var(--graph-selected); stroke-width: 3.5; opacity: 1; }
+        .call-path-cluster rect { fill: var(--surface-raised); fill-opacity: 0.42; stroke: var(--border-strong); stroke-width: 1.5; stroke-dasharray: 7 5; }
+        .call-path-cluster text { fill: var(--graph-node-text); font: 750 13px var(--font-code); }
         .call-path-node { cursor: pointer; }
-        .call-path-node rect { stroke: var(--border-strong); stroke-width: 1.5; }
-        .call-path-node-fork rect { stroke: var(--graph-fork); stroke-width: 2.5; }
-        .call-path-node-merge rect { stroke: var(--graph-merge); stroke-width: 2.5; }
-        .call-path-node:hover rect, .call-path-node-selected rect { stroke: var(--graph-selected); stroke-width: 3; }
+        .call-path-node > rect:first-of-type { stroke: var(--border-strong); stroke-width: 1.5; }
+        .call-path-node-fork > rect:first-of-type { stroke: var(--graph-fork); stroke-width: 2.5; }
+        .call-path-node-merge > rect:first-of-type { stroke: var(--graph-merge); stroke-width: 2.5; }
+        .call-path-node:hover > rect:first-of-type,
+        .call-path-node-selected > rect:first-of-type { stroke: var(--graph-selected); stroke-width: 3; }
         .call-path-node-role { font-size: 13px; font-weight: 800; }
         .call-path-node-label { fill: var(--graph-node-text); font: 700 14px var(--font-code); }
         .call-path-node-meta { fill: var(--graph-node-text); font: 11px var(--font-code); opacity: 0.78; }
+        .call-path-topology-fork { fill: var(--graph-fork); }
+        .call-path-topology-merge { fill: var(--graph-merge); stroke: none; }
+        .call-path-topology-key { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 0.74rem; font-weight: 750; }
+        .call-path-topology-key::before { display: inline-block; width: 10px; height: 10px; background: var(--topology-color); content: ""; }
+        .call-path-topology-key-fork { --topology-color: var(--graph-fork); }
+        .call-path-topology-key-fork::before { border-radius: 50%; }
+        .call-path-topology-key-merge { --topology-color: var(--graph-merge); }
+        .call-path-topology-key-merge::before { transform: rotate(45deg); }
         .call-path-node-muted { opacity: 0.3; }
 
         .call-tree-panel { margin-top: 13px; overflow: hidden; background: var(--surface-raised); border: 1px solid var(--border); border-radius: var(--radius-sm); }
@@ -1541,10 +1654,10 @@ class HtmlFormatter(BaseFormatter):
             .summary { grid-template-columns: 1fr; }
             .call-path-toolbar { align-items: stretch; }
             .call-path-toolbar > * { width: 100%; }
-            .call-path-toolbar input { width: 100%; min-width: 0; }
+            .call-path-toolbar input, .call-path-toolbar select { width: 100%; min-width: 0; }
             .call-path-zoom-controls { width: 100%; margin-left: 0; }
             .call-path-zoom-controls button { flex: 1; }
-            .call-path-svg { height: 440px; }
+            html.js .call-path-svg { height: 440px; }
             .call-tree-children { margin-left: 12px; }
             .call-tree-summary, .call-tree-leaf, .call-tree-shared-ref { align-items: flex-start; flex-wrap: wrap; }
             .call-tree-summary small, .call-tree-leaf small, .call-tree-shared-ref small { width: 100%; margin-left: 21px; }
@@ -1590,7 +1703,7 @@ class HtmlFormatter(BaseFormatter):
                 <select id="report-theme" data-theme-select aria-describedby="theme-status">
                     {THEME_OPTIONS}
                 </select>
-                <output class="theme-status" id="theme-status" data-theme-status aria-live="polite">1 / 10</output>
+                <output class="theme-status" id="theme-status" data-theme-status aria-live="polite">{DEFAULT_THEME_POSITION} / 10</output>
             </div>
         </div>
     </header>
@@ -1608,16 +1721,16 @@ class HtmlFormatter(BaseFormatter):
             var allowedThemes = themeOptions.map(function (option) {
                 return option.value;
             });
-            var activeTheme = document.documentElement.getAttribute("data-theme") || "harbor";
+            var activeTheme = document.documentElement.getAttribute("data-theme") || "{DEFAULT_THEME}";
             if (allowedThemes.indexOf(activeTheme) === -1) {
-                activeTheme = "harbor";
+                activeTheme = "{DEFAULT_THEME}";
             }
 
             function applyTheme(themeId, persist) {
                 var index = allowedThemes.indexOf(themeId);
                 if (index === -1) {
-                    index = 0;
-                    themeId = allowedThemes[0];
+                    themeId = "{DEFAULT_THEME}";
+                    index = allowedThemes.indexOf(themeId);
                 }
                 document.documentElement.setAttribute("data-theme", themeId);
                 themeSelect.value = themeId;
@@ -1689,18 +1802,325 @@ class HtmlFormatter(BaseFormatter):
             var noMatch = view.querySelector("[data-call-path-no-match]");
             var svg = view.querySelector("[data-call-path-svg]");
             var stage = view.querySelector("[data-call-path-stage]");
+            var graphNodes = svg ? Array.from(svg.querySelectorAll("g[data-call-path-node]")) : [];
+            var clusterLayer = view.querySelector("[data-call-path-clusters]");
+            var layoutSelect = view.querySelector("[data-call-path-layout]");
+            var layoutStatus = view.querySelector("[data-call-path-layout-status]");
             var zoomLabel = view.querySelector("[data-call-path-zoom-label]");
             var zoomIn = view.querySelector("[data-call-path-zoom-in]");
             var zoomOut = view.querySelector("[data-call-path-zoom-out]");
             var fit = view.querySelector("[data-call-path-fit]");
+            var touchPan = view.querySelector("[data-call-path-touch-pan]");
             var treeBranches = Array.from(view.querySelectorAll(".call-tree-node"));
             var treeExpand = view.querySelector("[data-call-tree-expand]");
             var treeCollapse = view.querySelector("[data-call-tree-collapse]");
             var graphScale = 1;
             var graphX = 0;
             var graphY = 0;
-            var graphWidth = svg ? Number(svg.getAttribute("data-graph-width")) : 920;
+            var graphWidth = svg ? Number(svg.getAttribute("data-graph-width")) : 1050;
             var graphHeight = svg ? Number(svg.getAttribute("data-graph-height")) : 300;
+            var currentLayout = "flow-lr";
+            var currentPositions = new Map();
+            var nodeWidth = 220;
+            var nodeHeight = 104;
+            var svgNamespace = "http://www.w3.org/2000/svg";
+            var printGraphView = null;
+
+            window.addEventListener("beforeprint", function () {
+                printGraphView = { scale: graphScale, x: graphX, y: graphY };
+                fitGraph();
+            });
+            window.addEventListener("afterprint", function () {
+                if (printGraphView) {
+                    graphScale = printGraphView.scale;
+                    graphX = printGraphView.x;
+                    graphY = printGraphView.y;
+                    updateGraphTransform();
+                    printGraphView = null;
+                }
+            });
+
+            function sortedGraphNodes() {
+                return graphNodes.slice().sort(function (left, right) {
+                    var layerDifference = Number(left.dataset.callPathLayer) -
+                        Number(right.dataset.callPathLayer);
+                    if (layerDifference !== 0) {
+                        return layerDifference;
+                    }
+                    var orderDifference = Number(left.dataset.callPathOrder) -
+                        Number(right.dataset.callPathOrder);
+                    if (orderDifference !== 0) {
+                        return orderDifference;
+                    }
+                    return left.dataset.callPathNode.localeCompare(right.dataset.callPathNode);
+                });
+            }
+
+            function layerGroups() {
+                var groups = new Map();
+                sortedGraphNodes().forEach(function (node) {
+                    var layer = Number(node.dataset.callPathLayer);
+                    if (!groups.has(layer)) {
+                        groups.set(layer, []);
+                    }
+                    groups.get(layer).push(node);
+                });
+                return Array.from(groups.entries()).sort(function (left, right) {
+                    return left[0] - right[0];
+                });
+            }
+
+            function rankedLayout(vertical) {
+                var groups = layerGroups();
+                var positions = new Map();
+                var maxMembers = groups.reduce(function (maximum, entry) {
+                    return Math.max(maximum, entry[1].length);
+                }, 1);
+                var layerStep = vertical ? 160 : 280;
+                var memberStep = vertical ? 250 : 132;
+                groups.forEach(function (entry, layerIndex) {
+                    var members = entry[1];
+                    var offset = (maxMembers - members.length) * memberStep / 2;
+                    members.forEach(function (node, memberIndex) {
+                        var primary = 52 + layerIndex * layerStep;
+                        var secondary = 52 + offset + memberIndex * memberStep;
+                        positions.set(node.dataset.callPathNode, vertical ?
+                            { x: secondary, y: primary } : { x: primary, y: secondary });
+                    });
+                });
+                return {
+                    positions: positions,
+                    width: vertical ? 104 + maxMembers * memberStep :
+                        104 + Math.max(groups.length, 1) * layerStep,
+                    height: vertical ? 104 + Math.max(groups.length, 1) * layerStep :
+                        104 + maxMembers * memberStep,
+                    clusters: []
+                };
+            }
+
+            function radialLayout() {
+                var groups = layerGroups();
+                var positions = new Map();
+                var diagonal = Math.hypot(nodeWidth, nodeHeight);
+                var radii = [];
+                var previousRadius = 0;
+                groups.forEach(function (entry, index) {
+                    var count = entry[1].length;
+                    if (index === 0 && count === 1) {
+                        radii.push(0);
+                        return;
+                    }
+                    var collisionRadius = count > 1 ?
+                        (diagonal + 54) / (2 * Math.sin(Math.PI / count)) : 0;
+                    previousRadius = Math.max(previousRadius + diagonal + 54, collisionRadius);
+                    radii.push(previousRadius);
+                });
+                var maxRadius = radii.reduce(function (maximum, radius) {
+                    return Math.max(maximum, radius);
+                }, 0);
+                var side = Math.max(720, 2 * (maxRadius + diagonal / 2 + 72));
+                var center = side / 2;
+                groups.forEach(function (entry, groupIndex) {
+                    var members = entry[1];
+                    var radius = radii[groupIndex];
+                    members.forEach(function (node, memberIndex) {
+                        var angle = -Math.PI / 2 + 2 * Math.PI * memberIndex / members.length;
+                        positions.set(node.dataset.callPathNode, {
+                            x: center + radius * Math.cos(angle) - nodeWidth / 2,
+                            y: center + radius * Math.sin(angle) - nodeHeight / 2
+                        });
+                    });
+                });
+                return { positions: positions, width: side, height: side, clusters: [] };
+            }
+
+            function fileGroupLayout() {
+                var grouped = new Map();
+                sortedGraphNodes().forEach(function (node) {
+                    var key = node.dataset.callPathFile || "unknown";
+                    if (!grouped.has(key)) {
+                        grouped.set(key, {
+                            label: node.dataset.callPathFileLabel || "unknown",
+                            nodes: []
+                        });
+                    }
+                    grouped.get(key).nodes.push(node);
+                });
+                var groups = Array.from(grouped.entries()).sort(function (left, right) {
+                    return left[1].label.localeCompare(right[1].label) ||
+                        left[0].localeCompare(right[0]);
+                });
+                var positions = new Map();
+                var clusters = [];
+                var cursorX = 44;
+                var cursorY = 44;
+                var rowHeight = 0;
+                var maximumX = 0;
+                var targetWidth = 1560;
+                groups.forEach(function (entry) {
+                    var group = entry[1];
+                    var columns = Math.ceil(Math.sqrt(group.nodes.length));
+                    var rows = Math.ceil(group.nodes.length / columns);
+                    var clusterWidth = 48 + columns * nodeWidth + (columns - 1) * 28;
+                    var clusterHeight = 76 + rows * nodeHeight + (rows - 1) * 28;
+                    if (cursorX > 44 && cursorX + clusterWidth > targetWidth) {
+                        cursorX = 44;
+                        cursorY += rowHeight + 38;
+                        rowHeight = 0;
+                    }
+                    clusters.push({
+                        x: cursorX,
+                        y: cursorY,
+                        width: clusterWidth,
+                        height: clusterHeight,
+                        label: group.label
+                    });
+                    group.nodes.forEach(function (node, index) {
+                        var row = Math.floor(index / columns);
+                        var offset = index % columns;
+                        var column = row % 2 === 0 ? offset : columns - 1 - offset;
+                        positions.set(node.dataset.callPathNode, {
+                            x: cursorX + 24 + column * (nodeWidth + 28),
+                            y: cursorY + 48 + row * (nodeHeight + 28)
+                        });
+                    });
+                    cursorX += clusterWidth + 38;
+                    rowHeight = Math.max(rowHeight, clusterHeight);
+                    maximumX = Math.max(maximumX, cursorX);
+                });
+                return {
+                    positions: positions,
+                    width: Math.max(720, maximumX + 6),
+                    height: Math.max(360, cursorY + rowHeight + 44),
+                    clusters: clusters
+                };
+            }
+
+            function renderClusters(clusters) {
+                if (!clusterLayer) {
+                    return;
+                }
+                clusterLayer.replaceChildren();
+                clusters.forEach(function (cluster) {
+                    var group = document.createElementNS(svgNamespace, "g");
+                    var rectangle = document.createElementNS(svgNamespace, "rect");
+                    var label = document.createElementNS(svgNamespace, "text");
+                    group.setAttribute("class", "call-path-cluster");
+                    rectangle.setAttribute("x", cluster.x);
+                    rectangle.setAttribute("y", cluster.y);
+                    rectangle.setAttribute("width", cluster.width);
+                    rectangle.setAttribute("height", cluster.height);
+                    rectangle.setAttribute("rx", "14");
+                    label.setAttribute("x", cluster.x + 18);
+                    label.setAttribute("y", cluster.y + 27);
+                    label.textContent = cluster.label;
+                    group.appendChild(rectangle);
+                    group.appendChild(label);
+                    clusterLayer.appendChild(group);
+                });
+            }
+
+            function boundaryPoint(from, to) {
+                var dx = to.x - from.x;
+                var dy = to.y - from.y;
+                if (dx === 0 && dy === 0) {
+                    return { x: from.x, y: from.y };
+                }
+                var denominator = Math.max(
+                    Math.abs(dx) / (nodeWidth / 2),
+                    Math.abs(dy) / (nodeHeight / 2)
+                );
+                return {
+                    x: from.x + dx / denominator,
+                    y: from.y + dy / denominator
+                };
+            }
+
+            function routeEdges(layoutId) {
+                edges.forEach(function (edge, index) {
+                    var sourcePosition = currentPositions.get(
+                        edge.getAttribute("data-call-path-edge-source")
+                    );
+                    var targetPosition = currentPositions.get(
+                        edge.getAttribute("data-call-path-edge-target")
+                    );
+                    if (!sourcePosition || !targetPosition) {
+                        return;
+                    }
+                    var sourceCenter = {
+                        x: sourcePosition.x + nodeWidth / 2,
+                        y: sourcePosition.y + nodeHeight / 2
+                    };
+                    var targetCenter = {
+                        x: targetPosition.x + nodeWidth / 2,
+                        y: targetPosition.y + nodeHeight / 2
+                    };
+                    var start = boundaryPoint(sourceCenter, targetCenter);
+                    var end = boundaryPoint(targetCenter, sourceCenter);
+                    var path;
+                    if (layoutId === "flow-lr") {
+                        var middleX = (start.x + end.x) / 2;
+                        path = "M " + start.x + " " + start.y + " C " + middleX + " " +
+                            start.y + ", " + middleX + " " + end.y + ", " + end.x + " " + end.y;
+                    } else if (layoutId === "flow-tb") {
+                        var middleY = (start.y + end.y) / 2;
+                        path = "M " + start.x + " " + start.y + " C " + start.x + " " +
+                            middleY + ", " + end.x + " " + middleY + ", " + end.x + " " + end.y;
+                    } else {
+                        var dx = end.x - start.x;
+                        var dy = end.y - start.y;
+                        var length = Math.max(Math.hypot(dx, dy), 1);
+                        var bend = ((index % 3) - 1) * 24;
+                        var controlX = (start.x + end.x) / 2 - dy / length * bend;
+                        var controlY = (start.y + end.y) / 2 + dx / length * bend;
+                        path = "M " + start.x + " " + start.y + " Q " + controlX + " " +
+                            controlY + ", " + end.x + " " + end.y;
+                    }
+                    edge.setAttribute("d", path);
+                });
+            }
+
+            function applyLayout(layoutId) {
+                var result;
+                if (layoutId === "flow-tb") {
+                    result = rankedLayout(true);
+                } else if (layoutId === "radial") {
+                    result = radialLayout();
+                } else if (layoutId === "files") {
+                    result = fileGroupLayout();
+                } else {
+                    layoutId = "flow-lr";
+                    result = rankedLayout(false);
+                }
+                currentLayout = layoutId;
+                currentPositions = result.positions;
+                graphWidth = result.width;
+                graphHeight = result.height;
+                graphNodes.forEach(function (node) {
+                    var position = currentPositions.get(node.dataset.callPathNode);
+                    if (position) {
+                        node.setAttribute("transform", "translate(" + position.x + " " + position.y + ")");
+                    }
+                });
+                if (svg) {
+                    svg.setAttribute("data-graph-width", graphWidth);
+                    svg.setAttribute("data-graph-height", graphHeight);
+                }
+                renderClusters(result.clusters);
+                routeEdges(layoutId);
+                var descriptions = {
+                    "flow-lr": "Flow layout · layers read left to right",
+                    "flow-tb": "Top-down layout · layers read from top to bottom",
+                    "radial": "Radial layout · shared layers arranged in rings",
+                    "files": "File groups layout · nodes grouped by source filename"
+                };
+                if (layoutStatus) {
+                    layoutStatus.textContent = descriptions[layoutId] + " · " +
+                        graphNodes.length + " nodes · " + edges.length + " connections";
+                }
+                view.setAttribute("data-call-path-layout-active", layoutId);
+                fitGraph();
+            }
 
             function updateGraphTransform() {
                 if (stage) {
@@ -1714,23 +2134,39 @@ class HtmlFormatter(BaseFormatter):
                 }
             }
 
+            function syncViewportCoordinates() {
+                if (!svg) {
+                    return;
+                }
+                var rectangle = svg.getBoundingClientRect();
+                var viewportWidth = Math.max(320, Math.round(rectangle.width));
+                var viewportHeight = Math.max(300, Math.round(rectangle.height));
+                svg.setAttribute(
+                    "viewBox",
+                    "0 0 " + viewportWidth + " " + viewportHeight
+                );
+            }
+
             function viewBoxPoint(event) {
                 if (!svg) {
                     return { x: 0, y: 0 };
                 }
-                var rect = svg.getBoundingClientRect();
-                var viewBox = svg.viewBox.baseVal;
-                return {
-                    x: (event.clientX - rect.left) * viewBox.width / rect.width,
-                    y: (event.clientY - rect.top) * viewBox.height / rect.height
-                };
+                var matrix = svg.getScreenCTM();
+                if (!matrix) {
+                    return { x: 0, y: 0 };
+                }
+                var point = svg.createSVGPoint();
+                point.x = event.clientX;
+                point.y = event.clientY;
+                var transformed = point.matrixTransform(matrix.inverse());
+                return { x: transformed.x, y: transformed.y };
             }
 
             function zoomAt(factor, point) {
                 if (!svg) {
                     return;
                 }
-                var nextScale = Math.max(0.35, Math.min(3, graphScale * factor));
+                var nextScale = Math.max(0.01, Math.min(4, graphScale * factor));
                 var contentX = (point.x - graphX) / graphScale;
                 var contentY = (point.y - graphY) / graphScale;
                 graphScale = nextScale;
@@ -1745,8 +2181,12 @@ class HtmlFormatter(BaseFormatter):
                 }
                 var viewBox = svg.viewBox.baseVal;
                 graphScale = Math.max(
-                    0.35,
-                    Math.min(1, viewBox.width / graphWidth, viewBox.height / graphHeight)
+                    0.01,
+                    Math.min(
+                        1,
+                        (viewBox.width - 48) / graphWidth,
+                        (viewBox.height - 48) / graphHeight
+                    )
                 );
                 graphX = (viewBox.width - graphWidth * graphScale) / 2;
                 graphY = (viewBox.height - graphHeight * graphScale) / 2;
@@ -1754,17 +2194,7 @@ class HtmlFormatter(BaseFormatter):
             }
 
             function initialGraphView() {
-                if (!svg) {
-                    return;
-                }
-                var viewBox = svg.viewBox.baseVal;
-                graphScale = Math.max(
-                    0.65,
-                    Math.min(1, viewBox.width / graphWidth, viewBox.height / graphHeight)
-                );
-                graphX = 24;
-                graphY = (viewBox.height - graphHeight * graphScale) / 2;
-                updateGraphTransform();
+                fitGraph();
             }
 
             function nodeMatches(nodeId, query) {
@@ -1775,7 +2205,8 @@ class HtmlFormatter(BaseFormatter):
                     return item.getAttribute("data-call-path-detail") === nodeId;
                 });
                 var nodeText = matchingNodes.map(function (node) {
-                    return node.textContent || "";
+                    return (node.textContent || "") + " " +
+                        (node.getAttribute("data-call-path-search-text") || "");
                 }).join(" ");
                 var detailText = detail ? detail.textContent || "" : "";
                 return (nodeText + " " + detailText).toLowerCase().indexOf(query) !== -1;
@@ -1787,6 +2218,17 @@ class HtmlFormatter(BaseFormatter):
                         "call-path-node-selected",
                         node.getAttribute("data-call-path-node") === nodeId
                     );
+                });
+                graphNodes.forEach(function (node) {
+                    node.setAttribute(
+                        "aria-pressed",
+                        node.getAttribute("data-call-path-node") === nodeId ? "true" : "false"
+                    );
+                });
+                edges.forEach(function (edge) {
+                    var incident = edge.getAttribute("data-call-path-edge-source") === nodeId ||
+                        edge.getAttribute("data-call-path-edge-target") === nodeId;
+                    edge.classList.toggle("call-path-edge-selected", Boolean(nodeId) && incident);
                 });
                 details.forEach(function (detail) {
                     var selected = detail.getAttribute("data-call-path-detail") === nodeId;
@@ -1817,7 +2259,7 @@ class HtmlFormatter(BaseFormatter):
                     var target = edge.getAttribute("data-call-path-edge-target");
                     edge.classList.toggle(
                         "call-path-edge-muted",
-                        !matchingIds.has(source) || !matchingIds.has(target)
+                        !matchingIds.has(source) && !matchingIds.has(target)
                     );
                 });
                 if (noMatch) {
@@ -1841,6 +2283,11 @@ class HtmlFormatter(BaseFormatter):
             if (search) {
                 search.addEventListener("input", filterGraph);
             }
+            if (layoutSelect) {
+                layoutSelect.addEventListener("change", function () {
+                    applyLayout(layoutSelect.value);
+                });
+            }
             if (zoomIn) {
                 zoomIn.addEventListener("click", function () {
                     if (svg) {
@@ -1858,6 +2305,14 @@ class HtmlFormatter(BaseFormatter):
             if (fit) {
                 fit.addEventListener("click", fitGraph);
             }
+            if (touchPan) {
+                touchPan.addEventListener("click", function () {
+                    var enabled = !view.classList.contains("call-path-touch-pan");
+                    view.classList.toggle("call-path-touch-pan", enabled);
+                    touchPan.setAttribute("aria-pressed", enabled ? "true" : "false");
+                    touchPan.textContent = enabled ? "Touch pan on" : "Touch pan";
+                });
+            }
             if (svg && stage) {
                 var dragging = false;
                 var lastPoint = null;
@@ -1869,7 +2324,7 @@ class HtmlFormatter(BaseFormatter):
                     zoomAt(event.deltaY < 0 ? 1.15 : 0.87, viewBoxPoint(event));
                 }, { passive: false });
                 svg.addEventListener("pointerdown", function (event) {
-                    if (event.button !== 0) {
+                    if (event.button !== 0 || event.target.closest("[data-call-path-node]")) {
                         return;
                     }
                     dragging = true;
@@ -1897,6 +2352,43 @@ class HtmlFormatter(BaseFormatter):
                     dragging = false;
                     lastPoint = null;
                     svg.classList.remove("call-path-panning");
+                });
+                svg.addEventListener("keydown", function (event) {
+                    if (event.target !== svg) {
+                        return;
+                    }
+                    var panStep = 42;
+                    if (event.key === "ArrowLeft") {
+                        graphX += panStep;
+                    } else if (event.key === "ArrowRight") {
+                        graphX -= panStep;
+                    } else if (event.key === "ArrowUp") {
+                        graphY += panStep;
+                    } else if (event.key === "ArrowDown") {
+                        graphY -= panStep;
+                    } else if (event.key === "+" || event.key === "=") {
+                        zoomAt(1.2, {
+                            x: svg.viewBox.baseVal.width / 2,
+                            y: svg.viewBox.baseVal.height / 2
+                        });
+                        event.preventDefault();
+                        return;
+                    } else if (event.key === "-" || event.key === "_") {
+                        zoomAt(0.8, {
+                            x: svg.viewBox.baseVal.width / 2,
+                            y: svg.viewBox.baseVal.height / 2
+                        });
+                        event.preventDefault();
+                        return;
+                    } else if (event.key === "0") {
+                        fitGraph();
+                        event.preventDefault();
+                        return;
+                    } else {
+                        return;
+                    }
+                    event.preventDefault();
+                    updateGraphTransform();
                 });
             }
             if (treeExpand) {
@@ -1928,10 +2420,21 @@ class HtmlFormatter(BaseFormatter):
                         noMatch.hidden = true;
                     }
                     selectNode(null);
-                    initialGraphView();
+                    applyLayout(currentLayout);
                 });
             }
-            initialGraphView();
+            syncViewportCoordinates();
+            if (layoutSelect) {
+                applyLayout(layoutSelect.value);
+            } else {
+                initialGraphView();
+            }
+            if (svg && "ResizeObserver" in window) {
+                new ResizeObserver(function () {
+                    syncViewportCoordinates();
+                    fitGraph();
+                }).observe(svg);
+            }
         });
     }());
     </script>
@@ -1939,10 +2442,17 @@ class HtmlFormatter(BaseFormatter):
 </html>
 """
         theme_ids = ",".join(theme_id for theme_id, _ in _HTML_THEMES)
+        default_position = next(
+            index
+            for index, (theme_id, _) in enumerate(_HTML_THEMES, 1)
+            if theme_id == _DEFAULT_HTML_THEME
+        )
         return (
             template.replace("{THEME_OPTIONS}", self._theme_options())
             .replace("{THEME_IDS}", theme_ids)
             .replace("{THEME_STORAGE_KEY}", _THEME_STORAGE_KEY)
+            .replace("{DEFAULT_THEME_POSITION}", str(default_position))
+            .replace("{DEFAULT_THEME}", _DEFAULT_HTML_THEME)
         )
 
     def _format_code_ref(

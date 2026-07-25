@@ -355,8 +355,22 @@ class TestHtmlFormatter:
         assert "1 static paths" in output
         assert "3 shared nodes" in output
         assert "endpoint handler → shared/intermediate logic" in output
-        assert "services.items.load_items" in output
-        assert "repository.fetch" in output
+        assert 'data-call-path-layout' in output
+        assert '<option value="flow-lr">Flow</option>' in output
+        assert '<option value="flow-tb">Top-down</option>' in output
+        assert '<option value="radial">Radial</option>' in output
+        assert '<option value="files">File groups</option>' in output
+        assert 'data-call-path-layer=' in output
+        assert 'data-call-path-file-label=' in output
+        assert '>get_items</text>' in output
+        assert '>load_items</text>' in output
+        assert '>fetch</text>' in output
+        assert '<strong>load_items</strong>' in output
+        assert '<strong>fetch</strong>' in output
+        assert '<h4>Static reachable frame: load_items</h4>' in output
+        assert '>services.items.load_items</text>' not in output
+        assert '<strong>services.items.load_items</strong>' not in output
+        assert '>repository.fetch</text>' not in output
         assert 'class="call-tree-panel"' in output
         assert '<details class="call-tree-panel">' in output  # collapsed by default
         assert 'data-call-tree-expand' in output
@@ -368,8 +382,55 @@ class TestHtmlFormatter:
         assert 'Show linear tracebacks (1 paths)' in output
         assert 'data-call-path-detail="affected-call-path-1-n2"' in output
         assert output.count("<text ") == output.count("</text>")
-        # The duplicate raw handler is normalized in the graph view.
-        assert output.count("routers.items.get_items") == 1
+        # The synthetic endpoint marker is replaced by the compact handler symbol.
+        assert ">[ENDPOINT] GET /items</text>" not in output
+        assert "function applyLayout(layoutId)" in output
+        assert "function radialLayout()" in output
+        assert "function fileGroupLayout()" in output
+
+    def test_html_deep_graph_is_scrollable_without_javascript_and_fully_fittable(self) -> None:
+        """Keep a 20-node chain available before enhancement and below legacy fit limits."""
+        handler = HandlerInfo(
+            name="route",
+            module="main",
+            file_path=Path("/app/main.py"),
+            line_number=3,
+        )
+        endpoint = Endpoint(path="/items", methods=[EndpointMethod.GET], handler=handler)
+        frames = [
+            CallStackFrame(
+                file_path="/app/main.py",
+                line_number=3,
+                function_name="main.route",
+            )
+        ]
+        frames.extend(
+            CallStackFrame(
+                file_path=f"/app/services/group_{index % 4}.py",
+                line_number=index + 10,
+                function_name=f"services.group_{index % 4}.step_{index}",
+            )
+            for index in range(1, 20)
+        )
+        affected = AffectedEndpoint(
+            endpoint=endpoint,
+            confidence=ConfidenceLevel.HIGH,
+            reason="Deep static chain",
+            call_stacks=[frames],
+        )
+        report = AnalysisReport(
+            app_path="/app",
+            diff_source="test.diff",
+            total_endpoints=1,
+            affected_endpoints=[affected],
+        )
+
+        output = HtmlFormatter().format(report)
+
+        assert 'width="5700" height="300" viewBox="0 0 5700 300"' in output
+        assert "var nextScale = Math.max(0.01" in output
+        assert "data-call-path-touch-pan" in output
+        assert "new ResizeObserver" in output
 
     def test_html_keeps_multiple_call_paths_separate(self) -> None:
         """Do not merge contextual paths that share a function or file."""
@@ -414,6 +475,8 @@ class TestHtmlFormatter:
         assert "3 shared nodes" in output
         assert "shared by all 2 paths" in output
         assert "call-path-node-fork" in output
+        assert "call-path-topology-key-fork" in output
+        assert "call-path-topology-key-merge" in output
         assert "Path 1 of 2" not in output
         assert "shared.py:8" in output
         assert "shared.py:19" in output
@@ -532,7 +595,7 @@ class TestHtmlFormatter:
         )
 
         output = HtmlFormatter().format(report)
-        theme_ids = re.findall(r'<option value="([a-z-]+)">', output)
+        theme_ids = re.findall(r'<option value="([a-z-]+)"(?: selected)?>', output)
 
         assert theme_ids == [
             "harbor",
@@ -546,7 +609,9 @@ class TestHtmlFormatter:
             "monochrome",
             "rose-quartz",
         ]
-        assert '<html lang="en" data-theme="harbor">' in output
+        assert '<html lang="en" data-theme="ember">' in output
+        assert '<option value="ember" selected>Ember</option>' in output
+        assert 'getAttribute("data-theme") || "ember"' in output
         assert 'data-theme-select' in output
         assert 'fastapi-endpoint-detector.theme.v1' in output
         assert output.count('html[data-theme="') == 10
