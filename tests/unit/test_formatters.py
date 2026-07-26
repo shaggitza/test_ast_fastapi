@@ -355,31 +355,31 @@ class TestHtmlFormatter:
         assert "1 static paths" in output
         assert "3 shared nodes" in output
         assert "endpoint handler → shared/intermediate logic" in output
-        assert 'data-call-path-layout' in output
+        assert "data-call-path-layout" in output
         assert '<option value="flow-lr">Flow</option>' in output
         assert '<option value="flow-tb">Top-down</option>' in output
         assert '<option value="radial">Radial</option>' in output
         assert '<option value="files">File groups</option>' in output
-        assert 'data-call-path-layer=' in output
-        assert 'data-call-path-file-label=' in output
-        assert '>get_items</text>' in output
-        assert '>load_items</text>' in output
-        assert '>fetch</text>' in output
-        assert '<strong>load_items</strong>' in output
-        assert '<strong>fetch</strong>' in output
-        assert '<h4>Static reachable frame: load_items</h4>' in output
-        assert '>services.items.load_items</text>' not in output
-        assert '<strong>services.items.load_items</strong>' not in output
-        assert '>repository.fetch</text>' not in output
+        assert "data-call-path-layer=" in output
+        assert "data-call-path-file-label=" in output
+        assert ">get_items</text>" in output
+        assert ">load_items</text>" in output
+        assert ">fetch</text>" in output
+        assert "<strong>load_items</strong>" in output
+        assert "<strong>fetch</strong>" in output
+        assert "<h4>Static reachable frame: load_items</h4>" in output
+        assert ">services.items.load_items</text>" not in output
+        assert "<strong>services.items.load_items</strong>" not in output
+        assert ">repository.fetch</text>" not in output
         assert 'class="call-tree-panel"' in output
         assert '<details class="call-tree-panel">' in output  # collapsed by default
-        assert 'data-call-tree-expand' in output
-        assert 'data-call-tree-collapse' in output
-        assert 'data-call-path-stage' in output
-        assert 'data-call-path-zoom-in' in output
-        assert 'data-call-path-zoom-out' in output
-        assert 'data-call-path-fit' in output
-        assert 'Show linear tracebacks (1 paths)' in output
+        assert "data-call-tree-expand" in output
+        assert "data-call-tree-collapse" in output
+        assert "data-call-path-stage" in output
+        assert "data-call-path-zoom-in" in output
+        assert "data-call-path-zoom-out" in output
+        assert "data-call-path-fit" in output
+        assert "Show linear tracebacks (1 paths)" in output
         assert 'data-call-path-detail="affected-call-path-1-n2"' in output
         assert output.count("<text ") == output.count("</text>")
         # The synthetic endpoint marker is replaced by the compact handler symbol.
@@ -441,12 +441,14 @@ class TestHtmlFormatter:
             line_number=3,
         )
         endpoint = Endpoint(path="/items", methods=[EndpointMethod.GET], handler=handler)
+
         def stack(file_path: str, line_number: int, function_name: str) -> CallStackFrame:
             return CallStackFrame(
                 file_path=file_path,
                 line_number=line_number,
                 function_name=function_name,
             )
+
         affected = AffectedEndpoint(
             endpoint=endpoint,
             confidence=ConfidenceLevel.MEDIUM,
@@ -612,8 +614,8 @@ class TestHtmlFormatter:
         assert '<html lang="en" data-theme="ember">' in output
         assert '<option value="ember" selected>Ember</option>' in output
         assert 'getAttribute("data-theme") || "ember"' in output
-        assert 'data-theme-select' in output
-        assert 'fastapi-endpoint-detector.theme.v1' in output
+        assert "data-theme-select" in output
+        assert "fastapi-endpoint-detector.theme.v1" in output
         assert output.count('html[data-theme="') == 10
         assert "@media (prefers-reduced-motion: reduce)" in output
         assert "@media print" in output

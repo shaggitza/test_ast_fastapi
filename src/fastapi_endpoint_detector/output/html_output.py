@@ -327,8 +327,7 @@ class HtmlFormatter(BaseFormatter):
                     display_path=self._display_file_path(frame.file_path, app_path),
                     line_number=start_line,
                     end_line_number=end_line,
-                    source_context=frame.code_context
-                    or "Source context unavailable in report.",
+                    source_context=frame.code_context or "Source context unavailable in report.",
                 )
             )
         return locations
@@ -400,7 +399,9 @@ class HtmlFormatter(BaseFormatter):
             max(1050, 100 + (max_layer + 1) * _CALL_PATH_LAYER_STEP),
             max(300, 145 + max_nodes_in_layer * _CALL_PATH_ROW_STEP),
         )
-        return sorted(node_by_id.values(), key=lambda node: (node.layer, node.y, node.node_id)), edges
+        return sorted(
+            node_by_id.values(), key=lambda node: (node.layer, node.y, node.node_id)
+        ), edges
 
     @staticmethod
     def _svg_text(value: str, limit: int = 35) -> str:
@@ -446,8 +447,8 @@ class HtmlFormatter(BaseFormatter):
             f'<span class="call-path-role call-path-role-{location.role}">'
             f"{html.escape(location.role_label)}</span> "
             f"<strong>{html.escape(location.display_name)}</strong> "
-            f'<code>{html.escape(Path(location.display_path).name)}:{location.line_number}</code> '
-            f'<small>{html.escape(membership)} · {len(node.outgoing)} child(s)</small>'
+            f"<code>{html.escape(Path(location.display_path).name)}:{location.line_number}</code> "
+            f"<small>{html.escape(membership)} · {len(node.outgoing)} child(s)</small>"
         )
         escaped_id = html.escape(node_id)
         if node_id in visited:
@@ -489,7 +490,7 @@ class HtmlFormatter(BaseFormatter):
         lines = [
             f'<section class="call-path-view call-path-fallback" id="{html.escape(view_id)}">',
             "<h4>Static call paths</h4>",
-            '<p><strong>No static call path available.</strong> '
+            "<p><strong>No static call path available.</strong> "
             "The evidence locations below are shown without fabricating intermediate frames.</p>",
         ]
         if references:
@@ -503,7 +504,7 @@ class HtmlFormatter(BaseFormatter):
                     reference.end_line_number,
                 )
                 lines.append(
-                    f"<li><span class=\"call-path-role call-path-role-changed\">"
+                    f'<li><span class="call-path-role call-path-role-changed">'
                     f"Evidence location</span> {location}</li>"
                 )
             lines.append("</ul>")
@@ -564,10 +565,9 @@ class HtmlFormatter(BaseFormatter):
         merge_count = sum(len(node.incoming) > 1 for node in nodes)
         path_count = len(call_stacks)
         lines = [
-            f'<section class="call-path-view" id="{html.escape(view_id)}" '
-            "data-call-path-view>",
+            f'<section class="call-path-view" id="{html.escape(view_id)}" data-call-path-view>',
             '<div class="call-path-toolbar">',
-            '<div><h4>Condensed static call graph</h4>'
+            "<div><h4>Condensed static call graph</h4>"
             '<p class="call-path-semantics">Arrows show static reachability: endpoint handler '
             "→ shared/intermediate logic → changed source location. This is not runtime execution.</p></div>",
             f'<label for="{html.escape(view_id)}-search">Search nodes '
@@ -583,19 +583,19 @@ class HtmlFormatter(BaseFormatter):
             '<button type="button" data-call-path-reset>Reset view</button>',
             '<div class="call-path-zoom-controls" aria-label="Graph navigation">'
             '<button type="button" data-call-path-zoom-out aria-label="Zoom out">-</button>'
-            '<span data-call-path-zoom-label>100%</span>'
+            "<span data-call-path-zoom-label>100%</span>"
             '<button type="button" data-call-path-zoom-in aria-label="Zoom in">+</button>'
             '<button type="button" data-call-path-fit>Fit</button>'
             '<button type="button" data-call-path-touch-pan aria-pressed="false" '
             'title="Enable two-axis touch panning">Touch pan</button></div>',
             "</div>",
             '<div class="call-path-summary">',
-            f'<strong>{path_count} static paths</strong> condensed into '
-            f'<strong>{len(nodes)} shared nodes</strong> and <strong>{len(edges)} connections</strong>.',
+            f"<strong>{path_count} static paths</strong> condensed into "
+            f"<strong>{len(nodes)} shared nodes</strong> and <strong>{len(edges)} connections</strong>.",
         ]
         if fork_count or merge_count:
             lines.append(
-                f" <span class=\"call-path-branch-summary\">"
+                f' <span class="call-path-branch-summary">'
                 f"{fork_count} fork(s), {merge_count} merge point(s)</span>"
             )
         lines.extend(
@@ -611,7 +611,7 @@ class HtmlFormatter(BaseFormatter):
                 '<output class="call-path-layout-status" data-call-path-layout-status '
                 'aria-live="polite">Flow layout · layers read left to right</output>',
                 '<p class="call-path-gesture-hint">Drag to pan · Ctrl/⌘ + wheel to zoom · '
-                'arrow keys pan when the canvas is focused</p>',
+                "arrow keys pan when the canvas is focused</p>",
                 '<div class="call-path-canvas" data-call-path-viewport>',
                 f'<svg class="call-path-svg" width="{width}" height="{height}" '
                 f'viewBox="0 0 {width} {height}" '
@@ -620,11 +620,11 @@ class HtmlFormatter(BaseFormatter):
                 f'aria-labelledby="{html.escape(graph_title_id)} {html.escape(graph_desc_id)}">'
                 f'<title id="{html.escape(graph_title_id)}">Condensed static call graph</title>'
                 f'<desc id="{html.escape(graph_desc_id)}">Selectable layouts preserve the same '
-                'static reachability nodes and directed connections.</desc>'
+                "static reachability nodes and directed connections.</desc>"
                 f'<defs><marker id="{html.escape(marker_id)}" markerWidth="8" markerHeight="8" '
                 'refX="7" refY="3" orient="auto" markerUnits="strokeWidth">'
                 '<path d="M0,0 L0,6 L7,3 z" class="call-path-arrow"></path></marker></defs>'
-                '<g data-call-path-stage><g data-call-path-clusters></g>',
+                "<g data-call-path-stage><g data-call-path-clusters></g>",
             ]
         )
         for source_id, target_id in sorted(edges):
@@ -689,27 +689,30 @@ class HtmlFormatter(BaseFormatter):
                 f'data-call-path-search-text="{html.escape(search_text)}" '
                 f'transform="translate({node.x} {node.y})" role="button" tabindex="0" '
                 f'aria-pressed="false" aria-label="{html.escape(aria_label)}">'
-                f'<title>{html.escape(location.label + "; " + membership_text)}</title>'
+                f"<title>{html.escape(location.label + '; ' + membership_text)}</title>"
                 f'<rect x="0" y="0" width="{_CALL_PATH_NODE_WIDTH}" '
                 f'height="{_CALL_PATH_NODE_HEIGHT}" rx="8"></rect>'
                 f"{topology_markers}"
                 '<text class="call-path-node-role" x="12" y="20">'
-                f'{html.escape(location.role_label)}</text>'
+                f"{html.escape(location.role_label)}</text>"
                 '<text class="call-path-node-label" x="12" y="45">'
-                f'{html.escape(self._svg_text(location.display_name, 22))}</text>'
+                f"{html.escape(self._svg_text(location.display_name, 22))}</text>"
                 '<text class="call-path-node-meta" x="12" y="67">'
-                f'{html.escape(self._svg_text(file_label + ":" + str(location.line_number), 28))}'
+                f"{html.escape(self._svg_text(file_label + ':' + str(location.line_number), 28))}"
                 "</text>"
                 '<text class="call-path-node-meta" x="12" y="88">'
-                f'{html.escape(self._svg_text(membership_text, 31))}</text></g>'
+                f"{html.escape(self._svg_text(membership_text, 31))}</text></g>"
             )
         lines.append("</g>")
         lines.append("</svg>")
         lines.append("</div>")
-        roots = sorted(
-            (node for node in nodes if not node.incoming),
-            key=lambda node: (node.layer, node.y, node.node_id),
-        ) or nodes[:1]
+        roots = (
+            sorted(
+                (node for node in nodes if not node.incoming),
+                key=lambda node: (node.layer, node.y, node.node_id),
+            )
+            or nodes[:1]
+        )
         lines.extend(
             [
                 '<details class="call-tree-panel">',
@@ -732,35 +735,41 @@ class HtmlFormatter(BaseFormatter):
                 '<p class="call-path-no-match" data-call-path-no-match hidden>'
                 "No nodes match the search.</p>",
                 '<aside class="call-path-details" data-call-path-details aria-live="polite">',
-                '<p data-call-path-default>Select a node to inspect its source and connections.</p>',
+                "<p data-call-path-default>Select a node to inspect its source and connections.</p>",
             ]
         )
         for node in nodes:
             location = node.location
-            incoming = ", ".join(
-                f"{node_by_id[item].location.display_name} "
-                f"({node_by_id[item].location.display_path}:"
-                f"{node_by_id[item].location.line_number})"
-                for item in sorted(node.incoming)
-            ) or "none"
-            outgoing = ", ".join(
-                f"{node_by_id[item].location.display_name} "
-                f"({node_by_id[item].location.display_path}:"
-                f"{node_by_id[item].location.line_number})"
-                for item in sorted(node.outgoing)
-            ) or "none"
+            incoming = (
+                ", ".join(
+                    f"{node_by_id[item].location.display_name} "
+                    f"({node_by_id[item].location.display_path}:"
+                    f"{node_by_id[item].location.line_number})"
+                    for item in sorted(node.incoming)
+                )
+                or "none"
+            )
+            outgoing = (
+                ", ".join(
+                    f"{node_by_id[item].location.display_name} "
+                    f"({node_by_id[item].location.display_path}:"
+                    f"{node_by_id[item].location.line_number})"
+                    for item in sorted(node.outgoing)
+                )
+                or "none"
+            )
             lines.append(
                 f'<div data-call-path-detail="{html.escape(node.node_id)}" hidden>'
-                f'<h4>{html.escape(location.role_label)}: '
-                f'{html.escape(location.display_name)}</h4>'
+                f"<h4>{html.escape(location.role_label)}: "
+                f"{html.escape(location.display_name)}</h4>"
                 f'<span class="sr-only">Qualified symbol: '
-                f'{html.escape(location.function_name)}.</span>'
-                f'<p><code>{html.escape(location.display_path)}:{location.line_number}'
-                f'{("-" + str(location.end_line_number)) if location.end_line_number else ""}'
+                f"{html.escape(location.function_name)}.</span>"
+                f"<p><code>{html.escape(location.display_path)}:{location.line_number}"
+                f"{('-' + str(location.end_line_number)) if location.end_line_number else ''}"
                 f"</code> · {html.escape(self._path_membership(node.path_indexes, path_count))}; "
                 f"{len(node.incoming)} incoming / {len(node.outgoing)} outgoing</p>"
-                f'<p><strong>Incoming:</strong> {html.escape(incoming)}<br>'
-                f'<strong>Outgoing:</strong> {html.escape(outgoing)}</p>'
+                f"<p><strong>Incoming:</strong> {html.escape(incoming)}<br>"
+                f"<strong>Outgoing:</strong> {html.escape(outgoing)}</p>"
                 f'<pre class="call-path-source">{html.escape(location.source_context)}</pre>'
                 "</div>"
             )
@@ -772,7 +781,7 @@ class HtmlFormatter(BaseFormatter):
         """Render the allow-listed visual themes for the standalone report."""
         return "".join(
             f'<option value="{theme_id}"'
-            f'{" selected" if theme_id == _DEFAULT_HTML_THEME else ""}>'
+            f"{' selected' if theme_id == _DEFAULT_HTML_THEME else ''}>"
             f"{html.escape(label)}</option>"
             for theme_id, label in _HTML_THEMES
         )
@@ -2956,7 +2965,7 @@ class HtmlFormatter(BaseFormatter):
 
             content_lines.append('<div class="table-wrap">')
             content_lines.append("<table>")
-            content_lines.append("<caption class=\"sr-only\">Discovered FastAPI endpoints</caption>")
+            content_lines.append('<caption class="sr-only">Discovered FastAPI endpoints</caption>')
             content_lines.append("<thead>")
             content_lines.append("<tr>")
             content_lines.append('<th scope="col">Method(s)</th>')

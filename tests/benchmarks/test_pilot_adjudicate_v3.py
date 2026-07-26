@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import stat
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -21,6 +22,34 @@ from benchmarks.real_world.ground_truth_v2.schema import (
 
 SHA1 = "1" * 40
 SHA2 = "2" * 40
+
+
+def _native_call_sha(call: dict[str, object]) -> str:
+    return adjudicate._sha(canonical_json(call))
+
+
+def _pinned_subagents_available() -> bool:
+    override = os.environ.get("PILOT_PI_SUBAGENTS_AGENTS_MODULE")
+    module = (
+        Path(override)
+        if override
+        else review_run._pi_agent_dir() / "npm/node_modules/pi-subagents/src/agents/agents.ts"
+    )
+    package = module.parents[2] / "package.json"
+    if not module.is_file() or not package.is_file():
+        return False
+    value = json.loads(package.read_bytes())
+    return value.get("name") == "pi-subagents" and value.get("version") == "0.34.0"
+
+
+def _use_native_call_validator_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    if not _pinned_subagents_available():
+        monkeypatch.setattr(adjudicate, "_validate_native_call", _native_call_sha)
+
+
+def _require_pinned_subagents() -> None:
+    if not _pinned_subagents_available():
+        pytest.skip("pinned pilot runtime is not installed in general CI")
 
 
 def _location(line: int = 1) -> dict[str, object]:
@@ -411,6 +440,7 @@ def test_launch_plan_is_one_shot_chain_with_step_output_schema(
         "_environment_attestation",
         lambda _root: {"schema_version": 1, "fresh_bridge_active": False},
     )
+    _use_native_call_validator_when_available(monkeypatch)
     plan = adjudicate.native_adjudication_launch_plan(root, pair_sha)
     call = cast("dict[str, Any]", plan["subagent_call"])
     assert "outputSchema" not in call
@@ -439,6 +469,7 @@ def test_launch_plan_claim_is_atomic_across_threads(
         "_environment_attestation",
         lambda _root: {"schema_version": 1, "fresh_bridge_active": False},
     )
+    _use_native_call_validator_when_available(monkeypatch)
 
     def launch() -> str:
         try:
@@ -1004,6 +1035,7 @@ def test_generated_agent_exactly_allowlists_runtime_structured_output() -> None:
 
 
 def test_native_argv_probe_activates_runtime_structured_output() -> None:
+    _require_pinned_subagents()
     result = adjudicate._structured_output_activation_probe(
         {"tools": ["read", "grep", "find", "ls", "structured_output"]}
     )

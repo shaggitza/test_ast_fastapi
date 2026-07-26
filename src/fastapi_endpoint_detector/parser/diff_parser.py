@@ -7,8 +7,7 @@ and extract structured change information.
 
 from pathlib import Path
 
-from unidiff import PatchedFile, PatchSet  # type: ignore[import-untyped]
-from unidiff.patch import Hunk  # type: ignore[import-untyped]
+from unidiff.patch import Hunk, PatchedFile, PatchSet
 
 from fastapi_endpoint_detector.models.diff import (
     ChangeType,

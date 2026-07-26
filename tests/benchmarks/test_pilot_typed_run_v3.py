@@ -21,6 +21,14 @@ _REAL_PI_AGENTS_MODULE = (
 )
 
 
+def _pinned_resolver_available() -> bool:
+    package = _REAL_PI_AGENTS_MODULE.parents[2] / "package.json"
+    if not _REAL_PI_AGENTS_MODULE.is_file() or not package.is_file():
+        return False
+    value = json.loads(package.read_bytes())
+    return value.get("name") == "pi-subagents" and value.get("version") == "0.34.0"
+
+
 def _private(path: Path) -> Path:
     path.mkdir(mode=0o700, parents=True)
     return path
@@ -146,6 +154,75 @@ def _record(record: dict[str, str]) -> dict[str, object]:
     }
 
 
+def _agent_rows(root: Path, source: str) -> list[dict[str, object]]:
+    if not root.is_dir():
+        return []
+    rows = []
+    for path in sorted(root.rglob("*.md")):
+        raw = path.read_bytes()
+        rows.append(
+            {
+                "name": runner._frontmatter_runtime_name(path, raw),
+                "filePath": str(path.resolve()),
+                "source": source,
+                "disabled": False,
+            }
+        )
+    return rows
+
+
+def _fixture_runtime_agent_discovery(identity: dict[str, Any]) -> dict[str, object]:
+    """Model resolver precedence without requiring the pinned Node package."""
+    source_root = Path(cast("str", identity["source_root"]))
+    agent_dir = Path(os.environ["PI_CODING_AGENT_DIR"])
+    builtin = _agent_rows(Path(os.environ["PILOT_PI_BUILTIN_AGENT_ROOT"]), "builtin")
+    user = _agent_rows(agent_dir / "agents", "user")
+    project = _agent_rows(source_root / ".pi/agents", "project") + _agent_rows(
+        source_root / ".agents", "project"
+    )
+    package: list[dict[str, object]] = []
+    settings = agent_dir / "settings.json"
+    if settings.is_file():
+        value = json.loads(settings.read_bytes())
+        for configured in value.get("packages", []):
+            source = configured.get("source") if isinstance(configured, dict) else None
+            if not isinstance(source, str) or not source.startswith("file:"):
+                continue
+            package_root = Path(source.removeprefix("file:"))
+            manifest = json.loads((package_root / "package.json").read_bytes())
+            metadata = manifest.get("pi-subagents", {})
+            for relative in metadata.get("agents", []):
+                package.extend(_agent_rows(package_root / relative, "package"))
+    definitions = {
+        "builtin": builtin,
+        "package": package,
+        "user": user,
+        "project": project,
+    }
+    effective: dict[str, dict[str, object]] = {}
+    for source in ("builtin", "package", "user", "project"):
+        for row in definitions[source]:
+            effective[cast("str", row["name"])] = row
+    return {
+        "schema_version": 1,
+        "roots": {
+            "userDir": str(agent_dir / "agents"),
+            "projectDir": str(source_root / ".pi/agents"),
+            "userSettingsPath": str(settings),
+            "projectSettingsPath": str(source_root / ".pi/settings.json"),
+        },
+        "definitions": definitions,
+        "effective": sorted(effective.values(), key=lambda row: cast("str", row["name"])),
+        "resolver": {
+            "module_path": "/fixture/pi-subagents/src/agents/agents.ts",
+            "module_sha256": "sha256:" + "a" * 64,
+            "package_path": "/fixture/pi-subagents/package.json",
+            "package_sha256": "sha256:" + "b" * 64,
+            "package_version": "0.34.0",
+        },
+    }
+
+
 def _setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, Path, Path]:
     source_root = Path(__file__).resolve().parents[2]
     record = _repo(tmp_path)
@@ -162,6 +239,8 @@ def _setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path,
     monkeypatch.setenv("PILOT_PI_SUBAGENTS_AGENTS_MODULE", str(_REAL_PI_AGENTS_MODULE))
     monkeypatch.delenv("PI_SUBAGENT_EXTRA_AGENT_DIRS", raising=False)
     monkeypatch.setattr(runner, "_source_record", lambda *_args: _record(record))
+    if not _pinned_resolver_available():
+        monkeypatch.setattr(runner, "_runtime_agent_discovery", _fixture_runtime_agent_discovery)
     return source_root, packets, cache, tmp_path / "execution"
 
 

@@ -23,7 +23,16 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def _git(git_dir: Path, *args: str, data: bytes | None = None) -> str:
     result = subprocess.run(
-        ["git", "--git-dir", str(git_dir), *args],
+        [
+            "git",
+            "-c",
+            "user.name=Endpoint Detector Tests",
+            "-c",
+            "user.email=tests@example.invalid",
+            "--git-dir",
+            str(git_dir),
+            *args,
+        ],
         input=data,
         capture_output=True,
         check=True,

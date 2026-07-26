@@ -43,7 +43,7 @@ dependencies = [
     "rich>=13.0.0",
     "pyyaml>=6.0",
     "tomli>=2.0; python_version < '3.11'",
-    "unidiff>=0.7.0",
+    "unidiff>=1.0.0",
     "mypy>=1.19.1",
 ]
 
@@ -116,6 +116,7 @@ select = [
 ]
 ignore = [
     "PLR0913",  # Too many arguments
+    "PLR0917",  # Too many positional arguments (newer Ruff equivalent)
     "PLR2004",  # Magic value comparison
 ]
 

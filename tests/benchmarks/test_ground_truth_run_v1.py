@@ -30,6 +30,85 @@ A = "prod-v1-i149-rank001-pr2330-A"
 B = "prod-v1-i149-rank001-pr2330-B"
 
 
+def _file_identity(name: str, index: int) -> dict[str, Any]:
+    return {
+        "path": f"/fixture/runtime/{name}",
+        "sha256": "sha256:" + f"{index:064x}",
+        "bytes": index + 1,
+    }
+
+
+def _fixture_runtime_identity() -> dict[str, Any]:
+    """Return a schema-valid runtime identity for hermetic ledger tests."""
+    census = {
+        "roots": {
+            "userDir": "/fixture/user/agents",
+            "projectDir": "/fixture/project/agents",
+            "userSettingsPath": "/fixture/user/settings.json",
+            "projectSettingsPath": "/fixture/project/settings.json",
+        },
+        "effective": [],
+        "builtin": [],
+        "package": [],
+        "user": [],
+        "project": [],
+    }
+    runtime_files = {
+        name: _file_identity(name, index)
+        for index, name in enumerate(
+            (
+                "package",
+                "agents",
+                "schemas",
+                "pi_args",
+                "foreground_execution",
+                "foreground_executor",
+            ),
+            1,
+        )
+    }
+    root_kinds = ("project-old", "project-new", "user-old", "user-new", "builtin")
+    return {
+        "schema_version": 1,
+        "pi_subagents_version": "0.35.1",
+        "pi_version": "0.80.10",
+        "pi_package": _file_identity("pi-package", 7),
+        "runtime_files": runtime_files,
+        "config": {
+            **_file_identity("config", 8),
+            "intercom_mode": "off",
+        },
+        "roots": [
+            {"kind": kind, "path": f"/fixture/roots/{kind}", "exists": False} for kind in root_kinds
+        ],
+        "resolver_census": census,
+        "resolver_census_sha256": run._sha(canonical_json(census)),
+        "resolver_execution": {
+            "node_path": "/fixture/bin/node",
+            "node_sha256": "sha256:" + "9" * 64,
+            "script_sha256": "sha256:" + "a" * 64,
+            "argv_sha256": "sha256:" + "b" * 64,
+            "timeout_seconds": 30,
+            "network_authorized": False,
+            "shell": False,
+        },
+    }
+
+
+def _actual_runtime_identity_or_skip() -> dict[str, Any]:
+    """Load the certification runtime only where that pinned installation exists."""
+    subagents, _resolver, pi_package, _config = run._package_paths()
+    if not (subagents / "package.json").is_file() or not pi_package.is_file():
+        pytest.skip("pinned production runtime is not installed in general CI")
+    try:
+        return run._runtime_identity(ROOT)
+    except run.GroundTruthRunError as exc:
+        message = str(exc)
+        if message.startswith("pinned ") and message.endswith(" is unavailable"):
+            pytest.skip("exact production runtime version is not installed")
+        raise
+
+
 def _private(path: Path) -> Path:
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.chmod(0o700)
@@ -99,7 +178,7 @@ def _runtime(previous: str = BASE) -> dict[str, Any]:
         "packet_publication_entry_hash": "sha256:" + "4" * 64,
         "production_profile_sha256": "sha256:" + "5" * 64,
         "production_files_sha256": "sha256:" + "6" * 64,
-        "runtime_identity": run._runtime_identity(ROOT),
+        "runtime_identity": _fixture_runtime_identity(),
         "extension_sha256": "sha256:" + "7" * 64,
         "extension_schema_sha256": "sha256:" + "8" * 64,
         "agent_source_sha256": "sha256:" + "9" * 64,
@@ -236,7 +315,7 @@ def _prepared(attempt: str) -> dict[str, Any]:
 
 
 def test_actual_runtime_identity_and_config_are_exact() -> None:
-    identity = run._runtime_identity(ROOT)
+    identity = _actual_runtime_identity_or_skip()
     assert identity["pi_subagents_version"] == "0.35.1"
     assert identity["pi_version"] == "0.80.10"
     assert identity["config"]["intercom_mode"] in {"fork-only", "off"}
@@ -254,7 +333,7 @@ def test_actual_runtime_identity_and_config_are_exact() -> None:
 def test_actual_resolver_resolves_exact_flat_user_agent_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    identity = run._runtime_identity(ROOT)
+    identity = _actual_runtime_identity_or_skip()
     resolver = Path(identity["runtime_files"]["agents"]["path"])
     agent_dir = tmp_path / "agent-home"
     agents = agent_dir / "agents"
@@ -369,7 +448,9 @@ def test_agent_disables_ambient_extensions_and_pinned_pi_args_supports_it(tmp_pa
     assert "extensions:\n" in body
     assert "extensions: []" not in body
     assert "subagentOnlyExtensions:" in body
-    pi_args = Path(run._runtime_identity(ROOT)["runtime_files"]["pi_args"]["path"]).read_text()
+    pi_args = Path(
+        _actual_runtime_identity_or_skip()["runtime_files"]["pi_args"]["path"]
+    ).read_text()
     assert 'args.push("--no-extensions")' in pi_args
 
 
