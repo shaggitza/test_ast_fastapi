@@ -19,7 +19,16 @@ from benchmarks.real_world.ground_truth_v2.schema import canonical_json
 
 def _git(git_dir: Path, *args: str, input_bytes: bytes | None = None) -> bytes:
     result = subprocess.run(
-        ["git", "--git-dir", str(git_dir), *args],
+        [
+            "git",
+            "-c",
+            "user.name=Endpoint Detector Tests",
+            "-c",
+            "user.email=tests@example.invalid",
+            "--git-dir",
+            str(git_dir),
+            *args,
+        ],
         input=input_bytes,
         capture_output=True,
         check=True,

@@ -851,40 +851,6 @@ def _reap_process(pid: int) -> None:
         os.waitpid(pid, os.WNOHANG)
 
 
-def _spawn_broker(
-    argv: list[str], env: dict[str, str], stdout_fd: int, stderr_fd: int
-) -> int:
-    """Spawn a session leader even where posix_spawn lacks setsid support."""
-    actions = [
-        (os.POSIX_SPAWN_DUP2, stdout_fd, 1),
-        (os.POSIX_SPAWN_DUP2, stderr_fd, 2),
-        (os.POSIX_SPAWN_CLOSE, stdout_fd),
-        (os.POSIX_SPAWN_CLOSE, stderr_fd),
-    ]
-    try:
-        return os.posix_spawn(
-            sys.executable,
-            argv,
-            env,
-            file_actions=actions,
-            setsid=True,
-        )
-    except NotImplementedError:
-        pid = os.fork()
-        if pid:
-            return pid
-        try:
-            os.setsid()
-            os.dup2(stdout_fd, 1)
-            os.dup2(stderr_fd, 2)
-            os.close(stdout_fd)
-            os.close(stderr_fd)
-            os.execve(sys.executable, argv, env)
-        except BaseException:
-            os._exit(127)
-        raise AssertionError("execve returned unexpectedly")  # pragma: no cover
-
-
 def _terminate_process(pid: int, identity: str) -> None:
     if not _same_process(pid, identity):
         _reap_process(pid)
@@ -1104,7 +1070,15 @@ def prepare_native_attempt(  # noqa: PLR0915
         stdout_fd = os.open(attempt / "logs/broker.stdout", os.O_WRONLY | os.O_CREAT, 0o600)
         stderr_fd = os.open(attempt / "logs/broker.stderr", os.O_WRONLY | os.O_CREAT, 0o600)
         try:
-            broker_pid = _spawn_broker(argv, env, stdout_fd, stderr_fd)
+            actions = [
+                (os.POSIX_SPAWN_DUP2, stdout_fd, 1),
+                (os.POSIX_SPAWN_DUP2, stderr_fd, 2),
+                (os.POSIX_SPAWN_CLOSE, stdout_fd),
+                (os.POSIX_SPAWN_CLOSE, stderr_fd),
+            ]
+            broker_pid = os.posix_spawn(
+                sys.executable, argv, env, file_actions=actions, setsid=True
+            )
         finally:
             os.close(stdout_fd)
             os.close(stderr_fd)
