@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import tokenize
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path  # noqa: TC003 - Pydantic models consume paths at runtime
@@ -29,6 +30,7 @@ class SecureASTExtractorError(Exception):
 ObjectKey = tuple[str, str]
 ObjectKind = Literal["app", "router"]
 CompositionMode = Literal["copy", "live"]
+EndpointImpact = Literal["none", "prior", "subsequent", "all"]
 _ORDER_SCALE = 1_000_000
 
 
@@ -59,6 +61,7 @@ class _Edge:
     prefix: str
     line: int
     child_cutoff: int | None
+    limitation_cutoff: tuple[str, int] | None
     mode: CompositionMode
 
 
@@ -67,6 +70,7 @@ class _OrderedInventoryLimitation:
     origin_module: str
     order: int
     condition: EndpointDiscoveryCondition
+    endpoint_impact: EndpointImpact = "none"
 
 
 @dataclass(frozen=True)
@@ -123,6 +127,7 @@ class _Module:
     ordered_inventory_limitations: dict[ObjectKey, list[_OrderedInventoryLimitation]] = field(
         default_factory=dict
     )
+    modeled_route_effects: set[int] = field(default_factory=set)
 
 
 class SecureASTExtractor:
@@ -175,19 +180,37 @@ class SecureASTExtractor:
 
     def extract_inventory(self) -> EndpointInventory:  # noqa: PLR0912, PLR0915
         """Return endpoints together with whole-inventory completeness evidence."""
-        modules, entry_module = self._load_modules()
-        if not modules:
-            if self.app_path.is_file():
-                limitation = EndpointDiscoveryCondition(
+        if not self.app_path.exists():
+            limitation = EndpointDiscoveryCondition(
+                source_path=self.app_path,
+                source_line=1,
+                reason="configured source path does not exist",
+            )
+            return EndpointInventory(
+                status=InventoryStatus.UNAVAILABLE,
+                limitations=(limitation,),
+            )
+        modules, entry_module, parse_failures = self._load_modules()
+        if self.app_path.is_file() and entry_module is None:
+            limitation = next(
+                (item for item in parse_failures if item.source_path.resolve() == self.app_path),
+                EndpointDiscoveryCondition(
                     source_path=self.app_path,
                     source_line=1,
-                    reason="configured source did not contain a parseable project-local module",
-                )
+                    reason="configured source did not contain a project-local Python module",
+                ),
+            )
+            return EndpointInventory(
+                status=InventoryStatus.UNAVAILABLE,
+                limitations=(limitation,),
+            )
+        if not modules:
+            if parse_failures:
                 return EndpointInventory(
                     status=InventoryStatus.UNAVAILABLE,
-                    limitations=(limitation,),
+                    limitations=parse_failures,
                 )
-            raise SecureASTExtractorError("no parseable project-local Python modules were found")
+            raise SecureASTExtractorError("no project-local Python modules were found")
 
         aliases = self._module_aliases(modules)
         for module in modules.values():
@@ -388,12 +411,15 @@ class SecureASTExtractor:
                     ordered_inventory_limitations.get(key, ()), tuple(limitations)
                 )
         found: list[Endpoint] = []
-        inventory_limitations: tuple[EndpointDiscoveryCondition, ...] = ()
+        inventory_limitations: tuple[EndpointDiscoveryCondition, ...] = (
+            tuple(parse_failures) if self.app_path.is_dir() else ()
+        )
 
         def visit(
             owner: ObjectKey,
             inherited: str,
             cutoff: int | None,
+            limitation_cutoff: tuple[str, int] | None,
             stack: frozenset[ObjectKey],
             inherited_conditions: tuple[EndpointDiscoveryCondition, ...],
         ) -> None:
@@ -407,14 +433,17 @@ class SecureASTExtractor:
                 item.discovery_conditions,
                 object_limitations.get(owner, ()),
             )
-            ordered_conditions = tuple(
-                limitation.condition
+            active_ordered_limitations = tuple(
+                limitation
                 for limitation in ordered_inventory_limitations.get(owner, ())
                 if (
-                    cutoff is None
-                    or limitation.origin_module != owner[0]
-                    or limitation.order <= cutoff
+                    limitation_cutoff is None
+                    or limitation.origin_module != limitation_cutoff[0]
+                    or limitation.order <= limitation_cutoff[1]
                 )
+            )
+            ordered_conditions = tuple(
+                limitation.condition for limitation in active_ordered_limitations
             )
             inventory_limitations = _merge_discovery_conditions(
                 inventory_limitations,
@@ -425,6 +454,24 @@ class SecureASTExtractor:
             for route in routes_by_owner.get(owner, []):
                 if cutoff is not None and route.line > cutoff:
                     continue
+                route_effect_conditions = tuple(
+                    limitation.condition
+                    for limitation in active_ordered_limitations
+                    if limitation.endpoint_impact == "all"
+                    or (
+                        limitation.endpoint_impact == "prior"
+                        and (limitation.origin_module != owner[0] or route.line <= limitation.order)
+                    )
+                    or (
+                        limitation.endpoint_impact == "subsequent"
+                        and (limitation.origin_module != owner[0] or route.line >= limitation.order)
+                    )
+                )
+                discovery_conditions = _merge_discovery_conditions(
+                    object_conditions,
+                    route.discovery_conditions,
+                    route_effect_conditions,
+                )
                 found.append(
                     Endpoint(
                         path=_join_paths(prefix, route.path),
@@ -432,27 +479,42 @@ class SecureASTExtractor:
                         handler=route.handler,
                         discovery_status=(
                             EndpointDiscoveryStatus.CONDITIONAL
-                            if object_conditions or route.discovery_conditions
+                            if discovery_conditions
                             else EndpointDiscoveryStatus.ESTABLISHED
                         ),
-                        discovery_conditions=_merge_discovery_conditions(
-                            object_conditions, route.discovery_conditions
-                        ),
+                        discovery_conditions=discovery_conditions,
                     )
                 )
             for edge in edges_by_parent.get(owner, []):
                 if cutoff is not None and edge.line > cutoff:
                     continue
+                edge_effect_conditions = tuple(
+                    limitation.condition
+                    for limitation in active_ordered_limitations
+                    if limitation.endpoint_impact == "all"
+                    or (
+                        limitation.endpoint_impact == "prior"
+                        and (limitation.origin_module != owner[0] or edge.line <= limitation.order)
+                    )
+                    or (
+                        limitation.endpoint_impact == "subsequent"
+                        and (limitation.origin_module != owner[0] or edge.line >= limitation.order)
+                    )
+                )
                 visit(
                     edge.child,
                     _join_paths(prefix, edge.prefix),
                     edge.child_cutoff,
+                    edge.limitation_cutoff,
                     stack | {owner},
-                    object_conditions,
+                    _merge_discovery_conditions(
+                        object_conditions,
+                        edge_effect_conditions,
+                    ),
                 )
 
         for root in sorted(set(roots)):
-            visit(root, "", None, frozenset(), ())
+            visit(root, "", None, None, frozenset(), ())
         endpoints = sorted(
             found,
             key=lambda endpoint: (
@@ -486,14 +548,40 @@ class SecureASTExtractor:
         # prevents unrelated modules from becoming public endpoints.
         return sorted(root.rglob("*.py"))
 
-    def _load_modules(self) -> tuple[dict[str, _Module], str | None]:
+    def _load_modules(
+        self,
+    ) -> tuple[dict[str, _Module], str | None, tuple[EndpointDiscoveryCondition, ...]]:
         root = self._source_root()
         modules: dict[str, _Module] = {}
         entry_module: str | None = None
-        for path in self._find_python_files(root):
+        parse_failures: list[EndpointDiscoveryCondition] = []
+        try:
+            paths = self._find_python_files(root)
+        except OSError as error:
+            return (
+                {},
+                None,
+                (
+                    EndpointDiscoveryCondition(
+                        source_path=self.app_path,
+                        source_line=1,
+                        reason=f"project-local Python sources could not be enumerated: {error}",
+                    ),
+                ),
+            )
+        for path in paths:
             try:
-                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            except (OSError, SyntaxError, UnicodeError):
+                with tokenize.open(path) as source_file:
+                    source = source_file.read()
+                tree = ast.parse(source, filename=str(path))
+            except (OSError, SyntaxError, UnicodeError) as error:
+                parse_failures.append(
+                    EndpointDiscoveryCondition(
+                        source_path=path.resolve(),
+                        source_line=max(getattr(error, "lineno", 1) or 1, 1),
+                        reason="project-local Python module could not be read, decoded, or parsed",
+                    )
+                )
                 continue
             relative = path.relative_to(root).with_suffix("")
             parts = list(relative.parts)
@@ -502,9 +590,9 @@ class SecureASTExtractor:
                 parts.pop()
             name = ".".join(parts) or path.parent.name
             modules[name] = _Module(name, path, tree, is_package)
-            if self.app_path.is_file() and path == self.app_path:
+            if self.app_path.is_file() and path.resolve() == self.app_path:
                 entry_module = name
-        return modules, entry_module
+        return modules, entry_module, tuple(parse_failures)
 
     def _module_aliases(self, modules: dict[str, _Module]) -> dict[str, str]:
         aliases: dict[str, str] = {}
@@ -520,6 +608,23 @@ class SecureASTExtractor:
         aliases: dict[str, str],
         modules: dict[str, _Module],
     ) -> None:
+        evaluate_annotations = not _uses_future_annotations(module.tree)
+
+        def invalidate_additional_bindings(
+            node: ast.AST,
+            excluded: frozenset[str] = frozenset(),
+        ) -> None:
+            candidate_line = getattr(node, "end_lineno", None) or getattr(node, "lineno", 1)
+            binding_line = candidate_line if isinstance(candidate_line, int) else 1
+            for name in (
+                _scope_bound_names(
+                    node,
+                    evaluate_annotations=evaluate_annotations,
+                )
+                - excluded
+            ):
+                self._invalidate_binding(module, name, binding_line)
+
         for node in module.tree.body:
             if isinstance(node, ast.ImportFrom):
                 target_module = self._absolute_import(module, node)
@@ -558,13 +663,24 @@ class SecureASTExtractor:
                 module.functions[node.name] = node
                 module.function_history.setdefault(node.name, []).append(node)
                 module.assignments.setdefault(node.name, []).append(node.lineno)
+                invalidate_additional_bindings(node, frozenset({node.name}))
             elif isinstance(node, ast.ClassDef):
                 module.assignments.setdefault(node.name, []).append(node.lineno)
                 module.functions.pop(node.name, None)
+                invalidate_additional_bindings(node, frozenset({node.name}))
+                binding_line = node.end_lineno or node.lineno
+                for name in _class_global_bound_names(
+                    node,
+                    evaluate_annotations=evaluate_annotations,
+                ):
+                    self._invalidate_binding(module, name, binding_line)
             elif isinstance(node, ast.If):
                 binding_line = node.end_lineno or node.lineno
                 conditional_name = self._exhaustive_conditional_app_binding(node, module)
-                bound_names = _conditional_bound_names(node)
+                bound_names = _scope_bound_names(
+                    node,
+                    evaluate_annotations=evaluate_annotations,
+                )
                 if conditional_name is not None:
                     bound_names.discard(conditional_name)
                     self._invalidate_binding(module, conditional_name, binding_line)
@@ -578,10 +694,30 @@ class SecureASTExtractor:
                     module.objects.setdefault(conditional_name, []).append(item)
                 for name in bound_names:
                     self._invalidate_binding(module, name, binding_line)
-            elif isinstance(node, (ast.For, ast.AsyncFor)):
+            elif isinstance(
+                node,
+                (
+                    ast.For,
+                    ast.AsyncFor,
+                    ast.While,
+                    ast.Try,
+                    ast.With,
+                    ast.AsyncWith,
+                    ast.Match,
+                ),
+            ) or _is_try_star(node):
+                binding_line = node.end_lineno or node.lineno
+                for name in _scope_bound_names(
+                    node,
+                    evaluate_annotations=evaluate_annotations,
+                ):
+                    self._invalidate_binding(module, name, binding_line)
+            elif isinstance(node, ast.AugAssign):
                 binding_line = node.end_lineno or node.lineno
                 for name in _bound_names(node.target):
                     self._invalidate_binding(module, name, binding_line)
+            elif isinstance(node, ast.Expr) or _is_type_alias(node):
+                invalidate_additional_bindings(node)
             elif isinstance(node, ast.Delete):
                 for target in node.targets:
                     for name in _bound_names(target):
@@ -597,10 +733,13 @@ class SecureASTExtractor:
                     targets: list[ast.expr] = (
                         [node.target] if isinstance(node, ast.AnnAssign) else node.targets
                     )
+                    target_names: set[str] = set()
                     for target in targets:
                         for name in _bound_names(target):
+                            target_names.add(name)
                             module.assignments.setdefault(name, []).append(node.lineno)
                             module.functions.pop(name, None)
+                    invalidate_additional_bindings(node, frozenset(target_names))
                     continue
                 module.assignments.setdefault(assigned_name, []).append(node.lineno)
                 module.functions.pop(assigned_name, None)
@@ -626,6 +765,7 @@ class SecureASTExtractor:
                 # recognition after this statement must follow the rebound name.
                 module.fastapi_names.discard(assigned_name)
                 module.router_names.discard(assigned_name)
+                invalidate_additional_bindings(node, frozenset({assigned_name}))
 
     @staticmethod
     def _invalidate_binding(module: _Module, name: str, line: int) -> None:
@@ -1025,6 +1165,7 @@ class SecureASTExtractor:
                     edge.prefix,
                     call_order,
                     edge.child_cutoff,
+                    edge.limitation_cutoff,
                     edge.mode,
                 )
                 for edge in list(edges)
@@ -1374,6 +1515,7 @@ class SecureASTExtractor:
                         prefix,
                         call_order,
                         cutoff,
+                        (module.name, call_order),
                         "copy",
                     )
                 )
@@ -1397,6 +1539,7 @@ class SecureASTExtractor:
                         child.key,
                         path,
                         call_order,
+                        None,
                         None,
                         "live",
                     )
@@ -1483,6 +1626,7 @@ class SecureASTExtractor:
                     edge.prefix,
                     edge.line,
                     edge.child_cutoff,
+                    edge.limitation_cutoff,
                     edge.mode,
                 )
                 for edge in edges
@@ -1822,6 +1966,7 @@ class SecureASTExtractor:
                                     prefix,
                                     order,
                                     order,
+                                    (current_module.name, order),
                                     "copy",
                                 )
                             )
@@ -1843,6 +1988,7 @@ class SecureASTExtractor:
                                     child.key,
                                     path,
                                     order,
+                                    None,
                                     None,
                                     "live",
                                 )
@@ -2110,6 +2256,8 @@ class SecureASTExtractor:
         owner: _Object,
         node: ast.AST,
         reason: str,
+        *,
+        endpoint_impact: EndpointImpact = "none",
     ) -> None:
         limitation = _OrderedInventoryLimitation(
             origin_module=module.name,
@@ -2119,6 +2267,7 @@ class SecureASTExtractor:
                 source_line=getattr(node, "lineno", 1),
                 reason=reason,
             ),
+            endpoint_impact=endpoint_impact,
         )
         limitations = module.ordered_inventory_limitations.setdefault(owner.key, [])
         if limitation not in limitations:
@@ -2130,7 +2279,8 @@ class SecureASTExtractor:
         aliases: dict[str, str],
         modules: dict[str, _Module],
     ) -> None:
-        """Record source-ordered uncertainty from module-level compound statements."""
+        """Record source-ordered uncertainty from executed module/header effects."""
+        evaluate_annotations = not _uses_future_annotations(module.tree)
         registration_methods = {
             *self.HTTP_METHODS,
             "api_route",
@@ -2153,6 +2303,45 @@ class SecureASTExtractor:
             "sort",
         }
         known_aliases: dict[str, frozenset[_Object]] = {}
+        dynamic_callable_aliases: set[str] = set()
+        discarded_decorator_factories: set[int] = set()
+
+        def collect_discarded_decorator_factories(statements: list[ast.stmt]) -> None:
+            for statement in statements:
+                if (
+                    isinstance(statement, ast.Expr)
+                    and isinstance(statement.value, ast.Call)
+                    and isinstance(statement.value.func, ast.Attribute)
+                    and statement.value.func.attr in {*self.HTTP_METHODS, "api_route"}
+                ):
+                    discarded_decorator_factories.add(_node_order(statement.value))
+                if isinstance(statement, ast.ClassDef):
+                    collect_discarded_decorator_factories(statement.body)
+                elif isinstance(
+                    statement,
+                    (
+                        ast.If,
+                        ast.For,
+                        ast.AsyncFor,
+                        ast.While,
+                        ast.Try,
+                        ast.With,
+                        ast.AsyncWith,
+                        ast.Match,
+                    ),
+                ) or _is_try_star(statement):
+                    nested: list[ast.stmt] = []
+                    for attribute in ("body", "orelse", "finalbody"):
+                        nested.extend(getattr(statement, attribute, ()))
+                    if _is_try_like(statement):
+                        nested.extend(
+                            item for handler in _try_handlers(statement) for item in handler.body
+                        )
+                    if isinstance(statement, ast.Match):
+                        nested.extend(item for case in statement.cases for item in case.body)
+                    collect_discarded_decorator_factories(nested)
+
+        collect_discarded_decorator_factories(module.tree.body)
 
         def object_root(  # noqa: PLR0911
             expression: ast.expr | None, line: int
@@ -2176,6 +2365,10 @@ class SecureASTExtractor:
                 return None
             while isinstance(current, ast.Attribute):
                 current = current.value
+                if isinstance(current, ast.Name):
+                    aliased = known_aliases.get(current.id, frozenset())
+                    if len(aliased) == 1:
+                        return next(iter(aliased))
                 resolved = self._resolve_object(current, module, aliases, modules, line)
                 if resolved is not None:
                     return resolved
@@ -2243,33 +2436,139 @@ class SecureASTExtractor:
                 )
             return frozenset()
 
-        def update_aliases(statement: ast.stmt) -> None:
+        def expression_is_dynamic_callable(expression: ast.expr, line: int) -> bool:
+            if isinstance(expression, ast.Name):
+                if expression.id in dynamic_callable_aliases:
+                    return True
+                binding = self._import_binding_at(module, expression.id, line)
+                if binding is not None:
+                    return (binding.module, binding.symbol) in {
+                        ("builtins", "exec"),
+                        ("builtins", "eval"),
+                    }
+                return (
+                    expression.id in {"exec", "eval"}
+                    and self._latest_binding_line(module, expression.id, line) is None
+                )
+            if isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name):
+                binding = self._import_binding_at(module, expression.value.id, line)
+                return (
+                    binding is not None
+                    and binding.module == "builtins"
+                    and binding.symbol is None
+                    and expression.attr in {"exec", "eval"}
+                )
+            return False
+
+        def update_aliases(statement: ast.stmt, *, conditionally_executed: bool) -> None:
             assignments: list[tuple[str, ast.expr]] = []
-            rebound: set[str] = set()
+            rebound = _scope_bound_names(
+                statement,
+                evaluate_annotations=evaluate_annotations,
+            )
             if isinstance(statement, ast.Assign):
                 for target in statement.targets:
-                    names = _bound_names(target)
-                    rebound.update(names)
-                    if len(names) == 1:
-                        assignments.append((next(iter(names)), statement.value))
-            elif isinstance(statement, ast.AnnAssign):
-                names = _bound_names(statement.target)
-                rebound.update(names)
-                if statement.value is not None and len(names) == 1:
-                    assignments.append((next(iter(names)), statement.value))
-            else:
-                rebound.update(_bound_names(statement))
-            for name in rebound:
-                known_aliases.pop(name, None)
+                    assignments.extend(_assignment_pairs(target, statement.value))
+            elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
+                assignments.extend(_assignment_pairs(statement.target, statement.value))
+            assignments.extend(
+                _executed_named_expr_bindings(
+                    statement,
+                    evaluate_annotations=evaluate_annotations,
+                )
+            )
+            if not conditionally_executed:
+                for name in rebound:
+                    known_aliases.pop(name, None)
+                    dynamic_callable_aliases.discard(name)
             for name, value in assignments:
                 resolved = alias_objects(value, statement.lineno)
                 if resolved:
-                    known_aliases[name] = resolved
+                    known_aliases[name] = (
+                        known_aliases.get(name, frozenset()) | resolved
+                        if conditionally_executed
+                        else resolved
+                    )
+                if expression_is_dynamic_callable(value, statement.lineno):
+                    dynamic_callable_aliases.add(name)
 
-        def record(owner: _Object, node: ast.AST, reason: str) -> None:
-            self._record_ordered_inventory_limitation(module, owner, node, reason)
+        def current_objects(line: int) -> set[_Object]:
+            found: set[_Object] = set()
+            for name in {*module.objects, *module.import_bindings}:
+                resolved = self._resolve_object(
+                    ast.Name(id=name, ctx=ast.Load()),
+                    module,
+                    aliases,
+                    modules,
+                    line,
+                )
+                if resolved is not None:
+                    found.add(resolved)
+            for owners in known_aliases.values():
+                found.update(owners)
+            found.update(item for item in module.factory_objects if item.line <= line)
+            return found
 
-        def visit(node: ast.AST) -> None:  # noqa: PLR0912
+        def resolves_builtin(call: ast.Call, names: set[str]) -> bool:
+            if isinstance(call.func, ast.Name):
+                if call.func.id in dynamic_callable_aliases and names & {"exec", "eval"}:
+                    return True
+                binding = self._import_binding_at(module, call.func.id, call.lineno)
+                if binding is not None:
+                    return binding.module == "builtins" and binding.symbol in names
+                return (
+                    call.func.id in names
+                    and self._latest_binding_line(module, call.func.id, call.lineno) is None
+                )
+            if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name):
+                binding = self._import_binding_at(module, call.func.value.id, call.lineno)
+                return (
+                    binding is not None
+                    and binding.module == "builtins"
+                    and binding.symbol is None
+                    and call.func.attr in names
+                )
+            return False
+
+        def is_dynamic_execution(call: ast.Call) -> bool:
+            return resolves_builtin(call, {"exec", "eval"})
+
+        def safe_setattr(call: ast.Call) -> bool:
+            return (
+                resolves_builtin(call, {"setattr"})
+                and len(call.args) >= 2
+                and isinstance(call.args[1], ast.Constant)
+                and call.args[1].value
+                in {
+                    "debug",
+                    "description",
+                    "docs_url",
+                    "openapi_url",
+                    "redoc_url",
+                    "root_path",
+                    "title",
+                    "version",
+                }
+            )
+
+        def record(
+            owner: _Object,
+            node: ast.AST,
+            reason: str,
+            *,
+            endpoint_impact: EndpointImpact = "none",
+        ) -> None:
+            self._record_ordered_inventory_limitation(
+                module,
+                owner,
+                node,
+                reason,
+                endpoint_impact=endpoint_impact,
+            )
+
+        def visit(  # noqa: PLR0912, PLR0915 - explicit executed-effect taxonomy
+            node: ast.AST, *, conditional: bool
+        ) -> None:
             if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
                 loop_evidence = node.iter if isinstance(node, ast.comprehension) else node
                 for owner in referenced_objects(node.iter, loop_evidence.lineno):
@@ -2280,15 +2579,38 @@ class SecureASTExtractor:
                     )
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 for decorator in node.decorator_list:
-                    visit(decorator)
+                    visit(decorator, conditional=conditional)
                 for default in [*node.args.defaults, *node.args.kw_defaults]:
                     if default is not None:
-                        visit(default)
+                        visit(default, conditional=conditional)
+                if evaluate_annotations:
+                    for annotation in [
+                        *(item.annotation for item in node.args.args),
+                        *(item.annotation for item in node.args.posonlyargs),
+                        *(item.annotation for item in node.args.kwonlyargs),
+                        node.args.vararg.annotation if node.args.vararg is not None else None,
+                        node.args.kwarg.annotation if node.args.kwarg is not None else None,
+                        node.returns,
+                    ]:
+                        if annotation is not None:
+                            visit(annotation, conditional=conditional)
+                return
+            if isinstance(node, ast.ClassDef):
+                for expression in [
+                    *node.decorator_list,
+                    *node.bases,
+                    *(item.value for item in node.keywords),
+                ]:
+                    visit(expression, conditional=conditional)
+                for statement in node.body:
+                    visit(statement, conditional=conditional)
                 return
             if isinstance(node, ast.Lambda):
                 for default in [*node.args.defaults, *node.args.kw_defaults]:
                     if default is not None:
-                        visit(default)
+                        visit(default, conditional=conditional)
+                return
+            if _is_type_alias(node):
                 return
             if isinstance(node, ast.Call):
                 receiver_expression = (
@@ -2300,53 +2622,113 @@ class SecureASTExtractor:
                 receiver = object_root(receiver_expression, node.lineno)
                 operation = node.func.attr if isinstance(node.func, ast.Attribute) else ""
                 receiver_attributes = attribute_names(receiver_expression)
-                mutates_routes = operation in registration_methods or (
-                    operation in route_collection_mutators
-                    and ("routes" in receiver_attributes or "router" in receiver_attributes)
+                modeled = _node_order(node) in module.modeled_route_effects
+                discarded_decorator_factory = _node_order(node) in discarded_decorator_factories
+                inventory_neutral_method = (
+                    operation
+                    in {
+                        "add_event_handler",
+                        "add_exception_handler",
+                        "add_middleware",
+                    }
+                    and exact_receiver is not None
                 )
-                if receiver is not None and mutates_routes:
+                route_collection_mutation = operation in route_collection_mutators and (
+                    receiver_attributes in {("routes",), ("router", "routes")}
+                )
+                if discarded_decorator_factory or inventory_neutral_method:
+                    pass
+                elif (
+                    conditional
+                    and receiver is not None
+                    and (operation in registration_methods or route_collection_mutation)
+                ):
                     record(
                         receiver,
                         node,
                         "module-level control flow may conditionally mutate route inventory",
+                        endpoint_impact=(
+                            "prior" if operation in {"clear", "pop", "remove"} else "none"
+                        ),
                     )
-                elif receiver is None and operation in registration_methods:
+                elif conditional and receiver is None and operation in registration_methods:
                     for owner in referenced_objects(receiver_expression or node.func, node.lineno):
                         record(
                             owner,
                             node,
                             "module-level control flow has a conditional registration receiver",
                         )
-                elif receiver is not None:
+                elif not conditional and receiver is not None and route_collection_mutation:
                     record(
                         receiver,
                         node,
-                        "module-level control flow invokes an unresolved route-state method",
+                        "direct module-level route collection mutation is not modeled",
+                        endpoint_impact=(
+                            "prior" if operation in {"clear", "pop", "remove"} else "none"
+                        ),
                     )
-                if operation not in registration_methods:
+                elif not conditional and receiver is not None and operation in registration_methods:
+                    if not modeled:
+                        record(
+                            receiver,
+                            node,
+                            "direct module-level route registration could not be modeled",
+                        )
+                elif receiver is not None and not modeled:
+                    record(
+                        receiver,
+                        node,
+                        "module-level execution invokes an unresolved route-state method",
+                        endpoint_impact="all",
+                    )
+                if is_dynamic_execution(node):
+                    for owner in current_objects(node.lineno):
+                        record(
+                            owner,
+                            node,
+                            "dynamic module-level execution can alter route inventory",
+                            endpoint_impact="all",
+                        )
+                if (
+                    operation not in registration_methods
+                    and not modeled
+                    and not inventory_neutral_method
+                    and not safe_setattr(node)
+                ):
                     if exact_receiver is not None and receiver is None:
                         record(
                             exact_receiver,
                             node,
-                            "module-level control flow invokes an unresolved route-object method",
+                            "module-level execution invokes an unresolved route-object method",
+                            endpoint_impact="all",
                         )
                     for argument in [*node.args, *(item.value for item in node.keywords)]:
                         for owner in referenced_objects(argument, node.lineno):
                             record(
                                 owner,
                                 node,
-                                "module-level control flow passes a route object "
+                                "module-level execution passes a route object "
                                 "to an unresolved call",
+                                endpoint_impact="all",
                             )
             elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Delete)):
                 targets: list[ast.expr] = []
                 value = node.value if not isinstance(node, ast.Delete) else None
-                if value is not None:
+                if value is not None and conditional:
                     for owner in referenced_objects(value, node.lineno):
                         record(
                             owner,
                             node,
                             "module-level control flow aliases a route object conditionally",
+                            endpoint_impact="all",
+                        )
+                if isinstance(value, ast.Attribute) and value.attr in registration_methods:
+                    escaped_owner = object_root(value.value, node.lineno)
+                    if escaped_owner is not None:
+                        record(
+                            escaped_owner,
+                            node,
+                            "route registration method escapes into an unresolved alias",
                         )
                 if isinstance(node, ast.Assign):
                     targets.extend(node.targets)
@@ -2355,19 +2737,40 @@ class SecureASTExtractor:
                 else:
                     targets.extend(node.targets)
                 for target in targets:
+                    if isinstance(target, ast.Attribute) and target.attr in registration_methods:
+                        registration_owner = object_root(target.value, node.lineno)
+                        if registration_owner is not None:
+                            record(
+                                registration_owner,
+                                node,
+                                "module-level execution may replace a route registration method",
+                                endpoint_impact="subsequent",
+                            )
                     attribute_target = target.value if isinstance(target, ast.Subscript) else target
                     target_attributes = attribute_names(attribute_target)
-                    if "routes" not in target_attributes and "router" not in target_attributes:
+                    mutates_route_state = (
+                        target_attributes == ("router",)
+                        or target_attributes[:1] == ("routes",)
+                        or target_attributes[:2] == ("router", "routes")
+                    )
+                    if not mutates_route_state:
                         continue
                     target_owner = route_state_owner(target, node.lineno)
                     if target_owner is not None:
                         record(
                             target_owner,
                             node,
-                            "module-level control flow may conditionally replace route state",
+                            "module-level execution may replace route state",
+                            endpoint_impact="prior",
                         )
+                if isinstance(node, ast.AnnAssign):
+                    if node.value is not None:
+                        visit(node.value, conditional=conditional)
+                    if evaluate_annotations:
+                        visit(node.annotation, conditional=conditional)
+                    return
             for child in ast.iter_child_nodes(node):
-                visit(child)
+                visit(child, conditional=conditional)
 
         control_flow_types = (
             ast.If,
@@ -2380,13 +2783,33 @@ class SecureASTExtractor:
             ast.Match,
         )
         for statement in module.tree.body:
-            if isinstance(statement, control_flow_types) or any(
-                isinstance(item, (ast.comprehension, ast.BoolOp, ast.IfExp, ast.NamedExpr))
-                for item in ast.walk(statement)
-            ):
-                visit(statement)
-            if not isinstance(statement, control_flow_types):
-                update_aliases(statement)
+            conditional = (
+                isinstance(statement, control_flow_types)
+                or _is_try_star(statement)
+                or (
+                    _has_executed_expression_control(
+                        statement,
+                        evaluate_annotations=evaluate_annotations,
+                    )
+                )
+            )
+            visit(statement, conditional=conditional)
+            update_aliases(statement, conditionally_executed=conditional)
+
+    def _route_registration_owner(
+        self,
+        expression: ast.expr | None,
+        module: _Module,
+        aliases: dict[str, str],
+        modules: dict[str, _Module],
+        line: int,
+    ) -> _Object | None:
+        owner = self._resolve_object(expression, module, aliases, modules, line)
+        if owner is not None:
+            return owner
+        if isinstance(expression, ast.Attribute) and expression.attr == "router":
+            return self._resolve_object(expression.value, module, aliases, modules, line)
+        return None
 
     def _collect_routes(  # noqa: PLR0912 - registration forms stay explicit
         self,
@@ -2402,6 +2825,16 @@ class SecureASTExtractor:
                     parsed = self._decorator_route(decorator, module, node.lineno)
                     if parsed is not None:
                         decorated_owner, decorated_path, methods = parsed
+                        if not methods:
+                            self._record_object_limitation(
+                                module,
+                                decorated_owner,
+                                decorator,
+                                "decorated route methods could not be resolved",
+                                inventory_only=True,
+                            )
+                            continue
+                        module.modeled_route_effects.add(_node_order(decorator))
                         routes.append(
                             _Route(
                                 decorated_owner.key,
@@ -2411,6 +2844,26 @@ class SecureASTExtractor:
                                 _node_order(node),
                             )
                         )
+                    elif (
+                        isinstance(decorator, ast.Call)
+                        and isinstance(decorator.func, ast.Attribute)
+                        and decorator.func.attr in {*self.HTTP_METHODS, "api_route"}
+                    ):
+                        owner = self._route_registration_owner(
+                            decorator.func.value,
+                            module,
+                            aliases,
+                            modules,
+                            node.lineno,
+                        )
+                        if owner is not None:
+                            self._record_object_limitation(
+                                module,
+                                owner,
+                                decorator,
+                                "decorated route path or methods could not be resolved",
+                                inventory_only=True,
+                            )
             elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
                 call = node.value
                 if not isinstance(call.func, ast.Attribute) or call.func.attr not in {
@@ -2419,8 +2872,12 @@ class SecureASTExtractor:
                     "add_websocket_route",
                 }:
                     continue
-                imperative_owner = self._resolve_object(
-                    call.func.value, module, aliases, modules, node.lineno
+                imperative_owner = self._route_registration_owner(
+                    call.func.value,
+                    module,
+                    aliases,
+                    modules,
+                    node.lineno,
                 )
                 if imperative_owner is None:
                     continue
@@ -2467,6 +2924,7 @@ class SecureASTExtractor:
                     )
                     continue
                 if methods:
+                    module.modeled_route_effects.add(_node_order(call))
                     routes.append(
                         _Route(
                             imperative_owner.key,
@@ -2541,6 +2999,7 @@ class SecureASTExtractor:
                     continue
                 prefix = self._keyword_string(call, "prefix", module, node.lineno) or ""
                 cutoff = _node_order(node) if child.key[0] == module.name else None
+                module.modeled_route_effects.add(_node_order(call))
                 edges.append(
                     _Edge(
                         parent.key,
@@ -2548,6 +3007,7 @@ class SecureASTExtractor:
                         prefix,
                         _node_order(node),
                         cutoff,
+                        (module.name, _node_order(node)),
                         "copy",
                     )
                 )
@@ -2565,12 +3025,14 @@ class SecureASTExtractor:
                         inventory_only=True,
                     )
                     continue
+                module.modeled_route_effects.add(_node_order(call))
                 edges.append(
                     _Edge(
                         parent.key,
                         child.key,
                         path,
                         _node_order(node),
+                        None,
                         None,
                         "live",
                     )
@@ -2684,7 +3146,7 @@ class SecureASTExtractor:
                     return self._handler(target, function)
         return None
 
-    def _literal_string(
+    def _literal_string(  # noqa: PLR0911 - bounded expression taxonomy
         self, expression: ast.expr | None, module: _Module, line: int
     ) -> str | None:
         if isinstance(expression, ast.Constant) and isinstance(expression.value, str):
@@ -2703,6 +3165,23 @@ class SecureASTExtractor:
             left = self._literal_string(expression.left, module, line)
             right = self._literal_string(expression.right, module, line)
             return left + right if left is not None and right is not None else None
+        if isinstance(expression, ast.JoinedStr):
+            parts: list[str] = []
+            for joined_value in expression.values:
+                if isinstance(joined_value, ast.Constant) and isinstance(joined_value.value, str):
+                    parts.append(joined_value.value)
+                    continue
+                if (
+                    not isinstance(joined_value, ast.FormattedValue)
+                    or joined_value.conversion != -1
+                    or joined_value.format_spec is not None
+                ):
+                    return None
+                resolved = self._literal_string(joined_value.value, module, line)
+                if resolved is None:
+                    return None
+                parts.append(resolved)
+            return "".join(parts)
         return None
 
     def _keyword_string(self, call: ast.Call, name: str, module: _Module, line: int) -> str | None:
@@ -2800,8 +3279,285 @@ def _function_bindings(
     return visitor.names
 
 
-def _conditional_bound_names(node: ast.If) -> set[str]:
-    """Return module-scope names a top-level conditional may bind or delete."""
+def _uses_future_annotations(tree: ast.Module) -> bool:
+    """Return whether annotations are postponed for this module."""
+    return any(
+        isinstance(statement, ast.ImportFrom)
+        and statement.module == "__future__"
+        and any(alias.name == "annotations" for alias in statement.names)
+        for statement in tree.body
+    )
+
+
+def _executed_named_expr_bindings(
+    node: ast.AST,
+    *,
+    evaluate_annotations: bool,
+) -> list[tuple[str, ast.expr]]:
+    """Return exact assignment-expression bindings from definitely executed headers."""
+
+    class NamedExpressionVisitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.bindings: list[tuple[str, ast.expr]] = []
+
+        def visit_NamedExpr(self, child: ast.NamedExpr) -> None:
+            if isinstance(child.target, ast.Name):
+                self.bindings.append((child.target.id, child.value))
+            self.visit(child.value)
+
+        def _visit_function_header(self, child: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+            for expression in [
+                *child.decorator_list,
+                *child.args.defaults,
+                *(item for item in child.args.kw_defaults if item is not None),
+            ]:
+                self.visit(expression)
+            if evaluate_annotations:
+                for annotation in [
+                    *(item.annotation for item in child.args.args),
+                    *(item.annotation for item in child.args.posonlyargs),
+                    *(item.annotation for item in child.args.kwonlyargs),
+                    child.args.vararg.annotation if child.args.vararg is not None else None,
+                    child.args.kwarg.annotation if child.args.kwarg is not None else None,
+                    child.returns,
+                ]:
+                    if annotation is not None:
+                        self.visit(annotation)
+
+        def visit_FunctionDef(self, child: ast.FunctionDef) -> None:
+            self._visit_function_header(child)
+
+        def visit_AsyncFunctionDef(self, child: ast.AsyncFunctionDef) -> None:
+            self._visit_function_header(child)
+
+        def visit_ClassDef(self, child: ast.ClassDef) -> None:
+            for expression in [
+                *child.decorator_list,
+                *child.bases,
+                *(item.value for item in child.keywords),
+            ]:
+                self.visit(expression)
+
+        def visit_Lambda(self, child: ast.Lambda) -> None:
+            for expression in [
+                *child.args.defaults,
+                *(item for item in child.args.kw_defaults if item is not None),
+            ]:
+                self.visit(expression)
+
+        def visit_AnnAssign(self, child: ast.AnnAssign) -> None:
+            if child.value is not None:
+                self.visit(child.value)
+            if evaluate_annotations:
+                self.visit(child.annotation)
+
+        def visit_ListComp(self, _child: ast.ListComp) -> None:
+            return
+
+        def visit_SetComp(self, _child: ast.SetComp) -> None:
+            return
+
+        def visit_DictComp(self, _child: ast.DictComp) -> None:
+            return
+
+        def visit_GeneratorExp(self, _child: ast.GeneratorExp) -> None:
+            return
+
+        def visit_TypeAlias(self, _child: ast.AST) -> None:
+            return
+
+    visitor = NamedExpressionVisitor()
+    visitor.visit(node)
+    return visitor.bindings
+
+
+def _class_global_bound_names(
+    node: ast.ClassDef,
+    *,
+    evaluate_annotations: bool,
+) -> set[str]:
+    """Return module names rebound by ``global`` statements in executed class bodies."""
+
+    class ClassScopeVisitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.globals: set[str] = set()
+            self.bound: set[str] = set()
+            self.nested_classes: list[ast.ClassDef] = []
+
+        def visit_Global(self, child: ast.Global) -> None:
+            self.globals.update(child.names)
+
+        def visit_Name(self, child: ast.Name) -> None:
+            if isinstance(child.ctx, (ast.Store, ast.Del)):
+                self.bound.add(child.id)
+
+        def visit_Import(self, child: ast.Import) -> None:
+            self.bound.update(alias.asname or alias.name.split(".")[0] for alias in child.names)
+
+        def visit_ImportFrom(self, child: ast.ImportFrom) -> None:
+            self.bound.update(alias.asname or alias.name for alias in child.names)
+
+        def _visit_function_header(self, child: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+            self.bound.add(child.name)
+            for expression in [
+                *child.decorator_list,
+                *child.args.defaults,
+                *(item for item in child.args.kw_defaults if item is not None),
+            ]:
+                self.visit(expression)
+            if evaluate_annotations:
+                for annotation in [
+                    *(item.annotation for item in child.args.args),
+                    *(item.annotation for item in child.args.posonlyargs),
+                    *(item.annotation for item in child.args.kwonlyargs),
+                    child.args.vararg.annotation if child.args.vararg is not None else None,
+                    child.args.kwarg.annotation if child.args.kwarg is not None else None,
+                    child.returns,
+                ]:
+                    if annotation is not None:
+                        self.visit(annotation)
+
+        def visit_FunctionDef(self, child: ast.FunctionDef) -> None:
+            self._visit_function_header(child)
+
+        def visit_AsyncFunctionDef(self, child: ast.AsyncFunctionDef) -> None:
+            self._visit_function_header(child)
+
+        def visit_ClassDef(self, child: ast.ClassDef) -> None:
+            self.bound.add(child.name)
+            for expression in [
+                *child.decorator_list,
+                *child.bases,
+                *(item.value for item in child.keywords),
+            ]:
+                self.visit(expression)
+            self.nested_classes.append(child)
+
+        def visit_Lambda(self, child: ast.Lambda) -> None:
+            for expression in [
+                *child.args.defaults,
+                *(item for item in child.args.kw_defaults if item is not None),
+            ]:
+                self.visit(expression)
+
+        def visit_ExceptHandler(self, child: ast.ExceptHandler) -> None:
+            if child.name:
+                self.bound.add(child.name)
+            self.generic_visit(child)
+
+        def visit_MatchAs(self, child: ast.MatchAs) -> None:
+            if child.name:
+                self.bound.add(child.name)
+            self.generic_visit(child)
+
+        def visit_MatchStar(self, child: ast.MatchStar) -> None:
+            if child.name:
+                self.bound.add(child.name)
+
+        def visit_MatchMapping(self, child: ast.MatchMapping) -> None:
+            if child.rest:
+                self.bound.add(child.rest)
+            self.generic_visit(child)
+
+    visitor = ClassScopeVisitor()
+    for statement in node.body:
+        visitor.visit(statement)
+    rebound = visitor.globals & visitor.bound
+    for nested in visitor.nested_classes:
+        rebound.update(
+            _class_global_bound_names(
+                nested,
+                evaluate_annotations=evaluate_annotations,
+            )
+        )
+    return rebound
+
+
+def _has_executed_expression_control(
+    node: ast.AST,
+    *,
+    evaluate_annotations: bool,
+) -> bool:
+    """Return whether an executed expression introduces conditional evaluation."""
+
+    class ControlVisitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.found = False
+
+        def visit_BoolOp(self, _child: ast.BoolOp) -> None:
+            self.found = True
+
+        def visit_IfExp(self, _child: ast.IfExp) -> None:
+            self.found = True
+
+        def visit_NamedExpr(self, _child: ast.NamedExpr) -> None:
+            self.found = True
+
+        def visit_comprehension(self, _child: ast.comprehension) -> None:
+            self.found = True
+
+        def _visit_function_header(self, child: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+            for expression in [
+                *child.decorator_list,
+                *child.args.defaults,
+                *(item for item in child.args.kw_defaults if item is not None),
+            ]:
+                self.visit(expression)
+            if evaluate_annotations:
+                for annotation in [
+                    *(item.annotation for item in child.args.args),
+                    *(item.annotation for item in child.args.posonlyargs),
+                    *(item.annotation for item in child.args.kwonlyargs),
+                    child.args.vararg.annotation if child.args.vararg is not None else None,
+                    child.args.kwarg.annotation if child.args.kwarg is not None else None,
+                    child.returns,
+                ]:
+                    if annotation is not None:
+                        self.visit(annotation)
+
+        def visit_FunctionDef(self, child: ast.FunctionDef) -> None:
+            self._visit_function_header(child)
+
+        def visit_AsyncFunctionDef(self, child: ast.AsyncFunctionDef) -> None:
+            self._visit_function_header(child)
+
+        def visit_ClassDef(self, child: ast.ClassDef) -> None:
+            for expression in [
+                *child.decorator_list,
+                *child.bases,
+                *(item.value for item in child.keywords),
+            ]:
+                self.visit(expression)
+            for statement in child.body:
+                self.visit(statement)
+
+        def visit_Lambda(self, child: ast.Lambda) -> None:
+            for expression in [
+                *child.args.defaults,
+                *(item for item in child.args.kw_defaults if item is not None),
+            ]:
+                self.visit(expression)
+
+        def visit_AnnAssign(self, child: ast.AnnAssign) -> None:
+            if child.value is not None:
+                self.visit(child.value)
+            if evaluate_annotations:
+                self.visit(child.annotation)
+
+        def visit_TypeAlias(self, _child: ast.AST) -> None:
+            return
+
+    visitor = ControlVisitor()
+    visitor.visit(node)
+    return visitor.found
+
+
+def _scope_bound_names(
+    node: ast.AST,
+    *,
+    evaluate_annotations: bool = True,
+) -> set[str]:
+    """Return containing-scope names one executed AST construct may bind or delete."""
 
     class BindingVisitor(ast.NodeVisitor):
         def __init__(self) -> None:
@@ -2811,24 +3567,92 @@ def _conditional_bound_names(node: ast.If) -> set[str]:
             if isinstance(child.ctx, (ast.Store, ast.Del)):
                 self.names.add(child.id)
 
-        def visit_FunctionDef(self, child: ast.FunctionDef) -> None:
+        def _visit_function_header(self, child: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
             self.names.add(child.name)
+            for expression in [
+                *child.decorator_list,
+                *child.args.defaults,
+                *(item for item in child.args.kw_defaults if item is not None),
+            ]:
+                self.visit(expression)
+            if evaluate_annotations:
+                for annotation in [
+                    *(item.annotation for item in child.args.args),
+                    *(item.annotation for item in child.args.posonlyargs),
+                    *(item.annotation for item in child.args.kwonlyargs),
+                    child.args.vararg.annotation if child.args.vararg is not None else None,
+                    child.args.kwarg.annotation if child.args.kwarg is not None else None,
+                    child.returns,
+                ]:
+                    if annotation is not None:
+                        self.visit(annotation)
+            for type_parameter in getattr(child, "type_params", ()):
+                self.visit(type_parameter)
+
+        def visit_FunctionDef(self, child: ast.FunctionDef) -> None:
+            self._visit_function_header(child)
 
         def visit_AsyncFunctionDef(self, child: ast.AsyncFunctionDef) -> None:
-            self.names.add(child.name)
+            self._visit_function_header(child)
 
         def visit_ClassDef(self, child: ast.ClassDef) -> None:
             self.names.add(child.name)
+            for expression in [
+                *child.decorator_list,
+                *child.bases,
+                *(item.value for item in child.keywords),
+            ]:
+                self.visit(expression)
+            for type_parameter in getattr(child, "type_params", ()):
+                self.visit(type_parameter)
 
-        def visit_Lambda(self, _child: ast.Lambda) -> None:
-            return
+        def visit_Lambda(self, child: ast.Lambda) -> None:
+            for expression in [
+                *child.args.defaults,
+                *(item for item in child.args.kw_defaults if item is not None),
+            ]:
+                self.visit(expression)
+
+        def visit_AnnAssign(self, child: ast.AnnAssign) -> None:
+            self.visit(child.target)
+            if child.value is not None:
+                self.visit(child.value)
+            if evaluate_annotations:
+                self.visit(child.annotation)
+
+        def visit_TypeAlias(self, child: ast.AST) -> None:
+            name = getattr(child, "name", None)
+            if isinstance(name, ast.Name):
+                self.names.add(name.id)
 
         def _visit_comprehension(self, child: ast.AST) -> None:
             # Comprehension targets have their own scope. Named expressions in
-            # their value/filter expressions may still bind the containing scope.
-            for descendant in ast.walk(child):
-                if isinstance(descendant, ast.NamedExpr):
-                    self.visit(descendant.target)
+            # executed value/filter expressions may bind the containing scope,
+            # but nested callable bodies remain deferred.
+            outer = self
+
+            class NamedExpressionVisitor(ast.NodeVisitor):
+                def visit_NamedExpr(self, item: ast.NamedExpr) -> None:
+                    outer.names.update(_bound_names(item.target))
+                    self.visit(item.value)
+
+                def visit_FunctionDef(self, _item: ast.FunctionDef) -> None:
+                    return
+
+                def visit_AsyncFunctionDef(self, _item: ast.AsyncFunctionDef) -> None:
+                    return
+
+                def visit_ClassDef(self, _item: ast.ClassDef) -> None:
+                    return
+
+                def visit_Lambda(self, item: ast.Lambda) -> None:
+                    for expression in [
+                        *item.args.defaults,
+                        *(value for value in item.args.kw_defaults if value is not None),
+                    ]:
+                        self.visit(expression)
+
+            NamedExpressionVisitor().visit(child)
 
         def visit_ListComp(self, child: ast.ListComp) -> None:
             self._visit_comprehension(child)
@@ -2872,6 +3696,44 @@ def _conditional_bound_names(node: ast.If) -> set[str]:
     return visitor.names
 
 
+def _is_try_star(node: ast.AST) -> bool:
+    """Return whether *node* is Python 3.11's optional ``ast.TryStar`` node."""
+    try_star = getattr(ast, "TryStar", None)
+    return try_star is not None and isinstance(node, try_star)
+
+
+def _is_try_like(node: ast.AST) -> bool:
+    return isinstance(node, ast.Try) or _is_try_star(node)
+
+
+def _try_handlers(node: ast.AST) -> tuple[ast.ExceptHandler, ...]:
+    handlers = getattr(node, "handlers", ())
+    return tuple(item for item in handlers if isinstance(item, ast.ExceptHandler))
+
+
+def _is_type_alias(node: ast.AST) -> bool:
+    """Return whether *node* is Python 3.12's optional ``ast.TypeAlias`` node."""
+    type_alias = getattr(ast, "TypeAlias", None)
+    return type_alias is not None and isinstance(node, type_alias)
+
+
+def _assignment_pairs(target: ast.expr, value: ast.expr) -> list[tuple[str, ast.expr]]:
+    """Return exact name/value pairs for bounded, shape-equal destructuring."""
+    if isinstance(target, ast.Name):
+        return [(target.id, value)]
+    if (
+        isinstance(target, (ast.Tuple, ast.List))
+        and isinstance(value, (ast.Tuple, ast.List))
+        and len(target.elts) == len(value.elts)
+    ):
+        return [
+            pair
+            for target_item, value_item in zip(target.elts, value.elts, strict=True)
+            for pair in _assignment_pairs(target_item, value_item)
+        ]
+    return []
+
+
 def _bound_names(target: ast.AST) -> set[str]:
     """Return names bound or deleted by one assignment target."""
     if isinstance(target, ast.Name):
@@ -2904,6 +3766,7 @@ def _merge_ordered_limitations(
             str(limitation.condition.source_path),
             limitation.condition.source_line,
             limitation.condition.reason,
+            limitation.endpoint_impact,
         ): limitation
         for group in groups
         for limitation in group
@@ -2968,8 +3831,8 @@ def _statement_may_bind_name(node: ast.stmt, name: str) -> bool:  # noqa: PLR091
         value = getattr(node, attribute, None)
         if isinstance(value, list):
             nested.extend(item for item in value if isinstance(item, ast.stmt))
-    if isinstance(node, ast.Try):
-        nested.extend(item for handler in node.handlers for item in handler.body)
+    if _is_try_like(node):
+        nested.extend(item for handler in _try_handlers(node) for item in handler.body)
     if isinstance(node, ast.Match):
         nested.extend(item for case in node.cases for item in case.body)
     return any(_statement_may_bind_name(item, name) for item in nested)
