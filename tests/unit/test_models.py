@@ -14,8 +14,10 @@ from fastapi_endpoint_detector.models.diff import (
 )
 from fastapi_endpoint_detector.models.endpoint import (
     Endpoint,
+    EndpointDiscoveryCondition,
     EndpointMethod,
     HandlerInfo,
+    InventoryStatus,
 )
 from fastapi_endpoint_detector.models.report import (
     AffectedEndpoint,
@@ -160,6 +162,55 @@ class TestDiffFile:
 
 class TestAnalysisReport:
     """Tests for AnalysisReport model."""
+
+    def test_inventory_strength_is_backward_compatible(self) -> None:
+        report = AnalysisReport(
+            app_path="/app",
+            diff_source="test.diff",
+            total_endpoints=0,
+        )
+
+        assert report.inventory_status is None
+        assert report.inventory_limitations == ()
+
+    def test_inventory_strength_requires_consistent_limitations(self) -> None:
+        limitation = EndpointDiscoveryCondition(
+            source_path=Path("/app/main.py"),
+            source_line=2,
+            reason="module could not be parsed",
+        )
+
+        with pytest.raises(ValidationError, match="unset inventory status forbids"):
+            AnalysisReport(
+                app_path="/app",
+                diff_source="test.diff",
+                total_endpoints=0,
+                inventory_limitations=(limitation,),
+            )
+        with pytest.raises(ValidationError, match="conditional/unavailable require"):
+            AnalysisReport(
+                app_path="/app",
+                diff_source="test.diff",
+                total_endpoints=0,
+                inventory_status=InventoryStatus.CONDITIONAL,
+            )
+        with pytest.raises(ValidationError, match="established inventory forbids"):
+            AnalysisReport(
+                app_path="/app",
+                diff_source="test.diff",
+                total_endpoints=0,
+                inventory_status=InventoryStatus.ESTABLISHED,
+                inventory_limitations=(limitation,),
+            )
+
+        report = AnalysisReport(
+            app_path="/app",
+            diff_source="test.diff",
+            total_endpoints=0,
+            inventory_status=InventoryStatus.UNAVAILABLE,
+            inventory_limitations=(limitation,),
+        )
+        assert report.inventory_limitations == (limitation,)
 
     def test_affected_count(self) -> None:
         """Test the affected_count property."""

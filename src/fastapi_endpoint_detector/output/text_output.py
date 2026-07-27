@@ -69,6 +69,14 @@ class TextFormatter(BaseFormatter):
         console.print("[bold]Summary[/bold]")
         console.print(f"  App Path: {report.app_path}")
         console.print(f"  Diff Source: {report.diff_source}")
+        if report.inventory_status is not None:
+            console.print(f"  Inventory Status: {report.inventory_status.value.upper()}")
+            for limitation in report.inventory_limitations:
+                console.print(
+                    f"    Limitation: {limitation.source_path}:{limitation.source_line}: "
+                    f"{limitation.reason}",
+                    markup=False,
+                )
         console.print(f"  Total Endpoints: {report.total_endpoints}")
         console.print(
             f"  Files Changed: {report.total_files_changed} ({report.python_files_changed} Python)"

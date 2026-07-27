@@ -1363,6 +1363,7 @@ class ChangeMapper:
         # Initialize endpoints
         report_progress(5, 100, "Extracting endpoints...")
         total_endpoints = len(self.registry)
+        target_inventory = self.inventory if self.secure_ast else None
 
         if self.use_scip:
             report_progress(10, 100, f"Analyzing {total_endpoints} endpoints (SCIP)...")
@@ -1379,6 +1380,12 @@ class ChangeMapper:
                 app_path=str(self.app_path),
                 diff_source=diff_source_str,
                 total_endpoints=total_endpoints,
+                inventory_status=(
+                    target_inventory.status if target_inventory is not None else None
+                ),
+                inventory_limitations=(
+                    target_inventory.limitations if target_inventory is not None else ()
+                ),
                 affected_endpoints=filtered,
                 candidate_endpoints=scip_affected,
                 orphan_changes=scip_orphans,
@@ -1481,6 +1488,10 @@ class ChangeMapper:
             app_path=str(self.app_path),
             diff_source=diff_source_str,
             total_endpoints=len(self.registry),
+            inventory_status=(target_inventory.status if target_inventory is not None else None),
+            inventory_limitations=(
+                target_inventory.limitations if target_inventory is not None else ()
+            ),
             affected_endpoints=filtered_affected,
             candidate_endpoints=materialized,
             orphan_changes=orphan_changes,

@@ -47,6 +47,11 @@ class JsonFormatter(BaseFormatter):
             "surface": (
                 endpoint.surface.model_dump(mode="json") if endpoint.surface is not None else None
             ),
+            "activation": (
+                endpoint.activation.model_dump(mode="json")
+                if endpoint.activation is not None
+                else None
+            ),
         }
 
     def _affected_to_dict(self, affected: AffectedEndpoint) -> dict[str, Any]:
@@ -81,6 +86,12 @@ class JsonFormatter(BaseFormatter):
             "timestamp": report.timestamp.isoformat(),
             "app_path": report.app_path,
             "diff_source": report.diff_source,
+            "inventory_status": (
+                report.inventory_status.value if report.inventory_status is not None else None
+            ),
+            "inventory_limitations": [
+                limitation.model_dump(mode="json") for limitation in report.inventory_limitations
+            ],
             "summary": {
                 "total_endpoints": report.total_endpoints,
                 "affected_endpoints": report.affected_count,
