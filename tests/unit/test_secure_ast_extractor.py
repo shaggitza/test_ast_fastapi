@@ -2,6 +2,7 @@
 Unit tests for SecureASTExtractor.
 """
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -1013,6 +1014,795 @@ if enabled:
         inventory = SecureASTExtractor(app_file).extract_inventory()
 
         assert inventory.status == InventoryStatus.ESTABLISHED
+
+    def test_configured_parse_failure_never_selects_sibling_app(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "broken.py"
+        app_file.write_text("from fastapi import FastAPI\napp = FastAPI(\n")
+        (tmp_path / "sibling.py").write_text(
+            "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/wrong')\ndef wrong(): pass\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.UNAVAILABLE
+        assert inventory.endpoints == []
+        assert len(inventory.limitations) == 1
+        assert inventory.limitations[0].source_path == app_file
+        assert inventory.limitations[0].source_line == 2
+
+    def test_missing_configured_source_never_selects_sibling_app(self, tmp_path: Path) -> None:
+        missing = tmp_path / "missing.py"
+        (tmp_path / "sibling.py").write_text(
+            "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/wrong')\ndef wrong(): pass\n"
+        )
+
+        inventory = SecureASTExtractor(missing).extract_inventory()
+
+        assert inventory.status == InventoryStatus.UNAVAILABLE
+        assert inventory.endpoints == []
+        assert inventory.limitations[0].source_path == missing
+        assert "does not exist" in inventory.limitations[0].reason
+
+    def test_all_malformed_directory_retains_parse_evidence(self, tmp_path: Path) -> None:
+        first = tmp_path / "first.py"
+        second = tmp_path / "second.py"
+        first.write_text("def broken(\n")
+        second.write_bytes(b"\xff")
+
+        inventory = SecureASTExtractor(tmp_path).extract_inventory()
+
+        assert inventory.status == InventoryStatus.UNAVAILABLE
+        assert inventory.endpoints == []
+        assert {item.source_path for item in inventory.limitations} == {first, second}
+
+    def test_python_source_encoding_cookie_is_honored(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_bytes(
+            "# -*- coding: latin-1 -*-\n"
+            "from fastapi import FastAPI\n"
+            "app = FastAPI(title='café')\n"
+            "@app.get('/known')\n"
+            "def known(): pass\n".encode("latin-1")
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.ESTABLISHED
+        assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /known"]
+
+    def test_directory_parse_failure_is_reported_as_conditional(self, tmp_path: Path) -> None:
+        (tmp_path / "main.py").write_text(
+            "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/known')\ndef known(): pass\n"
+        )
+        broken = tmp_path / "plugin.py"
+        broken.write_bytes(b"\xff")
+
+        inventory = SecureASTExtractor(tmp_path, app_entry="main:app").extract_inventory()
+
+        assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /known"]
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert inventory.limitations[0].source_path == broken
+
+    def test_direct_route_clear_downgrades_existing_endpoint(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "@app.get('/stale')\n"
+            "def stale(): pass\n"
+            "app.routes.clear()\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /stale"]
+        assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+        assert inventory.limitations[0].source_line == 5
+
+    def test_conditional_route_clear_downgrades_existing_endpoint(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "@app.get('/known')\n"
+            "def known(): pass\n"
+            "if enabled:\n"
+            "    app.routes.clear()\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+        assert inventory.endpoints[0].discovery_conditions[0].source_line == 6
+
+    def test_unresolved_addition_preserves_known_endpoint_strength(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "@app.get('/known')\n"
+            "def known(): pass\n"
+            "app.router.add_api_route(dynamic_path, missing_handler)\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /known"]
+        assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.ESTABLISHED
+
+    def test_nested_router_exact_add_api_route_is_established(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "def handler(): pass\n"
+            "app.router.add_api_route('/nested', handler, methods=('POST',))\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.ESTABLISHED
+        assert [endpoint.identifier for endpoint in inventory.endpoints] == ["POST /nested"]
+
+    def test_cross_module_clear_downgrades_imported_router_endpoint(self, tmp_path: Path) -> None:
+        (tmp_path / "routes.py").write_text(
+            "from fastapi import APIRouter\n"
+            "router = APIRouter()\n"
+            "\n\n\n\n\n\n\n\n"
+            "@router.get('/stale')\n"
+            "def stale(): pass\n"
+        )
+        (tmp_path / "plugin.py").write_text("from routes import router\nrouter.routes.clear()\n")
+        (tmp_path / "main.py").write_text(
+            "from fastapi import FastAPI\n"
+            "from routes import router\n"
+            "import plugin\n"
+            "app = FastAPI()\n"
+            "app.include_router(router)\n"
+        )
+
+        inventory = SecureASTExtractor(tmp_path, app_entry="main:app").extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+        assert inventory.endpoints[0].discovery_conditions[0].source_path.name == "plugin.py"
+
+    def test_imported_router_clear_after_copy_preserves_parent_snapshot(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "routes.py").write_text(
+            "from fastapi import APIRouter\n"
+            "router = APIRouter()\n"
+            "@router.get('/known')\n"
+            "def known(): pass\n"
+        )
+        (tmp_path / "main.py").write_text(
+            "from fastapi import FastAPI\n"
+            "from routes import router\n"
+            "app = FastAPI()\n"
+            "app.include_router(router)\n"
+            "router.routes.clear()\n"
+        )
+
+        inventory = SecureASTExtractor(tmp_path, app_entry="main:app").extract_inventory()
+
+        assert inventory.status == InventoryStatus.ESTABLISHED
+        assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.ESTABLISHED
+
+    @pytest.mark.parametrize(
+        "setup,effect",
+        [
+            ("import builtins", 'builtins.exec("app.routes.clear()")'),
+            ("from builtins import eval as run", 'run("app.routes.clear()")'),
+        ],
+    )
+    def test_qualified_dynamic_execution_fails_closed(
+        self, tmp_path: Path, setup: str, effect: str
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            f"{setup}\n"
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "@app.get('/known')\n"
+            "def known(): pass\n"
+            f"{effect}\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+
+    def test_assigned_dynamic_execution_alias_fails_closed(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "run = exec\n"
+            "app = FastAPI()\n"
+            "@app.get('/known')\n"
+            "def known(): pass\n"
+            'run("app.routes.clear()")\n'
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+
+    def test_conditional_rebinding_preserves_possible_dynamic_alias(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "run = exec\n"
+            "app = FastAPI()\n"
+            "@app.get('/known')\n"
+            "def known(): pass\n"
+            "if flag:\n"
+            "    run = lambda source: None\n"
+            'run("app.routes.clear()")\n'
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+
+    def test_destructured_dynamic_execution_alias_fails_closed(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "(run,) = (exec,)\n"
+            "app = FastAPI()\n"
+            "@app.get('/known')\n"
+            "def known(): pass\n"
+            'run("app.routes.clear()")\n'
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+
+    def test_dynamic_execution_tracks_imported_router(self, tmp_path: Path) -> None:
+        (tmp_path / "routes.py").write_text(
+            "from fastapi import APIRouter\n"
+            "router = APIRouter()\n"
+            "@router.get('/known')\n"
+            "def known(): pass\n"
+        )
+        (tmp_path / "main.py").write_text(
+            "from fastapi import FastAPI\n"
+            "from routes import router\n"
+            'exec("router.routes.clear()")\n'
+            "app = FastAPI()\n"
+            "app.include_router(router)\n"
+        )
+
+        inventory = SecureASTExtractor(tmp_path, app_entry="main:app").extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+
+    @pytest.mark.parametrize(
+        "statement",
+        [
+            "app.get('/unused')",
+            "app.add_event_handler('startup', lambda: None)",
+            "app.add_exception_handler(Exception, lambda: None)",
+            "app.add_middleware(object)",
+            "setattr(app, 'title', 'changed')",
+            "app.router.redirect_slashes = False",
+        ],
+    )
+    def test_inventory_neutral_setup_does_not_weaken_known_route(
+        self, tmp_path: Path, statement: str
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "@app.get('/known')\n"
+            "def known(): pass\n"
+            f"{statement}\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.ESTABLISHED
+        assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.ESTABLISHED
+
+    def test_nested_lambda_comprehension_body_does_not_rebind_app(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "callbacks = [lambda: (app := object()) for _ in ()]\n"
+            "@app.get('/known')\n"
+            "def known(): pass\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.ESTABLISHED
+        assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /known"]
+
+    def test_deferred_handler_expression_control_does_not_weaken_inventory(
+        self, tmp_path: Path
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "@app.get('/known')\n"
+            "def known(flag):\n"
+            "    return 'a' if flag else 'b'\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.ESTABLISHED
+
+    @pytest.mark.parametrize(
+        "header",
+        [
+            "other = (app := object())",
+            "def helper(value=(app := object())): pass",
+            "def helper(value: (app := object())): pass",
+            "class Helper((app := object())): pass",
+        ],
+    )
+    def test_executed_expression_rebinding_invalidates_stale_app(
+        self, tmp_path: Path, header: str
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            f"{header}\n"
+            "@app.get('/phantom')\n"
+            "def phantom(): pass\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.UNAVAILABLE
+        assert inventory.endpoints == []
+
+    @pytest.mark.parametrize(
+        "annotation",
+        [
+            "marker: mutate(app)",
+            "class Markers:\n    marker: mutate(app)",
+        ],
+    )
+    def test_postponed_module_and_class_annotations_do_not_execute(
+        self, tmp_path: Path, annotation: str
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from __future__ import annotations\n"
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            f"{annotation}\n"
+            "@app.get('/known')\n"
+            "def known(): pass\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.ESTABLISHED
+        assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /known"]
+
+    def test_postponed_annotation_does_not_execute_rebinding(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from __future__ import annotations\n"
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "def helper(value: (app := object())): pass\n"
+            "@app.get('/known')\n"
+            "def known(): pass\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.ESTABLISHED
+        assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /known"]
+
+    @pytest.mark.parametrize(
+        "method_setup",
+        [
+            "METHODS = ['GET']\nMETHODS.append('POST')",
+            "METHODS = ('GET',)\nCAPTURED = METHODS\nMETHODS = ('POST',)",
+        ],
+    )
+    def test_named_route_methods_fail_closed(self, tmp_path: Path, method_setup: str) -> None:
+        selected = "CAPTURED" if "CAPTURED" in method_setup else "METHODS"
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            f"{method_setup}\n"
+            f"@app.api_route('/item', methods={selected})\n"
+            "def item(): pass\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.endpoints == []
+        assert inventory.status == InventoryStatus.CONDITIONAL
+
+    @pytest.mark.parametrize(
+        "effect",
+        [
+            "configure(app)",
+            "app.configure()",
+            "setattr(app, 'routes', [])",
+            "def header(value: mutate(app)): pass",
+            "class Header(mutate(app)): pass",
+            'exec("app.routes.clear()")',
+            'eval("app.routes.clear()")',
+        ],
+    )
+    def test_direct_unknown_route_effects_fail_closed(self, tmp_path: Path, effect: str) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "@app.get('/known')\n"
+            "def known(): pass\n"
+            f"{effect}\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+        assert inventory.limitations
+
+    @pytest.mark.parametrize(
+        "rebind",
+        [
+            "match value:\n    case _: app = object()",
+            "(app := object())",
+            "while (app := object()):\n    break",
+            "try:\n    app = object()\nexcept Exception:\n    pass",
+            "with manager() as app:\n    pass",
+            "try:\n    pass\nexcept Exception as app:\n    pass",
+        ],
+    )
+    def test_compound_and_walrus_rebinding_invalidates_stale_app(
+        self, tmp_path: Path, rebind: str
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            f"{rebind}\n"
+            "@app.get('/phantom')\n"
+            "def phantom(): pass\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.UNAVAILABLE
+        assert inventory.endpoints == []
+
+    @pytest.mark.parametrize(
+        "alias_binding",
+        [
+            "other = (alias := app)",
+            "def header(value=(alias := app)): pass",
+        ],
+    )
+    def test_named_expression_route_alias_propagates_destructive_effect(
+        self, tmp_path: Path, alias_binding: str
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "@app.get('/known')\n"
+            "def known(): pass\n"
+            f"{alias_binding}\n"
+            "alias.routes.clear()\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+
+    def test_class_global_rebinding_invalidates_module_app(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "@app.get('/old')\n"
+            "def old(): pass\n"
+            "class Rebind:\n"
+            "    global app\n"
+            "    app = FastAPI()\n"
+            "@app.get('/new')\n"
+            "def new(): pass\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.UNAVAILABLE
+        assert inventory.endpoints == []
+
+    @pytest.mark.parametrize(
+        "header",
+        [
+            "def helper(value=(app := FastAPI())): pass",
+            "helper = lambda value=(app := FastAPI()): None",
+        ],
+    )
+    def test_class_global_header_rebinding_invalidates_module_app(
+        self, tmp_path: Path, header: str
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "@app.get('/old')\n"
+            "def old(): pass\n"
+            "class Rebind:\n"
+            "    global app\n"
+            f"    {header}\n"
+            "@app.get('/new')\n"
+            "def new(): pass\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.UNAVAILABLE
+        assert inventory.endpoints == []
+
+    @pytest.mark.parametrize(
+        "class_body",
+        [
+            ("    try:\n        raise ValueError()\n    except ValueError as app:\n        pass"),
+            "    match FastAPI():\n        case app:\n            pass",
+        ],
+    )
+    def test_class_global_string_binding_invalidates_module_app(
+        self, tmp_path: Path, class_body: str
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "@app.get('/old')\n"
+            "def old(): pass\n"
+            "class Rebind:\n"
+            "    global app\n"
+            f"{class_body}\n"
+            "@app.get('/new')\n"
+            "def new(): pass\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.UNAVAILABLE
+        assert inventory.endpoints == []
+
+    @pytest.mark.skipif(sys.version_info < (3, 11), reason="except* requires Python 3.11")
+    def test_try_star_rebinding_invalidates_stale_app(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "try:\n"
+            "    raise ExceptionGroup('errors', [ValueError()])\n"
+            "except* ValueError:\n"
+            "    app = FastAPI()\n"
+            "@app.get('/phantom')\n"
+            "def phantom(): pass\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.UNAVAILABLE
+        assert inventory.endpoints == []
+
+    @pytest.mark.parametrize(
+        "statement",
+        [
+            "match value:\n    case other: pass",
+            "(other := object())",
+            "try:\n    other = object()\nexcept Exception:\n    pass",
+        ],
+    )
+    def test_unrelated_compound_binding_preserves_exact_app(
+        self, tmp_path: Path, statement: str
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            f"{statement}\n"
+            "@app.get('/known')\n"
+            "def known(): pass\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.ESTABLISHED
+        assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /known"]
+
+    def test_router_clear_after_copy_does_not_weaken_parent_snapshot(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import APIRouter, FastAPI\n"
+            "app = FastAPI()\n"
+            "router = APIRouter()\n"
+            "@router.get('/known')\n"
+            "def known(): pass\n"
+            "app.include_router(router)\n"
+            "router.routes.clear()\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.ESTABLISHED
+        assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.ESTABLISHED
+
+    def test_router_clear_before_copy_downgrades_copied_endpoint(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import APIRouter, FastAPI\n"
+            "app = FastAPI()\n"
+            "router = APIRouter()\n"
+            "@router.get('/known')\n"
+            "def known(): pass\n"
+            "router.routes.clear()\n"
+            "app.include_router(router)\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+
+    def test_cyclic_named_route_methods_fail_closed(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "METHODS = METHODS\n"
+            "@app.api_route('/unknown', methods=METHODS)\n"
+            "def unknown(): pass\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert inventory.endpoints == []
+
+    @pytest.mark.parametrize(
+        "replacement,registration",
+        [
+            ("app.get = no_route", "@app.get('/phantom')\ndef phantom(): pass"),
+            (
+                "app.include_router = no_op",
+                "router = APIRouter()\n"
+                "@router.get('/phantom')\n"
+                "def phantom(): pass\n"
+                "app.include_router(router)",
+            ),
+        ],
+    )
+    def test_registration_method_replacement_downgrades_subsequent_routes(
+        self, tmp_path: Path, replacement: str, registration: str
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import APIRouter, FastAPI\n"
+            "app = FastAPI()\n"
+            "def no_route(*args, **kwargs): return lambda handler: handler\n"
+            "def no_op(*args, **kwargs): return None\n"
+            f"{replacement}\n"
+            f"{registration}\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert inventory.endpoints
+        assert all(
+            endpoint.discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+            for endpoint in inventory.endpoints
+        )
+
+    def test_exact_route_method_alias_fails_closed_instead_of_established_empty(
+        self, tmp_path: Path
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "route = app.get\n"
+            "@route('/hidden')\n"
+            "def hidden(): pass\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.endpoints == []
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert "unresolved alias" in inventory.limitations[0].reason
+
+    def test_class_body_route_fails_closed_without_flattening_namespace(
+        self, tmp_path: Path
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "other = FastAPI()\n"
+            "class Routes:\n"
+            "    app = other\n"
+            "    @app.get('/other-only')\n"
+            "    def items(self): pass\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.endpoints == []
+        assert inventory.status == InventoryStatus.CONDITIONAL
+
+    def test_static_fstring_route_is_established(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "resource = 'items'\n"
+            "@app.get(f'/{resource}')\n"
+            "def items(): pass\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.ESTABLISHED
+        assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /items"]
+
+    @pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 695 requires Python 3.12")
+    def test_type_alias_value_is_not_executed_eagerly(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "type Alias = mutate(app)\n"
+            "@app.get('/known')\n"
+            "def known(): pass\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.ESTABLISHED
+        assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /known"]
+
+    @pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 695 requires Python 3.12")
+    def test_type_alias_binding_invalidates_stale_app(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "type app = int\n"
+            "@app.get('/phantom')\n"
+            "def phantom(): pass\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.UNAVAILABLE
+        assert inventory.endpoints == []
 
     @pytest.mark.parametrize("method", ["get", "post", "put", "patch", "delete"])
     def test_extract_different_http_methods(self, tmp_path: Path, method: str) -> None:
