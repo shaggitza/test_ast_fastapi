@@ -8,7 +8,15 @@ from pathlib import Path
 import pytest
 import yaml
 
-from fastapi_endpoint_detector.models.endpoint import EndpointDiscoveryStatus, InventoryStatus
+from fastapi_endpoint_detector.models.endpoint import (
+    Endpoint,
+    EndpointDiscoveryCondition,
+    EndpointDiscoveryStatus,
+    EndpointInventory,
+    EndpointMethod,
+    HandlerInfo,
+    InventoryStatus,
+)
 from fastapi_endpoint_detector.models.report import (
     AffectedEndpoint,
     AnalysisReport,
@@ -16,7 +24,11 @@ from fastapi_endpoint_detector.models.report import (
 )
 from fastapi_endpoint_detector.models.surface_contract import load_surface_contracts
 from fastapi_endpoint_detector.output.formatters import get_formatter
-from fastapi_endpoint_detector.parser.custom_surface_extractor import CustomSurfaceExtractor
+from fastapi_endpoint_detector.parser.custom_surface_extractor import (
+    CustomSurfaceExtractor,
+    CustomSurfaceExtractorError,
+    merge_surface_inventory,
+)
 
 
 def _contracts(
@@ -65,6 +77,123 @@ def _contracts(
         encoding="utf-8",
     )
     return path
+
+
+def test_missing_root_does_not_discover_sibling_surfaces(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "@reactor.listen('sibling')\n"
+        "async def process(): pass\n",
+        encoding="utf-8",
+    )
+    loaded = load_surface_contracts(_contracts(tmp_path))
+    missing = tmp_path / "missing.py"
+
+    inventory = CustomSurfaceExtractor(missing, loaded).extract_inventory()
+
+    assert inventory.endpoints == []
+    assert inventory.status == InventoryStatus.UNAVAILABLE
+    assert inventory.limitations[0].source_path == missing
+
+
+def test_unparseable_explicit_file_is_unavailable(tmp_path: Path) -> None:
+    broken = tmp_path / "broken.py"
+    broken.write_text("def broken(:\n", encoding="utf-8")
+    loaded = load_surface_contracts(_contracts(tmp_path))
+
+    inventory = CustomSurfaceExtractor(broken, loaded).extract_inventory()
+
+    assert inventory.endpoints == []
+    assert inventory.status == InventoryStatus.UNAVAILABLE
+    assert any(item.source_path == broken.resolve() for item in inventory.limitations)
+
+
+def test_root_without_parseable_python_modules_is_unavailable(tmp_path: Path) -> None:
+    app = tmp_path / "app"
+    app.mkdir()
+    loaded = load_surface_contracts(_contracts(tmp_path))
+
+    inventory = CustomSurfaceExtractor(app, loaded).extract_inventory()
+
+    assert inventory.endpoints == []
+    assert inventory.status == InventoryStatus.UNAVAILABLE
+    assert inventory.limitations == (
+        EndpointDiscoveryCondition(
+            source_path=app.resolve(),
+            source_line=1,
+            reason="custom surface root has no successfully parsed Python modules",
+        ),
+    )
+
+
+def test_partially_parsed_directory_is_conditional(tmp_path: Path) -> None:
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "valid.py").write_text("value = 1\n", encoding="utf-8")
+    (app / "broken.py").write_text("def broken(:\n", encoding="utf-8")
+    loaded = load_surface_contracts(_contracts(tmp_path))
+
+    inventory = CustomSurfaceExtractor(app, loaded).extract_inventory()
+
+    assert inventory.endpoints == []
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert inventory.limitations[0].source_path == app / "broken.py"
+
+
+def test_merge_surface_inventory_is_symmetric_for_empty_inventories(tmp_path: Path) -> None:
+    limitation = EndpointDiscoveryCondition(
+        source_path=tmp_path / "main.py",
+        source_line=1,
+        reason="inventory incomplete",
+    )
+
+    def inventory(status: InventoryStatus) -> EndpointInventory:
+        return EndpointInventory(
+            status=status,
+            limitations=() if status == InventoryStatus.ESTABLISHED else (limitation,),
+        )
+
+    for left in InventoryStatus:
+        for right in InventoryStatus:
+            merged = merge_surface_inventory(inventory(left), inventory(right))
+            reverse = merge_surface_inventory(inventory(right), inventory(left))
+            if InventoryStatus.UNAVAILABLE in (left, right):
+                expected = InventoryStatus.UNAVAILABLE
+            elif InventoryStatus.CONDITIONAL in (left, right):
+                expected = InventoryStatus.CONDITIONAL
+            else:
+                expected = InventoryStatus.ESTABLISHED
+            assert merged.status == reverse.status == expected
+            assert merged.endpoints == reverse.endpoints == []
+
+
+def test_merge_with_usable_endpoints_and_incomplete_input_is_conditional(
+    tmp_path: Path,
+) -> None:
+    endpoint = Endpoint(
+        path="/items",
+        methods=[EndpointMethod.GET],
+        handler=HandlerInfo(
+            name="items", module="main", file_path=tmp_path / "main.py", line_number=1
+        ),
+    )
+    established = EndpointInventory(endpoints=[endpoint])
+    limitation = EndpointDiscoveryCondition(
+        source_path=tmp_path / "broken.py", source_line=1, reason="module unavailable"
+    )
+    unavailable = EndpointInventory(
+        status=InventoryStatus.UNAVAILABLE,
+        limitations=(limitation,),
+    )
+
+    for merged in (
+        merge_surface_inventory(established, unavailable),
+        merge_surface_inventory(unavailable, established),
+    ):
+        assert merged.endpoints == [endpoint]
+        assert merged.status == InventoryStatus.CONDITIONAL
+        assert merged.limitations == (limitation,)
 
 
 def test_exact_decorator_registration_has_complete_provenance(tmp_path: Path) -> None:
@@ -229,6 +358,73 @@ def test_explicit_bootstrap_executes_registration_body(tmp_path: Path) -> None:
     )
 
     assert [item.identifier for item in endpoints] == ["REACTOR topic:orders"]
+
+
+@pytest.mark.parametrize(
+    "signature",
+    ["required", "*, required", "*args", "**kwargs"],
+)
+def test_bootstrap_rejects_required_and_variadic_parameters(
+    tmp_path: Path,
+    signature: str,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def process(): pass\n"
+        f"def configure({signature}):\n"
+        "    reactor.listen('orders', process)\n",
+        encoding="utf-8",
+    )
+    loaded = load_surface_contracts(_contracts(tmp_path, handler={"kind": "argument", "index": 1}))
+
+    with pytest.raises(CustomSurfaceExtractorError, match="callable with zero arguments"):
+        CustomSurfaceExtractor(
+            tmp_path,
+            loaded,
+            bootstrap_entry="main:configure",
+        ).extract_inventory()
+
+
+def test_bootstrap_rejects_generator_without_executing_body(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def process(): pass\n"
+        "def configure():\n"
+        "    reactor.listen('orders', process)\n"
+        "    yield None\n",
+        encoding="utf-8",
+    )
+    loaded = load_surface_contracts(_contracts(tmp_path, handler={"kind": "argument", "index": 1}))
+
+    with pytest.raises(CustomSurfaceExtractorError, match="must not be a generator"):
+        CustomSurfaceExtractor(
+            tmp_path,
+            loaded,
+            bootstrap_entry="main:configure",
+        ).extract_inventory()
+
+
+def test_bootstrap_accepts_fully_defaulted_parameters(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def process(): pass\n"
+        "def configure(optional=None, *, enabled=True):\n"
+        "    reactor.listen('orders', process)\n",
+        encoding="utf-8",
+    )
+    loaded = load_surface_contracts(_contracts(tmp_path, handler={"kind": "argument", "index": 1}))
+
+    inventory = CustomSurfaceExtractor(
+        tmp_path,
+        loaded,
+        bootstrap_entry="main:configure",
+    ).extract_inventory()
+
+    assert [item.identifier for item in inventory.endpoints] == ["REACTOR topic:orders"]
+    assert inventory.status == InventoryStatus.ESTABLISHED
 
 
 def test_callback_argument_requires_one_unambiguous_project_function(tmp_path: Path) -> None:

@@ -20,7 +20,11 @@ from fastapi_endpoint_detector.models.effect_contract import (
     ResourceIdentityEvidence,
 )
 from fastapi_endpoint_detector.models.effect_contract_audit import EffectContractAudit
-from fastapi_endpoint_detector.models.endpoint import Endpoint
+from fastapi_endpoint_detector.models.endpoint import (
+    Endpoint,
+    EndpointDiscoveryCondition,
+    InventoryStatus,
+)
 from fastapi_endpoint_detector.models.resource_coupling import (
     ResourceCouplingCandidateEvidence,
     ResourceCouplingGraph,
@@ -375,6 +379,16 @@ class AnalysisReport(BaseModel):
     app_path: str = Field(description="Path to the analyzed FastAPI application")
     diff_source: str = Field(description="Source of the diff (file path or 'stdin')")
     total_endpoints: int = Field(description="Total endpoints in the application")
+    inventory_status: InventoryStatus | None = Field(
+        default=None,
+        description=(
+            "Completeness of the target execution-free inventory; unset for runtime analysis"
+        ),
+    )
+    inventory_limitations: tuple[EndpointDiscoveryCondition, ...] = Field(
+        default_factory=tuple,
+        description="Source-backed limitations on the target execution-free inventory",
+    )
     affected_endpoints: list[AffectedEndpoint] = Field(
         default_factory=list,
         description="Endpoints selected by the legacy confidence threshold",
@@ -423,6 +437,19 @@ class AnalysisReport(BaseModel):
         default=None,
         description="Bounded source-backed same-scope SQL ordering diagnostics.",
     )
+
+    @model_validator(mode="after")
+    def validate_inventory_strength(self) -> "AnalysisReport":
+        has_limitations = bool(self.inventory_limitations)
+        if self.inventory_status is None:
+            if has_limitations:
+                raise ValueError("unset inventory status forbids inventory limitations")
+            return self
+        if (self.inventory_status == InventoryStatus.ESTABLISHED) == has_limitations:
+            raise ValueError(
+                "established inventory forbids limitations; conditional/unavailable require them"
+            )
+        return self
 
     @model_validator(mode="after")
     def populate_candidates_from_legacy_results(self) -> "AnalysisReport":

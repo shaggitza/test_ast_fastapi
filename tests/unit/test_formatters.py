@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml
 
 from fastapi_endpoint_detector.models.endpoint import (
     Endpoint,
@@ -16,6 +17,7 @@ from fastapi_endpoint_detector.models.endpoint import (
     EndpointMethod,
     HandlerInfo,
     InventoryStatus,
+    RouteActivationEvidence,
 )
 from fastapi_endpoint_detector.models.report import (
     AffectedEndpoint,
@@ -61,6 +63,92 @@ def test_inventory_strength_is_structured_and_visible() -> None:
         rendered = formatter.format_inventory(inventory)
         assert "conditional" in rendered
         assert limitation.reason in rendered
+
+
+def test_unavailable_report_inventory_is_visible_in_all_formats() -> None:
+    limitation = EndpointDiscoveryCondition(
+        source_path=Path("/app/broken.py"),
+        source_line=17,
+        reason="target module could not be parsed",
+    )
+    report = AnalysisReport(
+        app_path="/app/broken.py",
+        diff_source="change.diff",
+        total_endpoints=0,
+        inventory_status=InventoryStatus.UNAVAILABLE,
+        inventory_limitations=(limitation,),
+    )
+
+    json_result = json.loads(JsonFormatter().format(report))
+    yaml_result = yaml.safe_load(YamlFormatter().format(report))
+    for result in (json_result, yaml_result):
+        assert result["inventory_status"] == "unavailable"
+        assert result["inventory_limitations"] == [
+            {
+                "source_path": "/app/broken.py",
+                "source_line": 17,
+                "reason": "target module could not be parsed",
+            }
+        ]
+    for formatter in (TextFormatter(), MarkdownFormatter(), HtmlFormatter()):
+        rendered = re.sub(r"\x1b\[[0-9;]*m", "", formatter.format(report))
+        assert "UNAVAILABLE" in rendered
+        assert "/app/broken.py" in rendered
+        assert "17" in rendered
+        assert limitation.reason in rendered
+
+
+def test_json_and_yaml_preserve_startup_activation_evidence() -> None:
+    condition = EndpointDiscoveryCondition(
+        source_path=Path("/app/main.py"),
+        source_line=8,
+        reason="route is installed only if framework startup executes",
+    )
+    digest = "sha256:" + "a" * 64
+    endpoint = Endpoint(
+        path="/late",
+        methods=[EndpointMethod.POST],
+        handler=HandlerInfo(
+            name="late", module="main", file_path=Path("/app/main.py"), line_number=5
+        ),
+        discovery_status=EndpointDiscoveryStatus.CONDITIONAL,
+        discovery_conditions=(condition,),
+        activation=RouteActivationEvidence(
+            lifecycle_surface_id="event:startup",
+            contract_id="fastapi-on-event",
+            registration_file=Path("/app/main.py"),
+            registration_line=7,
+            activation_file=Path("/app/main.py"),
+            activation_line=9,
+            activation_source_hash=digest,
+            contract_source_path="preset:framework-v1",
+            raw_hash=digest,
+            config_hash=digest,
+            preset_hash=digest,
+            contract_hash=digest,
+        ),
+    )
+    candidate = AffectedEndpoint(
+        endpoint=endpoint,
+        confidence=ConfidenceLevel.LOW,
+        reason="startup route",
+    )
+    report = AnalysisReport(
+        app_path="/app",
+        diff_source="change.diff",
+        total_endpoints=1,
+        candidate_endpoints=[candidate],
+    )
+
+    for result in (
+        json.loads(JsonFormatter().format(report)),
+        yaml.safe_load(YamlFormatter().format(report)),
+    ):
+        serialized = result["candidate_endpoints"][0]["endpoint"]
+        assert serialized["surface"] is None
+        assert serialized["activation"]["phase"] == "startup"
+        assert serialized["activation"]["activation_line"] == 9
+        assert serialized["activation"]["contract_id"] == "fastapi-on-event"
 
 
 def test_conditional_discovery_is_structured_and_visible() -> None:

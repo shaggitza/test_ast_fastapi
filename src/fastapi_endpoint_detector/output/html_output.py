@@ -2533,6 +2533,19 @@ class HtmlFormatter(BaseFormatter):
             f"<code>{html.escape(report.diff_source)}</code>"
             "</div>"
         )
+        if report.inventory_status is not None:
+            content_lines.append(
+                '<div class="summary-item"><span class="summary-label">'
+                "Inventory Status:</span> "
+                f"<strong>{html.escape(report.inventory_status.value.upper())}</strong></div>"
+            )
+            for limitation in report.inventory_limitations:
+                content_lines.append(
+                    '<div class="summary-item"><span class="summary-label">'
+                    "Inventory Limitation:</span> "
+                    f"<code>{html.escape(str(limitation.source_path))}:"
+                    f"{limitation.source_line}</code>: {html.escape(limitation.reason)}</div>"
+                )
         content_lines.append(
             f'<div class="summary-item">'
             f'<span class="summary-label">Total Endpoints:</span> {report.total_endpoints}'

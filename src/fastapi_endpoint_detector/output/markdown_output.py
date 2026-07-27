@@ -39,6 +39,13 @@ class MarkdownFormatter(BaseFormatter):
         lines.append("")
         lines.append(f"- **App Path:** `{report.app_path}`")
         lines.append(f"- **Diff Source:** `{report.diff_source}`")
+        if report.inventory_status is not None:
+            lines.append(f"- **Inventory Status:** `{report.inventory_status.value.upper()}`")
+            for limitation in report.inventory_limitations:
+                lines.append(
+                    f"  - **Inventory Limitation:** "
+                    f"`{limitation.source_path}:{limitation.source_line}` — {limitation.reason}"
+                )
         lines.append(f"- **Total Endpoints:** {report.total_endpoints}")
         lines.append(
             f"- **Files Changed:** {report.total_files_changed} ({report.python_files_changed} Python)"

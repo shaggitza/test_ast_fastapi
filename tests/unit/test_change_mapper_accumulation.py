@@ -8,6 +8,7 @@ import yaml
 
 from fastapi_endpoint_detector.analyzer.change_mapper import (
     _CONFIDENCE_SCORE,
+    ChangeMapper,
     _endpoint_result_key,
     _merge_affected,
     _normalized_diff_path,
@@ -230,6 +231,59 @@ def test_orphan_evidence_deduplicates_and_subtracts_all_processed_lines() -> Non
     assert orphan.added_lines == [3]
     assert orphan.removed_lines == [9]
     assert orphan.total_lines == 2
+
+
+class _NoopMypyAnalyzer:
+    def release_typed_snapshot(self) -> None:
+        return
+
+
+class _NoopSCIPAnalyzer:
+    def ensure_index(self, *, force: bool = False) -> None:
+        assert force
+
+
+def test_secure_report_propagates_unavailable_target_inventory_on_both_exits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    malformed = tmp_path / "main.py"
+    malformed.write_text("def broken(:\n", encoding="utf-8")
+
+    normal = ChangeMapper(malformed, secure_ast=True, use_cache=False)
+    monkeypatch.setattr(normal, "_preanalyze_mypy", lambda _callback: None)
+    normal._mypy_analyzer = _NoopMypyAnalyzer()  # type: ignore[assignment]
+    normal_report = normal.analyze_diff("")
+
+    scip = ChangeMapper(malformed, secure_ast=True, use_scip=True, use_cache=False)
+    scip._scip_analyzer = _NoopSCIPAnalyzer()  # type: ignore[assignment]
+    scip_report = scip.analyze_diff("")
+
+    for mapper, report in ((normal, normal_report), (scip, scip_report)):
+        assert report.inventory_status == InventoryStatus.UNAVAILABLE
+        assert report.inventory_status == mapper.inventory.status
+        assert report.inventory_limitations == mapper.inventory.limitations
+        assert report.inventory_limitations
+        assert report.inventory_limitations[0].source_path == malformed.resolve()
+
+
+def test_runtime_change_mapper_report_leaves_inventory_unset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app_file = tmp_path / "main.py"
+    app_file.write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n",
+        encoding="utf-8",
+    )
+    mapper = ChangeMapper(app_file, use_cache=False)
+    monkeypatch.setattr(mapper, "_preanalyze_mypy", lambda _callback: None)
+    mapper._mypy_analyzer = _NoopMypyAnalyzer()  # type: ignore[assignment]
+
+    report = mapper.analyze_diff("")
+
+    assert report.inventory_status is None
+    assert report.inventory_limitations == ()
 
 
 def test_json_and_yaml_preserve_plural_evidence(tmp_path: Path) -> None:

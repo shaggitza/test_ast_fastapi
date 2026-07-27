@@ -60,14 +60,19 @@ def merge_surface_inventory(
     """Merge adapter inventories without weakening per-endpoint evidence."""
     endpoints = [*native.endpoints, *custom.endpoints]
     limitations = tuple(dict.fromkeys((*native.limitations, *custom.limitations)))
-    if not limitations:
-        status = InventoryStatus.ESTABLISHED
-    elif endpoints:
-        status = InventoryStatus.CONDITIONAL
-    elif native.status == InventoryStatus.UNAVAILABLE:
+    statuses = (native.status, custom.status)
+    if endpoints:
+        status = (
+            InventoryStatus.ESTABLISHED
+            if all(item == InventoryStatus.ESTABLISHED for item in statuses)
+            else InventoryStatus.CONDITIONAL
+        )
+    elif InventoryStatus.UNAVAILABLE in statuses:
         status = InventoryStatus.UNAVAILABLE
-    else:
+    elif any(item == InventoryStatus.CONDITIONAL for item in statuses):
         status = InventoryStatus.CONDITIONAL
+    else:
+        status = InventoryStatus.ESTABLISHED
     return EndpointInventory(endpoints=endpoints, status=status, limitations=limitations)
 
 
@@ -396,7 +401,12 @@ class CustomSurfaceExtractor:
         self.app_path = app_path.resolve()
         self.contracts = contracts
         self.bootstrap_entry = bootstrap_entry
-        self.root = self.app_path if self.app_path.is_dir() else self.app_path.parent
+        if self.app_path.is_dir():
+            self.root = self.app_path
+        elif self.app_path.is_file():
+            self.root = self.app_path.parent
+        else:
+            self.root = self.app_path
         self._modules: dict[str, _Module] = {}
         self._functions: dict[
             str, list[tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef]]
@@ -409,6 +419,7 @@ class CustomSurfaceExtractor:
         self._startup_route_seen: set[tuple[str, int, str, tuple[EndpointMethod, ...], str]] = set()
         self._module_states: dict[str, dict[str, _Binding | None]] = {}
         self._building_states = False
+        self._inventory_unavailable = False
         self._declared_receiver_types = {
             contract.registration.receiver_type
             for contract in contracts.document.contracts
@@ -418,6 +429,17 @@ class CustomSurfaceExtractor:
     def extract_inventory(self) -> EndpointInventory:
         """Return all finite registrations and inventory-strength evidence."""
         self._load_modules()
+        if self._inventory_unavailable:
+            limitations = tuple(
+                sorted(
+                    set(self._limitations),
+                    key=lambda item: (str(item.source_path), item.source_line, item.reason),
+                )
+            )
+            return EndpointInventory(
+                status=InventoryStatus.UNAVAILABLE,
+                limitations=limitations,
+            )
         self._building_states = True
         try:
             for module in self._modules.values():
@@ -539,6 +561,23 @@ class CustomSurfaceExtractor:
             raise CustomSurfaceExtractorError(
                 "custom surface bootstrap must be synchronous and undecorated"
             )
+        yield_visitor = _YieldVisitor(function)
+        yield_visitor.visit(function)
+        if yield_visitor.found:
+            raise CustomSurfaceExtractorError("custom surface bootstrap must not be a generator")
+        positional = [*function.args.posonlyargs, *function.args.args]
+        required_positional = len(positional) - len(function.args.defaults)
+        required_keyword_only = any(default is None for default in function.args.kw_defaults)
+        if (
+            required_positional
+            or required_keyword_only
+            or function.args.vararg is not None
+            or function.args.kwarg is not None
+        ):
+            raise CustomSurfaceExtractorError(
+                "custom surface bootstrap must be callable with zero arguments "
+                "and must not be variadic"
+            )
         state = dict(self._module_states[module_name])
         for argument in [
             *function.args.posonlyargs,
@@ -555,7 +594,20 @@ class CustomSurfaceExtractor:
         )
 
     def _load_modules(self) -> None:
-        paths = [self.app_path] if self.app_path.is_file() else sorted(self.root.rglob("*.py"))
+        if self.app_path.is_file():
+            paths = [self.app_path]
+        elif self.app_path.is_dir():
+            paths = sorted(self.root.rglob("*.py"))
+        else:
+            self._inventory_unavailable = True
+            self._limitations.append(
+                EndpointDiscoveryCondition(
+                    source_path=self.app_path,
+                    source_line=1,
+                    reason="custom surface root is missing or is not a file or directory",
+                )
+            )
+            return
         for path in paths:
             try:
                 source = path.read_text(encoding="utf-8")
@@ -581,6 +633,15 @@ class CustomSurfaceExtractor:
                     self._functions.setdefault(f"{name}.{node.name}", []).append((module, node))
                 elif isinstance(node, ast.ClassDef):
                     self._classes.setdefault(f"{name}.{node.name}", []).append((module, node))
+        if not self._modules:
+            self._inventory_unavailable = True
+            self._limitations.append(
+                EndpointDiscoveryCondition(
+                    source_path=self.app_path,
+                    source_line=1,
+                    reason="custom surface root has no successfully parsed Python modules",
+                )
+            )
 
     def _process_statements(  # noqa: PLR0911, PLR0912, PLR0915
         self,
