@@ -11,7 +11,11 @@ import inspect
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+
+import fastapi.routing as fastapi_routing
+from fastapi.routing import APIRoute, APIWebSocketRoute
+from starlette.routing import Mount
 
 from fastapi_endpoint_detector.models.endpoint import (
     Endpoint,
@@ -208,6 +212,159 @@ class FastAPIExtractor:
 
         return dependencies
 
+    @staticmethod
+    def _join_paths(prefix: str, path: str) -> str:
+        """Join effective include and mount paths without losing root slashes."""
+        if not prefix:
+            return path if path.startswith("/") else f"/{path}" if path else "/"
+        normalized_prefix = prefix if prefix.startswith("/") else f"/{prefix}"
+        normalized_prefix = normalized_prefix.rstrip("/")
+        if path == "/":
+            return f"{normalized_prefix}/" if normalized_prefix else "/"
+        return f"{normalized_prefix}/{path.lstrip('/')}" if path else normalized_prefix
+
+    @staticmethod
+    def _require_route_path(
+        route: Any,
+        original_route: Any,
+        *,
+        allow_empty: bool = False,
+    ) -> str:
+        path = getattr(route, "path", None)
+        if isinstance(path, str) and (path or allow_empty):
+            return path
+        effective_route = getattr(route, "starlette_route", None)
+        effective_path = getattr(effective_route, "path", None)
+        if isinstance(effective_path, str) and (effective_path or allow_empty):
+            return effective_path
+        raise FastAPIExtractorError(
+            f"FastAPI route '{type(original_route).__name__}' has no effective path"
+        )
+
+    @staticmethod
+    def _require_route_endpoint(route: Any, original_route: Any) -> Callable[..., Any]:
+        endpoint = getattr(route, "endpoint", None)
+        if callable(endpoint):
+            return cast("Callable[..., Any]", endpoint)
+        effective_route = getattr(route, "starlette_route", None)
+        effective_endpoint = getattr(effective_route, "endpoint", None)
+        if callable(effective_endpoint):
+            return cast("Callable[..., Any]", effective_endpoint)
+        raise FastAPIExtractorError(
+            f"FastAPI route '{type(original_route).__name__}' has no callable endpoint"
+        )
+
+    @staticmethod
+    def _effective_route_metadata(route: Any) -> Any:
+        path = getattr(route, "path", None)
+        endpoint = getattr(route, "endpoint", None)
+        if isinstance(path, str) and path and callable(endpoint):
+            return route
+        return getattr(route, "starlette_route", None) or route
+
+    @staticmethod
+    def _http_methods(route: Any, original_route: Any) -> list[EndpointMethod]:
+        raw_methods = getattr(route, "methods", None)
+        if not raw_methods:
+            raise FastAPIExtractorError(
+                f"FastAPI route '{type(original_route).__name__}' has no HTTP methods"
+            )
+        if any(not isinstance(method, str) for method in raw_methods):
+            raise FastAPIExtractorError(
+                f"FastAPI route '{type(original_route).__name__}' has invalid HTTP methods"
+            )
+        normalized_methods = {method.upper() for method in raw_methods}
+        supported_methods = {
+            method.value
+            for method in EndpointMethod
+            if method not in {EndpointMethod.WEBSOCKET, EndpointMethod.CUSTOM}
+        }
+        unsupported_methods = normalized_methods - supported_methods
+        if unsupported_methods:
+            unsupported = ", ".join(sorted(unsupported_methods))
+            raise FastAPIExtractorError(f"Unsupported FastAPI HTTP methods: {unsupported}")
+        return [EndpointMethod(method) for method in sorted(normalized_methods)]
+
+    def _http_endpoint(self, route: Any, original_route: Any, prefix: str) -> Endpoint:
+        path = self._require_route_path(route, original_route)
+        endpoint = self._require_route_endpoint(route, original_route)
+        return Endpoint(
+            path=self._join_paths(prefix, path),
+            methods=self._http_methods(route, original_route),
+            handler=self._get_handler_info(endpoint),
+            name=getattr(route, "name", None),
+            tags=list(getattr(route, "tags", None) or []),
+            dependencies=self._extract_dependencies(route),
+        )
+
+    def _websocket_endpoint(self, route: Any, original_route: Any, prefix: str) -> Endpoint:
+        metadata = self._effective_route_metadata(route)
+        return Endpoint(
+            path=self._join_paths(prefix, self._require_route_path(metadata, original_route)),
+            methods=[EndpointMethod.WEBSOCKET],
+            handler=self._get_handler_info(self._require_route_endpoint(metadata, original_route)),
+            name=getattr(metadata, "name", None),
+            dependencies=self._extract_dependencies(metadata),
+        )
+
+    def _endpoints_from_route(
+        self,
+        route: Any,
+        prefix: str,
+        stack: frozenset[int],
+    ) -> list[Endpoint]:
+        original_route = getattr(route, "original_route", route)
+        if isinstance(original_route, APIRoute):
+            return [self._http_endpoint(route, original_route, prefix)]
+        if isinstance(original_route, APIWebSocketRoute):
+            return [self._websocket_endpoint(route, original_route, prefix)]
+        if isinstance(original_route, Mount):
+            child_routes = getattr(original_route, "routes", None)
+            if child_routes is None:
+                return []
+            effective_mount = self._effective_route_metadata(route)
+            mount_path = self._require_route_path(
+                effective_mount,
+                original_route,
+                allow_empty=True,
+            )
+            return self._walk_routes(
+                child_routes,
+                prefix=self._join_paths(prefix, mount_path),
+                stack=stack,
+            )
+        if (
+            getattr(original_route, "original_router", None) is not None
+            or getattr(original_route, "include_context", None) is not None
+        ):
+            raise FastAPIExtractorError(
+                "Unsupported included FastAPI router representation "
+                f"'{type(original_route).__name__}'"
+            )
+        return []
+
+    def _walk_routes(
+        self,
+        routes: Any,
+        prefix: str = "",
+        stack: frozenset[int] = frozenset(),
+    ) -> list[Endpoint]:
+        route_collection_id = id(routes)
+        if route_collection_id in stack:
+            return []
+        next_stack = stack | {route_collection_id}
+        normalize = getattr(fastapi_routing, "iter_route_contexts", None)
+        normalized_routes = normalize(routes) if callable(normalize) else iter(routes)
+        endpoints: list[Endpoint] = []
+        try:
+            for route in normalized_routes:
+                endpoints.extend(self._endpoints_from_route(route, prefix, next_stack))
+        except FastAPIExtractorError:
+            raise
+        except Exception as exc:
+            raise FastAPIExtractorError(f"Failed to inspect FastAPI routes: {exc}") from exc
+        return endpoints
+
     def extract_endpoints(self) -> list[Endpoint]:
         """
         Extract all endpoints from the FastAPI application.
@@ -219,63 +376,12 @@ class FastAPIExtractor:
             FastAPIExtractorError: If extraction fails.
         """
         app = self._load_app()
-        endpoints: list[Endpoint] = []
-
-        # Check if app has routes attribute
         if not hasattr(app, "routes"):
             raise FastAPIExtractorError(
                 f"Object '{self.app_variable}' does not have 'routes' attribute. "
                 "Is it a FastAPI application?"
             )
-
-        def join_paths(prefix: str, path: str) -> str:
-            if not prefix:
-                return path if path.startswith("/") else f"/{path}" if path else "/"
-            normalized_prefix = prefix if prefix.startswith("/") else f"/{prefix}"
-            normalized_prefix = normalized_prefix.rstrip("/")
-            if path == "/":
-                return f"{normalized_prefix}/" if normalized_prefix else "/"
-            return f"{normalized_prefix}/{path.lstrip('/')}" if path else normalized_prefix
-
-        def walk(routes: Any, prefix: str = "", stack: frozenset[int] = frozenset()) -> None:
-            route_collection_id = id(routes)
-            if route_collection_id in stack:
-                return
-            next_stack = stack | {route_collection_id}
-            for route in routes:
-                route_class_name = type(route).__name__
-                if route_class_name == "APIRoute":
-                    handler = route.endpoint
-                    handler_info = self._get_handler_info(handler)
-                    methods = [
-                        EndpointMethod(method.upper())
-                        for method in route.methods
-                        if method.upper() in EndpointMethod.__members__
-                    ]
-                    endpoints.append(
-                        Endpoint(
-                            path=join_paths(prefix, route.path),
-                            methods=methods,
-                            handler=handler_info,
-                            name=route.name,
-                            tags=list(route.tags) if route.tags else [],
-                            dependencies=self._extract_dependencies(route),
-                        )
-                    )
-                elif route_class_name == "APIWebSocketRoute":
-                    endpoints.append(
-                        Endpoint(
-                            path=join_paths(prefix, route.path),
-                            methods=[EndpointMethod.WEBSOCKET],
-                            handler=self._get_handler_info(route.endpoint),
-                            name=route.name,
-                            dependencies=self._extract_dependencies(route),
-                        )
-                    )
-                elif route_class_name == "Mount" and hasattr(route, "routes"):
-                    walk(route.routes, join_paths(prefix, route.path), next_stack)
-
-        walk(app.routes)
+        endpoints = self._walk_routes(app.routes)
         return sorted(endpoints, key=lambda endpoint: endpoint.identifier)
 
     def get_endpoint_handler_files(self) -> dict[Path, list[Endpoint]]:
