@@ -6,7 +6,7 @@ import ast
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -39,6 +39,10 @@ from fastapi_endpoint_detector.models.surface_contract import (
 class _Binding:
     kind: Literal["module", "symbol", "receiver", "function"]
     identity: str
+    instance_token: tuple[int, int] | None = None
+
+
+_Fallthrough = Literal["always", "maybe", "never"]
 
 
 @dataclass(frozen=True)
@@ -67,19 +71,67 @@ def merge_surface_inventory(
     return EndpointInventory(endpoints=endpoints, status=status, limitations=limitations)
 
 
+def _target_names(target: ast.AST) -> set[str]:
+    """Return names rebound by one assignment/delete target."""
+    if isinstance(target, ast.Name):
+        return {target.id}
+    if isinstance(target, ast.Starred):
+        return _target_names(target.value)
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return {name for item in target.elts for name in _target_names(item)}
+    return set()
+
+
+def _mutation_root_name(target: ast.AST) -> str | None:
+    """Return the local name whose object an attribute/subscript target mutates."""
+    root = target
+    while isinstance(root, (ast.Attribute, ast.Subscript)):
+        root = root.value
+    if isinstance(root, ast.Name):
+        return root.id
+    if isinstance(root, ast.NamedExpr):
+        return root.target.id
+    return None
+
+
+def _pattern_names(pattern: ast.pattern) -> set[str]:
+    """Return names captured by a structural pattern."""
+    if isinstance(pattern, ast.MatchAs):
+        names = {pattern.name} if pattern.name is not None else set()
+        if pattern.pattern is not None:
+            names.update(_pattern_names(pattern.pattern))
+        return names
+    if isinstance(pattern, ast.MatchStar):
+        return {pattern.name} if pattern.name is not None else set()
+    if isinstance(pattern, ast.MatchMapping):
+        names = {pattern.rest} if pattern.rest is not None else set()
+        for child in pattern.patterns:
+            names.update(_pattern_names(child))
+        return names
+    if isinstance(pattern, (ast.MatchSequence, ast.MatchOr)):
+        return {name for child in pattern.patterns for name in _pattern_names(child)}
+    if isinstance(pattern, ast.MatchClass):
+        return {
+            name
+            for child in (*pattern.patterns, *pattern.kwd_patterns)
+            for name in _pattern_names(child)
+        }
+    return set()
+
+
 class _StatementMutationVisitor(ast.NodeVisitor):
     """Collect calls/mutations without entering deferred callable or class bodies."""
 
     def __init__(self) -> None:
         self.calls: list[ast.Call] = []
-        self.has_named_expression = False
+        self.named_expression_targets: set[str] = set()
 
     def visit_Call(self, node: ast.Call) -> None:
         self.calls.append(node)
         self.generic_visit(node)
 
     def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
-        self.has_named_expression = True
+        self.named_expression_targets.update(_target_names(node.target))
         self.generic_visit(node)
 
     def visit_FunctionDef(self, _node: ast.FunctionDef) -> None:
@@ -93,6 +145,138 @@ class _StatementMutationVisitor(ast.NodeVisitor):
 
     def visit_Lambda(self, _node: ast.Lambda) -> None:
         return
+
+
+class _LoopBreakVisitor(ast.NodeVisitor):
+    """Detect a break owned by the current loop, excluding nested scopes/loops."""
+
+    def __init__(self) -> None:
+        self.found = False
+
+    def visit_Break(self, _node: ast.Break) -> None:
+        self.found = True
+
+    def visit_For(self, _node: ast.For) -> None:
+        return
+
+    def visit_AsyncFor(self, _node: ast.AsyncFor) -> None:
+        return
+
+    def visit_While(self, _node: ast.While) -> None:
+        return
+
+    def visit_FunctionDef(self, _node: ast.FunctionDef) -> None:
+        return
+
+    def visit_AsyncFunctionDef(self, _node: ast.AsyncFunctionDef) -> None:
+        return
+
+    def visit_ClassDef(self, _node: ast.ClassDef) -> None:
+        return
+
+    def visit_Lambda(self, _node: ast.Lambda) -> None:
+        return
+
+
+class _EagerStateMutationVisitor(ast.NodeVisitor):
+    """Collect bindings that may change while directly executing statements."""
+
+    def __init__(self) -> None:
+        self.rebound_names: set[str] = set()
+        self.mutated_roots: set[str] = set()
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, (ast.Store, ast.Del)):
+            self.rebound_names.add(node.id)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        if isinstance(node.ctx, (ast.Store, ast.Del)):
+            root = _mutation_root_name(node)
+            if root is not None:
+                self.mutated_roots.add(root)
+        self.generic_visit(node)
+
+    def visit_Subscript(self, node: ast.Subscript) -> None:
+        if isinstance(node.ctx, (ast.Store, ast.Del)):
+            root = _mutation_root_name(node)
+            if root is not None:
+                self.mutated_roots.add(root)
+        self.generic_visit(node)
+
+    def _visit_function_header(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        self.rebound_names.add(node.name)
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        self.visit(node.args)
+        if node.returns is not None:
+            self.visit(node.returns)
+        for type_parameter in getattr(node, "type_params", ()):
+            self.visit(type_parameter)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function_header(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function_header(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.rebound_names.add(node.name)
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for base in node.bases:
+            self.visit(base)
+        for keyword in node.keywords:
+            self.visit(keyword.value)
+        for type_parameter in getattr(node, "type_params", ()):
+            self.visit(type_parameter)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        self.visit(node.args)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            self.rebound_names.add(alias.asname or alias.name.split(".")[0])
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        for alias in node.names:
+            if alias.name != "*":
+                self.rebound_names.add(alias.asname or alias.name)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.name is not None:
+            self.rebound_names.add(node.name)
+        self.generic_visit(node)
+
+    def visit_Match(self, node: ast.Match) -> None:
+        for case in node.cases:
+            self.rebound_names.update(_pattern_names(case.pattern))
+        self.generic_visit(node)
+
+    def _visit_comprehension(
+        self,
+        node: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp,
+    ) -> None:
+        for generator in node.generators:
+            self.visit(generator.iter)
+            for condition in generator.ifs:
+                self.visit(condition)
+        if isinstance(node, ast.DictComp):
+            self.visit(node.key)
+            self.visit(node.value)
+        else:
+            self.visit(node.elt)
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        self._visit_comprehension(node)
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        self._visit_comprehension(node)
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        self._visit_comprehension(node)
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        self._visit_comprehension(node)
 
 
 class _ClassAttributeMutationVisitor(ast.NodeVisitor):
@@ -398,7 +582,7 @@ class CustomSurfaceExtractor:
                 elif isinstance(node, ast.ClassDef):
                     self._classes.setdefault(f"{name}.{node.name}", []).append((module, node))
 
-    def _process_statements(  # noqa: PLR0912, PLR0915
+    def _process_statements(  # noqa: PLR0911, PLR0912, PLR0915
         self,
         module: _Module,
         statements: list[ast.stmt],
@@ -406,11 +590,24 @@ class CustomSurfaceExtractor:
         inherited_conditions: tuple[EndpointDiscoveryCondition, ...],
         *,
         process_functions: bool,
-    ) -> None:
+    ) -> _Fallthrough:
+        current_conditions = inherited_conditions
+        overall_flow: _Fallthrough = "always"
         for statement in statements:
+            if isinstance(statement, (ast.Return, ast.Raise)):
+                value = statement.value if isinstance(statement, ast.Return) else statement.exc
+                if value is not None:
+                    self._inspect_expression(module, value, state, current_conditions)
+                if isinstance(statement, ast.Raise) and statement.cause is not None:
+                    self._inspect_expression(module, statement.cause, state, current_conditions)
+                return "never"
+            if isinstance(statement, (ast.Break, ast.Continue)):
+                return "never"
             if isinstance(statement, ast.Import):
                 for alias in statement.names:
-                    state[alias.asname or alias.name.split(".")[0]] = _Binding("module", alias.name)
+                    local_name = alias.asname or alias.name.split(".")[0]
+                    identity = alias.name if alias.asname else alias.name.split(".")[0]
+                    state[local_name] = _Binding("module", identity)
                 continue
             if isinstance(statement, ast.ImportFrom):
                 imported = self._resolve_import(module.name, statement.module, statement.level)
@@ -438,107 +635,579 @@ class CustomSurfaceExtractor:
                             module,
                             registration,
                             state,
-                            inherited_conditions,
+                            current_conditions,
                             decorated_handler=statement,
                         )
                 identity = f"{module.name}.{statement.name}"
                 state[statement.name] = _Binding("function", identity)
-                local = dict(state)
-                for argument in [
-                    *statement.args.posonlyargs,
-                    *statement.args.args,
-                    *statement.args.kwonlyargs,
-                ]:
-                    local[argument.arg] = None
                 # Function bodies are deferred; only an explicit bootstrap body is walked.
                 continue
             if isinstance(statement, (ast.Assign, ast.AnnAssign)):
                 value = statement.value
-                if isinstance(value, ast.Call):
-                    self._inspect_registration(
-                        module, value, state, inherited_conditions, decorated_handler=None
-                    )
+                if value is not None:
+                    self._inspect_expression(module, value, state, current_conditions)
                 binding = self._binding_from_expression(value, state)
                 targets = (
                     statement.targets if isinstance(statement, ast.Assign) else [statement.target]
                 )
                 for target in targets:
-                    if isinstance(target, ast.Name):
-                        state[target.id] = binding
-                    else:
-                        state.clear()
+                    self._inspect_target_expression(module, target, state, current_conditions)
+                    names = _target_names(target)
+                    for name in names:
+                        state[name] = binding if isinstance(target, ast.Name) else None
+                    self._invalidate_mutated_target(target, state)
                 continue
-            if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
-                self._inspect_registration(
-                    module,
-                    statement.value,
-                    state,
-                    inherited_conditions,
-                    decorated_handler=None,
-                )
+            if isinstance(statement, ast.Expr):
+                self._inspect_expression(module, statement.value, state, current_conditions)
                 continue
-            if isinstance(statement, (ast.AugAssign, ast.Delete)):
-                state.clear()
+            if isinstance(statement, ast.AugAssign):
+                self._inspect_target_expression(module, statement.target, state, current_conditions)
+                self._inspect_expression(module, statement.value, state, current_conditions)
+                for name in _target_names(statement.target):
+                    state[name] = None
+                self._invalidate_mutated_target(statement.target, state)
+                continue
+            if isinstance(statement, ast.Delete):
+                for target in statement.targets:
+                    self._inspect_target_expression(module, target, state, current_conditions)
+                    for name in _target_names(target):
+                        state[name] = None
+                    self._invalidate_mutated_target(target, state)
                 continue
             if isinstance(statement, ast.If):
-                condition = EndpointDiscoveryCondition(
-                    source_path=module.path,
-                    source_line=statement.lineno,
-                    reason="custom surface registration is guarded by source control flow",
-                )
-                branch_conditions = (*inherited_conditions, condition)
-                self._process_statements(
-                    module,
-                    statement.body,
-                    dict(state),
-                    branch_conditions,
-                    process_functions=process_functions,
-                )
-                self._process_statements(
-                    module,
-                    statement.orelse,
-                    dict(state),
-                    branch_conditions,
-                    process_functions=process_functions,
-                )
-                state.clear()
-                continue
-            if isinstance(
-                statement, (ast.For, ast.AsyncFor, ast.While, ast.Try, ast.With, ast.AsyncWith)
-            ):
-                condition = EndpointDiscoveryCondition(
-                    source_path=module.path,
-                    source_line=statement.lineno,
-                    reason="custom surface registration appears in unsupported control flow",
-                )
-                bodies: list[list[ast.stmt]] = []
-                for attribute in ("body", "orelse", "finalbody"):
-                    body = getattr(statement, attribute, None)
-                    if body:
-                        bodies.append(body)
-                for body in bodies:
-                    self._process_statements(
+                self._inspect_expression(module, statement.test, state, current_conditions)
+                truth = self._literal_truth(statement.test)
+                if truth is not None:
+                    selected = statement.body if truth else statement.orelse
+                    branch_flow = self._process_statements(
                         module,
-                        body,
-                        {},
-                        (*inherited_conditions, condition),
+                        selected,
+                        state,
+                        current_conditions,
                         process_functions=process_functions,
                     )
-                state.clear()
+                else:
+                    condition = self._control_flow_condition(module, statement.lineno)
+                    branch_conditions = (*current_conditions, condition)
+                    body_state = dict(state)
+                    else_state = dict(state)
+                    body_flow = self._process_statements(
+                        module,
+                        statement.body,
+                        body_state,
+                        branch_conditions,
+                        process_functions=process_functions,
+                    )
+                    else_flow = self._process_statements(
+                        module,
+                        statement.orelse,
+                        else_state,
+                        branch_conditions,
+                        process_functions=process_functions,
+                    )
+                    reachable = [
+                        branch_state
+                        for branch_state, flow in (
+                            (body_state, body_flow),
+                            (else_state, else_flow),
+                        )
+                        if flow != "never"
+                    ]
+                    if reachable:
+                        self._replace_state(state, self._join_states(reachable))
+                    branch_flow = self._branch_flow(body_flow, else_flow)
+                if branch_flow == "never":
+                    return "never"
+                if branch_flow == "maybe":
+                    current_conditions = (
+                        *current_conditions,
+                        self._control_flow_condition(module, statement.lineno),
+                    )
+                    overall_flow = "maybe"
                 continue
-            # Unknown mutation/call shapes invalidate finite receiver and callback bindings.
+            if isinstance(statement, ast.Match):
+                self._inspect_expression(module, statement.subject, state, current_conditions)
+                condition = self._control_flow_condition(module, statement.lineno)
+                branch_conditions = (*current_conditions, condition)
+                remaining_state = dict(state)
+                outgoing: list[dict[str, _Binding | None]] = []
+                body_flows: list[_Fallthrough] = []
+                for case in statement.cases:
+                    case_state = dict(remaining_state)
+                    for name in _pattern_names(case.pattern):
+                        case_state[name] = None
+                    if case.guard is not None:
+                        self._inspect_expression(module, case.guard, case_state, branch_conditions)
+                        guard_truth = self._literal_truth(case.guard)
+                    else:
+                        guard_truth = True
+                    body_state = dict(case_state)
+                    if guard_truth is not False:
+                        body_flow = self._process_statements(
+                            module,
+                            case.body,
+                            body_state,
+                            branch_conditions,
+                            process_functions=process_functions,
+                        )
+                        body_flows.append(body_flow)
+                        if body_flow != "never":
+                            outgoing.append(body_state)
+                    if guard_truth is not True:
+                        remaining_state = self._join_states((remaining_state, case_state))
+                # Do not prove pattern exhaustiveness in this bounded model.
+                outgoing.append(remaining_state)
+                self._replace_state(state, self._join_states(outgoing))
+                if any(flow != "always" for flow in body_flows):
+                    # The no-match/failed-guard path still reaches the next statement.
+                    overall_flow = "maybe"
+                    current_conditions = (*current_conditions, condition)
+                continue
+            if isinstance(statement, (ast.For, ast.AsyncFor, ast.While)):
+                if isinstance(statement, (ast.For, ast.AsyncFor)):
+                    self._inspect_expression(module, statement.iter, state, current_conditions)
+                else:
+                    self._inspect_expression(module, statement.test, state, current_conditions)
+                branch_conditions = (
+                    *current_conditions,
+                    self._control_flow_condition(module, statement.lineno),
+                )
+                body_state = dict(state)
+                if isinstance(statement, (ast.For, ast.AsyncFor)):
+                    for name in _target_names(statement.target):
+                        body_state[name] = None
+                body_flow = self._process_statements(
+                    module,
+                    statement.body,
+                    body_state,
+                    branch_conditions,
+                    process_functions=process_functions,
+                )
+                if isinstance(statement, ast.While) and self._literal_truth(statement.test) is True:
+                    break_visitor = _LoopBreakVisitor()
+                    for body_statement in statement.body:
+                        break_visitor.visit(body_statement)
+                    if not break_visitor.found:
+                        return "never"
+                loop_state = self._join_states((state, body_state))
+                else_state = dict(loop_state)
+                else_flow = self._process_statements(
+                    module,
+                    statement.orelse,
+                    else_state,
+                    branch_conditions,
+                    process_functions=process_functions,
+                )
+                reachable = [loop_state]
+                if else_flow != "never":
+                    reachable.append(else_state)
+                self._replace_state(state, self._join_states(reachable))
+                if body_flow != "always" or else_flow != "always":
+                    current_conditions = branch_conditions
+                    overall_flow = "maybe"
+                continue
+            if isinstance(statement, (ast.With, ast.AsyncWith)):
+                for item in statement.items:
+                    self._inspect_expression(module, item.context_expr, state, current_conditions)
+                body_state = dict(state)
+                for item in statement.items:
+                    if item.optional_vars is not None:
+                        for name in _target_names(item.optional_vars):
+                            body_state[name] = None
+                condition = self._control_flow_condition(module, statement.lineno)
+                branch_conditions = (*current_conditions, condition)
+                body_flow = self._process_statements(
+                    module,
+                    statement.body,
+                    body_state,
+                    branch_conditions,
+                    process_functions=process_functions,
+                )
+                if body_flow == "never":
+                    return "never"
+                self._replace_state(state, body_state)
+                if body_flow == "maybe":
+                    current_conditions = branch_conditions
+                    overall_flow = "maybe"
+                continue
+            if isinstance(statement, ast.Try) or statement.__class__.__name__ == "TryStar":
+                try_flow = self._process_try_statement(
+                    module,
+                    statement,
+                    state,
+                    current_conditions,
+                    process_functions=process_functions,
+                )
+                if try_flow == "never":
+                    return "never"
+                if try_flow == "maybe":
+                    current_conditions = (
+                        *current_conditions,
+                        self._control_flow_condition(module, statement.lineno),
+                    )
+                    overall_flow = "maybe"
+                continue
+            # Keep unknown eager shapes fail-closed without discarding unrelated bindings.
             mutation = _StatementMutationVisitor()
             mutation.visit(statement)
+            fallback_conditions = (
+                *current_conditions,
+                self._control_flow_condition(module, statement.lineno),
+            )
             for call in mutation.calls:
                 self._inspect_registration(
-                    module,
-                    call,
-                    state,
-                    inherited_conditions,
-                    decorated_handler=None,
+                    module, call, state, fallback_conditions, decorated_handler=None
                 )
-            if mutation.calls or mutation.has_named_expression:
-                state.clear()
+            for name in mutation.named_expression_targets:
+                state[name] = None
+        return overall_flow
+
+    @staticmethod
+    def _branch_flow(left: _Fallthrough, right: _Fallthrough) -> _Fallthrough:
+        if left == right:
+            return left
+        return "maybe"
+
+    @staticmethod
+    def _replace_state(
+        state: dict[str, _Binding | None], replacement: dict[str, _Binding | None]
+    ) -> None:
+        state.clear()
+        state.update(replacement)
+
+    @staticmethod
+    def _join_states(
+        states: tuple[dict[str, _Binding | None], ...] | list[dict[str, _Binding | None]],
+    ) -> dict[str, _Binding | None]:
+        if not states:
+            return {}
+        names = set().union(*(item.keys() for item in states))
+        joined: dict[str, _Binding | None] = {}
+        for name in sorted(names):
+            values = [item.get(name) for item in states]
+            if all(value == values[0] for value in values[1:]):
+                joined[name] = values[0]
+        return joined
+
+    @staticmethod
+    def _control_flow_condition(module: _Module, line: int) -> EndpointDiscoveryCondition:
+        return EndpointDiscoveryCondition(
+            source_path=module.path,
+            source_line=line,
+            reason="custom surface registration is guarded by source control flow",
+        )
+
+    def _process_try_statement(  # noqa: PLR0912
+        self,
+        module: _Module,
+        statement: ast.stmt,
+        state: dict[str, _Binding | None],
+        inherited_conditions: tuple[EndpointDiscoveryCondition, ...],
+        *,
+        process_functions: bool,
+    ) -> _Fallthrough:
+        conditions = (
+            *inherited_conditions,
+            self._control_flow_condition(module, statement.lineno),
+        )
+        entry_state = dict(state)
+        try_state = dict(state)
+        try_flow = self._process_statements(
+            module,
+            getattr(statement, "body"),  # noqa: B009 - Try/TryStar compatibility
+            try_state,
+            conditions,
+            process_functions=process_functions,
+        )
+        outgoing: list[dict[str, _Binding | None]] = []
+        flows: list[_Fallthrough] = [try_flow]
+        if try_flow != "never":
+            normal_state = dict(try_state)
+            normal_flow = self._process_statements(
+                module,
+                getattr(statement, "orelse"),  # noqa: B009 - Try/TryStar compatibility
+                normal_state,
+                conditions,
+                process_functions=process_functions,
+            )
+            flows.append(normal_flow)
+            if normal_flow != "never":
+                outgoing.append(normal_state)
+        exceptional_state = self._join_states((entry_state, try_state))
+        mutations = _EagerStateMutationVisitor()
+        for try_statement in getattr(statement, "body"):  # noqa: B009
+            mutations.visit(try_statement)
+        for name in mutations.rebound_names:
+            exceptional_state[name] = None
+        for root_name in mutations.mutated_roots:
+            self._invalidate_binding_aliases(root_name, exceptional_state)
+        exceptional_states = [exceptional_state]
+        for handler in getattr(statement, "handlers"):  # noqa: B009
+            # An exception may be raised before or after any modeled try mutation.
+            # TryStar handlers can also observe effects from earlier handlers.
+            handler_state = self._join_states(exceptional_states)
+            if handler.type is not None:
+                self._inspect_expression(module, handler.type, handler_state, conditions)
+            if handler.name is not None:
+                handler_state[handler.name] = None
+            handler_flow = self._process_statements(
+                module,
+                handler.body,
+                handler_state,
+                conditions,
+                process_functions=process_functions,
+            )
+            if handler.name is not None:
+                handler_state[handler.name] = None
+            exceptional_states.append(handler_state)
+            flows.append(handler_flow)
+            if handler_flow != "never":
+                outgoing.append(handler_state)
+        finalbody = getattr(statement, "finalbody")  # noqa: B009
+        if finalbody:
+            # Finally can run after normal, handled, or still-propagating exception paths.
+            final_inputs = [*outgoing, self._join_states(exceptional_states)]
+            finalized: list[dict[str, _Binding | None]] = []
+            for outgoing_state in final_inputs:
+                final_state = dict(outgoing_state)
+                final_flow = self._process_statements(
+                    module,
+                    finalbody,
+                    final_state,
+                    conditions,
+                    process_functions=process_functions,
+                )
+                flows.append(final_flow)
+                if final_flow != "never":
+                    finalized.append(final_state)
+            outgoing = finalized
+        if not outgoing:
+            return "never"
+        self._replace_state(state, self._join_states(outgoing))
+        return "always" if all(flow == "always" for flow in flows) else "maybe"
+
+    def _inspect_expression(  # noqa: PLR0911, PLR0912, PLR0915
+        self,
+        module: _Module,
+        expression: ast.expr,
+        state: dict[str, _Binding | None],
+        inherited_conditions: tuple[EndpointDiscoveryCondition, ...],
+    ) -> None:
+        if isinstance(expression, ast.Lambda):
+            return
+        if isinstance(expression, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            self._inspect_comprehension(module, expression, state, inherited_conditions)
+            return
+        if isinstance(expression, ast.NamedExpr):
+            self._inspect_expression(module, expression.value, state, inherited_conditions)
+            state[expression.target.id] = self._binding_from_expression(expression.value, state)
+            return
+        if isinstance(expression, ast.BoolOp):
+            skipped: list[dict[str, _Binding | None]] = []
+            conditional = False
+            working = dict(state)
+            for value in expression.values:
+                conditions = inherited_conditions
+                if conditional:
+                    conditions = (
+                        *conditions,
+                        self._expression_condition(module, value.lineno),
+                    )
+                self._inspect_expression(module, value, working, conditions)
+                truth = self._literal_truth(value)
+                continues = (
+                    truth
+                    if isinstance(expression.op, ast.And)
+                    else (None if truth is None else not truth)
+                )
+                if continues is False:
+                    self._replace_state(state, self._join_states((*skipped, working)))
+                    return
+                if continues is None:
+                    skipped.append(dict(working))
+                    conditional = True
+            self._replace_state(state, self._join_states((*skipped, working)))
+            return
+        if isinstance(expression, ast.IfExp):
+            self._inspect_expression(module, expression.test, state, inherited_conditions)
+            truth = self._literal_truth(expression.test)
+            if truth is not None:
+                selected = expression.body if truth else expression.orelse
+                self._inspect_expression(module, selected, state, inherited_conditions)
+                return
+            conditions = (
+                *inherited_conditions,
+                self._expression_condition(module, expression.lineno),
+            )
+            body_state = dict(state)
+            else_state = dict(state)
+            self._inspect_expression(module, expression.body, body_state, conditions)
+            self._inspect_expression(module, expression.orelse, else_state, conditions)
+            self._replace_state(state, self._join_states((body_state, else_state)))
+            return
+        if isinstance(expression, ast.Compare):
+            self._inspect_expression(module, expression.left, state, inherited_conditions)
+            previous = expression.left
+            conditional = False
+            compare_skipped: list[dict[str, _Binding | None]] = []
+            working = dict(state)
+            for index, (operator, comparator) in enumerate(
+                zip(expression.ops, expression.comparators, strict=True)
+            ):
+                conditions = inherited_conditions
+                if conditional:
+                    conditions = (
+                        *conditions,
+                        self._expression_condition(module, comparator.lineno),
+                    )
+                self._inspect_expression(module, comparator, working, conditions)
+                comparison = self._literal_comparison(previous, operator, comparator)
+                if comparison is False:
+                    self._replace_state(state, self._join_states((*compare_skipped, working)))
+                    return
+                if comparison is None and index < len(expression.comparators) - 1:
+                    compare_skipped.append(dict(working))
+                    conditional = True
+                previous = comparator
+            self._replace_state(state, self._join_states((*compare_skipped, working)))
+            return
+        if isinstance(expression, ast.Call):
+            self._inspect_registration(
+                module,
+                expression,
+                state,
+                inherited_conditions,
+                decorated_handler=None,
+            )
+        for child in ast.iter_child_nodes(expression):
+            if isinstance(child, ast.expr):
+                self._inspect_expression(module, child, state, inherited_conditions)
+            elif isinstance(child, ast.keyword):
+                self._inspect_expression(module, child.value, state, inherited_conditions)
+
+    @staticmethod
+    def _literal_truth(expression: ast.expr) -> bool | None:
+        if isinstance(expression, ast.Constant):
+            return bool(expression.value)
+        if isinstance(expression, (ast.List, ast.Tuple, ast.Set, ast.Dict)):
+            elements = expression.keys if isinstance(expression, ast.Dict) else expression.elts
+            if not elements:
+                return False
+        return None
+
+    @staticmethod
+    def _literal_comparison(  # noqa: PLR0911
+        left: ast.expr, operator: ast.cmpop, right: ast.expr
+    ) -> bool | None:
+        if not isinstance(left, ast.Constant) or not isinstance(right, ast.Constant):
+            return None
+        if isinstance(operator, ast.Eq):
+            return left.value == right.value
+        if isinstance(operator, ast.NotEq):
+            return left.value != right.value
+        if isinstance(operator, ast.Is) and (left.value is None or right.value is None):
+            return left.value is right.value
+        if isinstance(operator, ast.IsNot) and (left.value is None or right.value is None):
+            return left.value is not right.value
+        left_value: Any = left.value
+        right_value: Any = right.value
+        try:
+            if isinstance(operator, ast.Lt):
+                return bool(left_value < right_value)
+            if isinstance(operator, ast.LtE):
+                return bool(left_value <= right_value)
+            if isinstance(operator, ast.Gt):
+                return bool(left_value > right_value)
+            if isinstance(operator, ast.GtE):
+                return bool(left_value >= right_value)
+        except TypeError:
+            return None
+        return None
+
+    @staticmethod
+    def _expression_condition(module: _Module, line: int) -> EndpointDiscoveryCondition:
+        return EndpointDiscoveryCondition(
+            source_path=module.path,
+            source_line=line,
+            reason="custom surface registration is conditional on expression short-circuiting",
+        )
+
+    def _inspect_target_expression(
+        self,
+        module: _Module,
+        target: ast.expr,
+        state: dict[str, _Binding | None],
+        inherited_conditions: tuple[EndpointDiscoveryCondition, ...],
+    ) -> None:
+        """Inspect eager evaluation needed to locate an assignment/delete target."""
+        if isinstance(target, ast.Attribute):
+            self._inspect_expression(module, target.value, state, inherited_conditions)
+        elif isinstance(target, ast.Subscript):
+            self._inspect_expression(module, target.value, state, inherited_conditions)
+            self._inspect_expression(module, target.slice, state, inherited_conditions)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for item in target.elts:
+                self._inspect_target_expression(module, item, state, inherited_conditions)
+        elif isinstance(target, ast.Starred):
+            self._inspect_target_expression(module, target.value, state, inherited_conditions)
+
+    @staticmethod
+    def _invalidate_binding_aliases(
+        root_name: str,
+        state: dict[str, _Binding | None],
+    ) -> None:
+        binding = state.get(root_name)
+        if binding is None:
+            return
+        aliases = [name for name, candidate in state.items() if candidate == binding]
+        for name in aliases:
+            state[name] = None
+
+    @classmethod
+    def _invalidate_mutated_target(
+        cls,
+        target: ast.expr,
+        state: dict[str, _Binding | None],
+    ) -> None:
+        if not isinstance(target, (ast.Attribute, ast.Subscript)):
+            return
+        root_name = _mutation_root_name(target)
+        if root_name is not None:
+            cls._invalidate_binding_aliases(root_name, state)
+
+    def _inspect_comprehension(
+        self,
+        module: _Module,
+        expression: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp,
+        state: dict[str, _Binding | None],
+        inherited_conditions: tuple[EndpointDiscoveryCondition, ...],
+    ) -> None:
+        conditions = (
+            *inherited_conditions,
+            EndpointDiscoveryCondition(
+                source_path=module.path,
+                source_line=expression.lineno,
+                reason="custom surface registration is conditional on comprehension iteration",
+            ),
+        )
+        local = dict(state)
+        walrus = _StatementMutationVisitor()
+        walrus.visit(expression)
+        for generator in expression.generators:
+            self._inspect_expression(module, generator.iter, local, conditions)
+            for name in _target_names(generator.target):
+                local[name] = None
+            for filter_expression in generator.ifs:
+                self._inspect_expression(module, filter_expression, local, conditions)
+        if isinstance(expression, ast.DictComp):
+            self._inspect_expression(module, expression.key, local, conditions)
+            self._inspect_expression(module, expression.value, local, conditions)
+        else:
+            self._inspect_expression(module, expression.elt, local, conditions)
+        for name in walrus.named_expression_targets:
+            assigned = local.get(name)
+            if state.get(name) != assigned:
+                state[name] = None
 
     @staticmethod
     def _decorator_call(decorator: ast.expr) -> ast.Call | None:
@@ -1072,26 +1741,68 @@ class CustomSurfaceExtractor:
                 else InvocationKind.FUNCTION
             )
             return binding.identity, invocation, None
-        if not isinstance(expression, ast.Attribute) or not isinstance(expression.value, ast.Name):
+        if not isinstance(expression, ast.Attribute):
             return None
-        binding = state.get(expression.value.id)
+        binding = self._expression_binding(expression.value, state)
         if binding is None:
             return None
         binding = self._follow_project_binding(binding)
+        symbol = f"{binding.identity}.{expression.attr}"
         if binding.kind == "module":
-            return f"{binding.identity}.{expression.attr}", InvocationKind.FUNCTION, None
+            invocation = (
+                InvocationKind.CONSTRUCTOR
+                if symbol in self._declared_receiver_types
+                or any(
+                    contract.registration.symbol == symbol
+                    and contract.registration.invocation == InvocationKind.CONSTRUCTOR
+                    for contract in self.contracts.document.contracts
+                )
+                else InvocationKind.FUNCTION
+            )
+            return symbol, invocation, None
         if binding.kind == "receiver":
-            return (
-                f"{binding.identity}.{expression.attr}",
-                InvocationKind.INSTANCE_METHOD,
-                binding.identity,
-            )
+            return symbol, InvocationKind.INSTANCE_METHOD, binding.identity
         if binding.kind == "symbol":
+            if symbol in self._declared_receiver_types:
+                invocation = InvocationKind.CONSTRUCTOR
+            elif any(
+                contract.registration.symbol == symbol
+                and contract.registration.invocation == InvocationKind.FUNCTION
+                for contract in self.contracts.document.contracts
+            ):
+                invocation = InvocationKind.FUNCTION
+            else:
+                invocation = InvocationKind.CLASS_METHOD
             return (
-                f"{binding.identity}.{expression.attr}",
-                InvocationKind.CLASS_METHOD,
-                binding.identity,
+                symbol,
+                invocation,
+                None if invocation == InvocationKind.FUNCTION else binding.identity,
             )
+        return None
+
+    def _expression_binding(
+        self, expression: ast.expr, state: dict[str, _Binding | None]
+    ) -> _Binding | None:
+        """Resolve a bounded exact Name/Attribute chain without suffix guessing."""
+        attributes: list[str] = []
+        current = expression
+        for _depth in range(16):
+            if isinstance(current, ast.Attribute):
+                attributes.append(current.attr)
+                current = current.value
+                continue
+            if not isinstance(current, ast.Name):
+                return None
+            binding = state.get(current.id)
+            if binding is None:
+                return None
+            binding = self._follow_project_binding(binding)
+            if not attributes:
+                return binding
+            if binding.kind not in {"module", "symbol"}:
+                return None
+            suffix = ".".join(reversed(attributes))
+            return _Binding(binding.kind, f"{binding.identity}.{suffix}")
         return None
 
     def _follow_project_binding(self, binding: _Binding) -> _Binding:
@@ -1127,11 +1838,13 @@ class CustomSurfaceExtractor:
     def _binding_from_expression(
         self, expression: ast.expr | None, state: dict[str, _Binding | None]
     ) -> _Binding | None:
-        if isinstance(expression, ast.Name):
-            return state.get(expression.id)
-        if isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name):
-            owner = state.get(expression.value.id)
-            if owner is not None and owner.kind == "module":
+        if isinstance(expression, (ast.Name, ast.NamedExpr)):
+            return state.get(
+                expression.id if isinstance(expression, ast.Name) else expression.target.id
+            )
+        if isinstance(expression, ast.Attribute):
+            owner = self._expression_binding(expression.value, state)
+            if owner is not None and owner.kind in {"module", "symbol"}:
                 return _Binding("symbol", f"{owner.identity}.{expression.attr}")
         if isinstance(expression, ast.Call):
             resolved = self._resolve_call(expression.func, state)
@@ -1140,7 +1853,11 @@ class CustomSurfaceExtractor:
                 and resolved[1] in {InvocationKind.FUNCTION, InvocationKind.CONSTRUCTOR}
                 and resolved[0] in self._declared_receiver_types
             ):
-                return _Binding("receiver", resolved[0])
+                return _Binding(
+                    "receiver",
+                    resolved[0],
+                    (expression.lineno, expression.col_offset),
+                )
         return None
 
     def _resolve_class_method(
@@ -1180,14 +1897,14 @@ class CustomSurfaceExtractor:
     def _direct_symbol_identity(
         self, expression: ast.expr, state: dict[str, _Binding | None]
     ) -> str | None:
-        binding: _Binding | None = None
-        if isinstance(expression, ast.Name):
-            binding = state.get(expression.id)
-        elif isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name):
-            owner = state.get(expression.value.id)
-            if owner is not None and owner.kind == "module":
-                binding = _Binding("symbol", f"{owner.identity}.{expression.attr}")
-        return binding.identity if binding is not None and binding.kind == "symbol" else None
+        binding = self._expression_binding(expression, state)
+        if binding is None:
+            return None
+        if binding.kind == "symbol" or (
+            binding.kind == "module" and isinstance(expression, ast.Attribute)
+        ):
+            return binding.identity
+        return None
 
     def _symbol_identity(  # noqa: PLR0911
         self, expression: ast.expr, state: dict[str, _Binding | None]
@@ -1227,15 +1944,12 @@ class CustomSurfaceExtractor:
     def _resolve_handler(
         self, expression: ast.expr, state: dict[str, _Binding | None]
     ) -> tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef] | None:
-        identity: str | None = None
-        if isinstance(expression, ast.Name):
-            binding = state.get(expression.id)
-            if binding is not None and binding.kind in ("function", "symbol"):
-                identity = binding.identity
-        elif isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name):
-            owner = state.get(expression.value.id)
-            if owner is not None and owner.kind == "module":
-                identity = f"{owner.identity}.{expression.attr}"
+        binding = self._expression_binding(expression, state)
+        identity = (
+            binding.identity
+            if binding is not None and binding.kind in {"function", "symbol", "module"}
+            else None
+        )
         candidates = self._functions.get(identity or "", [])
         return candidates[0] if len(candidates) == 1 else None
 
