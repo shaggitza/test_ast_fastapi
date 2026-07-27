@@ -129,6 +129,14 @@ fastapi-endpoint-detector analyze [OPTIONS]
 | `--bootstrap-entry` | | No | Exact secure-AST `MODULE:FUNCTION` registration bootstrap |
 | `--config` | `-c` | No | Path to configuration file |
 
+Without `--secure-ast` or `--vm`, endpoint discovery imports the application in
+a fresh, time-bounded host subprocess. This isolates Python import state between
+analyses, but it is **not a security sandbox**: application code still has the
+host process's filesystem, environment, credential, device, and network access.
+Use default runtime discovery only for trusted applications. The bounded host
+subprocess currently requires POSIX; on other platforms use `--secure-ast` for
+execution-free discovery or `--vm` for the hardened untrusted-code boundary.
+
 `--vm` requires a prebuilt immutable image digest and a configured gVisor/Kata
 runtime. It never builds an image or imports application code on the host; see
 the [runtime sandbox policy](docs/runtime-sandbox.md).
@@ -172,6 +180,8 @@ fastapi-endpoint-detector list [OPTIONS]
 | `--format` | `-f` | No | Output format: `text`, `json`, `yaml`, `markdown`, `html` (default: `text`) |
 | `--output` | `-o` | No | Output file path (default: stdout) |
 | `--app-var` | | No | Name of the FastAPI app variable (default: `app`) |
+| `--secure-ast` | | No | Discover endpoints without importing application code |
+| `--vm` | | No | Run the explicit hardened runtime comparator |
 
 ## How It Works
 

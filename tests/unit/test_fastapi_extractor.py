@@ -1,7 +1,13 @@
 """Runtime FastAPI extractor parity tests."""
 
+import os
+import py_compile
+import subprocess
+import sys
+import time
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -322,4 +328,281 @@ def test_runtime_extractor_fails_closed_for_unknown_included_router_shape(
         FastAPIExtractorError,
         match="Unsupported included FastAPI router representation",
     ):
-        extractor.extract_endpoints()
+        extractor._extract_endpoints_in_process()
+
+
+def test_runtime_extractor_imports_package_directory_with_relative_routes(tmp_path: Path) -> None:
+    package = tmp_path / "runtime_package"
+    package.mkdir()
+    (package / "__init__.py").write_text(
+        """from fastapi import FastAPI
+from .routes import router
+
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+app.include_router(router)
+"""
+    )
+    routes = package / "routes.py"
+    routes.write_text(
+        """from fastapi import APIRouter
+
+router = APIRouter()
+
+@router.get("/package")
+def package_route():
+    return {}
+"""
+    )
+
+    endpoints = FastAPIExtractor(package).extract_endpoints()
+
+    assert [endpoint.identifier for endpoint in endpoints] == ["GET /package"]
+    assert endpoints[0].handler.module == "runtime_package.routes"
+    assert endpoints[0].handler.file_path == routes
+    assert "runtime_package" not in sys.modules
+    assert "runtime_package.routes" not in sys.modules
+
+
+def test_runtime_extractor_imports_nested_package_file_with_relative_routes(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "outer_package"
+    nested = package / "api"
+    nested.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (nested / "__init__.py").write_text("")
+    routes = nested / "routes.py"
+    routes.write_text(
+        """from fastapi import APIRouter
+
+router = APIRouter()
+
+@router.get("/nested")
+def nested_route():
+    return {}
+"""
+    )
+    main = nested / "main.py"
+    main.write_text(
+        """from fastapi import FastAPI
+from .routes import router
+
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+app.include_router(router)
+"""
+    )
+
+    endpoints = FastAPIExtractor(main).extract_endpoints()
+
+    assert [endpoint.identifier for endpoint in endpoints] == ["GET /nested"]
+    assert endpoints[0].handler.module == "outer_package.api.routes"
+    assert endpoints[0].handler.file_path == routes
+
+
+def test_runtime_extractor_supports_explicit_namespace_module_name(tmp_path: Path) -> None:
+    namespace = tmp_path / "runtime_namespace"
+    namespace.mkdir()
+    routes = namespace / "routes.py"
+    routes.write_text(
+        """from fastapi import APIRouter
+
+router = APIRouter()
+
+@router.get("/namespace")
+def namespace_route():
+    return {}
+"""
+    )
+    main = namespace / "main.py"
+    main.write_text(
+        """from fastapi import FastAPI
+from .routes import router
+
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+app.include_router(router)
+"""
+    )
+
+    endpoints = FastAPIExtractor(
+        main,
+        module_name="runtime_namespace.main",
+    ).extract_endpoints()
+
+    assert [endpoint.identifier for endpoint in endpoints] == ["GET /namespace"]
+    assert endpoints[0].handler.module == "runtime_namespace.routes"
+    assert endpoints[0].handler.file_path == routes
+
+
+def test_runtime_extractor_isolates_colliding_modules_and_preserves_parent_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module_name = "runtime_collision_helper"
+    sentinel = ModuleType(module_name)
+    sentinel.__dict__["marker"] = "parent"
+    monkeypatch.setitem(sys.modules, module_name, sentinel)
+    original_path = list(sys.path)
+
+    projects: list[Path] = []
+    for project_name, route_path in (("one", "/one"), ("two", "/two")):
+        project = tmp_path / project_name
+        project.mkdir()
+        (project / f"{module_name}.py").write_text(f"ROUTE_PATH = {route_path!r}\n")
+        (project / "main.py").write_text(
+            f"""from fastapi import FastAPI
+from {module_name} import ROUTE_PATH
+
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+@app.get(ROUTE_PATH)
+def endpoint():
+    return {{}}
+"""
+        )
+        projects.append(project)
+
+    first = FastAPIExtractor(projects[0] / "main.py").extract_endpoints()
+    second = FastAPIExtractor(projects[1] / "main.py").extract_endpoints()
+
+    assert [endpoint.identifier for endpoint in first] == ["GET /one"]
+    assert [endpoint.identifier for endpoint in second] == ["GET /two"]
+    assert sys.modules[module_name] is sentinel
+    assert sentinel.__dict__["marker"] == "parent"
+    assert sys.path == original_path
+
+
+def test_runtime_extractor_reloads_project_modules_on_each_extraction(tmp_path: Path) -> None:
+    helper = tmp_path / "runtime_reload_helper.py"
+    helper.write_text('ROUTE_PATH = "/before"\n')
+    main = tmp_path / "main.py"
+    main.write_text(
+        """from fastapi import FastAPI
+from runtime_reload_helper import ROUTE_PATH
+
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+@app.get(ROUTE_PATH)
+def endpoint():
+    return {}
+"""
+    )
+    extractor = FastAPIExtractor(main)
+
+    first = extractor.extract_endpoints()
+    helper.write_text('ROUTE_PATH = "/after-change"\n')
+    second = extractor.extract_endpoints()
+
+    assert [endpoint.identifier for endpoint in first] == ["GET /before"]
+    assert [endpoint.identifier for endpoint in second] == ["GET /after-change"]
+    assert "runtime_reload_helper" not in sys.modules
+
+
+def test_runtime_extractor_ignores_existing_stale_bytecode(tmp_path: Path) -> None:
+    helper = tmp_path / "runtime_stale_helper.py"
+    helper.write_text('ROUTE_PATH = "/before"\n')
+    py_compile.compile(str(helper), doraise=True)
+    original_stat = helper.stat()
+    helper.write_text('ROUTE_PATH = "/afterx"\n')
+    os.utime(helper, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    main = tmp_path / "main.py"
+    main.write_text(
+        """from fastapi import FastAPI
+from runtime_stale_helper import ROUTE_PATH
+
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+@app.get(ROUTE_PATH)
+def endpoint():
+    return {}
+"""
+    )
+
+    endpoints = FastAPIExtractor(main).extract_endpoints()
+
+    assert [endpoint.identifier for endpoint in endpoints] == ["GET /afterx"]
+
+
+def test_runtime_extractor_failure_and_timeout_leave_parent_state_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module_name = "runtime_failure_helper"
+    sentinel = ModuleType(module_name)
+    monkeypatch.setitem(sys.modules, module_name, sentinel)
+    original_path = list(sys.path)
+    (tmp_path / f"{module_name}.py").write_text("VALUE = 1\n")
+    failing = tmp_path / "failing.py"
+    failing.write_text(
+        f"""from {module_name} import VALUE
+raise RuntimeError(f"failed after import: {{VALUE}}")
+"""
+    )
+
+    with pytest.raises(FastAPIExtractorError, match="failed after import: 1"):
+        FastAPIExtractor(failing).extract_endpoints()
+
+    hanging = tmp_path / "hanging.py"
+    hanging.write_text("import time\ntime.sleep(10)\n")
+    started = time.monotonic()
+    with pytest.raises(FastAPIExtractorError, match="timed out"):
+        FastAPIExtractor(hanging, timeout_seconds=0.2).extract_endpoints()
+
+    assert time.monotonic() - started < 5
+    assert sys.modules[module_name] is sentinel
+    assert sys.path == original_path
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-session cleanup")
+def test_runtime_extractor_reaps_worker_when_parent_is_interrupted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app_file = tmp_path / "hanging.py"
+    app_file.write_text("import time\ntime.sleep(10)\n")
+    worker_pids: list[int] = []
+
+    def interrupt_communicate(
+        process: subprocess.Popen[str],
+        *_args: object,
+        **_kwargs: object,
+    ) -> tuple[str, str]:
+        worker_pids.append(process.pid)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(subprocess.Popen, "communicate", interrupt_communicate)
+
+    with pytest.raises(KeyboardInterrupt):
+        FastAPIExtractor(app_file).extract_endpoints()
+
+    assert len(worker_pids) == 1
+    with pytest.raises(ProcessLookupError):
+        os.kill(worker_pids[0], 0)
+
+
+def test_runtime_extractor_reports_worker_hard_exit(tmp_path: Path) -> None:
+    app_file = tmp_path / "hard_exit.py"
+    app_file.write_text("import os\nos._exit(7)\n")
+
+    with pytest.raises(FastAPIExtractorError, match="status 7"):
+        FastAPIExtractor(app_file).extract_endpoints()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"timeout_seconds": 0}, "timeout_seconds must be a finite positive number"),
+        ({"timeout_seconds": float("nan")}, "timeout_seconds must be a finite positive number"),
+        ({"timeout_seconds": float("inf")}, "timeout_seconds must be a finite positive number"),
+        ({"timeout_seconds": True}, "timeout_seconds must be a finite positive number"),
+        ({"output_limit_bytes": 0}, "output_limit_bytes must be a positive integer"),
+        ({"output_limit_bytes": 1.5}, "output_limit_bytes must be a positive integer"),
+        ({"output_limit_bytes": True}, "output_limit_bytes must be a positive integer"),
+    ],
+)
+def test_runtime_extractor_rejects_invalid_worker_limits(
+    tmp_path: Path,
+    kwargs: dict[str, Any],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        FastAPIExtractor(tmp_path / "main.py", **kwargs)
