@@ -102,6 +102,37 @@ class TestEndpointRegistry:
         assert len(endpoints) == 1
         assert endpoints[0] == sample_endpoint
 
+    def test_get_by_file_matches_unique_relative_suffix(
+        self,
+        sample_endpoint: Endpoint,
+    ) -> None:
+        registry = EndpointRegistry()
+        registry.register(sample_endpoint)
+
+        assert registry.get_by_file(Path("routers/users.py")) == [sample_endpoint]
+        assert registry.get_by_file(r"routers\users.py") == [sample_endpoint]
+
+    def test_get_by_file_fails_closed_for_ambiguous_suffix(self) -> None:
+        registry = EndpointRegistry()
+        endpoints = [
+            Endpoint(
+                path=f"/{directory}",
+                methods=[EndpointMethod.GET],
+                handler=HandlerInfo(
+                    name=f"get_{directory}",
+                    module=f"{directory}.users",
+                    file_path=Path(f"/repo/{directory}/users.py"),
+                    line_number=1,
+                ),
+            )
+            for directory in ("admin", "public")
+        ]
+        registry.register_many(endpoints)
+
+        assert registry.get_by_file("users.py") == []
+        assert registry.get_by_line_range(Path("users.py"), 1, 1) == []
+        assert registry.get_by_file("admin/users.py") == [endpoints[0]]
+
     def test_get_by_module(self, sample_endpoint: Endpoint) -> None:
         """Test getting endpoints by module."""
         registry = EndpointRegistry()

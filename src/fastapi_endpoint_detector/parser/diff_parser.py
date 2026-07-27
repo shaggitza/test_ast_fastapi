@@ -5,6 +5,7 @@ This module wraps the unidiff library to parse unified diff files
 and extract structured change information.
 """
 
+import os
 from pathlib import Path
 
 from unidiff.patch import Hunk, PatchedFile, PatchSet
@@ -63,21 +64,14 @@ class DiffParser:
         added_lines: list[int] = []
         removed_lines: list[int] = []
 
-        # Track line numbers as we iterate through the hunk
-        source_line = hunk.source_start
-        target_line = hunk.target_start
-
         for line in hunk:
-            if line.is_added:
-                added_lines.append(target_line)
-                target_line += 1
-            elif line.is_removed:
-                removed_lines.append(source_line)
-                source_line += 1
-            else:
-                # Context line
-                source_line += 1
-                target_line += 1
+            # unidiff already distinguishes source-side and target-side
+            # coordinates. Using those coordinates also avoids counting patch
+            # metadata such as ``\\ No newline at end of file`` as context.
+            if line.is_added and line.target_line_no is not None:
+                added_lines.append(line.target_line_no)
+            elif line.is_removed and line.source_line_no is not None:
+                removed_lines.append(line.source_line_no)
 
         return DiffHunk(
             source_start=hunk.source_start,
@@ -126,8 +120,67 @@ class DiffParser:
 
     @staticmethod
     def _strip_git_prefix(path: str, prefix: str) -> str:
-        """Remove one exact Git side prefix without stripping path characters."""
-        return path.removeprefix(prefix)
+        """Decode a Git pathname and remove one exact side prefix."""
+        return DiffParser._decode_git_path(path).removeprefix(prefix)
+
+    @staticmethod
+    def _decode_git_path(path: str) -> str:
+        """Decode Git's double-quoted C-style pathname representation.
+
+        Git quotes unusual pathnames and represents non-ASCII filesystem bytes
+        with octal escapes when ``core.quotePath`` is enabled. Decode only that
+        well-defined quoted form; ordinary paths are returned unchanged.
+        """
+        if len(path) < 2 or not path.startswith('"') or not path.endswith('"'):
+            return path
+
+        escaped = path[1:-1]
+        decoded = bytearray()
+        simple_escapes = {
+            "a": b"\a",
+            "b": b"\b",
+            "f": b"\f",
+            "n": b"\n",
+            "r": b"\r",
+            "t": b"\t",
+            "v": b"\v",
+            "\\": b"\\",
+            '"': b'"',
+        }
+        index = 0
+
+        while index < len(escaped):
+            character = escaped[index]
+            if character != "\\":
+                decoded.extend(character.encode("utf-8"))
+                index += 1
+                continue
+
+            index += 1
+            if index >= len(escaped):
+                decoded.extend(b"\\")
+                break
+
+            escape = escaped[index]
+            if escape in "01234567":
+                end = index + 1
+                while end < len(escaped) and end < index + 3 and escaped[end] in "01234567":
+                    end += 1
+                decoded.append(int(escaped[index:end], 8))
+                index = end
+                continue
+
+            replacement = simple_escapes.get(escape)
+            if replacement is None:
+                # Preserve unknown escapes rather than silently changing a
+                # pathname produced by a non-Git diff generator.
+                decoded.extend(b"\\")
+                decoded.extend(escape.encode("utf-8"))
+            else:
+                decoded.extend(replacement)
+            index += 1
+
+        return os.fsdecode(bytes(decoded))
 
     @classmethod
     def parse_file(cls, diff_path: Path, encoding: str = "utf-8") -> list[DiffFile]:

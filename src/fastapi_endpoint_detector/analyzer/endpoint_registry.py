@@ -3,7 +3,7 @@ Endpoint registry for storing and querying endpoints.
 """
 
 from collections.abc import Iterator
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod
 
@@ -99,18 +99,28 @@ class EndpointRegistry:
         if file_path in self._by_file:
             return self._by_file[file_path]
 
-        # Try matching by filename (for relative paths from diffs)
-        file_str = str(file_path)
-        for registered_path, endpoints in self._by_file.items():
-            registered_str = str(registered_path)
-            # Check if the diff path is a suffix of registered path
-            if registered_str.endswith(file_str) or registered_str.endswith(file_str.lstrip("./")):
-                return endpoints
-            # Or check by filename match if diff path contains subdirs
-            if file_path.name == registered_path.name and file_str in registered_str:
-                return endpoints
+        # Diff paths are commonly repository-relative while registered paths
+        # are absolute. Match complete path components and only accept one
+        # registered file; guessing by insertion order can map a change to the
+        # wrong endpoint when a project contains duplicate basenames.
+        query_parts = self._path_parts(file_path)
+        matches = [
+            endpoints
+            for registered_path, endpoints in self._by_file.items()
+            if self._has_path_suffix(self._path_parts(registered_path), query_parts)
+        ]
+        return matches[0] if len(matches) == 1 else []
 
-        return []
+    @staticmethod
+    def _path_parts(file_path: Path) -> tuple[str, ...]:
+        """Return platform-independent components for suffix matching."""
+        normalized = str(file_path).replace("\\", "/")
+        return tuple(part for part in PurePosixPath(normalized).parts if part not in ("/", "."))
+
+    @staticmethod
+    def _has_path_suffix(path: tuple[str, ...], suffix: tuple[str, ...]) -> bool:
+        """Return whether *suffix* identifies whole trailing path components."""
+        return bool(suffix) and len(path) >= len(suffix) and path[-len(suffix) :] == suffix
 
     def get_by_module(self, module: str) -> list[Endpoint]:
         """
