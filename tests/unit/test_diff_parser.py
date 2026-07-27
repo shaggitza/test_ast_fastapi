@@ -38,6 +38,45 @@ rename to new.txt
         assert parsed[0].path == Path("backend/app.py")
         assert parsed[0].source_path == Path("backend/app.py")
 
+    def test_no_newline_markers_do_not_shift_changed_lines(self) -> None:
+        diff = """diff --git a/app.py b/app.py
+index 1111111..2222222 100644
+--- a/app.py
++++ b/app.py
+@@ -1 +1 @@
+-old = 1
+\\ No newline at end of file
++new = 1
+\\ No newline at end of file
+"""
+
+        parsed = DiffParser.parse_string(diff)
+
+        assert DiffParser.get_changed_line_numbers(parsed[0]) == ([1], [1])
+
+    @pytest.mark.parametrize(
+        ("quoted_path", "expected"),
+        [
+            (r"a\tb.py", "a\tb.py"),
+            (r"caf\303\251.py", "café.py"),
+        ],
+    )
+    def test_decodes_git_quoted_paths(self, quoted_path: str, expected: str) -> None:
+        diff = f"""diff --git "a/{quoted_path}" "b/{quoted_path}"
+index 1111111..2222222 100644
+--- "a/{quoted_path}"
++++ "b/{quoted_path}"
+@@ -1 +1 @@
+-old = 1
++new = 1
+"""
+
+        parsed = DiffParser.parse_string(diff)
+
+        assert parsed[0].path == Path(expected)
+        assert parsed[0].source_path == Path(expected)
+        assert parsed[0].is_python_file
+
     """Tests for the DiffParser class."""
 
     def test_parse_simple_diff(self, simple_diff_content: str) -> None:
