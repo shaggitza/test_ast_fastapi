@@ -523,14 +523,16 @@ def unresolved_prediction(
     repository: str, pr: int, candidate_id: str, reason: str
 ) -> dict[str, Any]:
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "repository": repository,
         "pr": pr,
         "candidate": candidate_id,
+        "adapter": "fastapi-adapter-v1",
+        "status": "unresolved",
         "affected_entrypoints": [],
         "candidate_entrypoints": [],
         "unresolved": [reason],
-        "index_seconds": 0.0,
+        "timing_seconds": {},
     }
 
 
@@ -653,12 +655,13 @@ def process_entry(  # noqa: PLR0915
             "repository": repository,
             "pr": pr,
             "candidate": candidate_id,
-            "schema_version": 2,
+            "adapter": "fastapi-adapter-v1",
+            "schema_version": 3,
+            "status": "completed" if not unresolved else "partial",
             "affected_entrypoints": endpoints,
             "candidate_entrypoints": candidates,
             "unresolved": unresolved,
-            "index_seconds": 0.0,
-            "incremental_seconds": timings["analyzer"],
+            "timing_seconds": {"cold_no_cache_analyzer_wall": timings["analyzer"]},
         }
         return prediction, manifest_record
     except (RunnerError, OSError) as error:
@@ -807,13 +810,19 @@ def candidate_metadata(
         "id": candidate_id,
         "name": "fastapi-endpoint-detector",
         "version": version,
+        "adapter": "fastapi-adapter-v1",
         "git_sha": git_sha,
         "config_hash": config_hash,
         "dirty": dirty,
         "dirty_sha256": dirty_sha256,
         "uv_lock_sha256": lock_sha256,
         "uv_version": uv_version,
-        "command": "uv run --frozen fastapi-endpoint-detector analyze",
+        "command": "uv run --frozen fastapi-endpoint-detector analyze --no-cache",
+        "performance_protocol": {
+            "id": "cold-no-cache-analyzer-wall-v1",
+            "cache_enabled": False,
+            "incremental_valid": False,
+        },
     }
 
 
@@ -934,12 +943,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise AssertionError("runner did not produce exactly one unique prediction per selected PR")
 
     jsonl = "".join(json.dumps(item, sort_keys=True) + "\n" for item in predictions)
+    prediction_sha256 = hashlib.sha256(jsonl.encode()).hexdigest()
     manifest = {
-        "schema_version": 2,
-        "prediction_schema_version": 2,
+        "schema_version": 3,
+        "prediction_schema_version": 3,
         "created_at": utc_now(),
         "candidate": candidate,
         "git": {"candidate_sha": candidate["git_sha"]},
+        "prediction_output": {
+            "path": str(config.output),
+            "sha256": prediction_sha256,
+            "records": len(predictions),
+        },
+        "selected_keys": [
+            {"repository": item["repository"], "pr": item["pr"]} for item in predictions
+        ],
         "python": sys.version,
         "platform": platform.platform(),
         "corpus": {
@@ -972,6 +990,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "started_at": started_wall,
             "finished_at": utc_now(),
             "total_seconds": time.monotonic() - started,
+            "protocol": "cold-no-cache-analyzer-wall-v1",
+            "incremental_valid": False,
+            "not_measured": [
+                "warm_no_change",
+                "one_file_incremental_update",
+                "peak_rss",
+                "cache_size",
+            ],
         },
     }
     atomic_write(config.output, jsonl)

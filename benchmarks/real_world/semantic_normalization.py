@@ -132,7 +132,7 @@ def split_ranked_claims(
     rank = {"low": 0, "medium": 1, "high": 2}
     unique: dict[tuple[str, str, str, str, str, bool], tuple[int, AtomicClaim]] = {}
     items = record.get("candidate_entrypoints")
-    if not items:
+    if items is None:
         items = record.get("affected_entrypoints", [])
     for item in items:
         confidence = str(item.get("confidence", "medium")).lower()

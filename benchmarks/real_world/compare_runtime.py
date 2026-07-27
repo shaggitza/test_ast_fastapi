@@ -7,8 +7,18 @@ import argparse
 import hashlib
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from benchmarks.real_world.benchmark_schema import (
+    BenchmarkSchemaError,
+    finite_nonnegative,
+    strict_json_loads,
+)
 
 _FAILURE_PHASES = {
     "dependency",
@@ -28,9 +38,9 @@ class ComparisonError(ValueError):
 def _load(path: Path) -> tuple[dict[str, Any], str]:
     raw = path.read_bytes()
     try:
-        value = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ComparisonError(f"invalid JSON in {path}: {exc}") from exc
+        value = strict_json_loads(raw.decode("utf-8"), str(path))
+    except (BenchmarkSchemaError, UnicodeError) as exc:
+        raise ComparisonError(str(exc)) from exc
     if not isinstance(value, dict):
         raise ComparisonError(f"record {path} must be an object")
     return value, f"sha256:{hashlib.sha256(raw).hexdigest()}"
@@ -77,10 +87,13 @@ def _validate(record: dict[str, Any], expected_mode: str) -> None:  # noqa: PLR0
     if not isinstance(record["configuration"], dict):
         raise ComparisonError("configuration must be an object")
     timing = record["timing"]
-    if not isinstance(timing, dict) or any(
-        not isinstance(value, (int, float)) or value < 0 for value in timing.values()
-    ):
-        raise ComparisonError("timing values must be non-negative numbers")
+    if not isinstance(timing, dict):
+        raise ComparisonError("timing values must be finite non-negative numbers")
+    try:
+        for name, value in timing.items():
+            finite_nonnegative(value, f"timing.{name}")
+    except BenchmarkSchemaError as error:
+        raise ComparisonError("timing values must be finite non-negative numbers") from error
 
 
 def _endpoint_id(endpoint: dict[str, Any]) -> str:

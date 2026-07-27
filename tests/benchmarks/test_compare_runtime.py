@@ -120,3 +120,28 @@ def test_all_failure_phases_are_versioned(tmp_path: Path, phase: str) -> None:
     _write(runtime, second)
 
     assert compare(secure, runtime)["paired_success"] is False
+
+
+@pytest.mark.parametrize("invalid", [True, float("nan"), float("inf"), -1.0])
+def test_timing_rejects_bool_non_finite_and_negative_values(
+    tmp_path: Path, invalid: object
+) -> None:
+    secure = tmp_path / "secure.json"
+    runtime = tmp_path / "runtime.json"
+    secure_record = _record("secure")
+    secure_record["timing"] = {"impact_seconds": invalid}
+    _write(secure, secure_record)
+    _write(runtime, _record("runtime"))
+
+    with pytest.raises(ComparisonError):
+        compare(secure, runtime)
+
+
+def test_comparison_rejects_duplicate_json_members(tmp_path: Path) -> None:
+    secure = tmp_path / "secure.json"
+    runtime = tmp_path / "runtime.json"
+    secure.write_text('{"schema_version":1,"schema_version":1}', encoding="utf-8")
+    _write(runtime, _record("runtime"))
+
+    with pytest.raises(ComparisonError, match="duplicate JSON member"):
+        compare(secure, runtime)

@@ -6,14 +6,23 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import sys
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from benchmarks.real_world.benchmark_schema import (
+    BenchmarkSchemaError,
+    PrimaryArtifact,
+    finite_nonnegative,
+    read_primary_artifact,
+    strict_json_loads,
+)
 from benchmarks.real_world.benchmark_scope import (
     SCOPES,
     filter_entrypoint_items,
@@ -25,10 +34,6 @@ from benchmarks.real_world.semantic_normalization import (
     match_claims,
     split_ranked_claims,
 )
-
-
-def read_jsonl(path: Path) -> list[dict[str, Any]]:
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
 def key(record: dict[str, Any]) -> tuple[str, int]:
@@ -54,7 +59,7 @@ def ranked_entrypoints(record: dict[str, Any]) -> tuple[set[str], set[str]]:
     """Return selected and LOW exact IDs after strongest-tier deduplication."""
     rank = {"low": 0, "medium": 1, "high": 2}
     items = record.get("candidate_entrypoints")
-    if not items:
+    if items is None:
         items = record.get("affected_entrypoints", [])
     strongest: dict[str, int] = {}
     for item in items:
@@ -91,7 +96,7 @@ def low_diagnostics(
 def predicted_ids_by_kind(record: dict[str, Any], identifiers: set[str]) -> dict[str, set[str]]:
     rank = {"low": 0, "medium": 1, "high": 2}
     items = record.get("candidate_entrypoints")
-    if not items:
+    if items is None:
         items = record.get("affected_entrypoints", [])
     strongest: dict[str, tuple[int, str]] = {}
     for item in items:
@@ -113,7 +118,7 @@ def read_verification_selection(
 ) -> tuple[dict[str, Any], str, set[tuple[str, int]], str]:
     """Load and validate a versioned PR-level verification selection."""
     content = path.read_bytes()
-    manifest = json.loads(content)
+    manifest = strict_json_loads(content.decode("utf-8"), str(path))
     if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
         raise ValueError("verification set must use schema_version 1")
     identifier = manifest.get("id")
@@ -217,7 +222,7 @@ def read_route_census(  # noqa: PLR0912, PLR0915
     for line_number, line in enumerate(content.decode().splitlines(), start=1):
         if not line.strip():
             continue
-        item = json.loads(line)
+        item = strict_json_loads(line, f"{path}: line {line_number}")
         schema_version = item.get("schema_version") if isinstance(item, dict) else None
         if not isinstance(item, dict) or schema_version not in {1, 2}:
             raise ValueError(f"route census line {line_number} must use schema_version 1 or 2")
@@ -394,6 +399,374 @@ def ratio(numerator: int | float, denominator: int | float) -> float:
     return numerator / denominator if denominator else 0.0
 
 
+def _macro_result(
+    sums: dict[str, float], samples: dict[str, int]
+) -> dict[str, float | dict[str, int]]:
+    return {
+        "precision": ratio(sums["precision"], samples["precision"]),
+        "recall": ratio(sums["recall"], samples["recall"]),
+        "f1": ratio(sums["f1"], samples["f1"]),
+        "sample_prs": dict(samples),
+    }
+
+
+def _timing_summary(values: list[float]) -> dict[str, int | float]:
+    """Return nearest-rank p50/p95 plus mean/max for one timing protocol."""
+    ordered = sorted(values)
+
+    def percentile(fraction: float) -> float:
+        if not ordered:
+            return 0.0
+        return ordered[max(0, math.ceil(fraction * len(ordered)) - 1)]
+
+    return {
+        "samples": len(ordered),
+        "mean": ratio(sum(ordered), len(ordered)),
+        "p50": percentile(0.50),
+        "p95": percentile(0.95),
+        "max": max(ordered, default=0.0),
+    }
+
+
+_RUNNER_MANIFEST_FIELDS = {
+    "schema_version",
+    "prediction_schema_version",
+    "created_at",
+    "candidate",
+    "git",
+    "prediction_output",
+    "selected_keys",
+    "python",
+    "platform",
+    "corpus",
+    "root_config",
+    "app_entry_config",
+    "bootstrap_entry_config",
+    "configuration",
+    "selection_count",
+    "prs",
+    "timing",
+}
+_CANDIDATE_FIELDS = {
+    "id",
+    "name",
+    "version",
+    "adapter",
+    "git_sha",
+    "config_hash",
+    "dirty",
+    "dirty_sha256",
+    "uv_lock_sha256",
+    "uv_version",
+    "command",
+    "performance_protocol",
+}
+
+
+def _nonempty_string(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise BenchmarkSchemaError(f"prediction manifest {field} must be a non-empty string")
+    return value
+
+
+def _validate_hash(value: object, field: str, length: int) -> str:
+    text = _nonempty_string(value, field)
+    if len(text) != length or any(character not in "0123456789abcdef" for character in text):
+        raise BenchmarkSchemaError(f"prediction manifest {field} is not a valid digest")
+    return text
+
+
+def _validate_timestamp(value: object, field: str) -> str:
+    text = _nonempty_string(value, field)
+    try:
+        timestamp = datetime.fromisoformat(text)
+    except ValueError as error:
+        raise BenchmarkSchemaError(f"prediction manifest {field} is not ISO-8601") from error
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        raise BenchmarkSchemaError(f"prediction manifest {field} lacks a timezone")
+    return text
+
+
+def _validate_manifest_candidate(candidate: object) -> dict[str, Any]:
+    if not isinstance(candidate, dict) or set(candidate) != _CANDIDATE_FIELDS:
+        raise BenchmarkSchemaError("prediction manifest candidate fields are invalid")
+    for field in ("id", "name", "version", "uv_version", "command"):
+        _nonempty_string(candidate[field], f"candidate.{field}")
+    if candidate["name"] != "fastapi-endpoint-detector" or candidate["command"] != (
+        "uv run --frozen fastapi-endpoint-detector analyze --no-cache"
+    ):
+        raise BenchmarkSchemaError("prediction manifest candidate command is invalid")
+    _validate_hash(candidate["git_sha"], "candidate.git_sha", 40)
+    _validate_hash(candidate["config_hash"], "candidate.config_hash", 12)
+    if candidate["adapter"] != "fastapi-adapter-v1":
+        raise BenchmarkSchemaError("prediction manifest candidate adapter is invalid")
+    if type(candidate["dirty"]) is not bool:
+        raise BenchmarkSchemaError("prediction manifest candidate dirty flag is invalid")
+    if candidate["dirty"]:
+        _validate_hash(candidate["dirty_sha256"], "candidate.dirty_sha256", 64)
+    elif candidate["dirty_sha256"] is not None:
+        raise BenchmarkSchemaError("clean candidate must not have a dirty digest")
+    _validate_hash(candidate["uv_lock_sha256"], "candidate.uv_lock_sha256", 64)
+    protocol = candidate["performance_protocol"]
+    if protocol != {
+        "id": "cold-no-cache-analyzer-wall-v1",
+        "cache_enabled": False,
+        "incremental_valid": False,
+    }:
+        raise BenchmarkSchemaError("prediction manifest performance protocol is invalid")
+    return candidate
+
+
+def _validate_string_map(value: object, field: str) -> None:
+    if not isinstance(value, dict) or any(
+        not isinstance(key, str) or not isinstance(item, str) or not key.strip() or not item.strip()
+        for key, item in value.items()
+    ):
+        raise BenchmarkSchemaError(f"prediction manifest {field} must be a string map")
+
+
+def _validate_manifest_configuration(manifest: dict[str, Any]) -> None:
+    root = manifest["root_config"]
+    if not isinstance(root, dict) or set(root) != {"default", "repositories"}:
+        raise BenchmarkSchemaError("prediction manifest root_config is invalid")
+    _nonempty_string(root["default"], "root_config.default")
+    _validate_string_map(root["repositories"], "root_config.repositories")
+    _validate_string_map(manifest["app_entry_config"], "app_entry_config")
+    _validate_string_map(manifest["bootstrap_entry_config"], "bootstrap_entry_config")
+    configuration = manifest["configuration"]
+    expected = {
+        "cache",
+        "output",
+        "manifest",
+        "timeout_seconds",
+        "dry_run",
+        "allow_upstream_execution",
+        "use_scip",
+        "filters",
+    }
+    if not isinstance(configuration, dict) or set(configuration) != expected:
+        raise BenchmarkSchemaError("prediction manifest configuration fields are invalid")
+    for field in ("cache", "output", "manifest"):
+        _nonempty_string(configuration[field], f"configuration.{field}")
+    timeout = finite_nonnegative(
+        configuration["timeout_seconds"], "prediction manifest configuration.timeout_seconds"
+    )
+    if timeout == 0:
+        raise BenchmarkSchemaError("prediction manifest timeout must be positive")
+    for field in ("dry_run", "allow_upstream_execution", "use_scip"):
+        if type(configuration[field]) is not bool:
+            raise BenchmarkSchemaError(
+                f"prediction manifest configuration.{field} must be a boolean"
+            )
+    filters = configuration["filters"]
+    if not isinstance(filters, dict) or set(filters) != {"limit", "repositories", "prs"}:
+        raise BenchmarkSchemaError("prediction manifest filters are invalid")
+    if filters["limit"] is not None and (type(filters["limit"]) is not int or filters["limit"] < 0):
+        raise BenchmarkSchemaError("prediction manifest filter limit is invalid")
+    if not isinstance(filters["repositories"], list) or any(
+        not isinstance(item, str) or not item for item in filters["repositories"]
+    ):
+        raise BenchmarkSchemaError("prediction manifest repository filters are invalid")
+    if not isinstance(filters["prs"], list) or any(
+        type(item) is not int or item < 1 for item in filters["prs"]
+    ):
+        raise BenchmarkSchemaError("prediction manifest PR filters are invalid")
+
+
+def _validate_manifest_prs(  # noqa: PLR0912 - fail-closed PR schema checks are explicit
+    value: object, prediction_count: int
+) -> None:
+    required = {
+        "repository",
+        "pr",
+        "configured_app_root",
+        "configured_app_entry",
+        "configured_bootstrap_entry",
+        "merge_sha",
+        "base_sha",
+        "status",
+        "timing_seconds",
+    }
+    optional = {
+        "reason",
+        "candidate_endpoint_count",
+        "candidate_confidence_counts",
+        "effect_evidence_count",
+    }
+    if not isinstance(value, list) or len(value) != prediction_count:
+        raise BenchmarkSchemaError("prediction manifest PR records are invalid")
+    for item in value:
+        if not isinstance(item, dict) or not required <= set(item) <= required | optional:
+            raise BenchmarkSchemaError("prediction manifest PR record fields are invalid")
+        _nonempty_string(item["repository"], "prs.repository")
+        if type(item["pr"]) is not int or item["pr"] < 1:
+            raise BenchmarkSchemaError("prediction manifest PR identity is invalid")
+        _nonempty_string(item["configured_app_root"], "prs.configured_app_root")
+        for field in ("configured_app_entry", "configured_bootstrap_entry"):
+            if item[field] is not None:
+                _nonempty_string(item[field], f"prs.{field}")
+        for field in ("merge_sha", "base_sha"):
+            if item[field] is not None:
+                _validate_hash(item[field], f"prs.{field}", 40)
+        if item["status"] not in {"completed", "completed_with_unresolved", "unresolved"}:
+            raise BenchmarkSchemaError("prediction manifest PR status is invalid")
+        if item["status"] != "unresolved" and (
+            item["merge_sha"] is None or item["base_sha"] is None
+        ):
+            raise BenchmarkSchemaError("completed prediction manifest PR lacks source SHAs")
+        timing = item["timing_seconds"]
+        if not isinstance(timing, dict):
+            raise BenchmarkSchemaError("prediction manifest PR timing is invalid")
+        for name, timing_value in timing.items():
+            finite_nonnegative(timing_value, f"prediction manifest prs.timing_seconds.{name}")
+        if item["status"] == "unresolved":
+            _nonempty_string(item.get("reason"), "prs.reason")
+        for field in ("candidate_endpoint_count", "effect_evidence_count"):
+            if field in item and (type(item[field]) is not int or item[field] < 0):
+                raise BenchmarkSchemaError(f"prediction manifest prs.{field} is invalid")
+        if "candidate_confidence_counts" in item:
+            counts = item["candidate_confidence_counts"]
+            if (
+                not isinstance(counts, dict)
+                or set(counts) != {"high", "medium", "low"}
+                or any(type(count) is not int or count < 0 for count in counts.values())
+            ):
+                raise BenchmarkSchemaError(
+                    "prediction manifest PR candidate confidence counts are invalid"
+                )
+
+
+def _validate_manifest_shape(manifest: object, prediction_count: int) -> dict[str, Any]:
+    if not isinstance(manifest, dict) or set(manifest) != _RUNNER_MANIFEST_FIELDS:
+        raise BenchmarkSchemaError("prediction manifest has unknown or missing fields")
+    if manifest["schema_version"] != 3 or type(manifest["schema_version"]) is not int:
+        raise BenchmarkSchemaError("prediction manifest must use schema_version 3")
+    if (
+        manifest["prediction_schema_version"] != 3
+        or type(manifest["prediction_schema_version"]) is not int
+    ):
+        raise BenchmarkSchemaError("prediction manifest must bind prediction schema 3")
+    _validate_timestamp(manifest["created_at"], "created_at")
+    for field in ("python", "platform"):
+        _nonempty_string(manifest[field], field)
+    _validate_manifest_candidate(manifest["candidate"])
+    if (
+        type(manifest["selection_count"]) is not int
+        or manifest["selection_count"] != prediction_count
+    ):
+        raise BenchmarkSchemaError("prediction manifest selection count mismatch")
+    for field in ("git", "corpus"):
+        if not isinstance(manifest[field], dict):
+            raise BenchmarkSchemaError(f"prediction manifest {field} must be an object")
+    _validate_manifest_configuration(manifest)
+    _validate_manifest_prs(manifest["prs"], prediction_count)
+    timing = manifest["timing"]
+    if not isinstance(timing, dict) or set(timing) != {
+        "started_at",
+        "finished_at",
+        "total_seconds",
+        "protocol",
+        "incremental_valid",
+        "not_measured",
+    }:
+        raise BenchmarkSchemaError("prediction manifest timing fields are invalid")
+    _validate_timestamp(timing["started_at"], "timing.started_at")
+    _validate_timestamp(timing["finished_at"], "timing.finished_at")
+    finite_nonnegative(timing["total_seconds"], "prediction manifest timing.total_seconds")
+    if (
+        timing["protocol"] != "cold-no-cache-analyzer-wall-v1"
+        or timing["incremental_valid"] is not False
+        or not isinstance(timing["not_measured"], list)
+        or any(not isinstance(item, str) or not item for item in timing["not_measured"])
+    ):
+        raise BenchmarkSchemaError("prediction manifest timing protocol is invalid")
+    return manifest
+
+
+def read_prediction_manifest(  # noqa: PLR0912 - cross-artifact bindings stay explicit
+    path: Path,
+    predictions: PrimaryArtifact,
+) -> dict[str, Any]:
+    """Validate a schema-v3 runner manifest against exact prediction bytes and rows."""
+    raw = path.read_bytes()
+    manifest = _validate_manifest_shape(
+        strict_json_loads(raw.decode("utf-8"), str(path)), len(predictions.records)
+    )
+    output = manifest["prediction_output"]
+    if not isinstance(output, dict) or set(output) != {"path", "sha256", "records"}:
+        raise BenchmarkSchemaError("prediction manifest output fields are invalid")
+    _nonempty_string(output["path"], "prediction_output.path")
+    if Path(output["path"]).resolve() != predictions.path.resolve():
+        raise BenchmarkSchemaError("prediction manifest output path does not match predictions")
+    configuration = manifest["configuration"]
+    if (
+        Path(configuration["output"]).resolve() != predictions.path.resolve()
+        or Path(configuration["manifest"]).resolve() != path.resolve()
+    ):
+        raise BenchmarkSchemaError("prediction manifest configured artifact paths mismatch")
+    expected_sha = predictions.sha256
+    if (
+        output.get("sha256") != expected_sha
+        or type(output.get("records")) is not int
+        or output.get("records") != len(predictions.records)
+    ):
+        raise BenchmarkSchemaError("prediction manifest output hash or record count mismatch")
+    raw_keys = manifest["selected_keys"]
+    if not isinstance(raw_keys, list) or len(raw_keys) != len(predictions.records):
+        raise BenchmarkSchemaError("prediction manifest selected_keys are invalid")
+    manifest_keys: set[tuple[str, int]] = set()
+    for item in raw_keys:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"repository", "pr"}
+            or not isinstance(item.get("repository"), str)
+            or type(item.get("pr")) is not int
+        ):
+            raise BenchmarkSchemaError("prediction manifest contains malformed selected key")
+        item_key = (item["repository"], item["pr"])
+        if item_key in manifest_keys:
+            raise BenchmarkSchemaError(f"duplicate prediction manifest key: {item_key}")
+        manifest_keys.add(item_key)
+    prediction_keys = {key(item) for item in predictions.records}
+    if manifest_keys != prediction_keys:
+        raise BenchmarkSchemaError("prediction manifest selected keys do not match predictions")
+    pr_keys = {
+        (item.get("repository"), item.get("pr"))
+        for item in manifest["prs"]
+        if isinstance(item, dict)
+    }
+    if pr_keys != prediction_keys:
+        raise BenchmarkSchemaError("prediction manifest PR records do not match predictions")
+    candidate = manifest["candidate"]
+    if manifest["git"] != {"candidate_sha": candidate["git_sha"]}:
+        raise BenchmarkSchemaError("prediction manifest Git binding is invalid")
+    corpus = manifest["corpus"]
+    if set(corpus) != {"path", "sha256"}:
+        raise BenchmarkSchemaError("prediction manifest corpus binding is invalid")
+    _nonempty_string(corpus["path"], "corpus.path")
+    _validate_hash(corpus["sha256"], "corpus.sha256", 64)
+    candidate_id = candidate.get("id") if isinstance(candidate, dict) else None
+    record_candidates = {item.get("candidate") for item in predictions.records}
+    record_adapters = {item.get("adapter") for item in predictions.records}
+    if record_candidates != {candidate_id} or record_adapters != {candidate["adapter"]}:
+        raise BenchmarkSchemaError("prediction manifest candidate does not match predictions")
+    ineligibility_reasons = []
+    if configuration["dry_run"]:
+        ineligibility_reasons.append("dry_run")
+    if configuration["allow_upstream_execution"]:
+        ineligibility_reasons.append("upstream_execution")
+    return {
+        "path": str(path),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "prediction_sha256": expected_sha,
+        "candidate": candidate_id,
+        "adapter": candidate["adapter"],
+        "runner_provenance_validated": True,
+        "secure_execution_eligible": not ineligibility_reasons,
+        "execution_ineligibility_reasons": ineligibility_reasons,
+    }
+
+
 def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share one pass
     parser = argparse.ArgumentParser()
     parser.add_argument("--ground-truth", type=Path, required=True)
@@ -401,6 +774,11 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
     parser.add_argument("--scope", choices=SCOPES, default="all")
     parser.add_argument("--verification-set", type=Path)
     parser.add_argument("--route-census", type=Path)
+    parser.add_argument(
+        "--prediction-manifest",
+        type=Path,
+        help="schema-v3 runner manifest that authenticates prediction bytes and selection",
+    )
     args = parser.parse_args()
 
     scope_id = {
@@ -425,7 +803,8 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
                 f"not {scope_id!r}"
             )
 
-    truth_records = read_jsonl(args.ground_truth)
+    truth_artifact = read_primary_artifact(args.ground_truth, "ground_truth")
+    truth_records = truth_artifact.records
     truth_keys = {key(item) for item in truth_records}
     unmatched = verification_keys - truth_keys
     if unmatched:
@@ -437,9 +816,32 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
         or (verification_selection == "include" and key(item) in verification_keys)
         or (verification_selection == "exclude" and key(item) not in verification_keys)
     }
-    predictions = {
-        key(item): filter_record(item, args.scope) for item in read_jsonl(args.predictions)
+    prediction_artifact = read_primary_artifact(args.predictions, "prediction")
+    prediction_records = prediction_artifact.records
+    prediction_integrity = (
+        read_prediction_manifest(args.prediction_manifest, prediction_artifact)
+        if args.prediction_manifest is not None
+        else None
+    )
+    prediction_keys = {key(item) for item in prediction_records}
+    unknown_prediction_keys = prediction_keys - truth_keys
+    if unknown_prediction_keys:
+        raise ValueError(
+            f"prediction keys absent from ground truth: {sorted(unknown_prediction_keys)}"
+        )
+    predictions = {key(item): filter_record(item, args.scope) for item in prediction_records}
+    adjudicated_keys = {
+        record_key for record_key, record in truth.items() if record.get("status") == "adjudicated"
     }
+    unknown_label_prs = sum(1 for record in truth.values() if record.get("status") == "unknown")
+    not_evaluable_prs = sum(
+        1 for record in truth.values() if record.get("status") == "not_evaluable"
+    )
+    missing_prediction_keys = adjudicated_keys - prediction_keys
+    if missing_prediction_keys:
+        raise ValueError(
+            f"predictions are missing selected adjudicated keys: {sorted(missing_prediction_keys)}"
+        )
     census: dict[tuple[str, int], dict[str, Any]] | None = None
     census_sha256: str | None = None
     if args.route_census is not None:
@@ -447,12 +849,15 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
             args.route_census, set(truth), truth_keys, args.scope
         )
     totals: dict[str, int] = defaultdict(int)
-    macro: dict[str, float] = defaultdict(float)
+    macro_sums: dict[str, float] = defaultdict(float)
+    macro_samples: dict[str, int] = defaultdict(int)
     evaluated = 0
-    latencies: list[float] = []
+    completed_prediction_records = 0
+    timing_samples: dict[str, list[float]] = defaultdict(list)
     kind_totals: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     normalized_totals: dict[str, int] = defaultdict(int)
-    normalized_macro: dict[str, float] = defaultdict(float)
+    normalized_macro_sums: dict[str, float] = defaultdict(float)
+    normalized_macro_samples: dict[str, int] = defaultdict(int)
     normalized_kinds: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     normalized_rules: dict[str, int] = defaultdict(int)
     low_rules: dict[str, int] = defaultdict(int)
@@ -467,6 +872,8 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
     truth_positive_prs = 0
     negative_controls_with_fp = 0
     negative_controls_with_low_fp = 0
+    completed_negative_controls = 0
+    clean_completed_negative_controls = 0
     exact_stage_totals: dict[str, int] = defaultdict(int)
     normalized_stage_totals: dict[str, int] = defaultdict(int)
     exact_stage_repositories: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
@@ -482,8 +889,11 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
         reachability_only = {
             item["id"] for item in expected_record.get("reachability_only_entrypoints", [])
         }
-        predicted_record = predictions.get(record_key, {})
+        predicted_record = predictions[record_key]
         predicted, low_predicted = ranked_entrypoints(predicted_record)
+        unresolved = predicted_record.get("unresolved", [])
+        if not unresolved:
+            completed_prediction_records += 1
         tp = len(expected & predicted)
         fp = len(predicted - expected)
         fn = len(expected - predicted)
@@ -524,11 +934,16 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
                 exact_stage_repositories[record_key[0]][metric] += count
         if expected:
             truth_positive_prs += 1
-        elif predicted:
-            negative_controls_with_fp += 1
-        if not expected and low_predicted:
-            negative_controls_with_low_fp += 1
-        totals["unresolved"] += len(predicted_record.get("unresolved", []))
+        else:
+            if predicted:
+                negative_controls_with_fp += 1
+            if low_predicted:
+                negative_controls_with_low_fp += 1
+            if not unresolved:
+                completed_negative_controls += 1
+                if not predicted:
+                    clean_completed_negative_controls += 1
+        totals["unresolved"] += len(unresolved)
         expected_kinds = entrypoints_by_kind(expected_record)
         predicted_kinds = predicted_ids_by_kind(predicted_record, predicted)
         for kind in expected_kinds.keys() | predicted_kinds.keys():
@@ -623,29 +1038,43 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
                 normalized_kinds[claim.kind]["fp"] += 1
         normalized_precision = ratio(normalized["tp"], normalized["tp"] + normalized["fp"])
         normalized_recall = ratio(normalized["tp"], normalized["tp"] + normalized["fn"])
-        normalized_macro["precision"] += normalized_precision
-        normalized_macro["recall"] += normalized_recall
-        normalized_macro["f1"] += ratio(
+        normalized_f1 = ratio(
             2 * normalized_precision * normalized_recall,
             normalized_precision + normalized_recall,
         )
+        if normalized["expected_atoms"]:
+            normalized_macro_sums["precision"] += normalized_precision
+            normalized_macro_sums["recall"] += normalized_recall
+            normalized_macro_sums["f1"] += normalized_f1
+            for metric in ("precision", "recall", "f1"):
+                normalized_macro_samples[metric] += 1
 
         precision = ratio(tp, tp + fp)
         recall = ratio(tp, tp + fn)
-        macro["precision"] += precision
-        macro["recall"] += recall
-        macro["f1"] += ratio(2 * precision * recall, precision + recall)
+        f1 = ratio(2 * precision * recall, precision + recall)
+        if expected:
+            macro_sums["precision"] += precision
+            macro_sums["recall"] += recall
+            macro_sums["f1"] += f1
+            for metric in ("precision", "recall", "f1"):
+                macro_samples[metric] += 1
+        for name, value in predicted_record.get("timing_seconds", {}).items():
+            protocol = (
+                name if predicted_record.get("schema_version") == 3 else f"legacy_unattested_{name}"
+            )
+            timing_samples[protocol].append(float(value))
+        if "analyzer_seconds" in predicted_record:
+            timing_samples["legacy_analyzer_wall"].append(
+                float(predicted_record["analyzer_seconds"])
+            )
         if "incremental_seconds" in predicted_record:
-            latencies.append(float(predicted_record["incremental_seconds"]))
+            timing_samples["legacy_reported_incremental_unattested"].append(
+                float(predicted_record["incremental_seconds"])
+            )
 
     tp, fp, fn = totals["tp"], totals["fp"], totals["fn"]
     precision = ratio(tp, tp + fp)
     recall = ratio(tp, tp + fn)
-    adjudicated_keys = {
-        record_key
-        for record_key, record in truth.items()
-        if record.get("status", "adjudicated") == "adjudicated"
-    }
 
     def metrics(counts: dict[str, int]) -> dict[str, int | float]:
         item_precision = ratio(counts["tp"], counts["tp"] + counts["fp"])
@@ -682,8 +1111,54 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
             "candidate_ceiling": metrics(ceiling),
         }
 
+    negative_control_prs = evaluated - truth_positive_prs
+    inventory_completed = (
+        sum(1 for record_key in adjudicated_keys if census[record_key]["complete"])
+        if census is not None
+        else 0
+    )
+    timing_results = {
+        name: {
+            **_timing_summary(values),
+            "incremental_valid": False,
+            "definition": (
+                "historical field; timing protocol was not attested"
+                if name.startswith("legacy_")
+                else "runner-declared timing protocol"
+            ),
+        }
+        for name, values in sorted(timing_samples.items())
+    }
     result = {
+        "schema_version": 2,
         "scope": scope_id,
+        "integrity": {
+            "ground_truth": {
+                "path": str(args.ground_truth),
+                "sha256": truth_artifact.sha256,
+                "records": len(truth_records),
+            },
+            "predictions": {
+                "path": str(args.predictions),
+                "sha256": prediction_artifact.sha256,
+                "records": len(prediction_records),
+            },
+            "prediction_manifest": prediction_integrity,
+            "prediction_bytes_attested": prediction_integrity is not None,
+            "runner_provenance_validated": prediction_integrity is not None,
+            "secure_execution_eligible": bool(
+                prediction_integrity and prediction_integrity["secure_execution_eligible"]
+            ),
+            "truth_selection_attested": False,
+            "source_inventory_attested": False,
+            "fully_attested": False,
+            "official_scoring_eligible": False,
+            "limitations": [
+                "ground-truth completeness is not yet bound to a corpus selection manifest",
+                "candidate source inventory is not yet bound into the runner manifest",
+                "incremental backend reuse is not measured or attested",
+            ],
+        },
         "verification_set": (
             {
                 "id": verification_manifest["id"],
@@ -700,11 +1175,44 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
             else None
         ),
         "adjudicated_prs": evaluated,
+        "unknown_label_prs": unknown_label_prs,
+        "not_evaluable_prs": not_evaluable_prs,
         "prediction_coverage": ratio(len(adjudicated_keys & set(predictions)), evaluated),
+        "coverage": {
+            "record": {
+                "numerator": len(adjudicated_keys & set(predictions)),
+                "denominator": evaluated,
+                "rate": ratio(len(adjudicated_keys & set(predictions)), evaluated),
+            },
+            "completed": {
+                "numerator": completed_prediction_records,
+                "denominator": evaluated,
+                "rate": ratio(completed_prediction_records, evaluated),
+                "definition": "prediction rows with no unresolved diagnostics",
+            },
+            "inventory": {
+                "available": census is not None,
+                "numerator": inventory_completed if census is not None else None,
+                "denominator": evaluated if census is not None else None,
+                "rate": ratio(inventory_completed, evaluated) if census is not None else None,
+            },
+            "changed_symbols": {"available": False, "rate": None},
+            "unresolved_hunks": {"available": False, "rate": None},
+        },
         "truth_positive_prs": truth_positive_prs,
-        "negative_control_prs": evaluated - truth_positive_prs,
+        "negative_control_prs": negative_control_prs,
         "negative_controls_with_fp": negative_controls_with_fp,
         "negative_controls_with_low_fp": negative_controls_with_low_fp,
+        "negative_control_specificity": {
+            "completed_controls": completed_negative_controls,
+            "all_controls": negative_control_prs,
+            "clean_completed_controls": clean_completed_negative_controls,
+            "completed_control_coverage": ratio(completed_negative_controls, negative_control_prs),
+            "specificity": ratio(clean_completed_negative_controls, completed_negative_controls),
+            "conservative_specificity": ratio(
+                clean_completed_negative_controls, negative_control_prs
+            ),
+        },
         "micro": {
             "precision": precision,
             "recall": recall,
@@ -720,7 +1228,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
                 for repository, counts in sorted(ranked_repositories.items())
             },
         },
-        "macro": {name: ratio(value, evaluated) for name, value in macro.items()},
+        "macro": _macro_result(macro_sums, macro_samples),
         "by_repository": {
             repository: metrics(counts) for repository, counts in sorted(repository_totals.items())
         },
@@ -742,7 +1250,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
         "normalized": {
             "alias_version": ALIAS_VERSION,
             "micro": metrics(normalized_totals),
-            "macro": {name: ratio(value, evaluated) for name, value in normalized_macro.items()},
+            "macro": _macro_result(normalized_macro_sums, normalized_macro_samples),
             "by_repository": {
                 repository: metrics(counts)
                 for repository, counts in sorted(normalized_repositories.items())
@@ -769,10 +1277,11 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
             ],
         },
         "unresolved_items": totals["unresolved"],
-        "latency_seconds": {
-            "samples": len(latencies),
-            "mean": ratio(sum(latencies), len(latencies)),
-            "max": max(latencies, default=0.0),
+        "performance": {
+            "percentile_method": "nearest-rank",
+            "protocols": timing_results,
+            "incremental_gate_eligible": False,
+            "reason": "no backend currently attests incremental index reuse",
         },
     }
     if census is not None:
