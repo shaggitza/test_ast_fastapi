@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import tempfile
@@ -9,7 +10,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from benchmarks.real_world import run_current
+from benchmarks.real_world import evaluate, run_current
+from benchmarks.real_world.benchmark_schema import read_primary_artifact
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
@@ -127,6 +129,9 @@ class ResolutionAndSkipTests(unittest.TestCase):
         self.assertEqual(prediction["unresolved"], ["non_python_change"])
         self.assertEqual(prediction["affected_entrypoints"], [])
         self.assertNotIn("incremental_seconds", prediction)
+        self.assertNotIn("index_seconds", prediction)
+        self.assertEqual(prediction["schema_version"], 3)
+        self.assertEqual(prediction["status"], "unresolved")
         self.assertEqual(manifest["reason"], "non_python_change")
         self.assertEqual(manifest["merge_sha"], SHA_A)
 
@@ -266,7 +271,11 @@ class ResolutionAndSkipTests(unittest.TestCase):
         invoke.assert_called_once()
         self.assertFalse(invoke.call_args.kwargs["secure_ast"])
         self.assertEqual(prediction["unresolved"], [])
-        self.assertEqual(prediction["incremental_seconds"], 0.25)
+        self.assertEqual(prediction["schema_version"], 3)
+        self.assertEqual(prediction["status"], "completed")
+        self.assertEqual(prediction["timing_seconds"], {"cold_no_cache_analyzer_wall": 0.25})
+        self.assertNotIn("incremental_seconds", prediction)
+        self.assertNotIn("index_seconds", prediction)
         self.assertEqual(manifest["status"], "completed")
 
     def test_ambiguous_parent_is_unresolved(self) -> None:
@@ -429,9 +438,19 @@ class OutputCardinalityTests(unittest.TestCase):
                 "id": "candidate",
                 "name": "fastapi-endpoint-detector",
                 "version": "test",
+                "adapter": "fastapi-adapter-v1",
                 "git_sha": SHA_A,
-                "config_hash": "config",
-                "command": "uv run --frozen fastapi-endpoint-detector analyze",
+                "config_hash": "d" * 12,
+                "dirty": False,
+                "dirty_sha256": None,
+                "uv_lock_sha256": "b" * 64,
+                "uv_version": "uv test",
+                "command": "uv run --frozen fastapi-endpoint-detector analyze --no-cache",
+                "performance_protocol": {
+                    "id": "cold-no-cache-analyzer-wall-v1",
+                    "cache_enabled": False,
+                    "incremental_valid": False,
+                },
             }
             with mock.patch.object(run_current, "candidate_metadata", return_value=candidate):
                 result = run_current.main(
@@ -449,8 +468,11 @@ class OutputCardinalityTests(unittest.TestCase):
                     ]
                 )
 
-            rows = [json.loads(line) for line in output.read_text().splitlines()]
+            output_bytes = output.read_bytes()
+            rows = [json.loads(line) for line in output_bytes.decode().splitlines()]
             manifest_data = json.loads(manifest.read_text())
+            prediction_artifact = read_primary_artifact(output, "prediction")
+            manifest_binding = evaluate.read_prediction_manifest(manifest, prediction_artifact)
 
         self.assertEqual(result, 0)
         self.assertEqual(len(rows), 2)
@@ -460,6 +482,23 @@ class OutputCardinalityTests(unittest.TestCase):
         )
         self.assertEqual(manifest_data["selection_count"], 2)
         self.assertEqual(len(manifest_data["prs"]), 2)
+        self.assertEqual(manifest_data["schema_version"], 3)
+        self.assertEqual(manifest_data["prediction_schema_version"], 3)
+        self.assertEqual(manifest_data["prediction_output"]["records"], 2)
+        self.assertEqual(
+            manifest_data["prediction_output"]["sha256"],
+            hashlib.sha256(output_bytes).hexdigest(),
+        )
+        self.assertEqual(
+            manifest_data["selected_keys"],
+            [
+                {"repository": "owner/one", "pr": 1},
+                {"repository": "owner/two", "pr": 2},
+            ],
+        )
+        self.assertFalse(manifest_data["timing"]["incremental_valid"])
+        self.assertEqual(manifest_binding["candidate"], "candidate")
+        self.assertEqual(manifest_binding["prediction_sha256"], prediction_artifact.sha256)
 
 
 if __name__ == "__main__":

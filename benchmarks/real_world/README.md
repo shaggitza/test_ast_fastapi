@@ -154,13 +154,25 @@ plus runtime metadata:
 
 ```json
 {
+  "schema_version": 3,
   "repository": "owner/repo",
   "pr": 123,
   "candidate": "name/version/config-hash",
-  "affected_entrypoints": [{"id": "HTTP POST /api/items", "evidence": []}],
+  "adapter": "fastapi-adapter-v1",
+  "status": "completed",
+  "affected_entrypoints": [
+    {"id": "HTTP POST /api/items", "kind": "http", "evidence": []}
+  ],
+  "candidate_entrypoints": [
+    {
+      "id": "HTTP POST /api/items",
+      "kind": "http",
+      "confidence": "high",
+      "effect_evidence": []
+    }
+  ],
   "unresolved": [],
-  "index_seconds": 0.0,
-  "incremental_seconds": 0.0
+  "timing_seconds": {"cold_no_cache_analyzer_wall": 1.25}
 }
 ```
 
@@ -168,10 +180,26 @@ Use `evaluate.py` to compare predictions. The product score is
 `--scope fastapi`: finite HTTP method/path claims and explicit WebSocket routes
 that the FastAPI adapter can emit. The default `--scope all` preserves the
 broader cross-surface research score. Raw exact and normalized metrics are both
-reported. Primary metrics are micro/macro recall, precision, F1, unresolved
-rate, evaluable coverage, and latency. A candidate cannot improve its score by
-omitting hard PRs. Versioned scope membership and source hashes live under
-`scopes/`.
+reported. Primary metrics are micro recall, precision, F1, positive-PR macro
+metrics, negative-control specificity, unresolved diagnostics, and separately
+named coverage rates. Evaluation rejects duplicate rows, malformed candidates,
+unknown schema-v3 keys, and missing selected adjudicated predictions before
+scoring, so a candidate cannot improve its score by omitting hard PRs. Missing,
+`unknown`, and `not_evaluable` labels are never treated as negatives. Versioned
+scope membership and source hashes live under `scopes/`.
+
+Schema-v3 runner output calls its current measurement
+`cold_no_cache_analyzer_wall`. It is the wall time of a one-shot analyzer process
+run with `--no-cache`; it is **not incremental latency** and is ineligible for the
+incremental p95 gate. Historical `incremental_seconds` values are accepted only
+through the legacy adapter and reported as unattested. Real warm no-change and
+one-file update measurements require backend cache-reuse/invalidation telemetry.
+Checked-in legacy prediction JSONL remains scoreable through the strict legacy
+adapter, but historical schema-v1/v2 manifests cannot be supplied as a
+schema-v3 `--prediction-manifest`; those evaluations explicitly remain
+unattested. A schema-v3 manifest records and validates secure execution flags;
+dry-run or `--allow-upstream-execution` output is explicitly ineligible for the
+official secure score.
 
 ### Current candidate runner
 
@@ -202,7 +230,8 @@ python benchmarks/real_world/collect_prs.py
 python benchmarks/real_world/evaluate.py \
   --scope fastapi \
   --ground-truth benchmarks/real_world/adjudicated.jsonl \
-  --predictions path/to/predictions.jsonl
+  --predictions path/to/predictions.jsonl \
+  --prediction-manifest path/to/manifest.json
 ```
 
 ## Label status and limitations
