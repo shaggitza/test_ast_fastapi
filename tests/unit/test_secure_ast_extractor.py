@@ -3856,9 +3856,7 @@ def test_bootstrap_app_router_view_repeated_router_fails_closed(
     )
     (tmp_path / "main.py").write_text(source, encoding="utf-8")
 
-    inventory = SecureASTExtractor(
-        tmp_path, bootstrap_entry="main:run"
-    ).extract_inventory()
+    inventory = SecureASTExtractor(tmp_path, bootstrap_entry="main:run").extract_inventory()
 
     assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /positive"]
     assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.ESTABLISHED
@@ -3885,9 +3883,7 @@ def test_bootstrap_router_view_rebinding_back_to_app_restores_exact_router_surfa
         encoding="utf-8",
     )
 
-    inventory = SecureASTExtractor(
-        tmp_path, bootstrap_entry="main:run"
-    ).extract_inventory()
+    inventory = SecureASTExtractor(tmp_path, bootstrap_entry="main:run").extract_inventory()
 
     assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /positive"]
     assert inventory.status == InventoryStatus.ESTABLISHED

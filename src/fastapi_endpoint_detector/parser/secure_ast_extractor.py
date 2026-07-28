@@ -1323,11 +1323,9 @@ class SecureASTExtractor:
             if not isinstance(expression, ast.Attribute) or expression.attr != "router":
                 return False
             if (
-                isinstance(expression.value, ast.Name)
-                and expression.value.id in local_router_views
+                isinstance(expression.value, ast.Name) and expression.value.id in local_router_views
             ) or (
-                isinstance(expression.value, ast.Attribute)
-                and expression.value.attr == "router"
+                isinstance(expression.value, ast.Attribute) and expression.value.attr == "router"
             ):
                 return False
             nested = object_for(expression.value)
@@ -1522,9 +1520,7 @@ class SecureASTExtractor:
                         return None
                     continue
                 aliased_object = object_for(value)
-                aliases_router_view = (
-                    aliased_object is not None and denotes_router_view(value)
-                )
+                aliases_router_view = aliased_object is not None and denotes_router_view(value)
                 if aliased_object is not None:
                     local_objects[assigned] = aliased_object
                     if aliases_router_view:
