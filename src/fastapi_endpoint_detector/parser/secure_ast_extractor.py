@@ -37,6 +37,81 @@ CompositionMode = Literal["copy", "live"]
 EndpointImpact = Literal["none", "prior", "subsequent", "all"]
 _ORDER_SCALE = 1_000_000
 
+_HTTP_ROUTE_METADATA_KEYWORDS = frozenset(
+    {
+        "callbacks",
+        "dependencies",
+        "deprecated",
+        "description",
+        "generate_unique_id_function",
+        "include_in_schema",
+        "name",
+        "openapi_extra",
+        "operation_id",
+        "response_class",
+        "response_description",
+        "response_model",
+        "response_model_by_alias",
+        "response_model_exclude",
+        "response_model_exclude_defaults",
+        "response_model_exclude_none",
+        "response_model_exclude_unset",
+        "response_model_include",
+        "responses",
+        "status_code",
+        "summary",
+        "tags",
+    }
+)
+_HTTP_DECORATOR_KEYWORDS = _HTTP_ROUTE_METADATA_KEYWORDS | {"path"}
+_API_ROUTE_DECORATOR_KEYWORDS = _HTTP_DECORATOR_KEYWORDS | {"methods"}
+_FASTAPI_API_ROUTE_DECORATOR_KEYWORDS = _API_ROUTE_DECORATOR_KEYWORDS - {"callbacks"}
+_ROUTER_ADD_API_ROUTE_KEYWORDS = _API_ROUTE_DECORATOR_KEYWORDS | {
+    "endpoint",
+    "route_class_override",
+    "strict_content_type",
+}
+_FASTAPI_ADD_API_ROUTE_KEYWORDS = _ROUTER_ADD_API_ROUTE_KEYWORDS - {
+    "callbacks",
+    "route_class_override",
+    "strict_content_type",
+}
+_WEBSOCKET_DECORATOR_KEYWORDS = frozenset({"path", "name", "dependencies"})
+_ADD_API_WEBSOCKET_ROUTE_KEYWORDS = frozenset({"path", "endpoint", "name", "dependencies"})
+_ADD_WEBSOCKET_ROUTE_KEYWORDS = frozenset({"path", "endpoint", "name"})
+_INCLUDE_ROUTER_KEYWORDS = frozenset(
+    {
+        "router",
+        "prefix",
+        "tags",
+        "dependencies",
+        "default_response_class",
+        "responses",
+        "callbacks",
+        "deprecated",
+        "include_in_schema",
+        "generate_unique_id_function",
+    }
+)
+_MOUNT_KEYWORDS = frozenset({"path", "app", "name"})
+
+_SHARED_DECORATOR_CALL_SHAPES: dict[str, tuple[tuple[str, ...], frozenset[str]]] = {
+    "http": (("path",), _HTTP_DECORATOR_KEYWORDS),
+    "websocket": (("path", "name"), _WEBSOCKET_DECORATOR_KEYWORDS),
+}
+_SHARED_REGISTRATION_CALL_SHAPES: dict[str, tuple[tuple[str, ...], frozenset[str]]] = {
+    "include_router": (("router",), _INCLUDE_ROUTER_KEYWORDS),
+    "mount": (("path", "app", "name"), _MOUNT_KEYWORDS),
+    "add_api_websocket_route": (
+        ("path", "endpoint", "name"),
+        _ADD_API_WEBSOCKET_ROUTE_KEYWORDS,
+    ),
+    "add_websocket_route": (
+        ("path", "endpoint", "name"),
+        _ADD_WEBSOCKET_ROUTE_KEYWORDS,
+    ),
+}
+
 
 @dataclass(frozen=True)
 class _Object:
@@ -46,6 +121,39 @@ class _Object:
     prefix: str | None
     line: int
     discovery_conditions: tuple[EndpointDiscoveryCondition, ...] = ()
+
+
+def _uses_router_receiver(owner: _Object, receiver: ast.expr | None) -> bool:
+    """Identify APIRouter methods and the exact ``FastAPI.router`` surface."""
+    return owner.kind == "router" or (
+        owner.kind == "app" and isinstance(receiver, ast.Attribute) and receiver.attr == "router"
+    )
+
+
+def _decorator_call_shape(
+    operation: str, owner: _Object, receiver: ast.expr | None
+) -> tuple[tuple[str, ...], frozenset[str]]:
+    if operation == "api_route":
+        keywords = (
+            _API_ROUTE_DECORATOR_KEYWORDS
+            if _uses_router_receiver(owner, receiver)
+            else _FASTAPI_API_ROUTE_DECORATOR_KEYWORDS
+        )
+        return (("path",), keywords)
+    return _SHARED_DECORATOR_CALL_SHAPES.get(operation, _SHARED_DECORATOR_CALL_SHAPES["http"])
+
+
+def _registration_call_shape(
+    operation: str, owner: _Object, receiver: ast.expr | None
+) -> tuple[tuple[str, ...], frozenset[str]]:
+    if operation == "add_api_route":
+        keywords = (
+            _ROUTER_ADD_API_ROUTE_KEYWORDS
+            if _uses_router_receiver(owner, receiver)
+            else _FASTAPI_ADD_API_ROUTE_KEYWORDS
+        )
+        return (("path", "endpoint"), keywords)
+    return _SHARED_REGISTRATION_CALL_SHAPES[operation]
 
 
 @dataclass(frozen=True)
@@ -99,6 +207,17 @@ class _FactoryGraph:
     edges: list[_Edge] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class _NativeEffects:
+    routes: tuple[_Route, ...]
+    edges: tuple[_Edge, ...]
+
+
+@dataclass(frozen=True)
+class _DirectEffectResult:
+    status: Literal["modeled", "limited", "unrecognized"]
+
+
 @dataclass
 class _Module:
     name: str
@@ -131,7 +250,6 @@ class _Module:
     ordered_inventory_limitations: dict[ObjectKey, list[_OrderedInventoryLimitation]] = field(
         default_factory=dict
     )
-    modeled_route_effects: set[int] = field(default_factory=set)
 
 
 class SecureASTExtractor:
@@ -286,11 +404,15 @@ class SecureASTExtractor:
                 *module.factory_objects,
             ]
         }
+        native_effects = {
+            module.name: self._collect_native_effects(module, aliases, modules)
+            for module in modules.values()
+        }
         routes = [
             route
             for module in modules.values()
             for route in [
-                *self._collect_routes(module, aliases, modules),
+                *native_effects[module.name].routes,
                 *module.factory_routes,
             ]
         ]
@@ -298,12 +420,10 @@ class SecureASTExtractor:
             edge
             for module in modules.values()
             for edge in [
-                *self._collect_edges(module, aliases, modules),
+                *native_effects[module.name].edges,
                 *module.factory_edges,
             ]
         ]
-        for module in modules.values():
-            self._collect_control_flow_limitations(module, aliases, modules)
 
         referenced = {edge.child for edge in edges}
         if self._app_entry_parts is not None:
@@ -1141,6 +1261,8 @@ class SecureASTExtractor:
         final_returned_binding = returned_binding_tokens[-1]
 
         local_objects: dict[str, _Object] = {}
+        local_router_views: set[str] = set()
+        local_created_keys: set[ObjectKey] = set()
         local_strings: dict[str, str | None] = dict(bound_arguments)
         local_bindings = _function_bindings(function)
         local_functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
@@ -1175,6 +1297,18 @@ class SecureASTExtractor:
                     return local_objects[expression.id]
                 if expression.id in local_bindings:
                     return None
+            if isinstance(expression, ast.Attribute) and expression.attr == "router":
+                if (
+                    isinstance(expression.value, ast.Name)
+                    and expression.value.id in local_router_views
+                ) or (
+                    isinstance(expression.value, ast.Attribute)
+                    and expression.value.attr == "router"
+                ):
+                    return None
+                nested = object_for(expression.value)
+                if nested is not None and nested.kind == "app":
+                    return nested
             if (
                 isinstance(expression, ast.Attribute)
                 and isinstance(expression.value, ast.Name)
@@ -1182,6 +1316,20 @@ class SecureASTExtractor:
             ):
                 return None
             return self._resolve_object(expression, module, aliases, modules, call_line)
+
+        def denotes_router_view(expression: ast.expr) -> bool:
+            if isinstance(expression, ast.Name):
+                return expression.id in local_router_views
+            if not isinstance(expression, ast.Attribute) or expression.attr != "router":
+                return False
+            if (
+                isinstance(expression.value, ast.Name) and expression.value.id in local_router_views
+            ) or (
+                isinstance(expression.value, ast.Attribute) and expression.value.attr == "router"
+            ):
+                return False
+            nested = object_for(expression.value)
+            return nested is not None and nested.kind == "app"
 
         def snapshot_local_object(item: _Object, operation: ast.AST) -> _Object:
             """Freeze current local routes/edges at an include operation."""
@@ -1372,8 +1520,13 @@ class SecureASTExtractor:
                         return None
                     continue
                 aliased_object = object_for(value)
+                aliases_router_view = aliased_object is not None and denotes_router_view(value)
                 if aliased_object is not None:
                     local_objects[assigned] = aliased_object
+                    if aliases_router_view:
+                        local_router_views.add(assigned)
+                    else:
+                        local_router_views.discard(assigned)
                     local_strings.pop(assigned, None)
                     continue
 
@@ -1409,6 +1562,8 @@ class SecureASTExtractor:
                         conditionalize(statement, "factory router prefix is unresolved")
                     item = _Object(key, variable, constructor, prefix, call_line)
                     local_objects[assigned] = item
+                    local_router_views.discard(assigned)
+                    local_created_keys.add(item.key)
                     local_strings.pop(assigned, None)
                     if key != desired_key:
                         emitted_objects.append(item)
@@ -1463,6 +1618,9 @@ class SecureASTExtractor:
                     )
                     if nested is not None:
                         local_objects[assigned] = nested.root
+                        local_router_views.discard(assigned)
+                        local_created_keys.add(nested.root.key)
+                        local_created_keys.update(item.key for item in nested.objects)
                         if nested.root.key != desired_key:
                             emitted_objects.append(nested.root)
                         emitted_objects.extend(nested.objects)
@@ -1475,6 +1633,7 @@ class SecureASTExtractor:
                 ):
                     return None
                 local_objects.pop(assigned, None)
+                local_router_views.discard(assigned)
                 local_strings[assigned] = literal(value, statement.lineno)
                 continue
             if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -1488,12 +1647,39 @@ class SecureASTExtractor:
                         continue
                     owner = object_for(decorator.func.value)
                     method = decorator.func.attr
-                    if owner is None or (method not in self.HTTP_METHODS and method != "api_route"):
+                    if method not in self.HTTP_METHODS and method != "api_route":
                         continue
-                    path_expr = (
-                        decorator.args[0] if decorator.args else _keyword_expr(decorator, "path")
-                    )
-                    path = literal(path_expr, statement.lineno)
+                    if owner is None:
+                        unsupported_owner = None
+                        if (
+                            isinstance(decorator.func.value, ast.Attribute)
+                            and decorator.func.value.attr == "router"
+                        ):
+                            unsupported_owner = object_for(decorator.func.value.value)
+                        if unsupported_owner is not None:
+                            limit_registration(
+                                unsupported_owner,
+                                decorator,
+                                "factory decorator registration receiver is unsupported",
+                            )
+                        continue
+                    if owner.key[0] != module.name and owner.key not in local_created_keys:
+                        limit_registration(
+                            owner,
+                            decorator,
+                            "factory decorator mutates an imported route object",
+                        )
+                        continue
+                    decorator_shape = _decorator_call_shape(method, owner, decorator.func.value)
+                    arguments = _validated_call_arguments(decorator, *decorator_shape)
+                    if arguments is None:
+                        limit_registration(
+                            owner,
+                            decorator,
+                            "factory decorated route arguments are ambiguous",
+                        )
+                        continue
+                    path = literal(arguments.get("path"), statement.lineno)
                     if path is None:
                         limit_registration(
                             owner,
@@ -1557,6 +1743,29 @@ class SecureASTExtractor:
                 continue
             parent = object_for(call_function.value)
             if parent is None:
+                unsupported_owner = None
+                if (
+                    call_function.attr
+                    in {
+                        "include_router",
+                        "mount",
+                        "add_api_route",
+                        "add_api_websocket_route",
+                        "add_websocket_route",
+                    }
+                    and isinstance(call_function.value, ast.Attribute)
+                    and call_function.value.attr == "router"
+                ):
+                    exact_owner = object_for(call_function.value.value)
+                    if exact_owner is not None:
+                        unsupported_owner = exact_owner
+                if unsupported_owner is not None:
+                    limit_registration(
+                        unsupported_owner,
+                        statement,
+                        "factory registration receiver is unsupported",
+                    )
+                    continue
                 if allow_conditional and unresolved_call_touches_modeled(call):
                     conditionalize(
                         statement,
@@ -1566,9 +1775,56 @@ class SecureASTExtractor:
                 if touches_modeled_binding(statement):
                     return None
                 continue
+            if (
+                call_function.attr
+                in {
+                    "include_router",
+                    "mount",
+                    "add_api_route",
+                    "add_api_websocket_route",
+                    "add_websocket_route",
+                }
+                and parent.key[0] != module.name
+                and parent.key not in local_created_keys
+            ):
+                limit_registration(
+                    parent,
+                    statement,
+                    "factory registration mutates an imported route object",
+                )
+                continue
+            call_shape = (
+                _registration_call_shape(call_function.attr, parent, call_function.value)
+                if call_function.attr in {*_SHARED_REGISTRATION_CALL_SHAPES, "add_api_route"}
+                else None
+            )
+            if (
+                call_function.attr == "add_websocket_route"
+                and parent.kind == "app"
+                and not (
+                    isinstance(call_function.value, ast.Attribute)
+                    and call_function.value.attr == "router"
+                )
+            ):
+                limit_registration(
+                    parent,
+                    statement,
+                    "factory registration receiver is unsupported",
+                )
+                continue
+            arguments = (
+                _validated_call_arguments(call, *call_shape) if call_shape is not None else None
+            )
+            if call_shape is not None and arguments is None:
+                limit_registration(
+                    parent,
+                    statement,
+                    "factory registration arguments are ambiguous",
+                )
+                continue
             if call_function.attr == "include_router":
-                child_expr = call.args[0] if call.args else _keyword_expr(call, "router")
-                child = object_for(child_expr)
+                assert arguments is not None
+                child = object_for(arguments.get("router"))
                 if child is None or child.kind != "router":
                     limit_registration(
                         parent,
@@ -1611,10 +1867,9 @@ class SecureASTExtractor:
                     )
                 )
             elif call_function.attr == "mount":
-                path_expr = call.args[0] if call.args else _keyword_expr(call, "path")
-                child_expr = call.args[1] if len(call.args) > 1 else _keyword_expr(call, "app")
-                path = literal(path_expr, statement.lineno)
-                child = object_for(child_expr)
+                assert arguments is not None
+                path = literal(arguments.get("path"), statement.lineno)
+                child = object_for(arguments.get("app"))
                 if path is None or child is None or child.kind != "app":
                     limit_registration(
                         parent,
@@ -1639,12 +1894,9 @@ class SecureASTExtractor:
                 "add_api_websocket_route",
                 "add_websocket_route",
             }:
-                path_expr = call.args[0] if call.args else _keyword_expr(call, "path")
-                handler_expr = (
-                    call.args[1] if len(call.args) > 1 else _keyword_expr(call, "endpoint")
-                )
-                path = literal(path_expr, statement.lineno)
-                imperative_handler = handler_for(handler_expr)
+                assert arguments is not None
+                path = literal(arguments.get("path"), statement.lineno)
+                imperative_handler = handler_for(arguments.get("endpoint"))
                 if call_function.attr == "add_api_route":
                     methods_expr = _keyword_expr(call, "methods")
                     methods = (
@@ -1772,6 +2024,7 @@ class SecureASTExtractor:
             current_module: _Module,
             current: ast.FunctionDef | ast.AsyncFunctionDef,
             object_env: dict[str, _Object],
+            router_view_env: set[str],
             string_env: dict[str, str],
             stack: frozenset[tuple[str, str, int]],
         ) -> None:
@@ -1795,6 +2048,7 @@ class SecureASTExtractor:
                 return
             budget[0] -= 1
             local_objects = dict(object_env)
+            local_router_views = set(router_view_env)
             local_strings = dict(string_env)
             local_modules: dict[str, _Module] = {}
             local_functions: dict[str, tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef]] = {}
@@ -1817,13 +2071,27 @@ class SecureASTExtractor:
                     if imported is not None:
                         local_modules[imported_name] = imported
 
-            def object_for(expression: ast.expr | None, line: int) -> _Object | None:
+            def object_for(  # noqa: PLR0911
+                expression: ast.expr | None, line: int
+            ) -> _Object | None:
                 if isinstance(expression, ast.Name):
                     if expression.id in local_objects:
                         return local_objects[expression.id]
                     if expression.id in bound_names:
                         return None
                     return self._resolve_object(expression, current_module, aliases, modules, line)
+                if isinstance(expression, ast.Attribute) and expression.attr == "router":
+                    if (
+                        isinstance(expression.value, ast.Name)
+                        and expression.value.id in local_router_views
+                    ) or (
+                        isinstance(expression.value, ast.Attribute)
+                        and expression.value.attr == "router"
+                    ):
+                        return None
+                    nested = object_for(expression.value, line)
+                    if nested is not None and nested.kind == "app":
+                        return nested
                 if isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name):
                     imported = local_modules.get(expression.value.id)
                     if imported is not None:
@@ -1837,6 +2105,22 @@ class SecureASTExtractor:
                             min(len(modules) + 1, 64),
                         )
                 return self._resolve_object(expression, current_module, aliases, modules, line)
+
+            def denotes_router_view(expression: ast.expr, line: int) -> bool:
+                if isinstance(expression, ast.Name):
+                    return expression.id in local_router_views
+                if not isinstance(expression, ast.Attribute) or expression.attr != "router":
+                    return False
+                if (
+                    isinstance(expression.value, ast.Name)
+                    and expression.value.id in local_router_views
+                ) or (
+                    isinstance(expression.value, ast.Attribute)
+                    and expression.value.attr == "router"
+                ):
+                    return False
+                nested = object_for(expression.value, line)
+                return nested is not None and nested.kind == "app"
 
             def resolve_literal_name(name: str, line: int) -> str | None:
                 if name in local_strings:
@@ -1871,7 +2155,75 @@ class SecureASTExtractor:
                     global_names.update(statement.names)
                     continue
                 if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    decorator_handler = self._handler(current_module, statement)
+                    for decorator in statement.decorator_list:
+                        if not (
+                            isinstance(decorator, ast.Call)
+                            and isinstance(decorator.func, ast.Attribute)
+                            and decorator.func.attr in {*self.HTTP_METHODS, "api_route"}
+                        ):
+                            continue
+                        decorator_owner = object_for(decorator.func.value, decorator.lineno)
+                        if decorator_owner is None:
+                            limit(
+                                current_module,
+                                root,
+                                decorator,
+                                "bootstrap decorator registration receiver is unresolved",
+                                inventory_only=True,
+                            )
+                            continue
+                        operation = decorator.func.attr
+                        arguments = _validated_call_arguments(
+                            decorator,
+                            *_decorator_call_shape(
+                                operation, decorator_owner, decorator.func.value
+                            ),
+                        )
+                        path = (
+                            None
+                            if arguments is None
+                            else literal(arguments.get("path"), decorator.lineno)
+                        )
+                        methods_expr = _keyword_expr(decorator, "methods")
+                        decorator_methods = (
+                            self._literal_methods(
+                                methods_expr,
+                                current_module,
+                                decorator.lineno,
+                                partial(resolve_literal_name, line=decorator.lineno),
+                            )
+                            if operation == "api_route" and methods_expr is not None
+                            else (
+                                ("GET",)
+                                if operation == "api_route"
+                                else (
+                                    ("WEBSOCKET",)
+                                    if operation == "websocket"
+                                    else (operation.upper(),)
+                                )
+                            )
+                        )
+                        if arguments is None or path is None or not decorator_methods:
+                            limit(
+                                current_module,
+                                decorator_owner,
+                                decorator,
+                                "bootstrap decorated route is unresolved",
+                                inventory_only=True,
+                            )
+                            continue
+                        routes.append(
+                            _Route(
+                                decorator_owner.key,
+                                path,
+                                decorator_methods,
+                                decorator_handler,
+                                next_order(),
+                            )
+                        )
                     local_objects.pop(statement.name, None)
+                    local_router_views.discard(statement.name)
                     local_strings.pop(statement.name, None)
                     local_modules.pop(statement.name, None)
                     bound_names.add(statement.name)
@@ -1887,6 +2239,7 @@ class SecureASTExtractor:
                             continue
                         local = imported_alias.asname or imported_alias.name
                         bound_names.add(local)
+                        local_router_views.discard(local)
                         submodule_name = aliases.get(f"{target_name}.{imported_alias.name}")
                         if submodule_name in modules:
                             local_modules[local] = modules[submodule_name]
@@ -1919,6 +2272,7 @@ class SecureASTExtractor:
                     for imported_alias in statement.names:
                         local = imported_alias.asname or imported_alias.name.split(".")[0]
                         bound_names.add(local)
+                        local_router_views.discard(local)
                         target_name = aliases.get(imported_alias.name, imported_alias.name)
                         imported_module = modules.get(target_name)
                         if imported_module is not None:
@@ -1944,6 +2298,9 @@ class SecureASTExtractor:
                     local_modules.pop(name, None)
                     local_handlers.pop(name, None)
                     aliased = object_for(value, statement.lineno)
+                    aliases_router_view = aliased is not None and denotes_router_view(
+                        value, statement.lineno
+                    )
                     if aliased is not None:
                         if name in global_names:
                             limit(
@@ -1953,6 +2310,10 @@ class SecureASTExtractor:
                                 "bootstrap object escapes through global assignment",
                             )
                         local_objects[name] = aliased
+                        if aliases_router_view:
+                            local_router_views.add(name)
+                        else:
+                            local_router_views.discard(name)
                         local_strings.pop(name, None)
                     else:
                         value_string = literal(value, statement.lineno)
@@ -1972,6 +2333,7 @@ class SecureASTExtractor:
                                 "bootstrap object escapes through assignment",
                             )
                         local_objects.pop(name, None)
+                        local_router_views.discard(name)
                         local_strings.pop(name, None)
                         if value_string is not None:
                             local_strings[name] = value_string
@@ -1998,11 +2360,10 @@ class SecureASTExtractor:
                     continue
                 call = statement.value
                 line = statement.lineno
-                parent = (
-                    object_for(call.func.value, line)
-                    if isinstance(call.func, ast.Attribute)
-                    else None
+                registration_receiver = (
+                    call.func.value if isinstance(call.func, ast.Attribute) else None
                 )
+                parent = object_for(registration_receiver, line)
                 operation = call.func.attr if isinstance(call.func, ast.Attribute) else ""
                 registration_operations = {
                     "include_router",
@@ -2017,32 +2378,31 @@ class SecureASTExtractor:
                         root,
                         statement,
                         "bootstrap registration receiver is unresolved",
+                        inventory_only=True,
                     )
                     continue
                 if parent is not None and operation in registration_operations:
-                    if any(isinstance(argument, ast.Starred) for argument in call.args) or any(
-                        keyword.arg is None for keyword in call.keywords
+                    if (
+                        operation == "add_websocket_route"
+                        and parent.kind == "app"
+                        and not (
+                            isinstance(registration_receiver, ast.Attribute)
+                            and registration_receiver.attr == "router"
+                        )
                     ):
                         limit(
                             current_module,
                             parent,
                             statement,
-                            "starred bootstrap registration arguments are unsupported",
+                            "bootstrap registration receiver is unsupported",
                             inventory_only=True,
                         )
                         continue
-                    positional_names = {
-                        "include_router": ("router",),
-                        "mount": ("path", "app"),
-                        "add_api_route": ("path", "endpoint"),
-                        "add_api_websocket_route": ("path", "endpoint"),
-                        "add_websocket_route": ("path", "endpoint"),
-                    }[operation]
-                    keyword_names = [keyword.arg for keyword in call.keywords]
-                    duplicate_binding = any(
-                        name in keyword_names for name in positional_names[: len(call.args)]
-                    ) or len(keyword_names) != len(set(keyword_names))
-                    if len(call.args) > len(positional_names) or duplicate_binding:
+                    arguments = _validated_call_arguments(
+                        call,
+                        *_registration_call_shape(operation, parent, registration_receiver),
+                    )
+                    if arguments is None:
                         limit(
                             current_module,
                             parent,
@@ -2228,6 +2588,7 @@ class SecureASTExtractor:
                             )
                         continue
                     nested_objects: dict[str, _Object] = {}
+                    nested_router_views: set[str] = set()
                     nested_strings: dict[str, str] = {}
                     positional_defaults = (
                         {
@@ -2272,6 +2633,25 @@ class SecureASTExtractor:
                         )
                         if actual_object is not None:
                             nested_objects[parameter.arg] = actual_object
+                            aliases_router_view = (
+                                isinstance(expression, ast.Attribute)
+                                and expression.attr == "router"
+                                and (
+                                    underlying := self._resolve_object(
+                                        expression.value,
+                                        target_module,
+                                        aliases,
+                                        modules,
+                                        target_function.lineno,
+                                    )
+                                )
+                                is not None
+                                and underlying.kind == "app"
+                                if uses_default
+                                else denotes_router_view(expression, line)
+                            )
+                            if aliases_router_view:
+                                nested_router_views.add(parameter.arg)
                         actual_string = (
                             self._literal_string(expression, target_module, target_function.lineno)
                             if uses_default
@@ -2292,6 +2672,7 @@ class SecureASTExtractor:
                         target_module,
                         target_function,
                         nested_objects,
+                        nested_router_views,
                         nested_strings,
                         stack | {identity},
                     )
@@ -2355,7 +2736,7 @@ class SecureASTExtractor:
             value = self._literal_string(default, module, function.lineno)
             if value is not None:
                 initial_strings[parameter.arg] = value
-        apply(module, function, initial_objects, initial_strings, frozenset())
+        apply(module, function, initial_objects, set(), initial_strings, frozenset())
 
     @staticmethod
     def _record_object_limitation(
@@ -2401,13 +2782,15 @@ class SecureASTExtractor:
         if limitation not in limitations:
             limitations.append(limitation)
 
-    def _collect_control_flow_limitations(  # noqa: PLR0915
+    def _collect_native_effects(  # noqa: PLR0915
         self,
         module: _Module,
         aliases: dict[str, str],
         modules: dict[str, _Module],
-    ) -> None:
-        """Record source-ordered uncertainty from executed module/header effects."""
+    ) -> _NativeEffects:
+        """Emit direct graph effects and limitations in one ordered module traversal."""
+        routes: list[_Route] = []
+        edges: list[_Edge] = []
         evaluate_annotations = not _uses_future_annotations(module.tree)
         registration_methods = {
             *self.HTTP_METHODS,
@@ -2432,44 +2815,6 @@ class SecureASTExtractor:
         }
         known_aliases: dict[str, frozenset[_Object]] = {}
         dynamic_callable_aliases: set[str] = set()
-        discarded_decorator_factories: set[int] = set()
-
-        def collect_discarded_decorator_factories(statements: list[ast.stmt]) -> None:
-            for statement in statements:
-                if (
-                    isinstance(statement, ast.Expr)
-                    and isinstance(statement.value, ast.Call)
-                    and isinstance(statement.value.func, ast.Attribute)
-                    and statement.value.func.attr in {*self.HTTP_METHODS, "api_route"}
-                ):
-                    discarded_decorator_factories.add(_node_order(statement.value))
-                if isinstance(statement, ast.ClassDef):
-                    collect_discarded_decorator_factories(statement.body)
-                elif isinstance(
-                    statement,
-                    (
-                        ast.If,
-                        ast.For,
-                        ast.AsyncFor,
-                        ast.While,
-                        ast.Try,
-                        ast.With,
-                        ast.AsyncWith,
-                        ast.Match,
-                    ),
-                ) or _is_try_star(statement):
-                    nested: list[ast.stmt] = []
-                    for attribute in ("body", "orelse", "finalbody"):
-                        nested.extend(getattr(statement, attribute, ()))
-                    if _is_try_like(statement):
-                        nested.extend(
-                            item for handler in _try_handlers(statement) for item in handler.body
-                        )
-                    if isinstance(statement, ast.Match):
-                        nested.extend(item for case in statement.cases for item in case.body)
-                    collect_discarded_decorator_factories(nested)
-
-        collect_discarded_decorator_factories(module.tree.body)
 
         def object_root(  # noqa: PLR0911
             expression: ast.expr | None, line: int
@@ -2694,8 +3039,227 @@ class SecureASTExtractor:
                 endpoint_impact=endpoint_impact,
             )
 
+        def classify_direct_call(  # noqa: PLR0911, PLR0912, PLR0915
+            call: ast.Call,
+            *,
+            effect_node: ast.AST | None,
+            handler: HandlerInfo | None,
+            route_order: int | None,
+        ) -> _DirectEffectResult:
+            if not isinstance(call.func, ast.Attribute):
+                return _DirectEffectResult("unrecognized")
+            operation = call.func.attr
+            is_decorator = handler is not None
+            decorator_operations = {*self.HTTP_METHODS, "api_route"}
+            imperative_operations = {
+                "add_api_route",
+                "add_api_websocket_route",
+                "add_websocket_route",
+            }
+            composition_operations = {"include_router", "mount"}
+            if is_decorator:
+                if operation not in decorator_operations:
+                    return _DirectEffectResult("unrecognized")
+                owner = self._route_registration_owner(
+                    call.func.value, module, aliases, modules, call.lineno
+                )
+            elif effect_node is not None and operation in {
+                *imperative_operations,
+                *composition_operations,
+            }:
+                owner = self._route_registration_owner(
+                    call.func.value, module, aliases, modules, call.lineno
+                )
+            else:
+                return _DirectEffectResult("unrecognized")
+            if owner is None:
+                return _DirectEffectResult("unrecognized")
+            limitation_node = effect_node or call
+            if (
+                operation == "add_websocket_route"
+                and owner.kind == "app"
+                and not (
+                    isinstance(call.func.value, ast.Attribute) and call.func.value.attr == "router"
+                )
+            ):
+                self._record_object_limitation(
+                    module,
+                    owner,
+                    limitation_node,
+                    "imperative registration receiver is unsupported",
+                    inventory_only=True,
+                )
+                return _DirectEffectResult("limited")
+            if owner.key[0] != module.name:
+                reason = (
+                    "decorator registration mutates an imported route object"
+                    if is_decorator
+                    else (
+                        "imperative registration mutates an imported route object"
+                        if operation in imperative_operations
+                        else "composition mutates an imported route object"
+                    )
+                )
+                self._record_object_limitation(
+                    module, owner, limitation_node, reason, inventory_only=True
+                )
+                return _DirectEffectResult("limited")
+
+            call_shape = (
+                _decorator_call_shape(operation, owner, call.func.value)
+                if is_decorator
+                else _registration_call_shape(operation, owner, call.func.value)
+            )
+            arguments = _validated_call_arguments(call, *call_shape)
+            if arguments is None:
+                reason = (
+                    "decorated route arguments are ambiguous"
+                    if is_decorator
+                    else (
+                        "imperative registration arguments are ambiguous"
+                        if operation in imperative_operations
+                        else "composition registration arguments are ambiguous"
+                    )
+                )
+                self._record_object_limitation(
+                    module, owner, limitation_node, reason, inventory_only=True
+                )
+                return _DirectEffectResult("limited")
+
+            if is_decorator:
+                assert handler is not None and route_order is not None
+                path = self._literal_string(arguments.get("path"), module, call.lineno)
+                if path is None:
+                    self._record_object_limitation(
+                        module,
+                        owner,
+                        call,
+                        "decorated route path or methods could not be resolved",
+                        inventory_only=True,
+                    )
+                    return _DirectEffectResult("limited")
+                methods_expr = _keyword_expr(call, "methods")
+                methods = (
+                    self._literal_methods(methods_expr, module, call.lineno)
+                    if operation == "api_route" and methods_expr is not None
+                    else (
+                        ("GET",)
+                        if operation == "api_route"
+                        else (("WEBSOCKET",) if operation == "websocket" else (operation.upper(),))
+                    )
+                )
+                if not methods:
+                    self._record_object_limitation(
+                        module,
+                        owner,
+                        call,
+                        "decorated route methods could not be resolved",
+                        inventory_only=True,
+                    )
+                    return _DirectEffectResult("limited")
+                routes.append(_Route(owner.key, path, methods, handler, route_order))
+                return _DirectEffectResult("modeled")
+
+            assert effect_node is not None
+            effect_order = _node_order(effect_node)
+            if operation in imperative_operations:
+                path = self._literal_string(arguments.get("path"), module, call.lineno)
+                imperative_handler = self._resolve_handler(
+                    arguments.get("endpoint"), module, aliases, modules, call.lineno
+                )
+                if path is None or imperative_handler is None:
+                    self._record_object_limitation(
+                        module,
+                        owner,
+                        limitation_node,
+                        "imperative route path or handler could not be resolved",
+                        inventory_only=True,
+                    )
+                    return _DirectEffectResult("limited")
+                methods_expr = _keyword_expr(call, "methods")
+                methods = (
+                    self._literal_methods(methods_expr, module, call.lineno)
+                    if operation == "add_api_route" and methods_expr is not None
+                    else (("GET",) if operation == "add_api_route" else ("WEBSOCKET",))
+                )
+                if not methods:
+                    self._record_object_limitation(
+                        module,
+                        owner,
+                        limitation_node,
+                        "imperative route methods could not be resolved",
+                        inventory_only=True,
+                    )
+                    return _DirectEffectResult("limited")
+                routes.append(_Route(owner.key, path, methods, imperative_handler, effect_order))
+                return _DirectEffectResult("modeled")
+
+            if operation == "include_router":
+                child = self._resolve_object(
+                    arguments.get("router"), module, aliases, modules, call.lineno
+                )
+                if child is None or child.kind != "router":
+                    self._record_object_limitation(
+                        module,
+                        owner,
+                        limitation_node,
+                        "included router could not be resolved",
+                        inventory_only=True,
+                    )
+                    return _DirectEffectResult("limited")
+                prefix_expression = _keyword_expr(call, "prefix")
+                prefix = (
+                    ""
+                    if prefix_expression is None
+                    else self._literal_string(prefix_expression, module, call.lineno)
+                )
+                if prefix is None:
+                    self._record_object_limitation(
+                        module,
+                        owner,
+                        limitation_node,
+                        "included router prefix could not be resolved",
+                        inventory_only=True,
+                    )
+                    return _DirectEffectResult("limited")
+                cutoff = effect_order if child.key[0] == module.name else None
+                edges.append(
+                    _Edge(
+                        owner.key,
+                        child.key,
+                        prefix,
+                        effect_order,
+                        cutoff,
+                        (module.name, effect_order),
+                        "copy",
+                    )
+                )
+                return _DirectEffectResult("modeled")
+
+            path = self._literal_string(arguments.get("path"), module, call.lineno)
+            child = self._resolve_object(
+                arguments.get("app"), module, aliases, modules, call.lineno
+            )
+            if path is None or child is None or child.kind != "app":
+                self._record_object_limitation(
+                    module,
+                    owner,
+                    limitation_node,
+                    "mounted path or application could not be resolved",
+                    inventory_only=True,
+                )
+                return _DirectEffectResult("limited")
+            edges.append(_Edge(owner.key, child.key, path, effect_order, None, None, "live"))
+            return _DirectEffectResult("modeled")
+
         def visit(  # noqa: PLR0912, PLR0915 - explicit executed-effect taxonomy
-            node: ast.AST, *, conditional: bool
+            node: ast.AST,
+            *,
+            conditional: bool,
+            direct_effect_node: ast.AST | None = None,
+            decorator_handler: HandlerInfo | None = None,
+            decorator_route_order: int | None = None,
+            discarded_decorator_factory: bool = False,
         ) -> None:
             if isinstance(node, ast.BinOp):
                 pending: list[ast.expr] = [node]
@@ -2716,8 +3280,16 @@ class SecureASTExtractor:
                         "module-level loop aliases a route object conditionally",
                     )
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                direct_handler = self._handler(module, node) if direct_effect_node is node else None
                 for decorator in node.decorator_list:
-                    visit(decorator, conditional=conditional)
+                    visit(
+                        decorator,
+                        conditional=conditional,
+                        decorator_handler=direct_handler,
+                        decorator_route_order=(
+                            _node_order(node) if direct_handler is not None else None
+                        ),
+                    )
                 for default in [*node.args.defaults, *node.args.kw_defaults]:
                     if default is not None:
                         visit(default, conditional=conditional)
@@ -2760,8 +3332,14 @@ class SecureASTExtractor:
                 receiver = object_root(receiver_expression, node.lineno)
                 operation = node.func.attr if isinstance(node.func, ast.Attribute) else ""
                 receiver_attributes = attribute_names(receiver_expression)
-                modeled = _node_order(node) in module.modeled_route_effects
-                discarded_decorator_factory = _node_order(node) in discarded_decorator_factories
+                direct_result = classify_direct_call(
+                    node,
+                    effect_node=direct_effect_node,
+                    handler=decorator_handler,
+                    route_order=decorator_route_order,
+                )
+                modeled = direct_result.status == "modeled"
+                acknowledged = direct_result.status != "unrecognized"
                 inventory_neutral_method = (
                     operation
                     in {
@@ -2806,7 +3384,7 @@ class SecureASTExtractor:
                         ),
                     )
                 elif not conditional and receiver is not None and operation in registration_methods:
-                    if not modeled:
+                    if not acknowledged:
                         record(
                             receiver,
                             node,
@@ -2908,7 +3486,24 @@ class SecureASTExtractor:
                         visit(node.annotation, conditional=conditional)
                     return
             for child in ast.iter_child_nodes(node):
-                visit(child, conditional=conditional)
+                visit(
+                    child,
+                    conditional=conditional,
+                    direct_effect_node=(
+                        node
+                        if direct_effect_node is node
+                        and isinstance(node, ast.Expr)
+                        and child is node.value
+                        else None
+                    ),
+                    discarded_decorator_factory=(
+                        isinstance(node, ast.Expr)
+                        and child is node.value
+                        and isinstance(child, ast.Call)
+                        and isinstance(child.func, ast.Attribute)
+                        and child.func.attr in {*self.HTTP_METHODS, "api_route"}
+                    ),
+                )
 
         control_flow_types = (
             ast.If,
@@ -2931,8 +3526,9 @@ class SecureASTExtractor:
                     )
                 )
             )
-            visit(statement, conditional=conditional)
+            visit(statement, conditional=conditional, direct_effect_node=statement)
             update_aliases(statement, conditionally_executed=conditional)
+        return _NativeEffects(tuple(routes), tuple(edges))
 
     def _route_registration_owner(
         self,
@@ -2946,256 +3542,9 @@ class SecureASTExtractor:
         if owner is not None:
             return owner
         if isinstance(expression, ast.Attribute) and expression.attr == "router":
-            return self._resolve_object(expression.value, module, aliases, modules, line)
+            underlying = self._resolve_object(expression.value, module, aliases, modules, line)
+            return underlying if underlying is not None and underlying.kind == "app" else None
         return None
-
-    def _collect_routes(  # noqa: PLR0912 - registration forms stay explicit
-        self,
-        module: _Module,
-        aliases: dict[str, str],
-        modules: dict[str, _Module],
-    ) -> list[_Route]:
-        routes: list[_Route] = []
-        for node in module.tree.body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                handler = self._handler(module, node)
-                for decorator in node.decorator_list:
-                    parsed = self._decorator_route(decorator, module, node.lineno)
-                    if parsed is not None:
-                        decorated_owner, decorated_path, methods = parsed
-                        if not methods:
-                            self._record_object_limitation(
-                                module,
-                                decorated_owner,
-                                decorator,
-                                "decorated route methods could not be resolved",
-                                inventory_only=True,
-                            )
-                            continue
-                        module.modeled_route_effects.add(_node_order(decorator))
-                        routes.append(
-                            _Route(
-                                decorated_owner.key,
-                                decorated_path,
-                                methods,
-                                handler,
-                                _node_order(node),
-                            )
-                        )
-                    elif (
-                        isinstance(decorator, ast.Call)
-                        and isinstance(decorator.func, ast.Attribute)
-                        and decorator.func.attr in {*self.HTTP_METHODS, "api_route"}
-                    ):
-                        owner = self._route_registration_owner(
-                            decorator.func.value,
-                            module,
-                            aliases,
-                            modules,
-                            node.lineno,
-                        )
-                        if owner is not None:
-                            self._record_object_limitation(
-                                module,
-                                owner,
-                                decorator,
-                                "decorated route path or methods could not be resolved",
-                                inventory_only=True,
-                            )
-            elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
-                call = node.value
-                if not isinstance(call.func, ast.Attribute) or call.func.attr not in {
-                    "add_api_route",
-                    "add_api_websocket_route",
-                    "add_websocket_route",
-                }:
-                    continue
-                imperative_owner = self._route_registration_owner(
-                    call.func.value,
-                    module,
-                    aliases,
-                    modules,
-                    node.lineno,
-                )
-                if imperative_owner is None:
-                    continue
-                if imperative_owner.key[0] != module.name:
-                    self._record_object_limitation(
-                        module,
-                        imperative_owner,
-                        node,
-                        "imperative registration mutates an imported route object",
-                        inventory_only=True,
-                    )
-                    continue
-                path_expr = call.args[0] if call.args else _keyword_expr(call, "path")
-                handler_expr = (
-                    call.args[1] if len(call.args) > 1 else _keyword_expr(call, "endpoint")
-                )
-                imperative_path = self._literal_string(path_expr, module, node.lineno)
-                imperative_handler = self._resolve_handler(
-                    handler_expr, module, aliases, modules, node.lineno
-                )
-                if imperative_path is None or imperative_handler is None:
-                    self._record_object_limitation(
-                        module,
-                        imperative_owner,
-                        node,
-                        "imperative route path or handler could not be resolved",
-                        inventory_only=True,
-                    )
-                    continue
-                if call.func.attr == "add_api_route":
-                    methods_expr = _keyword_expr(call, "methods")
-                    methods = (
-                        self._literal_methods(methods_expr, module, node.lineno)
-                        if methods_expr is not None
-                        else ("GET",)
-                    )
-                else:
-                    methods = ("WEBSOCKET",)
-                if not methods:
-                    self._record_object_limitation(
-                        module,
-                        imperative_owner,
-                        node,
-                        "imperative route methods could not be resolved",
-                        inventory_only=True,
-                    )
-                    continue
-                if methods:
-                    module.modeled_route_effects.add(_node_order(call))
-                    routes.append(
-                        _Route(
-                            imperative_owner.key,
-                            imperative_path,
-                            methods,
-                            imperative_handler,
-                            _node_order(node),
-                        )
-                    )
-        return routes
-
-    def _decorator_route(
-        self, decorator: ast.expr, module: _Module, line: int
-    ) -> tuple[_Object, str, tuple[str, ...]] | None:
-        if not isinstance(decorator, ast.Call) or not isinstance(decorator.func, ast.Attribute):
-            return None
-        if not isinstance(decorator.func.value, ast.Name):
-            return None
-        owner = self._object_at(module, decorator.func.value.id, line)
-        if owner is None:
-            return None
-        method = decorator.func.attr
-        if method not in self.HTTP_METHODS and method != "api_route":
-            return None
-        path_expr = decorator.args[0] if decorator.args else _keyword_expr(decorator, "path")
-        path = self._literal_string(path_expr, module, line)
-        if path is None:
-            return None
-        if method == "api_route":
-            methods_expr = _keyword_expr(decorator, "methods")
-            methods = (
-                self._literal_methods(methods_expr, module, line)
-                if methods_expr is not None
-                else ("GET",)
-            )
-        else:
-            methods = ("WEBSOCKET",) if method == "websocket" else (method.upper(),)
-        return owner, path, methods
-
-    def _collect_edges(
-        self,
-        module: _Module,
-        aliases: dict[str, str],
-        modules: dict[str, _Module],
-    ) -> list[_Edge]:
-        edges: list[_Edge] = []
-        for node in module.tree.body:
-            if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
-                continue
-            call = node.value
-            if not isinstance(call.func, ast.Attribute):
-                continue
-            parent = self._resolve_object(call.func.value, module, aliases, modules, node.lineno)
-            if parent is None:
-                continue
-            if parent.key[0] != module.name:
-                self._record_object_limitation(
-                    module,
-                    parent,
-                    node,
-                    "composition mutates an imported route object",
-                    inventory_only=True,
-                )
-                continue
-            if call.func.attr == "include_router":
-                child_expr = call.args[0] if call.args else _keyword_expr(call, "router")
-                child = self._resolve_object(child_expr, module, aliases, modules, node.lineno)
-                if child is None or child.kind != "router":
-                    self._record_object_limitation(
-                        module,
-                        parent,
-                        node,
-                        "included router could not be resolved",
-                        inventory_only=True,
-                    )
-                    continue
-                prefix_expression = _keyword_expr(call, "prefix")
-                prefix = (
-                    ""
-                    if prefix_expression is None
-                    else self._literal_string(prefix_expression, module, node.lineno)
-                )
-                if prefix is None:
-                    self._record_object_limitation(
-                        module,
-                        parent,
-                        node,
-                        "included router prefix could not be resolved",
-                        inventory_only=True,
-                    )
-                    continue
-                cutoff = _node_order(node) if child.key[0] == module.name else None
-                module.modeled_route_effects.add(_node_order(call))
-                edges.append(
-                    _Edge(
-                        parent.key,
-                        child.key,
-                        prefix,
-                        _node_order(node),
-                        cutoff,
-                        (module.name, _node_order(node)),
-                        "copy",
-                    )
-                )
-            elif call.func.attr == "mount":
-                path_expr = call.args[0] if call.args else _keyword_expr(call, "path")
-                child_expr = call.args[1] if len(call.args) > 1 else _keyword_expr(call, "app")
-                path = self._literal_string(path_expr, module, node.lineno)
-                child = self._resolve_object(child_expr, module, aliases, modules, node.lineno)
-                if path is None or child is None or child.kind != "app":
-                    self._record_object_limitation(
-                        module,
-                        parent,
-                        node,
-                        "mounted path or application could not be resolved",
-                        inventory_only=True,
-                    )
-                    continue
-                module.modeled_route_effects.add(_node_order(call))
-                edges.append(
-                    _Edge(
-                        parent.key,
-                        child.key,
-                        path,
-                        _node_order(node),
-                        None,
-                        None,
-                        "live",
-                    )
-                )
-        return edges
 
     def _resolve_object(
         self,
@@ -4020,6 +4369,32 @@ def _assignment_name(node: ast.Assign | ast.AnnAssign) -> str | None:
 
 def _keyword_expr(call: ast.Call, name: str) -> ast.expr | None:
     return next((keyword.value for keyword in call.keywords if keyword.arg == name), None)
+
+
+def _validated_call_arguments(
+    call: ast.Call,
+    positional_names: tuple[str, ...],
+    allowed_keywords: frozenset[str],
+) -> dict[str, ast.expr] | None:
+    """Bind one supported static call shape without accepting unknown keywords."""
+    if (
+        len(call.args) > len(positional_names)
+        or any(isinstance(argument, ast.Starred) for argument in call.args)
+        or any(keyword.arg is None for keyword in call.keywords)
+    ):
+        return None
+    keyword_names = [keyword.arg for keyword in call.keywords]
+    if (
+        len(keyword_names) != len(set(keyword_names))
+        or any(name not in allowed_keywords for name in keyword_names)
+        or any(name in keyword_names for name in positional_names[: len(call.args)])
+    ):
+        return None
+    bound = dict(zip(positional_names, call.args, strict=False))
+    bound.update(
+        {keyword.arg: keyword.value for keyword in call.keywords if keyword.arg is not None}
+    )
+    return bound
 
 
 def _join_paths(prefix: str, path: str) -> str | None:  # noqa: PLR0911

@@ -2919,7 +2919,7 @@ app = FastAPI()
 async def first(websocket): pass
 async def second(websocket): pass
 app.add_api_websocket_route('/api', first)
-app.add_websocket_route(path='/plain', endpoint=second)
+app.router.add_websocket_route(path='/plain', endpoint=second)
 """
         )
         factory_app = tmp_path / "factory_app.py"
@@ -2930,7 +2930,7 @@ def create_app():
     async def first(websocket): pass
     async def second(websocket): pass
     app.add_api_websocket_route('/api', first)
-    app.add_websocket_route(path='/plain', endpoint=second)
+    app.router.add_websocket_route(path='/plain', endpoint=second)
     return app
 app = create_app()
 """
@@ -2955,7 +2955,7 @@ app = FastAPI()
 def known(): return None
 async def handler(websocket): pass
 app.add_api_websocket_route(dynamic_path, handler)
-app.add_websocket_route('/missing', unknown_handler)
+app.router.add_websocket_route('/missing', unknown_handler)
 """
         )
         module_inventory = SecureASTExtractor(module_app).extract_inventory()
@@ -2974,7 +2974,7 @@ def create_app():
     app = FastAPI()
     async def handler(websocket): pass
     app.add_api_websocket_route(dynamic_path, handler)
-    app.add_websocket_route('/missing', unknown_handler)
+    app.router.add_websocket_route('/missing', unknown_handler)
     return app
 """
         )
@@ -3490,6 +3490,890 @@ def test_parser_accepted_deep_native_decorator_expression_fails_closed(
     assert inventory.endpoints == []
     assert inventory.status == InventoryStatus.CONDITIONAL
     assert inventory.limitations
+
+
+@pytest.mark.parametrize(
+    "context",
+    ["module", "implicit-factory", "explicit-factory", "bootstrap"],
+)
+@pytest.mark.parametrize("operation", ["decorator", "route", "include", "mount"])
+@pytest.mark.parametrize("malformation", ["conflict", "excess", "star", "kwargs"])
+def test_malformed_native_registration_call_shapes_fail_closed(
+    tmp_path: Path,
+    context: str,
+    operation: str,
+    malformation: str,
+) -> None:
+    registrations = {
+        "decorator": {
+            "conflict": "@app.get('/bad', path='/other')\ndef bad(): pass",
+            "excess": "@app.get('/bad', 'extra')\ndef bad(): pass",
+            "star": "@app.get(*('/bad',))\ndef bad(): pass",
+            "kwargs": "@app.get(**{'path': '/bad'})\ndef bad(): pass",
+        },
+        "route": {
+            "conflict": "app.add_api_route('/bad', bad, path='/other')",
+            "excess": "app.add_api_route('/bad', bad, 'extra')",
+            "star": "app.add_api_route(*('/bad', bad))",
+            "kwargs": "app.add_api_route(**{'path': '/bad', 'endpoint': bad})",
+        },
+        "include": {
+            "conflict": "app.include_router(router, router=router)",
+            "excess": "app.include_router(router, router)",
+            "star": "app.include_router(*(router,))",
+            "kwargs": "app.include_router(**{'router': router})",
+        },
+        "mount": {
+            "conflict": "app.mount('/bad', child, path='/other')",
+            "excess": "app.mount('/bad', child, 'name', 'extra')",
+            "star": "app.mount(*('/bad', child))",
+            "kwargs": "app.mount(**{'path': '/bad', 'app': child})",
+        },
+    }
+    registration = registrations[operation][malformation]
+    common = (
+        "from fastapi import APIRouter, FastAPI\n"
+        "router = APIRouter()\n"
+        "child = FastAPI()\n"
+        "def bad(): pass\n"
+        "def safe(): pass\n"
+    )
+    kwargs: dict[str, str] = {}
+    if context == "module":
+        source = (
+            common
+            + "app = FastAPI()\n"
+            + registration
+            + "\n@app.get('/safe')\ndef safe_route(): pass\n"
+        )
+    elif context in {"implicit-factory", "explicit-factory"}:
+        indented = registration.replace("\n", "\n    ")
+        source = (
+            common
+            + "def create():\n"
+            + "    app = FastAPI()\n"
+            + f"    {indented}\n"
+            + "    @app.get('/safe')\n"
+            + "    def safe_route(): pass\n"
+            + "    return app\n"
+            + "app = create()\n"
+        )
+        if context == "explicit-factory":
+            kwargs["app_entry"] = "main:create"
+    else:
+        if operation == "decorator":
+            source = (
+                common
+                + "app = FastAPI()\n"
+                + registration
+                + "\n"
+                + "def run():\n"
+                + "    app.add_api_route('/safe', safe)\n"
+            )
+        else:
+            source = (
+                common
+                + "app = FastAPI()\n"
+                + "def run():\n"
+                + f"    {registration}\n"
+                + "    app.add_api_route('/safe', safe)\n"
+            )
+        kwargs["bootstrap_entry"] = "main:run"
+    (tmp_path / "main.py").write_text(source, encoding="utf-8")
+
+    inventory = SecureASTExtractor(tmp_path, **kwargs).extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /safe"]
+    assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.ESTABLISHED
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert len(inventory.limitations) == 1
+    assert "could not be modeled" not in inventory.limitations[0].reason
+
+
+@pytest.mark.parametrize("context", ["module", "implicit-factory", "explicit-factory"])
+def test_app_router_decorator_parity(context: str, tmp_path: Path) -> None:
+    body = (
+        "@app.router.get('/http')\n"
+        "def http(): pass\n"
+        "@app.router.api_route('/api', methods=['POST'])\n"
+        "def api(): pass\n"
+        "@app.router.websocket('/socket')\n"
+        "async def socket(websocket): pass\n"
+    )
+    kwargs: dict[str, str] = {}
+    if context == "module":
+        source = "from fastapi import FastAPI\napp = FastAPI()\n" + body
+    else:
+        source = (
+            "from fastapi import FastAPI\n"
+            "def create():\n"
+            "    app = FastAPI()\n"
+            + "".join(f"    {line}\n" for line in body.splitlines())
+            + "    return app\n"
+            + "app = create()\n"
+        )
+        if context == "explicit-factory":
+            kwargs["app_entry"] = "main:create"
+    (tmp_path / "main.py").write_text(source, encoding="utf-8")
+
+    inventory = SecureASTExtractor(tmp_path, **kwargs).extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == [
+        "GET /http",
+        "POST /api",
+        "WEBSOCKET /socket",
+    ]
+    assert inventory.status == InventoryStatus.ESTABLISHED
+
+
+@pytest.mark.parametrize("context", ["module", "implicit-factory", "explicit-factory"])
+def test_valid_native_decorator_shapes_and_metadata(context: str, tmp_path: Path) -> None:
+    registrations = (
+        "@app.websocket('/socket', 'socket-name', dependencies=[])\n"
+        "async def socket(websocket): pass\n"
+        "@app.router.websocket('/router-socket', 'router-name', dependencies=[])\n"
+        "async def router_socket(websocket): pass\n"
+        "@app.get('/safe', summary='Safe', tags=['metadata'])\n"
+        "def safe(): pass\n"
+    )
+    kwargs: dict[str, str] = {}
+    if context == "module":
+        source = "from fastapi import FastAPI\napp = FastAPI()\n" + registrations
+    else:
+        source = (
+            "from fastapi import FastAPI\n"
+            "def create():\n"
+            "    app = FastAPI()\n"
+            + "".join(f"    {line}\n" for line in registrations.splitlines())
+            + "    return app\n"
+            + "app = create()\n"
+        )
+        if context == "explicit-factory":
+            kwargs["app_entry"] = "main:create"
+    (tmp_path / "main.py").write_text(source, encoding="utf-8")
+
+    inventory = SecureASTExtractor(tmp_path, **kwargs).extract_inventory()
+
+    assert {endpoint.identifier for endpoint in inventory.endpoints} == {
+        "WEBSOCKET /socket",
+        "WEBSOCKET /router-socket",
+        "GET /safe",
+    }
+    assert inventory.status == InventoryStatus.ESTABLISHED
+
+
+@pytest.mark.parametrize(
+    "context",
+    ["module", "implicit-factory", "explicit-factory", "bootstrap"],
+)
+def test_valid_native_registration_surfaces_and_metadata(context: str, tmp_path: Path) -> None:
+    setup = (
+        "app = FastAPI()\n"
+        "router = APIRouter()\n"
+        "child = FastAPI()\n"
+        "def http(): pass\n"
+        "async def api_socket(websocket): pass\n"
+        "async def router_socket(websocket): pass\n"
+        "async def app_router_socket(websocket): pass\n"
+        "def child_route(): pass\n"
+    )
+    registrations = (
+        "app.router.add_api_route('/http', http, summary='HTTP metadata')\n"
+        "app.add_api_websocket_route('/api-socket', api_socket, 'api-name', dependencies=[])\n"
+        "router.add_websocket_route('/router-socket', router_socket, 'router-name')\n"
+        "app.router.add_websocket_route("
+        "'/app-router-socket', app_router_socket, 'app-router-name')\n"
+        "app.include_router(router, tags=['included'])\n"
+        "child.add_api_route('/child', child_route, summary='Child metadata')\n"
+        "app.mount('/mounted', child, 'child-name')\n"
+    )
+    kwargs: dict[str, str] = {}
+    if context == "module":
+        source = "from fastapi import APIRouter, FastAPI\n" + setup + registrations
+    elif context in {"implicit-factory", "explicit-factory"}:
+        body = setup + registrations + "return app\n"
+        source = (
+            "from fastapi import APIRouter, FastAPI\n"
+            "def create():\n"
+            + "".join(f"    {line}\n" for line in body.splitlines())
+            + "app = create()\n"
+        )
+        if context == "explicit-factory":
+            kwargs["app_entry"] = "main:create"
+    else:
+        bootstrap_registrations = registrations.replace(
+            "app.include_router", "app.router.include_router"
+        ).replace("app.mount", "app.router.mount")
+        source = (
+            "from fastapi import APIRouter, FastAPI\n"
+            + setup
+            + "def run():\n"
+            + "".join(f"    {line}\n" for line in bootstrap_registrations.splitlines())
+        )
+        kwargs["bootstrap_entry"] = "main:run"
+    (tmp_path / "main.py").write_text(source, encoding="utf-8")
+
+    inventory = SecureASTExtractor(tmp_path, **kwargs).extract_inventory()
+
+    assert {endpoint.identifier for endpoint in inventory.endpoints} == {
+        "GET /http",
+        "WEBSOCKET /api-socket",
+        "WEBSOCKET /router-socket",
+        "WEBSOCKET /app-router-socket",
+        "GET /mounted/child",
+    }
+    assert inventory.status == InventoryStatus.ESTABLISHED
+
+
+@pytest.mark.parametrize("context", ["implicit-factory", "explicit-factory"])
+@pytest.mark.parametrize(
+    "registration",
+    [
+        "router.router.add_api_route('/bad', bad)",
+        "router.router.add_api_websocket_route('/bad', bad)",
+        "router.router.add_websocket_route('/bad', bad)",
+        "router.router.include_router(child_router)",
+        "router.router.mount('/bad', child_app)",
+    ],
+)
+def test_factory_router_router_registration_receiver_is_an_inventory_only_limitation(
+    tmp_path: Path, context: str, registration: str
+) -> None:
+    source = (
+        "from fastapi import APIRouter, FastAPI\n"
+        "router = APIRouter()\n"
+        "child_router = APIRouter()\n"
+        "child_app = FastAPI()\n"
+        "def bad(): pass\n"
+        "def create():\n"
+        "    app = FastAPI()\n"
+        f"    {registration}\n"
+        "    app.include_router(router)\n"
+        "    @app.get('/safe')\n"
+        "    def safe(): pass\n"
+        "    return app\n"
+        "app = create()\n"
+    )
+    (tmp_path / "main.py").write_text(source, encoding="utf-8")
+    kwargs = {"app_entry": "main:create"} if context == "explicit-factory" else {}
+
+    inventory = SecureASTExtractor(tmp_path, **kwargs).extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /safe"]
+    assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.ESTABLISHED
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert [limitation.reason for limitation in inventory.limitations] == [
+        "factory registration receiver is unsupported"
+    ]
+
+
+@pytest.mark.parametrize("context", ["implicit-factory", "explicit-factory"])
+@pytest.mark.parametrize(
+    "invalid_registration",
+    [
+        "app.router.router.add_api_route('/bad', bad)",
+        "@app.router.router.get('/bad')\n    def decorated_bad(): pass",
+        "view = app.router\n    view.router.add_api_route('/bad', bad)",
+        "view = app.router\n    @view.router.get('/bad')\n    def decorated_bad(): pass",
+        "view = app.router\n    other = view\n    other.router.add_api_route('/bad', bad)",
+        "view = app\n    view = app.router\n    view.router.add_api_route('/bad', bad)",
+    ],
+)
+def test_factory_app_router_view_repeated_router_fails_closed(
+    tmp_path: Path, context: str, invalid_registration: str
+) -> None:
+    source = (
+        "from fastapi import FastAPI\n"
+        "def bad(): pass\n"
+        "def positive(): pass\n"
+        "def create():\n"
+        "    app = FastAPI()\n"
+        "    alias = app\n"
+        "    alias.router.add_api_route('/positive', positive)\n"
+        f"    {invalid_registration}\n"
+        "    return app\n"
+        "app = create()\n"
+    )
+    (tmp_path / "main.py").write_text(source, encoding="utf-8")
+    kwargs = {"app_entry": "main:create"} if context == "explicit-factory" else {}
+
+    inventory = SecureASTExtractor(tmp_path, **kwargs).extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /positive"]
+    assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.ESTABLISHED
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert len(inventory.limitations) == 1
+
+
+@pytest.mark.parametrize("context", ["implicit-factory", "explicit-factory"])
+def test_factory_router_view_rebinding_back_to_app_restores_exact_router_surface(
+    tmp_path: Path, context: str
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "def positive(): pass\n"
+        "def create():\n"
+        "    app = FastAPI()\n"
+        "    view = app.router\n"
+        "    view = app\n"
+        "    view.router.add_api_route('/positive', positive)\n"
+        "    return app\n"
+        "app = create()\n",
+        encoding="utf-8",
+    )
+    kwargs = {"app_entry": "main:create"} if context == "explicit-factory" else {}
+
+    inventory = SecureASTExtractor(tmp_path, **kwargs).extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /positive"]
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert inventory.limitations == ()
+
+
+@pytest.mark.parametrize(
+    "invalid_registration",
+    [
+        "app.router.router.add_api_route('/bad', bad)",
+        "@app.router.router.get('/bad')\n    def decorated_bad(): pass",
+        "view = app.router\n    view.router.add_api_route('/bad', bad)",
+        "view = app.router\n    @view.router.get('/bad')\n    def decorated_bad(): pass",
+        "view = app.router\n    other = view\n    other.router.add_api_route('/bad', bad)",
+        "view = app\n    view = app.router\n    view.router.add_api_route('/bad', bad)",
+    ],
+)
+def test_bootstrap_app_router_view_repeated_router_fails_closed(
+    tmp_path: Path, invalid_registration: str
+) -> None:
+    source = (
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "def bad(): pass\n"
+        "def positive(): pass\n"
+        "def run():\n"
+        "    alias = app\n"
+        "    alias.router.add_api_route('/positive', positive)\n"
+        f"    {invalid_registration}\n"
+    )
+    (tmp_path / "main.py").write_text(source, encoding="utf-8")
+
+    inventory = SecureASTExtractor(tmp_path, bootstrap_entry="main:run").extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /positive"]
+    assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.ESTABLISHED
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert len(inventory.limitations) == 1
+
+
+@pytest.mark.parametrize("registration", ["imperative", "decorator"])
+def test_bootstrap_router_view_rebinding_back_to_app_restores_exact_router_surface(
+    tmp_path: Path, registration: str
+) -> None:
+    route = {
+        "imperative": "view.router.add_api_route('/positive', positive)",
+        "decorator": "@view.router.get('/positive')\n    def positive_route(): pass",
+    }[registration]
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "def positive(): pass\n"
+        "def run():\n"
+        "    view = app.router\n"
+        "    view = app\n"
+        f"    {route}\n",
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(tmp_path, bootstrap_entry="main:run").extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /positive"]
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert inventory.limitations == ()
+
+
+@pytest.mark.parametrize("context", ["module", "bootstrap"])
+def test_nonfactory_router_router_registration_receiver_remains_fail_closed(
+    tmp_path: Path, context: str
+) -> None:
+    common = (
+        "from fastapi import APIRouter, FastAPI\n"
+        "app = FastAPI()\n"
+        "router = APIRouter()\n"
+        "def bad(): pass\n"
+        "@app.get('/safe')\n"
+        "def safe(): pass\n"
+    )
+    kwargs: dict[str, str] = {}
+    if context == "module":
+        source = (
+            common + "router.router.add_api_route('/bad', bad)\n" + "app.include_router(router)\n"
+        )
+    else:
+        source = common + "def run():\n    router.router.add_api_route('/bad', bad)\n"
+        kwargs["bootstrap_entry"] = "main:run"
+    (tmp_path / "main.py").write_text(source, encoding="utf-8")
+
+    inventory = SecureASTExtractor(tmp_path, **kwargs).extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /safe"]
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert len(inventory.limitations) == 1
+
+
+_NEGATIVE_REGISTRATION_CONTEXTS = [
+    (context, case)
+    for context in ["module", "implicit-factory", "explicit-factory", "bootstrap"]
+    for case in ["fourth", "middleware", "direct-app", "unknown-keyword"]
+] + [
+    (context, case)
+    for context in ["module", "implicit-factory", "explicit-factory"]
+    for case in ["unknown-decorator-keyword", "router-router-decorator"]
+]
+
+
+@pytest.mark.parametrize(("context", "case"), _NEGATIVE_REGISTRATION_CONTEXTS)
+def test_invalid_native_registration_surfaces_are_additive(
+    context: str, case: str, tmp_path: Path
+) -> None:
+    bad_registration = {
+        "fourth": "app.router.add_websocket_route('/bad', bad, 'name', [])",
+        "middleware": "app.router.add_websocket_route('/bad', bad, middleware=[])",
+        "direct-app": "app.add_websocket_route('/bad', bad)",
+        "unknown-keyword": "app.add_api_route('/bad', bad, impossible_keyword=True)",
+        "unknown-decorator-keyword": (
+            "@app.get('/bad', impossible_keyword=True)\ndef decorated_bad(): pass"
+        ),
+        "router-router-decorator": ("@router.router.get('/bad')\ndef decorated_bad(): pass"),
+    }[case]
+    common = (
+        "from fastapi import APIRouter, FastAPI\n"
+        "router = APIRouter()\n"
+        "async def bad(websocket): pass\n"
+    )
+    kwargs: dict[str, str] = {}
+    if context == "module":
+        source = (
+            common
+            + "app = FastAPI()\n"
+            + bad_registration
+            + "\napp.include_router(router)\n"
+            + "@app.get('/safe')\ndef safe(): pass\n"
+        )
+    elif context in {"implicit-factory", "explicit-factory"}:
+        indented = bad_registration.replace("\n", "\n    ")
+        source = (
+            common
+            + "def create():\n"
+            + "    app = FastAPI()\n"
+            + f"    {indented}\n"
+            + "    app.include_router(router)\n"
+            + "    @app.get('/safe')\n"
+            + "    def safe(): pass\n"
+            + "    return app\n"
+            + "app = create()\n"
+        )
+        if context == "explicit-factory":
+            kwargs["app_entry"] = "main:create"
+    else:
+        source = (
+            common
+            + "app = FastAPI()\n"
+            + "@app.get('/safe')\ndef safe(): pass\n"
+            + "def run():\n"
+            + f"    {bad_registration}\n"
+        )
+        kwargs["bootstrap_entry"] = "main:run"
+    (tmp_path / "main.py").write_text(source, encoding="utf-8")
+
+    inventory = SecureASTExtractor(tmp_path, **kwargs).extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /safe"]
+    assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.ESTABLISHED
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert len(inventory.limitations) == 1
+
+
+@pytest.mark.parametrize(
+    "context",
+    ["module", "implicit-factory", "explicit-factory", "bootstrap"],
+)
+@pytest.mark.parametrize(
+    "invalid_keyword", ["callbacks", "route_class_override", "strict_content_type"]
+)
+def test_fastapi_add_api_route_surface_keywords_are_additive_limitations(
+    tmp_path: Path, context: str, invalid_keyword: str
+) -> None:
+    value = "[]" if invalid_keyword == "callbacks" else "True"
+    registration = f"app.add_api_route('/bad', bad, {invalid_keyword}={value})"
+    kwargs: dict[str, str] = {}
+    if context == "module":
+        source = (
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "def bad(): pass\n"
+            "def safe(): pass\n"
+            f"{registration}\n"
+            "app.add_api_route('/safe', safe)\n"
+        )
+    elif context in {"implicit-factory", "explicit-factory"}:
+        source = (
+            "from fastapi import FastAPI\n"
+            "def create():\n"
+            "    app = FastAPI()\n"
+            "    def bad(): pass\n"
+            "    def safe(): pass\n"
+            f"    {registration}\n"
+            "    app.add_api_route('/safe', safe)\n"
+            "    return app\n"
+            "app = create()\n"
+        )
+        if context == "explicit-factory":
+            kwargs["app_entry"] = "main:create"
+    else:
+        source = (
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "def bad(): pass\n"
+            "def safe(): pass\n"
+            "def run():\n"
+            f"    {registration}\n"
+            "    app.add_api_route('/safe', safe)\n"
+        )
+        kwargs["bootstrap_entry"] = "main:run"
+    (tmp_path / "main.py").write_text(source, encoding="utf-8")
+
+    inventory = SecureASTExtractor(tmp_path, **kwargs).extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /safe"]
+    assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.ESTABLISHED
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert len(inventory.limitations) == 1
+
+
+@pytest.mark.parametrize("context", ["module", "implicit-factory", "explicit-factory"])
+def test_fastapi_api_route_callbacks_are_an_additive_limitation(
+    tmp_path: Path, context: str
+) -> None:
+    registration = (
+        "@app.api_route('/bad', callbacks=[])\n"
+        "def bad(): pass\n"
+        "@app.get('/safe', callbacks=[])\n"
+        "def safe(): pass\n"
+    )
+    kwargs: dict[str, str] = {}
+    if context == "module":
+        source = "from fastapi import FastAPI\napp = FastAPI()\n" + registration
+    else:
+        source = (
+            "from fastapi import FastAPI\n"
+            "def create():\n"
+            "    app = FastAPI()\n"
+            + "".join(f"    {line}\n" for line in registration.splitlines())
+            + "    return app\n"
+            + "app = create()\n"
+        )
+        if context == "explicit-factory":
+            kwargs["app_entry"] = "main:create"
+    (tmp_path / "main.py").write_text(source, encoding="utf-8")
+
+    inventory = SecureASTExtractor(tmp_path, **kwargs).extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /safe"]
+    assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.ESTABLISHED
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert len(inventory.limitations) == 1
+
+
+@pytest.mark.parametrize(
+    "context",
+    ["module", "implicit-factory", "explicit-factory", "bootstrap"],
+)
+def test_router_add_api_route_surface_keywords_are_supported(tmp_path: Path, context: str) -> None:
+    setup = (
+        "app = FastAPI()\n"
+        "router = APIRouter()\n"
+        "def router_route(): pass\n"
+        "def app_router_route(): pass\n"
+    )
+    registrations = (
+        "router.add_api_route('/router', router_route, callbacks=[], "
+        "route_class_override=True, strict_content_type=True)\n"
+        "app.router.add_api_route('/app-router', app_router_route, callbacks=[], "
+        "route_class_override=True, strict_content_type=True)\n"
+        "app.router.include_router(router)\n"
+    )
+    kwargs: dict[str, str] = {}
+    if context == "module":
+        source = "from fastapi import APIRouter, FastAPI\n" + setup + registrations
+    elif context in {"implicit-factory", "explicit-factory"}:
+        source = (
+            "from fastapi import APIRouter, FastAPI\n"
+            "def create():\n"
+            + "".join(f"    {line}\n" for line in (setup + registrations).splitlines())
+            + "    return app\n"
+            + "app = create()\n"
+        )
+        if context == "explicit-factory":
+            kwargs["app_entry"] = "main:create"
+    else:
+        source = (
+            "from fastapi import APIRouter, FastAPI\n"
+            + setup
+            + "def run():\n"
+            + "".join(f"    {line}\n" for line in registrations.splitlines())
+        )
+        kwargs["bootstrap_entry"] = "main:run"
+    (tmp_path / "main.py").write_text(source, encoding="utf-8")
+
+    inventory = SecureASTExtractor(tmp_path, **kwargs).extract_inventory()
+
+    assert {endpoint.identifier for endpoint in inventory.endpoints} == {
+        "GET /router",
+        "GET /app-router",
+    }
+    assert inventory.status == InventoryStatus.ESTABLISHED
+
+
+@pytest.mark.parametrize("context", ["module", "implicit-factory", "explicit-factory"])
+def test_router_api_route_callbacks_are_supported(tmp_path: Path, context: str) -> None:
+    registrations = (
+        "@router.api_route('/router', callbacks=[])\n"
+        "def router_route(): pass\n"
+        "@router.get('/router-get', callbacks=[])\n"
+        "def router_get(): pass\n"
+        "@app.router.api_route('/app-router', callbacks=[])\n"
+        "def app_router_route(): pass\n"
+        "@app.router.get('/app-router-get', callbacks=[])\n"
+        "def app_router_get(): pass\n"
+        "app.router.include_router(router)\n"
+    )
+    kwargs: dict[str, str] = {}
+    if context == "module":
+        source = (
+            "from fastapi import APIRouter, FastAPI\n"
+            "app = FastAPI()\nrouter = APIRouter()\n" + registrations
+        )
+    else:
+        body = "app = FastAPI()\nrouter = APIRouter()\n" + registrations
+        source = (
+            "from fastapi import APIRouter, FastAPI\n"
+            "def create():\n"
+            + "".join(f"    {line}\n" for line in body.splitlines())
+            + "    return app\n"
+            + "app = create()\n"
+        )
+        if context == "explicit-factory":
+            kwargs["app_entry"] = "main:create"
+    (tmp_path / "main.py").write_text(source, encoding="utf-8")
+
+    inventory = SecureASTExtractor(tmp_path, **kwargs).extract_inventory()
+
+    assert {endpoint.identifier for endpoint in inventory.endpoints} == {
+        "GET /router",
+        "GET /router-get",
+        "GET /app-router",
+        "GET /app-router-get",
+    }
+    assert inventory.status == InventoryStatus.ESTABLISHED
+
+
+@pytest.mark.parametrize(
+    "context",
+    ["module", "implicit-factory", "explicit-factory", "bootstrap"],
+)
+def test_app_router_direct_composition_preserves_copy_and_live_semantics(
+    tmp_path: Path, context: str
+) -> None:
+    setup = (
+        "app = FastAPI()\n"
+        "router = APIRouter()\n"
+        "child = FastAPI()\n"
+        "def before(): pass\n"
+        "def after(): pass\n"
+        "def mounted(): pass\n"
+    )
+    registrations = (
+        "router.add_api_route('/before', before)\n"
+        "app.router.include_router(router, prefix='/copy')\n"
+        "router.add_api_route('/after', after)\n"
+        "app.router.mount('/live', child)\n"
+        "child.add_api_route('/mounted', mounted)\n"
+    )
+    kwargs: dict[str, str] = {}
+    if context == "module":
+        source = "from fastapi import APIRouter, FastAPI\n" + setup + registrations
+    elif context in {"implicit-factory", "explicit-factory"}:
+        source = (
+            "from fastapi import APIRouter, FastAPI\n"
+            "def create():\n"
+            + "".join(f"    {line}\n" for line in (setup + registrations).splitlines())
+            + "    return app\n"
+            + "app = create()\n"
+        )
+        if context == "explicit-factory":
+            kwargs["app_entry"] = "main:create"
+    else:
+        source = (
+            "from fastapi import APIRouter, FastAPI\n"
+            + setup
+            + "def run():\n"
+            + "".join(f"    {line}\n" for line in registrations.splitlines())
+        )
+        kwargs["bootstrap_entry"] = "main:run"
+    (tmp_path / "main.py").write_text(source, encoding="utf-8")
+
+    inventory = SecureASTExtractor(tmp_path, **kwargs).extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == [
+        "GET /copy/before",
+        "GET /live/mounted",
+    ]
+    assert inventory.status == InventoryStatus.ESTABLISHED
+
+
+@pytest.mark.parametrize("reexported", [False, True], ids=["imported", "reexported"])
+@pytest.mark.parametrize("surface", ["decorator", "imperative", "app-router"])
+def test_factory_imported_mutation_has_one_typed_limitation(
+    tmp_path: Path, reexported: bool, surface: str
+) -> None:
+    (tmp_path / "provider.py").write_text(
+        "from fastapi import FastAPI\ntarget = FastAPI()\n@target.get('/safe')\ndef safe(): pass\n",
+        encoding="utf-8",
+    )
+    import_module = "public" if reexported else "provider"
+    if reexported:
+        (tmp_path / "public.py").write_text("from provider import target\n", encoding="utf-8")
+    mutation = {
+        "decorator": "@imported.get('/bad')\n    def bad(): pass",
+        "imperative": "imported.add_api_route('/bad', bad)",
+        "app-router": "imported.router.add_websocket_route('/bad', bad, 'name')",
+    }[surface]
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        f"from {import_module} import target as imported\n"
+        "def create():\n"
+        "    app = FastAPI()\n"
+        "    def bad(): pass\n"
+        f"    {mutation}\n"
+        "    app.mount('/provider', imported)\n"
+        "    @app.get('/safe')\n"
+        "    def safe(): pass\n"
+        "    return app\n"
+        "app = create()\n",
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(tmp_path, app_entry="main:create").extract_inventory()
+
+    assert {endpoint.identifier for endpoint in inventory.endpoints} == {
+        "GET /safe",
+        "GET /provider/safe",
+    }
+    assert all(
+        endpoint.discovery_status == EndpointDiscoveryStatus.ESTABLISHED
+        for endpoint in inventory.endpoints
+    )
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    factory_limitations = [
+        limitation
+        for limitation in inventory.limitations
+        if limitation.source_path.name == "main.py"
+    ]
+    assert len(factory_limitations) == 1
+    assert "factory" in factory_limitations[0].reason
+    assert "imported route object" in factory_limitations[0].reason
+
+
+@pytest.mark.parametrize("reexported", [False, True], ids=["imported", "reexported"])
+@pytest.mark.parametrize("operation", ["decorator", "imperative", "include", "mount"])
+def test_imported_mutation_has_one_typed_limitation(
+    tmp_path: Path,
+    reexported: bool,
+    operation: str,
+) -> None:
+    (tmp_path / "provider.py").write_text(
+        "from fastapi import APIRouter, FastAPI\n"
+        "target = FastAPI()\n"
+        "router = APIRouter()\n"
+        "target.include_router(router)\n",
+        encoding="utf-8",
+    )
+    imported_name = "router" if operation in {"decorator", "imperative"} else "target"
+    import_module = "public" if reexported else "provider"
+    if reexported:
+        (tmp_path / "public.py").write_text(
+            f"from provider import {imported_name}\n", encoding="utf-8"
+        )
+    mutation = {
+        "decorator": "@imported.get('/bad')\ndef bad(): pass",
+        "imperative": "imported.add_api_route('/bad', bad)",
+        "include": "imported.include_router(local_router)",
+        "mount": "imported.mount('/bad', child)",
+    }[operation]
+    (tmp_path / "main.py").write_text(
+        "from fastapi import APIRouter, FastAPI\n"
+        + f"from {import_module} import {imported_name} as imported\n"
+        + "local_router = APIRouter()\n"
+        + "child = FastAPI()\n"
+        + "def bad(): pass\n"
+        + mutation
+        + "\n",
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(tmp_path, app_entry="provider:target").extract_inventory()
+
+    mutation_line = 6
+    mutation_limitations = [
+        limitation
+        for limitation in inventory.limitations
+        if limitation.source_path.name == "main.py" and limitation.source_line == mutation_line
+    ]
+    assert inventory.endpoints == []
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert len(mutation_limitations) == 1
+    assert "imported route object" in mutation_limitations[0].reason
+    assert "could not be modeled" not in mutation_limitations[0].reason
+
+
+def test_consolidated_native_effect_pass_acknowledges_only_current_call(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import APIRouter, FastAPI\n"
+        "app = FastAPI()\n"
+        "router = APIRouter()\n"
+        "child = FastAPI()\n"
+        "@app.get('/decorated')\n"
+        "def decorated(): pass\n"
+        "def imperative(): pass\n"
+        "def included(): pass\n"
+        "def mounted(): pass\n"
+        "app.router.add_api_route('/imperative', imperative)\n"
+        "router.add_api_route('/included', included)\n"
+        "app.include_router(router)\n"
+        "child.add_api_route('/mounted', mounted)\n"
+        "app.mount('/live', child)\n"
+        "app.add_api_route(dynamic_path, missing_handler)\n"
+        "app.routes.clear()\n",
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(tmp_path).extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == [
+        "GET /decorated",
+        "GET /imperative",
+        "GET /included",
+        "GET /live/mounted",
+    ]
+    assert all(
+        endpoint.discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+        for endpoint in inventory.endpoints
+    )
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    lines = {limitation.source_line for limitation in inventory.limitations}
+    assert {15, 16}.issubset(lines)
+    assert not lines.intersection({5, 10, 12, 14})
 
 
 def test_secure_module_parser_recursion_error_is_fail_closed(
