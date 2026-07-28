@@ -22,7 +22,10 @@ from fastapi_endpoint_detector.models.report import (
     AnalysisReport,
     ConfidenceLevel,
 )
-from fastapi_endpoint_detector.models.surface_contract import load_surface_contracts
+from fastapi_endpoint_detector.models.surface_contract import (
+    load_surface_contracts,
+    load_surface_preset,
+)
 from fastapi_endpoint_detector.output.formatters import get_formatter
 from fastapi_endpoint_detector.parser.custom_surface_extractor import (
     CustomSurfaceExtractor,
@@ -77,6 +80,25 @@ def _contracts(
         encoding="utf-8",
     )
     return path
+
+
+def _argument_inventory(
+    tmp_path: Path,
+    source: str,
+    *,
+    handler: dict[str, object] | None = None,
+) -> EndpointInventory:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "main.py").write_text(source, encoding="utf-8")
+    return CustomSurfaceExtractor(
+        tmp_path,
+        load_surface_contracts(
+            _contracts(
+                tmp_path,
+                handler=handler or {"kind": "argument", "index": 1},
+            )
+        ),
+    ).extract_inventory()
 
 
 def test_missing_root_does_not_discover_sibling_surfaces(tmp_path: Path) -> None:
@@ -281,6 +303,688 @@ def test_exact_decorator_registration_has_complete_provenance(tmp_path: Path) ->
     assert endpoint.surface.config_hash == loaded.config_hash
     assert endpoint.surface.registration_source_hash.startswith("sha256:")
     assert endpoint.surface.handler_source_hash.startswith("sha256:")
+    assert inventory.limitations == ()
+
+
+def test_nested_decorator_registration_is_eager_without_revisiting_root(
+    tmp_path: Path,
+) -> None:
+    inventory = _argument_inventory(
+        tmp_path,
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def process(): pass\n"
+        "def identity(value): return value\n"
+        "@identity(reactor.listen('nested', process))\n"
+        "def wrapper(): pass\n",
+    )
+
+    assert [item.path for item in inventory.endpoints] == ["topic:nested"]
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert inventory.limitations == ()
+
+
+@pytest.mark.parametrize(
+    ("header", "resources"),
+    [
+        (
+            "def wrapper(a=reactor.listen('positional-default', process), "
+            "*, b=reactor.listen('keyword-default', process)): pass\n",
+            ["keyword-default", "positional-default"],
+        ),
+        (
+            "def wrapper(\n"
+            "    a: reactor.listen('positional', process), /,\n"
+            "    b: reactor.listen('ordinary', process),\n"
+            "    *args: reactor.listen('vararg', process),\n"
+            "    c: reactor.listen('keyword-only', process),\n"
+            "    **kwargs: reactor.listen('kwarg', process),\n"
+            ") -> reactor.listen('return', process): pass\n",
+            ["keyword-only", "kwarg", "ordinary", "positional", "return", "vararg"],
+        ),
+    ],
+)
+def test_function_definition_eager_values_are_discovered_in_runtime_order(
+    tmp_path: Path,
+    header: str,
+    resources: list[str],
+) -> None:
+    inventory = _argument_inventory(
+        tmp_path,
+        "from framework import Reactor\nreactor = Reactor()\nasync def process(): pass\n" + header,
+    )
+
+    assert (
+        sorted(item.surface.resource for item in inventory.endpoints if item.surface) == resources
+    )
+    assert inventory.status == InventoryStatus.ESTABLISHED
+
+
+def test_postponed_annotations_skip_calls_but_defaults_remain_eager(tmp_path: Path) -> None:
+    inventory = _argument_inventory(
+        tmp_path,
+        "from __future__ import annotations\n"
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def process(): pass\n"
+        "def wrapper(\n"
+        "    value: reactor.listen('function-annotation', process) = "
+        "reactor.listen('default', process),\n"
+        "): pass\n"
+        "class Container:\n"
+        "    value: reactor.listen('class-annotation', process)\n",
+    )
+
+    assert [item.path for item in inventory.endpoints] == ["topic:default"]
+    assert inventory.status == InventoryStatus.ESTABLISHED
+
+
+@pytest.mark.parametrize(
+    "definition",
+    [
+        "@reactor.listen('class-decorator', process)\nclass Container: pass\n",
+        "class Container(reactor.listen('class-base', process)): pass\n",
+        "class Container(metaclass=reactor.listen('class-keyword', process)): pass\n",
+        "class Container:\n    reactor.listen('class-body', process)\n",
+        "class Container:\n    value: reactor.listen('class-annotation', process)\n",
+    ],
+)
+def test_class_definition_eager_surfaces_are_discovered(
+    tmp_path: Path,
+    definition: str,
+) -> None:
+    inventory = _argument_inventory(
+        tmp_path,
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def process(): pass\n" + definition,
+    )
+
+    assert len(inventory.endpoints) == 1
+    assert inventory.status == InventoryStatus.ESTABLISHED
+
+
+def test_definition_headers_apply_state_changes_in_source_order(tmp_path: Path) -> None:
+    inventory = _argument_inventory(
+        tmp_path / "defaults",
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def process(): pass\n"
+        "def wrapper(\n"
+        "    first=(reactor := None),\n"
+        "    second=reactor.listen('not-reachable', process),\n"
+        "): pass\n",
+    )
+
+    annotations = _argument_inventory(
+        tmp_path / "annotations",
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def process(): pass\n"
+        "def wrapper(\n"
+        "    *args: (reactor := None),\n"
+        "    value: reactor.listen('not-reachable', process),\n"
+        "): pass\n",
+    )
+    class_header = _argument_inventory(
+        tmp_path / "class-header",
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def process(): pass\n"
+        "def identity(value): return value\n"
+        "@identity((reactor := None))\n"
+        "class Container(reactor.listen('not-reachable', process)): pass\n",
+    )
+
+    for result in (inventory, annotations, class_header):
+        assert result.endpoints == []
+        assert result.status == InventoryStatus.CONDITIONAL
+        assert any("unresolved callable identity" in item.reason for item in result.limitations)
+
+
+def test_class_locals_do_not_leak_but_explicit_globals_do(tmp_path: Path) -> None:
+    local = _argument_inventory(
+        tmp_path / "local",
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def process(): pass\n"
+        "class Container:\n"
+        "    reactor = None\n"
+        "reactor.listen('after', process)\n",
+    )
+    global_binding = _argument_inventory(
+        tmp_path / "global",
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def process(): pass\n"
+        "class Container:\n"
+        "    global reactor\n"
+        "    reactor = None\n"
+        "reactor.listen('after', process)\n",
+    )
+
+    assert [item.path for item in local.endpoints] == ["topic:after"]
+    assert global_binding.endpoints == []
+    assert global_binding.status == InventoryStatus.CONDITIONAL
+
+
+def test_class_body_mutation_invalidates_enclosing_receiver_aliases(tmp_path: Path) -> None:
+    inventory = _argument_inventory(
+        tmp_path,
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def process(): pass\n"
+        "class Container:\n"
+        "    reactor.listen = None\n"
+        "reactor.listen('after', process)\n",
+    )
+
+    assert inventory.endpoints == []
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any("unresolved callable identity" in item.reason for item in inventory.limitations)
+
+
+def test_nested_class_body_mutation_invalidates_enclosing_receiver(tmp_path: Path) -> None:
+    inventory = _argument_inventory(
+        tmp_path,
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def process(): pass\n"
+        "class Outer:\n"
+        "    class Inner:\n"
+        "        reactor.listen = None\n"
+        "reactor.listen('after', process)\n",
+    )
+
+    assert inventory.endpoints == []
+    assert inventory.status == InventoryStatus.CONDITIONAL
+
+
+def test_class_nonlocal_effect_propagates_inside_selected_bootstrap(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from framework import Reactor\n"
+        "async def process(): pass\n"
+        "def configure():\n"
+        "    reactor = Reactor()\n"
+        "    class Container:\n"
+        "        nonlocal reactor\n"
+        "        reactor = None\n"
+        "    reactor.listen('after', process)\n",
+        encoding="utf-8",
+    )
+    inventory = CustomSurfaceExtractor(
+        tmp_path,
+        load_surface_contracts(_contracts(tmp_path, handler={"kind": "argument", "index": 1})),
+        bootstrap_entry="main:configure",
+    ).extract_inventory()
+
+    assert inventory.endpoints == []
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any("unresolved callable identity" in item.reason for item in inventory.limitations)
+
+
+def test_class_body_comprehension_does_not_resolve_through_class_locals(
+    tmp_path: Path,
+) -> None:
+    inventory = _argument_inventory(
+        tmp_path,
+        "from framework import Reactor\n"
+        "async def process(): pass\n"
+        "items = [1]\n"
+        "class Container:\n"
+        "    reactor = Reactor()\n"
+        "    registrations = [reactor.listen('wrong', process) for item in items]\n",
+    )
+
+    assert inventory.endpoints == []
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any("unresolved callable identity" in item.reason for item in inventory.limitations)
+
+
+def test_nested_class_global_write_updates_module_frame(tmp_path: Path) -> None:
+    inventory = _argument_inventory(
+        tmp_path,
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def process(): pass\n"
+        "class Outer:\n"
+        "    class Inner:\n"
+        "        global reactor\n"
+        "        reactor = None\n"
+        "reactor.listen('wrong', process)\n",
+    )
+
+    assert inventory.endpoints == []
+    assert inventory.status == InventoryStatus.CONDITIONAL
+
+
+def test_class_global_write_is_visible_to_later_nested_class(tmp_path: Path) -> None:
+    unresolved = _argument_inventory(
+        tmp_path / "unresolved",
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def process(): pass\n"
+        "class Outer:\n"
+        "    global reactor\n"
+        "    reactor = None\n"
+        "    class Inner:\n"
+        "        reactor.listen('wrong', process)\n",
+    )
+    exact_alias = _argument_inventory(
+        tmp_path / "exact",
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def process(): pass\n"
+        "class Outer:\n"
+        "    global alias\n"
+        "    alias = reactor\n"
+        "    class Inner:\n"
+        "        alias.listen('inside', process)\n",
+    )
+
+    assert unresolved.endpoints == []
+    assert unresolved.status == InventoryStatus.CONDITIONAL
+    assert [item.path for item in exact_alias.endpoints] == ["topic:inside"]
+
+
+def test_nested_class_nonlocal_write_updates_bootstrap_frame(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from framework import Reactor\n"
+        "async def process(): pass\n"
+        "def configure():\n"
+        "    reactor = Reactor()\n"
+        "    class Outer:\n"
+        "        class Inner:\n"
+        "            nonlocal reactor\n"
+        "            reactor = None\n"
+        "    reactor.listen('wrong', process)\n",
+        encoding="utf-8",
+    )
+    inventory = CustomSurfaceExtractor(
+        tmp_path,
+        load_surface_contracts(_contracts(tmp_path, handler={"kind": "argument", "index": 1})),
+        bootstrap_entry="main:configure",
+    ).extract_inventory()
+
+    assert inventory.endpoints == []
+    assert inventory.status == InventoryStatus.CONDITIONAL
+
+
+def test_class_mutation_propagation_uses_exact_binding_not_root_name(
+    tmp_path: Path,
+) -> None:
+    alias_mutation = _argument_inventory(
+        tmp_path / "alias",
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def process(): pass\n"
+        "class Container:\n"
+        "    alias = reactor\n"
+        "    alias.listen = None\n"
+        "reactor.listen('wrong', process)\n",
+    )
+    local_mutation = _argument_inventory(
+        tmp_path / "local",
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def process(): pass\n"
+        "class Container:\n"
+        "    reactor = Reactor()\n"
+        "    reactor.listen = None\n"
+        "reactor.listen('after', process)\n",
+    )
+    conditional_alias_mutation = _argument_inventory(
+        tmp_path / "conditional",
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def process(): pass\n"
+        "class Container:\n"
+        "    if condition:\n"
+        "        alias = reactor\n"
+        "        alias.listen = None\n"
+        "reactor.listen('maybe-mutated', process)\n",
+    )
+
+    assert alias_mutation.endpoints == []
+    assert alias_mutation.status == InventoryStatus.CONDITIONAL
+    assert [item.path for item in local_mutation.endpoints] == ["topic:after"]
+    assert local_mutation.status == InventoryStatus.ESTABLISHED
+    assert conditional_alias_mutation.endpoints == []
+    assert conditional_alias_mutation.status == InventoryStatus.CONDITIONAL
+
+
+def test_class_body_fallthrough_conditions_later_registrations(tmp_path: Path) -> None:
+    definite = _argument_inventory(
+        tmp_path / "definite",
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def process(): pass\n"
+        "class Container:\n"
+        "    raise RuntimeError()\n"
+        "reactor.listen('unreachable', process)\n",
+    )
+    conditional = _argument_inventory(
+        tmp_path / "conditional",
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def process(): pass\n"
+        "class Container:\n"
+        "    if condition:\n"
+        "        raise RuntimeError()\n"
+        "reactor.listen('conditional', process)\n",
+    )
+
+    assert definite.endpoints == []
+    assert [item.path for item in conditional.endpoints] == ["topic:conditional"]
+    assert conditional.endpoints[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+
+
+def test_annotation_only_class_name_does_not_shadow_enclosing_receiver(
+    tmp_path: Path,
+) -> None:
+    inventory = _argument_inventory(
+        tmp_path,
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def process(): pass\n"
+        "class Container:\n"
+        "    reactor: int\n"
+        "    reactor.listen('inside', process)\n",
+    )
+
+    assert [item.path for item in inventory.endpoints] == ["topic:inside"]
+    assert inventory.status == InventoryStatus.ESTABLISHED
+
+
+def test_positional_annotations_follow_cpython_evaluation_order(tmp_path: Path) -> None:
+    inventory = _argument_inventory(
+        tmp_path,
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def process(): pass\n"
+        "def wrapper(\n"
+        "    positional_only: (reactor := None), /,\n"
+        "    ordinary: reactor.listen('ordinary-first', process),\n"
+        "): pass\n",
+    )
+
+    assert [item.path for item in inventory.endpoints] == ["topic:ordinary-first"]
+
+
+def test_decorator_callable_is_captured_before_named_argument_effects(
+    tmp_path: Path,
+) -> None:
+    inventory = _argument_inventory(
+        tmp_path,
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def original(): pass\n"
+        "async def other(): pass\n"
+        "@reactor.listen(\n"
+        "    'orders', receiver=(reactor := None), "
+        "mutate=(original := other), handler=original\n"
+        ")\n"
+        "def wrapper(): pass\n",
+        handler={"kind": "keyword", "name": "handler"},
+    )
+
+    assert [item.path for item in inventory.endpoints] == ["topic:orders"]
+    assert inventory.endpoints[0].handler.name == "other"
+    assert inventory.limitations == ()
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        "{call}\n",
+        "def wrapper(value={call}): pass\n",
+        "def wrapper(value: {call}): pass\n",
+        "class Wrapper({call}): pass\n",
+        "class Wrapper(metaclass={call}): pass\n",
+        "class Wrapper:\n    {call}\n",
+        "def identity(value): return value\n@identity({call})\ndef wrapper(): pass\n",
+    ],
+)
+@pytest.mark.parametrize(
+    ("keywords", "expected_handler"),
+    [
+        ("mutate=(original := other), handler=original", "other"),
+        ("handler=original, mutate=(original := other)", "original"),
+    ],
+)
+def test_eager_calls_capture_each_handler_argument(
+    tmp_path: Path,
+    context: str,
+    keywords: str,
+    expected_handler: str,
+) -> None:
+    call = f"reactor.listen('orders', {keywords})"
+    inventory = _argument_inventory(
+        tmp_path,
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def original(): pass\n"
+        "async def other(): pass\n" + context.format(call=call),
+        handler={"kind": "keyword", "name": "handler"},
+    )
+
+    assert [item.path for item in inventory.endpoints] == ["topic:orders"]
+    assert inventory.endpoints[0].handler.name == expected_handler
+    assert inventory.limitations == ()
+
+
+def test_python_call_order_uses_args_before_textually_earlier_keywords(
+    tmp_path: Path,
+) -> None:
+    inventory = _argument_inventory(
+        tmp_path,
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "original = reactor\n"
+        "async def process(): pass\n"
+        "reactor.listen(\n"
+        "    'first', reset=(reactor := None), *((reactor := original),)\n"
+        ")\n"
+        "reactor.listen('impossible-second', process)\n",
+    )
+
+    assert all(item.path != "topic:impossible-second" for item in inventory.endpoints)
+    assert any("unresolved callable identity" in item.reason for item in inventory.limitations)
+
+
+def test_class_method_handler_uses_its_positional_capture(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "from starlette.middleware.base import BaseHTTPMiddleware as Base\n\n"
+        "class First(Base):\n"
+        "    async def dispatch(self, request, call_next):\n"
+        "        return await call_next(request)\n\n"
+        "class Second(Base):\n"
+        "    async def dispatch(self, request, call_next):\n"
+        "        return await call_next(request)\n\n"
+        "app = FastAPI()\n"
+        "app.add_middleware(First, mutate=(First := Second))\n",
+        encoding="utf-8",
+    )
+
+    inventory = CustomSurfaceExtractor(
+        tmp_path,
+        load_surface_preset("framework-v1"),
+    ).extract_inventory()
+
+    middleware = next(item for item in inventory.endpoints if item.path == "protocol:http")
+    assert middleware.handler.line_number == 5
+
+
+def test_class_try_finally_does_not_revive_pending_exception(tmp_path: Path) -> None:
+    inventory = _argument_inventory(
+        tmp_path,
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def process(): pass\n"
+        "class Container:\n"
+        "    try:\n"
+        "        raise RuntimeError()\n"
+        "    finally:\n"
+        "        pass\n"
+        "reactor.listen('unreachable', process)\n",
+    )
+
+    assert inventory.endpoints == []
+
+
+def test_bootstrap_class_global_does_not_overwrite_function_local(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from framework import Reactor\n"
+        "reactor = None\n"
+        "async def process(): pass\n"
+        "def configure():\n"
+        "    reactor = Reactor()\n"
+        "    class Container:\n"
+        "        global reactor\n"
+        "        reactor = None\n"
+        "    reactor.listen('local', process)\n",
+        encoding="utf-8",
+    )
+    inventory = CustomSurfaceExtractor(
+        tmp_path,
+        load_surface_contracts(_contracts(tmp_path, handler={"kind": "argument", "index": 1})),
+        bootstrap_entry="main:configure",
+    ).extract_inventory()
+
+    assert [item.path for item in inventory.endpoints] == ["topic:local"]
+
+
+def test_bootstrap_class_global_refreshes_lookup_without_function_local(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def process(): pass\n"
+        "def configure():\n"
+        "    class Container:\n"
+        "        global reactor\n"
+        "        reactor = None\n"
+        "    reactor.listen('wrong', process)\n",
+        encoding="utf-8",
+    )
+    inventory = CustomSurfaceExtractor(
+        tmp_path,
+        load_surface_contracts(_contracts(tmp_path, handler={"kind": "argument", "index": 1})),
+        bootstrap_entry="main:configure",
+    ).extract_inventory()
+
+    assert inventory.endpoints == []
+    assert any("unresolved callable identity" in item.reason for item in inventory.limitations)
+
+
+def test_bootstrap_class_global_reads_module_not_function_local(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from framework import Reactor\n"
+        "reactor = None\n"
+        "async def process(): pass\n"
+        "def configure():\n"
+        "    reactor = Reactor()\n"
+        "    class Container:\n"
+        "        global reactor\n"
+        "        reactor.listen('wrong', process)\n"
+        "    reactor.listen('local', process)\n",
+        encoding="utf-8",
+    )
+    inventory = CustomSurfaceExtractor(
+        tmp_path,
+        load_surface_contracts(_contracts(tmp_path, handler={"kind": "argument", "index": 1})),
+        bootstrap_entry="main:configure",
+    ).extract_inventory()
+
+    assert [item.path for item in inventory.endpoints] == ["topic:local"]
+    assert any("unresolved callable identity" in item.reason for item in inventory.limitations)
+
+
+def test_inner_declared_outer_write_preserves_outer_class_local(tmp_path: Path) -> None:
+    inventory = _argument_inventory(
+        tmp_path,
+        "from framework import Reactor\n"
+        "reactor = None\n"
+        "async def process(): pass\n"
+        "class Outer:\n"
+        "    reactor = Reactor()\n"
+        "    class Inner:\n"
+        "        global reactor\n"
+        "        reactor = None\n"
+        "    reactor.listen('outer-local', process)\n",
+    )
+
+    assert [item.path for item in inventory.endpoints] == ["topic:outer-local"]
+
+
+def test_dead_class_binding_does_not_shield_outer_from_global_update(
+    tmp_path: Path,
+) -> None:
+    inventory = _argument_inventory(
+        tmp_path,
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def process(): pass\n"
+        "class Outer:\n"
+        "    if False:\n"
+        "        reactor = Reactor()\n"
+        "    class Inner:\n"
+        "        global reactor\n"
+        "        reactor = None\n"
+        "    reactor.listen('wrong', process)\n",
+    )
+
+    assert inventory.endpoints == []
+    assert any("unresolved callable identity" in item.reason for item in inventory.limitations)
+
+
+def test_inner_nonlocal_write_preserves_outer_class_local(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from framework import Reactor\n"
+        "async def process(): pass\n"
+        "def configure():\n"
+        "    reactor = None\n"
+        "    class Outer:\n"
+        "        reactor = Reactor()\n"
+        "        class Inner:\n"
+        "            nonlocal reactor\n"
+        "            reactor = None\n"
+        "        reactor.listen('outer-local', process)\n",
+        encoding="utf-8",
+    )
+    inventory = CustomSurfaceExtractor(
+        tmp_path,
+        load_surface_contracts(_contracts(tmp_path, handler={"kind": "argument", "index": 1})),
+        bootstrap_entry="main:configure",
+    ).extract_inventory()
+
+    assert [item.path for item in inventory.endpoints] == ["topic:outer-local"]
+
+
+def test_conditional_global_overlay_reaches_nested_class_with_condition(
+    tmp_path: Path,
+) -> None:
+    inventory = _argument_inventory(
+        tmp_path,
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "async def process(): pass\n"
+        "class Outer:\n"
+        "    global alias\n"
+        "    if condition:\n"
+        "        alias = reactor\n"
+        "        class Inner:\n"
+        "            alias.listen('conditional', process)\n",
+    )
+
+    assert [item.path for item in inventory.endpoints] == ["topic:conditional"]
+    assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+    assert any(
+        item.source_line == 6 and "guarded by source control flow" in item.reason
+        for item in inventory.limitations
+    )
 
 
 def test_nested_generator_does_not_change_callback_mode(tmp_path: Path) -> None:
