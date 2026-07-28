@@ -145,6 +145,9 @@ class YamlFormatter(BaseFormatter):
             "inventory_limitations": [
                 limitation.model_dump(mode="json") for limitation in inventory.limitations
             ],
+            "route_conditions": [
+                condition.model_dump(mode="json") for condition in inventory.route_conditions
+            ],
             "total": len(inventory.endpoints),
             "endpoints": [self._endpoint_to_dict(ep) for ep in inventory.endpoints],
         }

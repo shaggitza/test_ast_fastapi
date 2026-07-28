@@ -39,7 +39,7 @@ from fastapi_endpoint_detector.models.surface_contract import (
 class _Binding:
     kind: Literal["module", "symbol", "receiver", "function"]
     identity: str
-    instance_token: tuple[int, int] | None = None
+    instance_token: tuple[str, int, int] | None = None
 
 
 _Fallthrough = Literal["always", "maybe", "never"]
@@ -53,13 +53,48 @@ class _Module:
     tree: ast.Module
 
 
+def _endpoint_sort_key(endpoint: Endpoint) -> tuple[str, str, int, str]:
+    """Return a total canonical order for inventory merges."""
+    return (
+        endpoint.identifier,
+        str(endpoint.handler.file_path),
+        endpoint.handler.line_number,
+        json.dumps(endpoint.model_dump(mode="json"), sort_keys=True, separators=(",", ":")),
+    )
+
+
 def merge_surface_inventory(
     native: EndpointInventory,
     custom: EndpointInventory,
 ) -> EndpointInventory:
-    """Merge adapter inventories without weakening per-endpoint evidence."""
-    endpoints = [*native.endpoints, *custom.endpoints]
-    limitations = tuple(dict.fromkeys((*native.limitations, *custom.limitations)))
+    """Merge adapters and apply route-wide uncertainty to native route surfaces."""
+    route_conditions = tuple(
+        sorted(
+            {*native.route_conditions, *custom.route_conditions},
+            key=lambda item: (str(item.source_path), item.source_line, item.reason),
+        )
+    )
+    endpoints: list[Endpoint] = []
+    for endpoint in (*native.endpoints, *custom.endpoints):
+        if endpoint.surface is None and route_conditions:
+            endpoints.append(
+                endpoint.model_copy(
+                    update={
+                        "discovery_status": EndpointDiscoveryStatus.CONDITIONAL,
+                        "discovery_conditions": tuple(
+                            dict.fromkeys((*endpoint.discovery_conditions, *route_conditions))
+                        ),
+                    }
+                )
+            )
+        else:
+            endpoints.append(endpoint)
+    limitations = tuple(
+        sorted(
+            {*native.limitations, *custom.limitations, *route_conditions},
+            key=lambda item: (str(item.source_path), item.source_line, item.reason),
+        )
+    )
     statuses = (native.status, custom.status)
     if endpoints:
         status = (
@@ -73,7 +108,12 @@ def merge_surface_inventory(
         status = InventoryStatus.CONDITIONAL
     else:
         status = InventoryStatus.ESTABLISHED
-    return EndpointInventory(endpoints=endpoints, status=status, limitations=limitations)
+    return EndpointInventory(
+        endpoints=sorted(endpoints, key=_endpoint_sort_key),
+        status=status,
+        limitations=limitations,
+        route_conditions=route_conditions,
+    )
 
 
 def _target_names(target: ast.AST) -> set[str]:
@@ -284,6 +324,92 @@ class _EagerStateMutationVisitor(ast.NodeVisitor):
         self._visit_comprehension(node)
 
 
+class _FunctionScopeBindingVisitor(_EagerStateMutationVisitor):
+    """Collect whole-function locals and explicit scope declarations."""
+
+    def __init__(self, root: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        super().__init__()
+        self.root = root
+        self.globals: set[str] = set()
+        self.nonlocals: set[str] = set()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        if node is self.root:
+            for statement in node.body:
+                self.visit(statement)
+        else:
+            self._visit_function_header(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        if node is self.root:
+            for statement in node.body:
+                self.visit(statement)
+        else:
+            self._visit_function_header(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        super().visit_ClassDef(node)
+
+    def visit_Global(self, node: ast.Global) -> None:
+        self.globals.update(node.names)
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+        self.nonlocals.update(node.names)
+
+
+@dataclass(frozen=True)
+class _StartupAssignmentEffect:
+    targets: tuple[ast.expr, ...]
+    value: ast.expr | None
+
+
+@dataclass(frozen=True)
+class _StartupReturnEffect:
+    value: ast.expr
+
+
+_StartupEffect = ast.Call | _StartupAssignmentEffect | _StartupReturnEffect
+
+
+class _StartupStatementEffectsVisitor(_EagerStateMutationVisitor):
+    """Collect eager statement effects in Python evaluation order."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[_StartupEffect] = []
+
+    def visit_Call(self, node: ast.Call) -> None:
+        self.generic_visit(node)
+        self.events.append(node)
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        self.visit(node.value)
+        for target in node.targets:
+            self.visit(target)
+        self.events.append(_StartupAssignmentEffect(tuple(node.targets), node.value))
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if node.value is not None:
+            self.visit(node.value)
+        self.visit(node.target)
+        self.events.append(_StartupAssignmentEffect((node.target,), node.value))
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self.visit(node.target)
+        self.visit(node.value)
+        self.events.append(_StartupAssignmentEffect((node.target,), node.value))
+
+    def visit_Delete(self, node: ast.Delete) -> None:
+        for target in node.targets:
+            self.visit(target)
+        self.events.append(_StartupAssignmentEffect(tuple(node.targets), None))
+
+    def visit_Return(self, node: ast.Return) -> None:
+        if node.value is not None:
+            self.visit(node.value)
+            self.events.append(_StartupReturnEffect(node.value))
+
+
 class _ClassAttributeMutationVisitor(ast.NodeVisitor):
     """Detect direct class-body rebinding without entering nested scopes."""
 
@@ -415,6 +541,7 @@ class CustomSurfaceExtractor:
         self._class_bases: dict[str, tuple[str, ...] | None] = {}
         self._endpoints: list[Endpoint] = []
         self._limitations: list[EndpointDiscoveryCondition] = []
+        self._route_conditions: list[EndpointDiscoveryCondition] = []
         self._seen: set[tuple[str, int, int, str, str, str]] = set()
         self._startup_route_seen: set[tuple[str, int, str, tuple[EndpointMethod, ...], str]] = set()
         self._module_states: dict[str, dict[str, _Binding | None]] = {}
@@ -439,6 +566,7 @@ class CustomSurfaceExtractor:
             return EndpointInventory(
                 status=InventoryStatus.UNAVAILABLE,
                 limitations=limitations,
+                route_conditions=tuple(self._route_conditions),
             )
         self._building_states = True
         try:
@@ -512,17 +640,31 @@ class CustomSurfaceExtractor:
                     )
                 )
                 self._limitations.append(condition)
+        route_conditions = tuple(
+            sorted(
+                set(self._route_conditions),
+                key=lambda item: (str(item.source_path), item.source_line, item.reason),
+            )
+        )
+        if route_conditions:
+            normalized = [
+                (
+                    endpoint.model_copy(
+                        update={
+                            "discovery_status": EndpointDiscoveryStatus.CONDITIONAL,
+                            "discovery_conditions": tuple(
+                                dict.fromkeys((*endpoint.discovery_conditions, *route_conditions))
+                            ),
+                        }
+                    )
+                    if endpoint.surface is None
+                    else endpoint
+                )
+                for endpoint in normalized
+            ]
         for endpoint in normalized:
             self._limitations.extend(endpoint.discovery_conditions)
-        endpoints = sorted(
-            normalized,
-            key=lambda item: (
-                item.identifier,
-                str(item.handler.file_path),
-                item.handler.line_number,
-                item.surface.registration_line if item.surface else 0,
-            ),
-        )
+        endpoints = sorted(normalized, key=_endpoint_sort_key)
         limitations = tuple(
             sorted(
                 set(self._limitations),
@@ -533,6 +675,7 @@ class CustomSurfaceExtractor:
             endpoints=endpoints,
             status=InventoryStatus.CONDITIONAL if limitations else InventoryStatus.ESTABLISHED,
             limitations=limitations,
+            route_conditions=route_conditions,
         )
 
     def _process_bootstrap(self) -> None:
@@ -707,7 +850,7 @@ class CustomSurfaceExtractor:
                 value = statement.value
                 if value is not None:
                     self._inspect_expression(module, value, state, current_conditions)
-                binding = self._binding_from_expression(value, state)
+                binding = self._binding_from_expression(value, state, module.name)
                 targets = (
                     statement.targets if isinstance(statement, ast.Assign) else [statement.target]
                 )
@@ -1061,7 +1204,9 @@ class CustomSurfaceExtractor:
             return
         if isinstance(expression, ast.NamedExpr):
             self._inspect_expression(module, expression.value, state, inherited_conditions)
-            state[expression.target.id] = self._binding_from_expression(expression.value, state)
+            state[expression.target.id] = self._binding_from_expression(
+                expression.value, state, module.name
+            )
             return
         if isinstance(expression, ast.BoolOp):
             skipped: list[dict[str, _Binding | None]] = []
@@ -1491,26 +1636,58 @@ class CustomSurfaceExtractor:
         lifecycle_evidence: SurfaceRegistrationEvidence,
         registration_state: dict[str, _Binding | None],
     ) -> None:
-        """Emit only direct finite routes installed by one exact startup callback."""
+        """Interpret exact, straight-line startup route effects in source order."""
         state = dict(self._module_states.get(handler_module.name, {}))
         arguments = [
             *function.args.posonlyargs,
             *function.args.args,
             *function.args.kwonlyargs,
         ]
-        for argument in arguments:
-            state[argument.arg] = None
+        scope = _FunctionScopeBindingVisitor(function)
+        scope.visit(function)
+        local_names = scope.rebound_names - scope.globals - scope.nonlocals
+        local_names.update(argument.arg for argument in arguments)
+        for name in local_names:
+            state[name] = None
+
+        selected: _Binding | None = None
         expected_receiver_names: set[str] = set()
         if contract.registration.invocation == InvocationKind.CONSTRUCTOR and arguments:
-            state[arguments[0].arg] = _Binding("receiver", contract.registration.symbol)
+            registration_module = next(
+                (
+                    module.name
+                    for module in self._modules.values()
+                    if module.path == lifecycle_evidence.registration_file
+                ),
+                handler_module.name,
+            )
+            selected = _Binding(
+                "receiver",
+                contract.registration.symbol,
+                (registration_module, registration_call.lineno, registration_call.col_offset),
+            )
+            state[arguments[0].arg] = selected
             expected_receiver_names.add(arguments[0].arg)
-        elif isinstance(registration_call.func, ast.Attribute) and isinstance(
-            registration_call.func.value, ast.Name
-        ):
-            receiver_name = registration_call.func.value.id
-            receiver = registration_state.get(receiver_name)
-            if receiver is not None and receiver.kind == "receiver":
-                expected_receiver_names.add(receiver_name)
+        elif isinstance(registration_call.func, ast.Attribute):
+            selected = self._expression_binding(registration_call.func.value, registration_state)
+            if isinstance(registration_call.func.value, ast.Name):
+                expected_receiver_names.add(registration_call.func.value.id)
+        if selected is None or selected.kind != "receiver" or selected.instance_token is None:
+            return
+        selected_token = selected.instance_token
+
+        tracked_scope = {
+            name
+            for name, binding in state.items()
+            if self._binding_has_token(binding, selected_token)
+        } | expected_receiver_names
+        if (scope.globals | scope.nonlocals) & tracked_scope:
+            self._record_startup_route_limitation(
+                handler_module,
+                function.lineno,
+                "startup tracked state uses unsupported global or nonlocal binding",
+            )
+            return
 
         supported = {
             "add_api_route",
@@ -1518,182 +1695,590 @@ class CustomSurfaceExtractor:
             "add_api_websocket_route",
             "add_websocket_route",
         }
-        route_mutations = {*supported, "include_router", "include_routes", "mount"}
+        additive = {*supported, "include_router", "include_routes", "mount"}
+        disabled = False
         start_line, end_line = handler_range
         for statement in function.body:
             if statement.lineno < start_line or statement.lineno > end_line:
                 continue
             if isinstance(statement, (ast.Return, ast.Raise)):
+                value = statement.value if isinstance(statement, ast.Return) else statement.exc
+                if value is not None:
+                    effects = _StartupStatementEffectsVisitor()
+                    effects.visit(value)
+                    for event in effects.events:
+                        if isinstance(event, ast.Call):
+                            self._inspect_startup_call_effect(
+                                event,
+                                handler_module,
+                                state,
+                                selected_token,
+                                supported,
+                                additive,
+                                expected_receiver_names,
+                                inherited_conditions,
+                                lifecycle_evidence,
+                                direct_registration=False,
+                                disabled=disabled,
+                            )
+                    if self._expression_escapes_exact_receiver(value, state, selected_token):
+                        self._taint_startup_routes(
+                            handler_module,
+                            statement.lineno,
+                            "exact startup app escapes from the lifecycle callback",
+                            state,
+                            selected_token,
+                        )
                 break
+            if isinstance(statement, (ast.Global, ast.Nonlocal, ast.Pass)):
+                continue
+            if isinstance(statement, (ast.Import, ast.ImportFrom)):
+                aliases = statement.names
+                for alias in aliases:
+                    if isinstance(statement, ast.Import) or alias.name != "*":
+                        state[alias.asname or alias.name.split(".")[0]] = None
+                continue
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                for expression in self._startup_definition_header_expressions(statement):
+                    effects = _StartupStatementEffectsVisitor()
+                    effects.visit(expression)
+                    for event in effects.events:
+                        if isinstance(event, ast.Call):
+                            self._inspect_startup_call_effect(
+                                event,
+                                handler_module,
+                                state,
+                                selected_token,
+                                supported,
+                                additive,
+                                expected_receiver_names,
+                                inherited_conditions,
+                                lifecycle_evidence,
+                                direct_registration=False,
+                                disabled=disabled,
+                            )
+                    if self._expression_escapes_exact_receiver(expression, state, selected_token):
+                        self._taint_startup_routes(
+                            handler_module,
+                            expression.lineno,
+                            "exact startup app escapes through an eager nested-definition header",
+                            state,
+                            selected_token,
+                        )
+                state[statement.name] = None
+                continue
+            if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                value = statement.value
+                targets = tuple(
+                    statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+                )
+                if value is not None:
+                    effects = _StartupStatementEffectsVisitor()
+                    effects.visit(value)
+                    for event in effects.events:
+                        if isinstance(event, ast.Call):
+                            self._inspect_startup_call_effect(
+                                event,
+                                handler_module,
+                                state,
+                                selected_token,
+                                supported,
+                                additive,
+                                expected_receiver_names,
+                                inherited_conditions,
+                                lifecycle_evidence,
+                                direct_registration=False,
+                                disabled=disabled,
+                            )
+                binding = self._binding_from_expression(value, state, handler_module.name)
+                destructive_target = any(
+                    self._startup_destructive_target(target, state, selected_token)
+                    for target in targets
+                )
+                escapes = self._assignment_escapes_exact_receiver(
+                    targets, value, binding, state, selected_token
+                )
+                if destructive_target:
+                    self._taint_startup_routes(
+                        handler_module,
+                        statement.lineno,
+                        "startup may replace or mutate the exact app router or route collection",
+                        state,
+                        selected_token,
+                    )
+                elif escapes:
+                    self._taint_startup_routes(
+                        handler_module,
+                        statement.lineno,
+                        "exact startup app escapes into an unresolved value",
+                        state,
+                        selected_token,
+                    )
+                for target in targets:
+                    if self._startup_registration_target(target, state, selected_token, additive):
+                        disabled = True
+                        self._record_startup_route_limitation(
+                            handler_module,
+                            statement.lineno,
+                            "startup route registration method is replaced",
+                        )
+                    for name in _target_names(target):
+                        state[name] = binding if isinstance(target, ast.Name) else None
+                        if self._binding_has_token(binding, selected_token):
+                            expected_receiver_names.add(name)
+                continue
+            if isinstance(statement, ast.Delete):
+                destructive = any(
+                    self._startup_destructive_target(target, state, selected_token)
+                    for target in statement.targets
+                )
+                if destructive:
+                    self._taint_startup_routes(
+                        handler_module,
+                        statement.lineno,
+                        "startup may delete from the exact app router or route collection",
+                        state,
+                        selected_token,
+                    )
+                for target in statement.targets:
+                    if self._startup_registration_target(target, state, selected_token, additive):
+                        disabled = True
+                    for name in _target_names(target):
+                        state[name] = None
+                continue
+
             direct_call = (
                 statement.value
                 if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call)
                 else None
             )
-            if (
-                direct_call is not None
-                and self._is_expected_route_call(
-                    direct_call, expected_receiver_names, route_mutations
-                )
-                and not self._is_route_receiver_call(direct_call, state, route_mutations)
-            ):
-                self._record_startup_route_limitation(
-                    handler_module,
-                    statement.lineno,
-                    "startup route receiver was rebound or became unresolved",
-                )
-                continue
-            if direct_call is not None and self._is_route_receiver_call(
-                direct_call, state, route_mutations
-            ):
-                assert isinstance(direct_call.func, ast.Attribute)
-                operation = direct_call.func.attr
-                if operation not in supported:
-                    self._record_startup_route_limitation(
-                        handler_module,
-                        statement.lineno,
-                        f"startup route mutation {operation!r} is not finitely modeled",
-                    )
-                    continue
-                route = self._startup_route_from_call(
-                    direct_call,
-                    state,
-                    operation,
-                )
-                if route is None:
-                    self._record_startup_route_limitation(
-                        handler_module,
-                        statement.lineno,
-                        "startup route registration has dynamic or unresolved arguments",
-                    )
-                    continue
-                path, methods, route_handler = route
-                condition = EndpointDiscoveryCondition(
-                    source_path=handler_module.path,
-                    source_line=statement.lineno,
-                    reason="route is registered only if framework startup lifecycle executes",
-                )
-                conditions = tuple(dict.fromkeys((*inherited_conditions, condition)))
-                key = (
-                    str(handler_module.path),
-                    statement.lineno,
-                    path,
-                    methods,
-                    f"{route_handler[0].name}.{route_handler[1].name}",
-                )
-                if key in self._startup_route_seen:
-                    continue
-                self._startup_route_seen.add(key)
-                route_module, route_function = route_handler
-                self._endpoints.append(
-                    Endpoint(
-                        path=path,
-                        methods=list(methods),
-                        handler=HandlerInfo(
-                            name=route_function.name,
-                            module=route_module.name,
-                            file_path=route_module.path,
-                            line_number=route_function.lineno,
-                            end_line_number=route_function.end_lineno,
-                        ),
-                        discovery_status=EndpointDiscoveryStatus.CONDITIONAL,
-                        discovery_conditions=conditions,
-                        activation=RouteActivationEvidence(
-                            lifecycle_surface_id=lifecycle_evidence.surface_id,
-                            contract_id=lifecycle_evidence.contract_id,
-                            registration_file=lifecycle_evidence.registration_file,
-                            registration_line=lifecycle_evidence.registration_line,
-                            activation_file=handler_module.path,
-                            activation_line=statement.lineno,
-                            activation_source_hash=self._source_hash(handler_module, direct_call),
-                            contract_source_path=lifecycle_evidence.contract_source_path,
-                            raw_hash=lifecycle_evidence.raw_hash,
-                            config_hash=lifecycle_evidence.config_hash,
-                            preset_hash=lifecycle_evidence.preset_hash,
-                            contract_hash=lifecycle_evidence.contract_hash,
-                        ),
-                    )
-                )
+            if direct_call is not None:
+                effects = _StartupStatementEffectsVisitor()
+                effects.visit(direct_call)
+                for event in effects.events:
+                    if isinstance(event, ast.Call):
+                        self._inspect_startup_call_effect(
+                            event,
+                            handler_module,
+                            state,
+                            selected_token,
+                            supported,
+                            additive,
+                            expected_receiver_names,
+                            inherited_conditions,
+                            lifecycle_evidence,
+                            direct_registration=event is direct_call,
+                            disabled=disabled,
+                        )
                 continue
 
-            mutation = _StatementMutationVisitor()
-            mutation.visit(statement)
-            if any(
-                self._is_expected_route_call(call, expected_receiver_names, route_mutations)
-                and not self._is_route_receiver_call(call, state, route_mutations)
-                for call in mutation.calls
-            ):
-                self._record_startup_route_limitation(
-                    handler_module,
-                    statement.lineno,
-                    "startup route receiver was rebound or became unresolved",
-                )
-                continue
-            if any(
-                self._is_route_receiver_call(call, state, route_mutations)
-                for call in mutation.calls
-            ):
-                self._record_startup_route_limitation(
-                    handler_module,
-                    statement.lineno,
-                    "startup route registration appears in unsupported control flow or expression",
-                )
-                continue
-            if self._statement_uses_startup_receiver(statement, state):
-                self._record_startup_route_limitation(
-                    handler_module,
-                    statement.lineno,
-                    "startup app receiver escapes through an unsupported expression",
-                )
+            effects = _StartupStatementEffectsVisitor()
+            effects.visit(statement)
+            for event in effects.events:
+                if isinstance(event, ast.Call):
+                    self._inspect_startup_call_effect(
+                        event,
+                        handler_module,
+                        state,
+                        selected_token,
+                        supported,
+                        additive,
+                        expected_receiver_names,
+                        inherited_conditions,
+                        lifecycle_evidence,
+                        direct_registration=False,
+                        disabled=disabled,
+                    )
+                    continue
+                if isinstance(event, _StartupReturnEffect):
+                    if self._expression_escapes_exact_receiver(event.value, state, selected_token):
+                        self._taint_startup_routes(
+                            handler_module,
+                            event.value.lineno,
+                            "exact startup app escapes from the lifecycle callback",
+                            state,
+                            selected_token,
+                        )
+                    continue
+                targets, value = event.targets, event.value
+                if any(
+                    self._startup_registration_target(target, state, selected_token, additive)
+                    for target in targets
+                ):
+                    disabled = True
+                    self._record_startup_route_limitation(
+                        handler_module,
+                        statement.lineno,
+                        "startup route registration method is replaced",
+                    )
+                binding = self._binding_from_expression(value, state, handler_module.name)
+                if any(
+                    self._startup_destructive_target(target, state, selected_token)
+                    for target in targets
+                ):
+                    self._taint_startup_routes(
+                        handler_module,
+                        statement.lineno,
+                        "startup may replace, delete, or mutate the exact app router "
+                        "or route collection",
+                        state,
+                        selected_token,
+                    )
+                elif value is not None and self._assignment_escapes_exact_receiver(
+                    targets,
+                    value,
+                    binding,
+                    state,
+                    selected_token,
+                ):
+                    self._taint_startup_routes(
+                        handler_module,
+                        statement.lineno,
+                        "exact startup app escapes into an unresolved value",
+                        state,
+                        selected_token,
+                    )
+                for target in targets:
+                    for name in _target_names(target):
+                        state[name] = binding if isinstance(target, ast.Name) else None
+            # A compound statement may not execute, so no branch-local proof survives its join.
+            for name in effects.rebound_names | effects.mutated_roots:
+                state[name] = None
 
     @staticmethod
-    def _is_expected_route_call(
-        call: ast.Call, receiver_names: set[str], operations: set[str]
-    ) -> bool:
-        return (
+    def _startup_definition_header_expressions(
+        statement: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
+    ) -> tuple[ast.expr, ...]:
+        """Return eager nested-definition expressions without entering deferred bodies."""
+        expressions: list[ast.expr] = list(statement.decorator_list)
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            expressions.extend(statement.args.defaults)
+            expressions.extend(
+                default for default in statement.args.kw_defaults if default is not None
+            )
+            arguments = (
+                *statement.args.posonlyargs,
+                *statement.args.args,
+                *statement.args.kwonlyargs,
+            )
+            expressions.extend(
+                argument.annotation for argument in arguments if argument.annotation is not None
+            )
+            if statement.args.vararg is not None and statement.args.vararg.annotation is not None:
+                expressions.append(statement.args.vararg.annotation)
+            if statement.args.kwarg is not None and statement.args.kwarg.annotation is not None:
+                expressions.append(statement.args.kwarg.annotation)
+            if statement.returns is not None:
+                expressions.append(statement.returns)
+        else:
+            expressions.extend(statement.bases)
+            expressions.extend(keyword.value for keyword in statement.keywords)
+        return tuple(expressions)
+
+    def _inspect_startup_call_effect(  # noqa: PLR0911
+        self,
+        call: ast.Call,
+        module: _Module,
+        state: dict[str, _Binding | None],
+        token: tuple[str, int, int],
+        supported: set[str],
+        additive: set[str],
+        expected_receiver_names: set[str],
+        inherited_conditions: tuple[EndpointDiscoveryCondition, ...],
+        lifecycle: SurfaceRegistrationEvidence,
+        *,
+        direct_registration: bool,
+        disabled: bool,
+    ) -> None:
+        """Inspect one eager call before later source-ordered state effects."""
+        destructive_reason = self._startup_destructive_call(call, state, token)
+        if destructive_reason is not None:
+            self._taint_startup_routes(module, call.lineno, destructive_reason, state, token)
+            return
+
+        collection_operation = self._startup_route_collection_operation(call, state, token)
+        if collection_operation is not None:
+            self._record_startup_route_limitation(
+                module,
+                call.lineno,
+                "startup route collection mutation "
+                f"{collection_operation!r} is not finitely modeled",
+            )
+            return
+
+        operation = self._exact_receiver_operation(call, state, token)
+        if operation in additive:
+            if disabled and operation in supported:
+                return
+            if operation not in supported:
+                self._record_startup_route_limitation(
+                    module,
+                    call.lineno,
+                    f"startup route mutation {operation!r} is not finitely modeled",
+                )
+                return
+            if not direct_registration:
+                self._record_startup_route_limitation(
+                    module,
+                    call.lineno,
+                    "startup route registration appears in unsupported control flow or expression",
+                )
+                return
+            route = self._startup_route_from_call(call, state, operation)
+            if route is None:
+                self._record_startup_route_limitation(
+                    module,
+                    call.lineno,
+                    "startup route registration has dynamic or unresolved arguments",
+                )
+                return
+            self._append_startup_route(route, call, module, inherited_conditions, lifecycle)
+            return
+
+        if self._call_escapes_exact_receiver(call, state, token):
+            self._taint_startup_routes(
+                module,
+                call.lineno,
+                "exact startup app receiver escapes by being passed to unresolved code",
+                state,
+                token,
+            )
+        elif (
             isinstance(call.func, ast.Attribute)
-            and call.func.attr in operations
             and isinstance(call.func.value, ast.Name)
-            and call.func.value.id in receiver_names
+            and call.func.attr in additive
+            and call.func.value.id in expected_receiver_names
+        ):
+            self._record_startup_route_limitation(
+                module,
+                call.lineno,
+                "startup route receiver was rebound or became unresolved",
+            )
+
+    def _append_startup_route(
+        self,
+        route: tuple[
+            str,
+            tuple[EndpointMethod, ...],
+            tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef],
+        ],
+        call: ast.Call,
+        module: _Module,
+        inherited_conditions: tuple[EndpointDiscoveryCondition, ...],
+        lifecycle: SurfaceRegistrationEvidence,
+    ) -> None:
+        path, methods, (route_module, route_function) = route
+        condition = EndpointDiscoveryCondition(
+            source_path=module.path,
+            source_line=call.lineno,
+            reason="route is registered only if framework startup lifecycle executes",
+        )
+        conditions = tuple(dict.fromkeys((*inherited_conditions, condition)))
+        key = (
+            str(module.path),
+            call.lineno,
+            path,
+            methods,
+            f"{route_module.name}.{route_function.name}",
+        )
+        if key in self._startup_route_seen:
+            return
+        self._startup_route_seen.add(key)
+        self._endpoints.append(
+            Endpoint(
+                path=path,
+                methods=list(methods),
+                handler=HandlerInfo(
+                    name=route_function.name,
+                    module=route_module.name,
+                    file_path=route_module.path,
+                    line_number=route_function.lineno,
+                    end_line_number=route_function.end_lineno,
+                ),
+                discovery_status=EndpointDiscoveryStatus.CONDITIONAL,
+                discovery_conditions=conditions,
+                activation=RouteActivationEvidence(
+                    lifecycle_surface_id=lifecycle.surface_id,
+                    contract_id=lifecycle.contract_id,
+                    registration_file=lifecycle.registration_file,
+                    registration_line=lifecycle.registration_line,
+                    activation_file=module.path,
+                    activation_line=call.lineno,
+                    activation_source_hash=self._source_hash(module, call),
+                    contract_source_path=lifecycle.contract_source_path,
+                    raw_hash=lifecycle.raw_hash,
+                    config_hash=lifecycle.config_hash,
+                    preset_hash=lifecycle.preset_hash,
+                    contract_hash=lifecycle.contract_hash,
+                ),
+            )
         )
 
-    def _statement_uses_startup_receiver(
-        self, statement: ast.stmt, state: dict[str, _Binding | None]
-    ) -> bool:
-        for node in ast.walk(statement):
-            if not isinstance(node, ast.Name):
-                continue
-            binding = state.get(node.id)
-            if binding is None:
-                continue
-            binding = self._follow_project_binding(binding)
-            if binding.kind == "receiver" and binding.identity in {
-                "fastapi.FastAPI",
-                "starlette.applications.Starlette",
-            }:
-                return True
-        return False
+    def _binding_has_token(self, binding: _Binding | None, token: tuple[str, int, int]) -> bool:
+        if binding is None:
+            return False
+        resolved = self._follow_project_binding(binding)
+        return resolved.kind == "receiver" and resolved.instance_token == token
 
-    def _is_route_receiver_call(
+    def _expression_is_exact_receiver(
+        self,
+        expression: ast.expr,
+        state: dict[str, _Binding | None],
+        token: tuple[str, int, int],
+    ) -> bool:
+        return (
+            isinstance(expression, ast.Name)
+            and isinstance(expression.ctx, ast.Load)
+            and self._binding_has_token(state.get(expression.id), token)
+        )
+
+    def _expression_escapes_exact_receiver(
+        self,
+        expression: ast.expr,
+        state: dict[str, _Binding | None],
+        token: tuple[str, int, int],
+    ) -> bool:
+        if self._expression_is_exact_receiver(expression, state, token):
+            escaped = True
+        elif isinstance(expression, (ast.Attribute, ast.Subscript)):
+            chain = self._startup_route_chain(expression, state, token)
+            escaped = chain in {("router",), ("routes",), ("router", "routes")}
+            if not escaped and isinstance(expression, ast.Subscript):
+                escaped = self._expression_escapes_exact_receiver(expression.slice, state, token)
+        elif isinstance(expression, ast.Call):
+            escaped = self._call_escapes_exact_receiver(expression, state, token)
+        elif isinstance(expression, (ast.List, ast.Tuple, ast.Set)):
+            escaped = any(
+                self._expression_escapes_exact_receiver(item, state, token)
+                for item in expression.elts
+            )
+        elif isinstance(expression, ast.Dict):
+            escaped = any(
+                item is not None and self._expression_escapes_exact_receiver(item, state, token)
+                for item in (*expression.keys, *expression.values)
+            )
+        else:
+            escaped = any(
+                self._expression_escapes_exact_receiver(child, state, token)
+                for child in ast.iter_child_nodes(expression)
+                if isinstance(child, ast.expr)
+            )
+        return escaped
+
+    def _assignment_escapes_exact_receiver(
+        self,
+        targets: tuple[ast.expr, ...],
+        value: ast.expr | None,
+        binding: _Binding | None,
+        state: dict[str, _Binding | None],
+        token: tuple[str, int, int],
+    ) -> bool:
+        if value is None:
+            return False
+        if self._binding_has_token(binding, token) and all(
+            isinstance(target, ast.Name) for target in targets
+        ):
+            return False
+        return self._expression_escapes_exact_receiver(value, state, token)
+
+    def _exact_receiver_operation(
         self,
         call: ast.Call,
         state: dict[str, _Binding | None],
+        token: tuple[str, int, int],
+    ) -> str | None:
+        if not isinstance(call.func, ast.Attribute) or not self._expression_is_exact_receiver(
+            call.func.value, state, token
+        ):
+            return None
+        return call.func.attr
+
+    def _startup_route_chain(
+        self,
+        expression: ast.expr,
+        state: dict[str, _Binding | None],
+        token: tuple[str, int, int],
+    ) -> tuple[str, ...] | None:
+        attributes: list[str] = []
+        current = expression
+        while isinstance(current, (ast.Attribute, ast.Subscript)):
+            if isinstance(current, ast.Attribute):
+                attributes.append(current.attr)
+                current = current.value
+            else:
+                attributes.append("[]")
+                current = current.value
+        if not self._expression_is_exact_receiver(current, state, token):
+            return None
+        return tuple(reversed(attributes))
+
+    def _startup_destructive_target(
+        self,
+        target: ast.expr,
+        state: dict[str, _Binding | None],
+        token: tuple[str, int, int],
+    ) -> bool:
+        chain = self._startup_route_chain(target, state, token)
+        return chain is not None and (
+            chain == ("router",) or chain[:1] == ("routes",) or chain[:2] == ("router", "routes")
+        )
+
+    def _startup_registration_target(
+        self,
+        target: ast.expr,
+        state: dict[str, _Binding | None],
+        token: tuple[str, int, int],
         operations: set[str],
     ) -> bool:
-        if (
-            not isinstance(call.func, ast.Attribute)
-            or call.func.attr not in operations
-            or not isinstance(call.func.value, ast.Name)
-        ):
-            return False
-        binding = state.get(call.func.value.id)
-        if binding is None:
-            return False
-        binding = self._follow_project_binding(binding)
-        return binding.kind == "receiver" and binding.identity in {
-            "fastapi.FastAPI",
-            "starlette.applications.Starlette",
-        }
+        chain = self._startup_route_chain(target, state, token)
+        return chain is not None and len(chain) == 1 and chain[0] in operations
+
+    def _startup_route_collection_operation(
+        self,
+        call: ast.Call,
+        state: dict[str, _Binding | None],
+        token: tuple[str, int, int],
+    ) -> str | None:
+        if not isinstance(call.func, ast.Attribute):
+            return None
+        chain = self._startup_route_chain(call.func.value, state, token)
+        if chain is None or not (chain[:1] == ("routes",) or chain[:2] == ("router", "routes")):
+            return None
+        return call.func.attr
+
+    def _startup_destructive_call(
+        self,
+        call: ast.Call,
+        state: dict[str, _Binding | None],
+        token: tuple[str, int, int],
+    ) -> str | None:
+        operation = self._startup_route_collection_operation(call, state, token)
+        if operation not in {"clear", "pop", "remove"}:
+            return None
+        return f"startup may destructively call {operation!r} on the exact app routes"
+
+    def _call_escapes_exact_receiver(
+        self,
+        call: ast.Call,
+        state: dict[str, _Binding | None],
+        token: tuple[str, int, int],
+    ) -> bool:
+        if self._exact_receiver_operation(call, state, token) is not None:
+            return True
+        return any(
+            self._expression_escapes_exact_receiver(argument, state, token)
+            for argument in call.args
+        ) or any(
+            self._expression_escapes_exact_receiver(keyword.value, state, token)
+            for keyword in call.keywords
+        )
+
+    def _invalidate_token(
+        self, state: dict[str, _Binding | None], token: tuple[str, int, int]
+    ) -> None:
+        for name, binding in state.items():
+            if self._binding_has_token(binding, token):
+                state[name] = None
 
     def _startup_route_from_call(  # noqa: PLR0911
         self,
@@ -1767,6 +2352,26 @@ class CustomSurfaceExtractor:
                 reason=reason,
             )
         )
+
+    def _record_route_condition(self, module: _Module, line: int, reason: str) -> None:
+        condition = EndpointDiscoveryCondition(
+            source_path=module.path,
+            source_line=line,
+            reason=reason,
+        )
+        self._limitations.append(condition)
+        self._route_conditions.append(condition)
+
+    def _taint_startup_routes(
+        self,
+        module: _Module,
+        line: int,
+        reason: str,
+        state: dict[str, _Binding | None],
+        token: tuple[str, int, int],
+    ) -> None:
+        self._record_route_condition(module, line, reason)
+        self._invalidate_token(state, token)
 
     def _matches(
         self,
@@ -1897,7 +2502,10 @@ class CustomSurfaceExtractor:
         return current
 
     def _binding_from_expression(
-        self, expression: ast.expr | None, state: dict[str, _Binding | None]
+        self,
+        expression: ast.expr | None,
+        state: dict[str, _Binding | None],
+        module_name: str,
     ) -> _Binding | None:
         if isinstance(expression, (ast.Name, ast.NamedExpr)):
             return state.get(
@@ -1917,7 +2525,7 @@ class CustomSurfaceExtractor:
                 return _Binding(
                     "receiver",
                     resolved[0],
-                    (expression.lineno, expression.col_offset),
+                    (module_name, expression.lineno, expression.col_offset),
                 )
         return None
 

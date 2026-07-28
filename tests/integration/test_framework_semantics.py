@@ -165,6 +165,48 @@ def test_changed_startup_added_route_is_a_conditional_http_candidate(tmp_path: P
     assert candidates["GET /late"].endpoint.activation is not None
 
 
+def test_startup_exact_app_escape_lowers_existing_native_route_confidence(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n\n"
+        "@app.get('/known')\n"
+        "def known() -> int:\n"
+        "    return 2\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    configure(app)\n",
+        encoding="utf-8",
+    )
+    diff = tmp_path / "change.diff"
+    diff.write_text(
+        "diff --git a/main.py b/main.py\n"
+        "--- a/main.py\n"
+        "+++ b/main.py\n"
+        "@@ -6,2 +6,2 @@\n"
+        " def known() -> int:\n"
+        "-    return 1\n"
+        "+    return 2\n",
+        encoding="utf-8",
+    )
+
+    mapper = ChangeMapper(
+        app_path=tmp_path,
+        config=Config(analysis=AnalysisConfig(surface_preset="framework-v1")),
+        secure_ast=True,
+        use_cache=False,
+    )
+    report = mapper.analyze_diff(diff)
+
+    candidate = next(
+        item for item in report.candidate_endpoints if item.endpoint.identifier == "GET /known"
+    )
+    assert candidate.confidence == ConfidenceLevel.LOW
+    assert candidate.endpoint.discovery_conditions
+    assert mapper.inventory.route_conditions
+
+
 def test_changed_background_callback_is_low_boundary_from_http_handler(
     tmp_path: Path,
 ) -> None:

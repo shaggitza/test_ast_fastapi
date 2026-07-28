@@ -2,14 +2,22 @@
 
 from pathlib import Path
 
+import pytest
+
 from fastapi_endpoint_detector.config import AnalysisConfig, Config
 from fastapi_endpoint_detector.models.endpoint import (
+    Endpoint,
     EndpointDiscoveryStatus,
     EndpointInventory,
+    EndpointMethod,
+    HandlerInfo,
     InventoryStatus,
 )
 from fastapi_endpoint_detector.models.surface_contract import load_surface_preset
-from fastapi_endpoint_detector.parser.custom_surface_extractor import CustomSurfaceExtractor
+from fastapi_endpoint_detector.parser.custom_surface_extractor import (
+    CustomSurfaceExtractor,
+    merge_surface_inventory,
+)
 
 
 def _extract(tmp_path: Path) -> EndpointInventory:
@@ -326,6 +334,13 @@ def test_startup_callback_adds_only_conditional_direct_routes(tmp_path: Path) ->
     assert route.activation.phase == "startup"
     assert route.activation.contract_id == "fastapi-on-event"
     assert route.activation.lifecycle_surface_id == "event:startup"
+    assert route.activation.registration_file == (tmp_path / "main.py").resolve()
+    assert route.activation.registration_line == 7
+    assert route.activation.activation_file == (tmp_path / "main.py").resolve()
+    assert route.activation.activation_line == 9
+    assert route.activation.activation_source_hash.startswith("sha256:")
+    assert len(route.activation.activation_source_hash) == 71
+    assert lifecycle.surface.registration_source_hash.startswith("sha256:")
     assert route.handler.name == "late"
     assert route.discovery_status == EndpointDiscoveryStatus.CONDITIONAL
     assert any("only if framework startup" in item.reason for item in route.discovery_conditions)
@@ -404,6 +419,362 @@ def test_startup_route_control_flow_and_dynamic_arguments_fail_closed(tmp_path: 
     assert any("dynamic or unresolved" in reason for reason in reasons)
     assert any("not finitely modeled" in reason for reason in reasons)
     assert any("receiver escapes" in reason for reason in reasons)
+
+
+def test_startup_route_state_is_lexical_exact_and_source_sequential(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "other = FastAPI()\n\n"
+        "async def first(): return 1\n"
+        "async def second(): return 2\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    alias = app\n"
+        "    handler = first\n"
+        "    alias.add_api_route('/first', handler)\n"
+        "    alias = other\n"
+        "    alias.add_api_route('/other', second)\n"
+        "    handler = second\n"
+        "    app.add_api_route('/second', handler)\n"
+        "    del handler\n"
+        "    app.add_api_route('/missing', handler)\n"
+        "    title = app.title\n",
+        encoding="utf-8",
+    )
+
+    first = _extract(tmp_path)
+    second = _extract(tmp_path)
+
+    assert first == second
+    assert [endpoint.identifier for endpoint in first.endpoints] == [
+        "FRAMEWORK.LIFECYCLE event:startup",
+        "GET /first",
+        "GET /second",
+    ]
+    assert [endpoint.handler.name for endpoint in first.endpoints[1:]] == ["first", "second"]
+    assert first.route_conditions == ()
+
+
+def test_startup_whole_function_local_shadowing_omits_earlier_route(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "other = FastAPI()\n"
+        "async def late(): return None\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    app.add_api_route('/not-global', late)\n"
+        "    app = other\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == [
+        "FRAMEWORK.LIFECYCLE event:startup"
+    ]
+    assert any("receiver was rebound" in item.reason for item in inventory.limitations)
+    assert inventory.route_conditions == ()
+
+
+def test_startup_lexical_handler_shadowing_and_nested_definition_fail_closed(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "async def late(): return None\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    app.add_api_route('/shadowed', late)\n"
+        "    def late(): return None\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert all(endpoint.path != "/shadowed" for endpoint in inventory.endpoints)
+    assert any("dynamic or unresolved" in item.reason for item in inventory.limitations)
+
+
+@pytest.mark.parametrize(
+    "nested_header",
+    [
+        "    def nested(value=(late := None)): pass\n",
+        "    class Nested((late := object)): pass\n",
+    ],
+)
+def test_startup_nested_eager_headers_contribute_lexical_bindings(
+    tmp_path: Path,
+    nested_header: str,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "async def late(): return None\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    app.add_api_route('/shadowed', late)\n" + nested_header,
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert all(endpoint.path != "/shadowed" for endpoint in inventory.endpoints)
+    assert any("dynamic or unresolved" in item.reason for item in inventory.limitations)
+
+
+def test_startup_compound_rebindings_invalidate_receivers_and_handlers(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "other = FastAPI()\n"
+        "async def first(): return 1\n"
+        "async def second(): return 2\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    alias = app\n"
+        "    if enabled():\n"
+        "        alias = other\n"
+        "    alias.add_api_route('/stale-alias', first)\n"
+        "    handler = first\n"
+        "    if enabled():\n"
+        "        handler = second\n"
+        "    app.add_api_route('/stale-handler', handler)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert all(
+        endpoint.path not in {"/stale-alias", "/stale-handler"} for endpoint in inventory.endpoints
+    )
+    assert inventory.route_conditions == ()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "    if enabled():\n        app.router.routes = []\n",
+        "    if enabled():\n        del app.router.routes[0]\n",
+        "    app.router.routes += []\n",
+        "    app.router = other.router\n",
+        "    routes = app.router.routes\n    routes.clear()\n",
+    ],
+)
+def test_startup_destructive_targets_and_route_aliases_are_route_wide(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "other = FastAPI()\n"
+        "async def late(): return None\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    app.add_api_route('/before', late)\n"
+        + mutation
+        + "    app.add_api_route('/after', late)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory == _extract(tmp_path)
+    assert inventory.route_conditions
+    routes = [endpoint for endpoint in inventory.endpoints if endpoint.surface is None]
+    assert [endpoint.path for endpoint in routes] == ["/before"]
+    assert all(
+        endpoint.discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+        and all(
+            condition in endpoint.discovery_conditions for condition in inventory.route_conditions
+        )
+        for endpoint in routes
+    )
+
+
+@pytest.mark.parametrize(
+    "escape",
+    [
+        "    return [app]\n",
+        "    configure([app])\n",
+        "    box.value = app\n",
+        "    alias = app\n    alias = configure(alias)\n",
+    ],
+)
+def test_startup_receiver_escapes_recurse_and_taint_exact_state(
+    tmp_path: Path,
+    escape: str,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "async def late(): return None\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    app.add_api_route('/before', late)\n"
+        + escape
+        + "    app.add_api_route('/after', late)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.route_conditions
+    assert all(endpoint.path != "/after" for endpoint in inventory.endpoints)
+    route = next(endpoint for endpoint in inventory.endpoints if endpoint.path == "/before")
+    assert all(condition in route.discovery_conditions for condition in inventory.route_conditions)
+
+
+def test_startup_assignment_rhs_clear_is_route_wide(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "async def late(): return None\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    app.add_api_route('/before', late)\n"
+        "    result = app.router.routes.clear()\n"
+        "    app.add_api_route('/after', late)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.route_conditions
+    assert any("destructively call 'clear'" in item.reason for item in inventory.route_conditions)
+    assert all(endpoint.path != "/after" for endpoint in inventory.endpoints)
+
+
+def test_startup_unknown_route_collection_append_limits_inventory_only(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    app.router.routes.append(dynamic_route)\n",
+        encoding="utf-8",
+    )
+    custom = _extract(tmp_path)
+    known = Endpoint(
+        path="/known",
+        methods=[EndpointMethod.GET],
+        handler=HandlerInfo(
+            name="known",
+            module="main",
+            file_path=tmp_path / "main.py",
+            line_number=1,
+        ),
+    )
+
+    merged = merge_surface_inventory(EndpointInventory(endpoints=[known]), custom)
+
+    assert merged.route_conditions == ()
+    assert any("collection mutation 'append'" in item.reason for item in merged.limitations)
+    assert next(endpoint for endpoint in merged.endpoints if endpoint.path == "/known") == known
+
+
+def test_startup_compound_alias_then_clear_is_source_ordered(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "async def late(): return None\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    app.add_api_route('/before', late)\n"
+        "    if enabled():\n"
+        "        alias = app\n"
+        "        alias.router.routes.clear()\n"
+        "    app.add_api_route('/after', late)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.route_conditions
+    assert any("destructively call 'clear'" in item.reason for item in inventory.route_conditions)
+    assert all(endpoint.path != "/after" for endpoint in inventory.endpoints)
+
+
+def test_startup_nested_definition_header_escape_is_eager(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "async def late(): return None\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    app.add_api_route('/before', late)\n"
+        "    def nested(value=configure(app)): return value\n"
+        "    app.add_api_route('/after', late)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.route_conditions
+    assert all(endpoint.path != "/after" for endpoint in inventory.endpoints)
+
+
+def test_imported_exact_app_discovers_finite_startup_route(tmp_path: Path) -> None:
+    (tmp_path / "apps.py").write_text(
+        "from fastapi import FastAPI\n\napp = FastAPI()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "main.py").write_text(
+        "from apps import app\n\n"
+        "async def imported_handler(): return None\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    app.add_api_route('/imported', imported_handler)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert any(endpoint.path == "/imported" for endpoint in inventory.endpoints)
+    assert inventory.route_conditions == ()
+
+
+def test_destructive_startup_condition_downgrades_only_native_routes(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "async def late(): return None\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    app.add_api_route('/late', late)\n"
+        "    app.router.routes.clear()\n",
+        encoding="utf-8",
+    )
+    custom = _extract(tmp_path)
+    native = EndpointInventory(
+        endpoints=[
+            Endpoint(
+                path="/known",
+                methods=[EndpointMethod.GET],
+                handler=HandlerInfo(
+                    name="known",
+                    module="main",
+                    file_path=tmp_path / "main.py",
+                    line_number=1,
+                ),
+            )
+        ]
+    )
+
+    merged = merge_surface_inventory(native, custom)
+
+    assert merged.route_conditions
+    assert all(condition in merged.limitations for condition in merged.route_conditions)
+    routes = [endpoint for endpoint in merged.endpoints if endpoint.surface is None]
+    assert {endpoint.path for endpoint in routes} == {"/known", "/late"}
+    assert all(
+        endpoint.discovery_status == EndpointDiscoveryStatus.CONDITIONAL for endpoint in routes
+    )
+    lifecycle = next(endpoint for endpoint in merged.endpoints if endpoint.surface is not None)
+    assert lifecycle.discovery_status == EndpointDiscoveryStatus.ESTABLISHED
 
 
 def test_same_named_unrelated_lifecycle_method_never_matches(tmp_path: Path) -> None:

@@ -168,6 +168,66 @@ def test_merge_surface_inventory_is_symmetric_for_empty_inventories(tmp_path: Pa
             assert merged.endpoints == reverse.endpoints == []
 
 
+def test_merge_route_conditions_are_symmetric_and_condition_native_endpoints(
+    tmp_path: Path,
+) -> None:
+    condition = EndpointDiscoveryCondition(
+        source_path=tmp_path / "startup.py",
+        source_line=7,
+        reason="startup may mutate routes",
+    )
+    endpoint = Endpoint(
+        path="/items",
+        methods=[EndpointMethod.GET],
+        handler=HandlerInfo(
+            name="items", module="main", file_path=tmp_path / "main.py", line_number=1
+        ),
+    )
+    conditioned = endpoint.model_copy(
+        update={
+            "discovery_status": EndpointDiscoveryStatus.CONDITIONAL,
+            "discovery_conditions": (condition,),
+        }
+    )
+    route_wide = EndpointInventory(
+        endpoints=[conditioned],
+        status=InventoryStatus.CONDITIONAL,
+        limitations=(condition,),
+        route_conditions=(condition,),
+    )
+    empty = EndpointInventory()
+
+    forward = merge_surface_inventory(empty, route_wide)
+    reverse = merge_surface_inventory(route_wide, empty)
+
+    assert forward == reverse
+    assert forward.route_conditions == (condition,)
+    assert forward.endpoints == [conditioned]
+
+
+def test_merge_nonempty_inventories_is_reverse_order_symmetric(tmp_path: Path) -> None:
+    def endpoint(path: str, line: int) -> Endpoint:
+        return Endpoint(
+            path=path,
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(
+                name=path.removeprefix("/"),
+                module="main",
+                file_path=tmp_path / "main.py",
+                line_number=line,
+            ),
+        )
+
+    left = EndpointInventory(endpoints=[endpoint("/z", 2)])
+    right = EndpointInventory(endpoints=[endpoint("/a", 1)])
+
+    forward = merge_surface_inventory(left, right)
+    reverse = merge_surface_inventory(right, left)
+
+    assert forward == reverse
+    assert [item.path for item in forward.endpoints] == ["/a", "/z"]
+
+
 def test_merge_with_usable_endpoints_and_incomplete_input_is_conditional(
     tmp_path: Path,
 ) -> None:

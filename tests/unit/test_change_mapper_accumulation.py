@@ -112,6 +112,20 @@ def test_inventory_strength_requires_source_backed_limitations(tmp_path: Path) -
             status=InventoryStatus.UNAVAILABLE,
             limitations=(condition,),
         )
+    with pytest.raises(ValueError, match="route-wide conditions must also"):
+        EndpointInventory(
+            status=InventoryStatus.CONDITIONAL,
+            limitations=(condition,),
+            route_conditions=(
+                EndpointDiscoveryCondition(
+                    source_path=tmp_path / "main.py",
+                    source_line=2,
+                    reason="different condition",
+                ),
+            ),
+        )
+    with pytest.raises(ValueError, match="route-wide conditions"):
+        EndpointInventory(route_conditions=(condition,))
 
 
 def test_endpoint_discovery_provenance_requires_consistent_status(tmp_path: Path) -> None:
