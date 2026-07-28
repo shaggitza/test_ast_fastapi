@@ -15,6 +15,8 @@ from fastapi_endpoint_detector.models.diff import (
 from fastapi_endpoint_detector.models.endpoint import (
     Endpoint,
     EndpointDiscoveryCondition,
+    EndpointDiscoveryStatus,
+    EndpointInventory,
     EndpointMethod,
     HandlerInfo,
     InventoryStatus,
@@ -92,6 +94,52 @@ class TestEndpoint:
 
         # Methods should be sorted in identifier
         assert endpoint.identifier == "GET,POST /api/users"
+
+
+class TestEndpointInventory:
+    """Tests for whole-inventory route uncertainty invariants."""
+
+    def test_route_conditions_default_is_backward_compatible(self) -> None:
+        assert EndpointInventory().route_conditions == ()
+
+    def test_route_conditions_require_conditioned_native_endpoints(self) -> None:
+        condition = EndpointDiscoveryCondition(
+            source_path=Path("/app/main.py"),
+            source_line=9,
+            reason="startup may mutate routes",
+        )
+        endpoint = Endpoint(
+            path="/known",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(
+                name="known",
+                module="main",
+                file_path=Path("/app/main.py"),
+                line_number=3,
+            ),
+        )
+
+        with pytest.raises(ValueError, match="native endpoints must be conditional"):
+            EndpointInventory(
+                endpoints=[endpoint],
+                status=InventoryStatus.CONDITIONAL,
+                limitations=(condition,),
+                route_conditions=(condition,),
+            )
+
+        conditioned = endpoint.model_copy(
+            update={
+                "discovery_status": EndpointDiscoveryStatus.CONDITIONAL,
+                "discovery_conditions": (condition,),
+            }
+        )
+        inventory = EndpointInventory(
+            endpoints=[conditioned],
+            status=InventoryStatus.CONDITIONAL,
+            limitations=(condition,),
+            route_conditions=(condition,),
+        )
+        assert inventory.endpoints == [conditioned]
 
 
 class TestDiffHunk:

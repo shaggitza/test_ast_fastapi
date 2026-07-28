@@ -211,6 +211,7 @@ class EndpointInventory(BaseModel):
     endpoints: list[Endpoint] = Field(default_factory=list)
     status: InventoryStatus = InventoryStatus.ESTABLISHED
     limitations: tuple[EndpointDiscoveryCondition, ...] = ()
+    route_conditions: tuple[EndpointDiscoveryCondition, ...] = ()
 
     @model_validator(mode="after")
     def validate_strength(self) -> "EndpointInventory":
@@ -218,6 +219,24 @@ class EndpointInventory(BaseModel):
         if (self.status == InventoryStatus.ESTABLISHED) == has_limitations:
             raise ValueError(
                 "established inventory forbids limitations; conditional/unavailable require them"
+            )
+        if any(condition not in self.limitations for condition in self.route_conditions):
+            raise ValueError("route-wide conditions must also be inventory limitations")
+        if self.route_conditions and self.status == InventoryStatus.ESTABLISHED:
+            raise ValueError("route-wide conditions forbid established inventory")
+        if self.route_conditions and any(
+            endpoint.surface is None
+            and (
+                endpoint.discovery_status != EndpointDiscoveryStatus.CONDITIONAL
+                or any(
+                    condition not in endpoint.discovery_conditions
+                    for condition in self.route_conditions
+                )
+            )
+            for endpoint in self.endpoints
+        ):
+            raise ValueError(
+                "native endpoints must be conditional and include every route-wide condition"
             )
         if self.status == InventoryStatus.UNAVAILABLE and any(
             endpoint.discovery_status != EndpointDiscoveryStatus.CONDITIONAL

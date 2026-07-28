@@ -47,12 +47,19 @@ def test_inventory_strength_is_structured_and_visible() -> None:
         source_line=9,
         reason="unknown plugin may register routes",
     )
-    inventory = EndpointInventory(status=InventoryStatus.CONDITIONAL, limitations=(limitation,))
+    inventory = EndpointInventory(
+        status=InventoryStatus.CONDITIONAL,
+        limitations=(limitation,),
+        route_conditions=(limitation,),
+    )
 
     json_result = json.loads(JsonFormatter().format_inventory(inventory))
+    yaml_result = yaml.safe_load(YamlFormatter().format_inventory(inventory))
     assert json_result["schema_version"] == 2
     assert json_result["inventory_status"] == "conditional"
     assert json_result["inventory_limitations"][0]["reason"] == limitation.reason
+    assert json_result["route_conditions"][0]["reason"] == limitation.reason
+    assert yaml_result["route_conditions"] == json_result["route_conditions"]
     assert json_result["endpoints"] == []
     for formatter in (
         YamlFormatter(),
