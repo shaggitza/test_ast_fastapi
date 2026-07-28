@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 from click.testing import CliRunner
 
@@ -71,6 +72,31 @@ def _project(tmp_path: Path) -> tuple[Path, Path]:
         encoding="utf-8",
     )
     return config, diff
+
+
+@pytest.mark.parametrize("length, accepted", [(256, True), (257, False)])
+def test_integrated_custom_resource_character_boundary(
+    tmp_path: Path, length: int, accepted: bool
+) -> None:
+    config_path, _diff = _project(tmp_path)
+    resource = "x" * length
+    main = tmp_path / "app" / "main.py"
+    main.write_text(
+        main.read_text(encoding="utf-8").replace("'orders'", repr(resource)),
+        encoding="utf-8",
+    )
+
+    mapper = ChangeMapper(
+        app_path=tmp_path / "app",
+        config=load_config(config_path),
+        secure_ast=True,
+        use_cache=False,
+    )
+
+    if accepted:
+        assert [item.identifier for item in mapper.registry] == [f"REACTOR topic:{resource}"]
+    else:
+        assert list(mapper.registry) == []
 
 
 def test_config_relative_custom_surface_reaches_changed_handler(tmp_path: Path) -> None:

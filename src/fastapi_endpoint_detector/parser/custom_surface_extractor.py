@@ -33,6 +33,11 @@ from fastapi_endpoint_detector.models.surface_contract import (
     SurfaceContract,
     SurfaceMatchKind,
 )
+from fastapi_endpoint_detector.parser._static_evaluation import (
+    MAX_CUSTOM_RESOURCE_CHARS,
+    StaticEvaluationResult,
+    StaticStringEvaluator,
+)
 
 
 @dataclass(frozen=True)
@@ -59,6 +64,29 @@ class _CallEvaluation:
     callable_resolution: tuple[str, InvocationKind, str | None] | None
     positional: tuple[_EvaluatedArgument, ...]
     keywords: tuple[_EvaluatedArgument, ...]
+
+
+@dataclass(frozen=True)
+class _ResolvedResources:
+    values: tuple[str, ...] | None
+    reason: str
+
+
+@dataclass(frozen=True)
+class _StartupRouteResult:
+    route: (
+        tuple[
+            str,
+            tuple[EndpointMethod, ...],
+            tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef],
+        ]
+        | None
+    )
+    failure: str | None = None
+
+
+def _resource_failure(result: StaticEvaluationResult, fallback: str) -> str:
+    return fallback if result.failure == "unsupported" else result.reason
 
 
 @dataclass
@@ -203,7 +231,21 @@ def _pattern_names(pattern: ast.pattern) -> set[str]:
     return set()
 
 
-class _StatementMutationVisitor(ast.NodeVisitor):
+class _IterativeBinOpVisitor(ast.NodeVisitor):
+    """Visit deeply associated binary-expression operands without Python recursion."""
+
+    def visit_BinOp(self, node: ast.BinOp) -> None:
+        pending: list[ast.expr] = [node]
+        while pending:
+            operand = pending.pop()
+            if isinstance(operand, ast.BinOp):
+                pending.append(operand.right)
+                pending.append(operand.left)
+            else:
+                self.visit(operand)
+
+
+class _StatementMutationVisitor(_IterativeBinOpVisitor):
     """Collect calls/mutations without entering deferred callable or class bodies."""
 
     def __init__(self) -> None:
@@ -231,7 +273,7 @@ class _StatementMutationVisitor(ast.NodeVisitor):
         return
 
 
-class _LoopBreakVisitor(ast.NodeVisitor):
+class _LoopBreakVisitor(_IterativeBinOpVisitor):
     """Detect a break owned by the current loop, excluding nested scopes/loops."""
 
     def __init__(self) -> None:
@@ -262,7 +304,7 @@ class _LoopBreakVisitor(ast.NodeVisitor):
         return
 
 
-class _EagerStateMutationVisitor(ast.NodeVisitor):
+class _EagerStateMutationVisitor(_IterativeBinOpVisitor):
     """Collect bindings that may change while directly executing statements."""
 
     def __init__(self) -> None:
@@ -396,7 +438,7 @@ class _FunctionScopeBindingVisitor(_EagerStateMutationVisitor):
         self.nonlocals.update(node.names)
 
 
-class _ClassScopeDeclarationVisitor(ast.NodeVisitor):
+class _ClassScopeDeclarationVisitor(_IterativeBinOpVisitor):
     """Collect declarations owned by one class body, excluding nested scopes."""
 
     def __init__(self) -> None:
@@ -531,7 +573,7 @@ class _StartupStatementEffectsVisitor(_EagerStateMutationVisitor):
             self.events.append(_StartupReturnEffect(node.value))
 
 
-class _ClassAttributeMutationVisitor(ast.NodeVisitor):
+class _ClassAttributeMutationVisitor(_IterativeBinOpVisitor):
     """Detect direct class-body rebinding without entering nested scopes."""
 
     def __init__(self, name: str) -> None:
@@ -602,7 +644,7 @@ class _ClassAttributeMutationVisitor(ast.NodeVisitor):
         self.visit(node.args)
 
 
-class _YieldVisitor(ast.NodeVisitor):
+class _YieldVisitor(_IterativeBinOpVisitor):
     """Detect yields in one callback body without entering nested callables."""
 
     def __init__(self, root: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
@@ -612,11 +654,13 @@ class _YieldVisitor(ast.NodeVisitor):
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         if node is self.root:
-            self.generic_visit(node)
+            for statement in node.body:
+                self.visit(statement)
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
         if node is self.root:
-            self.generic_visit(node)
+            for statement in node.body:
+                self.visit(statement)
 
     def visit_Lambda(self, _node: ast.Lambda) -> None:
         return
@@ -893,7 +937,7 @@ class CustomSurfaceExtractor:
             try:
                 source = path.read_text(encoding="utf-8")
                 tree = ast.parse(source, filename=str(path))
-            except (OSError, SyntaxError, UnicodeError) as exc:
+            except (OSError, RecursionError, SyntaxError, UnicodeError) as exc:
                 self._limitations.append(
                     EndpointDiscoveryCondition(
                         source_path=path,
@@ -1755,6 +1799,16 @@ class CustomSurfaceExtractor:
     ) -> None:
         if isinstance(expression, ast.Lambda):
             return
+        if isinstance(expression, ast.BinOp):
+            pending: list[ast.expr] = [expression]
+            while pending:
+                operand = pending.pop()
+                if isinstance(operand, ast.BinOp):
+                    pending.append(operand.right)
+                    pending.append(operand.left)
+                else:
+                    self._inspect_expression(module, operand, state, inherited_conditions)
+            return
         if isinstance(expression, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
             self._inspect_comprehension(module, expression, state, inherited_conditions)
             return
@@ -2163,7 +2217,8 @@ class CustomSurfaceExtractor:
                     )
                 )
                 continue
-            resources = self._resources(contract, call, function)
+            resource_result = self._resources(contract, call, function)
+            resources = resource_result.values
             if resources is None:
                 self._limitations.append(
                     EndpointDiscoveryCondition(
@@ -2171,7 +2226,7 @@ class CustomSurfaceExtractor:
                         source_line=call.lineno,
                         reason=(
                             f"custom surface contract {contract.id!r} matched but "
-                            "resource set was not finite literal data"
+                            f"{resource_result.reason}"
                         ),
                     )
                 )
@@ -3295,15 +3350,18 @@ class CustomSurfaceExtractor:
                     "startup route registration appears in unsupported control flow or expression",
                 )
                 return
-            route = self._startup_route_from_call(call, state, operation)
-            if route is None:
+            route_result = self._startup_route_from_call(call, state, operation)
+            if route_result.route is None:
                 self._record_startup_route_limitation(
                     module,
                     call.lineno,
-                    "startup route registration has dynamic or unresolved arguments",
+                    route_result.failure
+                    or "startup route registration has dynamic or unresolved arguments",
                 )
                 return
-            self._append_startup_route(route, call, module, inherited_conditions, lifecycle)
+            self._append_startup_route(
+                route_result.route, call, module, inherited_conditions, lifecycle
+            )
             return
 
         if self._call_escapes_exact_receiver(call, state, token):
@@ -3556,18 +3614,11 @@ class CustomSurfaceExtractor:
         call: ast.Call,
         state: dict[str, _Binding | None],
         operation: str,
-    ) -> (
-        tuple[
-            str,
-            tuple[EndpointMethod, ...],
-            tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef],
-        ]
-        | None
-    ):
+    ) -> _StartupRouteResult:
         if any(isinstance(argument, ast.Starred) for argument in call.args) or any(
             keyword.arg is None for keyword in call.keywords
         ):
-            return None
+            return _StartupRouteResult(None)
 
         def selected(index: int, name: str) -> ast.expr | None:
             if index < len(call.args):
@@ -3579,14 +3630,20 @@ class CustomSurfaceExtractor:
 
         path_expression = selected(0, "path")
         handler_expression = selected(1, "endpoint")
-        paths = self._literal_resources(path_expression)
+        path_result = self._literal_startup_path(path_expression)
+        path = path_result.string
+        path_failure = (
+            f"startup route path {path_result.reason}"
+            if path_result.failure not in {None, "unsupported"}
+            else None
+        )
         handler = (
             self._resolve_handler(handler_expression, state)
             if handler_expression is not None
             else None
         )
-        if paths is None or len(paths) != 1 or handler is None:
-            return None
+        if path is None or handler is None:
+            return _StartupRouteResult(None, path_failure)
 
         methods: tuple[EndpointMethod, ...]
         if operation in {"add_api_websocket_route", "add_websocket_route"}:
@@ -3594,14 +3651,20 @@ class CustomSurfaceExtractor:
         else:
             method_values = [keyword.value for keyword in call.keywords if keyword.arg == "methods"]
             if len(method_values) > 1:
-                return None
+                return _StartupRouteResult(None)
             methods_expression = method_values[0] if method_values else None
             if methods_expression is None:
                 methods = (EndpointMethod.GET,)
             else:
-                values = self._literal_resources(methods_expression)
+                method_result = self._literal_startup_methods(methods_expression)
+                values = method_result.values
+                method_failure = (
+                    f"startup route methods {method_result.reason}"
+                    if method_result.failure not in {None, "unsupported"}
+                    else None
+                )
                 if values is None or not values:
-                    return None
+                    return _StartupRouteResult(None, method_failure)
                 try:
                     methods = tuple(
                         sorted(
@@ -3610,10 +3673,10 @@ class CustomSurfaceExtractor:
                         )
                     )
                 except ValueError:
-                    return None
+                    return _StartupRouteResult(None)
                 if EndpointMethod.CUSTOM in methods or EndpointMethod.WEBSOCKET in methods:
-                    return None
-        return paths[0], methods, handler
+                    return _StartupRouteResult(None)
+        return _StartupRouteResult((path, methods, handler))
 
     def _record_startup_route_limitation(self, module: _Module, line: int, reason: str) -> None:
         self._limitations.append(
@@ -3941,34 +4004,45 @@ class CustomSurfaceExtractor:
         return boundary.lineno, function.end_lineno or boundary.lineno
 
     @classmethod
-    def _resources(  # noqa: PLR0912
+    def _resources(  # noqa: PLR0911, PLR0912 - selector forms stay explicit
         cls,
         contract: SurfaceContract,
         call: ast.Call,
         handler: ast.FunctionDef | ast.AsyncFunctionDef,
-    ) -> tuple[str, ...] | None:
+    ) -> _ResolvedResources:
         """Resolve one bounded literal resource set without widening dynamic values."""
         selector = contract.surface.resource
         values: tuple[str, ...]
+        failure = "resource set was not finite literal data"
         if selector.kind == ResourceSelectorKind.HANDLER_NAME:
             values = (cls._handler_resource(handler.name, selector.handler_name_normalization),)
         elif selector.kind == ResourceSelectorKind.LITERAL:
             if selector.value is None:
-                return None
+                return _ResolvedResources(None, failure)
             values = (selector.value,)
         elif selector.kind == ResourceSelectorKind.ARGUMENTS:
             start = selector.index or 0
             selected = call.args[start:]
-            groups = [cls._literal_resources(expression) for expression in selected]
-            if not groups or any(group is None for group in groups):
-                return None
-            values = tuple(value for group in groups for value in group or ())
+            if not selected:
+                return _ResolvedResources(None, failure)
+            evaluator = StaticStringEvaluator(max_string_chars=MAX_CUSTOM_RESOURCE_CHARS)
+            collected: list[str] = []
+            for expression in selected:
+                result = evaluator.evaluate_more_values(expression)
+                if result.values is None:
+                    return _ResolvedResources(None, _resource_failure(result, failure))
+                if len(result.values) > cls.MAX_RESOURCES_PER_REGISTRATION - len(collected):
+                    return _ResolvedResources(
+                        None, "bounded static evaluation values limit exceeded"
+                    )
+                collected.extend(result.values)
+            values = tuple(collected)
         elif selector.kind == ResourceSelectorKind.KEYWORD_OR_HANDLER_NAME:
-            expression = next(
+            selected_keyword_expression = next(
                 (item.value for item in call.keywords if item.arg == selector.name),
                 None,
             )
-            if expression is None:
+            if selected_keyword_expression is None:
                 values = (
                     cls._handler_resource(
                         handler.name,
@@ -3976,10 +4050,10 @@ class CustomSurfaceExtractor:
                     ),
                 )
             else:
-                resolved = cls._literal_resources(expression)
-                if resolved is None:
-                    return None
-                values = resolved
+                result = cls._literal_resource_result(selected_keyword_expression)
+                if result.values is None:
+                    return _ResolvedResources(None, _resource_failure(result, failure))
+                values = result.values
         else:
             if selector.kind == ResourceSelectorKind.ARGUMENT:
                 index = selector.index or 0
@@ -3999,24 +4073,18 @@ class CustomSurfaceExtractor:
                     (item.value for item in call.keywords if item.arg == selector.name),
                     None,
                 )
-            resolved = cls._literal_resources(selected_expression)
-            if resolved is None:
-                return None
-            values = resolved
-        normalized = tuple(
-            sorted(
-                {
-                    value
-                    for value in values
-                    if value is not None and value.strip() and len(value) <= 256
-                }
-            )
-        )
-        if len(normalized) != len(set(values)) or not (
-            1 <= len(normalized) <= cls.MAX_RESOURCES_PER_REGISTRATION
+            result = cls._literal_resource_result(selected_expression)
+            if result.values is None:
+                return _ResolvedResources(None, _resource_failure(result, failure))
+            values = result.values
+        normalized = tuple(sorted({value for value in values if value.strip()}))
+        if (
+            any(len(value) > MAX_CUSTOM_RESOURCE_CHARS for value in values)
+            or len(normalized) != len(set(values))
+            or not (1 <= len(normalized) <= cls.MAX_RESOURCES_PER_REGISTRATION)
         ):
-            return None
-        return normalized
+            return _ResolvedResources(None, failure)
+        return _ResolvedResources(normalized, "")
 
     @staticmethod
     def _handler_resource(name: str, normalization: HandlerNameNormalization) -> str:
@@ -4024,19 +4092,19 @@ class CustomSurfaceExtractor:
             name.replace("_", "-") if normalization == HandlerNameNormalization.KEBAB_CASE else name
         )
 
-    @classmethod
-    def _literal_resources(cls, expression: ast.expr | None) -> tuple[str, ...] | None:
-        if isinstance(expression, ast.Constant) and isinstance(expression.value, str):
-            return (expression.value,)
-        if isinstance(expression, (ast.List, ast.Tuple, ast.Set)):
-            values: list[str] = []
-            for item in expression.elts:
-                resolved = cls._literal_resources(item)
-                if resolved is None:
-                    return None
-                values.extend(resolved)
-            return tuple(values)
-        return None
+    @staticmethod
+    def _literal_resource_result(expression: ast.expr | None) -> StaticEvaluationResult:
+        return StaticStringEvaluator(max_string_chars=MAX_CUSTOM_RESOURCE_CHARS).evaluate_values(
+            expression
+        )
+
+    @staticmethod
+    def _literal_startup_path(expression: ast.expr | None) -> StaticEvaluationResult:
+        return StaticStringEvaluator().evaluate_string(expression)
+
+    @staticmethod
+    def _literal_startup_methods(expression: ast.expr | None) -> StaticEvaluationResult:
+        return StaticStringEvaluator().evaluate_flat_values(expression)
 
     @staticmethod
     def _source_hash(module: _Module, node: ast.AST) -> str:

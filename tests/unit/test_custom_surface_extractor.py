@@ -2117,3 +2117,111 @@ def test_handler_redefinition_is_ambiguous_and_inventory_is_conditional(tmp_path
     assert inventory.endpoints == []
     assert inventory.status == InventoryStatus.CONDITIONAL
     assert "handler was unresolved" in inventory.limitations[0].reason
+
+
+@pytest.mark.parametrize("count, accepted", [(32, True), (33, False)])
+def test_custom_raw_duplicates_use_the_32_value_budget(
+    tmp_path: Path, count: int, accepted: bool
+) -> None:
+    duplicates = ", ".join(repr("orders") for _ in range(count))
+    (tmp_path / "main.py").write_text(
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        f"@reactor.listen([{duplicates}])\n"
+        "async def process(): pass\n",
+        encoding="utf-8",
+    )
+    contracts = _contracts(tmp_path)
+
+    inventory = CustomSurfaceExtractor(
+        tmp_path, load_surface_contracts(contracts)
+    ).extract_inventory()
+
+    if accepted:
+        assert [endpoint.identifier for endpoint in inventory.endpoints] == ["REACTOR topic:orders"]
+        assert inventory.status == InventoryStatus.ESTABLISHED
+    else:
+        assert inventory.endpoints == []
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert "bounded static evaluation values limit exceeded" in inventory.limitations[0].reason
+
+
+def test_custom_arguments_share_one_aggregate_value_budget(tmp_path: Path) -> None:
+    group = "[" + ", ".join(repr(f"topic-{index}") for index in range(17)) + "]"
+    (tmp_path / "main.py").write_text(
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        f"@reactor.listen({group}, {group})\n"
+        "async def process(): pass\n",
+        encoding="utf-8",
+    )
+    path = _contracts(tmp_path)
+    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    payload["contracts"][0]["surface"]["resource"] = {"kind": "arguments", "index": 0}
+    path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    inventory = CustomSurfaceExtractor(tmp_path, load_surface_contracts(path)).extract_inventory()
+
+    assert inventory.endpoints == []
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert "bounded static evaluation values limit exceeded" in inventory.limitations[0].reason
+
+
+def test_custom_resource_character_budget_is_atomic_and_deterministic(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        f"@reactor.listen(['ok', {'x' * 257!r}])\n"
+        "async def process(): pass\n",
+        encoding="utf-8",
+    )
+    contracts = _contracts(tmp_path)
+
+    inventory = CustomSurfaceExtractor(
+        tmp_path, load_surface_contracts(contracts)
+    ).extract_inventory()
+
+    assert inventory.endpoints == []
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert "bounded static evaluation string limit exceeded" in inventory.limitations[0].reason
+
+
+def test_parser_accepted_deep_custom_decorator_expression_fails_closed(
+    tmp_path: Path,
+) -> None:
+    expression = " + ".join(repr("x") for _ in range(1_200))
+    (tmp_path / "main.py").write_text(
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        f"@reactor.listen({expression})\n"
+        "async def process(): pass\n",
+        encoding="utf-8",
+    )
+    contracts = load_surface_contracts(_contracts(tmp_path))
+
+    inventory = CustomSurfaceExtractor(tmp_path, contracts).extract_inventory()
+
+    assert inventory.endpoints == []
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert inventory.limitations
+
+
+def test_custom_module_parser_recursion_error_is_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "main.py"
+    source.write_text("from framework import Reactor\nreactor = Reactor()\n", encoding="utf-8")
+    contracts = load_surface_contracts(_contracts(tmp_path))
+
+    def fail_parse(*_args: object, **_kwargs: object) -> object:
+        raise RecursionError("bounded parser probe")
+
+    monkeypatch.setattr(
+        "fastapi_endpoint_detector.parser.custom_surface_extractor.ast.parse", fail_parse
+    )
+
+    inventory = CustomSurfaceExtractor(source, contracts).extract_inventory()
+
+    assert inventory.status == InventoryStatus.UNAVAILABLE
+    assert inventory.endpoints == []
+    assert any("unparseable Python module" in item.reason for item in inventory.limitations)

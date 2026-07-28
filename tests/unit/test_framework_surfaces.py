@@ -346,6 +346,27 @@ def test_startup_callback_adds_only_conditional_direct_routes(tmp_path: Path) ->
     assert any("only if framework startup" in item.reason for item in route.discovery_conditions)
 
 
+def test_parser_accepted_deep_startup_route_expression_fails_closed(tmp_path: Path) -> None:
+    expression = " + ".join(repr("x") for _ in range(1_200))
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n\n"
+        "async def late(): return None\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        f"    app.add_api_route({expression}, late)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == [
+        "FRAMEWORK.LIFECYCLE event:startup"
+    ]
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any("startup route path" in item.reason for item in inventory.limitations)
+
+
 def test_startup_route_receiver_rebinding_fails_closed(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text(
         "from fastapi import FastAPI\n\n"
@@ -1216,3 +1237,69 @@ def test_framework_preset_loads_once() -> None:
     assert first is config.load_surface_contract_snapshot()
     assert first is not None
     assert first.document.preset.id == "framework-callbacks"
+
+
+def test_startup_route_arguments_require_scalar_path_and_flat_bounded_methods(
+    tmp_path: Path,
+) -> None:
+    too_many = ", ".join(repr("GET") for _ in range(33))
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n\n"
+        "async def late(): return None\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    app.add_api_route(['/container'], late, methods=['GET'])\n"
+        "    app.add_api_route('/scalar', late, methods='GET')\n"
+        "    app.add_api_route('/nested', late, methods=[['GET']])\n"
+        f"    app.add_api_route('/many', late, methods=[{too_many}])\n"
+        "    app.add_api_route('/valid', late, methods=['post', 'GET', 'GET'])\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == [
+        "FRAMEWORK.LIFECYCLE event:startup",
+        "GET,POST /valid",
+    ]
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert inventory.route_conditions == ()
+    argument_limitations = [
+        item
+        for item in inventory.limitations
+        if "startup route registration" in item.reason or "startup route methods" in item.reason
+    ]
+    assert len(argument_limitations) == 4
+    assert any("values limit exceeded" in item.reason for item in argument_limitations)
+
+
+def test_startup_over_budget_reason_is_local_and_lifecycle_evidence_remains(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n\n"
+        "async def late(): return None\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        f"    app.add_api_route({'/' + 'x' * 4096!r}, late, methods=['POST'])\n"
+        "    app.add_api_route('/valid', late, methods=['POST'])\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == [
+        "FRAMEWORK.LIFECYCLE event:startup",
+        "POST /valid",
+    ]
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert inventory.route_conditions == ()
+    budget_limitations = [
+        item
+        for item in inventory.limitations
+        if "bounded static evaluation string limit exceeded" in item.reason
+    ]
+    assert len(budget_limitations) == 1
+    assert budget_limitations[0].source_line == 9

@@ -21,6 +21,10 @@ from fastapi_endpoint_detector.models.endpoint import (
     HandlerInfo,
     InventoryStatus,
 )
+from fastapi_endpoint_detector.parser._static_evaluation import (
+    MAX_STATIC_STRING_CHARS,
+    StaticStringEvaluator,
+)
 
 
 class SecureASTExtractorError(Exception):
@@ -39,7 +43,7 @@ class _Object:
     key: ObjectKey
     variable: str
     kind: ObjectKind
-    prefix: str
+    prefix: str | None
     line: int
     discovery_conditions: tuple[EndpointDiscoveryCondition, ...] = ()
 
@@ -427,7 +431,7 @@ class SecureASTExtractor:
             if owner in stack:
                 return
             item = objects[owner]
-            prefix = _join_paths(inherited, item.prefix)
+            prefix = _join_paths(inherited, item.prefix) if item.prefix is not None else None
             object_conditions = _merge_discovery_conditions(
                 inherited_conditions,
                 item.discovery_conditions,
@@ -451,6 +455,21 @@ class SecureASTExtractor:
                 inventory_only_limitations.get(owner, ()),
                 ordered_conditions,
             )
+            if prefix is None:
+                inventory_limitations = _merge_discovery_conditions(
+                    inventory_limitations,
+                    (
+                        EndpointDiscoveryCondition(
+                            source_path=modules[item.key[0]].path,
+                            source_line=item.line,
+                            reason=(
+                                "native route prefix is unresolved or exceeds "
+                                "static resource limits"
+                            ),
+                        ),
+                    ),
+                )
+                return
             for route in routes_by_owner.get(owner, []):
                 if cutoff is not None and route.line > cutoff:
                     continue
@@ -472,9 +491,22 @@ class SecureASTExtractor:
                     route.discovery_conditions,
                     route_effect_conditions,
                 )
+                endpoint_path = _join_paths(prefix, route.path)
+                if endpoint_path is None:
+                    inventory_limitations = _merge_discovery_conditions(
+                        inventory_limitations,
+                        (
+                            EndpointDiscoveryCondition(
+                                source_path=modules[owner[0]].path,
+                                source_line=route.line,
+                                reason="native route path exceeds static resource limits",
+                            ),
+                        ),
+                    )
+                    continue
                 found.append(
                     Endpoint(
-                        path=_join_paths(prefix, route.path),
+                        path=endpoint_path,
                         methods=[EndpointMethod(method) for method in route.methods],
                         handler=route.handler,
                         discovery_status=(
@@ -501,9 +533,22 @@ class SecureASTExtractor:
                         and (limitation.origin_module != owner[0] or edge.line >= limitation.order)
                     )
                 )
+                edge_prefix = _join_paths(prefix, edge.prefix)
+                if edge_prefix is None:
+                    inventory_limitations = _merge_discovery_conditions(
+                        inventory_limitations,
+                        (
+                            EndpointDiscoveryCondition(
+                                source_path=modules[owner[0]].path,
+                                source_line=edge.line,
+                                reason="native composed prefix exceeds static resource limits",
+                            ),
+                        ),
+                    )
+                    continue
                 visit(
                     edge.child,
-                    _join_paths(prefix, edge.prefix),
+                    edge_prefix,
                     edge.child_cutoff,
                     edge.limitation_cutoff,
                     stack | {owner},
@@ -574,7 +619,7 @@ class SecureASTExtractor:
                 with tokenize.open(path) as source_file:
                     source = source_file.read()
                 tree = ast.parse(source, filename=str(path))
-            except (OSError, SyntaxError, UnicodeError) as error:
+            except (OSError, RecursionError, SyntaxError, UnicodeError) as error:
                 parse_failures.append(
                     EndpointDiscoveryCondition(
                         source_path=path.resolve(),
@@ -748,7 +793,12 @@ class SecureASTExtractor:
                 constructor = self._constructor_kind(value, module, node.lineno)
                 if constructor is not None:
                     assert isinstance(value, ast.Call)
-                    prefix = self._keyword_string(value, "prefix", module, node.lineno) or ""
+                    prefix_expression = _keyword_expr(value, "prefix")
+                    prefix = (
+                        ""
+                        if prefix_expression is None
+                        else self._literal_string(prefix_expression, module, node.lineno)
+                    )
                     item = _Object(
                         key=(module.name, f"{assigned_name}@{_node_token(node)}"),
                         variable=assigned_name,
@@ -1105,17 +1155,19 @@ class SecureASTExtractor:
             for item in history
         }
 
-        def literal(expression: ast.expr | None, line: int) -> str | None:
-            if isinstance(expression, ast.Name):
-                if expression.id in local_strings:
-                    return local_strings[expression.id]
-                if expression.id in local_bindings:
-                    return None
-            if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add):
-                left = literal(expression.left, line)
-                right = literal(expression.right, line)
-                return left + right if left is not None and right is not None else None
-            return self._literal_string(expression, module, call_line)
+        def resolve_literal_name(name: str) -> str | None:
+            if name in local_strings:
+                return local_strings[name]
+            if name in local_bindings:
+                return None
+            return self._literal_name(module, name, call_line)
+
+        def literal(expression: ast.expr | None, _line: int) -> str | None:
+            return (
+                StaticStringEvaluator(resolve_name=resolve_literal_name)
+                .evaluate_string(expression)
+                .string
+            )
 
         def object_for(expression: ast.expr | None) -> _Object | None:
             if isinstance(expression, ast.Name):
@@ -1189,6 +1241,15 @@ class SecureASTExtractor:
             )
             if condition not in factory_conditions:
                 factory_conditions.append(condition)
+
+        def limit_registration(owner: _Object, statement: ast.AST, reason: str) -> None:
+            self._record_object_limitation(
+                module,
+                owner,
+                statement,
+                reason,
+                inventory_only=True,
+            )
 
         def modeled_state_assignment(statement: ast.Assign | ast.AnnAssign) -> bool:
             targets = (
@@ -1338,7 +1399,14 @@ class SecureASTExtractor:
                         else (module.name, f"{namespace}:{assigned}@{statement_token}")
                     )
                     variable = desired_variable if assigned == returned_name else assigned
-                    prefix = literal(_keyword_expr(value, "prefix"), statement.lineno) or ""
+                    prefix_expression = _keyword_expr(value, "prefix")
+                    prefix = (
+                        ""
+                        if prefix_expression is None
+                        else literal(prefix_expression, statement.lineno)
+                    )
+                    if prefix is None:
+                        conditionalize(statement, "factory router prefix is unresolved")
                     item = _Object(key, variable, constructor, prefix, call_line)
                     local_objects[assigned] = item
                     local_strings.pop(assigned, None)
@@ -1427,15 +1495,27 @@ class SecureASTExtractor:
                     )
                     path = literal(path_expr, statement.lineno)
                     if path is None:
+                        limit_registration(
+                            owner,
+                            statement,
+                            "factory decorated route path is unresolved",
+                        )
                         continue
                     methods_expr = _keyword_expr(decorator, "methods")
                     methods = (
-                        _literal_methods(methods_expr)
+                        self._literal_methods(methods_expr, module, call_line, resolve_literal_name)
                         if method == "api_route" and methods_expr is not None
                         else (("GET",) if method == "api_route" else (method.upper(),))
                     )
                     if method == "websocket":
                         methods = ("WEBSOCKET",)
+                    if not methods:
+                        limit_registration(
+                            owner,
+                            statement,
+                            "factory decorated route methods are unresolved",
+                        )
+                        continue
                     if methods:
                         routes.append(
                             _Route(
@@ -1490,14 +1570,25 @@ class SecureASTExtractor:
                 child_expr = call.args[0] if call.args else _keyword_expr(call, "router")
                 child = object_for(child_expr)
                 if child is None or child.kind != "router":
-                    if not allow_conditional:
-                        return None
-                    conditionalize(
+                    limit_registration(
+                        parent,
                         statement,
-                        "unresolved router registration may mutate the explicitly selected app",
+                        "factory router registration is unresolved",
                     )
                     continue
-                prefix = literal(_keyword_expr(call, "prefix"), statement.lineno) or ""
+                prefix_expression = _keyword_expr(call, "prefix")
+                prefix = (
+                    ""
+                    if prefix_expression is None
+                    else literal(prefix_expression, statement.lineno)
+                )
+                if prefix is None:
+                    limit_registration(
+                        parent,
+                        statement,
+                        "factory router include prefix is unresolved",
+                    )
+                    continue
                 cutoff = (
                     call_order
                     if child.key in module_object_keys and child.key[0] == module.name
@@ -1525,11 +1616,10 @@ class SecureASTExtractor:
                 path = literal(path_expr, statement.lineno)
                 child = object_for(child_expr)
                 if path is None or child is None or child.kind != "app":
-                    if not allow_conditional:
-                        return None
-                    conditionalize(
+                    limit_registration(
+                        parent,
                         statement,
-                        "unresolved mount may mutate the explicitly selected app",
+                        "factory mount registration is unresolved",
                     )
                     continue
                 # Mount retains this exact object; later name rebinding cannot redirect it.
@@ -1558,16 +1648,17 @@ class SecureASTExtractor:
                 if call_function.attr == "add_api_route":
                     methods_expr = _keyword_expr(call, "methods")
                     methods = (
-                        _literal_methods(methods_expr) if methods_expr is not None else ("GET",)
+                        self._literal_methods(methods_expr, module, call_line, resolve_literal_name)
+                        if methods_expr is not None
+                        else ("GET",)
                     )
                 else:
                     methods = ("WEBSOCKET",)
                 if path is None or imperative_handler is None or not methods:
-                    if not allow_conditional:
-                        return None
-                    conditionalize(
+                    limit_registration(
+                        parent,
                         statement,
-                        "unresolved imperative route may mutate the explicitly selected app",
+                        "factory imperative route is unresolved",
                     )
                     continue
                 routes.append(
@@ -1661,8 +1752,21 @@ class SecureASTExtractor:
             operation_order[0] += 1
             return operation_order[0]
 
-        def limit(current_module: _Module, owner: _Object, node: ast.AST, reason: str) -> None:
-            self._record_object_limitation(current_module, owner, node, reason)
+        def limit(
+            current_module: _Module,
+            owner: _Object,
+            node: ast.AST,
+            reason: str,
+            *,
+            inventory_only: bool = False,
+        ) -> None:
+            self._record_object_limitation(
+                current_module,
+                owner,
+                node,
+                reason,
+                inventory_only=inventory_only,
+            )
 
         def apply(  # noqa: PLR0912, PLR0915
             current_module: _Module,
@@ -1734,16 +1838,19 @@ class SecureASTExtractor:
                         )
                 return self._resolve_object(expression, current_module, aliases, modules, line)
 
-            def literal(expression: ast.expr | None, line: int) -> str | None:
-                if isinstance(expression, ast.Name) and expression.id in local_strings:
-                    return local_strings[expression.id]
-                if isinstance(expression, ast.Name) and expression.id in bound_names:
+            def resolve_literal_name(name: str, line: int) -> str | None:
+                if name in local_strings:
+                    return local_strings[name]
+                if name in bound_names:
                     return None
-                if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add):
-                    left = literal(expression.left, line)
-                    right = literal(expression.right, line)
-                    return left + right if left is not None and right is not None else None
-                return self._literal_string(expression, current_module, line)
+                return self._literal_name(current_module, name, line)
+
+            def literal(expression: ast.expr | None, line: int) -> str | None:
+                return (
+                    StaticStringEvaluator(resolve_name=partial(resolve_literal_name, line=line))
+                    .evaluate_string(expression)
+                    .string
+                )
 
             def handler_for(expression: ast.expr | None, line: int) -> HandlerInfo | None:
                 if isinstance(expression, ast.Name) and expression.id in local_handlers:
@@ -1848,6 +1955,7 @@ class SecureASTExtractor:
                         local_objects[name] = aliased
                         local_strings.pop(name, None)
                     else:
+                        value_string = literal(value, statement.lineno)
                         escaped = [
                             owner
                             for tracked_name, owner in local_objects.items()
@@ -1864,7 +1972,7 @@ class SecureASTExtractor:
                                 "bootstrap object escapes through assignment",
                             )
                         local_objects.pop(name, None)
-                        value_string = literal(value, statement.lineno)
+                        local_strings.pop(name, None)
                         if value_string is not None:
                             local_strings[name] = value_string
                     continue
@@ -1920,6 +2028,7 @@ class SecureASTExtractor:
                             parent,
                             statement,
                             "starred bootstrap registration arguments are unsupported",
+                            inventory_only=True,
                         )
                         continue
                     positional_names = {
@@ -1939,6 +2048,7 @@ class SecureASTExtractor:
                             parent,
                             statement,
                             "bootstrap registration arguments are ambiguous",
+                            inventory_only=True,
                         )
                         continue
                     order = next_order()
@@ -1953,10 +2063,15 @@ class SecureASTExtractor:
                                 parent,
                                 statement,
                                 "bootstrap router prefix is unresolved",
+                                inventory_only=True,
                             )
                         elif child is None or child.kind != "router":
                             limit(
-                                current_module, parent, statement, "bootstrap router is unresolved"
+                                current_module,
+                                parent,
+                                statement,
+                                "bootstrap router is unresolved",
+                                inventory_only=True,
                             )
                         else:
                             edges.append(
@@ -1979,7 +2094,11 @@ class SecureASTExtractor:
                         child = object_for(child_expr, line)
                         if path is None or child is None or child.kind != "app":
                             limit(
-                                current_module, parent, statement, "bootstrap mount is unresolved"
+                                current_module,
+                                parent,
+                                statement,
+                                "bootstrap mount is unresolved",
+                                inventory_only=True,
                             )
                         else:
                             edges.append(
@@ -2004,13 +2123,22 @@ class SecureASTExtractor:
                         if operation == "add_api_route":
                             methods_expr = _keyword_expr(call, "methods")
                             methods = (
-                                _literal_methods(methods_expr)
+                                self._literal_methods(
+                                    methods_expr,
+                                    current_module,
+                                    line,
+                                    partial(resolve_literal_name, line=line),
+                                )
                                 if methods_expr is not None
                                 else ("GET",)
                             )
                         if path is None or handler is None or not methods:
                             limit(
-                                current_module, parent, statement, "bootstrap route is unresolved"
+                                current_module,
+                                parent,
+                                statement,
+                                "bootstrap route is unresolved",
+                                inventory_only=True,
                             )
                         else:
                             routes.append(_Route(parent.key, path, methods, handler, order))
@@ -2569,6 +2697,16 @@ class SecureASTExtractor:
         def visit(  # noqa: PLR0912, PLR0915 - explicit executed-effect taxonomy
             node: ast.AST, *, conditional: bool
         ) -> None:
+            if isinstance(node, ast.BinOp):
+                pending: list[ast.expr] = [node]
+                while pending:
+                    operand = pending.pop()
+                    if isinstance(operand, ast.BinOp):
+                        pending.append(operand.right)
+                        pending.append(operand.left)
+                    else:
+                        visit(operand, conditional=conditional)
+                return
             if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
                 loop_evidence = node.iter if isinstance(node, ast.comprehension) else node
                 for owner in referenced_objects(node.iter, loop_evidence.lineno):
@@ -2910,7 +3048,9 @@ class SecureASTExtractor:
                 if call.func.attr == "add_api_route":
                     methods_expr = _keyword_expr(call, "methods")
                     methods = (
-                        _literal_methods(methods_expr) if methods_expr is not None else ("GET",)
+                        self._literal_methods(methods_expr, module, node.lineno)
+                        if methods_expr is not None
+                        else ("GET",)
                     )
                 else:
                     methods = ("WEBSOCKET",)
@@ -2955,7 +3095,11 @@ class SecureASTExtractor:
             return None
         if method == "api_route":
             methods_expr = _keyword_expr(decorator, "methods")
-            methods = _literal_methods(methods_expr) if methods_expr is not None else ("GET",)
+            methods = (
+                self._literal_methods(methods_expr, module, line)
+                if methods_expr is not None
+                else ("GET",)
+            )
         else:
             methods = ("WEBSOCKET",) if method == "websocket" else (method.upper(),)
         return owner, path, methods
@@ -2997,7 +3141,21 @@ class SecureASTExtractor:
                         inventory_only=True,
                     )
                     continue
-                prefix = self._keyword_string(call, "prefix", module, node.lineno) or ""
+                prefix_expression = _keyword_expr(call, "prefix")
+                prefix = (
+                    ""
+                    if prefix_expression is None
+                    else self._literal_string(prefix_expression, module, node.lineno)
+                )
+                if prefix is None:
+                    self._record_object_limitation(
+                        module,
+                        parent,
+                        node,
+                        "included router prefix could not be resolved",
+                        inventory_only=True,
+                    )
+                    continue
                 cutoff = _node_order(node) if child.key[0] == module.name else None
                 module.modeled_route_effects.add(_node_order(call))
                 edges.append(
@@ -3146,43 +3304,43 @@ class SecureASTExtractor:
                     return self._handler(target, function)
         return None
 
-    def _literal_string(  # noqa: PLR0911 - bounded expression taxonomy
+    def _literal_name(self, module: _Module, name: str, line: int) -> str | None:
+        history = [item for item in module.strings.get(name, []) if item[0] <= line]
+        if not history:
+            return None
+        item_line, value = history[-1]
+        return value if item_line == self._latest_binding_line(module, name, line) else None
+
+    def _literal_string(
         self, expression: ast.expr | None, module: _Module, line: int
     ) -> str | None:
-        if isinstance(expression, ast.Constant) and isinstance(expression.value, str):
-            return expression.value
-        if isinstance(expression, ast.Name):
-            history = [item for item in module.strings.get(expression.id, []) if item[0] <= line]
-            if not history:
-                return None
-            item_line, value = history[-1]
-            return (
-                value
-                if item_line == self._latest_binding_line(module, expression.id, line)
-                else None
+        return (
+            StaticStringEvaluator(resolve_name=lambda name: self._literal_name(module, name, line))
+            .evaluate_string(expression)
+            .string
+        )
+
+    def _literal_methods(
+        self,
+        expression: ast.expr,
+        module: _Module,
+        line: int,
+        local_resolver: Callable[[str], str | None] | None = None,
+    ) -> tuple[str, ...]:
+        result = StaticStringEvaluator(
+            resolve_name=(
+                local_resolver
+                if local_resolver is not None
+                else lambda name: self._literal_name(module, name, line)
             )
-        if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add):
-            left = self._literal_string(expression.left, module, line)
-            right = self._literal_string(expression.right, module, line)
-            return left + right if left is not None and right is not None else None
-        if isinstance(expression, ast.JoinedStr):
-            parts: list[str] = []
-            for joined_value in expression.values:
-                if isinstance(joined_value, ast.Constant) and isinstance(joined_value.value, str):
-                    parts.append(joined_value.value)
-                    continue
-                if (
-                    not isinstance(joined_value, ast.FormattedValue)
-                    or joined_value.conversion != -1
-                    or joined_value.format_spec is not None
-                ):
-                    return None
-                resolved = self._literal_string(joined_value.value, module, line)
-                if resolved is None:
-                    return None
-                parts.append(resolved)
-            return "".join(parts)
-        return None
+        ).evaluate_flat_values(expression)
+        if result.values is None or not result.values:
+            return ()
+        allowed = {method.upper() for method in self.HTTP_METHODS if method != "websocket"}
+        normalized = {value.upper() for value in result.values}
+        if not normalized or not normalized <= allowed:
+            return ()
+        return tuple(sorted(normalized))
 
     def _keyword_string(self, call: ast.Call, name: str, module: _Module, line: int) -> str | None:
         return self._literal_string(_keyword_expr(call, name), module, line)
@@ -3229,12 +3387,26 @@ def _returns_outside_nested_functions(statements: list[ast.stmt]) -> list[ast.Re
     return returns
 
 
+class _IterativeBinOpVisitor(ast.NodeVisitor):
+    """Visit deeply associated binary-expression operands without Python recursion."""
+
+    def visit_BinOp(self, node: ast.BinOp) -> None:
+        pending: list[ast.expr] = [node]
+        while pending:
+            operand = pending.pop()
+            if isinstance(operand, ast.BinOp):
+                pending.append(operand.right)
+                pending.append(operand.left)
+            else:
+                self.visit(operand)
+
+
 def _function_bindings(
     function: ast.FunctionDef | ast.AsyncFunctionDef,
 ) -> set[str]:
     """Collect bindings in one function scope without descending into nested scopes."""
 
-    class BindingVisitor(ast.NodeVisitor):
+    class BindingVisitor(_IterativeBinOpVisitor):
         def __init__(self) -> None:
             self.names: set[str] = set()
 
@@ -3296,7 +3468,7 @@ def _executed_named_expr_bindings(
 ) -> list[tuple[str, ast.expr]]:
     """Return exact assignment-expression bindings from definitely executed headers."""
 
-    class NamedExpressionVisitor(ast.NodeVisitor):
+    class NamedExpressionVisitor(_IterativeBinOpVisitor):
         def __init__(self) -> None:
             self.bindings: list[tuple[str, ast.expr]] = []
 
@@ -3378,7 +3550,7 @@ def _class_global_bound_names(
 ) -> set[str]:
     """Return module names rebound by ``global`` statements in executed class bodies."""
 
-    class ClassScopeVisitor(ast.NodeVisitor):
+    class ClassScopeVisitor(_IterativeBinOpVisitor):
         def __init__(self) -> None:
             self.globals: set[str] = set()
             self.bound: set[str] = set()
@@ -3480,7 +3652,7 @@ def _has_executed_expression_control(
 ) -> bool:
     """Return whether an executed expression introduces conditional evaluation."""
 
-    class ControlVisitor(ast.NodeVisitor):
+    class ControlVisitor(_IterativeBinOpVisitor):
         def __init__(self) -> None:
             self.found = False
 
@@ -3559,7 +3731,7 @@ def _scope_bound_names(
 ) -> set[str]:
     """Return containing-scope names one executed AST construct may bind or delete."""
 
-    class BindingVisitor(ast.NodeVisitor):
+    class BindingVisitor(_IterativeBinOpVisitor):
         def __init__(self) -> None:
             self.names: set[str] = set()
 
@@ -3631,7 +3803,7 @@ def _scope_bound_names(
             # but nested callable bodies remain deferred.
             outer = self
 
-            class NamedExpressionVisitor(ast.NodeVisitor):
+            class NamedExpressionVisitor(_IterativeBinOpVisitor):
                 def visit_NamedExpr(self, item: ast.NamedExpr) -> None:
                     outer.names.update(_bound_names(item.target))
                     self.visit(item.value)
@@ -3850,23 +4022,26 @@ def _keyword_expr(call: ast.Call, name: str) -> ast.expr | None:
     return next((keyword.value for keyword in call.keywords if keyword.arg == name), None)
 
 
-def _literal_methods(expression: ast.expr) -> tuple[str, ...]:
-    if not isinstance(expression, (ast.List, ast.Tuple, ast.Set)):
-        return ()
-    methods: list[str] = []
-    for element in expression.elts:
-        if not isinstance(element, ast.Constant) or not isinstance(element.value, str):
-            return ()
-        method = element.value.upper()
-        if method not in EndpointMethod.__members__:
-            return ()
-        methods.append(method)
-    return tuple(methods)
-
-
-def _join_paths(prefix: str, path: str) -> str:
+def _join_paths(prefix: str, path: str) -> str | None:  # noqa: PLR0911
+    """Join one native path without allocating an over-limit result."""
+    limit = MAX_STATIC_STRING_CHARS
     if not prefix:
+        length = len(path) if path.startswith("/") else len(path) + 1
+        if length > limit:
+            return None
         return path if path.startswith("/") else f"/{path}" if path else "/"
+    trailing = len(prefix) - len(prefix.rstrip("/"))
+    prefix_length = len(prefix) + (0 if prefix.startswith("/") else 1) - trailing
+    if not path:
+        if max(prefix_length, 1) > limit:
+            return None
+    elif path == "/":
+        if max(prefix_length + 1, 1) > limit:
+            return None
+    else:
+        path_length = len(path) - (len(path) - len(path.lstrip("/")))
+        if prefix_length + 1 + path_length > limit:
+            return None
     normalized_prefix = prefix if prefix.startswith("/") else f"/{prefix}"
     normalized_prefix = normalized_prefix.rstrip("/")
     if not path:
