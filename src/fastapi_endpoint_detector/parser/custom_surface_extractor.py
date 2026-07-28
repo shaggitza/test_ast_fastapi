@@ -42,6 +42,34 @@ class _Binding:
     instance_token: tuple[str, int, int] | None = None
 
 
+@dataclass(frozen=True)
+class _EvaluatedArgument:
+    """Capture one call argument immediately after its evaluation."""
+
+    expression: ast.expr
+    state: dict[str, _Binding | None]
+    binding: _Binding | None
+
+
+@dataclass(frozen=True)
+class _CallEvaluation:
+    """Capture callable identity and per-argument binding states."""
+
+    callable_state: dict[str, _Binding | None]
+    callable_resolution: tuple[str, InvocationKind, str | None] | None
+    positional: tuple[_EvaluatedArgument, ...]
+    keywords: tuple[_EvaluatedArgument, ...]
+
+
+@dataclass
+class _StartupScopeFrame:
+    """Keep startup function-local and module-global bindings distinct."""
+
+    local_state: dict[str, _Binding | None]
+    global_state: dict[str, _Binding | None]
+    local_names: frozenset[str]
+
+
 _Fallthrough = Literal["always", "maybe", "never"]
 
 
@@ -51,6 +79,7 @@ class _Module:
     path: Path
     source: str
     tree: ast.Module
+    postponed_annotations: bool
 
 
 def _endpoint_sort_key(endpoint: Endpoint) -> tuple[str, str, int, str]:
@@ -137,6 +166,16 @@ def _mutation_root_name(target: ast.AST) -> str | None:
     if isinstance(root, ast.NamedExpr):
         return root.target.id
     return None
+
+
+def _uses_future_annotations(tree: ast.Module) -> bool:
+    """Return whether this module postpones annotation evaluation."""
+    return any(
+        isinstance(statement, ast.ImportFrom)
+        and statement.module == "__future__"
+        and any(alias.name == "annotations" for alias in statement.names)
+        for statement in tree.body
+    )
 
 
 def _pattern_names(pattern: ast.pattern) -> set[str]:
@@ -357,6 +396,54 @@ class _FunctionScopeBindingVisitor(_EagerStateMutationVisitor):
         self.nonlocals.update(node.names)
 
 
+class _ClassScopeDeclarationVisitor(ast.NodeVisitor):
+    """Collect declarations owned by one class body, excluding nested scopes."""
+
+    def __init__(self) -> None:
+        self.globals: set[str] = set()
+        self.nonlocals: set[str] = set()
+
+    def visit_Global(self, node: ast.Global) -> None:
+        self.globals.update(node.names)
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+        self.nonlocals.update(node.names)
+
+    def visit_FunctionDef(self, _node: ast.FunctionDef) -> None:
+        return
+
+    def visit_AsyncFunctionDef(self, _node: ast.AsyncFunctionDef) -> None:
+        return
+
+    def visit_ClassDef(self, _node: ast.ClassDef) -> None:
+        return
+
+    def visit_Lambda(self, _node: ast.Lambda) -> None:
+        return
+
+
+@dataclass
+class _FunctionScopeFrame:
+    """Track one selected function's local and module-global binding frames."""
+
+    local_state: dict[str, _Binding | None]
+    global_state: dict[str, _Binding | None]
+    local_names: frozenset[str]
+
+
+@dataclass
+class _ClassScopeFrame:
+    """Track one class namespace and its non-class lookup and target frames."""
+
+    lookup_state: dict[str, _Binding | None]
+    global_state: dict[str, _Binding | None]
+    nonlocal_state: dict[str, _Binding | None]
+    class_state: dict[str, _Binding | None]
+    globals: frozenset[str]
+    nonlocals: frozenset[str]
+    local_names: set[str]
+
+
 @dataclass(frozen=True)
 class _StartupAssignmentEffect:
     targets: tuple[ast.expr, ...]
@@ -382,6 +469,39 @@ class _StartupStatementEffectsVisitor(_EagerStateMutationVisitor):
         self.generic_visit(node)
         self.events.append(node)
 
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        self.visit(node.value)
+        self.visit(node.target)
+        self.events.append(_StartupAssignmentEffect((node.target,), node.value))
+
+    def visit_BoolOp(self, node: ast.BoolOp) -> None:
+        for value in node.values:
+            self.visit(value)
+            truth = CustomSurfaceExtractor._literal_truth(value)
+            if (isinstance(node.op, ast.And) and truth is False) or (
+                isinstance(node.op, ast.Or) and truth is True
+            ):
+                return
+
+    def visit_IfExp(self, node: ast.IfExp) -> None:
+        self.visit(node.test)
+        truth = CustomSurfaceExtractor._literal_truth(node.test)
+        if truth is None:
+            self.visit(node.body)
+            self.visit(node.orelse)
+        else:
+            self.visit(node.body if truth else node.orelse)
+
+    def _visit_comprehension(
+        self,
+        node: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp,
+    ) -> None:
+        first = node.generators[0] if node.generators else None
+        if first is not None and CustomSurfaceExtractor._literal_truth(first.iter) is False:
+            self.visit(first.iter)
+            return
+        super()._visit_comprehension(node)
+
     def visit_Assign(self, node: ast.Assign) -> None:
         self.visit(node.value)
         for target in node.targets:
@@ -392,7 +512,8 @@ class _StartupStatementEffectsVisitor(_EagerStateMutationVisitor):
         if node.value is not None:
             self.visit(node.value)
         self.visit(node.target)
-        self.events.append(_StartupAssignmentEffect((node.target,), node.value))
+        if node.value is not None:
+            self.events.append(_StartupAssignmentEffect((node.target,), node.value))
 
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
         self.visit(node.target)
@@ -545,6 +666,8 @@ class CustomSurfaceExtractor:
         self._seen: set[tuple[str, int, int, str, str, str]] = set()
         self._startup_route_seen: set[tuple[str, int, str, tuple[EndpointMethod, ...], str]] = set()
         self._module_states: dict[str, dict[str, _Binding | None]] = {}
+        self._class_scope_frames: list[_ClassScopeFrame] = []
+        self._function_scope_states: list[_FunctionScopeFrame] = []
         self._building_states = False
         self._inventory_unavailable = False
         self._declared_receiver_types = {
@@ -577,7 +700,7 @@ class CustomSurfaceExtractor:
                     module.tree.body,
                     state,
                     (),
-                    process_functions=False,
+                    evaluate_variable_annotations=not module.postponed_annotations,
                 )
                 self._module_states[module.name] = state
         finally:
@@ -588,7 +711,7 @@ class CustomSurfaceExtractor:
                 module.tree.body,
                 {},
                 (),
-                process_functions=False,
+                evaluate_variable_annotations=not module.postponed_annotations,
             )
         self._process_bootstrap()
         collapsed: dict[tuple[str, str, int], Endpoint] = {}
@@ -728,13 +851,28 @@ class CustomSurfaceExtractor:
             *function.args.kwonlyargs,
         ]:
             state[argument.arg] = None
-        self._process_statements(
-            module,
-            function.body,
-            state,
-            (),
-            process_functions=False,
+        scope = _FunctionScopeBindingVisitor(function)
+        scope.visit(function)
+        local_names = scope.rebound_names - scope.globals - scope.nonlocals
+        local_names.update(argument.arg for argument in positional)
+        local_names.update(argument.arg for argument in function.args.kwonlyargs)
+        self._function_scope_states.append(
+            _FunctionScopeFrame(
+                local_state=state,
+                global_state=self._module_states[module_name],
+                local_names=frozenset(local_names),
+            )
         )
+        try:
+            self._process_statements(
+                module,
+                function.body,
+                state,
+                (),
+                evaluate_variable_annotations=False,
+            )
+        finally:
+            self._function_scope_states.pop()
 
     def _load_modules(self) -> None:
         if self.app_path.is_file():
@@ -769,7 +907,13 @@ class CustomSurfaceExtractor:
             if parts and parts[-1] == "__init__":
                 parts.pop()
             name = ".".join(parts) or path.parent.name
-            module = _Module(name=name, path=path.resolve(), source=source, tree=tree)
+            module = _Module(
+                name=name,
+                path=path.resolve(),
+                source=source,
+                tree=tree,
+                postponed_annotations=_uses_future_annotations(tree),
+            )
             self._modules[name] = module
             for node in tree.body:
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -793,7 +937,7 @@ class CustomSurfaceExtractor:
         state: dict[str, _Binding | None],
         inherited_conditions: tuple[EndpointDiscoveryCondition, ...],
         *,
-        process_functions: bool,
+        evaluate_variable_annotations: bool,
     ) -> _Fallthrough:
         current_conditions = inherited_conditions
         overall_flow: _Fallthrough = "always"
@@ -823,31 +967,44 @@ class CustomSurfaceExtractor:
                     )
                 continue
             if isinstance(statement, ast.ClassDef):
-                identity = f"{module.name}.{statement.name}"
-                if self._building_states:
-                    bases = tuple(
-                        self._direct_symbol_identity(base, state) or "" for base in statement.bases
+                class_flow = self._process_class_definition(
+                    module,
+                    statement,
+                    state,
+                    current_conditions,
+                )
+                if class_flow == "never":
+                    return "never"
+                if class_flow == "maybe":
+                    current_conditions = (
+                        *current_conditions,
+                        self._control_flow_condition(module, statement.lineno),
                     )
-                    self._class_bases[identity] = bases if all(bases) else None
-                state[statement.name] = _Binding("symbol", identity)
+                    overall_flow = "maybe"
                 continue
             if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                for decorator in statement.decorator_list:
-                    registration = self._decorator_call(decorator)
-                    if registration is not None:
-                        self._inspect_registration(
-                            module,
-                            registration,
-                            state,
-                            current_conditions,
-                            decorated_handler=statement,
-                        )
-                identity = f"{module.name}.{statement.name}"
-                state[statement.name] = _Binding("function", identity)
+                self._process_function_definition(
+                    module,
+                    statement,
+                    state,
+                    current_conditions,
+                )
                 # Function bodies are deferred; only an explicit bootstrap body is walked.
                 continue
             if isinstance(statement, (ast.Assign, ast.AnnAssign)):
                 value = statement.value
+                if isinstance(statement, ast.AnnAssign) and value is None:
+                    self._inspect_target_expression(
+                        module, statement.target, state, current_conditions
+                    )
+                    if evaluate_variable_annotations:
+                        self._inspect_expression(
+                            module,
+                            statement.annotation,
+                            state,
+                            current_conditions,
+                        )
+                    continue
                 if value is not None:
                     self._inspect_expression(module, value, state, current_conditions)
                 binding = self._binding_from_expression(value, state, module.name)
@@ -860,6 +1017,13 @@ class CustomSurfaceExtractor:
                     for name in names:
                         state[name] = binding if isinstance(target, ast.Name) else None
                     self._invalidate_mutated_target(target, state)
+                if isinstance(statement, ast.AnnAssign) and evaluate_variable_annotations:
+                    self._inspect_expression(
+                        module,
+                        statement.annotation,
+                        state,
+                        current_conditions,
+                    )
                 continue
             if isinstance(statement, ast.Expr):
                 self._inspect_expression(module, statement.value, state, current_conditions)
@@ -888,7 +1052,7 @@ class CustomSurfaceExtractor:
                         selected,
                         state,
                         current_conditions,
-                        process_functions=process_functions,
+                        evaluate_variable_annotations=evaluate_variable_annotations,
                     )
                 else:
                     condition = self._control_flow_condition(module, statement.lineno)
@@ -900,14 +1064,14 @@ class CustomSurfaceExtractor:
                         statement.body,
                         body_state,
                         branch_conditions,
-                        process_functions=process_functions,
+                        evaluate_variable_annotations=evaluate_variable_annotations,
                     )
                     else_flow = self._process_statements(
                         module,
                         statement.orelse,
                         else_state,
                         branch_conditions,
-                        process_functions=process_functions,
+                        evaluate_variable_annotations=evaluate_variable_annotations,
                     )
                     reachable = [
                         branch_state
@@ -952,7 +1116,7 @@ class CustomSurfaceExtractor:
                             case.body,
                             body_state,
                             branch_conditions,
-                            process_functions=process_functions,
+                            evaluate_variable_annotations=evaluate_variable_annotations,
                         )
                         body_flows.append(body_flow)
                         if body_flow != "never":
@@ -985,7 +1149,7 @@ class CustomSurfaceExtractor:
                     statement.body,
                     body_state,
                     branch_conditions,
-                    process_functions=process_functions,
+                    evaluate_variable_annotations=evaluate_variable_annotations,
                 )
                 if isinstance(statement, ast.While) and self._literal_truth(statement.test) is True:
                     break_visitor = _LoopBreakVisitor()
@@ -1000,7 +1164,7 @@ class CustomSurfaceExtractor:
                     statement.orelse,
                     else_state,
                     branch_conditions,
-                    process_functions=process_functions,
+                    evaluate_variable_annotations=evaluate_variable_annotations,
                 )
                 reachable = [loop_state]
                 if else_flow != "never":
@@ -1025,7 +1189,7 @@ class CustomSurfaceExtractor:
                     statement.body,
                     body_state,
                     branch_conditions,
-                    process_functions=process_functions,
+                    evaluate_variable_annotations=evaluate_variable_annotations,
                 )
                 if body_flow == "never":
                     return "never"
@@ -1040,7 +1204,7 @@ class CustomSurfaceExtractor:
                     statement,
                     state,
                     current_conditions,
-                    process_functions=process_functions,
+                    evaluate_variable_annotations=evaluate_variable_annotations,
                 )
                 if try_flow == "never":
                     return "never"
@@ -1065,6 +1229,389 @@ class CustomSurfaceExtractor:
             for name in mutation.named_expression_targets:
                 state[name] = None
         return overall_flow
+
+    def _process_function_definition(
+        self,
+        module: _Module,
+        statement: ast.FunctionDef | ast.AsyncFunctionDef,
+        state: dict[str, _Binding | None],
+        inherited_conditions: tuple[EndpointDiscoveryCondition, ...],
+    ) -> None:
+        """Evaluate one function header in Python order without entering its body."""
+        for decorator in statement.decorator_list:
+            self._inspect_decorator_expression(
+                module,
+                decorator,
+                state,
+                inherited_conditions,
+                decorated_handler=statement,
+            )
+        for expression in (*statement.args.defaults, *statement.args.kw_defaults):
+            if expression is not None:
+                self._inspect_expression(module, expression, state, inherited_conditions)
+        if not module.postponed_annotations:
+            for expression in self._function_annotation_expressions(statement):
+                self._inspect_expression(module, expression, state, inherited_conditions)
+        state[statement.name] = _Binding("function", f"{module.name}.{statement.name}")
+
+    def _process_class_definition(  # noqa: PLR0912
+        self,
+        module: _Module,
+        statement: ast.ClassDef,
+        state: dict[str, _Binding | None],
+        inherited_conditions: tuple[EndpointDiscoveryCondition, ...],
+    ) -> _Fallthrough:
+        """Evaluate one class definition while keeping its namespace isolated."""
+        for decorator in statement.decorator_list:
+            self._inspect_decorator_expression(
+                module,
+                decorator,
+                state,
+                inherited_conditions,
+                decorated_handler=None,
+            )
+
+        resolved_bases: list[str] = []
+        for base in statement.bases:
+            resolved_bases.append(self._direct_symbol_identity(base, state) or "")
+            self._inspect_expression(module, base, state, inherited_conditions)
+        if self._building_states:
+            identity = f"{module.name}.{statement.name}"
+            bases = tuple(resolved_bases)
+            self._class_bases[identity] = bases if all(bases) else None
+        for keyword in statement.keywords:
+            self._inspect_expression(module, keyword.value, state, inherited_conditions)
+
+        declarations = _ClassScopeDeclarationVisitor()
+        for body_statement in statement.body:
+            declarations.visit(body_statement)
+        globals_ = frozenset(declarations.globals)
+        nonlocals = frozenset(declarations.nonlocals)
+
+        if self._class_scope_frames:
+            parent = self._class_scope_frames[-1]
+            lookup_state = dict(parent.lookup_state)
+            for name in parent.globals | parent.nonlocals:
+                lookup_state[name] = state.get(name)
+            global_state = parent.global_state
+            nonlocal_state = parent.nonlocal_state
+        elif self._function_scope_states:
+            function_scope = self._function_scope_states[-1]
+            nonlocal_state = function_scope.local_state
+            global_state = function_scope.global_state
+            lookup_state = dict(state)
+        else:
+            lookup_state = state
+            global_state = state
+            nonlocal_state = state
+
+        class_state = dict(lookup_state)
+        for name in globals_:
+            class_state[name] = global_state.get(name)
+        for name in nonlocals:
+            class_state[name] = nonlocal_state.get(name)
+        frame = _ClassScopeFrame(
+            lookup_state=lookup_state,
+            global_state=global_state,
+            nonlocal_state=nonlocal_state,
+            class_state=class_state,
+            globals=globals_,
+            nonlocals=nonlocals,
+            local_names=set(),
+        )
+        self._class_scope_frames.append(frame)
+        try:
+            class_flow = self._process_class_body(
+                module,
+                statement.body,
+                frame,
+                inherited_conditions,
+            )
+        finally:
+            self._class_scope_frames.pop()
+
+        if self._class_scope_frames:
+            parent = self._class_scope_frames[-1]
+            for name in parent.globals:
+                if name not in parent.local_names:
+                    state[name] = parent.global_state.get(name)
+            for name in parent.nonlocals:
+                if name not in parent.local_names:
+                    state[name] = parent.nonlocal_state.get(name)
+        if class_flow != "never":
+            state[statement.name] = _Binding("symbol", f"{module.name}.{statement.name}")
+        return class_flow
+
+    def _process_class_body(
+        self,
+        module: _Module,
+        statements: list[ast.stmt],
+        frame: _ClassScopeFrame,
+        inherited_conditions: tuple[EndpointDiscoveryCondition, ...],
+    ) -> _Fallthrough:
+        """Execute a class body while synchronizing declared outer bindings."""
+        current_conditions = inherited_conditions
+        overall_flow: _Fallthrough = "always"
+        for statement in statements:
+            flow = self._process_statements(
+                module,
+                [statement],
+                frame.class_state,
+                current_conditions,
+                evaluate_variable_annotations=not module.postponed_annotations,
+            )
+            frame.local_names = self._transfer_definite_class_locals(
+                [statement], frame.local_names, frame.globals | frame.nonlocals
+            )
+            self._sync_class_outer_bindings(frame)
+            if flow == "never":
+                return "never"
+            if flow == "maybe":
+                current_conditions = (
+                    *current_conditions,
+                    self._control_flow_condition(module, statement.lineno),
+                )
+                overall_flow = "maybe"
+        return overall_flow
+
+    def _transfer_definite_class_locals(  # noqa: PLR0912, PLR0915
+        self,
+        statements: list[ast.stmt],
+        initial: set[str],
+        declared_outer: frozenset[str],
+    ) -> set[str]:
+        """Transfer names definitely present in a class namespace on fallthrough."""
+        local_names = set(initial)
+        for statement in statements:
+            if isinstance(statement, ast.If):
+                truth = self._literal_truth(statement.test)
+                if truth is not None:
+                    local_names = self._transfer_definite_class_locals(
+                        statement.body if truth else statement.orelse,
+                        local_names,
+                        declared_outer,
+                    )
+                else:
+                    body_names = self._transfer_definite_class_locals(
+                        statement.body, local_names, declared_outer
+                    )
+                    else_names = self._transfer_definite_class_locals(
+                        statement.orelse, local_names, declared_outer
+                    )
+                    local_names = body_names & else_names
+                continue
+            if isinstance(statement, ast.Match):
+                branch_names = [set(local_names)]
+                branch_names.extend(
+                    self._transfer_definite_class_locals(case.body, local_names, declared_outer)
+                    for case in statement.cases
+                )
+                local_names = set.intersection(*branch_names)
+                continue
+            if isinstance(statement, (ast.For, ast.AsyncFor, ast.While)):
+                body_names = self._transfer_definite_class_locals(
+                    statement.body, local_names, declared_outer
+                )
+                else_names = self._transfer_definite_class_locals(
+                    statement.orelse, local_names, declared_outer
+                )
+                local_names &= body_names & else_names
+                continue
+            if isinstance(statement, (ast.With, ast.AsyncWith)):
+                local_names = self._transfer_definite_class_locals(
+                    statement.body, local_names, declared_outer
+                )
+                continue
+            if isinstance(statement, (ast.Try,)) or statement.__class__.__name__ == "TryStar":
+                paths = [set(local_names)]
+                paths.append(
+                    self._transfer_definite_class_locals(
+                        getattr(statement, "body"),  # noqa: B009 - Try/TryStar compatibility
+                        local_names,
+                        declared_outer,
+                    )
+                )
+                paths.extend(
+                    self._transfer_definite_class_locals(handler.body, local_names, declared_outer)
+                    for handler in getattr(statement, "handlers")  # noqa: B009
+                )
+                local_names = set.intersection(*paths)
+                local_names = self._transfer_definite_class_locals(
+                    getattr(statement, "finalbody"),  # noqa: B009 - Try/TryStar compatibility
+                    local_names,
+                    declared_outer,
+                )
+                continue
+
+            if isinstance(statement, ast.Delete):
+                for target in statement.targets:
+                    local_names.difference_update(_target_names(target))
+                continue
+            if isinstance(statement, ast.Assign):
+                for target in statement.targets:
+                    local_names.update(_target_names(target) - declared_outer)
+                continue
+            if isinstance(statement, ast.AnnAssign):
+                if statement.value is not None:
+                    local_names.update(_target_names(statement.target) - declared_outer)
+                continue
+            if isinstance(statement, ast.AugAssign):
+                local_names.update(_target_names(statement.target) - declared_outer)
+                continue
+            if isinstance(statement, (ast.Import, ast.ImportFrom)):
+                visitor = _EagerStateMutationVisitor()
+                visitor.visit(statement)
+                local_names.update(visitor.rebound_names - declared_outer)
+                continue
+            if (
+                isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                and statement.name not in declared_outer
+            ):
+                local_names.add(statement.name)
+        return local_names
+
+    def _sync_class_outer_bindings(self, frame: _ClassScopeFrame) -> None:
+        """Publish class global/nonlocal writes to their distinct target frames."""
+        updates = {
+            **{name: (frame.global_state, frame.class_state.get(name)) for name in frame.globals},
+            **{
+                name: (frame.nonlocal_state, frame.class_state.get(name))
+                for name in frame.nonlocals
+            },
+        }
+        for name, (target_state, binding) in updates.items():
+            target_state[name] = binding
+            frame.lookup_state[name] = binding
+            if (
+                name in frame.globals
+                and self._function_scope_states
+                and name not in self._function_scope_states[-1].local_names
+            ):
+                self._function_scope_states[-1].local_state[name] = binding
+            for ancestor in self._class_scope_frames:
+                if ancestor is frame:
+                    continue
+                if name in ancestor.local_names:
+                    continue
+                if name in ancestor.globals:
+                    ancestor.class_state[name] = ancestor.global_state.get(name)
+                elif name in ancestor.nonlocals:
+                    ancestor.class_state[name] = ancestor.nonlocal_state.get(name)
+                else:
+                    ancestor.class_state[name] = binding
+                    ancestor.lookup_state[name] = binding
+
+    def _inspect_decorator_expression(
+        self,
+        module: _Module,
+        decorator: ast.expr,
+        state: dict[str, _Binding | None],
+        inherited_conditions: tuple[EndpointDiscoveryCondition, ...],
+        *,
+        decorated_handler: ast.FunctionDef | ast.AsyncFunctionDef | None,
+    ) -> None:
+        """Inspect one decorator without revisiting its registration root."""
+        registration = self._decorator_call(decorator)
+        if registration is None:
+            self._inspect_expression(module, decorator, state, inherited_conditions)
+            return
+        if isinstance(decorator, ast.Call):
+            self._inspect_call_expression(
+                module,
+                decorator,
+                state,
+                inherited_conditions,
+                decorated_handler=decorated_handler,
+            )
+            return
+
+        if isinstance(decorator, ast.Attribute):
+            self._inspect_expression(module, decorator.value, state, inherited_conditions)
+        callable_state = dict(state)
+        evaluation = _CallEvaluation(
+            callable_state=callable_state,
+            callable_resolution=self._resolve_call(registration.func, callable_state),
+            positional=(),
+            keywords=(),
+        )
+        self._inspect_registration(
+            module,
+            registration,
+            state,
+            inherited_conditions,
+            decorated_handler=decorated_handler,
+            evaluation=evaluation,
+        )
+
+    def _inspect_call_expression(
+        self,
+        module: _Module,
+        call: ast.Call,
+        state: dict[str, _Binding | None],
+        inherited_conditions: tuple[EndpointDiscoveryCondition, ...],
+        *,
+        decorated_handler: ast.FunctionDef | ast.AsyncFunctionDef | None,
+    ) -> None:
+        """Evaluate a call in CPython AST order with per-argument captures."""
+        self._inspect_expression(module, call.func, state, inherited_conditions)
+        callable_state = dict(state)
+        callable_resolution = self._resolve_call(call.func, callable_state)
+        positional: list[_EvaluatedArgument] = []
+        for argument in call.args:
+            self._inspect_expression(module, argument, state, inherited_conditions)
+            positional.append(
+                _EvaluatedArgument(
+                    expression=argument,
+                    state=dict(state),
+                    binding=self._binding_from_expression(argument, state, module.name),
+                )
+            )
+        keywords: list[_EvaluatedArgument] = []
+        for keyword in call.keywords:
+            self._inspect_expression(module, keyword.value, state, inherited_conditions)
+            keywords.append(
+                _EvaluatedArgument(
+                    expression=keyword.value,
+                    state=dict(state),
+                    binding=self._binding_from_expression(keyword.value, state, module.name),
+                )
+            )
+        self._inspect_registration(
+            module,
+            call,
+            state,
+            inherited_conditions,
+            decorated_handler=decorated_handler,
+            evaluation=_CallEvaluation(
+                callable_state=callable_state,
+                callable_resolution=callable_resolution,
+                positional=tuple(positional),
+                keywords=tuple(keywords),
+            ),
+        )
+
+    @staticmethod
+    def _function_annotation_expressions(
+        statement: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> tuple[ast.expr, ...]:
+        """Return annotations in CPython compiler evaluation order, then the return."""
+        expressions = [
+            argument.annotation
+            for argument in (*statement.args.args, *statement.args.posonlyargs)
+            if argument.annotation is not None
+        ]
+        if statement.args.vararg is not None and statement.args.vararg.annotation is not None:
+            expressions.append(statement.args.vararg.annotation)
+        expressions.extend(
+            argument.annotation
+            for argument in statement.args.kwonlyargs
+            if argument.annotation is not None
+        )
+        if statement.args.kwarg is not None and statement.args.kwarg.annotation is not None:
+            expressions.append(statement.args.kwarg.annotation)
+        if statement.returns is not None:
+            expressions.append(statement.returns)
+        return tuple(expressions)
 
     @staticmethod
     def _branch_flow(left: _Fallthrough, right: _Fallthrough) -> _Fallthrough:
@@ -1108,7 +1655,7 @@ class CustomSurfaceExtractor:
         state: dict[str, _Binding | None],
         inherited_conditions: tuple[EndpointDiscoveryCondition, ...],
         *,
-        process_functions: bool,
+        evaluate_variable_annotations: bool,
     ) -> _Fallthrough:
         conditions = (
             *inherited_conditions,
@@ -1121,7 +1668,7 @@ class CustomSurfaceExtractor:
             getattr(statement, "body"),  # noqa: B009 - Try/TryStar compatibility
             try_state,
             conditions,
-            process_functions=process_functions,
+            evaluate_variable_annotations=evaluate_variable_annotations,
         )
         outgoing: list[dict[str, _Binding | None]] = []
         flows: list[_Fallthrough] = [try_flow]
@@ -1132,7 +1679,7 @@ class CustomSurfaceExtractor:
                 getattr(statement, "orelse"),  # noqa: B009 - Try/TryStar compatibility
                 normal_state,
                 conditions,
-                process_functions=process_functions,
+                evaluate_variable_annotations=evaluate_variable_annotations,
             )
             flows.append(normal_flow)
             if normal_flow != "never":
@@ -1159,7 +1706,7 @@ class CustomSurfaceExtractor:
                 handler.body,
                 handler_state,
                 conditions,
-                process_functions=process_functions,
+                evaluate_variable_annotations=evaluate_variable_annotations,
             )
             if handler.name is not None:
                 handler_state[handler.name] = None
@@ -1169,21 +1716,30 @@ class CustomSurfaceExtractor:
                 outgoing.append(handler_state)
         finalbody = getattr(statement, "finalbody")  # noqa: B009
         if finalbody:
-            # Finally can run after normal, handled, or still-propagating exception paths.
-            final_inputs = [*outgoing, self._join_states(exceptional_states)]
+            # Normal/handled paths may leave finally. A still-propagating exception
+            # executes finally for effects but never becomes ordinary fallthrough.
             finalized: list[dict[str, _Binding | None]] = []
-            for outgoing_state in final_inputs:
+            for outgoing_state in outgoing:
                 final_state = dict(outgoing_state)
                 final_flow = self._process_statements(
                     module,
                     finalbody,
                     final_state,
                     conditions,
-                    process_functions=process_functions,
+                    evaluate_variable_annotations=evaluate_variable_annotations,
                 )
                 flows.append(final_flow)
                 if final_flow != "never":
                     finalized.append(final_state)
+            pending_state = self._join_states(exceptional_states)
+            pending_flow = self._process_statements(
+                module,
+                finalbody,
+                pending_state,
+                conditions,
+                evaluate_variable_annotations=evaluate_variable_annotations,
+            )
+            flows.append(pending_flow)
             outgoing = finalized
         if not outgoing:
             return "never"
@@ -1278,13 +1834,14 @@ class CustomSurfaceExtractor:
             self._replace_state(state, self._join_states((*compare_skipped, working)))
             return
         if isinstance(expression, ast.Call):
-            self._inspect_registration(
+            self._inspect_call_expression(
                 module,
                 expression,
                 state,
                 inherited_conditions,
                 decorated_handler=None,
             )
+            return
         for child in ast.iter_child_nodes(expression):
             if isinstance(child, ast.expr):
                 self._inspect_expression(module, child, state, inherited_conditions)
@@ -1358,28 +1915,44 @@ class CustomSurfaceExtractor:
             self._inspect_target_expression(module, target.value, state, inherited_conditions)
 
     @staticmethod
+    def _invalidate_aliases_for_binding(
+        binding: _Binding | None,
+        state: dict[str, _Binding | None],
+    ) -> None:
+        if binding is None:
+            return
+        for name, candidate in state.items():
+            if candidate == binding:
+                state[name] = None
+
+    @classmethod
     def _invalidate_binding_aliases(
+        cls,
         root_name: str,
         state: dict[str, _Binding | None],
     ) -> None:
-        binding = state.get(root_name)
-        if binding is None:
-            return
-        aliases = [name for name, candidate in state.items() if candidate == binding]
-        for name in aliases:
-            state[name] = None
+        cls._invalidate_aliases_for_binding(state.get(root_name), state)
 
-    @classmethod
     def _invalidate_mutated_target(
-        cls,
+        self,
         target: ast.expr,
         state: dict[str, _Binding | None],
     ) -> None:
         if not isinstance(target, (ast.Attribute, ast.Subscript)):
             return
         root_name = _mutation_root_name(target)
-        if root_name is not None:
-            cls._invalidate_binding_aliases(root_name, state)
+        if root_name is None:
+            return
+        binding = state.get(root_name)
+        self._invalidate_aliases_for_binding(binding, state)
+        if not self._class_scope_frames:
+            return
+        current = self._class_scope_frames[-1]
+        self._invalidate_aliases_for_binding(binding, current.global_state)
+        self._invalidate_aliases_for_binding(binding, current.nonlocal_state)
+        self._invalidate_aliases_for_binding(binding, current.lookup_state)
+        for frame in self._class_scope_frames:
+            self._invalidate_aliases_for_binding(binding, frame.class_state)
 
     def _inspect_comprehension(
         self,
@@ -1396,11 +1969,16 @@ class CustomSurfaceExtractor:
                 reason="custom surface registration is conditional on comprehension iteration",
             ),
         )
-        local = dict(state)
+        local = dict(
+            self._class_scope_frames[-1].lookup_state if self._class_scope_frames else state
+        )
         walrus = _StatementMutationVisitor()
         walrus.visit(expression)
-        for generator in expression.generators:
-            self._inspect_expression(module, generator.iter, local, conditions)
+        for index, generator in enumerate(expression.generators):
+            # A class-body comprehension evaluates only its outermost iterable in
+            # the class namespace; its implicit scope cannot resolve class locals.
+            iteration_state = state if self._class_scope_frames and index == 0 else local
+            self._inspect_expression(module, generator.iter, iteration_state, conditions)
             for name in _target_names(generator.target):
                 local[name] = None
             for filter_expression in generator.ifs:
@@ -1427,6 +2005,50 @@ class CustomSurfaceExtractor:
             )
         return None
 
+    def _resolve_captured_handler(
+        self, capture: _EvaluatedArgument
+    ) -> tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef] | None:
+        resolved = self._resolve_handler(capture.expression, capture.state)
+        if resolved is not None or capture.binding is None:
+            return resolved
+        name = ast.Name(id="__captured_handler__", ctx=ast.Load())
+        return self._resolve_handler(name, {name.id: capture.binding})
+
+    def _resolve_captured_class_method(
+        self,
+        capture: _EvaluatedArgument,
+        registration_module: str,
+        method_name: str,
+        required_base: str,
+    ) -> tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef] | None:
+        if (
+            capture.binding is not None
+            and capture.binding.kind == "symbol"
+            and capture.binding.identity.startswith(f"{registration_module}.")
+        ):
+            resolved = self._resolve_class_method_identity(
+                capture.binding.identity,
+                method_name,
+                required_base,
+            )
+            if resolved is not None:
+                return resolved
+        resolved = self._resolve_class_method(
+            capture.expression,
+            capture.state,
+            method_name,
+            required_base,
+        )
+        if resolved is not None or capture.binding is None:
+            return resolved
+        name = ast.Name(id="__captured_class__", ctx=ast.Load())
+        return self._resolve_class_method(
+            name,
+            {name.id: capture.binding},
+            method_name,
+            required_base,
+        )
+
     def _inspect_registration(  # noqa: PLR0912, PLR0915
         self,
         module: _Module,
@@ -1435,10 +2057,15 @@ class CustomSurfaceExtractor:
         inherited_conditions: tuple[EndpointDiscoveryCondition, ...],
         *,
         decorated_handler: ast.FunctionDef | ast.AsyncFunctionDef | None,
+        evaluation: _CallEvaluation | None = None,
     ) -> None:
         if self._building_states:
             return
-        resolved = self._resolve_call(call.func, state)
+        resolved = (
+            evaluation.callable_resolution
+            if evaluation is not None
+            else self._resolve_call(call.func, state)
+        )
         if resolved is None:
             callable_name = (
                 call.func.id
@@ -1473,6 +2100,7 @@ class CustomSurfaceExtractor:
                 )
             else:
                 handler_result = None
+                capture: _EvaluatedArgument | None = None
                 if contract.handler.kind in {
                     HandlerSelectorKind.ARGUMENT,
                     HandlerSelectorKind.ARGUMENT_CLASS_METHOD,
@@ -1480,22 +2108,32 @@ class CustomSurfaceExtractor:
                     index = contract.handler.index or 0
                     if index < len(call.args):
                         handler_expression = call.args[index]
+                        if evaluation is not None and index < len(evaluation.positional):
+                            capture = evaluation.positional[index]
                 else:
-                    handler_expression = next(
-                        (item.value for item in call.keywords if item.arg == contract.handler.name),
+                    keyword_index = next(
+                        (
+                            index
+                            for index, item in enumerate(call.keywords)
+                            if item.arg == contract.handler.name
+                        ),
                         None,
                     )
-                if handler_expression is not None:
+                    if keyword_index is not None:
+                        handler_expression = call.keywords[keyword_index].value
+                        if evaluation is not None and keyword_index < len(evaluation.keywords):
+                            capture = evaluation.keywords[keyword_index]
+                if handler_expression is not None and capture is not None:
                     if contract.handler.kind == HandlerSelectorKind.ARGUMENT_CLASS_METHOD:
-                        handler_result = self._resolve_class_method(
-                            handler_expression,
-                            state,
+                        handler_result = self._resolve_captured_class_method(
+                            capture,
+                            module.name,
                             contract.handler.name or "",
                             contract.handler.base or "",
                         )
                     else:
-                        handler_result = self._resolve_handler(handler_expression, state)
-                elif contract.handler_optional:
+                        handler_result = self._resolve_captured_handler(capture)
+                elif handler_expression is None and contract.handler_optional:
                     continue
             if handler_result is None or not self._callback_matches(
                 contract.callback_mode, handler_result[1]
@@ -1622,7 +2260,7 @@ class CustomSurfaceExtractor:
                         handler_range,
                         merged,
                         evidence,
-                        state,
+                        evaluation.callable_state if evaluation is not None else None,
                     )
 
     def _emit_startup_routes(  # noqa: PLR0912, PLR0915
@@ -1634,10 +2272,11 @@ class CustomSurfaceExtractor:
         handler_range: tuple[int, int],
         inherited_conditions: tuple[EndpointDiscoveryCondition, ...],
         lifecycle_evidence: SurfaceRegistrationEvidence,
-        registration_state: dict[str, _Binding | None],
+        registration_callable_state: dict[str, _Binding | None] | None,
     ) -> None:
         """Interpret exact, straight-line startup route effects in source order."""
-        state = dict(self._module_states.get(handler_module.name, {}))
+        module_state = dict(self._module_states.get(handler_module.name, {}))
+        state = dict(module_state)
         arguments = [
             *function.args.posonlyargs,
             *function.args.args,
@@ -1649,6 +2288,11 @@ class CustomSurfaceExtractor:
         local_names.update(argument.arg for argument in arguments)
         for name in local_names:
             state[name] = None
+        startup_scope = _StartupScopeFrame(
+            local_state=state,
+            global_state=module_state,
+            local_names=frozenset(local_names),
+        )
 
         selected: _Binding | None = None
         expected_receiver_names: set[str] = set()
@@ -1668,8 +2312,13 @@ class CustomSurfaceExtractor:
             )
             state[arguments[0].arg] = selected
             expected_receiver_names.add(arguments[0].arg)
-        elif isinstance(registration_call.func, ast.Attribute):
-            selected = self._expression_binding(registration_call.func.value, registration_state)
+        elif (
+            isinstance(registration_call.func, ast.Attribute)
+            and registration_callable_state is not None
+        ):
+            selected = self._expression_binding(
+                registration_call.func.value, registration_callable_state
+            )
             if isinstance(registration_call.func.value, ast.Name):
                 expected_receiver_names.add(registration_call.func.value.id)
         if selected is None or selected.kind != "receiver" or selected.instance_token is None:
@@ -1739,9 +2388,54 @@ class CustomSurfaceExtractor:
                         state[alias.asname or alias.name.split(".")[0]] = None
                 continue
             if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                for expression in self._startup_definition_header_expressions(statement):
+                for expression in self._startup_definition_header_expressions(
+                    handler_module, statement
+                ):
+                    self._apply_startup_header_expression(
+                        expression,
+                        handler_module,
+                        state,
+                        selected_token,
+                        supported,
+                        additive,
+                        expected_receiver_names,
+                        inherited_conditions,
+                        lifecycle_evidence,
+                        disabled,
+                    )
+                if isinstance(statement, ast.ClassDef):
+                    disabled, class_flow = self._inspect_startup_class_body_effects(
+                        statement,
+                        handler_module,
+                        state,
+                        selected_token,
+                        supported,
+                        additive,
+                        expected_receiver_names,
+                        inherited_conditions,
+                        lifecycle_evidence,
+                        disabled,
+                        scope=startup_scope,
+                    )
+                    if class_flow == "never":
+                        break
+                    if class_flow == "maybe":
+                        disabled = True
+                        self._record_startup_route_limitation(
+                            handler_module,
+                            statement.lineno,
+                            "startup nested class body may not fall through",
+                        )
+                state[statement.name] = None
+                continue
+            if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                value = statement.value
+                targets = tuple(
+                    statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+                )
+                if isinstance(statement, ast.AnnAssign) and value is None:
                     effects = _StartupStatementEffectsVisitor()
-                    effects.visit(expression)
+                    effects.visit(statement.target)
                     for event in effects.events:
                         if isinstance(event, ast.Call):
                             self._inspect_startup_call_effect(
@@ -1757,21 +2451,7 @@ class CustomSurfaceExtractor:
                                 direct_registration=False,
                                 disabled=disabled,
                             )
-                    if self._expression_escapes_exact_receiver(expression, state, selected_token):
-                        self._taint_startup_routes(
-                            handler_module,
-                            expression.lineno,
-                            "exact startup app escapes through an eager nested-definition header",
-                            state,
-                            selected_token,
-                        )
-                state[statement.name] = None
-                continue
-            if isinstance(statement, (ast.Assign, ast.AnnAssign)):
-                value = statement.value
-                targets = tuple(
-                    statement.targets if isinstance(statement, ast.Assign) else [statement.target]
-                )
+                    continue
                 if value is not None:
                     effects = _StartupStatementEffectsVisitor()
                     effects.visit(value)
@@ -1945,8 +2625,611 @@ class CustomSurfaceExtractor:
             for name in effects.rebound_names | effects.mutated_roots:
                 state[name] = None
 
-    @staticmethod
+    def _apply_startup_header_expression(
+        self,
+        expression: ast.expr,
+        module: _Module,
+        state: dict[str, _Binding | None],
+        token: tuple[str, int, int],
+        supported: set[str],
+        additive: set[str],
+        expected_receiver_names: set[str],
+        inherited_conditions: tuple[EndpointDiscoveryCondition, ...],
+        lifecycle: SurfaceRegistrationEvidence,
+        disabled: bool,
+    ) -> None:
+        """Apply source-ordered call and walrus effects from one eager header."""
+        effects = _StartupStatementEffectsVisitor()
+        effects.visit(expression)
+        for event in effects.events:
+            if isinstance(event, ast.Call):
+                self._inspect_startup_call_effect(
+                    event,
+                    module,
+                    state,
+                    token,
+                    supported,
+                    additive,
+                    expected_receiver_names,
+                    inherited_conditions,
+                    lifecycle,
+                    direct_registration=False,
+                    disabled=disabled,
+                )
+                continue
+            if isinstance(event, _StartupReturnEffect):
+                continue
+            binding = self._binding_from_expression(event.value, state, module.name)
+            for target in event.targets:
+                for name in _target_names(target):
+                    state[name] = binding if isinstance(target, ast.Name) else None
+                    if self._binding_has_token(binding, token):
+                        expected_receiver_names.add(name)
+        if self._expression_escapes_exact_receiver(expression, state, token):
+            self._taint_startup_routes(
+                module,
+                expression.lineno,
+                "exact startup app escapes through an eager nested-definition header",
+                state,
+                token,
+            )
+
+    def _startup_possible_exact_join(
+        self,
+        states: tuple[dict[str, _Binding | None], ...],
+        token: tuple[str, int, int],
+    ) -> dict[str, _Binding | None]:
+        joined: dict[str, _Binding | None] = {}
+        for name in set().union(*(state.keys() for state in states)):
+            binding = next(
+                (
+                    state.get(name)
+                    for state in states
+                    if self._binding_has_token(state.get(name), token)
+                ),
+                None,
+            )
+            if binding is not None:
+                joined[name] = binding
+        return joined
+
+    def _inspect_startup_possible_expression(
+        self,
+        expression: ast.AST,
+        possible_state: dict[str, _Binding | None],
+        module: _Module,
+        actual_state: dict[str, _Binding | None],
+        token: tuple[str, int, int],
+        supported: set[str],
+        additive: set[str],
+        expected_receiver_names: set[str],
+        inherited_conditions: tuple[EndpointDiscoveryCondition, ...],
+        lifecycle: SurfaceRegistrationEvidence,
+        disabled: bool,
+        ancestor_class_states: tuple[dict[str, _Binding | None], ...],
+    ) -> dict[str, _Binding | None]:
+        effects = _StartupStatementEffectsVisitor()
+        effects.visit(expression)
+        for event in effects.events:
+            if isinstance(event, ast.Call):
+                condition_count = len(self._route_conditions)
+                self._inspect_startup_call_effect(
+                    event,
+                    module,
+                    possible_state,
+                    token,
+                    supported,
+                    additive,
+                    expected_receiver_names,
+                    inherited_conditions,
+                    lifecycle,
+                    direct_registration=False,
+                    disabled=disabled,
+                )
+                if len(self._route_conditions) > condition_count and not any(
+                    self._binding_has_token(binding, token) for binding in possible_state.values()
+                ):
+                    self._invalidate_token(actual_state, token)
+                    for ancestor in ancestor_class_states:
+                        self._invalidate_token(ancestor, token)
+                continue
+            if isinstance(event, _StartupReturnEffect):
+                continue
+            binding = self._binding_from_expression(event.value, possible_state, module.name)
+            for target in event.targets:
+                for name in _target_names(target):
+                    possible_state[name] = (
+                        binding if self._binding_has_token(binding, token) else None
+                    )
+        return possible_state
+
+    def _inspect_startup_possible_statements(
+        self,
+        statements: list[ast.stmt],
+        possible_state: dict[str, _Binding | None],
+        module: _Module,
+        actual_state: dict[str, _Binding | None],
+        token: tuple[str, int, int],
+        supported: set[str],
+        additive: set[str],
+        expected_receiver_names: set[str],
+        inherited_conditions: tuple[EndpointDiscoveryCondition, ...],
+        lifecycle: SurfaceRegistrationEvidence,
+        disabled: bool,
+        ancestor_class_states: tuple[dict[str, _Binding | None], ...],
+    ) -> dict[str, _Binding | None]:
+        current = dict(possible_state)
+        for statement in statements:
+            if isinstance(statement, ast.If):
+                current = self._inspect_startup_possible_expression(
+                    statement.test,
+                    current,
+                    module,
+                    actual_state,
+                    token,
+                    supported,
+                    additive,
+                    expected_receiver_names,
+                    inherited_conditions,
+                    lifecycle,
+                    disabled,
+                    ancestor_class_states,
+                )
+                truth = self._literal_truth(statement.test)
+                if truth is not None:
+                    current = self._inspect_startup_possible_statements(
+                        statement.body if truth else statement.orelse,
+                        current,
+                        module,
+                        actual_state,
+                        token,
+                        supported,
+                        additive,
+                        expected_receiver_names,
+                        inherited_conditions,
+                        lifecycle,
+                        disabled,
+                        ancestor_class_states,
+                    )
+                else:
+                    body_state = self._inspect_startup_possible_statements(
+                        statement.body,
+                        dict(current),
+                        module,
+                        actual_state,
+                        token,
+                        supported,
+                        additive,
+                        expected_receiver_names,
+                        inherited_conditions,
+                        lifecycle,
+                        disabled,
+                        ancestor_class_states,
+                    )
+                    else_state = self._inspect_startup_possible_statements(
+                        statement.orelse,
+                        dict(current),
+                        module,
+                        actual_state,
+                        token,
+                        supported,
+                        additive,
+                        expected_receiver_names,
+                        inherited_conditions,
+                        lifecycle,
+                        disabled,
+                        ancestor_class_states,
+                    )
+                    current = self._startup_possible_exact_join((body_state, else_state), token)
+                continue
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                for expression in self._startup_definition_header_expressions(module, statement):
+                    current = self._inspect_startup_possible_expression(
+                        expression,
+                        current,
+                        module,
+                        actual_state,
+                        token,
+                        supported,
+                        additive,
+                        expected_receiver_names,
+                        inherited_conditions,
+                        lifecycle,
+                        disabled,
+                        ancestor_class_states,
+                    )
+                continue
+            current = self._inspect_startup_possible_expression(
+                statement,
+                current,
+                module,
+                actual_state,
+                token,
+                supported,
+                additive,
+                expected_receiver_names,
+                inherited_conditions,
+                lifecycle,
+                disabled,
+                ancestor_class_states,
+            )
+        return current
+
+    def _inspect_startup_class_body_effects(  # noqa: PLR0912, PLR0915
+        self,
+        statement: ast.ClassDef,
+        module: _Module,
+        state: dict[str, _Binding | None],
+        token: tuple[str, int, int],
+        supported: set[str],
+        additive: set[str],
+        expected_receiver_names: set[str],
+        inherited_conditions: tuple[EndpointDiscoveryCondition, ...],
+        lifecycle: SurfaceRegistrationEvidence,
+        disabled: bool,
+        *,
+        scope: _StartupScopeFrame,
+        fallback_state: dict[str, _Binding | None] | None = None,
+        possible_exact_state: dict[str, _Binding | None] | None = None,
+        ancestor_class_states: tuple[dict[str, _Binding | None], ...] = (),
+    ) -> tuple[bool, _Fallthrough]:
+        """Fail closed on exact-app effects from one eagerly executed class body."""
+        declarations = _ClassScopeDeclarationVisitor()
+        for body_statement in statement.body:
+            declarations.visit(body_statement)
+        globals_ = declarations.globals
+        nonlocals = declarations.nonlocals
+        declared_outer = globals_ | nonlocals
+        fallback = state if fallback_state is None else fallback_state
+        class_state = dict(fallback)
+        for name in globals_:
+            class_state[name] = scope.global_state.get(name)
+        for name in nonlocals:
+            class_state[name] = scope.local_state.get(name)
+        possible_state = (
+            {
+                name: binding
+                for name, binding in class_state.items()
+                if self._binding_has_token(binding, token)
+            }
+            if possible_exact_state is None
+            else dict(possible_exact_state)
+        )
+        for name in globals_:
+            binding = scope.global_state.get(name)
+            possible_state[name] = binding if self._binding_has_token(binding, token) else None
+        for name in nonlocals:
+            binding = scope.local_state.get(name)
+            possible_state[name] = binding if self._binding_has_token(binding, token) else None
+        class_expected_names = {
+            name
+            for name in expected_receiver_names
+            if self._binding_has_token(class_state.get(name), token)
+        }
+
+        overall_flow: _Fallthrough = "always"
+        body_statements = self._startup_reachable_class_statements(statement.body)
+        for body_statement in body_statements:
+            possible_state = self._inspect_startup_possible_statements(
+                [body_statement],
+                possible_state,
+                module,
+                state,
+                token,
+                supported,
+                additive,
+                class_expected_names,
+                inherited_conditions,
+                lifecycle,
+                disabled,
+                ancestor_class_states,
+            )
+            statement_flow = self._startup_statement_flow(body_statement)
+            conservative_effects = (
+                statement_flow == "maybe"
+                or (
+                    isinstance(body_statement, ast.If)
+                    and self._literal_truth(body_statement.test) is None
+                )
+                or (
+                    isinstance(body_statement, (ast.For, ast.AsyncFor, ast.While))
+                    and self._literal_truth(
+                        body_statement.test
+                        if isinstance(body_statement, ast.While)
+                        else body_statement.iter
+                    )
+                    is None
+                )
+            )
+            entry_class_state = dict(class_state)
+            if isinstance(
+                body_statement,
+                (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+            ):
+                header_expressions = self._startup_definition_header_expressions(
+                    module, body_statement
+                )
+                visitors: list[tuple[_StartupStatementEffectsVisitor, ast.expr | None]] = []
+                for expression in header_expressions:
+                    effects = _StartupStatementEffectsVisitor()
+                    effects.visit(expression)
+                    visitors.append((effects, expression))
+            else:
+                effects = _StartupStatementEffectsVisitor()
+                effects.visit(body_statement)
+                visitors = [(effects, None)]
+                if isinstance(body_statement, ast.AnnAssign) and not module.postponed_annotations:
+                    annotation_effects = _StartupStatementEffectsVisitor()
+                    annotation_effects.visit(body_statement.annotation)
+                    visitors.append((annotation_effects, body_statement.annotation))
+
+            for effects, header_expression in visitors:
+                for event in effects.events:
+                    if isinstance(event, ast.Call):
+                        if conservative_effects:
+                            conservative_state = dict(entry_class_state)
+                            condition_count = len(self._route_conditions)
+                            self._inspect_startup_call_effect(
+                                event,
+                                module,
+                                conservative_state,
+                                token,
+                                supported,
+                                additive,
+                                class_expected_names,
+                                inherited_conditions,
+                                lifecycle,
+                                direct_registration=False,
+                                disabled=disabled,
+                            )
+                            if len(self._route_conditions) > condition_count and not any(
+                                self._binding_has_token(binding, token)
+                                for binding in conservative_state.values()
+                            ):
+                                self._invalidate_token(state, token)
+                                for ancestor in ancestor_class_states:
+                                    self._invalidate_token(ancestor, token)
+                        had_exact_receiver = any(
+                            self._binding_has_token(binding, token)
+                            for binding in class_state.values()
+                        )
+                        route_condition_count = len(self._route_conditions)
+                        self._inspect_startup_call_effect(
+                            event,
+                            module,
+                            class_state,
+                            token,
+                            supported,
+                            additive,
+                            class_expected_names,
+                            inherited_conditions,
+                            lifecycle,
+                            direct_registration=False,
+                            disabled=disabled,
+                        )
+                        if (
+                            had_exact_receiver
+                            and len(self._route_conditions) > route_condition_count
+                            and not any(
+                                self._binding_has_token(binding, token)
+                                for binding in class_state.values()
+                            )
+                        ):
+                            self._invalidate_token(state, token)
+                            for ancestor in ancestor_class_states:
+                                self._invalidate_token(ancestor, token)
+                        continue
+                    if isinstance(event, _StartupReturnEffect):
+                        if self._expression_escapes_exact_receiver(event.value, class_state, token):
+                            self._taint_startup_routes(
+                                module,
+                                event.value.lineno,
+                                "exact startup app escapes from an eager nested class body",
+                                state,
+                                token,
+                            )
+                            self._invalidate_token(class_state, token)
+                            for ancestor in ancestor_class_states:
+                                self._invalidate_token(ancestor, token)
+                        continue
+
+                    targets, value = event.targets, event.value
+                    if any(
+                        self._startup_registration_target(target, class_state, token, additive)
+                        for target in targets
+                    ):
+                        disabled = True
+                        self._record_startup_route_limitation(
+                            module,
+                            body_statement.lineno,
+                            "startup route registration method is replaced in an eager class body",
+                        )
+                    binding = self._binding_from_expression(value, class_state, module.name)
+                    destructive = any(
+                        self._startup_destructive_target(target, class_state, token)
+                        for target in targets
+                    )
+                    escapes_to_class_namespace = self._binding_has_token(binding, token) and any(
+                        isinstance(target, ast.Name) and target.id not in declared_outer
+                        for target in targets
+                    )
+                    escapes = escapes_to_class_namespace or self._assignment_escapes_exact_receiver(
+                        targets,
+                        value,
+                        binding,
+                        class_state,
+                        token,
+                    )
+                    if destructive or escapes:
+                        reason = (
+                            "startup may replace, delete, or mutate the exact app router "
+                            "or route collection in an eager class body"
+                            if destructive
+                            else "exact startup app escapes from an eager nested class body"
+                        )
+                        self._taint_startup_routes(
+                            module,
+                            body_statement.lineno,
+                            reason,
+                            state,
+                            token,
+                        )
+                        self._invalidate_token(class_state, token)
+                        for ancestor in ancestor_class_states:
+                            self._invalidate_token(ancestor, token)
+                        binding = None
+                    for target in targets:
+                        for name in _target_names(target):
+                            class_state[name] = binding if isinstance(target, ast.Name) else None
+                            if self._binding_has_token(binding, token):
+                                class_expected_names.add(name)
+                            elif name not in declared_outer:
+                                class_expected_names.discard(name)
+
+                if header_expression is not None and self._expression_escapes_exact_receiver(
+                    header_expression, class_state, token
+                ):
+                    self._taint_startup_routes(
+                        module,
+                        header_expression.lineno,
+                        "exact startup app escapes through an eager nested-definition header",
+                        state,
+                        token,
+                    )
+                    self._invalidate_token(class_state, token)
+                    for ancestor in ancestor_class_states:
+                        self._invalidate_token(ancestor, token)
+
+                if not isinstance(
+                    body_statement,
+                    (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Delete, ast.Expr),
+                ):
+                    for name in effects.rebound_names:
+                        class_state[name] = None
+                        if name not in declared_outer:
+                            class_expected_names.discard(name)
+
+            if isinstance(body_statement, ast.ClassDef):
+                disabled, nested_flow = self._inspect_startup_class_body_effects(
+                    body_statement,
+                    module,
+                    state,
+                    token,
+                    supported,
+                    additive,
+                    expected_receiver_names,
+                    inherited_conditions,
+                    lifecycle,
+                    disabled,
+                    scope=scope,
+                    fallback_state=fallback,
+                    possible_exact_state=possible_state,
+                    ancestor_class_states=(*ancestor_class_states, class_state),
+                )
+                if not any(self._binding_has_token(binding, token) for binding in state.values()):
+                    self._invalidate_token(class_state, token)
+                if nested_flow == "never":
+                    return disabled, "never"
+                if nested_flow == "maybe":
+                    overall_flow = "maybe"
+            if isinstance(
+                body_statement,
+                (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+            ):
+                class_state[body_statement.name] = None
+                class_expected_names.discard(body_statement.name)
+
+            for name in globals_:
+                binding = class_state.get(name)
+                scope.global_state[name] = binding
+                if name not in scope.local_names:
+                    scope.local_state[name] = binding
+                    fallback[name] = binding
+                for ancestor in ancestor_class_states:
+                    ancestor[name] = None
+                if self._binding_has_token(binding, token):
+                    expected_receiver_names.add(name)
+            for name in nonlocals:
+                binding = class_state.get(name)
+                scope.local_state[name] = binding
+                fallback[name] = binding
+                for ancestor in ancestor_class_states:
+                    ancestor[name] = None
+                if self._binding_has_token(binding, token):
+                    expected_receiver_names.add(name)
+
+            if statement_flow == "never":
+                return disabled, "never"
+            if statement_flow == "maybe":
+                overall_flow = "maybe"
+
+        return disabled, overall_flow
+
+    def _startup_reachable_class_statements(self, statements: list[ast.stmt]) -> list[ast.stmt]:
+        """Select only trivially reachable class statements without widening branches."""
+        selected: list[ast.stmt] = []
+        for statement in statements:
+            if isinstance(statement, ast.If):
+                truth = self._literal_truth(statement.test)
+                if truth is not None:
+                    selected.extend(
+                        self._startup_reachable_class_statements(
+                            statement.body if truth else statement.orelse
+                        )
+                    )
+                    continue
+            if isinstance(statement, ast.While) and self._literal_truth(statement.test) is False:
+                selected.extend(self._startup_reachable_class_statements(statement.orelse))
+                continue
+            if (
+                isinstance(statement, (ast.For, ast.AsyncFor))
+                and self._literal_truth(statement.iter) is False
+            ):
+                selected.extend(self._startup_reachable_class_statements(statement.orelse))
+                continue
+            selected.append(statement)
+        return selected
+
+    def _startup_statement_flow(  # noqa: PLR0911
+        self, statement: ast.stmt
+    ) -> _Fallthrough:
+        """Return a bounded fallthrough classification for one class statement."""
+        if isinstance(statement, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
+            return "never"
+        if isinstance(statement, ast.If):
+            truth = self._literal_truth(statement.test)
+            if truth is not None:
+                return self._startup_statements_flow(statement.body if truth else statement.orelse)
+            return self._branch_flow(
+                self._startup_statements_flow(statement.body),
+                self._startup_statements_flow(statement.orelse),
+            )
+        if isinstance(statement, ast.While):
+            truth = self._literal_truth(statement.test)
+            if truth is False:
+                return self._startup_statements_flow(statement.orelse)
+            return "maybe"
+        if isinstance(statement, (ast.For, ast.AsyncFor)):
+            if self._literal_truth(statement.iter) is False:
+                return self._startup_statements_flow(statement.orelse)
+            return "maybe"
+        if isinstance(statement, (ast.Try,)) or statement.__class__.__name__ == "TryStar":
+            return "maybe"
+        return "always"
+
+    def _startup_statements_flow(self, statements: list[ast.stmt]) -> _Fallthrough:
+        overall: _Fallthrough = "always"
+        for statement in self._startup_reachable_class_statements(statements):
+            flow = self._startup_statement_flow(statement)
+            if flow == "never":
+                return "never"
+            if flow == "maybe":
+                overall = "maybe"
+        return overall
+
     def _startup_definition_header_expressions(
+        self,
+        module: _Module,
         statement: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
     ) -> tuple[ast.expr, ...]:
         """Return eager nested-definition expressions without entering deferred bodies."""
@@ -1956,20 +3239,8 @@ class CustomSurfaceExtractor:
             expressions.extend(
                 default for default in statement.args.kw_defaults if default is not None
             )
-            arguments = (
-                *statement.args.posonlyargs,
-                *statement.args.args,
-                *statement.args.kwonlyargs,
-            )
-            expressions.extend(
-                argument.annotation for argument in arguments if argument.annotation is not None
-            )
-            if statement.args.vararg is not None and statement.args.vararg.annotation is not None:
-                expressions.append(statement.args.vararg.annotation)
-            if statement.args.kwarg is not None and statement.args.kwarg.annotation is not None:
-                expressions.append(statement.args.kwarg.annotation)
-            if statement.returns is not None:
-                expressions.append(statement.returns)
+            if not module.postponed_annotations:
+                expressions.extend(self._function_annotation_expressions(statement))
         else:
             expressions.extend(statement.bases)
             expressions.extend(keyword.value for keyword in statement.keywords)
@@ -2538,6 +3809,15 @@ class CustomSurfaceExtractor:
     ) -> tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef] | None:
         """Resolve one direct method on one exact local class with one exact base."""
         identity = self._symbol_identity(expression, state)
+        return self._resolve_class_method_identity(identity, method_name, required_base)
+
+    def _resolve_class_method_identity(
+        self,
+        identity: str | None,
+        method_name: str,
+        required_base: str,
+    ) -> tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef] | None:
+        """Resolve a method from an already captured exact class identity."""
         candidates = self._classes.get(identity or "", [])
         if len(candidates) != 1 or self._class_bases.get(identity or "") != (required_base,):
             return None

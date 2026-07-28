@@ -717,6 +717,425 @@ def test_startup_nested_definition_header_escape_is_eager(tmp_path: Path) -> Non
     assert all(endpoint.path != "/after" for endpoint in inventory.endpoints)
 
 
+def test_postponed_nested_annotation_has_no_startup_route_effect(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from __future__ import annotations\n"
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "async def first(): return 1\n"
+        "async def second(): return 2\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    app.add_api_route('/first', first)\n"
+        "    def nested(value: configure(app)): return value\n"
+        "    app.add_api_route('/second', second)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.route_conditions == ()
+    assert [endpoint.path for endpoint in inventory.endpoints if endpoint.surface is None] == [
+        "/first",
+        "/second",
+    ]
+
+
+def test_startup_nested_class_additive_route_effect_fails_closed(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "async def late(): return None\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    class Configure:\n"
+        "        app.add_api_route('/class-body', late)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert all(endpoint.path != "/class-body" for endpoint in inventory.endpoints)
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any(
+        "unsupported control flow or expression" in item.reason for item in inventory.limitations
+    )
+    assert inventory.route_conditions == ()
+
+
+@pytest.mark.parametrize(
+    "class_effect",
+    [
+        "        app.router.routes.clear()\n",
+        "        saved = app\n",
+    ],
+)
+def test_startup_nested_class_destructive_and_escape_effects_are_route_wide(
+    tmp_path: Path,
+    class_effect: str,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "async def first(): return 1\n"
+        "async def second(): return 2\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    app.add_api_route('/before', first)\n"
+        "    class Configure:\n" + class_effect + "    app.add_api_route('/after', second)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.route_conditions
+    assert [endpoint.path for endpoint in inventory.endpoints if endpoint.surface is None] == [
+        "/before"
+    ]
+    assert any(
+        "eager nested class body" in item.reason or "destructively call" in item.reason
+        for item in inventory.route_conditions
+    )
+
+
+def test_startup_nested_inert_class_body_does_not_condition_inventory(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "async def late(): return None\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    class Metadata:\n"
+        "        value = 1\n"
+        "    app.add_api_route('/after', late)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.route_conditions == ()
+    assert any(endpoint.path == "/after" for endpoint in inventory.endpoints)
+
+
+def test_nested_startup_class_uses_nonclass_fallback_for_exact_app(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "async def first(): return 1\n"
+        "async def second(): return 2\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    app.add_api_route('/before', first)\n"
+        "    class Outer:\n"
+        "        app = object()\n"
+        "        class Inner:\n"
+        "            app.router.routes.clear()\n"
+        "    app.add_api_route('/after', second)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.route_conditions
+    assert [endpoint.path for endpoint in inventory.endpoints if endpoint.surface is None] == [
+        "/before"
+    ]
+
+
+def test_postponed_function_annotation_inside_startup_class_is_not_eager(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from __future__ import annotations\n"
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "async def late(): return None\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    class Metadata:\n"
+        "        def nested(value: configure(app)): return value\n"
+        "    app.add_api_route('/after', late)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.route_conditions == ()
+    assert any(endpoint.path == "/after" for endpoint in inventory.endpoints)
+
+
+def test_annotation_only_startup_class_target_does_not_mutate_routes(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "async def late(): return None\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    app.router: int\n"
+        "    class Metadata:\n"
+        "        app.router: int\n"
+        "    app.add_api_route('/after', late)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.route_conditions == ()
+    assert any(endpoint.path == "/after" for endpoint in inventory.endpoints)
+
+
+def test_startup_class_local_app_shadow_does_not_condition_exact_app(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "async def late(): return None\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    class Metadata:\n"
+        "        app = object()\n"
+        "        app.add_api_route('/wrong', late)\n"
+        "    app.add_api_route('/after', late)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.route_conditions == ()
+    assert not any("receiver was rebound" in item.reason for item in inventory.limitations)
+    assert any(endpoint.path == "/after" for endpoint in inventory.endpoints)
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "    def nested(value=(alias := None)): pass\n",
+        "    @(alias := None)\n    def nested(): pass\n",
+        "    class Nested((alias := None)): pass\n",
+        "    def nested(value: (alias := None)): pass\n",
+    ],
+)
+def test_startup_nested_headers_apply_named_expression_bindings(
+    tmp_path: Path, header: str
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "async def late(): return None\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    alias = app\n"
+        "    app.add_api_route('/before', late)\n"
+        + header
+        + "    alias.add_api_route('/after', late)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert all(endpoint.path != "/after" for endpoint in inventory.endpoints)
+    assert any("receiver was rebound" in item.reason for item in inventory.limitations)
+
+
+@pytest.mark.parametrize(
+    "dead_effect",
+    [
+        "        if False:\n            app.router.routes.clear()\n",
+        "        if False:\n            saved = app\n",
+        "        while False:\n            app.router.routes.clear()\n",
+        "        for item in ():\n            app.router.routes.clear()\n",
+        "        False and app.router.routes.clear()\n",
+        "        app.router.routes.clear() if False else None\n",
+        "        values = [app.router.routes.clear() for item in ()]\n",
+    ],
+)
+def test_dead_startup_class_effect_does_not_taint_routes(tmp_path: Path, dead_effect: str) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "async def late(): return None\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    class Metadata:\n" + dead_effect + "    app.add_api_route('/after', late)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.route_conditions == ()
+    assert any(endpoint.path == "/after" for endpoint in inventory.endpoints)
+
+
+def test_dead_class_assignment_does_not_hide_reachable_destructive_effect(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "async def late(): return None\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    class Configure:\n"
+        "        if False:\n"
+        "            app = object()\n"
+        "        app.router.routes.clear()\n"
+        "    app.add_api_route('/after', late)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.route_conditions
+    assert all(endpoint.path != "/after" for endpoint in inventory.endpoints)
+
+
+def test_unknown_startup_class_branches_remain_conservative(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "async def late(): return None\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    class Configure:\n"
+        "        if condition:\n"
+        "            app = object()\n"
+        "        else:\n"
+        "            app.router.routes.clear()\n"
+        "    app.add_api_route('/after', late)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.route_conditions
+    assert all(endpoint.path != "/after" for endpoint in inventory.endpoints)
+
+
+def test_startup_class_raise_stops_later_route_discovery(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "async def late(): return None\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    class Configure:\n"
+        "        raise RuntimeError()\n"
+        "    app.add_api_route('/after', late)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert all(endpoint.path != "/after" for endpoint in inventory.endpoints)
+
+
+def test_possible_startup_class_nonfallthrough_fails_closed(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "async def late(): return None\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    class Configure:\n"
+        "        if condition:\n"
+        "            raise RuntimeError()\n"
+        "    app.add_api_route('/after', late)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert all(endpoint.path != "/after" for endpoint in inventory.endpoints)
+    assert any("may not fall through" in item.reason for item in inventory.limitations)
+
+
+def test_startup_activation_uses_pre_argument_receiver_capture(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "alias = app\n"
+        "async def late(): return None\n\n"
+        "@app.on_event('startup', marker=(app := None))\n"
+        "async def startup() -> None:\n"
+        "    alias.add_api_route('/captured', late)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert any(endpoint.path == "/captured" for endpoint in inventory.endpoints)
+
+
+@pytest.mark.parametrize(
+    "branch_body",
+    [
+        "        if condition:\n"
+        "            app = object()\n"
+        "            app.router.routes.clear()\n",
+        "        if condition:\n"
+        "            app = object()\n"
+        "        else:\n"
+        "            alias = app\n"
+        "            alias.router.routes.clear()\n",
+    ],
+)
+def test_possible_exact_startup_class_aliases_taint_route_wide(
+    tmp_path: Path, branch_body: str
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "async def first(): return 1\n"
+        "async def second(): return 2\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    app.add_api_route('/before', first)\n"
+        "    class Configure:\n" + branch_body + "    app.add_api_route('/after', second)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.route_conditions
+    assert all(endpoint.path != "/after" for endpoint in inventory.endpoints)
+    before = next(endpoint for endpoint in inventory.endpoints if endpoint.path == "/before")
+    assert before.discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+    assert all(condition in before.discovery_conditions for condition in inventory.route_conditions)
+
+
+def test_startup_class_global_uses_module_app_not_same_named_function_local(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "alias = app\n"
+        "async def first(): return 1\n"
+        "async def second(): return 2\n\n"
+        "@app.on_event('startup')\n"
+        "async def startup() -> None:\n"
+        "    app = object()\n"
+        "    alias.add_api_route('/before', first)\n"
+        "    class Configure:\n"
+        "        global app\n"
+        "        app.router.routes.clear()\n"
+        "    alias.add_api_route('/after', second)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.route_conditions
+    assert all(endpoint.path != "/after" for endpoint in inventory.endpoints)
+    before = next(endpoint for endpoint in inventory.endpoints if endpoint.path == "/before")
+    assert all(condition in before.discovery_conditions for condition in inventory.route_conditions)
+
+
 def test_imported_exact_app_discovers_finite_startup_route(tmp_path: Path) -> None:
     (tmp_path / "apps.py").write_text(
         "from fastapi import FastAPI\n\napp = FastAPI()\n",
