@@ -22,6 +22,7 @@ from fastapi_endpoint_detector.models.endpoint import (
     HandlerInfo,
 )
 from fastapi_endpoint_detector.parser.fastapi_extractor import FastAPIExtractor
+from fastapi_endpoint_detector.source_inventory import SourceInventory
 
 
 def _endpoint(main: Path) -> Endpoint:
@@ -71,15 +72,15 @@ def test_shared_project_path_index_is_enumerated_and_resolved_once(
     source = tmp_path / "pkg" / "service.py"
     source.parent.mkdir()
     source.write_text("value = 1\n")
-    original_rglob = Path.rglob
-    enumerations = 0
+    original_build = SourceInventory.build
+    inventory_builds = 0
 
-    def counted_rglob(path: Path, pattern: str):
-        nonlocal enumerations
-        enumerations += 1
-        return original_rglob(path, pattern)
+    def counted_build(root: Path) -> SourceInventory:
+        nonlocal inventory_builds
+        inventory_builds += 1
+        return original_build(root)
 
-    monkeypatch.setattr(Path, "rglob", counted_rglob)
+    monkeypatch.setattr(SourceInventory, "build", staticmethod(counted_build))
     analyzer = MypyAnalyzer(tmp_path)
     index = analyzer._project_path_index()
     dependencies = []
@@ -103,7 +104,7 @@ def test_shared_project_path_index_is_enumerated_and_resolved_once(
         assert deps.references_symbol_at_line("pkg/service.py", 1) is not None
         assert deps.get_call_stack("pkg/service.py")
 
-    assert enumerations == 1
+    assert inventory_builds == 1
     assert len(index._query_cache) == 1
     assert all(deps._path_index is index for deps in dependencies)
     assert all(
@@ -216,20 +217,20 @@ def test_normal_analysis_reuses_build_inventory_and_handler_reverse_index(
         methods=[EndpointMethod.GET],
         handler=HandlerInfo(name="handler", module="main", file_path=main, line_number=1),
     )
-    original_rglob = Path.rglob
-    enumerations = 0
+    original_build = SourceInventory.build
+    inventory_builds = 0
 
-    def counted_rglob(path: Path, pattern: str):
-        nonlocal enumerations
-        enumerations += 1
-        return original_rglob(path, pattern)
+    def counted_build(root: Path) -> SourceInventory:
+        nonlocal inventory_builds
+        inventory_builds += 1
+        return original_build(root)
 
-    monkeypatch.setattr(Path, "rglob", counted_rglob)
+    monkeypatch.setattr(SourceInventory, "build", staticmethod(counted_build))
     analyzer = MypyAnalyzer(tmp_path)
     deps = analyzer.analyze_endpoint(endpoint)
 
     assert deps.references_symbol_at_line("main.py", 1) is not None
-    assert enumerations == 1
+    assert inventory_builds == 1
     assert any(
         module.endswith(".main") or module == "main"
         for module in analyzer._modules_by_canonical_path[str(main.resolve())]

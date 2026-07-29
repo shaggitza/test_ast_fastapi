@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper, ChangeMapperError
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
@@ -48,6 +45,78 @@ def test_inventory_is_deterministic_and_applies_project_relative_globs(tmp_path:
     assert first.fingerprint == second.fingerprint
 
 
+def test_segment_globs_match_zero_and_multiple_directory_depths(tmp_path: Path) -> None:
+    for relative in (
+        "pkg/main.py",
+        "pkg/deep/nested/worker.py",
+        "tests/helper.py",
+        "tests/deep/helper.py",
+        "pkg/tests/helper.py",
+        "pkg/tests/deep/helper.py",
+    ):
+        source = tmp_path / relative
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("value = 1\n", encoding="utf-8")
+
+    inventory = SourceInventory.build(
+        tmp_path,
+        include_patterns=("pkg/**/*.py",),
+        exclude_patterns=("**/tests/**",),
+    )
+
+    assert [entry.relative_path for entry in inventory.entries] == [
+        "pkg/deep/nested/worker.py",
+        "pkg/main.py",
+    ]
+
+
+def test_diff_scope_rejects_absolute_traversal_and_ambiguous_paths(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text("value = 1\n", encoding="utf-8")
+    inventory = SourceInventory.build(
+        tmp_path,
+        include_patterns=("main.py",),
+        exclude_patterns=(),
+    )
+
+    assert inventory.allows_diff_path(Path("main.py"))
+    assert not inventory.allows_diff_path(Path("a/main.py"))
+    assert not inventory.allows_diff_path(Path("b/main.py"))
+    for unsafe in (
+        Path("/etc/outside.py"),
+        Path("../outside.py"),
+        Path("a/../outside.py"),
+        Path("b/../../outside.py"),
+        Path("C:\\outside.py"),
+    ):
+        assert not inventory.allows_diff_path(unsafe)
+
+
+def test_rename_scope_authenticates_both_sides_without_traversal(tmp_path: Path) -> None:
+    app = tmp_path / "main.py"
+    app.write_text("from fastapi import FastAPI\napp = FastAPI()\n", encoding="utf-8")
+    mapper = ChangeMapper(app, secure_ast=True)
+    safe_rename = DiffParser.parse_string(
+        "diff --git a/old.py b/new.txt\n"
+        "similarity index 100%\n"
+        "rename from old.py\n"
+        "rename to new.txt\n"
+    )
+    unsafe_rename = DiffParser.parse_string(
+        "diff --git a/../outside.py b/new.txt\n"
+        "similarity index 100%\n"
+        "rename from ../outside.py\n"
+        "rename to new.txt\n"
+    )
+
+    safe_scope, _, safe_unresolved = mapper._partition_changed_files(safe_rename)
+    unsafe_scope, _, unsafe_unresolved = mapper._partition_changed_files(unsafe_rename)
+
+    assert safe_scope == safe_rename
+    assert safe_unresolved == []
+    assert unsafe_scope == []
+    assert len(unsafe_unresolved) == 1
+
+
 def test_inventory_detects_source_drift_atomically(tmp_path: Path) -> None:
     source = tmp_path / "main.py"
     source.write_text("value = 1\n", encoding="utf-8")
@@ -59,6 +128,40 @@ def test_inventory_detects_source_drift_atomically(tmp_path: Path) -> None:
     extracted = SecureASTExtractor(tmp_path, source_inventory=inventory).extract_inventory()
     assert extracted.status == InventoryStatus.UNAVAILABLE
     assert "could not be verified" in extracted.limitations[0].reason
+
+
+def test_inventory_caps_accept_boundaries_and_reject_overflow(tmp_path: Path) -> None:
+    hidden = tmp_path / ".ignored"
+    hidden.mkdir()
+    for index in range(10):
+        (hidden / f"ignored-{index}.py").write_text("ignored", encoding="utf-8")
+    first = tmp_path / "a.py"
+    first.write_bytes(b"ab")
+
+    boundary = SourceInventory.build(
+        tmp_path,
+        max_candidates=2,
+        max_files=1,
+        max_file_bytes=2,
+        max_aggregate_bytes=2,
+    )
+    assert [(entry.relative_path, entry.size_bytes) for entry in boundary.entries] == [
+        ("a.py", 2)
+    ]
+
+    with pytest.raises(SourceInventoryError, match="candidate limit"):
+        SourceInventory.build(tmp_path, max_candidates=1)
+    with pytest.raises(SourceInventoryError, match="per-file byte limit"):
+        SourceInventory.build(tmp_path, max_file_bytes=1)
+
+    second = tmp_path / "b.py"
+    second.write_bytes(b"cd")
+    with pytest.raises(SourceInventoryError, match="selected-file limit"):
+        SourceInventory.build(tmp_path, max_files=1)
+    aggregate_boundary = SourceInventory.build(tmp_path, max_aggregate_bytes=4)
+    assert sum(entry.size_bytes for entry in aggregate_boundary.entries) == 4
+    with pytest.raises(SourceInventoryError, match="aggregate byte limit"):
+        SourceInventory.build(tmp_path, max_aggregate_bytes=3)
 
 
 def test_secure_ast_and_mypy_consume_the_same_inventory(tmp_path: Path) -> None:
@@ -80,6 +183,57 @@ def test_secure_ast_and_mypy_consume_the_same_inventory(tmp_path: Path) -> None:
     assert extracted.status == InventoryStatus.ESTABLISHED
     assert [endpoint.identifier for endpoint in extracted.endpoints] == ["GET /kept"]
     assert sources == {"main.py": inventory.python_entries[0].sha256}
+
+
+def test_mypy_fails_closed_before_cache_for_excluded_project_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "main.py").write_text("from pkg.helper import value\n", encoding="utf-8")
+    inventory = SourceInventory.build(
+        tmp_path,
+        include_patterns=("pkg/__init__.py", "pkg/main.py"),
+        exclude_patterns=(),
+    )
+    analyzer = MypyAnalyzer(package, source_inventory=inventory)
+    initial_fingerprint = analyzer._cache_fingerprint()[0]
+    analyzer._ensure_mypy_built()  # Missing imports are external/unknown, not local inputs.
+
+    helper = package / "helper.py"
+    helper.write_text("value = 1\n", encoding="utf-8")
+    assert analyzer._cache_fingerprint()[0] == initial_fingerprint
+
+    cached = MypyAnalyzer(package, source_inventory=inventory)
+    cached.set_cache_path(tmp_path / "cache.json")
+    cached.cache_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(cached, "_load_cache", lambda: True)
+    with pytest.raises(SourceInventoryError, match="graph inputs absent"):
+        cached.analyze_endpoints([], use_cache=True)
+    assert cached._build_result is None
+    assert cached._trees == {}
+
+    helper.write_text("value = 2\n", encoding="utf-8")
+    with pytest.raises(SourceInventoryError, match="graph inputs absent"):
+        cached._ensure_mypy_built()
+
+
+def test_shared_inventory_canonicalizes_mypy_build_root_context(tmp_path: Path) -> None:
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "main.py").write_text("value = 1\n", encoding="utf-8")
+    inventory = SourceInventory.build(tmp_path)
+
+    project_analyzer = MypyAnalyzer(tmp_path, source_inventory=inventory)
+    package_analyzer = MypyAnalyzer(package, source_inventory=inventory)
+
+    assert project_analyzer.cache_path == package_analyzer.cache_path
+    assert project_analyzer._get_source_root() != package_analyzer._get_source_root()
+    # Build sources, mypy_path, module names, and the cache identity all use the
+    # inventory root, so app-path forms cannot collide with differing contexts.
+    assert project_analyzer._cache_fingerprint()[0] == package_analyzer._cache_fingerprint()[0]
 
 
 @pytest.mark.parametrize(

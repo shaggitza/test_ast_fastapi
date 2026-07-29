@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from fnmatch import fnmatchcase
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import ClassVar
 
 
 class SourceInventoryError(ValueError):
@@ -32,11 +35,26 @@ class SourceInventoryEntry:
 class SourceInventory:
     """Canonical deterministic source scope and immutable file fingerprint."""
 
+    DEFAULT_MAX_CANDIDATES: ClassVar[int] = 100_000
+    DEFAULT_MAX_FILES: ClassVar[int] = 20_000
+    DEFAULT_MAX_FILE_BYTES: ClassVar[int] = 16 * 1024 * 1024
+    DEFAULT_MAX_AGGREGATE_BYTES: ClassVar[int] = 256 * 1024 * 1024
+    HASH_CHUNK_BYTES: ClassVar[int] = 1024 * 1024
+    IMPLICIT_EXCLUSIONS: ClassVar[tuple[str, ...]] = (
+        "dot-prefixed path segments",
+        "__pycache__ directories",
+        "symbolic links",
+    )
+
     root: Path
     include_patterns: tuple[str, ...]
     exclude_patterns: tuple[str, ...]
     entries: tuple[SourceInventoryEntry, ...]
     fingerprint: str
+    max_candidates: int
+    max_files: int
+    max_file_bytes: int
+    max_aggregate_bytes: int
 
     @classmethod
     def build(
@@ -50,8 +68,16 @@ class SourceInventory:
             "**/tests/**",
             "**/__pycache__/**",
         ),
+        max_candidates: int = DEFAULT_MAX_CANDIDATES,
+        max_files: int = DEFAULT_MAX_FILES,
+        max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
+        max_aggregate_bytes: int = DEFAULT_MAX_AGGREGATE_BYTES,
     ) -> SourceInventory:
-        """Build one bounded-to-root snapshot without following source-file aliases."""
+        """Build one resource-bounded root-confined snapshot.
+
+        Dot-prefixed path segments, ``__pycache__`` directories, and symbolic links
+        are always excluded and cannot be re-enabled by include patterns.
+        """
         try:
             canonical_root = root.expanduser().resolve(strict=True)
         except OSError as error:
@@ -62,54 +88,33 @@ class SourceInventory:
             raise SourceInventoryError(f"source inventory root is not a directory: {root}")
         if not include_patterns:
             raise SourceInventoryError("source inventory requires at least one include pattern")
+        limits = {
+            "max_candidates": max_candidates,
+            "max_files": max_files,
+            "max_file_bytes": max_file_bytes,
+            "max_aggregate_bytes": max_aggregate_bytes,
+        }
+        for name, value in limits.items():
+            if value < 0:
+                raise SourceInventoryError(f"source inventory {name} must not be negative")
 
-        entries: list[SourceInventoryEntry] = []
-        try:
-            candidates = sorted(canonical_root.rglob("*"), key=lambda item: item.as_posix())
-        except OSError as error:
-            raise SourceInventoryError(f"source inventory enumeration failed: {error}") from error
-        for candidate in candidates:
-            try:
-                if not candidate.is_file():
-                    continue
-                relative = candidate.relative_to(canonical_root).as_posix()
-            except (OSError, ValueError) as error:
-                raise SourceInventoryError(
-                    f"source inventory candidate is outside its root: {candidate}"
-                ) from error
-            if any(part.startswith(".") or part == "__pycache__" for part in relative.split("/")):
-                continue
-            if not _matches_any(relative, include_patterns) or _matches_any(
-                relative, exclude_patterns
-            ):
-                continue
-            if candidate.is_symlink():
-                # Project-local providers never follow source aliases outside the snapshot.
-                continue
-            try:
-                raw = candidate.read_bytes()
-                resolved = candidate.resolve(strict=True)
-                resolved.relative_to(canonical_root)
-            except (OSError, ValueError) as error:
-                raise SourceInventoryError(
-                    f"source inventory file is unreadable or escapes its root: {relative}"
-                ) from error
-            entries.append(
-                SourceInventoryEntry(
-                    relative_path=relative,
-                    path=resolved,
-                    module_name=_module_name(relative) if resolved.suffix == ".py" else None,
-                    sha256=hashlib.sha256(raw).hexdigest(),
-                    size_bytes=len(raw),
-                )
-            )
-
+        entries = _collect_entries(
+            canonical_root,
+            include_patterns=include_patterns,
+            exclude_patterns=exclude_patterns,
+            max_candidates=max_candidates,
+            max_files=max_files,
+            max_file_bytes=max_file_bytes,
+            max_aggregate_bytes=max_aggregate_bytes,
+        )
         payload = json.dumps(
             {
-                "schema": 1,
+                "schema": 2,
                 "root": str(canonical_root),
                 "include_patterns": list(include_patterns),
                 "exclude_patterns": list(exclude_patterns),
+                "implicit_exclusions": list(cls.IMPLICIT_EXCLUSIONS),
+                "limits": limits,
                 "entries": [
                     {
                         "path": item.relative_path,
@@ -128,6 +133,10 @@ class SourceInventory:
             exclude_patterns=exclude_patterns,
             entries=tuple(entries),
             fingerprint=hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+            max_candidates=max_candidates,
+            max_files=max_files,
+            max_file_bytes=max_file_bytes,
+            max_aggregate_bytes=max_aggregate_bytes,
         )
 
     def verify(self) -> None:
@@ -136,6 +145,10 @@ class SourceInventory:
             self.root,
             include_patterns=self.include_patterns,
             exclude_patterns=self.exclude_patterns,
+            max_candidates=self.max_candidates,
+            max_files=self.max_files,
+            max_file_bytes=self.max_file_bytes,
+            max_aggregate_bytes=self.max_aggregate_bytes,
         )
         if current.fingerprint != self.fingerprint:
             raise SourceInventoryError("source inventory changed after snapshot construction")
@@ -159,20 +172,26 @@ class SourceInventory:
         return any(item.path == resolved for item in self.entries)
 
     def allows_diff_path(self, path: Path) -> bool:
-        """Whether a target/source diff path belongs to the configured source scope."""
-        normalized = path.as_posix().lstrip("/")
-        for prefix in ("a/", "b/"):
-            if normalized.startswith(prefix):
-                normalized = normalized[len(prefix) :]
-        candidates = {normalized}
-        root_name = self.root.name
-        marker = f"{root_name}/"
-        if normalized.startswith(marker):
-            candidates.add(normalized[len(marker) :])
-        return any(
-            _matches_any(candidate, self.include_patterns)
-            and not _matches_any(candidate, self.exclude_patterns)
-            for candidate in candidates
+        """Whether a safe project-relative Git diff path belongs to this scope."""
+        normalized = path.as_posix()
+        if (
+            not normalized
+            or normalized == "."
+            or "\\" in normalized
+            or PurePosixPath(normalized).is_absolute()
+            or PureWindowsPath(normalized).is_absolute()
+        ):
+            return False
+        parts = normalized.split("/")
+        if any(part in {"", ".", ".."} for part in parts):
+            return False
+
+        # DiffParser removes one exact Git side prefix. Treat this API's input only
+        # as project-relative; guessing whether an ``a/`` or ``b/`` segment is a
+        # side marker would be ambiguous with real directories of those names.
+        relative = "/".join(parts)
+        return _matches_any(relative, self.include_patterns) and not _matches_any(
+            relative, self.exclude_patterns
         )
 
 
@@ -187,15 +206,193 @@ def source_root_for_app(app_path: Path) -> Path:
     return package
 
 
+def _collect_entries(
+    root: Path,
+    *,
+    include_patterns: tuple[str, ...],
+    exclude_patterns: tuple[str, ...],
+    max_candidates: int,
+    max_files: int,
+    max_file_bytes: int,
+    max_aggregate_bytes: int,
+) -> list[SourceInventoryEntry]:
+    """Traverse deterministically without retaining more than bounded candidates."""
+    entries: list[SourceInventoryEntry] = []
+    candidate_count = 0
+    aggregate_bytes = 0
+    pending_directories = [root]
+    while pending_directories:
+        directory = pending_directories.pop()
+        children = _bounded_children(
+            directory,
+            remaining_candidates=max_candidates - candidate_count,
+            max_candidates=max_candidates,
+        )
+        candidate_count += len(children)
+        child_directories: list[Path] = []
+        for child in children:
+            kind = _candidate_kind(child)
+            if kind == "ignored":
+                continue
+            if kind == "directory":
+                child_directories.append(Path(child.path))
+                continue
+            if kind != "file":
+                continue
+            candidate = Path(child.path)
+            relative = candidate.relative_to(root).as_posix()
+            if not _matches_any(relative, include_patterns) or _matches_any(
+                relative, exclude_patterns
+            ):
+                continue
+            if len(entries) >= max_files:
+                raise SourceInventoryError(
+                    f"source inventory selected-file limit exceeded ({max_files})"
+                )
+            entry = _build_entry(
+                candidate,
+                root=root,
+                relative=relative,
+                max_file_bytes=max_file_bytes,
+                remaining_aggregate_bytes=max_aggregate_bytes - aggregate_bytes,
+            )
+            aggregate_bytes += entry.size_bytes
+            entries.append(entry)
+        # Reverse push preserves deterministic ascending depth-first traversal.
+        pending_directories.extend(reversed(child_directories))
+    entries.sort(key=lambda item: item.relative_path)
+    return entries
+
+
+def _bounded_children(
+    directory: Path,
+    *,
+    remaining_candidates: int,
+    max_candidates: int,
+) -> list[os.DirEntry[str]]:
+    children: list[os.DirEntry[str]] = []
+    try:
+        with os.scandir(directory) as iterator:
+            for child in iterator:
+                if len(children) >= remaining_candidates:
+                    raise SourceInventoryError(
+                        f"source inventory candidate limit exceeded ({max_candidates})"
+                    )
+                children.append(child)
+    except SourceInventoryError:
+        raise
+    except OSError as error:
+        raise SourceInventoryError(
+            f"source inventory enumeration failed at {directory}: {error}"
+        ) from error
+    children.sort(key=lambda item: item.name)
+    return children
+
+
+def _candidate_kind(candidate: os.DirEntry[str]) -> str:
+    if candidate.name.startswith(".") or candidate.name == "__pycache__":
+        return "ignored"
+    try:
+        if candidate.is_symlink():
+            return "ignored"
+        if candidate.is_dir(follow_symlinks=False):
+            return "directory"
+        if candidate.is_file(follow_symlinks=False):
+            return "file"
+    except OSError as error:
+        raise SourceInventoryError(
+            f"source inventory candidate is unreadable: {candidate.path}"
+        ) from error
+    return "other"
+
+
+def _build_entry(
+    candidate: Path,
+    *,
+    root: Path,
+    relative: str,
+    max_file_bytes: int,
+    remaining_aggregate_bytes: int,
+) -> SourceInventoryEntry:
+    try:
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(root)
+        digest, size_bytes = _stream_hash(
+            resolved,
+            max_file_bytes=max_file_bytes,
+            max_aggregate_bytes=remaining_aggregate_bytes,
+        )
+    except SourceInventoryError:
+        raise
+    except (OSError, ValueError) as error:
+        raise SourceInventoryError(
+            f"source inventory file is unreadable or escapes its root: {relative}"
+        ) from error
+    return SourceInventoryEntry(
+        relative_path=relative,
+        path=resolved,
+        module_name=_module_name(relative) if resolved.suffix == ".py" else None,
+        sha256=digest,
+        size_bytes=size_bytes,
+    )
+
+
+def _stream_hash(
+    path: Path,
+    *,
+    max_file_bytes: int,
+    max_aggregate_bytes: int,
+) -> tuple[str, int]:
+    """Hash one file incrementally while enforcing exact byte boundaries."""
+    digest = hashlib.sha256()
+    size_bytes = 0
+    with path.open("rb") as source:
+        while chunk := source.read(SourceInventory.HASH_CHUNK_BYTES):
+            size_bytes += len(chunk)
+            if size_bytes > max_file_bytes:
+                raise SourceInventoryError(
+                    f"source inventory per-file byte limit exceeded ({max_file_bytes})"
+                )
+            if size_bytes > max_aggregate_bytes:
+                raise SourceInventoryError(
+                    "source inventory aggregate byte limit exceeded "
+                    f"({max_aggregate_bytes})"
+                )
+            digest.update(chunk)
+    return digest.hexdigest(), size_bytes
+
+
 def _matches_any(relative_path: str, patterns: tuple[str, ...]) -> bool:
-    path = PurePosixPath(relative_path)
-    for pattern in patterns:
-        normalized = pattern.replace("\\", "/")
-        if path.match(normalized):
-            return True
-        if normalized.startswith("**/") and path.match(normalized[3:]):
-            return True
-    return False
+    path_segments = relative_path.split("/")
+    return any(
+        _match_segments(path_segments, pattern.replace("\\", "/").split("/"))
+        for pattern in patterns
+    )
+
+
+def _match_segments(path: list[str], pattern: list[str]) -> bool:
+    """Match slash-delimited globs where ``**`` spans zero or more segments."""
+    matched: set[tuple[int, int]] = set()
+
+    def visit(path_index: int, pattern_index: int) -> bool:
+        state = (path_index, pattern_index)
+        if state in matched:
+            return False
+        matched.add(state)
+        if pattern_index == len(pattern):
+            return path_index == len(path)
+        segment = pattern[pattern_index]
+        if segment == "**":
+            return visit(path_index, pattern_index + 1) or (
+                path_index < len(path) and visit(path_index + 1, pattern_index)
+            )
+        return (
+            path_index < len(path)
+            and fnmatchcase(path[path_index], segment)
+            and visit(path_index + 1, pattern_index + 1)
+        )
+
+    return visit(0, 0)
 
 
 def _module_name(relative_path: str) -> str:

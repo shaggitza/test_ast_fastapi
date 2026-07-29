@@ -40,7 +40,7 @@ from fastapi_endpoint_detector.models.endpoint import (
     Endpoint,
 )
 from fastapi_endpoint_detector.models.surface_contract import CallbackRangeMode
-from fastapi_endpoint_detector.source_inventory import SourceInventory
+from fastapi_endpoint_detector.source_inventory import SourceInventory, SourceInventoryError
 
 # Type alias for line-level progress callback (file_path, line_number, symbol_name)
 LineProgressCallback = Callable[[str, int, str], None]
@@ -377,7 +377,7 @@ class MypyAnalyzer:
     and extract precise file/line information for all references.
     """
 
-    CACHE_SCHEMA_VERSION = 18
+    CACHE_SCHEMA_VERSION = 19
     MAX_POINTS_TO_TARGETS = 8
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
@@ -499,31 +499,23 @@ class MypyAnalyzer:
         from mypy.modulefinder import BuildSource
         from mypy.options import Options
 
-        source_root = self._get_source_root()
+        requested_root = self._get_source_root()
 
         # Consume the same canonical inventory as execution-free route discovery.
-        inventory = self.source_inventory or SourceInventory.build(source_root)
+        inventory = self.source_inventory or SourceInventory.build(requested_root)
         if self.source_inventory is not None:
             inventory.verify()
         sources: list[BuildSource] = []
-        for py_file in inventory.python_paths:
-            try:
-                rel_path = py_file.relative_to(source_root.parent)
-                if rel_path.name == "__init__.py":
-                    module_name = str(rel_path.parent).replace("/", ".").replace("\\", ".")
-                else:
-                    module_name = str(rel_path.with_suffix("")).replace("/", ".").replace("\\", ".")
-            except ValueError:
-                module_name = py_file.stem
-
-            sources.append(BuildSource(path=str(py_file), module=module_name))
-            self._module_to_path[module_name] = str(py_file)
+        for entry in inventory.python_entries:
+            if entry.module_name is None:  # pragma: no cover - guaranteed by python_entries
+                continue
+            sources.append(BuildSource(path=str(entry.path), module=entry.module_name))
 
         # Configure mypy for full analysis with AST retention
         options = Options()
         options.ignore_missing_imports = True
         options.follow_imports = "normal"
-        options.mypy_path = [str(source_root.parent)]
+        options.mypy_path = [str(inventory.root)]
         options.namespace_packages = True
         options.explicit_package_bases = True
         options.preserve_asts = True
@@ -532,18 +524,46 @@ class MypyAnalyzer:
         options.export_types = True  # Critical for type information!
 
         original_path = sys.path.copy()
-        if str(source_root.parent) not in sys.path:
-            sys.path.insert(0, str(source_root.parent))
+        if str(inventory.root) not in sys.path:
+            sys.path.insert(0, str(inventory.root))
 
         try:
             fscache = FileSystemCache()
-            self._build_result = mypy_build(sources=sources, options=options, fscache=fscache)
+            build_result = mypy_build(sources=sources, options=options, fscache=fscache)
+            inventory_paths = {entry.path for entry in inventory.entries}
+            inventory_directories = {
+                parent
+                for entry in inventory.entries
+                for parent in entry.path.parents
+                if parent == inventory.root or inventory.root in parent.parents
+            }
+            unauthenticated: set[str] = set()
+            for state in build_result.graph.values():
+                if not state.path:
+                    continue
+                try:
+                    graph_path = Path(state.path).resolve()
+                    relative_graph_path = graph_path.relative_to(inventory.root)
+                except OSError:
+                    continue
+                except ValueError:
+                    continue
+                if graph_path.is_dir() and graph_path in inventory_directories:
+                    continue
+                if graph_path not in inventory_paths:
+                    unauthenticated.add(relative_graph_path.as_posix())
+            if unauthenticated:
+                paths = ", ".join(sorted(unauthenticated))
+                raise SourceInventoryError(
+                    "mypy admitted project-local graph inputs absent from the source "
+                    f"inventory: {paths}"
+                )
 
-            # Store the types map
-            self._types_map = self._build_result.types
+            self._build_result = build_result
+            self._types_map = build_result.types
 
-            # Capture modules with trees
-            for module_name, state in self._build_result.graph.items():
+            # Capture modules with authenticated trees.
+            for module_name, state in build_result.graph.items():
                 if state.path:
                     self._module_to_path[module_name] = state.path
                 tree = state.tree
@@ -3695,6 +3715,19 @@ class MypyAnalyzer:
         use_cache: bool = True,
     ) -> dict[str, EndpointDependencies]:
         """Analyze multiple endpoints."""
+        # A shared inventory can intentionally omit importable local files. Authenticate
+        # the current mypy graph before trusting a cache whose inventory fingerprint does
+        # not change when one of those excluded files appears or changes.
+        if self.source_inventory is not None:
+            pre_cache_fingerprint, _sources = self._cache_fingerprint()
+            self._expected_source_fingerprint = pre_cache_fingerprint
+            try:
+                self._ensure_mypy_built()
+            except MypyAnalyzerError:
+                pass
+            finally:
+                self._expected_source_fingerprint = None
+
         # Try to load from cache
         if use_cache and self.cache_path.exists() and self._load_cache():
             all_cached = all(self._endpoint_key(ep) in self._endpoint_deps for ep in endpoints)
@@ -3777,6 +3810,14 @@ class MypyAnalyzer:
                 "mypy": mypy_version,
                 "python": list(sys.version_info[:3]),
                 "source_root": str(self.source_root.resolve()),
+                "mypy_build_context": {
+                    "build_root": str(inventory.root),
+                    "mypy_path": [str(inventory.root)],
+                    "module_policy": "source-inventory-relative-v1",
+                    "follow_imports": "normal",
+                    "namespace_packages": True,
+                    "explicit_package_bases": True,
+                },
                 "source_inventory": inventory.fingerprint,
                 "sources": sources,
             },

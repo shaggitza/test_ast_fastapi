@@ -252,11 +252,21 @@ canonical, deterministic project-local source inventory consumed by native AST
 discovery, mypy input construction, cache fingerprints, and changed-file
 scoping. Changes outside that inventory—and non-Python/configuration changes
 without a finite contract—remain explicit unresolved/orphan evidence rather than
-silently disappearing. Runtime and SCIP modes reject non-default source globs
-because they do not yet consume this inventory. The previously advertised
-`follow_imports: false`, `include_test_endpoints: true`, `use_mypy: false`, and
-`mypy_config` settings are rejected when non-default until they have end-to-end
-semantics; use the explicit `--scip` backend selector instead.
+silently disappearing. Glob matching is slash-segment based: `**` matches zero
+or more complete path segments. Dot-prefixed path segments, `__pycache__`
+directories, and symbolic links are always excluded, even when an include glob
+would otherwise select them. Inventory traversal and hashing use deterministic
+candidate/file/per-file/aggregate-byte limits and fail closed when a limit is
+exceeded.
+
+The inventory authenticates ordinary drift between provider phases, but it is
+not an atomic filesystem snapshot: concurrent mutation after verification or
+while a provider rereads a file can still produce a mixed-time view. Run
+analysis against a quiescent checkout. Runtime and SCIP modes reject non-default
+source globs because they do not yet consume this inventory. The previously
+advertised `follow_imports: false`, `include_test_endpoints: true`, `use_mypy:
+false`, and `mypy_config` settings are rejected when non-default until they have
+end-to-end semantics; use the explicit `--scip` backend selector instead.
 
 ## Use Cases
 
