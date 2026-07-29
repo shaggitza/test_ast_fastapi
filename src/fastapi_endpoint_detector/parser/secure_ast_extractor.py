@@ -20,6 +20,16 @@ from fastapi_endpoint_detector.models.endpoint import (
     EndpointMethod,
     HandlerInfo,
     InventoryStatus,
+    NativeAssemblyMode,
+    NativeRegistrationKind,
+    NativeRootSelectionKind,
+    NativeRouteAssemblyEdgeEvidence,
+    NativeRouteObjectEvidence,
+    NativeRouteProvenance,
+    NativeRouteRegistrationEvidence,
+    NativeRouteRootEvidence,
+    NativeSourceSpan,
+    SnapshotSide,
 )
 from fastapi_endpoint_detector.parser._static_evaluation import (
     MAX_STATIC_STRING_CHARS,
@@ -38,6 +48,24 @@ EndpointImpact = Literal["none", "prior", "subsequent", "all"]
 _ORDER_SCALE = 1_000_000
 _EAGER_DEFINITION_MAX_WORK = 2_048
 _EAGER_DEFINITION_MAX_DEPTH = 32
+
+
+def _native_span(path: Path, node: ast.AST) -> NativeSourceSpan:
+    """Convert one parser occurrence to the public exclusive-end span contract."""
+    start_line = getattr(node, "lineno", 1)
+    start_column = getattr(node, "col_offset", 0)
+    end_line = getattr(node, "end_lineno", None) or start_line
+    end_column = getattr(node, "end_col_offset", None)
+    if end_column is None:
+        end_column = start_column + 1
+    return NativeSourceSpan(
+        file_path=path,
+        start_line=start_line,
+        start_column=start_column,
+        end_line=end_line,
+        end_column=end_column,
+    )
+
 
 _HTTP_ROUTE_METADATA_KEYWORDS = frozenset(
     {
@@ -123,6 +151,7 @@ class _Object:
     prefix: str | None
     line: int
     discovery_conditions: tuple[EndpointDiscoveryCondition, ...] = ()
+    source_span: NativeSourceSpan | None = None
 
 
 def _uses_router_receiver(owner: _Object, receiver: ast.expr | None) -> bool:
@@ -250,6 +279,9 @@ class _Route:
     handler: HandlerInfo
     line: int
     discovery_conditions: tuple[EndpointDiscoveryCondition, ...] = ()
+    registration_kind: NativeRegistrationKind | None = None
+    operation: str | None = None
+    source_span: NativeSourceSpan | None = None
 
 
 @dataclass(frozen=True)
@@ -261,6 +293,8 @@ class _Edge:
     child_cutoff: int | None
     limitation_cutoff: tuple[str, int] | None
     mode: CompositionMode
+    operation: Literal["include_router", "mount"] | None = None
+    source_span: NativeSourceSpan | None = None
 
 
 @dataclass(frozen=True)
@@ -675,11 +709,13 @@ class SecureASTExtractor:
         app_variable: str = "app",
         app_entry: str | None = None,
         bootstrap_entry: str | None = None,
+        snapshot_side: SnapshotSide | Literal["target", "baseline"] = SnapshotSide.TARGET,
     ) -> None:
         self.app_path = app_path.resolve()
         self.app_variable = app_variable
         self.app_entry = app_entry
         self.bootstrap_entry = bootstrap_entry
+        self.snapshot_side = SnapshotSide(snapshot_side)
         self._app_entry_parts = self._parse_entry(app_entry, "--app-entry")
         self._bootstrap_entry_parts = self._parse_entry(bootstrap_entry, "--bootstrap-entry")
 
@@ -878,6 +914,7 @@ class SecureASTExtractor:
                 limitations=(limitation,),
             )
 
+        bootstrap_span: NativeSourceSpan | None = None
         if self._bootstrap_entry_parts is not None:
             if len(set(roots)) != 1:
                 raise SecureASTExtractorError(
@@ -900,6 +937,7 @@ class SecureASTExtractor:
                 or bootstrap_function.decorator_list
             ):
                 raise SecureASTExtractorError("bootstrap entry must be synchronous and undecorated")
+            bootstrap_span = _native_span(bootstrap_module.path, bootstrap_function)
             selected_root = objects[roots[0]]
             if selected_root.kind != "app":
                 raise SecureASTExtractorError("bootstrap_entry requires a FastAPI app root")
@@ -941,6 +979,30 @@ class SecureASTExtractor:
             tuple(parse_failures) if self.app_path.is_dir() else ()
         )
 
+        def object_evidence(item: _Object) -> NativeRouteObjectEvidence:
+            source_span = item.source_span
+            if source_span is None:
+                source_line = item.line
+                if source_line >= _ORDER_SCALE and source_line < 2**31 - 1:
+                    source_line //= _ORDER_SCALE
+                if source_line >= 2**31 - 1:
+                    source_line = 1
+                source_span = NativeSourceSpan(
+                    file_path=modules[item.key[0]].path,
+                    start_line=max(source_line, 1),
+                    start_column=0,
+                    end_line=max(source_line, 1),
+                    end_column=1,
+                )
+            return NativeRouteObjectEvidence(
+                side=self.snapshot_side,
+                object_kind=item.kind,
+                module=item.key[0],
+                symbol=item.key[1],
+                resolved_prefix=item.prefix,
+                source_span=source_span,
+            )
+
         def visit(
             owner: ObjectKey,
             inherited: str,
@@ -948,11 +1010,16 @@ class SecureASTExtractor:
             limitation_cutoff: tuple[str, int] | None,
             stack: frozenset[ObjectKey],
             inherited_conditions: tuple[EndpointDiscoveryCondition, ...],
+            root_evidence: NativeRouteRootEvidence,
+            object_chain: tuple[NativeRouteObjectEvidence, ...],
+            assembly_chain: tuple[NativeRouteAssemblyEdgeEvidence, ...],
+            provenance_available: bool,
         ) -> None:
             nonlocal inventory_limitations
             if owner in stack:
                 return
             item = objects[owner]
+            current_object_chain = (*object_chain, object_evidence(item))
             prefix = _join_paths(inherited, item.prefix) if item.prefix is not None else None
             object_conditions = _merge_discovery_conditions(
                 inherited_conditions,
@@ -1026,11 +1093,34 @@ class SecureASTExtractor:
                         ),
                     )
                     continue
+                native_provenance = None
+                if (
+                    provenance_available
+                    and route.registration_kind is not None
+                    and route.operation is not None
+                    and route.source_span is not None
+                ):
+                    native_provenance = NativeRouteProvenance(
+                        side=self.snapshot_side,
+                        root=root_evidence,
+                        registration=NativeRouteRegistrationEvidence(
+                            side=self.snapshot_side,
+                            kind=route.registration_kind,
+                            operation=route.operation,
+                            owner_module=route.owner[0],
+                            owner_symbol=route.owner[1],
+                            occurrence_order=route.line,
+                            source_span=route.source_span,
+                        ),
+                        object_chain=current_object_chain,
+                        assembly_chain=assembly_chain,
+                    )
                 found.append(
                     Endpoint(
                         path=endpoint_path,
                         methods=[EndpointMethod(method) for method in route.methods],
                         handler=route.handler,
+                        native_provenance=native_provenance,
                         discovery_status=(
                             EndpointDiscoveryStatus.CONDITIONAL
                             if discovery_conditions
@@ -1068,6 +1158,29 @@ class SecureASTExtractor:
                         ),
                     )
                     continue
+                edge_available = (
+                    provenance_available
+                    and edge.operation is not None
+                    and edge.source_span is not None
+                )
+                next_assembly_chain = assembly_chain
+                if edge_available:
+                    assert edge.operation is not None and edge.source_span is not None
+                    next_assembly_chain = (
+                        *assembly_chain,
+                        NativeRouteAssemblyEdgeEvidence(
+                            side=self.snapshot_side,
+                            operation=edge.operation,
+                            mode=NativeAssemblyMode(edge.mode),
+                            parent_module=edge.parent[0],
+                            parent_symbol=edge.parent[1],
+                            child_module=edge.child[0],
+                            child_symbol=edge.child[1],
+                            occurrence_order=edge.line,
+                            resolved_prefix=edge.prefix,
+                            source_span=edge.source_span,
+                        ),
+                    )
                 visit(
                     edge.child,
                     edge_prefix,
@@ -1078,10 +1191,31 @@ class SecureASTExtractor:
                         object_conditions,
                         edge_effect_conditions,
                     ),
+                    root_evidence,
+                    current_object_chain,
+                    next_assembly_chain,
+                    edge_available,
                 )
 
         for root in sorted(set(roots)):
-            visit(root, "", None, None, frozenset(), ())
+            root_item = objects[root]
+            if explicit_object is not None:
+                selection_kind = NativeRootSelectionKind.APP_ENTRY_OBJECT
+            elif explicit_variable is not None:
+                selection_kind = NativeRootSelectionKind.APP_ENTRY_FACTORY
+            elif root_item.kind == "router":
+                selection_kind = NativeRootSelectionKind.ROUTER_VARIABLE
+            else:
+                selection_kind = NativeRootSelectionKind.APP_VARIABLE
+            root_evidence = NativeRouteRootEvidence(
+                side=self.snapshot_side,
+                selection_kind=selection_kind,
+                module=root[0],
+                symbol=root[1],
+                source_span=root_item.source_span,
+                bootstrap_span=bootstrap_span,
+            )
+            visit(root, "", None, None, frozenset(), (), root_evidence, (), (), True)
         endpoints = sorted(
             found,
             key=lambda endpoint: (
@@ -1257,6 +1391,7 @@ class SecureASTExtractor:
                         kind="app",
                         prefix="",
                         line=binding_line,
+                        source_span=_native_span(module.path, node),
                     )
                     module.objects.setdefault(conditional_name, []).append(item)
                 for name in bound_names:
@@ -1327,6 +1462,7 @@ class SecureASTExtractor:
                         kind=constructor,
                         prefix=prefix,
                         line=node.lineno,
+                        source_span=_native_span(module.path, node),
                     )
                     module.objects.setdefault(assigned_name, []).append(item)
                 elif isinstance(value, ast.Call):
@@ -1530,6 +1666,7 @@ class SecureASTExtractor:
                 graph.root.prefix,
                 call.line,
                 graph.root.discovery_conditions,
+                graph.root.source_span,
             )
             history.append(root)
             history.sort(key=lambda item: item.line)
@@ -1749,6 +1886,7 @@ class SecureASTExtractor:
                 item.prefix,
                 call_line,
                 item.discovery_conditions,
+                _native_span(module.path, operation),
             )
             emitted_objects.append(snapshot)
             routes.extend(
@@ -1759,6 +1897,9 @@ class SecureASTExtractor:
                     route.handler,
                     call_order,
                     route.discovery_conditions,
+                    route.registration_kind,
+                    route.operation,
+                    route.source_span,
                 )
                 for route in list(routes)
                 if route.owner == item.key
@@ -1772,6 +1913,8 @@ class SecureASTExtractor:
                     edge.child_cutoff,
                     edge.limitation_cutoff,
                     edge.mode,
+                    edge.operation,
+                    edge.source_span,
                 )
                 for edge in list(edges)
                 if edge.parent == item.key
@@ -1990,7 +2133,14 @@ class SecureASTExtractor:
                     )
                     if prefix is None:
                         conditionalize(statement, "factory router prefix is unresolved")
-                    item = _Object(key, variable, constructor, prefix, call_line)
+                    item = _Object(
+                        key,
+                        variable,
+                        constructor,
+                        prefix,
+                        call_line,
+                        source_span=_native_span(module.path, statement),
+                    )
                     local_objects[assigned] = item
                     local_router_views.discard(assigned)
                     local_created_keys.add(item.key)
@@ -2150,6 +2300,9 @@ class SecureASTExtractor:
                                 methods,
                                 handler,
                                 call_order,
+                                registration_kind=NativeRegistrationKind.DECORATOR,
+                                operation=method,
+                                source_span=_native_span(module.path, decorator),
                             )
                         )
                 local_objects.pop(statement.name, None)
@@ -2328,6 +2481,8 @@ class SecureASTExtractor:
                         cutoff,
                         (module.name, call_order),
                         "copy",
+                        "include_router",
+                        _native_span(module.path, call),
                     )
                 )
             elif call_function.attr == "mount":
@@ -2351,6 +2506,8 @@ class SecureASTExtractor:
                         None,
                         None,
                         "live",
+                        "mount",
+                        _native_span(module.path, call),
                     )
                 )
             elif call_function.attr in {
@@ -2384,6 +2541,9 @@ class SecureASTExtractor:
                         methods,
                         imperative_handler,
                         call_order,
+                        registration_kind=NativeRegistrationKind.IMPERATIVE,
+                        operation=call_function.attr,
+                        source_span=_native_span(module.path, call),
                     )
                 )
             elif call_function.attr not in {
@@ -2413,6 +2573,7 @@ class SecureASTExtractor:
                 root.prefix,
                 call_line,
                 combined_conditions,
+                root.source_span,
             )
             emitted_objects = [item for item in emitted_objects if item.key != old_key]
             routes = [
@@ -2423,6 +2584,9 @@ class SecureASTExtractor:
                     route.handler,
                     route.line,
                     route.discovery_conditions,
+                    route.registration_kind,
+                    route.operation,
+                    route.source_span,
                 )
                 for route in routes
             ]
@@ -2435,6 +2599,8 @@ class SecureASTExtractor:
                     edge.child_cutoff,
                     edge.limitation_cutoff,
                     edge.mode,
+                    edge.operation,
+                    edge.source_span,
                 )
                 for edge in edges
             ]
@@ -2446,6 +2612,7 @@ class SecureASTExtractor:
                 root.prefix,
                 root.line,
                 combined_conditions,
+                root.source_span,
             )
             emitted_objects = [root if item.key == root.key else item for item in emitted_objects]
         return _FactoryGraph(root, emitted_objects, routes, edges)
@@ -2798,6 +2965,9 @@ class SecureASTExtractor:
                                 decorator_methods,
                                 decorator_handler,
                                 next_order(),
+                                registration_kind=NativeRegistrationKind.DECORATOR,
+                                operation=operation,
+                                source_span=_native_span(current_module.path, decorator),
                             )
                         )
                     displace_global_binding(statement.name, statement)
@@ -3065,6 +3235,8 @@ class SecureASTExtractor:
                                     order,
                                     (current_module.name, order),
                                     "copy",
+                                    "include_router",
+                                    _native_span(current_module.path, call),
                                 )
                             )
                     elif operation == "mount":
@@ -3092,6 +3264,8 @@ class SecureASTExtractor:
                                     None,
                                     None,
                                     "live",
+                                    "mount",
+                                    _native_span(current_module.path, call),
                                 )
                             )
                     else:
@@ -3123,7 +3297,18 @@ class SecureASTExtractor:
                                 inventory_only=True,
                             )
                         else:
-                            routes.append(_Route(parent.key, path, methods, handler, order))
+                            routes.append(
+                                _Route(
+                                    parent.key,
+                                    path,
+                                    methods,
+                                    handler,
+                                    order,
+                                    registration_kind=NativeRegistrationKind.IMPERATIVE,
+                                    operation=operation,
+                                    source_span=_native_span(current_module.path, call),
+                                )
+                            )
                     continue
 
                 helper_target: tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef] | None = None
@@ -3779,7 +3964,18 @@ class SecureASTExtractor:
                         inventory_only=True,
                     )
                     return _DirectEffectResult("limited")
-                routes.append(_Route(owner.key, path, methods, handler, route_order))
+                routes.append(
+                    _Route(
+                        owner.key,
+                        path,
+                        methods,
+                        handler,
+                        route_order,
+                        registration_kind=NativeRegistrationKind.DECORATOR,
+                        operation=operation,
+                        source_span=_native_span(module.path, call),
+                    )
+                )
                 return _DirectEffectResult("modeled")
 
             assert effect_node is not None
@@ -3813,7 +4009,18 @@ class SecureASTExtractor:
                         inventory_only=True,
                     )
                     return _DirectEffectResult("limited")
-                routes.append(_Route(owner.key, path, methods, imperative_handler, effect_order))
+                routes.append(
+                    _Route(
+                        owner.key,
+                        path,
+                        methods,
+                        imperative_handler,
+                        effect_order,
+                        registration_kind=NativeRegistrationKind.IMPERATIVE,
+                        operation=operation,
+                        source_span=_native_span(module.path, call),
+                    )
+                )
                 return _DirectEffectResult("modeled")
 
             if operation == "include_router":
@@ -3854,6 +4061,8 @@ class SecureASTExtractor:
                         cutoff,
                         (module.name, effect_order),
                         "copy",
+                        "include_router",
+                        _native_span(module.path, call),
                     )
                 )
                 return _DirectEffectResult("modeled")
@@ -3871,7 +4080,19 @@ class SecureASTExtractor:
                     inventory_only=True,
                 )
                 return _DirectEffectResult("limited")
-            edges.append(_Edge(owner.key, child.key, path, effect_order, None, None, "live"))
+            edges.append(
+                _Edge(
+                    owner.key,
+                    child.key,
+                    path,
+                    effect_order,
+                    None,
+                    None,
+                    "live",
+                    "mount",
+                    _native_span(module.path, call),
+                )
+            )
             return _DirectEffectResult("modeled")
 
         def visit(  # noqa: PLR0912, PLR0915 - explicit executed-effect taxonomy

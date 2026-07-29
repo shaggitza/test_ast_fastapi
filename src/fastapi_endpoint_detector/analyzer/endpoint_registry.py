@@ -21,6 +21,7 @@ class EndpointRegistry:
         self._by_path: dict[str, list[Endpoint]] = {}
         self._by_file: dict[Path, list[Endpoint]] = {}
         self._by_module: dict[str, list[Endpoint]] = {}
+        self._by_structural_file: dict[Path, list[tuple[Endpoint, str, int, int]]] = {}
 
     def register(self, endpoint: Endpoint) -> None:
         """
@@ -47,6 +48,34 @@ class EndpointRegistry:
         if module not in self._by_module:
             self._by_module[module] = []
         self._by_module[module].append(endpoint)
+
+        provenance = endpoint.native_provenance
+        if provenance is not None:
+            occurrences = [
+                (
+                    f"route_{provenance.registration.operation}",
+                    provenance.registration.source_span,
+                ),
+                *(
+                    (f"object_{item.object_kind}", item.source_span)
+                    for item in provenance.object_chain
+                ),
+                *(
+                    (f"assembly_{item.operation}", item.source_span)
+                    for item in provenance.assembly_chain
+                ),
+            ]
+            if provenance.root.bootstrap_span is not None:
+                occurrences.append(("bootstrap", provenance.root.bootstrap_span))
+            seen: set[tuple[str, Path, int, int]] = set()
+            for kind, span in occurrences:
+                identity = (kind, span.file_path, span.start_line, span.end_line)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                self._by_structural_file.setdefault(span.file_path, []).append(
+                    (endpoint, kind, span.start_line, span.end_line)
+                )
 
     def register_many(self, endpoints: list[Endpoint]) -> None:
         """
@@ -121,6 +150,48 @@ class EndpointRegistry:
     def _has_path_suffix(path: tuple[str, ...], suffix: tuple[str, ...]) -> bool:
         """Return whether *suffix* identifies whole trailing path components."""
         return bool(suffix) and len(path) >= len(suffix) and path[-len(suffix) :] == suffix
+
+    def get_structural_overlaps(
+        self,
+        file_path: Path | str,
+        changed_lines: set[int],
+    ) -> list[tuple[Endpoint, tuple[str, ...], set[int]]]:
+        """Return exact native assembly occurrences intersecting target-side lines."""
+        if not changed_lines:
+            return []
+        query = Path(file_path)
+        try:
+            resolved = query.resolve()
+        except OSError:
+            resolved = query
+        if resolved in self._by_structural_file:
+            buckets = [self._by_structural_file[resolved]]
+        elif query in self._by_structural_file:
+            buckets = [self._by_structural_file[query]]
+        else:
+            query_parts = self._path_parts(query)
+            buckets = [
+                occurrences
+                for registered_path, occurrences in self._by_structural_file.items()
+                if self._has_path_suffix(self._path_parts(registered_path), query_parts)
+            ]
+        if len(buckets) != 1:
+            return []
+        matches: dict[int, tuple[Endpoint, set[str], set[int]]] = {}
+        for endpoint, kind, start_line, end_line in buckets[0]:
+            overlap = {line for line in changed_lines if start_line <= line <= end_line}
+            if not overlap:
+                continue
+            key = id(endpoint)
+            current = matches.get(key)
+            if current is None:
+                matches[key] = (endpoint, {kind}, overlap)
+            else:
+                current[1].add(kind)
+                current[2].update(overlap)
+        return [
+            (endpoint, tuple(sorted(kinds)), lines) for endpoint, kinds, lines in matches.values()
+        ]
 
     def get_by_module(self, module: str) -> list[Endpoint]:
         """

@@ -57,7 +57,7 @@ def test_inventory_strength_is_structured_and_visible() -> None:
 
     json_result = json.loads(JsonFormatter().format_inventory(inventory))
     yaml_result = yaml.safe_load(YamlFormatter().format_inventory(inventory))
-    assert json_result["schema_version"] == 3
+    assert json_result["schema_version"] == 4
     assert json_result["inventory_status"] == "conditional"
     assert json_result["inventory_limitations"][0]["reason"] == limitation.reason
     assert json_result["route_conditions"][0]["reason"] == limitation.reason

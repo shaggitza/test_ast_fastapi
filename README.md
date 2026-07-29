@@ -103,11 +103,14 @@ fastapi-endpoint-detector list --app path/to/main.py --format html -o endpoints.
 
 ### Machine-readable endpoint provenance
 
-JSON and YAML inventories and analysis reports use schema version 3. Each endpoint may
-include the additive, nullable `dependency_graph` field: schema-v1 bounded evidence for
-the declared FastAPI dependency tree, with explicit status and limitations. Trusted
-runtime extraction transports this evidence through the private protocol-v2 worker;
-consumers should use the public inventory/report schema rather than that worker protocol.
+JSON and YAML inventories and analysis reports use schema version 4. Each endpoint may
+include two additive nullable evidence fields. `dependency_graph` is schema-v1 bounded
+runtime evidence for the declared FastAPI dependency tree. `native_provenance` is
+schema-v1 secure-AST evidence for the snapshot side, selected root, exact decorator or
+imperative registration span, app/router constructor chain, and ordered include/mount
+chain. Source columns use Python AST offsets and end coordinates are exclusive. Trusted
+runtime extraction transports dependency evidence through the private protocol-v2
+worker; it does not guess source-level route assembly occurrences.
 
 ## Commands
 

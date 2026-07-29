@@ -57,6 +57,7 @@ class EvidenceProducer(str, Enum):
     """Analyzer that produced an evidence record."""
 
     DIRECT = "direct"
+    STRUCTURAL = "structural"
     MYPY = "mypy"
     SCIP = "scip"
     DATA_FLOW = "data_flow"
@@ -76,6 +77,7 @@ class ChangeEffectKind(str, Enum):
     """Semantic shape of a source change."""
 
     HANDLER_IMPLEMENTATION = "handler_implementation"
+    ROUTE_ASSEMBLY = "route_assembly"
     DEFENSIVE_COPY_ADDED = "defensive_copy_added"
     ARGUMENT_MUTATION_ISOLATED = "argument_mutation_isolated"
     RETURN_VALUE_CHANGED = "return_value_changed"

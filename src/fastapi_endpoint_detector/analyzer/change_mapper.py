@@ -42,6 +42,7 @@ from fastapi_endpoint_detector.models.endpoint import (
     Endpoint,
     EndpointDiscoveryStatus,
     EndpointInventory,
+    SnapshotSide,
 )
 from fastapi_endpoint_detector.models.report import (
     AffectedEndpoint,
@@ -98,14 +99,33 @@ _CONFIDENCE_SCORE = {
 }
 
 
-def _endpoint_result_key(endpoint: Endpoint) -> tuple[str, str, int, str, str]:
+EndpointResultKey = tuple[str, str, int, str, str, str]
+
+
+def _endpoint_result_key(endpoint: Endpoint) -> EndpointResultKey:
     handler = endpoint.handler
+    provenance = endpoint.native_provenance
+    occurrence = ""
+    if provenance is not None:
+        registration = provenance.registration
+        occurrence = ":".join(
+            (
+                provenance.side.value,
+                str(registration.source_span.file_path.resolve()),
+                str(registration.occurrence_order),
+                *(
+                    f"{edge.source_span.file_path.resolve()}@{edge.occurrence_order}"
+                    for edge in provenance.assembly_chain
+                ),
+            )
+        )
     return (
         endpoint.identifier,
         str(handler.file_path.resolve()),
         handler.line_number,
         handler.name,
         handler.module,
+        occurrence,
     )
 
 
@@ -207,7 +227,7 @@ class _AffectedAccumulator:
 
 
 def _merge_affected(
-    accumulated: dict[tuple[str, str, int, str, str], _AffectedAccumulator],
+    accumulated: dict[EndpointResultKey, _AffectedAccumulator],
     candidate: AffectedEndpoint,
 ) -> None:
     if (
@@ -572,6 +592,7 @@ class ChangeMapper:
                 app_variable=self.app_variable,
                 app_entry=self.app_entry,
                 bootstrap_entry=self.bootstrap_entry,
+                snapshot_side=SnapshotSide.BASELINE,
             )
             self._baseline_registry = EndpointRegistry()
             native = extractor.extract_inventory()
@@ -878,14 +899,55 @@ class ChangeMapper:
             Tuple of (affected endpoints, processed added lines, processed removed lines).
             Processed lines are those that were matched to any endpoint.
         """
-        affected: dict[tuple[str, str, int, str, str], _AffectedAccumulator] = {}
+        affected: dict[EndpointResultKey, _AffectedAccumulator] = {}
         processed_added_lines: set[int] = set()
         processed_removed_lines: set[int] = set()
 
         # Get changed lines
         added_lines, removed_lines = DiffParser.get_changed_line_numbers(diff_file)
 
-        # Find endpoints in the changed file
+        # Native route registrations and exact include/mount/object occurrences own
+        # their materialized descendants. Only target additions are queried here:
+        # removed coordinates require the explicit baseline path handled by SCIP.
+        for endpoint, kinds, overlap in self.registry.get_structural_overlaps(
+            diff_file.path, set(added_lines)
+        ):
+            matched_kinds = ", ".join(kinds)
+            changed_line = min(overlap)
+            _merge_affected(
+                affected,
+                AffectedEndpoint(
+                    endpoint=endpoint,
+                    confidence=ConfidenceLevel.HIGH,
+                    reason=(
+                        f"Native route assembly occurrence modified ({matched_kinds}) "
+                        f"in {diff_file.path}"
+                    ),
+                    dependency_chain=[str(diff_file.path), *kinds],
+                    changed_files=[str(diff_file.path)],
+                    effect_evidence=[
+                        EffectEvidence(
+                            producer=EvidenceProducer.STRUCTURAL,
+                            status=EvidenceStatus.ESTABLISHED,
+                            effect=ChangeEffectKind.ROUTE_ASSEMBLY,
+                            channel=ImpactChannel.UNKNOWN,
+                            disposition=EffectDisposition.INTERNAL_EFFECT,
+                            summary=(
+                                "Changed source overlaps exact secure-AST route assembly "
+                                "provenance for this endpoint occurrence."
+                            ),
+                            changed_location=CodeReference(
+                                file_path=str(diff_file.path),
+                                line_number=changed_line,
+                                symbol=matched_kinds,
+                            ),
+                        )
+                    ],
+                ),
+            )
+            processed_added_lines.update(overlap)
+
+        # Find endpoints whose handlers are defined in the changed file.
         file_endpoints = self.registry.get_by_file(diff_file.path)
 
         # Check for direct handler changes
@@ -948,7 +1010,7 @@ class ChangeMapper:
         if has_removed:
             self.baseline_scip_analyzer.ensure_index(force=not self.use_cache)
 
-        affected: dict[tuple[str, str, int, str, str], _AffectedAccumulator] = {}
+        affected: dict[EndpointResultKey, _AffectedAccumulator] = {}
         orphan_evidence: dict[str, _OrphanAccumulator] = {}
         target_root = self.app_path.parent if self.app_path.is_file() else self.app_path
         baseline_root = (
@@ -968,6 +1030,55 @@ class ChangeMapper:
                 if candidate.identifier == endpoint.identifier
             ]
             return matches[0] if len(matches) == 1 else endpoint
+
+        def analyze_structural_side(
+            registry: EndpointRegistry,
+            file_path: Path,
+            lines: list[int],
+            side: str,
+        ) -> set[int]:
+            processed: set[int] = set()
+            for discovered, kinds, overlap in registry.get_structural_overlaps(
+                file_path, set(lines)
+            ):
+                # Structural evidence remains attached to its source snapshot.
+                # Lifecycle reconciliation is deliberately deferred rather than
+                # replacing a baseline occurrence by a same-identifier target.
+                endpoint = discovered
+                matched_kinds = ", ".join(kinds)
+                _merge_affected(
+                    affected,
+                    AffectedEndpoint(
+                        endpoint=endpoint,
+                        confidence=ConfidenceLevel.HIGH,
+                        reason=(
+                            f"Secure-AST {side} route assembly occurrence modified "
+                            f"({matched_kinds}) in {file_path}"
+                        ),
+                        dependency_chain=[str(file_path), *kinds],
+                        changed_files=[str(file_path)],
+                        effect_evidence=[
+                            EffectEvidence(
+                                producer=EvidenceProducer.STRUCTURAL,
+                                status=EvidenceStatus.ESTABLISHED,
+                                effect=ChangeEffectKind.ROUTE_ASSEMBLY,
+                                channel=ImpactChannel.UNKNOWN,
+                                disposition=EffectDisposition.INTERNAL_EFFECT,
+                                summary=(
+                                    f"Changed {side} source overlaps exact secure-AST route "
+                                    "assembly provenance for this endpoint occurrence."
+                                ),
+                                changed_location=CodeReference(
+                                    file_path=str(file_path),
+                                    line_number=min(overlap),
+                                    symbol=matched_kinds,
+                                ),
+                            )
+                        ],
+                    ),
+                )
+                processed.update(overlap)
+            return processed
 
         def analyze_side(
             analyzer: SCIPAnalyzer,
@@ -1060,25 +1171,45 @@ class ChangeMapper:
             added_lines, removed_lines = DiffParser.get_changed_line_numbers(diff_file)
             processed_added: set[int] = set()
             if diff_file.path.suffix == ".py" and added_lines:
-                processed_added = analyze_side(
-                    self.scip_analyzer,
-                    self.registry,
-                    target_root,
-                    diff_file.path,
-                    added_lines,
-                    "target",
+                processed_added.update(
+                    analyze_structural_side(
+                        self.registry,
+                        diff_file.path,
+                        added_lines,
+                        "target",
+                    )
+                )
+                processed_added.update(
+                    analyze_side(
+                        self.scip_analyzer,
+                        self.registry,
+                        target_root,
+                        diff_file.path,
+                        added_lines,
+                        "target",
+                    )
                 )
             processed_removed: set[int] = set()
             source_path = diff_file.source_path or diff_file.path
             if removed_lines and source_path.suffix == ".py":
                 assert baseline_root is not None
-                processed_removed = analyze_side(
-                    self.baseline_scip_analyzer,
-                    self.baseline_registry,
-                    baseline_root,
-                    source_path,
-                    removed_lines,
-                    "baseline",
+                processed_removed.update(
+                    analyze_structural_side(
+                        self.baseline_registry,
+                        source_path,
+                        removed_lines,
+                        "baseline",
+                    )
+                )
+                processed_removed.update(
+                    analyze_side(
+                        self.baseline_scip_analyzer,
+                        self.baseline_registry,
+                        baseline_root,
+                        source_path,
+                        removed_lines,
+                        "baseline",
+                    )
                 )
 
             reason = "Changed lines did not resolve through SCIP to a registered endpoint"
@@ -1427,7 +1558,7 @@ class ChangeMapper:
 
         # Analyze each Python file
         report_progress(70, 100, f"Checking {len(python_files)} changed files...")
-        all_affected: dict[tuple[str, str, int, str, str], _AffectedAccumulator] = {}
+        all_affected: dict[EndpointResultKey, _AffectedAccumulator] = {}
         orphan_evidence: dict[str, _OrphanAccumulator] = {}
 
         for i, diff_file in enumerate(python_files):

@@ -37,6 +37,11 @@ class YamlFormatter(BaseFormatter):
                 if endpoint.dependency_graph is not None
                 else None
             ),
+            "native_provenance": (
+                endpoint.native_provenance.model_dump(mode="json")
+                if endpoint.native_provenance is not None
+                else None
+            ),
             "discovery_status": endpoint.discovery_status.value,
             "discovery_conditions": [
                 condition.model_dump(mode="json") for condition in endpoint.discovery_conditions
@@ -80,7 +85,7 @@ class YamlFormatter(BaseFormatter):
     def format(self, report: AnalysisReport) -> str:
         """Format an analysis report as YAML."""
         data = {
-            "schema_version": 3,
+            "schema_version": 4,
             "timestamp": report.timestamp.isoformat(),
             "app_path": report.app_path,
             "diff_source": report.diff_source,
@@ -146,7 +151,7 @@ class YamlFormatter(BaseFormatter):
     def format_inventory(self, inventory: EndpointInventory) -> str:
         """Format endpoints with whole-inventory strength metadata."""
         data = {
-            "schema_version": 3,
+            "schema_version": 4,
             "inventory_status": inventory.status.value,
             "inventory_limitations": [
                 limitation.model_dump(mode="json") for limitation in inventory.limitations

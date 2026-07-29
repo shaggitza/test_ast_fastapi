@@ -48,6 +48,36 @@ class EndpointDiscoveryStatus(str, Enum):
     CONDITIONAL = "conditional"
 
 
+class SnapshotSide(str, Enum):
+    """Source snapshot that produced one native route occurrence."""
+
+    TARGET = "target"
+    BASELINE = "baseline"
+
+
+class NativeRegistrationKind(str, Enum):
+    """Python construct that installed one native route."""
+
+    DECORATOR = "decorator"
+    IMPERATIVE = "imperative"
+
+
+class NativeAssemblyMode(str, Enum):
+    """Composition semantics of one native route-assembly edge."""
+
+    COPY = "copy"
+    LIVE = "live"
+
+
+class NativeRootSelectionKind(str, Enum):
+    """How secure discovery selected the root that owns a native route."""
+
+    APP_VARIABLE = "app_variable"
+    ROUTER_VARIABLE = "router_variable"
+    APP_ENTRY_OBJECT = "app_entry_object"
+    APP_ENTRY_FACTORY = "app_entry_factory"
+
+
 class DependencyGraphStatus(str, Enum):
     """Completeness of runtime dependency-graph evidence."""
 
@@ -277,6 +307,132 @@ class HandlerInfo(BaseModel):
         frozen = True
 
 
+class NativeSourceSpan(BaseModel):
+    """Column-complete Python AST span; end coordinates are exclusive."""
+
+    file_path: Path
+    start_line: int = Field(ge=1)
+    start_column: int = Field(ge=0)
+    end_line: int = Field(ge=1)
+    end_column: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_span(self) -> "NativeSourceSpan":
+        if (self.end_line, self.end_column) < (self.start_line, self.start_column):
+            raise ValueError("native source span end must not precede start")
+        return self
+
+    def overlaps_lines(self, lines: set[int]) -> set[int]:
+        """Return changed lines intersecting this source occurrence."""
+        return {line for line in lines if self.start_line <= line <= self.end_line}
+
+    class Config:
+        frozen = True
+
+
+class NativeRouteRegistrationEvidence(BaseModel):
+    """Exact source occurrence that registered one native endpoint."""
+
+    side: SnapshotSide
+    kind: NativeRegistrationKind
+    operation: str = Field(pattern=r"^[a-z][a-z0-9_]*$", max_length=64)
+    owner_module: str = Field(min_length=1, max_length=512)
+    owner_symbol: str = Field(min_length=1, max_length=2048)
+    occurrence_order: int = Field(ge=0)
+    source_span: NativeSourceSpan
+
+    class Config:
+        frozen = True
+
+
+class NativeRouteAssemblyEdgeEvidence(BaseModel):
+    """One ordered include or mount occurrence on a public route path."""
+
+    side: SnapshotSide
+    operation: Literal["include_router", "mount"]
+    mode: NativeAssemblyMode
+    parent_module: str = Field(min_length=1, max_length=512)
+    parent_symbol: str = Field(min_length=1, max_length=2048)
+    child_module: str = Field(min_length=1, max_length=512)
+    child_symbol: str = Field(min_length=1, max_length=2048)
+    occurrence_order: int = Field(ge=0)
+    resolved_prefix: str = Field(max_length=4096)
+    source_span: NativeSourceSpan
+
+    class Config:
+        frozen = True
+
+
+class NativeRouteObjectEvidence(BaseModel):
+    """App/router constructor occurrence whose prefix contributes to a route."""
+
+    side: SnapshotSide
+    object_kind: Literal["app", "router"]
+    module: str = Field(min_length=1, max_length=512)
+    symbol: str = Field(min_length=1, max_length=2048)
+    resolved_prefix: str | None = Field(default=None, max_length=4096)
+    source_span: NativeSourceSpan
+
+    class Config:
+        frozen = True
+
+
+class NativeRouteRootEvidence(BaseModel):
+    """Selected secure-AST root for one native endpoint occurrence."""
+
+    side: SnapshotSide
+    selection_kind: NativeRootSelectionKind
+    module: str = Field(min_length=1, max_length=512)
+    symbol: str = Field(min_length=1, max_length=2048)
+    source_span: NativeSourceSpan | None = None
+    bootstrap_span: NativeSourceSpan | None = None
+
+    class Config:
+        frozen = True
+
+
+class NativeRouteProvenance(BaseModel):
+    """Immutable route-registration and assembly chain decided by secure AST."""
+
+    schema_version: Literal[1] = 1
+    side: SnapshotSide
+    root: NativeRouteRootEvidence
+    registration: NativeRouteRegistrationEvidence
+    object_chain: tuple[NativeRouteObjectEvidence, ...] = Field(min_length=1, max_length=256)
+    assembly_chain: tuple[NativeRouteAssemblyEdgeEvidence, ...] = Field(default=(), max_length=256)
+
+    @model_validator(mode="after")
+    def validate_chain(self) -> "NativeRouteProvenance":
+        evidence = [
+            self.root.side,
+            self.registration.side,
+            *(item.side for item in self.object_chain),
+            *(item.side for item in self.assembly_chain),
+        ]
+        if any(side != self.side for side in evidence):
+            raise ValueError("native route provenance cannot mix snapshot sides")
+        if len(self.object_chain) != len(self.assembly_chain) + 1:
+            raise ValueError("native object chain must contain one object per assembly hop")
+        for index, edge in enumerate(self.assembly_chain):
+            parent = self.object_chain[index]
+            child = self.object_chain[index + 1]
+            if (edge.parent_module, edge.parent_symbol) != (parent.module, parent.symbol) or (
+                edge.child_module,
+                edge.child_symbol,
+            ) != (child.module, child.symbol):
+                raise ValueError("native assembly edge must connect adjacent object occurrences")
+        owner = self.object_chain[-1]
+        if (self.registration.owner_module, self.registration.owner_symbol) != (
+            owner.module,
+            owner.symbol,
+        ):
+            raise ValueError("native registration owner must be the final object occurrence")
+        return self
+
+    class Config:
+        frozen = True
+
+
 class SurfaceRegistrationEvidence(BaseModel):
     """Data-only registration and contract provenance for a custom surface."""
 
@@ -346,6 +502,10 @@ class Endpoint(BaseModel):
         default=None,
         description="Authoritative declared dependency graph; None means not collected",
     )
+    native_provenance: NativeRouteProvenance | None = Field(
+        default=None,
+        description="Secure-AST native registration and assembly evidence when collected",
+    )
     discovery_status: EndpointDiscoveryStatus = EndpointDiscoveryStatus.ESTABLISHED
     discovery_conditions: tuple[EndpointDiscoveryCondition, ...] = ()
     surface: SurfaceRegistrationEvidence | None = None
@@ -363,6 +523,8 @@ class Endpoint(BaseModel):
             raise ValueError("CUSTOM must be the only method on a custom surface")
         if custom != (self.surface is not None):
             raise ValueError("custom endpoints require CUSTOM method and surface provenance")
+        if custom and self.native_provenance is not None:
+            raise ValueError("custom endpoints cannot carry native route provenance")
         if self.activation is not None and (
             custom
             or self.surface is not None
