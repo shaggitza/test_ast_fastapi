@@ -1147,6 +1147,57 @@ def test_schema_v4_manifest_rejects_prediction_cold_timing_disagreement(tmp_path
         )
 
 
+def test_schema_v4_manifest_rejects_unresolved_cold_without_preparation(
+    tmp_path: Path,
+) -> None:
+    predictions, manifest_path, prediction, manifest = _schema_v4_manifest_fixture(tmp_path)
+    prediction["status"] = "unresolved"
+    prediction["unresolved"] = ["fabricated failure"]
+    manifest_pr = manifest["prs"][0]
+    manifest_pr["status"] = "unresolved"
+    manifest_pr["reason"] = "fabricated failure"
+    manifest_pr["timing_seconds"].pop("baseline_target_preparation")
+    manifest_pr["phase_telemetry"]["baseline_target_preparation"] = {
+        "status": "not_measured",
+        "reason": "fabricated_missing_preparation",
+    }
+    manifest["timing"]["phases"]["baseline_target_preparation"] = {
+        "status": "not_measured",
+        "reason": "fabricated_missing_preparation",
+    }
+    _write_schema_v4_manifest_fixture(predictions, manifest_path, prediction, manifest)
+
+    with pytest.raises(ValueError, match="cold phase requires measured preparation"):
+        evaluate.read_prediction_manifest(
+            manifest_path, read_primary_artifact(predictions, "prediction")
+        )
+
+
+def test_schema_v4_manifest_rejects_unresolved_measured_preparation(tmp_path: Path) -> None:
+    predictions, manifest_path, prediction, manifest = _schema_v4_manifest_fixture(tmp_path)
+    prediction["status"] = "unresolved"
+    prediction["unresolved"] = ["fabricated failure"]
+    prediction["timing_seconds"] = {}
+    manifest_pr = manifest["prs"][0]
+    manifest_pr["status"] = "unresolved"
+    manifest_pr["reason"] = "fabricated failure"
+    manifest_pr["timing_seconds"].pop("analyzer")
+    manifest_pr["phase_telemetry"]["cold_build"] = {
+        "status": "not_measured",
+        "reason": "fabricated_missing_cold",
+    }
+    manifest["timing"]["phases"]["cold_build"] = {
+        "status": "not_measured",
+        "reason": "fabricated_missing_cold",
+    }
+    _write_schema_v4_manifest_fixture(predictions, manifest_path, prediction, manifest)
+
+    with pytest.raises(ValueError, match=r"unresolved.*must not attest measured phases"):
+        evaluate.read_prediction_manifest(
+            manifest_path, read_primary_artifact(predictions, "prediction")
+        )
+
+
 def test_explicit_empty_candidate_list_does_not_fall_back_to_affected() -> None:
     record = {
         "affected_entrypoints": [{"id": "HTTP GET /selected", "kind": "http"}],

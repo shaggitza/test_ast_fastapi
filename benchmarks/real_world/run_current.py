@@ -564,6 +564,16 @@ def new_phase_telemetry() -> dict[str, dict[str, Any]]:
     }
 
 
+def normalize_unresolved_phase_telemetry(
+    timings: dict[str, float], phase_telemetry: dict[str, dict[str, Any]]
+) -> None:
+    """Clear phase attestations when the enclosing PR run does not complete."""
+    timings.pop("baseline_target_preparation", None)
+    timings.pop("analyzer", None)
+    phase_telemetry["baseline_target_preparation"] = _not_measured("run_unresolved")
+    phase_telemetry["cold_build"] = _not_measured("run_unresolved")
+
+
 def aggregate_phase_telemetry(
     records: Sequence[dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
@@ -761,6 +771,7 @@ def process_entry(  # noqa: PLR0915
     except (RunnerError, OSError) as error:
         elapsed = time.monotonic() - started
         timings["total"] = elapsed
+        normalize_unresolved_phase_telemetry(timings, phase_telemetry)
         reason = str(error)
         manifest_record["merge_sha"] = merge_sha
         manifest_record["base_sha"] = base_sha

@@ -657,6 +657,94 @@ class OutputCardinalityTests(unittest.TestCase):
             "not_measured",
         )
 
+    def test_cleanup_failure_clears_phase_attestations_and_round_trips(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_name:
+            temporary = Path(temporary_name)
+            corpus = temporary / "corpus.json"
+            output = temporary / "predictions.jsonl"
+            manifest = temporary / "manifest.json"
+            corpus.write_text(json.dumps({"entries": [entry("owner/repo", 1)]}), encoding="utf-8")
+            candidate = {
+                "id": "candidate/v1",
+                "name": "fastapi-endpoint-detector",
+                "version": "test",
+                "adapter": "fastapi-adapter-v1",
+                "git_sha": SHA_A,
+                "config_hash": "d" * 12,
+                "dirty": False,
+                "dirty_sha256": None,
+                "uv_lock_sha256": "b" * 64,
+                "uv_version": "uv test",
+                "command": "uv run --frozen fastapi-endpoint-detector analyze --no-cache",
+                "performance_protocol": {
+                    "id": "cold-no-cache-analyzer-wall-v1",
+                    "cache_enabled": False,
+                    "incremental_valid": False,
+                },
+            }
+
+            def make_worktree(_cache: Path, worktree: Path, _sha: str) -> None:
+                worktree.mkdir()
+
+            with (
+                mock.patch.object(run_current, "candidate_metadata", return_value=candidate),
+                mock.patch.object(run_current, "ensure_cache", return_value=temporary / "bare"),
+                mock.patch.object(run_current, "merge_parents", return_value=[SHA_B]),
+                mock.patch.object(run_current, "add_detached_worktree", side_effect=make_worktree),
+                mock.patch.object(run_current, "write_local_diff"),
+                mock.patch.object(run_current, "invoke_analyzer", return_value=([], [], [], 0.25)),
+                mock.patch.object(
+                    run_current, "remove_worktree", side_effect=OSError("cleanup failed")
+                ),
+            ):
+                result = run_current.main(
+                    [
+                        "--corpus",
+                        str(corpus),
+                        "--output",
+                        str(output),
+                        "--manifest",
+                        str(manifest),
+                    ]
+                )
+
+            artifact = read_primary_artifact(output, "prediction")
+            binding = evaluate.read_prediction_manifest(manifest, artifact)
+            prediction = artifact.records[0]
+            manifest_data = json.loads(manifest.read_text(encoding="utf-8"))
+            manifest_pr = manifest_data["prs"][0]
+
+        self.assertEqual(result, 0)
+        self.assertEqual(prediction["status"], "unresolved")
+        self.assertEqual(prediction["timing_seconds"], {})
+        self.assertEqual(manifest_pr["status"], "unresolved")
+        self.assertIn("cleanup failed", manifest_pr["reason"])
+        self.assertNotIn("baseline_target_preparation", manifest_pr["timing_seconds"])
+        self.assertNotIn("analyzer", manifest_pr["timing_seconds"])
+        self.assertLessEqual(
+            {"cache_fetch", "parent_resolution", "worktree", "diff", "total"},
+            set(manifest_pr["timing_seconds"]),
+        )
+        self.assertTrue(
+            all(
+                manifest_pr["phase_telemetry"][phase]["status"] == "not_measured"
+                for phase in run_current.PERFORMANCE_PHASES
+            )
+        )
+        self.assertTrue(
+            all(
+                phase["status"] == "not_measured"
+                for phase in manifest_data["timing"]["phases"].values()
+            )
+        )
+        self.assertTrue(
+            all(
+                resource["status"] == "not_measured"
+                for resource in manifest_data["timing"]["resources"].values()
+            )
+        )
+        self.assertEqual(binding["candidate"], "candidate/v1")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -257,8 +257,12 @@ ends after the local diff is written. `cold_build` is the analyzer subprocess wa
 time. `warm_no_change` and `one_file_incremental_update` are explicitly
 `not_measured` until a backend attests cache reuse and invalidation. Peak process-
 tree RSS and backend cache size are likewise `not_measured`; they are never
-inferred from unrelated process counters or filesystem size. Only measured,
-finite samples are aggregated, and `incremental_valid` remains false.
+inferred from unrelated process counters or filesystem size. Preparation must be
+measured before cold analysis can be measured. A PR run with status `unresolved`
+attests no measured phases: failures clear preparation/cold telemetry and their
+corresponding timing fields while retaining truthful total and internal runner
+diagnostics. Only measured, finite samples from completed or partial predictions
+are aggregated, and `incremental_valid` remains false.
 
 Historical `incremental_seconds` values are accepted only through the legacy
 adapter and reported as unattested. Checked-in legacy prediction JSONL remains

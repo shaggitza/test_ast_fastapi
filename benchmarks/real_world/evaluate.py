@@ -610,7 +610,7 @@ def _validate_measurement_state(value: object, field: str) -> float | None:
     raise BenchmarkSchemaError(f"prediction manifest {field} status is invalid")
 
 
-def _validate_manifest_prs(  # noqa: PLR0912 - fail-closed PR schema checks are explicit
+def _validate_manifest_prs(  # noqa: PLR0912, PLR0915 - schema checks stay explicit
     value: object, prediction_count: int, schema_version: int
 ) -> dict[str, list[float]]:
     required = {
@@ -675,6 +675,18 @@ def _validate_manifest_prs(  # noqa: PLR0912 - fail-closed PR schema checks are 
                     )
                 if sample is not None:
                     phase_samples[phase].append(sample)
+            preparation_sample = measured_samples["baseline_target_preparation"]
+            cold_sample = measured_samples["cold_build"]
+            if cold_sample is not None and preparation_sample is None:
+                raise BenchmarkSchemaError(
+                    "prediction manifest PR cold phase requires measured preparation"
+                )
+            if item["status"] == "unresolved" and any(
+                measured_samples[phase] is not None for phase in _MEASURED_PHASE_TIMING_FIELDS
+            ):
+                raise BenchmarkSchemaError(
+                    "unresolved prediction manifest PR must not attest measured phases"
+                )
             if item["status"] != "unresolved" and any(
                 measured_samples[phase] is None for phase in _MEASURED_PHASE_TIMING_FIELDS
             ):
