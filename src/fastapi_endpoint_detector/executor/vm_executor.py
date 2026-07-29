@@ -386,10 +386,7 @@ class VMExecutor:
         target_field = self._validated_mount_field(target, "mount target")
         # Policy v1 requires Docker 29 / API 1.52, where bind-nonrecursive was
         # removed in favor of this bind-recursive=disabled spelling.
-        return (
-            f"type=bind,src={source_field},dst={target_field},"
-            "readonly,bind-recursive=disabled"
-        )
+        return f"type=bind,src={source_field},dst={target_field},readonly,bind-recursive=disabled"
 
     def _container_command(
         self,

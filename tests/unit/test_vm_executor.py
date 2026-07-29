@@ -111,9 +111,7 @@ def test_inspected_image_digest_cannot_become_a_docker_option(mock_run: Mock) ->
 def test_ambiguous_or_missing_image_digest_fails_closed(mock_run: Mock) -> None:
     mock_run.return_value = Mock(
         returncode=0,
-        stdout=_image_inspect(
-            digests=[_DIGEST, "other.example/detector@sha256:" + "b" * 64]
-        ),
+        stdout=_image_inspect(digests=[_DIGEST, "other.example/detector@sha256:" + "b" * 64]),
         stderr="",
     )
 
