@@ -3714,50 +3714,45 @@ class MypyAnalyzer:
         endpoints: list[Endpoint],
         use_cache: bool = True,
     ) -> dict[str, EndpointDependencies]:
-        """Analyze multiple endpoints."""
-        # A shared inventory can intentionally omit importable local files. Authenticate
-        # the current mypy graph before trusting a cache whose inventory fingerprint does
-        # not change when one of those excluded files appears or changes.
-        if self.source_inventory is not None:
-            pre_cache_fingerprint, _sources = self._cache_fingerprint()
-            self._expected_source_fingerprint = pre_cache_fingerprint
-            try:
-                self._ensure_mypy_built()
-            except MypyAnalyzerError:
-                pass
-            finally:
-                self._expected_source_fingerprint = None
+        """Analyze endpoints through the authenticated bulk cache lifecycle."""
+        analysis_fingerprint, _sources = self._cache_fingerprint()
 
-        # Try to load from cache
-        if use_cache and self.cache_path.exists() and self._load_cache():
+        # Inventory fingerprints intentionally ignore excluded files. A newly importable
+        # excluded local file can therefore change mypy's graph without changing the cache
+        # key. Rebuild on every bulk lifecycle so an existing typed snapshot cannot bypass
+        # fresh graph-membership authentication before either disk or in-memory evidence is
+        # reused.
+        self._reset_build_state()
+        graph_authenticated = False
+        self._expected_source_fingerprint = analysis_fingerprint
+        try:
+            self._ensure_mypy_built()
+            graph_authenticated = True
+        except MypyAnalyzerError:
+            pass
+        finally:
+            self._expected_source_fingerprint = None
+
+        # A cache is trustworthy only after the fresh graph was authenticated against the
+        # same canonical inventory. If mypy is unavailable, retain the uncached fallback.
+        if (
+            graph_authenticated
+            and use_cache
+            and self.cache_path.exists()
+            and self._load_cache()
+        ):
             all_cached = all(self._endpoint_key(ep) in self._endpoint_deps for ep in endpoints)
             if all_cached:
                 return self._endpoint_deps
         else:
             self._endpoint_deps.clear()
 
-        analysis_fingerprint, _sources = self._cache_fingerprint()
-        if self._trees and (
-            self._built_source_fingerprint is None
-            or self._built_source_fingerprint != analysis_fingerprint
-        ):
-            self._reset_build_state()
-
-        # Build mypy once for all endpoints
-        self._expected_source_fingerprint = analysis_fingerprint
-        try:
-            self._ensure_mypy_built()
-        except MypyAnalyzerError:
-            pass
-        finally:
-            self._expected_source_fingerprint = None
-
-        # Analyze uncached endpoints
+        # Analyze uncached endpoints using the freshly authenticated build when available.
         for endpoint in endpoints:
             if self._endpoint_key(endpoint) not in self._endpoint_deps:
                 self.analyze_endpoint(endpoint)
 
-        # Save cache
+        # Save cache only if the selected source inventory remained unchanged.
         if use_cache:
             current_fingerprint, _sources = self._cache_fingerprint()
             if current_fingerprint == analysis_fingerprint:

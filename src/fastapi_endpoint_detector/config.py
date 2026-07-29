@@ -5,7 +5,7 @@ This module handles configuration file parsing, validation, and provides
 sensible defaults for all configuration options.
 """
 
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Literal
 
 import yaml
@@ -72,6 +72,7 @@ class ParserConfig(BaseModel):
                 if (
                     not pattern.strip()
                     or normalized.startswith("/")
+                    or PureWindowsPath(pattern).is_absolute()
                     or ".." in normalized.split("/")
                 ):
                     raise ValueError(

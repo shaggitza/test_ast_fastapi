@@ -185,6 +185,61 @@ def test_secure_ast_and_mypy_consume_the_same_inventory(tmp_path: Path) -> None:
     assert sources == {"main.py": inventory.python_entries[0].sha256}
 
 
+def _mapper_with_excluded_import(tmp_path: Path) -> ChangeMapper:
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "from pkg.helper import value\n"
+        "app = FastAPI()\n"
+        "@app.get('/')\n"
+        "def handler() -> int:\n"
+        "    return value\n",
+        encoding="utf-8",
+    )
+    config = Config(
+        parser=ParserConfig(
+            include_patterns=["pkg/__init__.py", "pkg/main.py"],
+            exclude_patterns=[],
+        )
+    )
+    return ChangeMapper(tmp_path, config=config, secure_ast=True)
+
+
+def test_change_mapper_authenticates_graph_before_loading_valid_cache(tmp_path: Path) -> None:
+    seeded = _mapper_with_excluded_import(tmp_path)
+    seeded._preanalyze_mypy()
+    assert seeded.mypy_analyzer.cache_path.exists()
+    assert seeded.mypy_analyzer.get_endpoint_dependencies(seeded.registry.get_all()[0]) is not None
+
+    (tmp_path / "pkg" / "helper.py").write_text("value = 1\n", encoding="utf-8")
+    fresh = ChangeMapper(tmp_path, config=seeded.config, secure_ast=True)
+
+    with pytest.raises(SourceInventoryError, match="graph inputs absent"):
+        fresh._preanalyze_mypy()
+
+    assert fresh.mypy_analyzer._build_result is None
+    assert fresh.mypy_analyzer._trees == {}
+
+
+def test_change_mapper_reauthenticates_graph_before_same_analyzer_cache_reuse(
+    tmp_path: Path,
+) -> None:
+    mapper = _mapper_with_excluded_import(tmp_path)
+    mapper._preanalyze_mypy()
+    assert mapper.mypy_analyzer._build_result is not None
+    assert mapper.mypy_analyzer._trees
+
+    (tmp_path / "pkg" / "helper.py").write_text("value = 1\n", encoding="utf-8")
+
+    with pytest.raises(SourceInventoryError, match="graph inputs absent"):
+        mapper._preanalyze_mypy()
+
+    assert mapper.mypy_analyzer._build_result is None
+    assert mapper.mypy_analyzer._trees == {}
+
+
 def test_mypy_fails_closed_before_cache_for_excluded_project_import(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -234,6 +289,16 @@ def test_shared_inventory_canonicalizes_mypy_build_root_context(tmp_path: Path) 
     # Build sources, mypy_path, module names, and the cache identity all use the
     # inventory root, so app-path forms cannot collide with differing contexts.
     assert project_analyzer._cache_fingerprint()[0] == package_analyzer._cache_fingerprint()[0]
+
+
+@pytest.mark.parametrize("pattern", ["C:/outside.py", "C:\\outside.py"])
+@pytest.mark.parametrize("field_name", ["include_patterns", "exclude_patterns"])
+def test_windows_drive_absolute_source_globs_are_rejected(
+    field_name: str, pattern: str
+) -> None:
+    values = {field_name: [pattern]}
+    with pytest.raises(ValueError, match="project-relative globs"):
+        ParserConfig.model_validate(values)
 
 
 @pytest.mark.parametrize(

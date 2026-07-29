@@ -1597,42 +1597,16 @@ class ChangeMapper:
         self,
         progress_callback: ProgressCallback | None = None,
     ) -> None:
-        """Pre-analyze all endpoints with mypy."""
+        """Pre-analyze all endpoints through mypy's authenticated bulk lifecycle."""
         endpoints = self.registry.get_all()
         total = len(endpoints)
+        if progress_callback:
+            progress_callback(10, 100, "Authenticating mypy graph and cache...")
 
-        # Try to load from cache first
-        if self.use_cache and self.mypy_analyzer.cache_path.exists():
-            if progress_callback:
-                progress_callback(10, 100, "Loading cached analysis...")
-            try:
-                self.mypy_analyzer._load_cache()
-                # Check if all endpoints are cached
-                all_cached = all(
-                    self.mypy_analyzer.get_endpoint_dependencies(endpoint) is not None
-                    for endpoint in endpoints
-                )
-                if all_cached:
-                    if progress_callback:
-                        progress_callback(65, 100, f"Loaded {total} endpoints from cache")
-                    return
-            except Exception:
-                pass
+        self.mypy_analyzer.analyze_endpoints(endpoints, use_cache=self.use_cache)
 
-        # Analyze uncached endpoints
-        for i, endpoint in enumerate(endpoints):
-            if progress_callback:
-                progress_callback(
-                    10 + int(55 * (i + 1) / max(total, 1)),
-                    100,
-                    f"Analyzing endpoint {i + 1}/{total}: {endpoint.path}",
-                )
-            if self.mypy_analyzer.get_endpoint_dependencies(endpoint) is None:
-                self.mypy_analyzer.analyze_endpoint(endpoint)
-
-        # Save cache after analysis
-        if self.use_cache:
-            self.mypy_analyzer._save_cache()
+        if progress_callback:
+            progress_callback(65, 100, f"Analyzed {total} endpoints")
 
     def get_endpoints(self) -> list[Endpoint]:
         """Get all endpoints in the application."""
