@@ -467,7 +467,17 @@ _PERFORMANCE_PHASES = (
     "warm_no_change",
     "one_file_incremental_update",
 )
+_MEASURED_PHASE_TIMING_FIELDS = {
+    "baseline_target_preparation": "baseline_target_preparation",
+    "cold_build": "analyzer",
+}
+_UNMEASURED_PERFORMANCE_PHASES = {"warm_no_change", "one_file_incremental_update"}
 _RESOURCE_METRICS = ("peak_rss_bytes", "cache_size_bytes")
+_V4_PREDICTION_STATUS_BY_MANIFEST_STATUS = {
+    "completed": "completed",
+    "completed_with_unresolved": "partial",
+    "unresolved": "unresolved",
+}
 
 
 def _nonempty_string(value: object, field: str) -> str:
@@ -653,12 +663,32 @@ def _validate_manifest_prs(  # noqa: PLR0912 - fail-closed PR schema checks are 
             telemetry = item["phase_telemetry"]
             if not isinstance(telemetry, dict) or set(telemetry) != set(_PERFORMANCE_PHASES):
                 raise BenchmarkSchemaError("prediction manifest PR phase telemetry is invalid")
+            measured_samples: dict[str, float | None] = {}
             for phase in _PERFORMANCE_PHASES:
                 sample = _validate_measurement_state(
                     telemetry[phase], f"prs.phase_telemetry.{phase}"
                 )
+                measured_samples[phase] = sample
+                if phase in _UNMEASURED_PERFORMANCE_PHASES and sample is not None:
+                    raise BenchmarkSchemaError(
+                        f"prediction manifest prs.phase_telemetry.{phase} must be not_measured"
+                    )
                 if sample is not None:
                     phase_samples[phase].append(sample)
+            if item["status"] != "unresolved" and any(
+                measured_samples[phase] is None for phase in _MEASURED_PHASE_TIMING_FIELDS
+            ):
+                raise BenchmarkSchemaError(
+                    "completed prediction manifest PR must measure preparation and cold phases"
+                )
+            for phase, timing_field in _MEASURED_PHASE_TIMING_FIELDS.items():
+                sample = measured_samples[phase]
+                if (sample is None and timing_field in timing) or (
+                    sample is not None and timing.get(timing_field) != sample
+                ):
+                    raise BenchmarkSchemaError(
+                        f"prediction manifest PR {phase} telemetry does not match timing"
+                    )
         if item["status"] == "unresolved":
             _nonempty_string(item.get("reason"), "prs.reason")
         for field in ("candidate_endpoint_count", "effect_evidence_count"):
@@ -841,13 +871,33 @@ def read_prediction_manifest(  # noqa: PLR0912, PLR0915 - bindings stay explicit
     prediction_keys = {key(item) for item in predictions.records}
     if manifest_keys != prediction_keys:
         raise BenchmarkSchemaError("prediction manifest selected keys do not match predictions")
-    pr_keys = {
-        (item.get("repository"), item.get("pr"))
-        for item in manifest["prs"]
-        if isinstance(item, dict)
-    }
-    if pr_keys != prediction_keys:
+    manifest_prs = {key(item): item for item in manifest["prs"] if isinstance(item, dict)}
+    if set(manifest_prs) != prediction_keys:
         raise BenchmarkSchemaError("prediction manifest PR records do not match predictions")
+    if manifest["schema_version"] == 4:
+        predictions_by_key = {key(item): item for item in predictions.records}
+        for record_key, manifest_pr in manifest_prs.items():
+            prediction = predictions_by_key[record_key]
+            expected_prediction_status = _V4_PREDICTION_STATUS_BY_MANIFEST_STATUS[
+                manifest_pr["status"]
+            ]
+            if prediction["status"] != expected_prediction_status:
+                raise BenchmarkSchemaError(
+                    f"prediction manifest PR status does not match prediction for {record_key}"
+                )
+            cold_state = manifest_pr["phase_telemetry"]["cold_build"]
+            prediction_timing = prediction["timing_seconds"]
+            cold_timing_name = "cold_no_cache_analyzer_wall"
+            if cold_state["status"] == "measured":
+                if prediction_timing.get(cold_timing_name) != cold_state["seconds"]:
+                    raise BenchmarkSchemaError(
+                        "prediction manifest PR cold timing does not match "
+                        f"prediction for {record_key}"
+                    )
+            elif cold_timing_name in prediction_timing:
+                raise BenchmarkSchemaError(
+                    f"prediction manifest PR cold timing does not match prediction for {record_key}"
+                )
     candidate = manifest["candidate"]
     if manifest["git"] != {"candidate_sha": candidate["git_sha"]}:
         raise BenchmarkSchemaError("prediction manifest Git binding is invalid")

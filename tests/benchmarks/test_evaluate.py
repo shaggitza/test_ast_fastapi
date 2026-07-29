@@ -12,6 +12,7 @@ from benchmarks.real_world.benchmark_schema import read_primary_artifact, read_p
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+    from typing import Any
 
 
 def test_ranked_kind_preserves_declared_non_http_kind() -> None:
@@ -955,6 +956,194 @@ def test_schema_v4_aggregate_rejects_mixed_or_dropped_measured_samples() -> None
             {"status": "not_measured", "reason": "missing", "samples": []},
             [],
             "timing.phases.warm_no_change",
+        )
+
+
+def _schema_v4_manifest_fixture(
+    tmp_path: Path,
+) -> tuple[Path, Path, dict[str, Any], dict[str, Any]]:
+    predictions = tmp_path / "predictions.jsonl"
+    manifest_path = tmp_path / "manifest.json"
+    prediction = {
+        "schema_version": 3,
+        "repository": "owner/repo",
+        "pr": 1,
+        "candidate": "candidate/v1",
+        "adapter": "fastapi-adapter-v1",
+        "status": "completed",
+        "affected_entrypoints": [],
+        "candidate_entrypoints": [],
+        "unresolved": [],
+        "timing_seconds": {"cold_no_cache_analyzer_wall": 2.0},
+    }
+    manifest = {
+        "schema_version": 4,
+        "prediction_schema_version": 3,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "candidate": {
+            "id": "candidate/v1",
+            "name": "fastapi-endpoint-detector",
+            "version": "test",
+            "adapter": "fastapi-adapter-v1",
+            "git_sha": "a" * 40,
+            "config_hash": "d" * 12,
+            "dirty": False,
+            "dirty_sha256": None,
+            "uv_lock_sha256": "b" * 64,
+            "uv_version": "uv test",
+            "command": "uv run --frozen fastapi-endpoint-detector analyze --no-cache",
+            "performance_protocol": {
+                "id": "cold-no-cache-analyzer-wall-v1",
+                "cache_enabled": False,
+                "incremental_valid": False,
+            },
+        },
+        "git": {"candidate_sha": "a" * 40},
+        "prediction_output": {"path": str(predictions), "sha256": "", "records": 1},
+        "selected_keys": [{"repository": "owner/repo", "pr": 1}],
+        "python": "Python test",
+        "platform": "test-platform",
+        "corpus": {"path": "corpus.json", "sha256": "c" * 64},
+        "root_config": {"default": ".", "repositories": {}},
+        "app_entry_config": {},
+        "bootstrap_entry_config": {},
+        "configuration": {
+            "cache": "/tmp/cache",
+            "output": str(predictions),
+            "manifest": str(manifest_path),
+            "timeout_seconds": 60.0,
+            "dry_run": False,
+            "allow_upstream_execution": False,
+            "use_scip": False,
+            "filters": {"limit": None, "repositories": [], "prs": []},
+        },
+        "selection_count": 1,
+        "prs": [
+            {
+                "repository": "owner/repo",
+                "pr": 1,
+                "configured_app_root": ".",
+                "configured_app_entry": None,
+                "configured_bootstrap_entry": None,
+                "merge_sha": "a" * 40,
+                "base_sha": "e" * 40,
+                "status": "completed",
+                "timing_seconds": {
+                    "baseline_target_preparation": 1.0,
+                    "analyzer": 2.0,
+                    "total": 3.0,
+                },
+                "phase_telemetry": {
+                    "baseline_target_preparation": {"status": "measured", "seconds": 1.0},
+                    "cold_build": {"status": "measured", "seconds": 2.0},
+                    "warm_no_change": {
+                        "status": "not_measured",
+                        "reason": "backend_cache_reuse_not_implemented",
+                    },
+                    "one_file_incremental_update": {
+                        "status": "not_measured",
+                        "reason": "backend_invalidation_telemetry_not_implemented",
+                    },
+                },
+            }
+        ],
+        "timing": {
+            "started_at": "2026-01-01T00:00:00+00:00",
+            "finished_at": "2026-01-01T00:00:03+00:00",
+            "total_seconds": 3.0,
+            "protocol": "phase-telemetry-v1",
+            "incremental_valid": False,
+            "phases": {
+                "baseline_target_preparation": {"status": "measured", "samples": [1.0]},
+                "cold_build": {"status": "measured", "samples": [2.0]},
+                "warm_no_change": {"status": "not_measured", "reason": "no_samples"},
+                "one_file_incremental_update": {
+                    "status": "not_measured",
+                    "reason": "no_samples",
+                },
+            },
+            "resources": {
+                "peak_rss_bytes": {"status": "not_measured", "reason": "not_sampled"},
+                "cache_size_bytes": {"status": "not_measured", "reason": "not_sampled"},
+            },
+        },
+    }
+    return predictions, manifest_path, prediction, manifest
+
+
+def _write_schema_v4_manifest_fixture(
+    predictions: Path,
+    manifest_path: Path,
+    prediction: dict[str, Any],
+    manifest: dict[str, Any],
+) -> None:
+    prediction_content = json.dumps(prediction) + "\n"
+    predictions.write_text(prediction_content)
+    manifest["prediction_output"]["sha256"] = hashlib.sha256(
+        prediction_content.encode()
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
+
+
+def test_schema_v4_manifest_rejects_fabricated_warm_telemetry(tmp_path: Path) -> None:
+    predictions, manifest_path, prediction, manifest = _schema_v4_manifest_fixture(tmp_path)
+    manifest["prs"][0]["phase_telemetry"]["warm_no_change"] = {
+        "status": "measured",
+        "seconds": 123.0,
+    }
+    manifest["timing"]["phases"]["warm_no_change"] = {
+        "status": "measured",
+        "samples": [123.0],
+    }
+    _write_schema_v4_manifest_fixture(predictions, manifest_path, prediction, manifest)
+
+    with pytest.raises(ValueError, match="warm_no_change must be not_measured"):
+        evaluate.read_prediction_manifest(
+            manifest_path, read_primary_artifact(predictions, "prediction")
+        )
+
+
+def test_schema_v4_manifest_rejects_completed_with_all_phases_not_measured(
+    tmp_path: Path,
+) -> None:
+    predictions, manifest_path, prediction, manifest = _schema_v4_manifest_fixture(tmp_path)
+    for phase in evaluate._PERFORMANCE_PHASES:
+        manifest["prs"][0]["phase_telemetry"][phase] = {
+            "status": "not_measured",
+            "reason": "fabricated_missing_sample",
+        }
+        manifest["timing"]["phases"][phase] = {
+            "status": "not_measured",
+            "reason": "fabricated_missing_sample",
+        }
+    manifest["prs"][0]["timing_seconds"] = {"total": 3.0}
+    _write_schema_v4_manifest_fixture(predictions, manifest_path, prediction, manifest)
+
+    with pytest.raises(ValueError, match="must measure preparation and cold phases"):
+        evaluate.read_prediction_manifest(
+            manifest_path, read_primary_artifact(predictions, "prediction")
+        )
+
+
+def test_schema_v4_manifest_rejects_prediction_status_disagreement(tmp_path: Path) -> None:
+    predictions, manifest_path, prediction, manifest = _schema_v4_manifest_fixture(tmp_path)
+    manifest["prs"][0]["status"] = "completed_with_unresolved"
+    _write_schema_v4_manifest_fixture(predictions, manifest_path, prediction, manifest)
+
+    with pytest.raises(ValueError, match="PR status does not match prediction"):
+        evaluate.read_prediction_manifest(
+            manifest_path, read_primary_artifact(predictions, "prediction")
+        )
+
+
+def test_schema_v4_manifest_rejects_prediction_cold_timing_disagreement(tmp_path: Path) -> None:
+    predictions, manifest_path, prediction, manifest = _schema_v4_manifest_fixture(tmp_path)
+    prediction["timing_seconds"]["cold_no_cache_analyzer_wall"] = 9.0
+    _write_schema_v4_manifest_fixture(predictions, manifest_path, prediction, manifest)
+
+    with pytest.raises(ValueError, match="PR cold timing does not match prediction"):
+        evaluate.read_prediction_manifest(
+            manifest_path, read_primary_artifact(predictions, "prediction")
         )
 
 
