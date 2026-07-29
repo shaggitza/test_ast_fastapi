@@ -159,6 +159,65 @@ def test_awaited_coroutine_body_is_established(tmp_path: Path) -> None:
     assert not dependencies.references_lines_low_only("worker.py", {1})
 
 
+def test_unawaited_local_coroutine_body_is_low_only(tmp_path: Path) -> None:
+    dependencies = _dependencies(
+        tmp_path,
+        (
+            "    async def deferred() -> int:\n"
+            "        return changed()\n"
+            "    deferred()\n"
+            "    return 1\n"
+        ),
+        async_handler=True,
+    )
+
+    assert dependencies.references_symbol_at_line("worker.py", 1) is not None
+    assert dependencies.references_lines_low_only("worker.py", {1})
+    assert any(
+        any("deferred_coroutine_creation" in frame.code_context for frame in stack)
+        for stack in dependencies.get_call_stack("worker.py")
+    )
+
+
+def test_awaited_local_coroutine_body_is_established(tmp_path: Path) -> None:
+    dependencies = _dependencies(
+        tmp_path,
+        (
+            "    async def deferred() -> int:\n"
+            "        return changed()\n"
+            "    return await deferred()\n"
+        ),
+        async_handler=True,
+    )
+
+    assert dependencies.references_symbol_at_line("worker.py", 1) is not None
+    assert not dependencies.references_lines_low_only("worker.py", {1})
+
+
+def test_unawaited_local_coroutine_shares_edge_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(MypyAnalyzer, "MAX_POINTS_TO_EDGES", 0)
+
+    dependencies = _dependencies(
+        tmp_path,
+        (
+            "    async def deferred() -> int:\n"
+            "        return changed()\n"
+            "    deferred()\n"
+            "    return 1\n"
+        ),
+        async_handler=True,
+    )
+
+    assert dependencies.references_symbol_at_line("worker.py", 1) is None
+    assert dependencies.status == DependencyGraphStatus.CONDITIONAL
+    assert [item.code for item in dependencies.limitations] == [
+        "points_to_edge_cap_exhausted"
+    ]
+
+
 @pytest.mark.parametrize(
     "handler_source",
     [
@@ -233,6 +292,61 @@ def test_exactly_invoked_lambda_body_is_reachable(
     dependencies = _dependencies(tmp_path, handler_source)
 
     assert dependencies.references_symbol_at_line("worker.py", 1) is not None
+
+
+def test_local_lambda_join_retains_every_fallthrough_target(tmp_path: Path) -> None:
+    dependencies = _dependencies(
+        tmp_path,
+        (
+            "    callback = lambda: changed()\n"
+            "    flag = object()\n"
+            "    if flag:\n"
+            "        callback = lambda: 0\n"
+            "    return callback()\n"
+        ),
+    )
+
+    assert dependencies.references_symbol_at_line("worker.py", 1) is not None
+
+
+def test_local_lambda_join_discards_terminal_branch_target(tmp_path: Path) -> None:
+    dependencies = _dependencies(
+        tmp_path,
+        (
+            "    callback = lambda: 0\n"
+            "    flag = object()\n"
+            "    if flag:\n"
+            "        callback = lambda: changed()\n"
+            "        return 1\n"
+            "    return callback()\n"
+        ),
+    )
+
+    assert dependencies.references_symbol_at_line("worker.py", 1) is None
+
+
+def test_local_callable_target_cap_is_explicit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(MypyAnalyzer, "MAX_LOCAL_CALLABLE_TARGETS", 1)
+
+    dependencies = _dependencies(
+        tmp_path,
+        (
+            "    callback = lambda: changed()\n"
+            "    flag = object()\n"
+            "    if flag:\n"
+            "        callback = lambda: 0\n"
+            "    return callback()\n"
+        ),
+    )
+
+    assert dependencies.references_symbol_at_line("worker.py", 1) is None
+    assert dependencies.status == DependencyGraphStatus.CONDITIONAL
+    assert [item.code for item in dependencies.limitations] == [
+        "local_callable_target_cap_exhausted"
+    ]
 
 
 def test_match_subject_guard_and_live_arm_are_traversed(tmp_path: Path) -> None:

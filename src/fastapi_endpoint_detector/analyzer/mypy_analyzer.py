@@ -137,6 +137,9 @@ class _StatementControl:
     falls_through: bool = True
     breaks: bool = False
     continues: bool = False
+    break_callable_environments: tuple[dict[str, tuple[Any, ...]], ...] = ()
+    continue_callable_environments: tuple[dict[str, tuple[Any, ...]], ...] = ()
+    terminal_callable_environments: tuple[dict[str, tuple[Any, ...]], ...] = ()
 
 
 @dataclass
@@ -417,8 +420,9 @@ class MypyAnalyzer:
     and extract precise file/line information for all references.
     """
 
-    CACHE_SCHEMA_VERSION = 20
+    CACHE_SCHEMA_VERSION = 21
     MAX_POINTS_TO_TARGETS = 8
+    MAX_LOCAL_CALLABLE_TARGETS = 8
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
     MAX_POINTS_TO_EDGES = 4096
@@ -3031,7 +3035,36 @@ class MypyAnalyzer:
         awaited_call_ids: set[int] = set()
         consumed_generator_call_kinds: dict[int, bool | None] = {}
         deferred_environment: dict[str, _DeferredGenerator] = {}
-        deferred_local_functions: dict[str, Any] = {}
+        deferred_local_functions: dict[str, tuple[Any, ...]] = {}
+
+        def join_local_callable_environments(
+            environments: list[dict[str, tuple[Any, ...]]],
+            line: int,
+        ) -> dict[str, tuple[Any, ...]]:
+            """Join exact local callable targets retained on every incoming path."""
+            if not environments:
+                return {}
+            common_names = set.intersection(*(set(environment) for environment in environments))
+            joined: dict[str, tuple[Any, ...]] = {}
+            for name in sorted(common_names):
+                targets: list[Any] = []
+                seen_ids: set[int] = set()
+                for environment in environments:
+                    for target in environment[name]:
+                        if id(target) not in seen_ids:
+                            seen_ids.add(id(target))
+                            targets.append(target)
+                if len(targets) > self.MAX_LOCAL_CALLABLE_TARGETS:
+                    deps.add_limitation(
+                        "local_callable_target_cap_exhausted",
+                        current_file,
+                        line,
+                        "Mypy local callable flow traversal reached its target cap; "
+                        "the overflowing binding was not analyzed.",
+                    )
+                    continue
+                joined[name] = tuple(targets)
+            return joined
 
         def resolve_and_trace(
             fullname: str,
@@ -3381,72 +3414,97 @@ class MypyAnalyzer:
             }:
                 traced = True
 
-            local_function = (
-                deferred_local_functions.get(callee.name)
+            local_functions = (
+                deferred_local_functions.get(callee.name, ())
                 if isinstance(callee, NameExpr)
-                else callee
+                else (callee,)
                 if isinstance(callee, LambdaExpr)
-                else None
+                else ()
             )
-            if local_function is not None:
+            if local_functions:
                 traced = True
-                function = self._actual_function(local_function)
-                local_fullname = (
-                    callee.fullname if isinstance(callee, NameExpr) else None
-                ) or (
-                    f"{current_module}.<lambda>@{function.line}"
-                    if isinstance(function, LambdaExpr)
-                    else f"{current_module}.{function.name}"
-                )
-                start, end = self._get_func_lines(function)
-                if isinstance(function, LambdaExpr):
-                    end = start
-                is_deferred_coroutine = (
-                    bool(getattr(function, "is_coroutine", False))
-                    and id(call) not in awaited_call_ids
-                )
-                deps.add_symbol_reference(
-                    current_file,
-                    local_fullname,
-                    start,
-                    end,
-                    low_confidence=is_deferred_coroutine,
-                )
-                local_frame = CallFrame(
-                    current_file,
-                    start,
-                    local_fullname,
-                    code_context=(
-                        "Execution summary: deferred_coroutine_creation"
-                        if is_deferred_coroutine
-                        else ""
-                    ),
-                    caller_file_path=current_file,
-                    caller_line_number=call.line,
-                )
-                deps.add_call_stack(current_file, [*call_stack, local_frame])
-                if not is_deferred_coroutine and depth + 1 < self.max_depth:
-                    self._trace_references(
-                        function,
-                        deps,
-                        current_file,
-                        current_module,
-                        [*call_stack, local_frame],
-                        visited,
-                        import_map,
-                        depth=depth + 1,
-                        low_confidence_path=low_confidence_path,
-                        initial_environment=dict(flow_environment),
-                        finite_edge_budget=finite_edge_budget,
+                has_multiple_targets = len(local_functions) > 1
+                for local_function in local_functions:
+                    function = self._actual_function(local_function)
+                    local_fullname = (
+                        callee.fullname if isinstance(callee, NameExpr) else None
+                    ) or (
+                        f"{current_module}.<lambda>@{function.line}"
+                        if isinstance(function, LambdaExpr)
+                        else f"{current_module}.{function.name}"
                     )
-                elif not is_deferred_coroutine:
-                    deps.add_limitation(
-                        "analysis_depth_exhausted",
-                        current_file,
-                        call.line,
-                        "Mypy dependency traversal reached its configured maximum depth; "
-                        "deeper references were not analyzed.",
+                    start, end = self._get_func_lines(function)
+                    if isinstance(function, LambdaExpr):
+                        end = start
+                    is_deferred_coroutine = (
+                        bool(getattr(function, "is_coroutine", False))
+                        and id(call) not in awaited_call_ids
                     )
+                    low_confidence_edge = is_deferred_coroutine or has_multiple_targets
+                    target_depth = depth + 1
+                    if target_depth > self.max_depth:
+                        deps.add_limitation(
+                            "analysis_depth_exhausted",
+                            current_file,
+                            call.line,
+                            "Mypy dependency traversal reached its configured maximum depth; "
+                            "deeper references were not analyzed.",
+                        )
+                        continue
+                    if low_confidence_edge:
+                        if finite_edge_budget[0] >= self.MAX_POINTS_TO_EDGES:
+                            deps.add_limitation(
+                                "points_to_edge_cap_exhausted",
+                                current_file,
+                                call.line,
+                                "Mypy finite points-to traversal reached its edge cap; "
+                                "additional low-confidence references were not analyzed.",
+                            )
+                            continue
+                        finite_edge_budget[0] += 1
+                    target_low_confidence = low_confidence_path or low_confidence_edge
+                    deps.add_symbol_reference(
+                        current_file,
+                        local_fullname,
+                        start,
+                        end,
+                        low_confidence=target_low_confidence,
+                    )
+                    local_frame = CallFrame(
+                        current_file,
+                        start,
+                        local_fullname,
+                        code_context=(
+                            "Execution summary: deferred_coroutine_creation"
+                            if is_deferred_coroutine
+                            else ""
+                        ),
+                        caller_file_path=current_file,
+                        caller_line_number=call.line,
+                    )
+                    deps.add_call_stack(current_file, [*call_stack, local_frame])
+                    if target_depth < self.max_depth:
+                        self._trace_references(
+                            function,
+                            deps,
+                            current_file,
+                            current_module,
+                            [*call_stack, local_frame],
+                            visited,
+                            import_map,
+                            depth=target_depth,
+                            low_confidence_path=target_low_confidence,
+                            initial_environment=dict(flow_environment),
+                            finite_edge_budget=finite_edge_budget,
+                        )
+                    else:
+                        deps.add_limitation(
+                            "analysis_depth_exhausted",
+                            current_file,
+                            call.line,
+                            "Mypy dependency traversal reached its configured maximum depth; "
+                            "deeper references were not analyzed.",
+                        )
 
             callback_binding = (
                 self._callback_binding(call, callback_summary)
@@ -3560,7 +3618,7 @@ class MypyAnalyzer:
 
         def walk_node(n: Any) -> _StatementControl:
             """Recursively walk a mypy AST node and propagate bounded control outcomes."""
-            nonlocal deferred_environment, flow_environment
+            nonlocal deferred_environment, deferred_local_functions, flow_environment
             if n is None:
                 return _StatementControl()
 
@@ -3589,7 +3647,7 @@ class MypyAnalyzer:
             elif isinstance(n, FuncDef):
                 # A nested definition executes only its eager signature expressions.
                 # Its body is deferred until an exact local call resolves back to it.
-                deferred_local_functions[n.name] = n
+                deferred_local_functions[n.name] = (n,)
                 if hasattr(n, "arguments"):
                     for arg in n.arguments:
                         if hasattr(arg, "initializer") and arg.initializer:
@@ -3610,6 +3668,18 @@ class MypyAnalyzer:
                         falls_through=statement_result.falls_through,
                         breaks=result.breaks or statement_result.breaks,
                         continues=result.continues or statement_result.continues,
+                        break_callable_environments=(
+                            *result.break_callable_environments,
+                            *statement_result.break_callable_environments,
+                        ),
+                        continue_callable_environments=(
+                            *result.continue_callable_environments,
+                            *statement_result.continue_callable_environments,
+                        ),
+                        terminal_callable_environments=(
+                            *result.terminal_callable_environments,
+                            *statement_result.terminal_callable_environments,
+                        ),
                     )
                 return result
 
@@ -3625,7 +3695,7 @@ class MypyAnalyzer:
                     finite_budget,
                 )
                 local_callable = (
-                    n.rvalue
+                    (n.rvalue,)
                     if isinstance(n.rvalue, LambdaExpr)
                     else deferred_local_functions.get(n.rvalue.name)
                     if isinstance(n.rvalue, NameExpr)
@@ -3670,13 +3740,18 @@ class MypyAnalyzer:
 
             elif isinstance(n, ReturnStmt):
                 walk_node(n.expr)
-                return _StatementControl(falls_through=False)
+                return _StatementControl(
+                    falls_through=False,
+                    terminal_callable_environments=(dict(deferred_local_functions),),
+                )
 
             elif isinstance(n, IfStmt):
                 base_environment = dict(flow_environment)
                 base_deferred = dict(deferred_environment)
+                base_local_callables = dict(deferred_local_functions)
                 branch_environments: list[dict[str, _FinitePointsTo]] = []
                 branch_deferred: list[dict[str, _DeferredGenerator]] = []
+                branch_local_callables: list[dict[str, tuple[Any, ...]]] = []
                 branch_results: list[_StatementControl] = []
                 false_path_remains = True
                 for expr, body in zip(n.expr, n.body, strict=True):
@@ -3684,6 +3759,7 @@ class MypyAnalyzer:
                         break
                     flow_environment = dict(base_environment)
                     deferred_environment = dict(base_deferred)
+                    deferred_local_functions = dict(base_local_callables)
                     walk_node(expr)
                     truth = literal_truth(expr)
                     if truth is not False:
@@ -3692,11 +3768,13 @@ class MypyAnalyzer:
                         if branch_result.falls_through:
                             branch_environments.append(dict(flow_environment))
                             branch_deferred.append(dict(deferred_environment))
+                            branch_local_callables.append(dict(deferred_local_functions))
                     if truth is True:
                         false_path_remains = False
                 if false_path_remains:
                     flow_environment = dict(base_environment)
                     deferred_environment = dict(base_deferred)
+                    deferred_local_functions = dict(base_local_callables)
                     branch_result = (
                         walk_node(n.else_body) if n.else_body else _StatementControl()
                     )
@@ -3704,6 +3782,7 @@ class MypyAnalyzer:
                     if branch_result.falls_through:
                         branch_environments.append(dict(flow_environment))
                         branch_deferred.append(dict(deferred_environment))
+                        branch_local_callables.append(dict(deferred_local_functions))
                 if branch_environments:
                     flow_environment = self._join_finite_environments(branch_environments)
                     common_deferred = set.intersection(
@@ -3717,34 +3796,91 @@ class MypyAnalyzer:
                             for branch in branch_deferred[1:]
                         )
                     }
+                    deferred_local_functions = join_local_callable_environments(
+                        branch_local_callables,
+                        n.line,
+                    )
                 else:
                     flow_environment.clear()
                     deferred_environment.clear()
+                    deferred_local_functions.clear()
                 return _StatementControl(
                     falls_through=any(result.falls_through for result in branch_results),
                     breaks=any(result.breaks for result in branch_results),
                     continues=any(result.continues for result in branch_results),
+                    break_callable_environments=tuple(
+                        environment
+                        for result in branch_results
+                        for environment in result.break_callable_environments
+                    ),
+                    continue_callable_environments=tuple(
+                        environment
+                        for result in branch_results
+                        for environment in result.continue_callable_environments
+                    ),
+                    terminal_callable_environments=tuple(
+                        environment
+                        for result in branch_results
+                        for environment in result.terminal_callable_environments
+                    ),
                 )
 
             elif isinstance(n, WhileStmt):
                 walk_node(n.expr)
                 truth = literal_truth(n.expr)
-                body_result = _StatementControl()
+                base_local_callables = dict(deferred_local_functions)
+                body_result = _StatementControl(falls_through=False)
+                body_fallthrough: list[dict[str, tuple[Any, ...]]] = []
                 if truth is not False:
                     flow_environment.clear()
                     deferred_environment.clear()
+                    deferred_local_functions = dict(base_local_callables)
                     body_result = walk_node(n.body)
-                else_result = _StatementControl()
-                if truth is not True and n.else_body:
+                    if body_result.falls_through:
+                        body_fallthrough.append(dict(deferred_local_functions))
+                    body_fallthrough.extend(body_result.continue_callable_environments)
+
+                normal_exit_inputs: list[dict[str, tuple[Any, ...]]] = []
+                if truth is not True:
+                    normal_exit_inputs.append(base_local_callables)
+                    normal_exit_inputs.extend(body_fallthrough)
+                else_result = _StatementControl(falls_through=False)
+                else_fallthrough: list[dict[str, tuple[Any, ...]]] = []
+                if normal_exit_inputs:
+                    deferred_local_functions = join_local_callable_environments(
+                        normal_exit_inputs,
+                        n.line,
+                    )
                     flow_environment.clear()
                     deferred_environment.clear()
-                    else_result = walk_node(n.else_body)
+                    else_result = (
+                        walk_node(n.else_body) if n.else_body else _StatementControl()
+                    )
+                    if else_result.falls_through:
+                        else_fallthrough.append(dict(deferred_local_functions))
+
+                exit_environments = [
+                    *body_result.break_callable_environments,
+                    *else_fallthrough,
+                ]
                 flow_environment.clear()
                 deferred_environment.clear()
-                if truth is True:
-                    return _StatementControl(falls_through=body_result.breaks)
+                deferred_local_functions = join_local_callable_environments(
+                    exit_environments,
+                    n.line,
+                )
                 return _StatementControl(
-                    falls_through=body_result.breaks or else_result.falls_through
+                    falls_through=bool(exit_environments),
+                    breaks=else_result.breaks,
+                    continues=else_result.continues,
+                    break_callable_environments=else_result.break_callable_environments,
+                    continue_callable_environments=(
+                        else_result.continue_callable_environments
+                    ),
+                    terminal_callable_environments=(
+                        *body_result.terminal_callable_environments,
+                        *else_result.terminal_callable_environments,
+                    ),
                 )
 
             elif isinstance(n, ForStmt):
@@ -3755,27 +3891,59 @@ class MypyAnalyzer:
                 )
                 walk_node(n.expr)
                 empty = literal_iterable_empty(n.expr)
-                body_result = _StatementControl()
+                base_local_callables = dict(deferred_local_functions)
+                body_result = _StatementControl(falls_through=False)
+                for_normal_exit_inputs: list[dict[str, tuple[Any, ...]]] = []
+                if empty is not False:
+                    for_normal_exit_inputs.append(base_local_callables)
                 if empty is not True:
                     flow_environment.clear()
                     deferred_environment.clear()
+                    deferred_local_functions = dict(base_local_callables)
                     body_result = walk_node(n.body)
+                    if body_result.falls_through:
+                        for_normal_exit_inputs.append(dict(deferred_local_functions))
+                    for_normal_exit_inputs.extend(
+                        body_result.continue_callable_environments
+                    )
+
+                else_result = _StatementControl(falls_through=False)
+                for_else_fallthrough: list[dict[str, tuple[Any, ...]]] = []
+                if for_normal_exit_inputs:
+                    deferred_local_functions = join_local_callable_environments(
+                        for_normal_exit_inputs,
+                        n.line,
+                    )
+                    flow_environment.clear()
+                    deferred_environment.clear()
+                    else_result = (
+                        walk_node(n.else_body) if n.else_body else _StatementControl()
+                    )
+                    if else_result.falls_through:
+                        for_else_fallthrough.append(dict(deferred_local_functions))
+
+                exit_environments = [
+                    *body_result.break_callable_environments,
+                    *for_else_fallthrough,
+                ]
                 flow_environment.clear()
                 deferred_environment.clear()
-                else_reachable = (
-                    empty is not False
-                    or body_result.falls_through
-                    or body_result.continues
+                deferred_local_functions = join_local_callable_environments(
+                    exit_environments,
+                    n.line,
                 )
-                else_result = (
-                    walk_node(n.else_body)
-                    if else_reachable and n.else_body
-                    else _StatementControl(falls_through=else_reachable)
-                )
-                flow_environment.clear()
-                deferred_environment.clear()
                 return _StatementControl(
-                    falls_through=body_result.breaks or else_result.falls_through
+                    falls_through=bool(exit_environments),
+                    breaks=else_result.breaks,
+                    continues=else_result.continues,
+                    break_callable_environments=else_result.break_callable_environments,
+                    continue_callable_environments=(
+                        else_result.continue_callable_environments
+                    ),
+                    terminal_callable_environments=(
+                        *body_result.terminal_callable_environments,
+                        *else_result.terminal_callable_environments,
+                    ),
                 )
 
             elif isinstance(n, WithStmt):
@@ -3789,22 +3957,38 @@ class MypyAnalyzer:
                 return result
 
             elif isinstance(n, TryStmt):
+                base_local_callables = dict(deferred_local_functions)
                 flow_environment.clear()
                 deferred_environment.clear()
+                deferred_local_functions = dict(base_local_callables)
                 body_result = walk_node(n.body)
+                incoming_fallthrough: list[dict[str, tuple[Any, ...]]] = []
                 incoming_results: list[_StatementControl] = []
                 if body_result.falls_through:
                     if n.else_body:
                         flow_environment.clear()
                         deferred_environment.clear()
-                        incoming_results.append(walk_node(n.else_body))
+                        else_result = walk_node(n.else_body)
+                        incoming_results.append(else_result)
+                        if else_result.falls_through:
+                            incoming_fallthrough.append(dict(deferred_local_functions))
                     else:
                         incoming_results.append(_StatementControl())
+                        incoming_fallthrough.append(dict(deferred_local_functions))
                 incoming_results.append(
                     _StatementControl(
                         falls_through=False,
                         breaks=body_result.breaks,
                         continues=body_result.continues,
+                        break_callable_environments=(
+                            body_result.break_callable_environments
+                        ),
+                        continue_callable_environments=(
+                            body_result.continue_callable_environments
+                        ),
+                        terminal_callable_environments=(
+                            body_result.terminal_callable_environments
+                        ),
                     )
                 )
                 if hasattr(n, "types") and n.types:
@@ -3814,40 +3998,95 @@ class MypyAnalyzer:
                 for handler in n.handlers:
                     flow_environment.clear()
                     deferred_environment.clear()
-                    incoming_results.append(walk_node(handler))
+                    deferred_local_functions = dict(base_local_callables)
+                    handler_result = walk_node(handler)
+                    incoming_results.append(handler_result)
+                    if handler_result.falls_through:
+                        incoming_fallthrough.append(dict(deferred_local_functions))
+
+                incoming_breaks = tuple(
+                    environment
+                    for result in incoming_results
+                    for environment in result.break_callable_environments
+                )
+                incoming_continues = tuple(
+                    environment
+                    for result in incoming_results
+                    for environment in result.continue_callable_environments
+                )
+                incoming_terminals = tuple(
+                    environment
+                    for result in incoming_results
+                    for environment in result.terminal_callable_environments
+                )
                 incoming = _StatementControl(
-                    falls_through=any(result.falls_through for result in incoming_results),
-                    breaks=any(result.breaks for result in incoming_results),
-                    continues=any(result.continues for result in incoming_results),
+                    falls_through=bool(incoming_fallthrough),
+                    breaks=bool(incoming_breaks),
+                    continues=bool(incoming_continues),
+                    break_callable_environments=incoming_breaks,
+                    continue_callable_environments=incoming_continues,
+                    terminal_callable_environments=incoming_terminals,
                 )
                 if n.finally_body:
-                    flow_environment.clear()
-                    deferred_environment.clear()
-                    final_result = walk_node(n.finally_body)
+                    final_fallthrough: list[dict[str, tuple[Any, ...]]] = []
+                    final_breaks: list[dict[str, tuple[Any, ...]]] = []
+                    final_continues: list[dict[str, tuple[Any, ...]]] = []
+                    final_terminals: list[dict[str, tuple[Any, ...]]] = []
+                    incoming_by_kind = (
+                        ("fallthrough", tuple(incoming_fallthrough)),
+                        ("break", incoming_breaks),
+                        ("continue", incoming_continues),
+                        ("terminal", incoming_terminals),
+                    )
+                    for incoming_kind, environments in incoming_by_kind:
+                        for environment in environments:
+                            flow_environment.clear()
+                            deferred_environment.clear()
+                            deferred_local_functions = dict(environment)
+                            final_result = walk_node(n.finally_body)
+                            if final_result.falls_through:
+                                retained = dict(deferred_local_functions)
+                                if incoming_kind == "fallthrough":
+                                    final_fallthrough.append(retained)
+                                elif incoming_kind == "break":
+                                    final_breaks.append(retained)
+                                elif incoming_kind == "continue":
+                                    final_continues.append(retained)
+                                else:
+                                    final_terminals.append(retained)
+                            final_breaks.extend(final_result.break_callable_environments)
+                            final_continues.extend(
+                                final_result.continue_callable_environments
+                            )
+                            final_terminals.extend(
+                                final_result.terminal_callable_environments
+                            )
+                    incoming_fallthrough = final_fallthrough
                     incoming = _StatementControl(
-                        falls_through=(
-                            incoming.falls_through and final_result.falls_through
-                        ),
-                        breaks=(
-                            final_result.breaks
-                            or (final_result.falls_through and incoming.breaks)
-                        ),
-                        continues=(
-                            final_result.continues
-                            or (final_result.falls_through and incoming.continues)
-                        ),
+                        falls_through=bool(final_fallthrough),
+                        breaks=bool(final_breaks),
+                        continues=bool(final_continues),
+                        break_callable_environments=tuple(final_breaks),
+                        continue_callable_environments=tuple(final_continues),
+                        terminal_callable_environments=tuple(final_terminals),
                     )
                 flow_environment.clear()
                 deferred_environment.clear()
+                deferred_local_functions = join_local_callable_environments(
+                    incoming_fallthrough,
+                    n.line,
+                )
                 return incoming
 
             elif isinstance(n, MatchStmt):
                 walk_node(n.subject)
                 base_environment = dict(flow_environment)
                 base_deferred = dict(deferred_environment)
+                base_local_callables = dict(deferred_local_functions)
                 match_results: list[_StatementControl] = []
                 match_environments: list[dict[str, _FinitePointsTo]] = []
                 match_deferred: list[dict[str, _DeferredGenerator]] = []
+                match_local_callables: list[dict[str, tuple[Any, ...]]] = []
                 unmatched_path_remains = True
 
                 def walk_pattern(pattern: Any) -> None:
@@ -3877,6 +4116,7 @@ class MypyAnalyzer:
                         break
                     flow_environment = dict(base_environment)
                     deferred_environment = dict(base_deferred)
+                    deferred_local_functions = dict(base_local_callables)
                     walk_pattern(pattern)
                     guard_truth = None
                     if guard is not None:
@@ -3888,6 +4128,9 @@ class MypyAnalyzer:
                         if match_result.falls_through:
                             match_environments.append(dict(flow_environment))
                             match_deferred.append(dict(deferred_environment))
+                            match_local_callables.append(
+                                dict(deferred_local_functions)
+                            )
                     irrefutable = isinstance(pattern, AsPattern) and pattern.pattern is None
                     if irrefutable and (guard is None or guard_truth is True):
                         unmatched_path_remains = False
@@ -3895,6 +4138,7 @@ class MypyAnalyzer:
                     match_results.append(_StatementControl())
                     match_environments.append(base_environment)
                     match_deferred.append(base_deferred)
+                    match_local_callables.append(base_local_callables)
                 if match_environments:
                     flow_environment = self._join_finite_environments(match_environments)
                     common_deferred = set.intersection(
@@ -3908,13 +4152,33 @@ class MypyAnalyzer:
                             for branch in match_deferred[1:]
                         )
                     }
+                    deferred_local_functions = join_local_callable_environments(
+                        match_local_callables,
+                        n.line,
+                    )
                 else:
                     flow_environment.clear()
                     deferred_environment.clear()
+                    deferred_local_functions.clear()
                 return _StatementControl(
                     falls_through=any(result.falls_through for result in match_results),
                     breaks=any(result.breaks for result in match_results),
                     continues=any(result.continues for result in match_results),
+                    break_callable_environments=tuple(
+                        environment
+                        for result in match_results
+                        for environment in result.break_callable_environments
+                    ),
+                    continue_callable_environments=tuple(
+                        environment
+                        for result in match_results
+                        for environment in result.continue_callable_environments
+                    ),
+                    terminal_callable_environments=tuple(
+                        environment
+                        for result in match_results
+                        for environment in result.terminal_callable_environments
+                    ),
                 )
 
             elif isinstance(n, AwaitExpr):
@@ -3924,16 +4188,27 @@ class MypyAnalyzer:
 
             elif isinstance(n, RaiseStmt):
                 walk_node(n.expr)
-                return _StatementControl(falls_through=False)
+                return _StatementControl(
+                    falls_through=False,
+                    terminal_callable_environments=(dict(deferred_local_functions),),
+                )
 
             elif isinstance(n, AssertStmt):
                 walk_node(n.expr)
 
             elif isinstance(n, BreakStmt):
-                return _StatementControl(falls_through=False, breaks=True)
+                return _StatementControl(
+                    falls_through=False,
+                    breaks=True,
+                    break_callable_environments=(dict(deferred_local_functions),),
+                )
 
             elif isinstance(n, ContinueStmt):
-                return _StatementControl(falls_through=False, continues=True)
+                return _StatementControl(
+                    falls_through=False,
+                    continues=True,
+                    continue_callable_environments=(dict(deferred_local_functions),),
+                )
 
             elif isinstance(n, IndexExpr):
                 walk_node(n.base)
@@ -4045,7 +4320,7 @@ class MypyAnalyzer:
                     for decorator in n.decorators:
                         walk_node(decorator)
                 if hasattr(n, "func"):
-                    deferred_local_functions[n.func.name] = n.func
+                    deferred_local_functions[n.func.name] = (n.func,)
                     walk_node(n.func)
 
             return _StatementControl()
@@ -4141,6 +4416,7 @@ class MypyAnalyzer:
                 "max_depth": self.max_depth,
                 "finite_points_to": {
                     "max_targets": self.MAX_POINTS_TO_TARGETS,
+                    "max_local_callable_targets": self.MAX_LOCAL_CALLABLE_TARGETS,
                     "max_factory_returns": self.MAX_FACTORY_RETURNS,
                     "max_factory_states": self.MAX_FACTORY_STATES,
                     "max_edges": self.MAX_POINTS_TO_EDGES,
