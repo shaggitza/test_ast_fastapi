@@ -203,6 +203,22 @@ class EffectSelector(_StrictModel):
         return self
 
 
+class CompositeEffectSelector(_StrictModel):
+    """Ordered, domain-separated resource identity components."""
+
+    kind: Literal["composite"]
+    components: tuple[EffectSelector, ...] = Field(min_length=2, max_length=4)
+
+    @model_validator(mode="after")
+    def validate_components(self) -> CompositeEffectSelector:
+        if any(component.kind == SelectorKind.NONE for component in self.components):
+            raise ValueError("composite resource components cannot be none selectors")
+        return self
+
+
+EffectResourceSelector = EffectSelector | CompositeEffectSelector
+
+
 class EffectBehavior(_StrictModel):
     """Declared call timing without implied control-flow proof."""
 
@@ -226,7 +242,7 @@ class EffectContract(_StrictModel):
     invocation: InvocationKind
     operation: EffectOperation
     channel: EffectChannel
-    resource: EffectSelector = Field(default_factory=EffectSelector)
+    resource: EffectResourceSelector = Field(default_factory=EffectSelector)
     value: EffectSelector | None = None
     behavior: EffectBehavior = Field(default_factory=EffectBehavior)
     package: PackageApplicability | None = None
@@ -276,7 +292,12 @@ class EffectContract(_StrictModel):
             self.channel != EffectChannel.OUTBOUND_HTTP or self.operation != EffectOperation.REQUEST
         ):
             raise ValueError("HTTP methods require an outbound_http request contract")
-        selectors = (self.resource, self.value)
+        resource_selectors = (
+            self.resource.components
+            if isinstance(self.resource, CompositeEffectSelector)
+            else (self.resource,)
+        )
+        selectors = (*resource_selectors, self.value)
         if self.invocation in {InvocationKind.FUNCTION, InvocationKind.CONSTRUCTOR} and any(
             selector is not None and selector.kind == SelectorKind.RECEIVER
             for selector in selectors
@@ -288,7 +309,7 @@ class EffectContract(_StrictModel):
 class EffectContractDocument(_StrictModel):
     """Versioned root document for a deterministic contract set."""
 
-    schema_version: Literal[1, 2, 3] = 1
+    schema_version: Literal[1, 2, 3, 4] = 1
     preset: PresetMetadata
     contracts: tuple[EffectContract, ...] = Field(min_length=1)
 
@@ -296,7 +317,7 @@ class EffectContractDocument(_StrictModel):
     @classmethod
     def validate_schema_version_type(cls, value: object) -> object:
         if type(value) is not int:  # bool is intentionally excluded
-            raise ValueError("schema_version must be the integer 1, 2, or 3")
+            raise ValueError("schema_version must be the integer 1, 2, 3, or 4")
         return value
 
     @model_validator(mode="after")
@@ -311,6 +332,10 @@ class EffectContractDocument(_StrictModel):
             contract.http_method is not None for contract in self.contracts
         ):
             raise ValueError("structured HTTP methods require schema_version 3")
+        if self.schema_version < 4 and any(
+            isinstance(contract.resource, CompositeEffectSelector) for contract in self.contracts
+        ):
+            raise ValueError("composite resource selectors require schema_version 4")
         ids: set[str] = set()
         keys: dict[tuple[str, InvocationKind], EffectContract] = {}
         for contract in self.contracts:

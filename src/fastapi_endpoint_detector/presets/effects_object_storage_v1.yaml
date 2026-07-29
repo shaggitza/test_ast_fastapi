@@ -1,25 +1,33 @@
-schema_version: 1
+schema_version: 4
 preset:
   id: typed-s3-effects
-  version: 1.0.0
+  version: 2.0.0
   provenance:
     kind: preset
     source: fastapi-endpoint-detector/effects_object_storage_v1.yaml
-    revision: "1"
+    revision: "2"
 contracts:
   - id: typed-s3-get-object
     symbol: mypy_boto3_s3.client.S3Client.get_object
     invocation: instance_method
     operation: read
     channel: object_storage
-    resource: {kind: keyword, name: Key}
+    resource:
+      kind: composite
+      components:
+        - {kind: keyword, name: Bucket}
+        - {kind: keyword, name: Key}
     package: {distribution: mypy-boto3-s3, version: ">=1.34,<2"}
   - id: typed-s3-put-object
     symbol: mypy_boto3_s3.client.S3Client.put_object
     invocation: instance_method
     operation: write
     channel: object_storage
-    resource: {kind: keyword, name: Key}
+    resource:
+      kind: composite
+      components:
+        - {kind: keyword, name: Bucket}
+        - {kind: keyword, name: Key}
     value: {kind: keyword, name: Body}
     package: {distribution: mypy-boto3-s3, version: ">=1.34,<2"}
   - id: typed-s3-delete-object
@@ -27,5 +35,9 @@ contracts:
     invocation: instance_method
     operation: delete
     channel: object_storage
-    resource: {kind: keyword, name: Key}
+    resource:
+      kind: composite
+      components:
+        - {kind: keyword, name: Bucket}
+        - {kind: keyword, name: Key}
     package: {distribution: mypy-boto3-s3, version: ">=1.34,<2"}
