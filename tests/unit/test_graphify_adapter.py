@@ -5,9 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import pytest
@@ -24,6 +25,10 @@ from fastapi_endpoint_detector.analyzer.graphify_adapter import (
     import_graphify_snapshot,
     load_graphify_snapshot,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "graphify_0_9_30_graph.json"
 
@@ -44,6 +49,34 @@ def _payload() -> dict[str, Any]:
 
 def _write_payload(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, allow_nan=False, sort_keys=True), encoding="utf-8")
+
+
+def _assert_fifo_rejected_without_writer(fifo: Path, load: Callable[[], object]) -> None:
+    outcomes: list[object] = []
+
+    def invoke() -> None:
+        try:
+            outcomes.append(load())
+        except Exception as error:
+            outcomes.append(error)
+
+    thread = threading.Thread(target=invoke, daemon=True)
+    thread.start()
+    thread.join(timeout=1.0)
+    if thread.is_alive():
+        try:
+            writer = os.open(fifo, os.O_WRONLY | getattr(os, "O_NONBLOCK", 0))
+        except OSError:
+            pass
+        else:
+            os.close(writer)
+        thread.join(timeout=1.0)
+        pytest.fail("FIFO read blocked while waiting for a writer")
+
+    assert len(outcomes) == 1
+    error = outcomes[0]
+    assert isinstance(error, GraphifyAdapterError)
+    assert "not a regular file" in str(error)
 
 
 def test_loads_pinned_fixture_with_exact_source_provenance_and_orientation(
@@ -150,6 +183,49 @@ def test_strict_schema_rejects_unsupported_or_malformed_graphs(
     _write_payload(graph, payload)
 
     with pytest.raises(GraphifyAdapterError, match=message):
+        load_graphify_snapshot(graph, project_root=project, side="target")
+
+
+@pytest.mark.parametrize(
+    ("collection", "field", "value"),
+    [
+        ("nodes", "confidence", []),
+        ("links", "confidence", []),
+        ("nodes", "confidence_score", 10**400),
+        ("links", "weight", 10**400),
+    ],
+    ids=[
+        "node-confidence-list",
+        "edge-confidence-list",
+        "huge-node-score",
+        "huge-edge-weight",
+    ],
+)
+def test_malformed_confidence_and_huge_numbers_are_adapter_errors(
+    tmp_path: Path,
+    collection: str,
+    field: str,
+    value: object,
+) -> None:
+    project = _project(tmp_path)
+    payload = _payload()
+    payload[collection][0][field] = value
+    graph = tmp_path / "malformed-known-field.json"
+    _write_payload(graph, payload)
+
+    with pytest.raises(GraphifyAdapterError):
+        load_graphify_snapshot(graph, project_root=project, side="target")
+
+
+def test_parser_value_errors_are_adapter_errors(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    graph = tmp_path / "huge-json-number.json"
+    graph.write_text(
+        FIXTURE.read_text(encoding="utf-8").replace('"weight": 0.5', '"weight": ' + "9" * 5000),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(GraphifyAdapterError):
         load_graphify_snapshot(graph, project_root=project, side="target")
 
 
@@ -261,6 +337,25 @@ def test_graph_and_source_reads_enforce_exact_and_over_limit_boundaries(
     monkeypatch.setattr(graphify_adapter, "MAX_SOURCE_BYTES", source_size - 1)
     with pytest.raises(GraphifyAdapterError, match="source file exceeds"):
         load_graphify_snapshot(FIXTURE, project_root=project, side="target")
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs are unavailable")
+@pytest.mark.parametrize("fifo_input", ["graph", "source"])
+def test_graph_and_source_fifos_fail_without_a_writer(tmp_path: Path, fifo_input: str) -> None:
+    project = _project(tmp_path)
+    graph = tmp_path / "graph.json"
+    if fifo_input == "graph":
+        fifo = graph
+    else:
+        fifo = project / "app.py"
+        fifo.unlink()
+        _write_payload(graph, _payload())
+    os.mkfifo(fifo)
+
+    _assert_fifo_rejected_without_writer(
+        fifo,
+        lambda: load_graphify_snapshot(graph, project_root=project, side="target"),
+    )
 
 
 def test_graph_read_rejects_non_regular_and_mutating_files(

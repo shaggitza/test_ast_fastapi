@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
 
-from fastapi_endpoint_detector.strict_data import DuplicateKeyError, load_json_unique
+from fastapi_endpoint_detector.strict_data import load_json_unique
 
 GRAPHIFY_PACKAGE_NAME = "graphifyy"
 GRAPHIFY_PACKAGE_VERSION = "0.9.30"
@@ -209,7 +209,10 @@ def _bounded_string(value: object, location: str, *, allow_empty: bool = False) 
 def _finite_number(value: object, location: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise GraphifyAdapterError(f"{location} must be a finite number")
-    result = float(value)
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise GraphifyAdapterError(f"{location} must be a finite number") from error
     if not math.isfinite(result):
         raise GraphifyAdapterError(f"{location} must be finite")
     return result
@@ -221,18 +224,29 @@ def _signature(value: os.stat_result) -> tuple[int, int, int, int, int]:
 
 def _read_regular_file(path: Path, limit: int, description: str) -> tuple[bytes, _FileSnapshot]:
     """Read at most limit+1 bytes through one descriptor and detect path mutation."""
+    flags = os.O_RDONLY
+    for supported_flag in ("O_BINARY", "O_CLOEXEC", "O_NOFOLLOW", "O_NONBLOCK"):
+        flags |= getattr(os, supported_flag, 0)
+
+    descriptor: int | None = None
     try:
-        with path.open("rb") as handle:
-            before = os.fstat(handle.fileno())
-            if not stat.S_ISREG(before.st_mode):
-                raise GraphifyAdapterError(f"{description} is not a regular file: {path}")
+        descriptor = os.open(path, flags)
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise GraphifyAdapterError(f"{description} is not a regular file: {path}")
+        handle = os.fdopen(descriptor, "rb")
+        descriptor = None
+        with handle:
             raw = handle.read(limit + 1)
             after = os.fstat(handle.fileno())
-        current = path.stat()
+        current = path.stat(follow_symlinks=False)
     except GraphifyAdapterError:
         raise
     except (OSError, RuntimeError) as error:
         raise GraphifyAdapterError(f"cannot read {description} {path}: {error}") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
     before_signature = _signature(before)
     if _signature(after) != before_signature or _signature(current) != before_signature:
@@ -268,7 +282,7 @@ def _strict_json(raw: bytes, source: Path) -> dict[str, object]:
     try:
         text = raw.decode("utf-8")
         value = load_json_unique(text)
-    except (UnicodeError, json.JSONDecodeError, DuplicateKeyError) as error:
+    except (UnicodeError, TypeError, ValueError, OverflowError) as error:
         raise GraphifyAdapterError(f"invalid strict JSON in {source}: {error}") from error
     _validate_json_numbers(value)
     if not isinstance(value, dict):
@@ -347,8 +361,13 @@ def _source_span(
     match = _LOCATION.fullmatch(raw_location)
     if match is None:
         raise GraphifyAdapterError(f"{location}.source_location is unsupported: {raw_location!r}")
-    start_line = int(match.group("start"))
-    end_line = int(match.group("end") or start_line)
+    try:
+        start_line = int(match.group("start"))
+        end_line = int(match.group("end") or start_line)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise GraphifyAdapterError(
+            f"{location}.source_location is unsupported: {raw_location!r}"
+        ) from error
     if end_line < start_line:
         raise GraphifyAdapterError(f"{location}.source_location has a reversed range")
     if end_line > source.line_count:
@@ -381,7 +400,7 @@ def _optional_edge_span(
 def _strength(value: object, location: str, *, optional: bool = False) -> GraphifyStrength | None:
     if value is None and optional:
         return None
-    if value not in {"EXTRACTED", "INFERRED", "AMBIGUOUS"}:
+    if not isinstance(value, str) or value not in {"EXTRACTED", "INFERRED", "AMBIGUOUS"}:
         raise GraphifyAdapterError(f"{location} has unsupported extractor confidence {value!r}")
     return cast("GraphifyStrength", value)
 
