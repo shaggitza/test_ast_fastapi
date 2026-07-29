@@ -6,6 +6,7 @@ import json
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from benchmarks.real_world import compare_runtime
 from benchmarks.real_world.compare_runtime import (
     ComparisonError,
     compare,
@@ -16,14 +17,19 @@ from benchmarks.real_world.compare_runtime import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-LOCK_HASH = "a" * 64
+H = "sha256:" + "a" * 64
+
+
+def _digest(character: str) -> str:
+    return "sha256:" + character * 64
 
 
 def _record(
     mode: str,
     *,
     snapshot: str = "target",
-    dependency_lock: bool = False,
+    lock: str = H,
+    measured: bool = True,
 ) -> dict[str, Any]:
     inventory = {
         "inventory_status": "established" if mode == "secure" else "runtime_observed",
@@ -43,25 +49,48 @@ def _record(
             }
         ]
     }
+    state: dict[str, object]
+    resource: dict[str, object]
+    if measured:
+        state = {"status": "measured", "seconds": 1.0}
+        resource = {"status": "measured", "bytes": 104857600}
+    else:
+        state = {"status": "not_measured", "reason": "collector_unavailable"}
+        resource = {"status": "not_measured", "reason": "collector_unavailable"}
     configuration: dict[str, object] = {
-        "app_entry": "main:app",
+        "app_entry": None,
         "bootstrap_entry": None,
         "app_variable": "app",
         "backend": "mypy",
+        "dependency_lock_sha256": lock,
     }
-    if dependency_lock:
-        configuration["dependency_lock_sha256"] = LOCK_HASH
+    source = _digest("b" if snapshot == "target" else "c")
+    image = f"registry.example/detector@{_digest('d' if snapshot == 'target' else 'e')}"
+    provenance = {
+        "source_sha256": source,
+        "tool_sha256": _digest("f"),
+        "effective_invocation_sha256": _digest("1" if mode == "secure" else "2"),
+        "dependency_lock_sha256": lock,
+        "runtime_image_digest": image,
+        "runtime_sbom_sha256": _digest("3" if snapshot == "target" else "4"),
+    }
+    if mode == "runtime":
+        provenance.update(
+            runtime_seccomp_sha256=_digest("5"),
+            runtime_policy_sha256=_digest("6"),
+        )
     return {
         "schema_version": 1,
         "mode": mode,
         "snapshot": snapshot,
         "status": "success",
         "configuration": configuration,
-        "timing": {"list_seconds": 1.0, "impact_seconds": 2.0, "rss_mib": 100},
+        "timing": {"list": dict(state), "impact": dict(state)},
+        "resources": {"peak_rss_bytes": resource},
         "failure": None,
         "inventory": inventory,
         "impact": impact,
-        "provenance": {"artifact": mode},
+        "provenance": provenance,
     }
 
 
@@ -72,12 +101,10 @@ def _write(path: Path, value: object) -> None:
 def _matrix_paths(tmp_path: Path) -> dict[tuple[str, str], Path]:
     paths: dict[tuple[str, str], Path] = {}
     for snapshot in ("target", "baseline"):
+        lock = _digest("7" if snapshot == "target" else "8")
         for mode in ("secure", "runtime"):
             path = tmp_path / f"{mode}-{snapshot}.json"
-            _write(
-                path,
-                _record(mode, snapshot=snapshot, dependency_lock=True),
-            )
+            _write(path, _record(mode, snapshot=snapshot, lock=lock))
             paths[(snapshot, mode)] = path
     return paths
 
@@ -89,6 +116,21 @@ def _compare_matrix(paths: dict[tuple[str, str], Path]) -> dict[str, Any]:
         secure_baseline_path=paths[("baseline", "secure")],
         runtime_baseline_path=paths[("baseline", "runtime")],
     )
+
+
+def _cli_arguments(paths: dict[tuple[str, str], Path], output: Path) -> list[str]:
+    return [
+        "--secure-target",
+        str(paths[("target", "secure")]),
+        "--runtime-target",
+        str(paths[("target", "runtime")]),
+        "--secure-baseline",
+        str(paths[("baseline", "secure")]),
+        "--runtime-baseline",
+        str(paths[("baseline", "runtime")]),
+        "--output",
+        str(output),
+    ]
 
 
 def test_paired_success_preserves_exact_and_normalized_metrics(tmp_path: Path) -> None:
@@ -105,6 +147,7 @@ def test_paired_success_preserves_exact_and_normalized_metrics(tmp_path: Path) -
 
     assert result["runtime_role"] == "positive_observation_comparator_not_truth"
     assert result["paired_success"] is True
+    assert result["quality_eligible"] is True
     assert result["inventory"]["runtime_only"] == ["DELETE /runtime-only"]
     assert result["inventory"]["interpretation"] == "requires_source_adjudication"
     assert result["impact_exact"]["intersection_count"] == 0
@@ -113,7 +156,7 @@ def test_paired_success_preserves_exact_and_normalized_metrics(tmp_path: Path) -
         "secure": "established",
         "runtime": "runtime_observed",
     }
-    assert result["input_hashes"]["secure"].startswith("sha256:")
+    assert result["provenance_digests"]["runtime"].startswith("sha256:")
 
 
 def test_failure_phase_abstains_from_quality_metrics(tmp_path: Path) -> None:
@@ -132,21 +175,111 @@ def test_failure_phase_abstains_from_quality_metrics(tmp_path: Path) -> None:
     result = compare(secure, runtime)
 
     assert result["paired_success"] is False
+    assert result["quality_eligible"] is False
     assert result["inventory"] is None
     assert result["failure"]["runtime"]["phase"] == "import"
-    assert result["inventory_strength"]["runtime"] is None
 
 
-def test_configuration_mismatch_fails_closed(tmp_path: Path) -> None:
+@pytest.mark.parametrize("field", ["app_entry", "bootstrap_entry"])
+def test_runtime_rejects_unsupported_entry_selection(tmp_path: Path, field: str) -> None:
     secure = tmp_path / "secure.json"
     runtime = tmp_path / "runtime.json"
-    _write(secure, _record("secure"))
+    secure_record = _record("secure")
     runtime_record = _record("runtime")
-    runtime_record["configuration"]["app_entry"] = "other:app"
+    secure_record["configuration"][field] = "main:create_app"
+    runtime_record["configuration"][field] = "main:create_app"
+    _write(secure, secure_record)
     _write(runtime, runtime_record)
 
-    with pytest.raises(ComparisonError, match="identical"):
+    with pytest.raises(ComparisonError, match="do not support"):
         compare(secure, runtime)
+
+
+@pytest.mark.parametrize("mode", ["secure", "runtime"])
+def test_absent_provenance_fails_closed(tmp_path: Path, mode: str) -> None:
+    secure = tmp_path / "secure.json"
+    runtime = tmp_path / "runtime.json"
+    records = {name: _record(name) for name in ("secure", "runtime")}
+    records[mode].pop("provenance")
+    _write(secure, records["secure"])
+    _write(runtime, records["runtime"])
+
+    with pytest.raises(ComparisonError, match="missing required"):
+        compare(secure, runtime)
+
+
+def test_spoofed_mode_or_digest_provenance_fails_closed(tmp_path: Path) -> None:
+    secure = tmp_path / "secure.json"
+    runtime = tmp_path / "runtime.json"
+    secure_record = _record("secure")
+    runtime_record = _record("runtime")
+    runtime_record["provenance"] = dict(secure_record["provenance"])
+    _write(secure, secure_record)
+    _write(runtime, runtime_record)
+    with pytest.raises(ComparisonError, match="mode-specific"):
+        compare(secure, runtime)
+
+    runtime_record = _record("runtime")
+    runtime_record["provenance"]["runtime_policy_sha256"] = "sha256:" + "A" * 64
+    _write(runtime, runtime_record)
+    with pytest.raises(ComparisonError, match="lowercase sha256"):
+        compare(secure, runtime)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("timing", {"arbitrary": {"status": "measured", "seconds": 1}}),
+        ("timing", {"list": {"status": "invented"}, "impact": {"status": "invented"}}),
+        ("resources", {"rss_mib": 100}),
+    ],
+)
+def test_arbitrary_telemetry_fails_closed(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    secure = tmp_path / "secure.json"
+    runtime = tmp_path / "runtime.json"
+    secure_record = _record("secure")
+    secure_record[field] = value
+    _write(secure, secure_record)
+    _write(runtime, _record("runtime"))
+
+    with pytest.raises(ComparisonError):
+        compare(secure, runtime)
+
+
+@pytest.mark.parametrize(
+    ("mode", "status"),
+    [("secure", "invented"), ("runtime", "established"), ("runtime", "invented")],
+)
+def test_arbitrary_inventory_status_fails_closed(
+    tmp_path: Path, mode: str, status: str
+) -> None:
+    secure = tmp_path / "secure.json"
+    runtime = tmp_path / "runtime.json"
+    records = {name: _record(name) for name in ("secure", "runtime")}
+    records[mode]["inventory"]["inventory_status"] = status
+    _write(secure, records["secure"])
+    _write(runtime, records["runtime"])
+
+    with pytest.raises(ComparisonError, match="inventory status"):
+        compare(secure, runtime)
+
+
+def test_not_measured_attestations_suppress_quality_but_remain_operational(
+    tmp_path: Path,
+) -> None:
+    secure = tmp_path / "secure.json"
+    runtime = tmp_path / "runtime.json"
+    _write(secure, _record("secure", measured=False))
+    _write(runtime, _record("runtime"))
+
+    result = compare(secure, runtime)
+
+    assert result["paired_success"] is True
+    assert result["quality_eligible"] is False
+    assert result["inventory"] is None
+    assert result["timing"]["secure"]["list"]["status"] == "not_measured"
 
 
 @pytest.mark.parametrize(
@@ -172,13 +305,13 @@ def test_all_failure_phases_are_versioned(tmp_path: Path, phase: str) -> None:
 
 
 @pytest.mark.parametrize("invalid", [True, float("nan"), float("inf"), -1.0])
-def test_timing_rejects_bool_non_finite_and_negative_values(
+def test_measurement_rejects_bool_non_finite_and_negative_values(
     tmp_path: Path, invalid: object
 ) -> None:
     secure = tmp_path / "secure.json"
     runtime = tmp_path / "runtime.json"
     secure_record = _record("secure")
-    secure_record["timing"] = {"impact_seconds": invalid}
+    secure_record["timing"]["impact"] = {"status": "measured", "seconds": invalid}
     _write(secure, secure_record)
     _write(runtime, _record("runtime"))
 
@@ -196,35 +329,42 @@ def test_comparison_rejects_duplicate_json_members(tmp_path: Path) -> None:
         compare(secure, runtime)
 
 
-def test_target_baseline_matrix_separates_operational_and_quality_results(
-    tmp_path: Path,
-) -> None:
+def test_target_baseline_permits_snapshot_specific_environments(tmp_path: Path) -> None:
     paths = _matrix_paths(tmp_path)
-    secure_target = _record("secure", snapshot="target", dependency_lock=True)
-    secure_target["inventory"]["endpoints"].append(
-        {"methods": ["PATCH"], "path": "/target-only", "surface": None}
-    )
-    _write(paths[("target", "secure")], secure_target)
 
     result = _compare_matrix(paths)
 
-    assert result["protocol"] == "secure-runtime-target-baseline-v1"
-    assert result["runtime_role"] == "positive_observation_comparator_not_truth"
-    assert result["operational"]["artifact_count"] == 4
-    assert result["operational"]["success_count"] == {"secure": 2, "runtime": 2}
-    assert result["operational"]["abstention_count"] == {"secure": 0, "runtime": 0}
-    assert result["operational"]["peak_rss_mib"] == {"secure": 100, "runtime": 100}
+    assert result["configuration"]["snapshots"]["target"]["dependency_lock_sha256"] != result[
+        "configuration"
+    ]["snapshots"]["baseline"]["dependency_lock_sha256"]
+    assert result["operational"]["peak_rss_bytes"] == {
+        "secure": {"status": "measured", "bytes": 104857600},
+        "runtime": {"status": "measured", "bytes": 104857600},
+    }
     assert result["paired_success_quality"]["eligible_snapshots"] == ["target", "baseline"]
-    assert result["lifecycle"]["secure"]["inventory"]["added"] == ["PATCH /target-only"]
-    assert result["lifecycle"]["runtime"]["inventory"]["added"] == []
-    assert set(result["input_hashes"]) == {"target", "baseline"}
+    assert set(result["provenance_digests"]) == {"target", "baseline"}
+
+
+def test_matrix_rejects_within_snapshot_environment_mismatch(tmp_path: Path) -> None:
+    paths = _matrix_paths(tmp_path)
+    runtime = _record("runtime", snapshot="target", lock=_digest("9"))
+    _write(paths[("target", "runtime")], runtime)
+
+    with pytest.raises(ComparisonError, match="snapshot configuration"):
+        _compare_matrix(paths)
+
+    runtime = _record("runtime", snapshot="target", lock=_digest("7"))
+    runtime["provenance"]["runtime_sbom_sha256"] = _digest("0")
+    _write(paths[("target", "runtime")], runtime)
+    with pytest.raises(ComparisonError, match="runtime_sbom_sha256"):
+        _compare_matrix(paths)
 
 
 def test_matrix_keeps_failures_operational_and_excludes_them_from_quality(
     tmp_path: Path,
 ) -> None:
     paths = _matrix_paths(tmp_path)
-    failed = _record("runtime", snapshot="baseline", dependency_lock=True)
+    failed = _record("runtime", snapshot="baseline", lock=_digest("8"))
     failed.update(
         status="failure",
         failure={"phase": "dependency", "message": "lock install failed"},
@@ -238,38 +378,20 @@ def test_matrix_keeps_failures_operational_and_excludes_them_from_quality(
     assert result["operational"]["success_count"] == {"secure": 2, "runtime": 1}
     assert result["operational"]["failure_phase_counts"]["runtime"] == {"dependency": 1}
     assert result["paired_success_quality"]["eligible_snapshots"] == ["target"]
-    assert result["snapshot_pairs"]["baseline"]["inventory"] is None
     assert result["lifecycle"]["runtime"] is None
-    assert result["lifecycle"]["secure"] is not None
 
 
-@pytest.mark.parametrize("lock_hash", [None, "abc", "g" * 64, True])
-def test_matrix_requires_a_pinned_dependency_lock(tmp_path: Path, lock_hash: object) -> None:
+def test_matrix_rejects_snapshot_or_entry_configuration_mismatch(tmp_path: Path) -> None:
     paths = _matrix_paths(tmp_path)
-    record = _record("runtime", snapshot="target", dependency_lock=True)
-    if lock_hash is None:
-        record["configuration"].pop("dependency_lock_sha256")
-    else:
-        record["configuration"]["dependency_lock_sha256"] = lock_hash
-    _write(paths[("target", "runtime")], record)
-
-    with pytest.raises(ComparisonError, match=r"dependency_lock_sha256|identical"):
-        _compare_matrix(paths)
-
-
-def test_matrix_rejects_snapshot_or_cross_snapshot_configuration_mismatch(
-    tmp_path: Path,
-) -> None:
-    paths = _matrix_paths(tmp_path)
-    record = _record("secure", snapshot="target", dependency_lock=True)
+    record = _record("secure", snapshot="target", lock=_digest("8"))
     _write(paths[("baseline", "secure")], record)
     with pytest.raises(ComparisonError, match="declares target"):
         _compare_matrix(paths)
 
-    record = _record("secure", snapshot="baseline", dependency_lock=True)
+    record = _record("secure", snapshot="baseline", lock=_digest("8"))
     record["configuration"]["app_variable"] = "application"
     _write(paths[("baseline", "secure")], record)
-    with pytest.raises(ComparisonError, match="identical"):
+    with pytest.raises(ComparisonError, match="snapshot configuration"):
         _compare_matrix(paths)
 
 
@@ -295,18 +417,7 @@ def test_duplicate_or_malformed_endpoint_rows_fail_closed(tmp_path: Path) -> Non
 def test_cli_matrix_is_no_clobber(tmp_path: Path) -> None:
     paths = _matrix_paths(tmp_path)
     output = tmp_path / "comparison.json"
-    arguments = [
-        "--secure-target",
-        str(paths[("target", "secure")]),
-        "--runtime-target",
-        str(paths[("target", "runtime")]),
-        "--secure-baseline",
-        str(paths[("baseline", "secure")]),
-        "--runtime-baseline",
-        str(paths[("baseline", "runtime")]),
-        "--output",
-        str(output),
-    ]
+    arguments = _cli_arguments(paths, output)
 
     assert main(arguments) == 0
     result = json.loads(output.read_text(encoding="utf-8"))
@@ -314,3 +425,39 @@ def test_cli_matrix_is_no_clobber(tmp_path: Path) -> None:
     with pytest.raises(SystemExit) as raised:
         main(arguments)
     assert raised.value.code == 2
+
+
+def test_cli_rejects_existing_and_absent_frozen_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _matrix_paths(tmp_path)
+    existing = tmp_path / "frozen.json"
+    existing.write_text("frozen", encoding="utf-8")
+    absent = tmp_path / "absent-frozen.json"
+    monkeypatch.setattr(compare_runtime, "_FROZEN_FILES", (existing, absent))
+    monkeypatch.setattr(compare_runtime, "_FROZEN_ROOTS", ())
+
+    for output in (existing, absent):
+        with pytest.raises(SystemExit) as raised:
+            main(_cli_arguments(paths, output))
+        assert raised.value.code == 2
+        assert not absent.exists()
+    assert existing.read_text(encoding="utf-8") == "frozen"
+
+
+def test_cli_rejects_frozen_root_and_symlinked_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _matrix_paths(tmp_path)
+    frozen_root = tmp_path / "results"
+    frozen_root.mkdir()
+    alias = tmp_path / "results-alias"
+    alias.symlink_to(frozen_root, target_is_directory=True)
+    monkeypatch.setattr(compare_runtime, "_FROZEN_FILES", ())
+    monkeypatch.setattr(compare_runtime, "_FROZEN_ROOTS", (frozen_root,))
+
+    for output in (frozen_root / "new.json", alias / "new.json"):
+        with pytest.raises(SystemExit) as raised:
+            main(_cli_arguments(paths, output))
+        assert raised.value.code == 2
+        assert not (frozen_root / "new.json").exists()

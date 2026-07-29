@@ -90,9 +90,14 @@ truth**: `secure_only` and `runtime_only` are disagreements for source review,
 not false positives or false negatives.
 
 A target/baseline comparison consumes four independently generated schema-v1
-artifacts. All four must declare byte-identical app/factory/bootstrap/backend
-configuration and the same `dependency_lock_sha256`; otherwise comparison
-abstains with an error rather than mixing environments.
+artifacts. All four must declare the same app/bootstrap/app-variable/backend
+selection. Runtime records currently require null `app_entry` and
+`bootstrap_entry`, because isolated runtime does not yet execute those options.
+Target and baseline may use different dependency environments, but the secure
+and runtime records within each snapshot must attest the same source, tool,
+lock, immutable runtime image, and SBOM. Runtime provenance additionally binds
+the seccomp policy, sandbox policy, and exact effective invocation. Provenance
+is strictly mode-specific and its canonical digest is retained in the report.
 
 ```bash
 python benchmarks/real_world/compare_runtime.py \
@@ -103,14 +108,24 @@ python benchmarks/real_world/compare_runtime.py \
   --output /results/secure-runtime-comparison.json
 ```
 
-The report keeps all-corpus operational evidence (success/abstention, structured
-failure phases, inventory strength, timing, and peak RSS) separate from the
-paired-success quality subset. Inventory and impact disagreements are reported
-exactly and with normalized path parameters; target/baseline lifecycle deltas
-are computed separately for secure and runtime modes. A failed artifact never
-contributes partial quality metrics. Comparison output is no-clobber and cannot
-replace the source artifacts or canonical ground truth. Its secure publisher
-currently requires the same Linux/POSIX filesystem semantics documented above.
+The report keeps four-artifact operational evidence (success/abstention,
+structured failure phases, inventory strength, timing, and peak RSS) separate
+from the paired-success quality subset. Timing has exact `list` and `impact`
+measurement states; resources have an exact `peak_rss_bytes` state. Each state
+is either `measured` with its unit or `not_measured` with a reason, matching the
+benchmark telemetry convention. Secure inventory strength is exactly one of
+`established`, `conditional`, or `unavailable`; runtime strength is exactly one
+of `runtime_observed`, `runtime_conditional`, or `runtime_unavailable`. A
+successful pair contributes quality only when both timing states and peak RSS
+are measured for both modes. Inventory and impact disagreements are reported
+exactly and with normalized path parameters;
+target/baseline lifecycle deltas are computed separately for secure and runtime
+modes. A failed artifact never contributes partial quality metrics. This tool
+compares one matrix; it does not aggregate or publish a corpus. Comparison
+output is no-clobber and cannot target source artifacts, frozen corpus/review
+files, canonical ground truth, or `benchmarks/results/**`, including through a
+symlinked parent. Its secure publisher currently requires the same Linux/POSIX
+filesystem semantics documented above.
 
 ## Frozen 50-project expansion
 

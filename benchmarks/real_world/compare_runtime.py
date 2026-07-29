@@ -14,13 +14,26 @@ from typing import Any
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from benchmarks.real_world._secure_publish import SecurePathError, publish_exclusive_bytes
+from benchmarks.real_world._secure_publish import (
+    SecurePathError,
+    ensure_publishable,
+    publish_exclusive_bytes,
+)
 from benchmarks.real_world.benchmark_schema import (
     BenchmarkSchemaError,
     finite_nonnegative,
     strict_json_loads,
 )
 
+HERE = Path(__file__).resolve().parent
+PROJECT_ROOT = HERE.parents[1]
+_FROZEN_FILES = (
+    HERE / "corpus.json",
+    HERE / "adjudicated.jsonl",
+    HERE / "review-a.jsonl",
+    HERE / "review-b.jsonl",
+)
+_FROZEN_ROOTS = (PROJECT_ROOT / "benchmarks" / "results",)
 _FAILURE_PHASES = {
     "dependency",
     "import",
@@ -30,18 +43,54 @@ _FAILURE_PHASES = {
     "unavailable",
 }
 _PARAMETER = re.compile(r"\{[^{}]+\}")
-_LOCK_HASH = re.compile(r"(?:sha256:)?[0-9a-f]{64}", re.IGNORECASE)
+_SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
+_IMAGE_DIGEST = re.compile(r"[^\s@]+@sha256:[0-9a-f]{64}")
 _ENTRY_CONFIGURATION_FIELDS = {
     "app_entry",
     "bootstrap_entry",
     "app_variable",
     "backend",
 }
+_TIMING_FIELDS = {"list", "impact"}
+_RESOURCE_FIELDS = {"peak_rss_bytes"}
+_SECURE_INVENTORY_STATES = {"established", "conditional", "unavailable"}
+_RUNTIME_INVENTORY_STATES = {
+    "runtime_observed",
+    "runtime_conditional",
+    "runtime_unavailable",
+}
+_COMMON_PROVENANCE_FIELDS = {
+    "source_sha256",
+    "tool_sha256",
+    "effective_invocation_sha256",
+    "dependency_lock_sha256",
+    "runtime_image_digest",
+    "runtime_sbom_sha256",
+}
+_RUNTIME_PROVENANCE_FIELDS = {
+    *_COMMON_PROVENANCE_FIELDS,
+    "runtime_seccomp_sha256",
+    "runtime_policy_sha256",
+}
+_ENVIRONMENT_PROVENANCE_FIELDS = {
+    "source_sha256",
+    "tool_sha256",
+    "dependency_lock_sha256",
+    "runtime_image_digest",
+    "runtime_sbom_sha256",
+}
 _RUNTIME_ROLE = "positive_observation_comparator_not_truth"
 
 
 class ComparisonError(ValueError):
     """A paired record is invalid or configured inequitably."""
+
+
+def _canonical_digest(value: object) -> str:
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
 def _load(path: Path) -> tuple[dict[str, Any], str]:
@@ -58,12 +107,14 @@ def _load(path: Path) -> tuple[dict[str, Any], str]:
     return value, f"sha256:{hashlib.sha256(raw).hexdigest()}"
 
 
-def _validate_configuration(configuration: object, *, require_lock: bool) -> dict[str, Any]:
+def _validate_configuration(configuration: object) -> dict[str, Any]:
     if not isinstance(configuration, dict):
         raise ComparisonError("configuration must be an object")
-    missing = _ENTRY_CONFIGURATION_FIELDS - set(configuration)
-    if missing:
-        raise ComparisonError(f"configuration is missing entry fields: {sorted(missing)}")
+    expected = {*_ENTRY_CONFIGURATION_FIELDS, "dependency_lock_sha256"}
+    if set(configuration) != expected:
+        raise ComparisonError(
+            "configuration requires exact app/bootstrap/app-variable/backend/lock fields"
+        )
     for field in ("app_entry", "bootstrap_entry"):
         value = configuration[field]
         if value is not None and (not isinstance(value, str) or not value.strip()):
@@ -72,12 +123,9 @@ def _validate_configuration(configuration: object, *, require_lock: bool) -> dic
         value = configuration[field]
         if not isinstance(value, str) or not value.strip():
             raise ComparisonError(f"configuration.{field} must be a non-empty string")
-    if require_lock:
-        lock_hash = configuration.get("dependency_lock_sha256")
-        if not isinstance(lock_hash, str) or not _LOCK_HASH.fullmatch(lock_hash):
-            raise ComparisonError(
-                "target/baseline comparison requires configuration.dependency_lock_sha256"
-            )
+    lock_hash = configuration["dependency_lock_sha256"]
+    if not isinstance(lock_hash, str) or not _SHA256.fullmatch(lock_hash):
+        raise ComparisonError("configuration.dependency_lock_sha256 must be a sha256 digest")
     return configuration
 
 
@@ -90,6 +138,57 @@ def _validate_failure(failure: object) -> None:
         raise ComparisonError("failure.message must be a non-empty string")
 
 
+def _validate_measurement(value: object, *, field: str, unit: str) -> None:
+    if not isinstance(value, dict):
+        raise ComparisonError(f"{field} measurement state must be an object")
+    if value.get("status") == "measured":
+        if set(value) != {"status", unit}:
+            raise ComparisonError(f"{field} measured state requires only {unit}")
+        try:
+            finite_nonnegative(value[unit], f"{field}.{unit}")
+        except BenchmarkSchemaError as error:
+            raise ComparisonError(f"{field}.{unit} must be finite and non-negative") from error
+    elif value.get("status") == "not_measured":
+        if (
+            set(value) != {"status", "reason"}
+            or not isinstance(value.get("reason"), str)
+            or not value["reason"].strip()
+        ):
+            raise ComparisonError(f"{field} not_measured state requires only a reason")
+    else:
+        raise ComparisonError(f"{field} status must be measured or not_measured")
+
+
+def _validate_telemetry(record: dict[str, Any]) -> None:
+    timing = record["timing"]
+    resources = record["resources"]
+    if not isinstance(timing, dict) or set(timing) != _TIMING_FIELDS:
+        raise ComparisonError("timing requires exact list and impact states")
+    if not isinstance(resources, dict) or set(resources) != _RESOURCE_FIELDS:
+        raise ComparisonError("resources requires exact peak_rss_bytes state")
+    for name in sorted(_TIMING_FIELDS):
+        _validate_measurement(timing[name], field=f"timing.{name}", unit="seconds")
+    _validate_measurement(
+        resources["peak_rss_bytes"],
+        field="resources.peak_rss_bytes",
+        unit="bytes",
+    )
+
+
+def _validate_provenance(value: object, mode: str) -> dict[str, str]:
+    expected = _RUNTIME_PROVENANCE_FIELDS if mode == "runtime" else _COMMON_PROVENANCE_FIELDS
+    if not isinstance(value, dict) or set(value) != expected:
+        raise ComparisonError(f"{mode} provenance requires exact mode-specific fields")
+    for field in expected - {"runtime_image_digest"}:
+        digest = value[field]
+        if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
+            raise ComparisonError(f"provenance.{field} must be a lowercase sha256 digest")
+    image = value["runtime_image_digest"]
+    if not isinstance(image, str) or not _IMAGE_DIGEST.fullmatch(image):
+        raise ComparisonError("provenance.runtime_image_digest must be an immutable image digest")
+    return value
+
+
 def _validate(record: dict[str, Any], expected_mode: str) -> None:  # noqa: PLR0912
     required = {
         "schema_version",
@@ -98,14 +197,11 @@ def _validate(record: dict[str, Any], expected_mode: str) -> None:  # noqa: PLR0
         "status",
         "configuration",
         "timing",
-    }
-    if set(record) - {
-        *required,
-        "failure",
-        "inventory",
-        "impact",
+        "resources",
         "provenance",
-    }:
+    }
+    allowed = {*required, "failure", "inventory", "impact"}
+    if set(record) - allowed:
         raise ComparisonError("record contains unknown top-level fields")
     if required - set(record):
         raise ComparisonError("record is missing required fields")
@@ -115,30 +211,35 @@ def _validate(record: dict[str, Any], expected_mode: str) -> None:  # noqa: PLR0
         raise ComparisonError("snapshot must be target or baseline")
     if record["status"] not in {"success", "failure"}:
         raise ComparisonError("status must be success or failure")
+    configuration = _validate_configuration(record["configuration"])
+    if expected_mode == "runtime" and any(
+        configuration[field] is not None for field in ("app_entry", "bootstrap_entry")
+    ):
+        raise ComparisonError(
+            "runtime records do not support non-null app_entry or bootstrap_entry"
+        )
+    provenance = _validate_provenance(record["provenance"], expected_mode)
+    if provenance["dependency_lock_sha256"] != configuration["dependency_lock_sha256"]:
+        raise ComparisonError("provenance dependency lock does not match configuration")
+    _validate_telemetry(record)
     if record["status"] == "success":
         inventory = record.get("inventory")
         if not isinstance(inventory, dict) or not isinstance(record.get("impact"), dict):
             raise ComparisonError("successful records require inventory and impact")
         inventory_status = inventory.get("inventory_status")
-        if not isinstance(inventory_status, str) or not inventory_status.strip():
-            raise ComparisonError("successful inventory requires inventory_status")
+        allowed_inventory = (
+            _SECURE_INVENTORY_STATES
+            if expected_mode == "secure"
+            else _RUNTIME_INVENTORY_STATES
+        )
+        if inventory_status not in allowed_inventory:
+            raise ComparisonError(f"successful {expected_mode} inventory status is invalid")
         if record.get("failure") is not None:
             raise ComparisonError("successful records forbid failure metadata")
     else:
         _validate_failure(record.get("failure"))
         if record.get("inventory") is not None or record.get("impact") is not None:
             raise ComparisonError("failed records forbid partial inventory/impact claims")
-    _validate_configuration(record["configuration"], require_lock=False)
-    timing = record["timing"]
-    if not isinstance(timing, dict) or not timing:
-        raise ComparisonError("timing values must be finite non-negative numbers")
-    try:
-        for name, value in timing.items():
-            if not isinstance(name, str) or not name:
-                raise ComparisonError("timing names must be non-empty strings")
-            finite_nonnegative(value, f"timing.{name}")
-    except BenchmarkSchemaError as error:
-        raise ComparisonError("timing values must be finite non-negative numbers") from error
 
 
 def _endpoint_id(endpoint: dict[str, Any]) -> str:
@@ -214,6 +315,25 @@ def _set_metrics(secure: set[str], runtime: set[str]) -> dict[str, Any]:
     }
 
 
+def _paired_attestations_measured(secure: dict[str, Any], runtime: dict[str, Any]) -> bool:
+    for record in (secure, runtime):
+        if any(record["timing"][name]["status"] != "measured" for name in _TIMING_FIELDS):
+            return False
+        if record["resources"]["peak_rss_bytes"]["status"] != "measured":
+            return False
+    return True
+
+
+def _validate_pair_equivalence(secure: dict[str, Any], runtime: dict[str, Any]) -> None:
+    if secure["snapshot"] != runtime["snapshot"]:
+        raise ComparisonError("paired records must use the same snapshot")
+    if secure["configuration"] != runtime["configuration"]:
+        raise ComparisonError("paired records must use identical snapshot configuration")
+    for field in _ENVIRONMENT_PROVENANCE_FIELDS:
+        if secure["provenance"][field] != runtime["provenance"][field]:
+            raise ComparisonError(f"paired records have mismatched provenance.{field}")
+
+
 def _compare_loaded(
     secure: dict[str, Any],
     runtime: dict[str, Any],
@@ -221,20 +341,25 @@ def _compare_loaded(
     secure_hash: str,
     runtime_hash: str,
 ) -> dict[str, Any]:
-    if secure["snapshot"] != runtime["snapshot"]:
-        raise ComparisonError("paired records must use the same snapshot")
-    if secure["configuration"] != runtime["configuration"]:
-        raise ComparisonError("paired records must use identical entry/backend configuration")
+    _validate_pair_equivalence(secure, runtime)
+    paired_success = secure["status"] == runtime["status"] == "success"
+    quality_eligible = paired_success and _paired_attestations_measured(secure, runtime)
     result: dict[str, Any] = {
         "schema_version": 1,
         "runtime_role": _RUNTIME_ROLE,
         "snapshot": secure["snapshot"],
-        "paired_success": secure["status"] == runtime["status"] == "success",
+        "paired_success": paired_success,
+        "quality_eligible": quality_eligible,
         "status": {"secure": secure["status"], "runtime": runtime["status"]},
         "failure": {"secure": secure.get("failure"), "runtime": runtime.get("failure")},
         "configuration": secure["configuration"],
         "timing": {"secure": secure["timing"], "runtime": runtime["timing"]},
+        "resources": {"secure": secure["resources"], "runtime": runtime["resources"]},
         "input_hashes": {"secure": secure_hash, "runtime": runtime_hash},
+        "provenance_digests": {
+            "secure": _canonical_digest(secure["provenance"]),
+            "runtime": _canonical_digest(runtime["provenance"]),
+        },
         "inventory_strength": {
             "secure": secure.get("inventory", {}).get("inventory_status")
             if secure["status"] == "success"
@@ -244,7 +369,7 @@ def _compare_loaded(
             else None,
         },
     }
-    if not result["paired_success"]:
+    if not quality_eligible:
         result["inventory"] = None
         result["impact_exact"] = None
         result["impact_normalized"] = None
@@ -303,17 +428,27 @@ def _mode_lifecycle(target: dict[str, Any], baseline: dict[str, Any]) -> dict[st
     }
 
 
+def _aggregate_peak_rss(
+    records: dict[tuple[str, str], dict[str, Any]], mode: str
+) -> dict[str, Any]:
+    states = [
+        records[(snapshot, mode)]["resources"]["peak_rss_bytes"]
+        for snapshot in ("target", "baseline")
+    ]
+    if all(state["status"] == "measured" for state in states):
+        return {"status": "measured", "bytes": max(state["bytes"] for state in states)}
+    return {"status": "not_measured", "reason": "one_or_more_snapshot_rss_not_measured"}
+
+
 def _operational_summary(records: dict[tuple[str, str], dict[str, Any]]) -> dict[str, Any]:
     success_count = {"secure": 0, "runtime": 0}
     failure_phases: dict[str, dict[str, int]] = {"secure": {}, "runtime": {}}
-    inventory_strength: dict[str, dict[str, str | None]] = {
-        "target": {},
-        "baseline": {},
-    }
+    inventory_strength: dict[str, dict[str, str | None]] = {"target": {}, "baseline": {}}
     timing: dict[str, dict[str, dict[str, Any]]] = {"target": {}, "baseline": {}}
-    peak_rss_mib: dict[str, float | int | None] = {"secure": None, "runtime": None}
+    resources: dict[str, dict[str, dict[str, Any]]] = {"target": {}, "baseline": {}}
     for (snapshot, mode), record in records.items():
         timing[snapshot][mode] = record["timing"]
+        resources[snapshot][mode] = record["resources"]
         if record["status"] == "success":
             success_count[mode] += 1
             inventory_strength[snapshot][mode] = record["inventory"]["inventory_status"]
@@ -321,10 +456,6 @@ def _operational_summary(records: dict[tuple[str, str], dict[str, Any]]) -> dict
             inventory_strength[snapshot][mode] = None
             phase = record["failure"]["phase"]
             failure_phases[mode][phase] = failure_phases[mode].get(phase, 0) + 1
-        rss = record["timing"].get("rss_mib")
-        if isinstance(rss, (int, float)) and not isinstance(rss, bool):
-            current = peak_rss_mib[mode]
-            peak_rss_mib[mode] = rss if current is None else max(current, rss)
     return {
         "artifact_count": len(records),
         "success_count": success_count,
@@ -332,7 +463,10 @@ def _operational_summary(records: dict[tuple[str, str], dict[str, Any]]) -> dict
         "failure_phase_counts": failure_phases,
         "inventory_strength": inventory_strength,
         "timing": timing,
-        "peak_rss_mib": peak_rss_mib,
+        "resources": resources,
+        "peak_rss_bytes": {
+            mode: _aggregate_peak_rss(records, mode) for mode in ("secure", "runtime")
+        },
     }
 
 
@@ -343,7 +477,7 @@ def compare_target_baseline(
     secure_baseline_path: Path,
     runtime_baseline_path: Path,
 ) -> dict[str, Any]:
-    """Compare secure/runtime on both snapshots with one pinned configuration."""
+    """Compare secure/runtime pairs while permitting snapshot-specific environments."""
     paths = {
         ("target", "secure"): secure_target_path,
         ("target", "runtime"): runtime_target_path,
@@ -360,23 +494,34 @@ def compare_target_baseline(
         records[(snapshot, mode)] = record
         hashes[(snapshot, mode)] = digest
 
-    configurations = [record["configuration"] for record in records.values()]
-    if any(configuration != configurations[0] for configuration in configurations[1:]):
-        raise ComparisonError(
-            "target/baseline secure/runtime records must use identical entry/backend configuration"
-        )
-    configuration = _validate_configuration(configurations[0], require_lock=True)
-
-    pairs: dict[str, dict[str, Any]] = {}
     for snapshot in ("target", "baseline"):
-        pairs[snapshot] = _compare_loaded(
+        _validate_pair_equivalence(
+            records[(snapshot, "secure")], records[(snapshot, "runtime")]
+        )
+    entry_configuration = {
+        field: records[("target", "secure")]["configuration"][field]
+        for field in sorted(_ENTRY_CONFIGURATION_FIELDS)
+    }
+    for record in records.values():
+        if any(
+            record["configuration"][field] != value
+            for field, value in entry_configuration.items()
+        ):
+            raise ComparisonError(
+                "target/baseline records must use identical entry/backend configuration"
+            )
+
+    pairs = {
+        snapshot: _compare_loaded(
             records[(snapshot, "secure")],
             records[(snapshot, "runtime")],
             secure_hash=hashes[(snapshot, "secure")],
             runtime_hash=hashes[(snapshot, "runtime")],
         )
+        for snapshot in ("target", "baseline")
+    }
     eligible_snapshots = [
-        snapshot for snapshot in ("target", "baseline") if pairs[snapshot]["paired_success"]
+        snapshot for snapshot in ("target", "baseline") if pairs[snapshot]["quality_eligible"]
     ]
     quality = {
         snapshot: {
@@ -390,7 +535,13 @@ def compare_target_baseline(
         "schema_version": 1,
         "protocol": "secure-runtime-target-baseline-v1",
         "runtime_role": _RUNTIME_ROLE,
-        "configuration": configuration,
+        "configuration": {
+            "entry": entry_configuration,
+            "snapshots": {
+                snapshot: records[(snapshot, "secure")]["configuration"]
+                for snapshot in ("target", "baseline")
+            },
+        },
         "operational": _operational_summary(records),
         "snapshot_pairs": pairs,
         "paired_success_quality": {
@@ -409,6 +560,13 @@ def compare_target_baseline(
             snapshot: {mode: hashes[(snapshot, mode)] for mode in ("secure", "runtime")}
             for snapshot in ("target", "baseline")
         },
+        "provenance_digests": {
+            snapshot: {
+                mode: _canonical_digest(records[(snapshot, mode)]["provenance"])
+                for mode in ("secure", "runtime")
+            }
+            for snapshot in ("target", "baseline")
+        },
     }
 
 
@@ -418,11 +576,29 @@ def _write_output(
     *,
     input_paths: tuple[Path, ...],
 ) -> None:
+    forbidden_files = (*_FROZEN_FILES, *input_paths)
     try:
+        absolute = path.expanduser().absolute()
+        if absolute in {item.expanduser().absolute() for item in forbidden_files} or any(
+            absolute == root.expanduser().absolute()
+            or absolute.is_relative_to(root.expanduser().absolute())
+            for root in _FROZEN_ROOTS
+        ):
+            raise SecurePathError(f"refusing to target frozen benchmark artifact: {path}")
+        ensure_publishable(
+            path,
+            forbidden_files=forbidden_files,
+            forbidden_roots=_FROZEN_ROOTS,
+        )
         content = (json.dumps(result, indent=2, sort_keys=True, allow_nan=False) + "\n").encode(
             "utf-8"
         )
-        publish_exclusive_bytes(path, content, forbidden_files=input_paths)
+        publish_exclusive_bytes(
+            path,
+            content,
+            forbidden_files=forbidden_files,
+            forbidden_roots=_FROZEN_ROOTS,
+        )
     except (SecurePathError, TypeError, ValueError) as error:
         raise ComparisonError(f"could not write {path}: {error}") from error
 
