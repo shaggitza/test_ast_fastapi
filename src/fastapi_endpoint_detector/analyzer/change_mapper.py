@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fastapi_endpoint_detector.analyzer.client_surface_adapter import (
+    MAX_CLIENT_SOURCE_BYTES,
     analyze_client_source,
     is_client_source,
 )
@@ -1360,7 +1361,15 @@ class ChangeMapper:
             try:
                 source_path = candidate_path.resolve()
                 source_path.relative_to(root)
-                source = source_path.read_text(encoding="utf-8")
+                with source_path.open("rb") as source_file:
+                    source_bytes = source_file.read(MAX_CLIENT_SOURCE_BYTES + 1)
+                if len(source_bytes) > MAX_CLIENT_SOURCE_BYTES:
+                    warnings.append(
+                        f"Client adapter skipped {diff_file.path}: source exceeds "
+                        f"{MAX_CLIENT_SOURCE_BYTES} bytes"
+                    )
+                    continue
+                source = source_bytes.decode("utf-8")
             except (OSError, UnicodeError, ValueError) as error:
                 warnings.append(f"Client adapter could not read {diff_file.path}: {error}")
                 continue

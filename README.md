@@ -251,15 +251,22 @@ integrations:
   use_mypy: true
 ```
 
-The TypeScript client adapter recognizes only direct literal `fetch`,
-`axios.<method>`, and `new WebSocket` calls in `.js`, `.jsx`, `.ts`, `.tsx`, and
-`.svelte` files. Root-relative URLs are local; absolute URLs require an exact
-allowlisted host. Query strings remain in evidence but are removed from route
-identity. A reference is joined only when it matches one established native
-server surface uniquely. Dynamic variables, computed methods, ambiguous route
-templates, external hosts, deployment configuration, and environment expansion
-remain explicit orphan/limitation evidence rather than causing cross-language
-fanout.
+The TypeScript client adapter recognizes only direct literal calls to proven,
+unshadowed global `fetch` and `WebSocket` bindings, plus `axios.<method>` through
+an exact unshadowed `import axios from "axios"` or
+`const axios = require("axios")` binding, in `.js`, `.jsx`, `.ts`, `.tsx`, and
+`.svelte` files. Svelte scanning is limited to complete script regions; markup
+expressions are unresolved. Root-relative URLs are local, while absolute URLs
+require an exact allowlisted host. Query and fragment values and URL credentials
+are excluded from evidence and route identity. A reference is joined only when
+it matches one established native server surface uniquely, including exact
+trailing-slash identity and supported Starlette converter semantics.
+
+Dynamic variables, computed methods, aliases, ambiguous bindings or route
+templates, and external hosts remain orphan/limitation evidence rather than
+causing cross-language fanout. Deployment/configuration and environment evidence
+is **not implemented in this tranche**; changes such as Dockerfile and `.env`
+files are outside this adapter and may not appear as explicit report evidence.
 
 ## Use Cases
 

@@ -24,10 +24,21 @@ from fastapi_endpoint_detector.models.endpoint import (
 
 _CLIENT_SUFFIXES = frozenset({".js", ".jsx", ".ts", ".tsx", ".svelte"})
 _HTTP_METHODS = frozenset({"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"})
-_MAX_SOURCE_BYTES = 2 * 1024 * 1024
+MAX_CLIENT_SOURCE_BYTES = 2 * 1024 * 1024
 _MAX_LIMITATIONS = 256
+_MAX_SVELTE_SCRIPT_REGIONS = 16
 _IDENTIFIER = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
 _ROUTE_PARAMETER = re.compile(r"^\{[^{}:]+(?::(path|int|float|uuid|str))?\}$")
+_SVELTE_SCRIPT_CLOSE = re.compile(r"</script\s*>")
+_EXACT_AXIOS_IMPORT = re.compile(
+    r"(?m)^[ \t]*import[ \t]+(?P<local>axios)[ \t]+from[ \t]+"
+    r"(?P<quote>['\"])axios(?P=quote)[ \t]*;?[ \t]*(?://[^\n]*)?$"
+)
+_EXACT_AXIOS_REQUIRE = re.compile(
+    r"(?m)^[ \t]*const[ \t]+(?P<local>axios)[ \t]*=[ \t]*require\([ \t]*"
+    r"(?P<quote>['\"])axios(?P=quote)[ \t]*\)[ \t]*;?[ \t]*(?://[^\n]*)?$"
+)
+_UUID_SEGMENT = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 
 
 @dataclass(frozen=True)
@@ -64,26 +75,28 @@ def is_client_source(path: Path) -> bool:
     return path.suffix.casefold() in _CLIENT_SUFFIXES
 
 
-def _code_mask(source: str) -> list[bool]:
+def _code_mask(source: str, *, start: int = 0, end: int | None = None) -> list[bool]:
     """Mark code characters while excluding comments and string contents."""
+    if end is None:
+        end = len(source)
     mask = [False] * len(source)
-    index = 0
-    while index < len(source):
+    index = start
+    while index < end:
         if source.startswith("//", index):
             index += 2
-            while index < len(source) and source[index] != "\n":
+            while index < end and source[index] != "\n":
                 index += 1
             continue
         if source.startswith("/*", index):
             index += 2
-            while index < len(source) and not source.startswith("*/", index):
+            while index < end and not source.startswith("*/", index):
                 index += 1
-            index = min(len(source), index + 2)
+            index = min(end, index + 2)
             continue
         if source[index] in {"'", '"', "`"}:
             quote = source[index]
             index += 1
-            while index < len(source):
+            while index < end:
                 if source[index] == "\\":
                     index += 2
                     continue
@@ -92,9 +105,89 @@ def _code_mask(source: str) -> list[bool]:
                     break
                 index += 1
             continue
-        mask[index] = True
+        mask[index] = not source[index].isspace()
         index += 1
     return mask
+
+
+def _tag_end(source: str, start: int) -> int | None:
+    """Return the end of one markup tag without interpreting its attributes."""
+    quote: str | None = None
+    for index in range(start, len(source)):
+        char = source[index]
+        if quote is not None:
+            if char == quote:
+                quote = None
+        elif char in {"'", '"'}:
+            quote = char
+        elif char == ">":
+            return index + 1
+    return None
+
+
+def _markup_expression_end(source: str, start: int) -> int:
+    """Skip one balanced Svelte markup expression without treating it as script."""
+    depth = 0
+    quote: str | None = None
+    index = start
+    while index < len(source):
+        char = source[index]
+        if quote is not None:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+        elif char in {"'", '"', "`"}:
+            quote = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+    return len(source)
+
+
+def _svelte_code_mask(source: str) -> tuple[list[bool], bool]:
+    """Mask only finitely many complete Svelte script regions."""
+    mask = [False] * len(source)
+    cursor = 0
+    regions = 0
+    truncated = False
+    while cursor < len(source):
+        if source.startswith("<!--", cursor):
+            comment_close = source.find("-->", cursor + 4)
+            cursor = len(source) if comment_close < 0 else comment_close + 3
+            continue
+        if source.startswith("<script", cursor) and (
+            cursor + 7 == len(source) or source[cursor + 7].isspace() or source[cursor + 7] == ">"
+        ):
+            opening_end = _tag_end(source, cursor + 7)
+            if opening_end is None:
+                break
+            script_close = _SVELTE_SCRIPT_CLOSE.search(source, opening_end)
+            if script_close is None:
+                break
+            if regions >= _MAX_SVELTE_SCRIPT_REGIONS:
+                truncated = True
+                break
+            region_mask = _code_mask(source, start=opening_end, end=script_close.start())
+            for index in range(opening_end, script_close.start()):
+                mask[index] = region_mask[index]
+            regions += 1
+            cursor = script_close.end()
+            continue
+        if source[cursor] == "{":
+            cursor = _markup_expression_end(source, cursor)
+            continue
+        if source[cursor] == "<":
+            markup_tag_end = _tag_end(source, cursor + 1)
+            cursor = len(source) if markup_tag_end is None else markup_tag_end
+            continue
+        cursor += 1
+    return mask, truncated
 
 
 def _skip_space(source: str, index: int, end: int) -> int:
@@ -137,6 +230,137 @@ def _call_end(source: str, mask: list[bool], opening: int) -> int | None:
             if depth == 0:
                 return index + 1
     return None
+
+
+def _code_identifier_offsets(source: str, mask: list[bool], name: str) -> list[int]:
+    offsets: list[int] = []
+    cursor = 0
+    while cursor < len(source):
+        found = _identifier_at(source, mask, cursor)
+        if found is None:
+            cursor += 1
+            continue
+        identifier, end = found
+        if identifier == name:
+            offsets.append(cursor)
+        cursor = end
+    return offsets
+
+
+def _previous_code_index(mask: list[bool], index: int) -> int | None:
+    index -= 1
+    while index >= 0:
+        if mask[index]:
+            return index
+        index -= 1
+    return None
+
+
+def _next_code_index(mask: list[bool], index: int) -> int | None:
+    while index < len(mask):
+        if mask[index]:
+            return index
+        index += 1
+    return None
+
+
+def _previous_identifier(source: str, mask: list[bool], index: int) -> tuple[str, int] | None:
+    end = _previous_code_index(mask, index)
+    if end is None or not (source[end].isalnum() or source[end] in {"_", "$"}):
+        return None
+    start = end
+    while start > 0 and mask[start - 1] and (
+        source[start - 1].isalnum() or source[start - 1] in {"_", "$"}
+    ):
+        start -= 1
+    found = _identifier_at(source, mask, start)
+    if found is None or found[1] != end + 1:
+        return None
+    return found[0], start
+
+
+def _is_direct_call_use(source: str, mask: list[bool], start: int, end: int) -> bool:
+    previous = _previous_code_index(mask, start)
+    if previous is not None and source[previous] == ".":
+        return False
+    previous_identifier = _previous_identifier(source, mask, start)
+    if previous_identifier is not None and previous_identifier[0] in {
+        "class",
+        "function",
+        "interface",
+        "new",
+        "type",
+    }:
+        return False
+    opening = _skip_space(source, end, len(source))
+    if opening >= len(source) or source[opening] != "(":
+        return False
+    call_end = _call_end(source, mask, opening)
+    following = _next_code_index(mask, call_end) if call_end is not None else None
+    return following is None or source[following] != "{"
+
+
+def _global_binding_is_unambiguous(source: str, mask: list[bool], name: str) -> bool:
+    """Require every mention of a supported global to be its direct call shape."""
+    for start in _code_identifier_offsets(source, mask, name):
+        end = start + len(name)
+        if name == "fetch":
+            if not _is_direct_call_use(source, mask, start, end):
+                return False
+            continue
+        previous = _previous_identifier(source, mask, start)
+        if previous is None or previous[0] != "new":
+            return False
+        before_new = _previous_code_index(mask, previous[1])
+        if before_new is not None and source[before_new] == ".":
+            return False
+        opening = _skip_space(source, end, len(source))
+        if opening >= len(source) or source[opening] != "(":
+            return False
+    return True
+
+
+def _brace_depth(mask: list[bool], source: str, end: int) -> int:
+    depth = 0
+    for index in range(end):
+        if not mask[index]:
+            continue
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth = max(0, depth - 1)
+    return depth
+
+
+def _axios_binding(source: str, mask: list[bool]) -> tuple[bool, tuple[int, int] | None]:
+    definitions: list[tuple[int, int]] = []
+    for pattern in (_EXACT_AXIOS_IMPORT, _EXACT_AXIOS_REQUIRE):
+        for match in pattern.finditer(source):
+            start, end = match.span("local")
+            if (
+                all(mask[index] for index in range(start, end))
+                and _brace_depth(mask, source, start) == 0
+            ):
+                definitions.append((start, end))
+    if len(definitions) != 1:
+        return False, None
+    definition = definitions[0]
+    for start in _code_identifier_offsets(source, mask, "axios"):
+        if start == definition[0]:
+            continue
+        previous = _previous_code_index(mask, start)
+        if previous is not None and source[previous] == ".":
+            return False, None
+        dot = _skip_space(source, start + len("axios"), len(source))
+        if dot >= len(source) or source[dot] != ".":
+            return False, None
+        method = _identifier_at(source, mask, dot + 1)
+        if method is None or method[0].upper() not in _HTTP_METHODS:
+            return False, None
+        opening = _skip_space(source, method[1], len(source))
+        if opening >= len(source) or source[opening] != "(":
+            return False, None
+    return True, definition
 
 
 def _method_option(  # noqa: PLR0911, PLR0912
@@ -200,6 +424,30 @@ def _method_option(  # noqa: PLR0911, PLR0912
     return True, None
 
 
+def _redacted_url(raw_url: str) -> str:
+    """Remove credentials and query/fragment values from report-facing evidence."""
+    try:
+        parsed = urlsplit(raw_url)
+        if parsed.scheme:
+            hostname = parsed.hostname or "<invalid-host>"
+            if ":" in hostname:
+                hostname = f"[{hostname}]"
+            try:
+                port = f":{parsed.port}" if parsed.port is not None else ""
+            except ValueError:
+                port = ":<invalid-port>"
+            result = f"{parsed.scheme}://{hostname}{port}{parsed.path}"
+        else:
+            result = parsed.path
+        if parsed.query:
+            result += "?<redacted>"
+        if parsed.fragment:
+            result += "#<redacted>"
+        return result
+    except ValueError:
+        return "<invalid-url>"
+
+
 def _normalized_url(
     raw_url: str,
     *,
@@ -241,11 +489,15 @@ def extract_client_references(  # noqa: PLR0912, PLR0915
     """Extract direct literal fetch/axios/WebSocket references without execution."""
     if not is_client_source(file_path):
         return (), ()
-    if len(source.encode("utf-8")) > _MAX_SOURCE_BYTES:
-        return (), (f"{file_path}: client source exceeds {_MAX_SOURCE_BYTES} bytes",)
+    if len(source.encode("utf-8")) > MAX_CLIENT_SOURCE_BYTES:
+        return (), (f"{file_path}: client source exceeds {MAX_CLIENT_SOURCE_BYTES} bytes",)
 
     hosts = frozenset(host.casefold() for host in allowed_hosts)
-    mask = _code_mask(source)
+    if file_path.suffix.casefold() == ".svelte":
+        mask, scripts_truncated = _svelte_code_mask(source)
+    else:
+        mask = _code_mask(source)
+        scripts_truncated = False
     line_starts = [0]
     line_starts.extend(index + 1 for index, char in enumerate(source) if char == "\n")
     references: list[ClientSurfaceReference] = []
@@ -255,6 +507,30 @@ def extract_client_references(  # noqa: PLR0912, PLR0915
     def limitation(offset: int, reason: str) -> None:
         if len(limitations) < _MAX_LIMITATIONS:
             limitations.append(f"{file_path}:{_line_number(line_starts, offset)}: {reason}")
+
+    if file_path.suffix.casefold() == ".svelte":
+        limitation(
+            0,
+            "Svelte markup expressions are unresolved; only complete script regions are scanned",
+        )
+        if scripts_truncated:
+            limitation(0, f"Svelte script region limit {_MAX_SVELTE_SCRIPT_REGIONS} reached")
+
+    fetch_is_global = _global_binding_is_unambiguous(source, mask, "fetch")
+    websocket_is_global = _global_binding_is_unambiguous(source, mask, "WebSocket")
+    axios_is_imported, _axios_definition = _axios_binding(source, mask)
+    if _code_identifier_offsets(source, mask, "fetch") and not fetch_is_global:
+        limitation(0, "fetch binding is shadowed or ambiguous; fetch calls were not resolved")
+    if _code_identifier_offsets(source, mask, "WebSocket") and not websocket_is_global:
+        limitation(
+            0,
+            "WebSocket binding is shadowed or ambiguous; constructor calls were not resolved",
+        )
+    if _code_identifier_offsets(source, mask, "axios") and not axios_is_imported:
+        limitation(
+            0,
+            "axios binding is not one exact unshadowed axios import; calls were not resolved",
+        )
 
     while cursor < len(source):
         token = _identifier_at(source, mask, cursor)
@@ -266,7 +542,7 @@ def extract_client_references(  # noqa: PLR0912, PLR0915
         method: EndpointMethod | None = None
         websocket = False
 
-        if name == "fetch":
+        if name == "fetch" and fetch_is_global:
             opening = _skip_space(source, after_name, len(source))
             if opening >= len(source) or source[opening] != "(":
                 cursor = after_name
@@ -288,7 +564,7 @@ def extract_client_references(  # noqa: PLR0912, PLR0915
                 cursor = call_end
                 continue
             method = EndpointMethod(option_method or "GET")
-        elif name == "axios":
+        elif name == "axios" and axios_is_imported:
             dot = _skip_space(source, after_name, len(source))
             if dot >= len(source) or source[dot] != ".":
                 cursor = after_name
@@ -313,7 +589,7 @@ def extract_client_references(  # noqa: PLR0912, PLR0915
                 continue
             raw_url, _literal_end = literal
             method = EndpointMethod(method_token[0].upper())
-        elif name == "new":
+        elif name == "new" and websocket_is_global:
             constructor_start = _skip_space(source, after_name, len(source))
             constructor = _identifier_at(source, mask, constructor_start)
             if constructor is None or constructor[0] != "WebSocket":
@@ -342,7 +618,10 @@ def extract_client_references(  # noqa: PLR0912, PLR0915
 
         normalized = _normalized_url(raw_url, websocket=websocket, allowed_hosts=hosts)
         if normalized is None:
-            limitation(cursor, f"client URL {raw_url!r} is dynamic, external, or not allowlisted")
+            limitation(
+                cursor,
+                f"client URL {_redacted_url(raw_url)!r} is dynamic, external, or not allowlisted",
+            )
             cursor = call_end
             continue
         references.append(
@@ -351,7 +630,7 @@ def extract_client_references(  # noqa: PLR0912, PLR0915
                 start_line=_line_number(line_starts, cursor),
                 end_line=_line_number(line_starts, call_end - 1),
                 method=method,
-                raw_url=raw_url,
+                raw_url=_redacted_url(raw_url),
                 normalized_path=normalized,
             )
         )
@@ -363,36 +642,35 @@ def extract_client_references(  # noqa: PLR0912, PLR0915
     return tuple(references), tuple(limitations)
 
 
-def _route_matches(route: str, path: str) -> bool:  # noqa: PLR0911
+def _route_matches(route: str, path: str) -> bool:
+    """Match only route shapes whose Starlette converter semantics are modeled exactly."""
     if route == path:
         return True
-    route_segments = route.strip("/").split("/")
-    path_segments = path.strip("/").split("/")
-    route_index = 0
-    path_index = 0
-    while route_index < len(route_segments) and path_index < len(path_segments):
-        route_segment = route_segments[route_index]
-        parameter = _ROUTE_PARAMETER.fullmatch(route_segment)
+    route_segments = route.split("/")
+    pattern: list[str] = []
+    for index, segment in enumerate(route_segments):
+        parameter = _ROUTE_PARAMETER.fullmatch(segment)
         if parameter is None:
-            if route_segment != path_segments[path_index]:
+            if "{" in segment or "}" in segment:
                 return False
-        else:
-            converter = parameter.group(1)
-            value = path_segments[path_index]
-            if not value:
+            pattern.append(re.escape(segment))
+            continue
+        converter = parameter.group(1) or "str"
+        if converter == "str":
+            pattern.append(r"[^/]+")
+        elif converter == "int":
+            pattern.append(r"[0-9]+")
+        elif converter == "float":
+            pattern.append(r"[0-9]+(?:\.[0-9]+)?")
+        elif converter == "uuid":
+            pattern.append(_UUID_SEGMENT)
+        elif converter == "path":
+            if index != len(route_segments) - 1:
                 return False
-            if converter == "int" and not value.isdecimal():
-                return False
-            if converter == "float":
-                try:
-                    float(value)
-                except ValueError:
-                    return False
-            if converter == "path":
-                return route_index == len(route_segments) - 1
-        route_index += 1
-        path_index += 1
-    return route_index == len(route_segments) and path_index == len(path_segments)
+            pattern.append(r".*")
+        else:  # pragma: no cover - guarded by _ROUTE_PARAMETER
+            return False
+    return re.fullmatch("/".join(pattern), path) is not None
 
 
 def join_client_references(

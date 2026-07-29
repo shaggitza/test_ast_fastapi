@@ -6,6 +6,7 @@ import pytest
 
 from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
 from fastapi_endpoint_detector.analyzer.client_surface_adapter import (
+    MAX_CLIENT_SOURCE_BYTES,
     analyze_client_source,
     extract_client_references,
     join_client_references,
@@ -59,6 +60,7 @@ def endpoint(
 
 def test_extracts_literal_fetch_axios_and_websocket_without_comments_or_strings() -> None:
     source = """
+import axios from "axios";
 // fetch("/comment")
 const text = 'axios.delete("/inside-string")';
 fetch("/items?limit=2", { method: "POST" });
@@ -83,18 +85,20 @@ fetch('/dynamic-options', options);
         ("WEBSOCKET", "/events"),
         ("GET", "/nested"),
     ]
-    assert references[0].raw_url == "/items?limit=2"
-    assert references[2].raw_url.endswith("?token=redacted")
+    assert references[0].raw_url == "/items?<redacted>"
+    assert references[2].raw_url == "wss://api.example.test/events?<redacted>"
     assert any("dynamic fetch URL" in item for item in limitations)
     assert sum("dynamic or invalid fetch method" in item for item in limitations) == 3
 
 
 def test_absolute_hosts_are_exact_and_external_urls_do_not_fan_out() -> None:
     source = """
+<script>
 fetch("https://allowed.example/items");
 fetch("https://external.example/items");
 fetch("https://[invalid/items");
 new WebSocket("ws://allowed.example/ws");
+</script>
 """
     analysis = analyze_client_source(
         source,
@@ -111,7 +115,7 @@ new WebSocket("ws://allowed.example/ws");
         "WEBSOCKET /ws",
     ]
     assert any("external.example" in item for item in analysis.limitations)
-    assert any("https://[invalid/items" in item for item in analysis.limitations)
+    assert any("<invalid-url>" in item for item in analysis.limitations)
 
 
 def test_join_requires_one_established_explicit_server_surface() -> None:
@@ -200,9 +204,10 @@ def test_change_mapper_maps_only_changed_joined_calls_and_keeps_orphans(tmp_path
         "WEBSOCKET /events",
     }
     post = next(item for item in affected if item.endpoint.identifier == "POST /items")
-    assert "/items?limit=1" in post.reason
+    assert "/items?<redacted>" in post.reason
+    assert "limit=1" not in post.reason
     assert post.dependency_chain == [
-        "client:POST /items?limit=1",
+        "client:POST /items?<redacted>",
         "server:POST /items",
     ]
     assert len(orphans) == 1
@@ -237,8 +242,168 @@ index 1111111..2222222 100644
     report = mapper.analyze_diff(diff)
 
     assert [item.endpoint.identifier for item in report.candidate_endpoints] == ["GET /health"]
-    assert "/health?verbose=1" in report.candidate_endpoints[0].reason
+    assert "/health?<redacted>" in report.candidate_endpoints[0].reason
+    assert "verbose=1" not in report.candidate_endpoints[0].reason
     assert report.orphan_changes == []
+
+
+def test_svelte_scans_only_complete_bounded_script_regions() -> None:
+    source = """<!-- fetch('/comment') -->
+<p data-call="<script>fetch('/attribute')</script>">fetch('/text')</p>
+{fetch('/markup-expression')}
+{ "<script>fetch('/expression-string')</script>" }
+<script>fetch('/instance')</script>
+<script context="module">
+fetch('/module')
+</script>
+"""
+
+    references, limitations = extract_client_references(source, Path("View.svelte"))
+
+    assert [item.normalized_path for item in references] == ["/instance", "/module"]
+    assert [item.start_line for item in references] == [5, 7]
+    assert any("markup expressions are unresolved" in item for item in limitations)
+
+
+@pytest.mark.parametrize(
+    "source, limitation",
+    [
+        ("function fetch(url) {}\nfetch('/health')", "fetch binding is shadowed"),
+        ("function run(fetch) { fetch('/health') }", "fetch binding is shadowed"),
+        ("const api = { fetch() {} };\napi.fetch('/health')", "fetch binding is shadowed"),
+        (
+            "const WebSocket = function () {};\nnew WebSocket('/events')",
+            "WebSocket binding is shadowed",
+        ),
+        ("import { default as axios } from 'axios';\naxios.get('/health')", "axios binding is not"),
+        (
+            "import axios from 'axios';\nfunction run(axios) { axios.get('/health') }",
+            "axios binding is not",
+        ),
+        (
+            "import * as axios from 'axios';\naxios.get('/health')",
+            "axios binding is not",
+        ),
+    ],
+)
+def test_shadowed_member_and_ambiguous_bindings_abstain(source: str, limitation: str) -> None:
+    references, limitations = extract_client_references(source, Path("client.ts"))
+
+    assert references == ()
+    assert any(limitation in item for item in limitations)
+
+
+def test_axios_requires_an_exact_import_or_require_binding() -> None:
+    esm, _ = extract_client_references(
+        "import axios from 'axios';\naxios.post('/items')", Path("esm.ts")
+    )
+    cjs, _ = extract_client_references(
+        "const axios = require(\"axios\");\naxios.get('/health')", Path("cjs.js")
+    )
+    alias, _ = extract_client_references(
+        "import axiosAlias from 'axios';\naxiosAlias.get('/health')", Path("alias.ts")
+    )
+
+    assert [(item.method.value, item.normalized_path) for item in esm] == [("POST", "/items")]
+    assert [(item.method.value, item.normalized_path) for item in cjs] == [("GET", "/health")]
+    assert alias == ()
+
+
+@pytest.mark.parametrize(
+    "route, valid_path, invalid_paths",
+    [
+        ("/i/{value:int}", "/i/123", ("/i/\u0661", "/i/-1", "/i/1.0")),
+        ("/f/{value:float}", "/f/12.50", ("/f/nan", "/f/-1", "/f/1.")),
+        (
+            "/v/{value:uuid}",
+            "/v/123e4567-e89b-12d3-a456-426614174000",
+            ("/v/not-a-uuid", "/v/123e4567e89b12d3a456426614174000"),
+        ),
+        ("/s/{value:str}", "/s/text", ("/s/", "/s/a/b")),
+        ("/files/{value:path}", "/files/a/b", ("/files",)),
+    ],
+)
+def test_starlette_converters_match_only_exact_supported_semantics(
+    route: str, valid_path: str, invalid_paths: tuple[str, ...]
+) -> None:
+    paths = (valid_path, *invalid_paths)
+    references, _ = extract_client_references(
+        "\n".join(f"fetch('{path}')" for path in paths), Path("client.ts")
+    )
+    matches, _ = join_client_references(references, [endpoint(EndpointMethod.GET, route)])
+
+    assert [item.reference.normalized_path for item in matches] == [valid_path]
+
+
+def test_http_and_websocket_trailing_slashes_are_distinct() -> None:
+    http_references, _ = extract_client_references("fetch('/x/')", Path("client.ts"))
+    websocket_references, _ = extract_client_references(
+        "new WebSocket('/events/')", Path("client.ts")
+    )
+
+    http_matches, _ = join_client_references(
+        http_references, [endpoint(EndpointMethod.GET, "/x")]
+    )
+    websocket_matches, _ = join_client_references(
+        websocket_references, [endpoint(EndpointMethod.WEBSOCKET, "/events")]
+    )
+
+    assert http_matches == ()
+    assert websocket_matches == ()
+
+
+def test_url_evidence_redacts_credentials_query_and_fragment() -> None:
+    references, limitations = extract_client_references(
+        'fetch("https://user:password@api.example.test/health?token=secret#private")',
+        Path("client.ts"),
+        allowed_hosts=("api.example.test",),
+    )
+
+    assert references[0].raw_url == "https://api.example.test/health?<redacted>#<redacted>"
+    evidence = "\n".join((references[0].raw_url, *limitations))
+    assert "password" not in evidence
+    assert "token=secret" not in evidence
+    assert "private" not in evidence
+
+
+def test_change_mapper_reads_at_most_max_plus_one_bytes(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n", encoding="utf-8"
+    )
+    (tmp_path / "client.ts").write_bytes(b" " * (MAX_CLIENT_SOURCE_BYTES + 2))
+    diff_file = DiffFile(
+        path=Path("client.ts"),
+        change_type=ChangeType.MODIFIED,
+        hunks=[
+            DiffHunk(
+                source_start=1,
+                source_length=0,
+                target_start=1,
+                target_length=1,
+                added_lines=[1],
+            )
+        ],
+    )
+    mapper = ChangeMapper(
+        tmp_path,
+        Config(analysis=AnalysisConfig(typescript_client_adapter=True)),
+        secure_ast=True,
+        use_cache=False,
+    )
+    warnings: list[str] = []
+
+    affected, orphans = mapper._analyze_client_surface_changes([diff_file], warnings)
+
+    assert affected == []
+    assert len(orphans) == 1
+    assert any(f"exceeds {MAX_CLIENT_SOURCE_BYTES} bytes" in item for item in warnings)
+
+
+def test_readme_does_not_claim_deployment_evidence_is_implemented() -> None:
+    readme = (Path(__file__).parents[2] / "README.md").read_text(encoding="utf-8")
+
+    assert "Deployment/configuration and environment evidence\nis **not implemented" in readme
+    assert "deployment configuration, and environment expansion\nremain explicit" not in readme
 
 
 def test_disabled_adapter_returns_no_cross_language_evidence(tmp_path: Path) -> None:
