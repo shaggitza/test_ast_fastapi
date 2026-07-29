@@ -336,7 +336,7 @@ def test_union_receiver_is_ambiguous_when_implementations_differ(tmp_path: Path)
     assert site.receiver_candidates == tuple(sorted(site.receiver_candidates))
 
 
-def test_union_receiver_with_common_inherited_method_is_exact(tmp_path: Path) -> None:
+def test_open_union_receiver_with_common_method_is_not_exact(tmp_path: Path) -> None:
     main = tmp_path / "main.py"
     main.write_text(
         "class Base:\n"
@@ -351,9 +351,10 @@ def test_union_receiver_with_common_inherited_method_is_exact(tmp_path: Path) ->
     deps = MypyAnalyzer(tmp_path).analyze_endpoint(_endpoint(main, line=10))
     site = _site_by_spelling(deps.resolved_call_sites, "value.run")[0]
 
-    assert site.status == CallResolutionStatus.EXACT
-    assert site.canonical_symbol and site.canonical_symbol.endswith("Base.run")
-    assert site.invocation == InvocationKind.INSTANCE_METHOD
+    assert site.status == CallResolutionStatus.AMBIGUOUS
+    assert site.canonical_symbol is None
+    assert site.invocation is None
+    assert site.reason_code == "open_receiver"
     assert len(site.receiver_candidates) == 2
 
 

@@ -349,6 +349,22 @@ class _FinitePointsTo:
 
 
 @dataclass(frozen=True)
+class _CallableTarget:
+    """One source-proven project callable and its optional bound receiver."""
+
+    fullname: str
+    invocation: InvocationKind
+    receiver: _FinitePointsTo | None = None
+
+
+@dataclass(frozen=True)
+class _FiniteCallable:
+    """A bounded finite union of source-proven callable targets."""
+
+    targets: tuple[_CallableTarget, ...]
+
+
+@dataclass(frozen=True)
 class _DeferredGenerator:
     """One exact generator call whose body has not executed yet."""
 
@@ -376,12 +392,12 @@ class MypyAnalyzer:
     and extract precise file/line information for all references.
     """
 
-    CACHE_SCHEMA_VERSION = 18
+    CACHE_SCHEMA_VERSION = 19
     MAX_POINTS_TO_TARGETS = 8
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
     MAX_POINTS_TO_EDGES = 4096
-    EXECUTION_SUMMARY_VERSION = 4
+    EXECUTION_SUMMARY_VERSION = 5
     GENERATOR_CONSUMERS: ClassVar[dict[str, tuple[int, str, bool | None]]] = {
         "starlette.responses.StreamingResponse": (0, "content", None),
     }
@@ -1206,6 +1222,7 @@ class MypyAnalyzer:
                 bool,
                 _FinitePointsTo | None,
                 tuple[tuple[str, _FinitePointsTo], ...],
+                tuple[tuple[str, _FiniteCallable], ...],
             ],
             int,
         ] = {}
@@ -1245,7 +1262,7 @@ class MypyAnalyzer:
                 dependency_start,
                 dependency_end,
             )
-            visited[(dependency_fullname, False, None, ())] = dependency_depth
+            visited[(dependency_fullname, False, None, (), ())] = dependency_depth
             if dependency_depth < self.max_depth:
                 self._trace_references(
                     dependency_node,
@@ -1590,6 +1607,51 @@ class MypyAnalyzer:
                 result[name] = value
         return result
 
+    @classmethod
+    def _join_callable_values(
+        cls,
+        left: _FiniteCallable | None,
+        right: _FiniteCallable | None,
+    ) -> _FiniteCallable | None:
+        """Join complete callable unions without retaining a partial fanout."""
+        if left is None or right is None:
+            return None
+        targets = set(left.targets) | set(right.targets)
+        if not targets or len(targets) > cls.MAX_POINTS_TO_TARGETS:
+            return None
+        return _FiniteCallable(
+            tuple(
+                sorted(
+                    targets,
+                    key=lambda target: (
+                        target.fullname,
+                        target.invocation.value,
+                        repr(target.receiver),
+                    ),
+                )
+            )
+        )
+
+    @classmethod
+    def _join_callable_environments(
+        cls,
+        environments: list[dict[str, _FiniteCallable]],
+    ) -> dict[str, _FiniteCallable]:
+        """Keep only callable bindings proven on every continuing branch."""
+        if not environments:
+            return {}
+        common = set(environments[0])
+        for environment in environments[1:]:
+            common &= environment.keys()
+        result: dict[str, _FiniteCallable] = {}
+        for name in sorted(common):
+            value: _FiniteCallable | None = environments[0][name]
+            for environment in environments[1:]:
+                value = cls._join_callable_values(value, environment[name])
+            if value is not None:
+                result[name] = value
+        return result
+
     def _exact_project_identity(self, fullname: str) -> tuple[str, str] | None:
         """Split a canonical fullname at the longest exact built module prefix."""
         if fullname not in self._exact_project_identity_cache:
@@ -1761,6 +1823,151 @@ class MypyAnalyzer:
             if value is not None:
                 environment[parameter] = value
 
+        required = {
+            argument.variable.name
+            for argument in arguments
+            if argument.kind in (ARG_POS, ARG_NAMED)
+        }
+        if required - assigned:
+            return None
+        if any(
+            argument.kind not in (ARG_POS, ARG_OPT, ARG_NAMED, ARG_NAMED_OPT)
+            for argument in arguments
+        ):
+            return None
+        return environment
+
+    def _finite_callable_value(
+        self,
+        expression: Any,
+        object_environment: dict[str, _FinitePointsTo],
+        callable_environment: dict[str, _FiniteCallable],
+        import_map: dict[str, str],
+        budget: list[int],
+    ) -> _FiniteCallable | None:
+        """Resolve the bounded callable-value subset without type-only dispatch."""
+        from mypy.nodes import ConditionalExpr, MemberExpr, NameExpr
+
+        if budget[0] >= self.MAX_FACTORY_STATES:
+            return None
+        budget[0] += 1
+        if isinstance(expression, NameExpr):
+            if expression.name in callable_environment:
+                return callable_environment[expression.name]
+            imported = self._explicit_import_fullname(expression, import_map)
+            declaration = (
+                self._exact_finite_project_callable(imported) if imported is not None else None
+            )
+            if declaration is None:
+                direct = self._callable_declaration(getattr(expression, "node", None))
+                declaration = (
+                    direct
+                    if direct is not None and self._exact_project_identity(direct[0]) is not None
+                    else None
+                )
+            return (
+                _FiniteCallable((_CallableTarget(*declaration),))
+                if declaration is not None
+                else None
+            )
+        if isinstance(expression, MemberExpr):
+            imported = self._explicit_import_fullname(expression, import_map)
+            declaration = (
+                self._exact_finite_project_callable(imported)
+                or self._project_member_declaration(imported)
+                if imported is not None
+                else None
+            )
+            if declaration is not None:
+                return _FiniteCallable((_CallableTarget(*declaration),))
+            receiver = self._finite_expression_value(
+                expression.expr,
+                object_environment,
+                import_map,
+                (),
+                budget,
+            )
+            declaration = (
+                self._finite_member_declaration(receiver, expression.name)
+                if receiver is not None
+                else None
+            )
+            return (
+                _FiniteCallable((_CallableTarget(*declaration, receiver=receiver),))
+                if declaration is not None
+                else None
+            )
+        if isinstance(expression, ConditionalExpr):
+            left = self._finite_callable_value(
+                expression.if_expr,
+                object_environment,
+                dict(callable_environment),
+                import_map,
+                budget,
+            )
+            right = self._finite_callable_value(
+                expression.else_expr,
+                object_environment,
+                dict(callable_environment),
+                import_map,
+                budget,
+            )
+            return self._join_callable_values(left, right)
+        return None
+
+    def _bind_callable_arguments(
+        self,
+        function: Any,
+        call: Any,
+        object_environment: dict[str, _FinitePointsTo],
+        callable_environment: dict[str, _FiniteCallable],
+        import_map: dict[str, str],
+        budget: list[int],
+        *,
+        skip_implicit_receiver: bool = False,
+    ) -> dict[str, _FiniteCallable] | None:
+        """Bind callable-valued arguments for one exact non-star call shape."""
+        from mypy.nodes import ARG_NAMED, ARG_NAMED_OPT, ARG_OPT, ARG_POS, ARG_STAR, ARG_STAR2
+
+        actual = self._actual_function(function)
+        arguments = list(getattr(actual, "arguments", ()))
+        if skip_implicit_receiver:
+            if not arguments:
+                return None
+            arguments = arguments[1:]
+        if any(argument.kind in (ARG_STAR, ARG_STAR2) for argument in arguments):
+            return None
+        positional_arguments = [
+            argument for argument in arguments if argument.kind in (ARG_POS, ARG_OPT)
+        ]
+        by_name = {
+            argument.variable.name: argument for argument in arguments if not argument.pos_only
+        }
+        assigned: set[str] = set()
+        environment: dict[str, _FiniteCallable] = {}
+        positional = 0
+        for expression, kind, name in zip(call.args, call.arg_kinds, call.arg_names, strict=True):
+            if kind == ARG_POS and name is None:
+                if positional >= len(positional_arguments):
+                    return None
+                parameter = positional_arguments[positional].variable.name
+                positional += 1
+            elif kind == ARG_NAMED and name in by_name:
+                parameter = name
+            else:
+                return None
+            if parameter in assigned:
+                return None
+            assigned.add(parameter)
+            value = self._finite_callable_value(
+                expression,
+                object_environment,
+                callable_environment,
+                import_map,
+                budget,
+            )
+            if value is not None:
+                environment[parameter] = value
         required = {
             argument.variable.name
             for argument in arguments
@@ -2387,6 +2594,21 @@ class MypyAnalyzer:
             is_async=is_async,
         )
 
+    @staticmethod
+    def _receiver_dispatch_is_closed(info: Any, member_name: str) -> bool:
+        """Return whether a type-only receiver proves runtime dispatch identity."""
+        from mypy.nodes import Decorator
+
+        if bool(getattr(info, "is_protocol", False)) or bool(getattr(info, "is_abstract", False)):
+            return False
+        if bool(getattr(info, "is_final", False)):
+            return True
+        member = info.get(member_name)
+        node = getattr(member, "node", None) if member is not None else None
+        if isinstance(node, Decorator):
+            return bool(getattr(node.var, "is_final", False))
+        return bool(getattr(node, "is_final", False))
+
     def _member_call_resolution(
         self,
         callee: Any,
@@ -2422,6 +2644,7 @@ class MypyAnalyzer:
 
         receiver_infos: list[TypeInfo] = []
         incomplete = False
+        type_only_receivers = False
         if isinstance(callee.expr, NameExpr):
             imported = (
                 import_map.get(callee.expr.name, "")
@@ -2452,6 +2675,7 @@ class MypyAnalyzer:
             if constructed is not None:
                 receiver_infos.append(constructed)
         if not receiver_infos:
+            type_only_receivers = True
             receiver_type = self._get_type_from_node(callee.expr)
             if (
                 receiver_type is None
@@ -2481,6 +2705,26 @@ class MypyAnalyzer:
                 else:
                     resolutions.add(declaration)
             if len(resolutions) == 1 and not incomplete:
+                project_receivers = [
+                    info
+                    for info in receiver_infos
+                    if getattr(info, "module_name", "") in self._project_modules
+                ]
+                if (
+                    type_only_receivers
+                    and project_receivers
+                    and not all(
+                        self._receiver_dispatch_is_closed(info, callee.name)
+                        for info in project_receivers
+                    )
+                ):
+                    return (
+                        CallResolutionStatus.AMBIGUOUS,
+                        None,
+                        None,
+                        candidates,
+                        "open_receiver",
+                    )
                 resolved_symbol, invocation = next(iter(resolutions))
                 return (
                     CallResolutionStatus.EXACT,
@@ -2897,6 +3141,7 @@ class MypyAnalyzer:
                 bool,
                 _FinitePointsTo | None,
                 tuple[tuple[str, _FinitePointsTo], ...],
+                tuple[tuple[str, _FiniteCallable], ...],
             ],
             int,
         ],
@@ -2906,6 +3151,7 @@ class MypyAnalyzer:
         low_confidence_path: bool = False,
         receiver_value: _FinitePointsTo | None = None,
         initial_environment: dict[str, _FinitePointsTo] | None = None,
+        initial_callable_environment: dict[str, _FiniteCallable] | None = None,
         finite_edge_budget: list[int] | None = None,
     ) -> None:
         """
@@ -2961,11 +3207,13 @@ class MypyAnalyzer:
         )
 
         flow_environment: dict[str, _FinitePointsTo] = dict(initial_environment or {})
+        callable_environment: dict[str, _FiniteCallable] = dict(initial_callable_environment or {})
         function_node = self._actual_function(node)
         if receiver_value is not None and getattr(function_node, "arguments", None):
             self_name = function_node.arguments[0].variable.name
             flow_environment[self_name] = receiver_value
         finite_budget = [0]
+        callable_budget = [0]
         awaited_call_ids: set[int] = set()
         consumed_generator_call_kinds: dict[int, bool | None] = {}
         deferred_environment: dict[str, _DeferredGenerator] = {}
@@ -2977,6 +3225,7 @@ class MypyAnalyzer:
             low_confidence_edge: bool = False,
             target_receiver: _FinitePointsTo | None = None,
             target_environment: dict[str, _FinitePointsTo] | None = None,
+            target_callable_environment: dict[str, _FiniteCallable] | None = None,
             edge_kind: str | None = None,
         ) -> None:
             """Resolve a fullname and preserve LOW provenance through descendants."""
@@ -2989,11 +3238,13 @@ class MypyAnalyzer:
                 finite_edge_budget[0] += 1
             target_low_confidence = low_confidence_path or low_confidence_edge
             environment_key = tuple(sorted((target_environment or {}).items()))
+            callable_environment_key = tuple(sorted((target_callable_environment or {}).items()))
             visit_key = (
                 fullname,
                 target_low_confidence,
                 target_receiver,
                 environment_key,
+                callable_environment_key,
             )
             previous_depth = visited.get(visit_key)
             should_recurse = previous_depth is None or target_depth < previous_depth
@@ -3074,6 +3325,7 @@ class MypyAnalyzer:
                         low_confidence_path=target_low_confidence,
                         receiver_value=target_receiver,
                         initial_environment=target_environment,
+                        initial_callable_environment=target_callable_environment,
                         finite_edge_budget=finite_edge_budget,
                     )
             else:
@@ -3132,6 +3384,7 @@ class MypyAnalyzer:
                                 low_confidence_path=target_low_confidence,
                                 receiver_value=target_receiver,
                                 initial_environment=target_environment,
+                                initial_callable_environment=target_callable_environment,
                                 finite_edge_budget=finite_edge_budget,
                             )
                 # Ambiguous or unresolved symbols are not converted into
@@ -3169,6 +3422,35 @@ class MypyAnalyzer:
                     require_async is None or generator.is_async == require_async
                 ):
                     consume_deferred_generator(generator, line)
+
+        def callable_arguments_for(
+            target: _CallableTarget,
+            call: CallExpr,
+        ) -> dict[str, _FiniteCallable] | None:
+            """Bind callable arguments for one source-proven target occurrence."""
+            resolved = self._function_node_for_fullname(target.fullname)
+            if resolved is None:
+                return None
+            return self._bind_callable_arguments(
+                resolved[0],
+                call,
+                flow_environment,
+                callable_environment,
+                import_map,
+                callable_budget,
+                skip_implicit_receiver=target.invocation
+                in {InvocationKind.INSTANCE_METHOD, InvocationKind.CLASS_METHOD},
+            )
+
+        def invalidate_bound_callables() -> None:
+            """Preserve immutable function aliases but kill receiver-dependent values."""
+            nonlocal callable_environment
+            retained: dict[str, _FiniteCallable] = {}
+            for name, value in callable_environment.items():
+                targets = tuple(target for target in value.targets if target.receiver is None)
+                if targets:
+                    retained[name] = _FiniteCallable(targets)
+            callable_environment = retained
 
         def handle_call_expr(call: CallExpr) -> None:
             """Trace exact calls, adding bounded finite receiver edges as LOW only."""
@@ -3222,6 +3504,7 @@ class MypyAnalyzer:
                 for argument in call.args:
                     walk_node(argument)
                 flow_environment.clear()
+                invalidate_bound_callables()
                 deferred_environment.clear()
                 return
 
@@ -3313,6 +3596,32 @@ class MypyAnalyzer:
                     )
                     traced = True
 
+            if not traced and (call_site is None or call_site.status != CallResolutionStatus.EXACT):
+                callable_value = self._finite_callable_value(
+                    callee,
+                    flow_environment,
+                    callable_environment,
+                    import_map,
+                    callable_budget,
+                )
+                if callable_value is not None:
+                    for target in callable_value.targets:
+                        if self._generator_fullname_kind(target.fullname) is not None:
+                            continue
+                        target_callable_environment = callable_arguments_for(target, call)
+                        if target_callable_environment is None:
+                            continue
+                        deps.add_reference(current_file, call.line, target.fullname)
+                        resolve_and_trace(
+                            target.fullname,
+                            call.line,
+                            low_confidence_edge=True,
+                            target_receiver=target.receiver,
+                            target_callable_environment=target_callable_environment,
+                            edge_kind="finite_callable",
+                        )
+                        traced = True
+
             if (
                 not traced
                 and call_site is not None
@@ -3320,7 +3629,15 @@ class MypyAnalyzer:
                 and call_site.canonical_symbol is not None
             ):
                 deps.add_reference(current_file, call.line, call_site.canonical_symbol)
-                resolve_and_trace(call_site.canonical_symbol, call.line)
+                target = _CallableTarget(
+                    call_site.canonical_symbol,
+                    call_site.invocation or InvocationKind.FUNCTION,
+                )
+                resolve_and_trace(
+                    call_site.canonical_symbol,
+                    call.line,
+                    target_callable_environment=callable_arguments_for(target, call),
+                )
 
             # FastAPI dependency injection passes callables as values rather
             # than invoking them in the handler body. Treat the callable given
@@ -3349,11 +3666,12 @@ class MypyAnalyzer:
             for arg in call.args:
                 walk_node(arg)
             flow_environment.clear()
+            invalidate_bound_callables()
             deferred_environment.clear()
 
         def walk_node(n: Any) -> None:
-            """Recursively walk a mypy AST node with a bounded local environment."""
-            nonlocal deferred_environment, flow_environment
+            """Recursively walk a mypy AST node with bounded local environments."""
+            nonlocal callable_environment, deferred_environment, flow_environment
             if n is None:
                 return
 
@@ -3412,6 +3730,13 @@ class MypyAnalyzer:
                     (),
                     finite_budget,
                 )
+                callable_value = self._finite_callable_value(
+                    n.rvalue,
+                    flow_environment,
+                    callable_environment,
+                    import_map,
+                    callable_budget,
+                )
                 deferred_value = (
                     self._deferred_generator_call(
                         n.rvalue,
@@ -3434,6 +3759,10 @@ class MypyAnalyzer:
                             flow_environment.pop(lv.name, None)
                         else:
                             flow_environment[lv.name] = value
+                        if callable_value is None:
+                            callable_environment.pop(lv.name, None)
+                        else:
+                            callable_environment[lv.name] = callable_value
                         if deferred_value is None:
                             deferred_environment.pop(lv.name, None)
                         else:
@@ -3442,6 +3771,7 @@ class MypyAnalyzer:
                         # Arbitrary/reflection-driven member mutation invalidates all
                         # finite heap evidence outside constructor summarization.
                         flow_environment.clear()
+                        callable_environment.clear()
                         deferred_environment.clear()
                     walk_node(lv)
 
@@ -3450,26 +3780,34 @@ class MypyAnalyzer:
 
             elif isinstance(n, IfStmt):
                 base_environment = dict(flow_environment)
+                base_callable = dict(callable_environment)
                 base_deferred = dict(deferred_environment)
                 branch_environments: list[dict[str, _FinitePointsTo]] = []
+                branch_callable: list[dict[str, _FiniteCallable]] = []
                 branch_deferred: list[dict[str, _DeferredGenerator]] = []
                 for expr, body in zip(n.expr, n.body, strict=True):
                     flow_environment = dict(base_environment)
+                    callable_environment = dict(base_callable)
                     deferred_environment = dict(base_deferred)
                     walk_node(expr)
                     walk_node(body)
                     branch_environments.append(dict(flow_environment))
+                    branch_callable.append(dict(callable_environment))
                     branch_deferred.append(dict(deferred_environment))
                 flow_environment = dict(base_environment)
+                callable_environment = dict(base_callable)
                 deferred_environment = dict(base_deferred)
                 if n.else_body:
                     walk_node(n.else_body)
                     branch_environments.append(dict(flow_environment))
+                    branch_callable.append(dict(callable_environment))
                     branch_deferred.append(dict(deferred_environment))
                 else:
                     branch_environments.append(base_environment)
+                    branch_callable.append(base_callable)
                     branch_deferred.append(base_deferred)
                 flow_environment = self._join_finite_environments(branch_environments)
+                callable_environment = self._join_callable_environments(branch_callable)
                 common_deferred = set.intersection(*(set(branch) for branch in branch_deferred))
                 deferred_environment = {
                     name: branch_deferred[0][name]
@@ -3482,9 +3820,11 @@ class MypyAnalyzer:
             elif isinstance(n, WhileStmt):
                 walk_node(n.expr)
                 flow_environment.clear()
+                callable_environment.clear()
                 deferred_environment.clear()
                 walk_node(n.body)
                 flow_environment.clear()
+                callable_environment.clear()
                 deferred_environment.clear()
 
             elif isinstance(n, ForStmt):
@@ -3495,26 +3835,32 @@ class MypyAnalyzer:
                 )
                 walk_node(n.expr)
                 flow_environment.clear()
+                callable_environment.clear()
                 deferred_environment.clear()
                 walk_node(n.body)
                 flow_environment.clear()
+                callable_environment.clear()
                 deferred_environment.clear()
 
             elif isinstance(n, WithStmt):
                 for expr in n.expr:
                     walk_node(expr)
                 flow_environment.clear()
+                callable_environment.clear()
                 deferred_environment.clear()
                 walk_node(n.body)
                 flow_environment.clear()
+                callable_environment.clear()
                 deferred_environment.clear()
 
             elif isinstance(n, TryStmt):
                 flow_environment.clear()
+                callable_environment.clear()
                 deferred_environment.clear()
                 walk_node(n.body)
                 for handler in n.handlers:
                     flow_environment.clear()
+                    callable_environment.clear()
                     deferred_environment.clear()
                     walk_node(handler)
                 if hasattr(n, "types") and n.types:
@@ -3523,13 +3869,16 @@ class MypyAnalyzer:
                             walk_node(exc_type)
                 if n.else_body:
                     flow_environment.clear()
+                    callable_environment.clear()
                     deferred_environment.clear()
                     walk_node(n.else_body)
                 if n.finally_body:
                     flow_environment.clear()
+                    callable_environment.clear()
                     deferred_environment.clear()
                     walk_node(n.finally_body)
                 flow_environment.clear()
+                callable_environment.clear()
                 deferred_environment.clear()
 
             elif isinstance(n, AwaitExpr):
