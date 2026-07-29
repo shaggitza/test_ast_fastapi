@@ -254,10 +254,11 @@ integrations:
 The TypeScript client adapter recognizes only direct literal calls to proven,
 unshadowed global `fetch` and `WebSocket` bindings, plus `axios.<method>` through
 an exact unshadowed `import axios from "axios"` or
-`const axios = require("axios")` binding, in `.js`, `.jsx`, `.ts`, `.tsx`, and
-`.svelte` files. Svelte scanning is limited to complete script regions; markup
-expressions are unresolved. Root-relative URLs are local, while absolute URLs
-require an exact allowlisted host. Query and fragment values and URL credentials
+`const axios = require("axios")` binding, in `.js` and `.ts` files and complete
+script regions in `.svelte` files. JSX/TSX files and Svelte markup expressions
+are unresolved so rendered text is never scanned as executable code. Root-relative
+URLs are local, while absolute URLs require an exact allowlisted host. Query and
+fragment values and URL credentials
 are excluded from evidence and route identity. A reference is joined only when
 it matches one established native server surface uniquely, including exact
 trailing-slash identity and supported Starlette converter semantics.

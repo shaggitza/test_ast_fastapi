@@ -91,6 +91,47 @@ fetch('/dynamic-options', options);
     assert sum("dynamic or invalid fetch method" in item for item in limitations) == 3
 
 
+@pytest.mark.parametrize("key", ["'method'", '"method"'])
+def test_fetch_parses_exact_quoted_method_keys(key: str) -> None:
+    references, limitations = extract_client_references(
+        f"fetch('/items', {{{key}: 'POST'}})", Path("client.ts")
+    )
+
+    assert [(item.method.value, item.normalized_path) for item in references] == [
+        ("POST", "/items")
+    ]
+    assert limitations == ()
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        "{method: 'GET', 'method': 'POST'}",
+        "{'method': 'POST', method: 'POST'}",
+        "{'method': dynamicMethod}",
+        "{['method']: 'POST'}",
+    ],
+)
+def test_fetch_abstains_on_duplicate_or_ambiguous_method_options(options: str) -> None:
+    references, limitations = extract_client_references(
+        f"fetch('/items', {options})", Path("client.ts")
+    )
+
+    assert references == ()
+    assert any("dynamic or invalid fetch method" in item for item in limitations)
+
+
+def test_fetch_quoted_method_key_is_case_sensitive() -> None:
+    references, limitations = extract_client_references(
+        "fetch('/items', {'METHOD': 'POST'})", Path("client.ts")
+    )
+
+    assert [(item.method.value, item.normalized_path) for item in references] == [
+        ("GET", "/items")
+    ]
+    assert limitations == ()
+
+
 def test_absolute_hosts_are_exact_and_external_urls_do_not_fan_out() -> None:
     source = """
 <script>
@@ -293,6 +334,28 @@ def test_shadowed_member_and_ambiguous_bindings_abstain(source: str, limitation:
     assert any(limitation in item for item in limitations)
 
 
+@pytest.mark.parametrize(
+    "path, source",
+    [
+        (
+            "component.jsx",
+            "export function View() { return <div>fetch('/health')</div>; }",
+        ),
+        (
+            "component.tsx",
+            "export function View() { return <span>fetch('/health')</span>; }",
+        ),
+    ],
+)
+def test_jsx_and_tsx_abstain_instead_of_scanning_rendered_text(
+    path: str, source: str
+) -> None:
+    references, limitations = extract_client_references(source, Path(path))
+
+    assert references == ()
+    assert any("rendered text" in item for item in limitations)
+
+
 def test_axios_requires_an_exact_import_or_require_binding() -> None:
     esm, _ = extract_client_references(
         "import axios from 'axios';\naxios.post('/items')", Path("esm.ts")
@@ -310,6 +373,24 @@ def test_axios_requires_an_exact_import_or_require_binding() -> None:
 
 
 @pytest.mark.parametrize(
+    "source",
+    [
+        (
+            "function require(name) { return fake(name); }\n"
+            "const axios = require('axios');\naxios.get('/health')"
+        ),
+        "import axios from 'axios';\naxios.GET('/health')",
+        "const axios = require('axios');\naxios.Post('/items')",
+    ],
+)
+def test_axios_abstains_on_shadowed_require_or_non_lowercase_methods(source: str) -> None:
+    references, limitations = extract_client_references(source, Path("client.ts"))
+
+    assert references == ()
+    assert any("axios binding is not" in item for item in limitations)
+
+
+@pytest.mark.parametrize(
     "route, valid_path, invalid_paths",
     [
         ("/i/{value:int}", "/i/123", ("/i/\u0661", "/i/-1", "/i/1.0")),
@@ -317,7 +398,7 @@ def test_axios_requires_an_exact_import_or_require_binding() -> None:
         (
             "/v/{value:uuid}",
             "/v/123e4567-e89b-12d3-a456-426614174000",
-            ("/v/not-a-uuid", "/v/123e4567e89b12d3a456426614174000"),
+            ("/v/not-a-uuid", "/v/123e4567-e89b-12d3-a456-42661417400"),
         ),
         ("/s/{value:str}", "/s/text", ("/s/", "/s/a/b")),
         ("/files/{value:path}", "/files/a/b", ("/files",)),
@@ -333,6 +414,21 @@ def test_starlette_converters_match_only_exact_supported_semantics(
     matches, _ = join_client_references(references, [endpoint(EndpointMethod.GET, route)])
 
     assert [item.reference.normalized_path for item in matches] == [valid_path]
+
+
+def test_starlette_uuid_converter_accepts_each_optional_hyphen() -> None:
+    paths = (
+        "/v/123e4567e89b12d3a456426614174000",
+        "/v/123e4567-e89b12d3-a456426614174000",
+    )
+    references, _ = extract_client_references(
+        "\n".join(f"fetch('{path}')" for path in paths), Path("client.ts")
+    )
+    matches, _ = join_client_references(
+        references, [endpoint(EndpointMethod.GET, "/v/{value:uuid}")]
+    )
+
+    assert [item.reference.normalized_path for item in matches] == list(paths)
 
 
 def test_http_and_websocket_trailing_slashes_are_distinct() -> None:

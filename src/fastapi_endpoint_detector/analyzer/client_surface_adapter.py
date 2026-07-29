@@ -24,6 +24,7 @@ from fastapi_endpoint_detector.models.endpoint import (
 
 _CLIENT_SUFFIXES = frozenset({".js", ".jsx", ".ts", ".tsx", ".svelte"})
 _HTTP_METHODS = frozenset({"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"})
+_AXIOS_METHODS = frozenset(method.casefold() for method in _HTTP_METHODS)
 MAX_CLIENT_SOURCE_BYTES = 2 * 1024 * 1024
 _MAX_LIMITATIONS = 256
 _MAX_SVELTE_SCRIPT_REGIONS = 16
@@ -38,7 +39,7 @@ _EXACT_AXIOS_REQUIRE = re.compile(
     r"(?m)^[ \t]*const[ \t]+(?P<local>axios)[ \t]*=[ \t]*require\([ \t]*"
     r"(?P<quote>['\"])axios(?P=quote)[ \t]*\)[ \t]*;?[ \t]*(?://[^\n]*)?$"
 )
-_UUID_SEGMENT = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+_UUID_SEGMENT = r"[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}"
 
 
 @dataclass(frozen=True)
@@ -332,9 +333,20 @@ def _brace_depth(mask: list[bool], source: str, end: int) -> int:
     return depth
 
 
+def _require_binding_is_unambiguous(source: str, mask: list[bool]) -> bool:
+    """Require every CommonJS ``require`` mention to remain a direct global call."""
+    offsets = _code_identifier_offsets(source, mask, "require")
+    return bool(offsets) and all(
+        _is_direct_call_use(source, mask, start, start + len("require")) for start in offsets
+    )
+
+
 def _axios_binding(source: str, mask: list[bool]) -> tuple[bool, tuple[int, int] | None]:
     definitions: list[tuple[int, int]] = []
-    for pattern in (_EXACT_AXIOS_IMPORT, _EXACT_AXIOS_REQUIRE):
+    patterns = [_EXACT_AXIOS_IMPORT]
+    if _require_binding_is_unambiguous(source, mask):
+        patterns.append(_EXACT_AXIOS_REQUIRE)
+    for pattern in patterns:
         for match in pattern.finditer(source):
             start, end = match.span("local")
             if (
@@ -355,7 +367,7 @@ def _axios_binding(source: str, mask: list[bool]) -> tuple[bool, tuple[int, int]
         if dot >= len(source) or source[dot] != ".":
             return False, None
         method = _identifier_at(source, mask, dot + 1)
-        if method is None or method[0].upper() not in _HTTP_METHODS:
+        if method is None or method[0] not in _AXIOS_METHODS:
             return False, None
         opening = _skip_space(source, method[1], len(source))
         if opening >= len(source) or source[opening] != "(":
@@ -363,7 +375,7 @@ def _axios_binding(source: str, mask: list[bool]) -> tuple[bool, tuple[int, int]
     return True, definition
 
 
-def _method_option(  # noqa: PLR0911, PLR0912
+def _method_option(  # noqa: PLR0911, PLR0912, PLR0915
     source: str,
     mask: list[bool],
     start: int,
@@ -380,10 +392,25 @@ def _method_option(  # noqa: PLR0911, PLR0912
         return True, None
 
     methods: list[str] = []
-    seen_method = False
+    method_occurrences = 0
     brace_depth = 0
     while cursor < end:
         if not mask[cursor]:
+            if brace_depth == 1 and source[cursor] in {"'", '"', "`"}:
+                key = _literal_at(source, cursor, end)
+                if key is None:
+                    return True, None
+                after_key = _skip_space(source, key[1], end)
+                if key[0] == "method" and after_key < end and source[after_key] == ":":
+                    method_occurrences += 1
+                    value_start = _skip_space(source, after_key + 1, end)
+                    literal = _literal_at(source, value_start, end)
+                    if literal is not None:
+                        methods.append(literal[0].upper())
+                        cursor = literal[1]
+                        continue
+                cursor = key[1]
+                continue
             cursor += 1
             continue
         if source.startswith("...", cursor) and brace_depth == 1:
@@ -408,7 +435,7 @@ def _method_option(  # noqa: PLR0911, PLR0912
         cursor = after_name
         if brace_depth != 1 or name != "method":
             continue
-        seen_method = True
+        method_occurrences += 1
         value_start = _skip_space(source, after_name, end)
         if value_start >= end or source[value_start] != ":":
             continue
@@ -417,9 +444,9 @@ def _method_option(  # noqa: PLR0911, PLR0912
         if literal is not None:
             methods.append(literal[0].upper())
             cursor = literal[1]
-    if not seen_method:
+    if method_occurrences == 0:
         return False, None
-    if len(methods) == 1 and methods[0] in _HTTP_METHODS:
+    if method_occurrences == 1 and len(methods) == 1 and methods[0] in _HTTP_METHODS:
         return True, methods[0]
     return True, None
 
@@ -493,7 +520,12 @@ def extract_client_references(  # noqa: PLR0912, PLR0915
         return (), (f"{file_path}: client source exceeds {MAX_CLIENT_SOURCE_BYTES} bytes",)
 
     hosts = frozenset(host.casefold() for host in allowed_hosts)
-    if file_path.suffix.casefold() == ".svelte":
+    suffix = file_path.suffix.casefold()
+    if suffix in {".jsx", ".tsx"}:
+        return (), (
+            f"{file_path}:1: JSX/TSX source is unresolved to avoid scanning rendered text as code",
+        )
+    if suffix == ".svelte":
         mask, scripts_truncated = _svelte_code_mask(source)
     else:
         mask = _code_mask(source)
@@ -508,7 +540,7 @@ def extract_client_references(  # noqa: PLR0912, PLR0915
         if len(limitations) < _MAX_LIMITATIONS:
             limitations.append(f"{file_path}:{_line_number(line_starts, offset)}: {reason}")
 
-    if file_path.suffix.casefold() == ".svelte":
+    if suffix == ".svelte":
         limitation(
             0,
             "Svelte markup expressions are unresolved; only complete script regions are scanned",
@@ -570,7 +602,7 @@ def extract_client_references(  # noqa: PLR0912, PLR0915
                 cursor = after_name
                 continue
             method_token = _identifier_at(source, mask, dot + 1)
-            if method_token is None or method_token[0].upper() not in _HTTP_METHODS:
+            if method_token is None or method_token[0] not in _AXIOS_METHODS:
                 cursor = after_name
                 continue
             opening = _skip_space(source, method_token[1], len(source))
