@@ -2,6 +2,7 @@
 Unit tests for the Pydantic models.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -13,7 +14,16 @@ from fastapi_endpoint_detector.models.diff import (
     DiffHunk,
 )
 from fastapi_endpoint_detector.models.endpoint import (
+    DependencyCallableKind,
+    DependencyDeclarationKind,
+    DependencyDeclarationScope,
+    DependencyGraphLimitation,
+    DependencyGraphStatus,
+    DependencyResolutionStatus,
+    DependencySourceSpan,
     Endpoint,
+    EndpointDependencyGraph,
+    EndpointDependencyOccurrence,
     EndpointDiscoveryCondition,
     EndpointDiscoveryStatus,
     EndpointInventory,
@@ -77,6 +87,101 @@ class TestEndpoint:
 
         assert endpoint.path == "/api/users"
         assert EndpointMethod.GET in endpoint.methods
+
+    def test_dependency_graph_none_and_established_empty_are_distinct(self) -> None:
+        handler = HandlerInfo(
+            name="get_users",
+            module="routers.users",
+            file_path=Path("/app/routers/users.py"),
+            line_number=10,
+        )
+        legacy = Endpoint(path="/legacy", methods=[EndpointMethod.GET], handler=handler)
+        collected = legacy.model_copy(
+            update={
+                "dependency_graph": EndpointDependencyGraph(
+                    status=DependencyGraphStatus.ESTABLISHED
+                )
+            }
+        )
+
+        assert legacy.dependency_graph is None
+        assert collected.dependency_graph is not None
+        assert collected.dependency_graph.occurrences == ()
+        with pytest.raises(ValidationError):
+            collected.dependency_graph.status = DependencyGraphStatus.CONDITIONAL
+
+    def test_dependency_graph_uncertainty_requires_graph_scoped_limitation(self) -> None:
+        limitation = DependencyGraphLimitation(
+            code="shape_unavailable",
+            source_path=Path("/app/main.py"),
+            source_line=4,
+            reason="FastAPI dependant shape changed",
+        )
+        graph = EndpointDependencyGraph(
+            status=DependencyGraphStatus.CONDITIONAL,
+            limitations=(limitation,),
+        )
+
+        assert graph.limitations == (limitation,)
+        with pytest.raises(ValueError, match="conditional/unavailable require"):
+            EndpointDependencyGraph(status=DependencyGraphStatus.CONDITIONAL)
+
+    def test_dependency_graph_rejects_malformed_tree_and_strength_payloads(self) -> None:
+        def occurrence(path: tuple[int, ...], order: int) -> EndpointDependencyOccurrence:
+            return EndpointDependencyOccurrence(
+                index_path=path,
+                parent_path=path[:-1],
+                depth=len(path),
+                order=order,
+                declaration_scope=DependencyDeclarationScope.NESTED,
+                declaration_kind=DependencyDeclarationKind.DEPENDS_OR_SECURITY,
+                callable_kind=DependencyCallableKind.FUNCTION,
+                resolution_status=DependencyResolutionStatus.ESTABLISHED,
+                display_name="dependency",
+                module="main",
+                qualname="dependency",
+                source_span=DependencySourceSpan(
+                    file_path=Path("/app/main.py"), start_line=1, end_line=2
+                ),
+            )
+
+        malformed = [
+            (occurrence((-1,), 0), "bounded nonnegative"),
+            (occurrence((0, 0), 0), "parent must exist earlier"),
+            (occurrence((1,), 0), "indexes must be contiguous"),
+        ]
+        for item, message in malformed:
+            with pytest.raises(ValueError, match=message):
+                EndpointDependencyGraph(
+                    status=DependencyGraphStatus.ESTABLISHED,
+                    occurrences=(item,),
+                )
+
+        with pytest.raises(ValueError, match="depth-first preorder"):
+            EndpointDependencyGraph(
+                status=DependencyGraphStatus.ESTABLISHED,
+                occurrences=(
+                    occurrence((0,), 0),
+                    occurrence((1,), 1),
+                    occurrence((0, 0), 2),
+                ),
+            )
+
+        uncertain = occurrence((0,), 0).model_copy(
+            update={"resolution_status": DependencyResolutionStatus.CONDITIONAL}
+        )
+        with pytest.raises(ValueError, match="only established occurrences"):
+            EndpointDependencyGraph(
+                status=DependencyGraphStatus.ESTABLISHED,
+                occurrences=(uncertain,),
+            )
+
+        orphan_payload = {
+            "status": "established",
+            "occurrences": [occurrence((0, 0), 0).model_dump(mode="json")],
+        }
+        with pytest.raises(ValueError, match="parent must exist earlier"):
+            EndpointDependencyGraph.model_validate_json(json.dumps(orphan_payload))
 
     def test_endpoint_identifier(self) -> None:
         """Test the endpoint identifier property."""

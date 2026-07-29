@@ -14,7 +14,14 @@ from fastapi_endpoint_detector.analyzer.mypy_analyzer import (
 )
 from fastapi_endpoint_detector.config import AnalysisConfig, Config, ParserConfig
 from fastapi_endpoint_detector.models.diff import ChangeType, DiffFile
-from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, HandlerInfo
+from fastapi_endpoint_detector.models.endpoint import (
+    DependencyGraphStatus,
+    DependencySourceSpan,
+    Endpoint,
+    EndpointMethod,
+    HandlerInfo,
+)
+from fastapi_endpoint_detector.parser.fastapi_extractor import FastAPIExtractor
 
 
 def _endpoint(main: Path) -> Endpoint:
@@ -346,6 +353,221 @@ def test_annotated_dependency_alias_traces_provider_and_nested_calls(tmp_path: P
 
     assert deps.references_symbol_at_line("dependencies.py", 7) is not None
     assert deps.references_symbol_at_line("dependencies.py", 4) is not None
+
+
+def test_runtime_graph_seeds_app_dependency_and_nested_helper_by_qualified_source(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first.py"
+    first.write_text(
+        "def helper() -> int:\n    return 1\n\ndef auth() -> int:\n    return helper()\n"
+    )
+    second = tmp_path / "second.py"
+    second.write_text("def auth() -> int:\n    return 2\n")
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from fastapi import Depends, FastAPI\n"
+        "from first import auth\n\n"
+        "app = FastAPI(dependencies=[Depends(auth)])\n\n"
+        "@app.get('/runtime-seed')\n"
+        "def handler() -> int:\n"
+        "    return 1\n"
+    )
+    endpoint = FastAPIExtractor(main).extract_endpoints()[0]
+
+    deps = MypyAnalyzer(tmp_path, max_depth=3).analyze_endpoint(endpoint)
+
+    assert deps.references_symbol_at_line("first.py", 4) is not None
+    assert deps.references_symbol_at_line("first.py", 1) is not None
+    assert deps.references_symbol_at_line("second.py", 1) is None
+
+    assert endpoint.dependency_graph is not None
+    mismatched_occurrences = tuple(
+        occurrence.model_copy(
+            update={
+                "source_span": DependencySourceSpan(
+                    file_path=second,
+                    start_line=1,
+                    end_line=2,
+                )
+            }
+        )
+        for occurrence in endpoint.dependency_graph.occurrences
+    )
+    mismatched = endpoint.model_copy(
+        update={
+            "dependency_graph": endpoint.dependency_graph.model_copy(
+                update={"occurrences": mismatched_occurrences}
+            )
+        }
+    )
+    mismatched_deps = MypyAnalyzer(tmp_path, max_depth=3).analyze_endpoint(mismatched)
+    assert mismatched_deps.references_symbol_at_line("first.py", 4) is None
+    assert mismatched_deps.references_symbol_at_line("first.py", 1) is None
+
+    same_file_wrong_span = endpoint.model_copy(
+        update={
+            "dependency_graph": endpoint.dependency_graph.model_copy(
+                update={
+                    "occurrences": tuple(
+                        occurrence.model_copy(
+                            update={
+                                "source_span": DependencySourceSpan(
+                                    file_path=first,
+                                    start_line=1,
+                                    end_line=2,
+                                )
+                            }
+                        )
+                        for occurrence in endpoint.dependency_graph.occurrences
+                    )
+                }
+            )
+        }
+    )
+    same_file_deps = MypyAnalyzer(tmp_path, max_depth=3).analyze_endpoint(same_file_wrong_span)
+    assert same_file_deps.references_symbol_at_line("first.py", 4) is None
+
+
+def test_suppressing_wraps_decorators_are_physical_and_unseeded(tmp_path: Path) -> None:
+    (tmp_path / "decorators.py").write_text(
+        "from functools import wraps\n\n"
+        "def suppress(func):\n"
+        "    @wraps(func)\n"
+        "    def wrapper():\n"
+        "        return 0\n"
+        "    return wrapper\n"
+    )
+    external = tmp_path / "external.py"
+    external.write_text(
+        "from decorators import suppress\n"
+        "from fastapi import Depends, FastAPI\n\n"
+        "def helper() -> int:\n    return 1\n\n"
+        "@suppress\n"
+        "def auth() -> int:\n    return helper()\n\n"
+        "app = FastAPI(dependencies=[Depends(auth)])\n\n"
+        "@app.get('/')\n"
+        "def handler() -> int:\n    return 1\n"
+    )
+    endpoint = FastAPIExtractor(external).extract_endpoints()[0]
+    occurrence = endpoint.dependency_graph.occurrences[0]  # type: ignore[union-attr]
+    # Python 3.11+ exposes code.co_qualname and can attest the physical local
+    # wrapper. Python 3.10 cannot recover that qualified identity safely once
+    # functools.wraps copied the decorated function metadata, so it abstains.
+    assert (occurrence.module, occurrence.qualname) in {
+        ("decorators", "suppress.<locals>.wrapper"),
+        (None, None),
+    }
+    assert (occurrence.module, occurrence.qualname) != ("external", "auth")
+    assert occurrence.source_span is not None
+    assert occurrence.source_span.file_path == tmp_path / "decorators.py"
+    assert endpoint.dependency_graph is not None
+    assert endpoint.dependency_graph.status == DependencyGraphStatus.CONDITIONAL
+    deps = MypyAnalyzer(tmp_path, max_depth=3).analyze_endpoint(endpoint)
+    assert deps.references_symbol_at_line("external.py", 4) is None
+
+    same_file = tmp_path / "same_file.py"
+    same_file.write_text(
+        "from functools import wraps\n"
+        "from fastapi import Depends, FastAPI\n\n"
+        "def suppress(func):\n"
+        "    @wraps(func)\n"
+        "    def wrapper():\n"
+        "        return 0\n"
+        "    return wrapper\n\n"
+        "def helper() -> int:\n    return 1\n\n"
+        "@suppress\n"
+        "def auth() -> int:\n    return helper()\n\n"
+        "app = FastAPI(dependencies=[Depends(auth)])\n\n"
+        "@app.get('/')\n"
+        "def handler() -> int:\n    return 1\n"
+    )
+    same_endpoint = FastAPIExtractor(same_file).extract_endpoints()[0]
+    same_deps = MypyAnalyzer(tmp_path, max_depth=3).analyze_endpoint(same_endpoint)
+    assert same_deps.references_symbol_at_line("same_file.py", 10) is None
+    assert same_deps.references_symbol_at_line("same_file.py", 14) is None
+
+
+def test_runtime_seeds_exact_children_under_unseedable_parents(tmp_path: Path) -> None:
+    main = tmp_path / "parents.py"
+    main.write_text(
+        "from functools import partial\n"
+        "from fastapi import Depends, FastAPI\n\n"
+        "def partial_leaf() -> int:\n    return 1\n\n"
+        "def parent(value: int = Depends(partial_leaf)) -> int:\n    return value\n\n"
+        "def instance_leaf() -> int:\n    return 2\n\n"
+        "class Provider:\n"
+        "    def __call__(self, value: int = Depends(instance_leaf)) -> int:\n"
+        "        return value\n\n"
+        "provider = Provider()\n"
+        "app = FastAPI(dependencies=[Depends(partial(parent)), Depends(provider)])\n\n"
+        "@app.get('/')\n"
+        "def handler() -> int:\n    return 1\n"
+    )
+    endpoint = FastAPIExtractor(main).extract_endpoints()[0]
+    deps = MypyAnalyzer(tmp_path, max_depth=3).analyze_endpoint(endpoint)
+    assert deps.references_symbol_at_line("parents.py", 4) is not None
+    assert deps.references_symbol_at_line("parents.py", 10) is not None
+
+
+def test_bound_method_seed_preserves_exact_class_and_canonical_module(tmp_path: Path) -> None:
+    other = tmp_path / "other_methods.py"
+    other.write_text(
+        "def other_helper() -> int:\n    return 3\n\n"
+        "class First:\n"
+        "    def auth(self) -> int:\n"
+        "        return other_helper()\n"
+    )
+    main = tmp_path / "methods.py"
+    main.write_text(
+        "from fastapi import Depends, FastAPI\n\n"
+        "def first_helper() -> int:\n    return 1\n\n"
+        "def second_helper() -> int:\n    return 2\n\n"
+        "class First:\n"
+        "    def auth(self) -> int:\n"
+        "        return first_helper()\n\n"
+        "class Second:\n"
+        "    def auth(self) -> int:\n"
+        "        return second_helper()\n\n"
+        "first = First()\n"
+        "app = FastAPI(dependencies=[Depends(first.auth)])\n\n"
+        "@app.get('/')\n"
+        "def handler() -> int:\n    return 1\n"
+    )
+    endpoint = FastAPIExtractor(main).extract_endpoints()[0]
+    deps = MypyAnalyzer(tmp_path, max_depth=3).analyze_endpoint(endpoint)
+    assert deps.references_symbol_at_line("methods.py", 3) is not None
+    assert deps.references_symbol_at_line("methods.py", 10) is not None
+    assert deps.references_symbol_at_line("methods.py", 6) is None
+    assert deps.references_symbol_at_line("methods.py", 14) is None
+    assert deps.references_symbol_at_line("other_methods.py", 1) is None
+    assert deps.references_symbol_at_line("other_methods.py", 4) is None
+
+
+def test_dependency_graph_hash_prevents_stale_endpoint_cache_reuse(tmp_path: Path) -> None:
+    main = tmp_path / "cached.py"
+    main.write_text(
+        "from fastapi import Depends, FastAPI\n\n"
+        "def helper() -> int:\n    return 1\n\n"
+        "def auth() -> int:\n    return helper()\n\n"
+        "app = FastAPI(dependencies=[Depends(auth)])\n\n"
+        "@app.get('/')\n"
+        "def handler() -> int:\n    return 1\n"
+    )
+    endpoint = FastAPIExtractor(main).extract_endpoints()[0]
+    legacy = endpoint.model_copy(update={"dependency_graph": None})
+    cache_path = tmp_path / "analysis-cache.json"
+    first = MypyAnalyzer(tmp_path, max_depth=3)
+    first.set_cache_path(cache_path)
+    first.analyze_endpoints([legacy])
+
+    second = MypyAnalyzer(tmp_path, max_depth=3)
+    second.set_cache_path(cache_path)
+    results = second.analyze_endpoints([endpoint])
+    deps = results[second._endpoint_key(endpoint)]
+    assert deps.references_symbol_at_line("cached.py", 3) is not None
+    assert deps.references_symbol_at_line("cached.py", 6) is not None
+    assert second._endpoint_key(legacy) != second._endpoint_key(endpoint)
 
 
 def test_imported_global_is_referenced_at_definition(tmp_path: Path) -> None:

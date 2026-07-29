@@ -34,7 +34,11 @@ from fastapi_endpoint_detector.models.effect_contract import (
     ResolvedCallSite,
     ResourceIdentityEvidence,
 )
-from fastapi_endpoint_detector.models.endpoint import Endpoint
+from fastapi_endpoint_detector.models.endpoint import (
+    DependencyCallableKind,
+    DependencyResolutionStatus,
+    Endpoint,
+)
 from fastapi_endpoint_detector.models.surface_contract import CallbackRangeMode
 
 # Type alias for line-level progress callback (file_path, line_number, symbol_name)
@@ -372,7 +376,7 @@ class MypyAnalyzer:
     and extract precise file/line information for all references.
     """
 
-    CACHE_SCHEMA_VERSION = 16
+    CACHE_SCHEMA_VERSION = 18
     MAX_POINTS_TO_TARGETS = 8
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
@@ -957,10 +961,74 @@ class MypyAnalyzer:
         self._python_dependency_cache[cache_key] = set(found)
         return found
 
+    def _runtime_dependency_seeds(self, endpoint: Endpoint) -> dict[str, int]:
+        """Return only uniquely source-attested project-local runtime graph seeds."""
+        graph = endpoint.dependency_graph
+        if graph is None:
+            return {}
+        seeds: dict[str, int] = {}
+        canonical_root = self.source_root.resolve()
+        for occurrence in graph.occurrences:
+            if (
+                occurrence.resolution_status != DependencyResolutionStatus.ESTABLISHED
+                or occurrence.callable_kind
+                not in {DependencyCallableKind.FUNCTION, DependencyCallableKind.BOUND_METHOD}
+                or occurrence.module is None
+                or occurrence.qualname is None
+                or occurrence.source_span is None
+                or occurrence.display_name == "<lambda>"
+                or "<locals>" in occurrence.qualname
+            ):
+                continue
+            fullname = f"{occurrence.module}.{occurrence.qualname}"
+            resolved = self._resolve_fullname_to_file(fullname)
+            if resolved is None:
+                continue
+            definition_path, definition_module = resolved
+            if definition_module != occurrence.module and not definition_module.endswith(
+                f".{occurrence.module}"
+            ):
+                continue
+            try:
+                runtime_path = occurrence.source_span.file_path.resolve()
+                mypy_path = Path(definition_path).resolve()
+                runtime_path.relative_to(canonical_root)
+                mypy_path.relative_to(canonical_root)
+            except (OSError, ValueError):
+                continue
+            if runtime_path != mypy_path:
+                continue
+            dependency_tree = self._trees.get(definition_module)
+            if dependency_tree is None:
+                continue
+            symbol_name = occurrence.qualname.rsplit(".", maxsplit=1)[-1]
+            result = self._find_func_in_tree(
+                dependency_tree,
+                symbol_name,
+                qualified_name=occurrence.qualname,
+            )
+            if result is None or result[1] != occurrence.qualname:
+                continue
+            definition_node = getattr(result[0], "func", result[0])
+            definition_start, definition_end = self._get_func_lines(definition_node)
+            if (
+                occurrence.source_span.end_line < definition_start
+                or occurrence.source_span.start_line > definition_end
+            ):
+                continue
+            canonical_fullname = f"{definition_module}.{result[1]}"
+            previous = seeds.get(canonical_fullname)
+            if previous is None or occurrence.depth < previous:
+                seeds[canonical_fullname] = occurrence.depth
+        return seeds
+
     def _python_dependency_closure(self, endpoint: Endpoint) -> dict[str, int]:
-        """Expand explicit FastAPI dependency annotations to the configured depth."""
+        """Expand explicit and source-attested runtime dependencies to bounded depth."""
         depths: dict[str, int] = {}
-        queue = [(fullname, 1) for fullname in self._python_dependency_fullnames(endpoint)]
+        initial = dict.fromkeys(self._python_dependency_fullnames(endpoint), 1)
+        for fullname, depth in self._runtime_dependency_seeds(endpoint).items():
+            initial[fullname] = min(initial.get(fullname, depth), depth)
+        queue = list(initial.items())
         while queue:
             fullname, depth = queue.pop(0)
             previous = depths.get(fullname)
@@ -976,8 +1044,17 @@ class MypyAnalyzer:
             dependency_tree = self._trees.get(dependency_module)
             if dependency_tree is None:
                 continue
-            symbol_name = fullname.rsplit(".", maxsplit=1)[-1]
-            dependency_result = self._find_func_in_tree(dependency_tree, symbol_name)
+            qualified_name = (
+                fullname[len(dependency_module) + 1 :]
+                if fullname.startswith(f"{dependency_module}.")
+                else fullname.rsplit(".", maxsplit=1)[-1]
+            )
+            symbol_name = qualified_name.rsplit(".", maxsplit=1)[-1]
+            dependency_result = self._find_func_in_tree(
+                dependency_tree,
+                symbol_name,
+                qualified_name=qualified_name,
+            )
             if dependency_result is None:
                 continue
             node, _qualified = dependency_result
@@ -1002,8 +1079,20 @@ class MypyAnalyzer:
 
     @staticmethod
     def _endpoint_key(endpoint: Endpoint) -> str:
-        """Key dependency data by public route and physical handler identity."""
+        """Key dependency data by route, handler, and authoritative runtime graph."""
         handler = endpoint.handler
+        graph_payload = (
+            None
+            if endpoint.dependency_graph is None
+            else endpoint.dependency_graph.model_dump(mode="json")
+        )
+        graph_hash = hashlib.sha256(
+            json.dumps(
+                graph_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
         return json.dumps(
             [
                 endpoint.identifier,
@@ -1011,6 +1100,7 @@ class MypyAnalyzer:
                 handler.line_number,
                 handler.name,
                 handler.module,
+                graph_hash,
             ],
             separators=(",", ":"),
         )
