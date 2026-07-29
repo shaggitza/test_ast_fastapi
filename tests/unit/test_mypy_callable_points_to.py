@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.models.effect_contract import CallResolutionStatus
 from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, HandlerInfo
@@ -133,6 +135,120 @@ def test_finite_callable_branch_union_traces_all_and_only_possible_targets(
     assert dependencies.references_lines_low_only("callbacks.py", {1, 4})
 
 
+def test_finite_callable_union_with_unsupported_target_drops_all_targets(
+    tmp_path: Path,
+) -> None:
+    callbacks = tmp_path / "callbacks.py"
+    callbacks.write_text(
+        "def fixed() -> int:\n"
+        "    return 1\n\n"
+        "def variadic(*args: object) -> int:\n"
+        "    return len(args)\n",
+        encoding="utf-8",
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from callbacks import fixed, variadic\n\n"
+        "def handler(flag: bool) -> int:\n"
+        "    callback = fixed if flag else variadic\n"
+        "    return callback()\n",
+        encoding="utf-8",
+    )
+
+    dependencies = MypyAnalyzer(tmp_path, max_depth=4).analyze_endpoint(_endpoint(main, 3))
+
+    assert dependencies.references_symbol_at_line("callbacks.py", 1) is None
+    assert dependencies.references_symbol_at_line("callbacks.py", 4) is None
+
+
+def test_finite_callable_union_with_generator_target_drops_all_targets(
+    tmp_path: Path,
+) -> None:
+    callbacks = tmp_path / "callbacks.py"
+    callbacks.write_text(
+        "from collections.abc import Iterator\n\n"
+        "def fixed() -> Iterator[int]:\n"
+        "    return iter((1,))\n\n"
+        "def deferred() -> Iterator[int]:\n"
+        "    yield 1\n",
+        encoding="utf-8",
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from collections.abc import Iterator\n"
+        "from callbacks import deferred, fixed\n\n"
+        "def handler(flag: bool) -> Iterator[int]:\n"
+        "    callback = fixed if flag else deferred\n"
+        "    return callback()\n",
+        encoding="utf-8",
+    )
+
+    dependencies = MypyAnalyzer(tmp_path, max_depth=4).analyze_endpoint(_endpoint(main, 4))
+
+    assert dependencies.references_symbol_at_line("callbacks.py", 3) is None
+    assert dependencies.references_symbol_at_line("callbacks.py", 6) is None
+
+
+def test_finite_callable_union_reserves_all_edges_before_tracing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    callbacks = tmp_path / "callbacks.py"
+    callbacks.write_text(
+        "def first() -> int:\n"
+        "    return 1\n\n"
+        "def second() -> int:\n"
+        "    return 2\n",
+        encoding="utf-8",
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from callbacks import first, second\n\n"
+        "def handler(flag: bool) -> int:\n"
+        "    callback = first if flag else second\n"
+        "    return callback()\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(MypyAnalyzer, "MAX_POINTS_TO_EDGES", 1)
+
+    dependencies = MypyAnalyzer(tmp_path, max_depth=4).analyze_endpoint(_endpoint(main, 3))
+
+    assert dependencies.references_symbol_at_line("callbacks.py", 1) is None
+    assert dependencies.references_symbol_at_line("callbacks.py", 4) is None
+
+
+def test_finite_callable_union_reserves_all_binding_states_before_tracing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    callbacks = tmp_path / "callbacks.py"
+    callbacks.write_text(
+        "from collections.abc import Callable\n\n"
+        "def first(callback: Callable[[], int]) -> int:\n"
+        "    return callback()\n\n"
+        "def second(callback: Callable[[], int]) -> int:\n"
+        "    return callback()\n\n"
+        "def changed() -> int:\n"
+        "    return 1\n",
+        encoding="utf-8",
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from callbacks import changed, first, second\n\n"
+        "def handler(flag: bool) -> int:\n"
+        "    callback = first if flag else second\n"
+        "    return callback(changed)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(MypyAnalyzer, "MAX_FACTORY_STATES", 5)
+
+    dependencies = MypyAnalyzer(tmp_path, max_depth=5).analyze_endpoint(_endpoint(main, 3))
+
+    assert dependencies.references_symbol_at_line("callbacks.py", 3) is None
+    assert dependencies.references_symbol_at_line("callbacks.py", 6) is None
+    assert dependencies.references_symbol_at_line("callbacks.py", 9) is None
+
+
 def test_callable_target_cap_fails_closed_without_partial_fanout(tmp_path: Path) -> None:
     callbacks = tmp_path / "callbacks.py"
     callbacks.write_text(
@@ -164,6 +280,66 @@ def test_callable_target_cap_fails_closed_without_partial_fanout(tmp_path: Path)
         dependencies.references_symbol_at_line("callbacks.py", line) is None
         for line in range(1, 27, 3)
     )
+
+
+def test_bound_receiver_union_traces_each_concrete_override(tmp_path: Path) -> None:
+    services = tmp_path / "services.py"
+    services.write_text(
+        "class First:\n"
+        "    def changed(self) -> int:\n"
+        "        return 1\n\n"
+        "class Second:\n"
+        "    def changed(self) -> int:\n"
+        "        return 2\n",
+        encoding="utf-8",
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from services import First, Second\n\n"
+        "def handler(flag: bool) -> int:\n"
+        "    service = First() if flag else Second()\n"
+        "    callback = service.changed\n"
+        "    return callback()\n",
+        encoding="utf-8",
+    )
+
+    dependencies = MypyAnalyzer(tmp_path, max_depth=4).analyze_endpoint(_endpoint(main, 3))
+
+    assert dependencies.references_symbol_at_line("services.py", 2) is not None
+    assert dependencies.references_symbol_at_line("services.py", 6) is not None
+    assert dependencies.references_lines_low_only("services.py", {2, 6})
+
+
+def test_bound_receiver_union_with_unresolved_member_drops_all_targets(
+    tmp_path: Path,
+) -> None:
+    services = tmp_path / "services.py"
+    services.write_text(
+        "from collections.abc import Callable\n\n"
+        "def dynamic() -> int:\n"
+        "    return 0\n\n"
+        "class Supported:\n"
+        "    def changed(self) -> int:\n"
+        "        return 1\n\n"
+        "class Dynamic:\n"
+        "    def __getattr__(self, name: str) -> Callable[[], int]:\n"
+        "        return dynamic\n",
+        encoding="utf-8",
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from services import Dynamic, Supported\n\n"
+        "def handler(flag: bool) -> int:\n"
+        "    service = Supported() if flag else Dynamic()\n"
+        "    callback = service.changed\n"
+        "    return callback()\n",
+        encoding="utf-8",
+    )
+
+    dependencies = MypyAnalyzer(tmp_path, max_depth=4).analyze_endpoint(_endpoint(main, 3))
+
+    assert dependencies.references_symbol_at_line("services.py", 3) is None
+    assert dependencies.references_symbol_at_line("services.py", 7) is None
 
 
 def test_protocol_and_open_base_receivers_are_not_exact_dispatch(tmp_path: Path) -> None:

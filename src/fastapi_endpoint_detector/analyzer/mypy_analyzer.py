@@ -397,7 +397,7 @@ class MypyAnalyzer:
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
     MAX_POINTS_TO_EDGES = 4096
-    EXECUTION_SUMMARY_VERSION = 5
+    EXECUTION_SUMMARY_VERSION = 6
     GENERATOR_CONSUMERS: ClassVar[dict[str, tuple[int, str, bool | None]]] = {
         "starlette.responses.StreamingResponse": (0, "content", None),
     }
@@ -1849,6 +1849,7 @@ class MypyAnalyzer:
         from mypy.nodes import ConditionalExpr, MemberExpr, NameExpr
 
         if budget[0] >= self.MAX_FACTORY_STATES:
+            budget[0] = self.MAX_FACTORY_STATES + 1
             return None
         budget[0] += 1
         if isinstance(expression, NameExpr):
@@ -1887,14 +1888,9 @@ class MypyAnalyzer:
                 (),
                 budget,
             )
-            declaration = (
-                self._finite_member_declaration(receiver, expression.name)
-                if receiver is not None
-                else None
-            )
             return (
-                _FiniteCallable((_CallableTarget(*declaration, receiver=receiver),))
-                if declaration is not None
+                self._finite_member_callable(receiver, expression.name)
+                if receiver is not None
                 else None
             )
         if isinstance(expression, ConditionalExpr):
@@ -1966,6 +1962,8 @@ class MypyAnalyzer:
                 import_map,
                 budget,
             )
+            if budget[0] > self.MAX_FACTORY_STATES:
+                return None
             if value is not None:
                 environment[parameter] = value
         required = {
@@ -2065,6 +2063,7 @@ class MypyAnalyzer:
         from mypy.nodes import CallExpr, ConditionalExpr, MemberExpr, NameExpr
 
         if budget[0] >= self.MAX_FACTORY_STATES:
+            budget[0] = self.MAX_FACTORY_STATES + 1
             return None
         budget[0] += 1
         if isinstance(expression, NameExpr):
@@ -2334,6 +2333,50 @@ class MypyAnalyzer:
                 return None
             declarations.add(declaration)
         return next(iter(declarations)) if len(declarations) == 1 else None
+
+    def _finite_member_callable(
+        self,
+        receiver: _FinitePointsTo,
+        member_name: str,
+    ) -> _FiniteCallable | None:
+        """Bind one exact callable target for every finite concrete receiver."""
+        if not receiver.types or len(receiver.types) > self.MAX_POINTS_TO_TARGETS:
+            return None
+        targets: set[_CallableTarget] = set()
+        for fullname in receiver.types:
+            info = self._exact_finite_project_type_info(fullname)
+            member = info.get(member_name) if info is not None else None
+            declaration = self._callable_declaration(member.node) if member is not None else None
+            if declaration is None:
+                return None
+            target_fullname, invocation = declaration
+            singleton_receiver = _FinitePointsTo((fullname,), receiver.fields)
+            targets.add(
+                _CallableTarget(
+                    target_fullname,
+                    invocation,
+                    receiver=(
+                        singleton_receiver
+                        if invocation
+                        in {InvocationKind.INSTANCE_METHOD, InvocationKind.CLASS_METHOD}
+                        else None
+                    ),
+                )
+            )
+        if not targets or len(targets) > self.MAX_POINTS_TO_TARGETS:
+            return None
+        return _FiniteCallable(
+            tuple(
+                sorted(
+                    targets,
+                    key=lambda target: (
+                        target.fullname,
+                        target.invocation.value,
+                        repr(target.receiver),
+                    ),
+                )
+            )
+        )
 
     @staticmethod
     def _exact_call_argument(
@@ -3223,6 +3266,7 @@ class MypyAnalyzer:
             call_line: int,
             *,
             low_confidence_edge: bool = False,
+            reserved_low_confidence_edge: bool = False,
             target_receiver: _FinitePointsTo | None = None,
             target_environment: dict[str, _FinitePointsTo] | None = None,
             target_callable_environment: dict[str, _FiniteCallable] | None = None,
@@ -3232,7 +3276,7 @@ class MypyAnalyzer:
             target_depth = depth + 1
             if target_depth > self.max_depth:
                 return
-            if low_confidence_edge:
+            if low_confidence_edge and not reserved_low_confidence_edge:
                 if finite_edge_budget[0] >= self.MAX_POINTS_TO_EDGES:
                     return
                 finite_edge_budget[0] += 1
@@ -3605,21 +3649,37 @@ class MypyAnalyzer:
                     callable_budget,
                 )
                 if callable_value is not None:
+                    prepared_targets: list[
+                        tuple[_CallableTarget, dict[str, _FiniteCallable]]
+                    ] = []
                     for target in callable_value.targets:
-                        if self._generator_fullname_kind(target.fullname) is not None:
-                            continue
-                        target_callable_environment = callable_arguments_for(target, call)
-                        if target_callable_environment is None:
-                            continue
-                        deps.add_reference(current_file, call.line, target.fullname)
-                        resolve_and_trace(
-                            target.fullname,
-                            call.line,
-                            low_confidence_edge=True,
-                            target_receiver=target.receiver,
-                            target_callable_environment=target_callable_environment,
-                            edge_kind="finite_callable",
+                        target_callable_environment = (
+                            None
+                            if self._generator_fullname_kind(target.fullname) is not None
+                            else callable_arguments_for(target, call)
                         )
+                        if target_callable_environment is not None:
+                            prepared_targets.append((target, target_callable_environment))
+                    edge_count = len(prepared_targets)
+                    has_full_capacity = (
+                        edge_count == len(callable_value.targets)
+                        and edge_count > 0
+                        and edge_count
+                        <= self.MAX_POINTS_TO_EDGES - finite_edge_budget[0]
+                    )
+                    if has_full_capacity:
+                        finite_edge_budget[0] += edge_count
+                        for target, target_callable_environment in prepared_targets:
+                            deps.add_reference(current_file, call.line, target.fullname)
+                            resolve_and_trace(
+                                target.fullname,
+                                call.line,
+                                low_confidence_edge=True,
+                                reserved_low_confidence_edge=True,
+                                target_receiver=target.receiver,
+                                target_callable_environment=target_callable_environment,
+                                edge_kind="finite_callable",
+                            )
                         traced = True
 
             if (
