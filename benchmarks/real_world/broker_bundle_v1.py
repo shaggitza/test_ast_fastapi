@@ -4,20 +4,21 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
 import fcntl
 import hashlib
 import json
 import os
 import re
+import secrets
 import stat
-import tempfile
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, cast
 
-from benchmarks.real_world import ground_truth_packet_v1 as packet_v1
 from benchmarks.real_world import ground_truth_run_v1 as run_v1
 from benchmarks.real_world import ground_truth_submit_v1 as submit_v1
 from benchmarks.real_world.ground_truth_v2.schema import canonical_json
@@ -44,12 +45,6 @@ _RUNTIME_DOMAINS: Final = {
     ),
 }
 _FREEZE_PHASES: Final = ("prepared", "launch_claimed", "pre_escrow")
-_FALSE_AUTHORITY: Final = {
-    "review_launch": False,
-    "escrow": False,
-    "adjudication": False,
-    "canonical_import": False,
-}
 _ROOT_MARKER: Final = ".broker-new-lineage-root-v1.json"
 _ROOT_LOCK: Final = ".broker-new-lineage-root-v1.lock"
 _RECEIPT_NAME: Final = ".bundle-receipt-v1.json"
@@ -230,8 +225,23 @@ def _digest(value: object, label: str) -> str:
     return value
 
 
+def _false_authority_map() -> dict[str, bool]:
+    """Return a fresh, non-authorizing map; callers never share mutable authority state."""
+    return {
+        "review_launch": False,
+        "escrow": False,
+        "adjudication": False,
+        "canonical_import": False,
+    }
+
+
 def _false_authority(value: object, label: str) -> None:
-    if value != _FALSE_AUTHORITY:
+    if (
+        not isinstance(value, dict)
+        or frozenset(value)
+        != frozenset(("review_launch", "escrow", "adjudication", "canonical_import"))
+        or any(item is not False for item in value.values())
+    ):
         _fail(f"{label} authority map is invalid")
 
 
@@ -432,11 +442,122 @@ def _control_snapshot(
     }
 
 
-def _atomic(path: Path, value: dict[str, Any], *, mode: int = 0o400) -> None:
+def _reject_protected_destination(path: Path, label: str) -> None:
+    _normalized_absolute(path, label)
+    if any(part.casefold() in _PROTECTED_PARTS for part in path.parts):
+        _fail("protected historical destination is forbidden")
+
+
+def _fsync(descriptor: int, _label: str) -> None:
+    """Durability seam used by focused order-injection tests."""
+    os.fsync(descriptor)
+
+
+def _write_all(descriptor: int, raw: bytes) -> None:
+    view = memoryview(raw)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            _fail("staged file write failed")
+        view = view[written:]
+
+
+def _exists_at(parent_fd: int, name: str) -> bool:
     try:
-        submit_v1._atomic_no_clobber(path, canonical_json(value), mode=mode)
-    except submit_v1.SubmissionRejected as error:
-        raise BrokerBundleError(f"cannot publish {path.name}") from error
+        os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _rename_noreplace_at(parent_fd: int, source: str, target: str) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = libc.renameat2
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    if renameat2(parent_fd, os.fsencode(source), parent_fd, os.fsencode(target), 1) == 0:
+        return
+    error = ctypes.get_errno()
+    if error in {errno.EEXIST, errno.ENOTEMPTY}:
+        _fail("output already exists at atomic publication")
+    _fail(f"atomic no-replace publication failed: errno {error}")
+
+
+def _verify_live_root(root: Path, root_fd: int, expected: os.stat_result) -> None:
+    live_fd, live_status = _descriptor_walk(root)
+    try:
+        if (
+            _root_identity(live_status) != _root_identity(expected)
+            or _root_identity(os.fstat(root_fd)) != _root_identity(expected)
+        ):
+            _fail("lineage root changed during operation")
+    finally:
+        os.close(live_fd)
+
+
+def _atomic_at(
+    root: Path,
+    root_fd: int,
+    root_status: os.stat_result,
+    name: str,
+    value: dict[str, Any],
+    *,
+    mode: int = 0o400,
+) -> None:
+    temporary = f".{name}.{secrets.token_hex(12)}"
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=root_fd,
+        )
+        _write_all(descriptor, canonical_json(value))
+        os.fchmod(descriptor, mode)
+        _fsync(descriptor, f"file:{name}")
+        os.close(descriptor)
+        descriptor = None
+        _verify_live_root(root, root_fd, root_status)
+        _rename_noreplace_at(root_fd, temporary, name)
+        _fsync(root_fd, f"directory:{root}")
+    except OSError as error:
+        raise BrokerBundleError(f"cannot publish {name}: {error}") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        with suppress(FileNotFoundError):
+            os.unlink(temporary, dir_fd=root_fd)
+
+
+def _relative_bytes(root_fd: int, name: str, *, modes: set[int]) -> bytes:
+    descriptor = os.open(
+        name,
+        os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+        dir_fd=root_fd,
+    )
+    try:
+        status = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(status.st_mode)
+            or status.st_uid != os.getuid()
+            or status.st_nlink != 1
+            or stat.S_IMODE(status.st_mode) not in modes
+            or status.st_size > _MAX_FILE
+        ):
+            _fail(f"input is not an exact owned regular file: {name}")
+        raw = _read_fd(descriptor, status, name)
+        if _identity(os.stat(name, dir_fd=root_fd, follow_symlinks=False)) != _identity(status):
+            _fail(f"input changed while reading: {name}")
+        return raw
+    finally:
+        os.close(descriptor)
 
 
 def _root_marker_body(root: Path, status: os.stat_result, lineage_id: str) -> dict[str, Any]:
@@ -447,7 +568,7 @@ def _root_marker_body(root: Path, status: os.stat_result, lineage_id: str) -> di
         "root_path": str(root),
         "root_device": status.st_dev,
         "root_inode": status.st_ino,
-        "authorizations": _FALSE_AUTHORITY,
+        "authorizations": _false_authority_map(),
     }
 
 
@@ -481,56 +602,56 @@ def _validate_marker(value: dict[str, Any], raw: bytes, root: Path, status: os.s
         _fail("lineage root marker is invalid")
 
 
-def _inspect_root(root: Path) -> tuple[os.stat_result, dict[str, Any], bytes]:
-    if any(part.lower() in _PROTECTED_PARTS for part in root.parts):
-        _fail("protected historical destination is forbidden")
-    descriptor, status = _descriptor_walk(root)
-    os.close(descriptor)
+def _inspect_root_at(
+    root: Path, root_fd: int
+) -> tuple[os.stat_result, dict[str, Any], bytes]:
+    _reject_protected_destination(root, "lineage root")
+    status = os.fstat(root_fd)
     if (
         not stat.S_ISDIR(status.st_mode)
         or status.st_uid != os.getuid()
         or stat.S_IMODE(status.st_mode) != 0o700
     ):
         _fail("lineage root must be an owned mode-0700 directory")
-    marker, raw = _json_file(root / _ROOT_MARKER, modes={0o400})
+    raw = _relative_bytes(root_fd, _ROOT_MARKER, modes={0o400})
+    marker = _json_raw(raw, str(root / _ROOT_MARKER))
     _validate_marker(marker, raw, root, status)
     return status, marker, raw
 
 
 @contextmanager
-def _lineage_lock(  # noqa: PLR0912, PLR0915
+def _lineage_lock(
     root: Path, *, lineage_id: str | None = None, create: bool = False
-) -> Iterator[tuple[os.stat_result, dict[str, Any], bytes]]:
-    active = cast("set[str]", getattr(_ACTIVE_LOCKS, "roots", set()))
+) -> Iterator[tuple[int, os.stat_result, dict[str, Any], bytes]]:
+    active = cast(
+        "dict[str, tuple[int, os.stat_result, dict[str, Any], bytes]]",
+        getattr(_ACTIVE_LOCKS, "roots", {}),
+    )
     key = str(root)
     if key in active:
-        status, marker, raw = _inspect_root(root)
+        root_fd, status, marker, raw = active[key]
+        _verify_live_root(root, root_fd, status)
         if lineage_id is not None and marker["lineage_id"] != _lineage(lineage_id):
             _fail("lineage root belongs to another lineage")
-        yield status, marker, raw
+        yield root_fd, status, marker, raw
         return
-    if any(part.lower() in _PROTECTED_PARTS for part in root.parts):
-        _fail("protected historical destination is forbidden")
-    descriptor, initial = _descriptor_walk(root)
-    os.close(descriptor)
+    _reject_protected_destination(root, "lineage root")
+    root_fd, initial = _descriptor_walk(root)
     if (
         not stat.S_ISDIR(initial.st_mode)
         or initial.st_uid != os.getuid()
         or stat.S_IMODE(initial.st_mode) != 0o700
     ):
+        os.close(root_fd)
         _fail("lineage root must be an owned mode-0700 directory")
     lock_fd: int | None = None
     try:
-        parent_fd, _ = _descriptor_walk(root)
-        try:
-            lock_fd = os.open(
-                _ROOT_LOCK,
-                os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,
-                0o600,
-                dir_fd=parent_fd,
-            )
-        finally:
-            os.close(parent_fd)
+        lock_fd = os.open(
+            _ROOT_LOCK,
+            os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=root_fd,
+        )
         lock_status = os.fstat(lock_fd)
         if (
             not stat.S_ISREG(lock_status.st_mode)
@@ -540,36 +661,35 @@ def _lineage_lock(  # noqa: PLR0912, PLR0915
         ):
             _fail("lineage root lock identity is invalid")
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        active.add(key)
-        _ACTIVE_LOCKS.roots = active
-        marker_path = root / _ROOT_MARKER
-        if create and not marker_path.exists():
+        if create and not _exists_at(root_fd, _ROOT_MARKER):
             if lineage_id is None:
                 _fail("lineage_id is required")
             body = _root_marker_body(root, initial, _lineage(lineage_id))
-            _atomic(marker_path, {**body, "marker_sha256": _sha(canonical_json(body))})
-            parent_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            try:
-                os.fsync(parent_fd)
-            finally:
-                os.close(parent_fd)
-        status, marker, raw = _inspect_root(root)
+            _atomic_at(
+                root,
+                root_fd,
+                initial,
+                _ROOT_MARKER,
+                {**body, "marker_sha256": _sha(canonical_json(body))},
+            )
+        status, marker, raw = _inspect_root_at(root, root_fd)
         if _root_identity(status) != _root_identity(initial):
             _fail("lineage root identity changed")
         if lineage_id is not None and marker["lineage_id"] != _lineage(lineage_id):
             _fail("lineage root belongs to another lineage")
-        yield status, marker, raw
-        current, _, _ = _inspect_root(root)
-        if _root_identity(current) != _root_identity(status):
-            _fail("lineage root changed during operation")
+        active[key] = (root_fd, status, marker, raw)
+        _ACTIVE_LOCKS.roots = active
+        yield root_fd, status, marker, raw
+        _verify_live_root(root, root_fd, status)
     except OSError as error:
         raise BrokerBundleError(f"cannot lock lineage root: {error}") from error
     finally:
+        active.pop(key, None)
+        _ACTIVE_LOCKS.roots = active
         if lock_fd is not None:
-            active.discard(key)
-            _ACTIVE_LOCKS.roots = active
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             os.close(lock_fd)
+        os.close(root_fd)
 
 
 def _entry(path: str, raw: bytes, category: str) -> dict[str, Any]:
@@ -591,24 +711,81 @@ def _root_binding(root: Path, status: os.stat_result, marker_raw: bytes) -> dict
     }
 
 
-def _cleanup_tree(path: Path) -> None:
-    if not path.exists():
+def _open_directory_at(parent_fd: int, name: str) -> int:
+    return os.open(
+        name,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        dir_fd=parent_fd,
+    )
+
+
+def _remove_tree_at(parent_fd: int, name: str) -> None:
+    try:
+        descriptor = _open_directory_at(parent_fd, name)
+    except FileNotFoundError:
         return
-    path.chmod(0o700)
-    items = list(path.rglob("*"))
-    for item in items:
-        if item.is_dir():
-            item.chmod(0o700)
-    for item in sorted(items, reverse=True):
-        if item.is_dir():
-            item.rmdir()
-        else:
-            item.chmod(0o600)
-            item.unlink()
-    path.rmdir()
+    try:
+        os.fchmod(descriptor, 0o700)
+        for child in os.listdir(descriptor):  # noqa: PTH208 -- descriptor-relative traversal
+            status = os.stat(child, dir_fd=descriptor, follow_symlinks=False)
+            if stat.S_ISDIR(status.st_mode):
+                _remove_tree_at(descriptor, child)
+            else:
+                os.chmod(child, 0o600, dir_fd=descriptor, follow_symlinks=False)
+                os.unlink(child, dir_fd=descriptor)
+    finally:
+        os.close(descriptor)
+    os.rmdir(name, dir_fd=parent_fd)
 
 
-def materialize_bundle(  # noqa: PLR0915
+def _stage_file(
+    staging_fd: int,
+    relative: str,
+    raw: bytes,
+    directories: set[str],
+) -> None:
+    parts = PurePosixPath(relative).parts
+    current = os.dup(staging_fd)
+    prefix: list[str] = []
+    try:
+        for part in parts[:-1]:
+            prefix.append(part)
+            directory = "/".join(prefix)
+            with suppress(FileExistsError):
+                os.mkdir(part, mode=0o700, dir_fd=current)
+            following = _open_directory_at(current, part)
+            os.close(current)
+            current = following
+            directories.add(directory)
+        descriptor = os.open(
+            parts[-1],
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=current,
+        )
+        try:
+            _write_all(descriptor, raw)
+            os.fchmod(descriptor, 0o400)
+            _fsync(descriptor, f"staged-file:{relative}")
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(current)
+
+
+def _sync_staged_directories(staging_fd: int, directories: set[str]) -> None:
+    for relative in sorted(directories, key=lambda item: (-item.count("/"), item)):
+        descriptor, _ = _open_relative(staging_fd, relative, directory=True)
+        try:
+            os.fchmod(descriptor, 0o500)
+            _fsync(descriptor, f"staged-directory:{relative}")
+        finally:
+            os.close(descriptor)
+    os.fchmod(staging_fd, 0o500)
+    _fsync(staging_fd, "staged-directory:.")
+
+
+def materialize_bundle(
     runtime_attestation: Path,
     binding: Path,
     production_profile: Path,
@@ -619,18 +796,19 @@ def materialize_bundle(  # noqa: PLR0915
     lineage_id: str,
 ) -> dict[str, Any]:
     """Atomically publish one enclosing object containing bundle and receipt."""
-    _normalized_absolute(output, "output path")
+    _reject_protected_destination(output, "output path")
     if output.name in {"", ".", ".."}:
         _fail("output path is invalid")
     lineage_id = _lineage(lineage_id)
     if not sources or len(sources) > _MAX_FILES:
         _fail("bundle source cardinality is invalid")
     with _lineage_lock(output.parent, lineage_id=lineage_id, create=True) as (
+        root_fd,
         root_status,
         _marker,
         marker_raw,
     ):
-        if output.exists() or output.is_symlink():
+        if _exists_at(root_fd, output.name):
             _fail(f"output already exists: {output}")
         snapshot = _control_snapshot(
             runtime_attestation, binding, production_profile, launch_profile
@@ -669,24 +847,20 @@ def materialize_bundle(  # noqa: PLR0915
             "launch_profile_sha256": snapshot["launch_profile_sha256"],
             "files": rows,
             "inventory_sha256": _sha(canonical_json(rows)),
-            "authorizations": _FALSE_AUTHORITY,
+            "authorizations": _false_authority_map(),
         }
         bundle_id = _sha(_BUNDLE_DOMAIN + canonical_json(manifest_body))
         manifest = {**manifest_body, "bundle_id": bundle_id}
-        staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output.parent))
-        staging.chmod(0o700)
+        staging_name = f".{output.name}.{secrets.token_hex(12)}"
+        os.mkdir(staging_name, mode=0o700, dir_fd=root_fd)
+        staging_fd = _open_directory_at(root_fd, staging_name)
+        directories: set[str] = set()
         try:
-            for directory in (staging / "control", staging / "broker"):
-                directory.mkdir(mode=0o700)
             for relative, raw in (*control_rows, *source_rows):
-                target = staging / relative
-                target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                target.write_bytes(raw)
-                target.chmod(0o400)
+                _stage_file(staging_fd, relative, raw, directories)
             manifest_raw = canonical_json(manifest)
-            (staging / "manifest.json").write_bytes(manifest_raw)
-            (staging / "manifest.json").chmod(0o400)
-            stage_status = staging.stat(follow_symlinks=False)
+            _stage_file(staging_fd, "manifest.json", manifest_raw, directories)
+            stage_status = os.fstat(staging_fd)
             receipt_body = {
                 "schema_version": 1,
                 "protocol": _RECEIPT_PROTOCOL,
@@ -703,25 +877,19 @@ def materialize_bundle(  # noqa: PLR0915
                 "binding_sha256": snapshot["binding_sha256"],
                 "production_profile_sha256": snapshot["production_profile_sha256"],
                 "launch_profile_sha256": snapshot["launch_profile_sha256"],
-                "authorizations": _FALSE_AUTHORITY,
+                "authorizations": _false_authority_map(),
             }
             receipt = {**receipt_body, "receipt_sha256": _sha(canonical_json(receipt_body))}
-            (staging / _RECEIPT_NAME).write_bytes(canonical_json(receipt))
-            (staging / _RECEIPT_NAME).chmod(0o400)
-            for directory in sorted(
-                (item for item in staging.rglob("*") if item.is_dir()), reverse=True
-            ):
-                directory.chmod(0o500)
-            staging.chmod(0o500)
-            packet_v1._rename_noreplace(staging, output)
-            parent_fd = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            try:
-                os.fsync(parent_fd)
-            finally:
-                os.close(parent_fd)
+            _stage_file(staging_fd, _RECEIPT_NAME, canonical_json(receipt), directories)
+            _sync_staged_directories(staging_fd, directories)
+            _verify_live_root(output.parent, root_fd, root_status)
+            _rename_noreplace_at(root_fd, staging_name, output.name)
+            _fsync(root_fd, f"directory:{output.parent}")
         except BaseException:
-            _cleanup_tree(staging)
+            _remove_tree_at(root_fd, staging_name)
             raise
+        finally:
+            os.close(staging_fd)
     receipt_path = output / _RECEIPT_NAME
     return verify_bundle(receipt_path)
 
@@ -917,7 +1085,7 @@ def verify_bundle(receipt_path: Path) -> dict[str, Any]:  # noqa: PLR0912, PLR09
     if receipt_path.name != _RECEIPT_NAME:
         _fail("receipt must be inside its atomic bundle object")
     root = receipt_path.parent.parent
-    with _lineage_lock(root) as (root_status, marker, marker_raw):
+    with _lineage_lock(root) as (_root_fd, root_status, marker, marker_raw):
         receipt_fd, receipt_status = _open_file(receipt_path, modes={0o400})
         try:
             receipt_raw = _read_fd(receipt_fd, receipt_status, "bundle receipt")
@@ -1170,19 +1338,22 @@ def prepare_freeze(
     clock: datetime | None = None,
 ) -> dict[str, Any]:
     """Publish a false-authority freeze and durably claim its prepared phase."""
-    _normalized_absolute(output, "freeze output")
+    _reject_protected_destination(output, "freeze output")
+    for phase_name in _FREEZE_PHASES:
+        _reject_protected_destination(_phase_path(output, phase_name), "freeze phase output")
     receipt = verify_bundle(receipt_path)
     root = Path(cast("str", receipt["lineage_root_path"]))
     if output.parent != root:
         _fail("freeze must be published in the bound lineage root")
     with _lineage_lock(root, lineage_id=cast("str", receipt["lineage_id"])) as (
+        root_fd,
         root_status,
         _marker,
         marker_raw,
     ):
-        if output.exists() or output.is_symlink():
+        if _exists_at(root_fd, output.name):
             _fail(f"output already exists: {output}")
-        if any(_phase_path(output, phase).exists() for phase in _FREEZE_PHASES):
+        if any(_exists_at(root_fd, _phase_path(output, phase).name) for phase in _FREEZE_PHASES):
             _fail("orphan freeze phase state exists")
         snapshot = _control_snapshot(
             runtime_attestation, binding, production_profile, launch_profile
@@ -1213,10 +1384,10 @@ def prepare_freeze(
             "bundle_inventory_sha256": receipt["inventory_sha256"],
             "phase_scope": list(_FREEZE_PHASES),
             "prepared_at": now.isoformat().replace("+00:00", "Z"),
-            "authorizations": _FALSE_AUTHORITY,
+            "authorizations": _false_authority_map(),
         }
         freeze = {**body, "freeze_sha256": _sha(canonical_json(body))}
-        _atomic(output, freeze)
+        _atomic_at(root, root_fd, root_status, output.name, freeze)
     verify_freeze(
         output, runtime_attestation, binding, production_profile, launch_profile, phase="prepared"
     )
@@ -1235,9 +1406,11 @@ def verify_freeze(
     """Validate and consume exactly the next durable, no-clobber freeze phase."""
     if phase not in _FREEZE_PHASES:
         _fail("freeze phase is invalid")
-    _normalized_absolute(freeze_path, "freeze path")
+    _reject_protected_destination(freeze_path, "freeze path")
+    phase_path = _phase_path(freeze_path, phase)
+    _reject_protected_destination(phase_path, "freeze phase path")
     root = freeze_path.parent
-    with _lineage_lock(root) as (root_status, marker, marker_raw):
+    with _lineage_lock(root) as (root_fd, root_status, marker, marker_raw):
         freeze, freeze_raw = _json_file(freeze_path, modes={0o400})
         _freeze_document(freeze, freeze_raw)
         if (
@@ -1292,16 +1465,15 @@ def verify_freeze(
             "phase": phase,
             "ordinal": ordinal,
             "previous_phase_sha256": previous,
-            "authorizations": _FALSE_AUTHORITY,
+            "authorizations": _false_authority_map(),
         }
-        _atomic(
-            _phase_path(freeze_path, phase), {**body, "phase_sha256": _sha(canonical_json(body))}
+        _atomic_at(
+            root,
+            root_fd,
+            root_status,
+            phase_path.name,
+            {**body, "phase_sha256": _sha(canonical_json(body))},
         )
-        parent_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            os.fsync(parent_fd)
-        finally:
-            os.close(parent_fd)
         return freeze
 
 

@@ -327,10 +327,14 @@ def test_atomic_bundle_and_monotonic_freeze_grant_no_authority(tmp_path: Path) -
                 phase="pre_escrow",
             )
         assert receipt_path.parent == output
-        assert receipt["authorizations"] == bundle._FALSE_AUTHORITY
+        assert all(value is False for value in receipt["authorizations"].values())
         assert all(
-            json.loads(bundle._phase_path(freeze_path, phase).read_bytes())["authorizations"]
-            == bundle._FALSE_AUTHORITY
+            all(
+                value is False
+                for value in json.loads(
+                    bundle._phase_path(freeze_path, phase).read_bytes()
+                )["authorizations"].values()
+            )
             for phase in bundle._FREEZE_PHASES
         )
         assert not (tmp_path / "escrow").exists()
@@ -436,7 +440,7 @@ def test_publication_crash_window_exposes_neither_bundle_nor_receipt(
     def crash(*_args: object) -> None:
         raise OSError("simulated crash")
 
-    monkeypatch.setattr(bundle.packet_v1, "_rename_noreplace", crash)
+    monkeypatch.setattr(bundle, "_rename_noreplace_at", crash)
     with pytest.raises(bundle.BrokerBundleError, match="simulated crash"):
         bundle.materialize_bundle(
             inputs["runtime"],
@@ -573,10 +577,193 @@ def test_ancestor_alias_and_protected_destination_are_rejected(tmp_path: Path) -
         )
 
 
+def test_active_lineage_root_replacement_exposes_nothing_at_live_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs = _inputs(tmp_path)
+    output = tmp_path / "bundle"
+    displaced = tmp_path.with_name(f"{tmp_path.name}-displaced")
+    original = bundle._sync_staged_directories
+    replaced = False
+
+    def replace_after_staging(staging_fd: int, directories: set[str]) -> None:
+        nonlocal replaced
+        original(staging_fd, directories)
+        tmp_path.rename(displaced)
+        tmp_path.mkdir(mode=0o700)
+        replaced = True
+
+    monkeypatch.setattr(bundle, "_sync_staged_directories", replace_after_staging)
+    try:
+        with pytest.raises(bundle.BrokerBundleError, match="lineage root changed"):
+            bundle.materialize_bundle(
+                inputs["runtime"],
+                inputs["binding"],
+                inputs["profile"],
+                inputs["launch"],
+                {"runner.py": inputs["broker"]},
+                output,
+                lineage_id="campaign-v8",
+            )
+        assert replaced
+        assert not (tmp_path / "bundle").exists()
+        assert not (tmp_path / bundle._ROOT_MARKER).exists()
+        assert not (tmp_path / bundle._RECEIPT_NAME).exists()
+        assert not (displaced / "bundle").exists()
+        assert not list(displaced.glob(".bundle.*"))
+    finally:
+        _unlock(displaced)
+        tmp_path.rmdir()
+        displaced.rename(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "protected_name", ["production_v1", "ledger-v7", "ledger_v7", "escrow", "reviews", "labels"]
+)
+def test_protected_final_bundle_component_is_rejected_before_root_state(
+    tmp_path: Path, protected_name: str
+) -> None:
+    inputs = _inputs(tmp_path)
+    with pytest.raises(bundle.BrokerBundleError, match="protected historical"):
+        bundle.materialize_bundle(
+            inputs["runtime"],
+            inputs["binding"],
+            inputs["profile"],
+            inputs["launch"],
+            {"runner.py": inputs["broker"]},
+            tmp_path / protected_name,
+            lineage_id="campaign-v8",
+        )
+    assert not (tmp_path / protected_name).exists()
+    assert not (tmp_path / bundle._ROOT_MARKER).exists()
+    assert not (tmp_path / bundle._ROOT_LOCK).exists()
+
+
+def test_protected_freeze_basename_and_derived_phases_are_never_created(tmp_path: Path) -> None:
+    inputs, output, receipt = _materialize(tmp_path)
+    freeze = tmp_path / "escrow"
+    try:
+        with pytest.raises(bundle.BrokerBundleError, match="protected historical"):
+            bundle.prepare_freeze(
+                receipt,
+                inputs["runtime"],
+                inputs["binding"],
+                inputs["profile"],
+                inputs["launch"],
+                freeze,
+            )
+        assert not freeze.exists()
+        assert not any(
+            bundle._phase_path(freeze, phase).exists() for phase in bundle._FREEZE_PHASES
+        )
+    finally:
+        _unlock(output)
+
+
+def test_authority_rebinding_and_mutation_cannot_authorize_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attacker_map = bundle._false_authority_map()
+    attacker_map["escrow"] = True
+    monkeypatch.setattr(bundle, "_FALSE_AUTHORITY", attacker_map, raising=False)
+    inputs, output, receipt, freeze = _prepare(tmp_path)
+    try:
+        bundle.verify_freeze(
+            freeze,
+            inputs["runtime"],
+            inputs["binding"],
+            inputs["profile"],
+            inputs["launch"],
+            phase="launch_claimed",
+        )
+        artifacts = [
+            tmp_path / bundle._ROOT_MARKER,
+            output / "manifest.json",
+            receipt,
+            freeze,
+            *(bundle._phase_path(freeze, phase) for phase in ("prepared", "launch_claimed")),
+        ]
+        for path in artifacts:
+            authority = json.loads(path.read_bytes())["authorizations"]
+            assert set(authority) == {
+                "review_launch",
+                "escrow",
+                "adjudication",
+                "canonical_import",
+            }
+            assert all(value is False for value in authority.values())
+        fresh = bundle._false_authority_map()
+        assert fresh is not attacker_map
+        assert all(value is False for value in fresh.values())
+        for invalid in (
+            {**fresh, "escrow": True},
+            {**fresh, "escrow": 0},
+            {key: False for key in fresh if key != "escrow"},
+        ):
+            with pytest.raises(bundle.BrokerBundleError, match="authority map is invalid"):
+                bundle._false_authority(invalid, "probe")
+    finally:
+        _unlock(output)
+
+
+def test_staged_bundle_and_atomic_documents_follow_durability_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+    original_sync = bundle._fsync
+    original_rename = bundle._rename_noreplace_at
+
+    def record_sync(descriptor: int, label: str) -> None:
+        events.append(label)
+        original_sync(descriptor, label)
+
+    def record_rename(parent_fd: int, source: str, target: str) -> None:
+        events.append(f"rename:{target}")
+        original_rename(parent_fd, source, target)
+
+    monkeypatch.setattr(bundle, "_fsync", record_sync)
+    monkeypatch.setattr(bundle, "_rename_noreplace_at", record_rename)
+    _inputs_used, output, _receipt, freeze = _prepare(tmp_path)
+    try:
+        bundle_start = next(
+            index for index, event in enumerate(events) if event.startswith("staged-file:")
+        )
+        bundle_rename = events.index("rename:bundle")
+        publication = events[bundle_start : bundle_rename + 2]
+        file_positions = [
+            index for index, event in enumerate(publication) if event.startswith("staged-file:")
+        ]
+        directory_positions = [
+            index
+            for index, event in enumerate(publication)
+            if event.startswith("staged-directory:")
+        ]
+        assert len(file_positions) == 8
+        assert file_positions and directory_positions
+        assert max(file_positions) < min(directory_positions)
+        assert max(directory_positions) < publication.index("rename:bundle")
+        assert publication[-1] == f"directory:{tmp_path}"
+        assert publication.index("staged-directory:broker/pkg") < publication.index(
+            "staged-directory:broker"
+        )
+        for name in (
+            bundle._ROOT_MARKER,
+            freeze.name,
+            bundle._phase_path(freeze, "prepared").name,
+        ):
+            rename_index = events.index(f"rename:{name}")
+            assert events[rename_index - 1] == f"file:{name}"
+            assert events[rename_index + 1] == f"directory:{tmp_path}"
+    finally:
+        _unlock(output)
+
+
 def test_orphan_freeze_state_fails_closed_without_clobber(tmp_path: Path) -> None:
     inputs, output, receipt = _materialize(tmp_path)
     freeze = tmp_path / "prepare-freeze.json"
-    bundle._atomic(bundle._phase_path(freeze, "prepared"), {"orphan": True})
+    orphan = bundle._phase_path(freeze, "prepared")
+    orphan.write_bytes(canonical_json({"orphan": True}))
+    orphan.chmod(0o400)
     try:
         with pytest.raises(bundle.BrokerBundleError, match="orphan freeze phase"):
             bundle.prepare_freeze(
