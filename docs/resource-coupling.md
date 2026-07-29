@@ -11,7 +11,7 @@ Configure an effect source and a separate namespace-qualified coupling document:
 
 ```yaml
 analysis:
-  effect_preset: redis-v1
+  effect_preset: filesystem-v1
   resource_coupling: .resource-coupling.yaml
 ```
 
@@ -19,10 +19,10 @@ analysis:
 schema_version: 1
 mode: report_only
 groups:
-  - id: orders-cache
-    resource_space: production-orders-redis-db0
-    producer_contract_ids: [redis-delete, redis-set]
-    consumer_contract_ids: [redis-get]
+  - id: generated-files
+    resource_space: application-data-directory
+    producer_contract_ids: [pathlib-write-text]
+    consumer_contract_ids: [pathlib-read-text]
 limits:
   max_endpoint_links_per_resource: 32
   max_edges: 1000

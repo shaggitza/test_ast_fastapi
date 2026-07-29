@@ -24,11 +24,10 @@ if TYPE_CHECKING:
 
 _EXPECTED_PRESET_HASHES = {
     "filesystem-v1": "sha256:8e09b0a197a523b701bd18ce042b72bf8e8d5cc5c0741d18e7c1c61937712c40",
-    "http-clients-v1": "sha256:2a3e5f3e85d31a6ca4cae5f917d31081ab126ee82fd677d39dccd1040deb4f99",
-    "message-bus-v1": "sha256:e5b5dca859e0513f331392b4573e85336376277d64a835c4e9a85ea7459b8c2c",
+    "http-clients-v1": "sha256:c1f6bcb56e06525f20e2eac5a68c9bc5812c281c054209fb6feb3c7df63cc890",
+    "message-bus-v1": "sha256:05c2d745da13fc39984d20b6cd260221eeac40ba7049a492cef6979488ac81a1",
     "mongodb-v1": "sha256:1541057fa430ee8ced171b379aa9dab1f4007156fd9b8632784c0ccdfd2f2032",
     "object-storage-v1": "sha256:e105008879ac0fdccec5dd03b0eb9a031749539713b617de089d8d82a796683c",
-    "redis-v1": "sha256:20161274ce0b8d2f2e18933c159aac66a272078dd3944c3980d857e65d85fa86",
     "sqlalchemy-v1": "sha256:132982ba61f04626df531dc80c71ce5d21c12ec583a932d21c220486785c8d04",
 }
 
@@ -105,13 +104,7 @@ _EXPECTED_CONTRACT_IDS = {
         "requests-session-post",
         "requests-session-put",
     },
-    "message-bus-v1": {
-        "aiokafka-send-and-wait",
-        "confluent-kafka-produce",
-        "kafka-python-send",
-        "kombu-producer-publish",
-        "pika-basic-publish",
-    },
+    "message-bus-v1": {"confluent-kafka-produce"},
     "mongodb-v1": {
         "motor-delete-many",
         "motor-delete-one",
@@ -139,19 +132,6 @@ _EXPECTED_CONTRACT_IDS = {
         "typed-s3-head-object",
         "typed-s3-list-objects-v2",
         "typed-s3-put-object",
-    },
-    "redis-v1": {
-        "redis-delete",
-        "redis-expire",
-        "redis-get",
-        "redis-hdel",
-        "redis-hget",
-        "redis-hset",
-        "redis-incrby",
-        "redis-lpush",
-        "redis-publish",
-        "redis-rpush",
-        "redis-set",
     },
     "sqlalchemy-v1": {
         "sqlalchemy-async-session-add",
@@ -186,7 +166,6 @@ def test_bundled_effect_presets_are_strict_versioned_snapshots(name: str) -> Non
         "http-clients-v1": "3.0.0",
         "mongodb-v1": "2.0.0",
         "object-storage-v1": "2.0.0",
-        "redis-v1": "2.0.0",
         "sqlalchemy-v1": "3.0.0",
     }.get(name, "1.0.0")
     expected_revision = {
@@ -194,7 +173,6 @@ def test_bundled_effect_presets_are_strict_versioned_snapshots(name: str) -> Non
         "http-clients-v1": "3",
         "mongodb-v1": "2",
         "object-storage-v1": "2",
-        "redis-v1": "2",
         "sqlalchemy-v1": "3",
     }.get(name, "1")
     assert loaded.document.preset.version == expected_version
@@ -237,7 +215,7 @@ def test_http_client_preset_declares_exact_methods_for_each_supported_client() -
     expected = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
     assert methods_by_class == {
         "aiohttp.client.ClientSession": expected,
-        "httpx": expected,
+        "httpx._api": expected,
         "httpx._client.AsyncClient": expected,
         "httpx._client.Client": expected,
         "requests.api": expected,
@@ -257,15 +235,38 @@ def test_dynamic_or_generic_surfaces_are_not_preset_contracts() -> None:
             "builtins.open",  # mode-dependent until a predicate schema exists
             "requests.api.request",  # method argument is not modeled by schema v3
             "httpx.request",
+            "httpx.get",  # public spelling resolves to the declaration owner below the facade
             "aiohttp.client.request",
             "boto3.client",
+            "redis.commands.core.BasicKeyCommands.get",  # shared sync/async owner
             "redis.Redis.get",
             "motor.motor_asyncio.AsyncIOMotorCollection.find",
             "pymongo.collection.Collection.update_one",
             "pymongo.synchronous.collection.Collection.find",
             "redis.commands.core.BasicKeyCommands.incr",
+            "aiokafka.producer.producer.AIOKafkaProducer.send_and_wait",
+            "kafka.producer.kafka.KafkaProducer.send",
+            "pika.channel.Channel.basic_publish",
+            "kombu.messaging.Producer.publish",
         }
     )
+
+
+def test_receiver_http_clients_abstain_from_incomplete_url_identity() -> None:
+    loaded = load_effect_preset("http-clients-v1")
+    contracts = {contract.id: contract for contract in loaded.document.contracts}
+
+    receiver_ids = {
+        contract_id
+        for contract_id in contracts
+        if contract_id.startswith(("httpx-client-", "httpx-async-client-", "aiohttp-session-"))
+    }
+    assert receiver_ids
+    assert all(contracts[item].resource.kind == SelectorKind.NONE for item in receiver_ids)
+    assert contracts["httpx-get"].resource.kind == SelectorKind.ARGUMENT
+    assert contracts["requests-api-get"].resource.kind == SelectorKind.ARGUMENT
+    assert contracts["requests-api-get"].package is not None
+    assert contracts["requests-api-get"].package.version == ">=2.34,<3"
 
 
 def test_object_storage_abstains_from_false_key_only_object_identity() -> None:
@@ -300,14 +301,23 @@ def test_async_presets_declare_only_supported_effect_timing() -> None:
     assert all(contract.behavior.async_mode == AsyncMode.ASYNC for contract in motor.values())
     assert all(contract.behavior.timing == EffectTiming.AWAIT for contract in motor.values())
 
+    http = load_effect_preset("http-clients-v1")
+    aiohttp = [
+        contract for contract in http.document.contracts if contract.id.startswith("aiohttp-")
+    ]
+    assert aiohttp
+    assert all(contract.behavior.async_mode == AsyncMode.ASYNC for contract in aiohttp)
+    assert all(contract.behavior.timing == EffectTiming.AWAIT for contract in aiohttp)
+
     messages = load_effect_preset("message-bus-v1")
-    aiokafka = next(
-        contract
-        for contract in messages.document.contracts
-        if contract.id == "aiokafka-send-and-wait"
-    )
-    assert aiokafka.behavior.async_mode == AsyncMode.ASYNC
-    assert aiokafka.behavior.timing == EffectTiming.AWAIT
+    assert len(messages.document.contracts) == 1
+    confluent = messages.document.contracts[0]
+    assert confluent.id == "confluent-kafka-produce"
+    assert confluent.symbol == "confluent_kafka.cimpl.Producer.produce"
+    assert confluent.behavior.async_mode == AsyncMode.SYNC
+    assert confluent.behavior.timing == EffectTiming.STAGED
+    assert confluent.package is not None
+    assert confluent.package.version == ">=2.13,<3"
 
 
 def test_sqlalchemy_preset_declares_exact_transaction_and_savepoint_scopes() -> None:
@@ -354,7 +364,7 @@ def test_effect_preset_and_user_document_are_mutually_exclusive(tmp_path: Path) 
     with pytest.raises(ValueError, match="mutually exclusive"):
         AnalysisConfig(
             effect_contracts=tmp_path / "effects.yaml",
-            effect_preset="redis-v1",
+            effect_preset="filesystem-v1",
         )
 
 

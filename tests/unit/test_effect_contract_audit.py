@@ -138,13 +138,6 @@ def _audit(
     ("preset", "symbol", "invocation", "contract_id", "negative_symbol"),
     [
         (
-            "redis-v1",
-            "redis.commands.core.HashCommands.hset",
-            InvocationKind.INSTANCE_METHOD,
-            "redis-hset",
-            "project.Cache.hset",
-        ),
-        (
             "mongodb-v1",
             "motor.core.AgnosticCollection.update_one",
             InvocationKind.INSTANCE_METHOD,
@@ -174,10 +167,10 @@ def _audit(
         ),
         (
             "message-bus-v1",
-            "aiokafka.producer.producer.AIOKafkaProducer.send_and_wait",
+            "confluent_kafka.cimpl.Producer.produce",
             InvocationKind.INSTANCE_METHOD,
-            "aiokafka-send-and-wait",
-            "project.Producer.send_and_wait",
+            "confluent-kafka-produce",
+            "confluent_kafka.Producer.produce",
         ),
     ],
 )

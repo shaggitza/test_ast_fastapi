@@ -33,7 +33,6 @@ BUNDLED_EFFECT_PRESETS = {
     "object-storage-v1": (
         Path(__file__).parent.parent / "presets" / "effects_object_storage_v1.yaml"
     ),
-    "redis-v1": Path(__file__).parent.parent / "presets" / "effects_redis_v1.yaml",
     "sqlalchemy-v1": Path(__file__).parent.parent / "presets" / "effects_sqlalchemy_v1.yaml",
 }
 
