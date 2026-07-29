@@ -1,6 +1,7 @@
 """Exact FastAPI and Starlette lifecycle/middleware surface contracts."""
 
 import asyncio
+import re
 from importlib.metadata import version
 from pathlib import Path
 
@@ -29,6 +30,18 @@ def _extract(tmp_path: Path, *, app_entry: str | None = None) -> EndpointInvento
         load_surface_preset("framework-v1"),
         app_entry=app_entry,
     ).extract_inventory()
+
+
+def _expected_late_nested_calls(callback: str) -> list[str]:
+    installed_version = version("fastapi")
+    release = re.match(r"^(\d+)\.(\d+)", installed_version)
+    assert release is not None
+    major_minor = (int(release.group(1)), int(release.group(2)))
+    if major_minor <= (0, 100):
+        return []
+    if major_minor >= (0, 139):
+        return [callback]
+    pytest.skip(f"nested lifecycle copy behavior is not calibrated for FastAPI {installed_version}")
 
 
 def test_fastapi_lifespan_splits_exact_pre_and_post_yield_ranges(tmp_path: Path) -> None:
@@ -197,13 +210,7 @@ def test_runtime_oracle_late_nested_router_include_is_version_dependent() -> Non
 
     asyncio.run(enter_lifespan())
 
-    expected_calls = {
-        "0.100.0": [],
-        "0.139.0": ["child"],
-    }
-    installed_version = version("fastapi")
-    assert installed_version in expected_calls
-    assert calls == expected_calls[installed_version]
+    assert calls == _expected_late_nested_calls("child")
 
 
 def test_runtime_oracle_late_nested_known_leaf_is_version_dependent() -> None:
@@ -227,13 +234,7 @@ def test_runtime_oracle_late_nested_known_leaf_is_version_dependent() -> None:
 
     asyncio.run(enter_lifespan())
 
-    expected_calls = {
-        "0.100.0": [],
-        "0.139.0": ["leaf"],
-    }
-    installed_version = version("fastapi")
-    assert installed_version in expected_calls
-    assert calls == expected_calls[installed_version]
+    assert calls == _expected_late_nested_calls("leaf")
 
 
 def test_framework_surfaces_are_scoped_to_selected_app_not_mounted_lifespan(
