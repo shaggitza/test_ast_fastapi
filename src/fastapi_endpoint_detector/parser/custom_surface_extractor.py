@@ -1068,6 +1068,28 @@ class CustomSurfaceExtractor:
             pending.extend(sorted(included_by.get(ancestor, ()), reverse=True))
         return tuple(ancestors)
 
+    @staticmethod
+    def _framework_copied_lifecycle_conditions(
+        endpoints: tuple[Endpoint, ...],
+    ) -> tuple[EndpointDiscoveryCondition, ...]:
+        """Describe lifecycle copies whose ancestor execution varies by runtime."""
+        conditions: list[EndpointDiscoveryCondition] = []
+        for endpoint in endpoints:
+            surface = endpoint.surface
+            if surface is None or surface.surface_kind != "framework.lifecycle":
+                continue
+            conditions.append(
+                EndpointDiscoveryCondition(
+                    source_path=surface.registration_file,
+                    source_line=surface.registration_line,
+                    reason=(
+                        "router lifecycle copied into an already-included router has "
+                        "runtime-version-dependent execution"
+                    ),
+                )
+            )
+        return tuple(conditions)
+
     def _filter_framework_surfaces(self) -> None:
         """Apply selected-app identity and APIRouter copy-at-include semantics."""
         if not self._scope_framework_surfaces:
@@ -1097,8 +1119,16 @@ class CustomSurfaceExtractor:
                     for ancestor in self._framework_include_ancestors(event.parent, included_by):
                         conditions.setdefault(ancestor, []).append(event.condition)
                 continue
-            live.setdefault(event.parent, []).extend(live.get(event.child, ()))
-            conditions.setdefault(event.parent, []).extend(conditions.get(event.child, ()))
+            copied_endpoints = tuple(live.get(event.child, ()))
+            copied_conditions = tuple(conditions.get(event.child, ()))
+            live.setdefault(event.parent, []).extend(copied_endpoints)
+            conditions.setdefault(event.parent, []).extend(copied_conditions)
+            copied_lifecycle_conditions = self._framework_copied_lifecycle_conditions(
+                copied_endpoints
+            )
+            for ancestor in self._framework_include_ancestors(event.parent, included_by):
+                conditions.setdefault(ancestor, []).extend(copied_conditions)
+                conditions[ancestor].extend(copied_lifecycle_conditions)
             included_by.setdefault(event.child, set()).add(event.parent)
 
         accepted = {

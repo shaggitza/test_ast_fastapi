@@ -1,6 +1,7 @@
 """Exact FastAPI and Starlette lifecycle/middleware surface contracts."""
 
 import asyncio
+from importlib.metadata import version
 from pathlib import Path
 
 import pytest
@@ -177,6 +178,64 @@ def test_runtime_oracle_mount_excludes_child_lifespan_and_router_include_copies(
     assert "copied" in calls
 
 
+def test_runtime_oracle_late_nested_router_include_is_version_dependent() -> None:
+    calls: list[str] = []
+    child = APIRouter()
+    parent = APIRouter()
+    app = FastAPI()
+    app.include_router(parent)
+
+    @child.on_event("startup")
+    async def child_startup() -> None:
+        calls.append("child")
+
+    parent.include_router(child)
+
+    async def enter_lifespan() -> None:
+        async with app.router.lifespan_context(app):
+            pass
+
+    asyncio.run(enter_lifespan())
+
+    expected_calls = {
+        "0.100.0": [],
+        "0.139.0": ["child"],
+    }
+    installed_version = version("fastapi")
+    assert installed_version in expected_calls
+    assert calls == expected_calls[installed_version]
+
+
+def test_runtime_oracle_late_nested_known_leaf_is_version_dependent() -> None:
+    calls: list[str] = []
+    leaf = APIRouter()
+
+    @leaf.on_event("startup")
+    async def leaf_startup() -> None:
+        calls.append("leaf")
+
+    child = APIRouter()
+    parent = APIRouter()
+    app = FastAPI()
+    app.include_router(parent)
+    child.include_router(leaf)
+    parent.include_router(child)
+
+    async def enter_lifespan() -> None:
+        async with app.router.lifespan_context(app):
+            pass
+
+    asyncio.run(enter_lifespan())
+
+    expected_calls = {
+        "0.100.0": [],
+        "0.139.0": ["leaf"],
+    }
+    installed_version = version("fastapi")
+    assert installed_version in expected_calls
+    assert calls == expected_calls[installed_version]
+
+
 def test_framework_surfaces_are_scoped_to_selected_app_not_mounted_lifespan(
     tmp_path: Path,
 ) -> None:
@@ -244,6 +303,28 @@ def test_nested_router_lifecycle_late_registration_reaches_selected_app(
     assert any("runtime-version-dependent" in item.reason for item in inventory.limitations)
 
 
+def test_late_nested_router_include_reaches_every_existing_ancestor(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import APIRouter, FastAPI\n\n"
+        "child = APIRouter()\n"
+        "parent = APIRouter()\n"
+        "root = APIRouter()\n"
+        "root.include_router(parent)\n"
+        "app = FastAPI()\n"
+        "app.include_router(root)\n\n"
+        "@child.on_event('startup')\n"
+        "async def version_dependent(): pass\n"
+        "parent.include_router(child)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.endpoints == []
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any("runtime-version-dependent" in item.reason for item in inventory.limitations)
+
+
 def test_rebound_default_app_does_not_leave_stale_framework_surface(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text(
         "from fastapi import FastAPI\n\n"
@@ -301,6 +382,25 @@ def test_nested_dynamic_include_reaches_already_included_selected_app(tmp_path: 
         "app = FastAPI()\n"
         "app.include_router(parent)\n"
         "parent.include_router(build_router())\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.endpoints == []
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any("inventory is incomplete" in item.reason for item in inventory.limitations)
+
+
+def test_late_resolved_nested_include_propagates_child_limitation(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import APIRouter, FastAPI\n\n"
+        "child = APIRouter()\n"
+        "parent = APIRouter()\n"
+        "app = FastAPI()\n"
+        "app.include_router(parent)\n"
+        "child.include_router(build_router())\n"
+        "parent.include_router(child)\n",
         encoding="utf-8",
     )
 
