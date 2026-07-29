@@ -198,12 +198,31 @@ class VMExecutor:
             raise VMExecutorError("Docker image build timed out") from exc
         self._resolved_image = None
 
+    @staticmethod
+    def _validated_image_inspection(stdout: str) -> dict[str, Any]:
+        try:
+            payload = json.loads(stdout)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise VMExecutorError("image inspect did not return image configuration") from exc
+        if not isinstance(payload, list) or len(payload) != 1 or not isinstance(payload[0], dict):
+            raise VMExecutorError("image inspect did not return exactly one image configuration")
+        inspected = payload[0]
+        config = inspected.get("Config")
+        if not isinstance(config, dict) or "Volumes" not in config:
+            raise VMExecutorError("image inspect did not return Config.Volumes")
+        volumes = config["Volumes"]
+        if volumes is not None and not isinstance(volumes, dict):
+            raise VMExecutorError("image inspect returned malformed Config.Volumes")
+        if volumes:
+            raise VMExecutorError("runtime image must not declare writable volumes")
+        return inspected
+
     def _resolve_image(self) -> str:
         if self._resolved_image is not None:
             return self._resolved_image
         try:
             result = subprocess.run(
-                ["docker", "image", "inspect", "--format", "{{json .RepoDigests}}", self.image],
+                ["docker", "image", "inspect", self.image],
                 capture_output=True,
                 check=False,
                 text=True,
@@ -213,15 +232,15 @@ class VMExecutor:
             raise VMExecutorError("Docker or the configured image is unavailable") from exc
         if result.returncode != 0:
             raise VMExecutorError(f"Docker image {self.image!r} is unavailable")
+        inspected = self._validated_image_inspection(result.stdout)
         if "@sha256:" in self.image:
             resolved = self.image
         else:
-            try:
-                digests = json.loads(result.stdout)
-            except (json.JSONDecodeError, TypeError) as exc:
-                raise VMExecutorError("image inspect did not return repository digests") from exc
+            digests = inspected.get("RepoDigests")
+            if not isinstance(digests, list):
+                raise VMExecutorError("image inspect did not return repository digests")
             candidates = sorted(
-                item for item in digests or [] if isinstance(item, str) and "@sha256:" in item
+                item for item in digests if isinstance(item, str) and "@sha256:" in item
             )
             if len(candidates) != 1:
                 raise VMExecutorError("runtime image must resolve to exactly one repository digest")
@@ -287,8 +306,16 @@ class VMExecutor:
     @classmethod
     def _validate_directory_entries(cls, root: Path, label: str) -> None:
         inspected = 0
+
+        def raise_walk_error(exc: OSError) -> None:
+            raise VMExecutorError(f"cannot inspect {label} directory {root}: {exc}") from exc
+
         try:
-            for directory, names, files in os.walk(root, followlinks=False):
+            for directory, names, files in os.walk(
+                root,
+                followlinks=False,
+                onerror=raise_walk_error,
+            ):
                 parent = Path(directory)
                 for name in (*names, *files):
                     inspected += 1
@@ -302,6 +329,12 @@ class VMExecutor:
         except OSError as exc:
             raise VMExecutorError(f"cannot inspect {label} directory {root}: {exc}") from exc
 
+    @staticmethod
+    def _validated_mount_field(value: str, label: str) -> str:
+        if any(character in value for character in ",\r\n"):
+            raise VMExecutorError(f"{label} contains a Docker mount grammar metacharacter")
+        return value
+
     @classmethod
     def _validated_mount_source(
         cls,
@@ -312,6 +345,7 @@ class VMExecutor:
     ) -> Path:
         # Resolving here would follow the symlink components rejected below.
         absolute = Path(os.path.abspath(path.expanduser()))  # noqa: PTH100
+        cls._validated_mount_field(str(absolute), f"{label} path")
         current = Path(absolute.anchor)
         try:
             for component in absolute.parts[1:]:
@@ -348,7 +382,14 @@ class VMExecutor:
         return resolved
 
     def _mount(self, source: Path, target: str) -> str:
-        return f"type=bind,src={source},dst={target},readonly,bind-nonrecursive"
+        source_field = self._validated_mount_field(str(source), "mount source")
+        target_field = self._validated_mount_field(target, "mount target")
+        # Policy v1 requires Docker 29 / API 1.52, where bind-nonrecursive was
+        # removed in favor of this bind-recursive=disabled spelling.
+        return (
+            f"type=bind,src={source_field},dst={target_field},"
+            "readonly,bind-recursive=disabled"
+        )
 
     def _container_command(
         self,
@@ -440,11 +481,41 @@ class VMExecutor:
         command.extend(cli)
         return command
 
+    @staticmethod
+    def _absence_query_failure(container_filter: str, label: str) -> str | None:
+        command = [
+            "docker",
+            "container",
+            "ls",
+            "--all",
+            "--no-trunc",
+            "--quiet",
+            "--filter",
+            container_filter,
+        ]
+        try:
+            remaining = subprocess.run(
+                command,
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
+            return f"cleanup verification query for {label}: {exc}"
+        if remaining.returncode != 0:
+            detail = remaining.stderr.strip() or f"exit status {remaining.returncode}"
+            return f"cleanup verification query for {label} failed: {detail}"
+        if remaining.stdout.strip():
+            return f"container still exists after forced removal ({label})"
+        return None
+
     @classmethod
     def _cleanup_container(cls, cidfile: Path, name: str) -> None:
         if cls._CONTAINER_NAME_PATTERN.fullmatch(name) is None or name.startswith("-"):
             raise VMExecutorError("sandbox container name is invalid")
         target = name
+        cid: str | None = None
         failures: list[str] = []
         try:
             if cidfile.is_file():
@@ -454,6 +525,7 @@ class VMExecutor:
                         failures.append("CID file contained an invalid container identifier")
                     else:
                         target = candidate
+                        cid = candidate
         except (OSError, UnicodeError) as exc:
             failures.append(f"cannot read CID file: {exc}")
         for command in (
@@ -469,18 +541,14 @@ class VMExecutor:
                 )
             except (OSError, subprocess.TimeoutExpired) as exc:
                 failures.append(f"{' '.join(command[:2])}: {exc}")
-        try:
-            remaining = subprocess.run(
-                ["docker", "container", "inspect", target],
-                capture_output=True,
-                check=False,
-                timeout=10,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            failures.append(f"cleanup verification: {exc}")
-        else:
-            if remaining.returncode == 0:
-                failures.append("container still exists after forced removal")
+        exact_name_filter = name.replace(".", "[.]")
+        verification_filters = [("generated name", f"name=^/{exact_name_filter}$")]
+        if cid is not None:
+            verification_filters.append(("CID", f"id={cid}"))
+        for label, container_filter in verification_filters:
+            query_failure = cls._absence_query_failure(container_filter, label)
+            if query_failure is not None:
+                failures.append(query_failure)
         if failures:
             raise VMExecutorError("sandbox cleanup failed: " + "; ".join(failures))
 

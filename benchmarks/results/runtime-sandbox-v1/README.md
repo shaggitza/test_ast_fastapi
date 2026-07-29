@@ -16,12 +16,14 @@ The command builder and lifecycle tests attest:
   rejected);
 - no image pull, network, host environment inheritance, IPC sharing, retained
   logs, devices, privileges, capabilities, sockets, or writable checkout/root;
-- non-root execution, read-only non-recursive mounts, deny-by-default seccomp,
-  and bounded noexec tmpfs;
+- non-root execution, Docker 29+ `bind-recursive=disabled` read-only mounts,
+  image `Config.Volumes` rejection, deny-by-default seccomp, and bounded noexec
+  tmpfs;
 - memory/swap, CPU, PID, nofile, nproc, fsize, core, timeout, and output limits;
-- unique name/CID cleanup with post-removal inspection;
+- unique name/CID cleanup with successful bounded absence queries;
 - deterministic content-addressed policy provenance and rejection of mutated
-  policy bytes, broad/symlinked mounts, special files, and malformed CID values;
+  policy bytes, mount-grammar metacharacters, broad/symlinked/unreadable mounts,
+  special files, and malformed CID values;
 - malformed output and endpoint schema rejection.
 
 The wheel build contains
