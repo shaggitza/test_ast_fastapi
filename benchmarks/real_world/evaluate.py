@@ -900,6 +900,14 @@ def read_prediction_manifest(  # noqa: PLR0912, PLR0915 - bindings stay explicit
             cold_state = manifest_pr["phase_telemetry"]["cold_build"]
             prediction_timing = prediction["timing_seconds"]
             cold_timing_name = "cold_no_cache_analyzer_wall"
+            expected_timing_names = (
+                set() if prediction["status"] == "unresolved" else {cold_timing_name}
+            )
+            if set(prediction_timing) != expected_timing_names:
+                raise BenchmarkSchemaError(
+                    "prediction manifest PR prediction timing keys do not match "
+                    f"status for {record_key}"
+                )
             if cold_state["status"] == "measured":
                 if prediction_timing.get(cold_timing_name) != cold_state["seconds"]:
                     raise BenchmarkSchemaError(

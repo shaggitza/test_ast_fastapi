@@ -1147,6 +1147,86 @@ def test_schema_v4_manifest_rejects_prediction_cold_timing_disagreement(tmp_path
         )
 
 
+def test_schema_v4_manifest_rejects_completed_prediction_extra_timing(tmp_path: Path) -> None:
+    predictions, manifest_path, prediction, manifest = _schema_v4_manifest_fixture(tmp_path)
+    prediction["timing_seconds"]["warm_no_change"] = 123.0
+    _write_schema_v4_manifest_fixture(predictions, manifest_path, prediction, manifest)
+
+    with pytest.raises(ValueError, match="prediction timing keys do not match status"):
+        evaluate.read_prediction_manifest(
+            manifest_path, read_primary_artifact(predictions, "prediction")
+        )
+
+
+def test_schema_v4_manifest_rejects_unresolved_prediction_extra_timing(tmp_path: Path) -> None:
+    predictions, manifest_path, prediction, manifest = _schema_v4_manifest_fixture(tmp_path)
+    prediction["status"] = "unresolved"
+    prediction["unresolved"] = ["fabricated failure"]
+    prediction["timing_seconds"] = {"one_file_incremental_update": 456.0}
+    manifest_pr = manifest["prs"][0]
+    manifest_pr["status"] = "unresolved"
+    manifest_pr["reason"] = "fabricated failure"
+    for phase, timing_name in evaluate._MEASURED_PHASE_TIMING_FIELDS.items():
+        manifest_pr["timing_seconds"].pop(timing_name)
+        manifest_pr["phase_telemetry"][phase] = {
+            "status": "not_measured",
+            "reason": "run_unresolved",
+        }
+        manifest["timing"]["phases"][phase] = {
+            "status": "not_measured",
+            "reason": "no_measured_pr_samples",
+        }
+    _write_schema_v4_manifest_fixture(predictions, manifest_path, prediction, manifest)
+
+    with pytest.raises(ValueError, match="prediction timing keys do not match status"):
+        evaluate.read_prediction_manifest(
+            manifest_path, read_primary_artifact(predictions, "prediction")
+        )
+
+
+def test_schema_v4_evaluator_outputs_only_attested_prediction_timing(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    predictions, manifest_path, prediction, manifest = _schema_v4_manifest_fixture(tmp_path)
+    truth = tmp_path / "truth.jsonl"
+    truth.write_text(
+        json.dumps(
+            {
+                "repository": "owner/repo",
+                "pr": 1,
+                "status": "adjudicated",
+                "affected_entrypoints": [],
+            }
+        )
+        + "\n"
+    )
+    _write_schema_v4_manifest_fixture(predictions, manifest_path, prediction, manifest)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "evaluate.py",
+            "--ground-truth",
+            str(truth),
+            "--predictions",
+            str(predictions),
+            "--prediction-manifest",
+            str(manifest_path),
+        ],
+    )
+
+    evaluate.main()
+
+    result = json.loads(capsys.readouterr().out)
+    performance = result["performance"]
+    assert set(performance["protocols"]) == {"cold_no_cache_analyzer_wall"}
+    assert performance["protocols"]["cold_no_cache_analyzer_wall"]["samples"] == 1
+    phases = performance["manifest_phase_telemetry"]["phases"]
+    for phase in ("warm_no_change", "one_file_incremental_update"):
+        assert phases[phase]["status"] == "not_measured"
+        assert phase not in performance["protocols"]
+
+
 def test_schema_v4_manifest_rejects_unresolved_cold_without_preparation(
     tmp_path: Path,
 ) -> None:
