@@ -22,6 +22,66 @@ Third-party source and patches are fetched on demand and are not vendored.
 Re-running the collector creates a new corpus; it must not silently replace the
 frozen benchmark used in a published comparison.
 
+## Three workflows (do not use the production path for data generation)
+
+There are three different goals here, and they do not need the same process:
+
+1. **Exploratory training data**: collect PR metadata, obtain diffs, and join
+   whatever completed labels we have. This is the cheap path. It does not run
+   the production custody/ledger workflow, does not write canonical truth, and
+   may use one reviewed label as an explicitly exploratory training target.
+2. **Analyzer comparison**: run `run_current.py` and score with `evaluate.py`
+   against a deliberately frozen and fully adjudicated corpus.
+3. **Publication-grade ground truth**: use the pilot/production protocols only
+   when we need an auditable public claim, not just examples for fine-tuning.
+
+The first path is intentionally small and ordinary. Its secure no-clobber
+publisher currently requires Linux/POSIX filesystem semantics (directory file
+descriptors, no-follow opens, and hard links), matching current CI coverage.
+Use real, non-symlinked working and cache directories for these exploratory
+scripts; no cross-platform fallback is provided.
+
+To use the frozen corpus, join it to its identity-matched adjudicated labels:
+
+```bash
+.venv/bin/python benchmarks/real_world/build_training_dataset.py \
+  --corpus benchmarks/real_world/corpus.json \
+  --labels benchmarks/real_world/adjudicated.jsonl \
+  --diff-dir /tmp/blast-radius-frozen-diffs --fetch-diffs \
+  --output /tmp/blast-radius-frozen-train.jsonl
+```
+
+For a fresh collection, use a separate completed review JSONL produced for the
+same repository/PR identities. Do not join a latest-N collection to the frozen
+historical labels merely because both files use the same format:
+
+```bash
+# Pick a fresh output; the collector defaults to candidate-corpus.json and is
+# no-clobber, so corpus.json remains the frozen artifact.
+.venv/bin/python benchmarks/real_world/collect_prs.py \
+  --repository open-webui/open-webui --repository langflow-ai/langflow \
+  --limit 20 --output /tmp/blast-radius-corpus.json
+
+.venv/bin/python benchmarks/real_world/build_training_dataset.py \
+  --corpus /tmp/blast-radius-corpus.json \
+  --labels /tmp/completed-labels-for-blast-radius-corpus.jsonl \
+  --diff-dir /tmp/blast-radius-fresh-diffs --fetch-diffs \
+  --output /tmp/blast-radius-fresh-train.jsonl
+```
+
+Only identity-matched completed labels produce examples. Corpus identities with
+no completed matching label are skipped and reported in `missing_labels`; they
+are never treated as negatives.
+
+`build_training_dataset.py` emits one JSON object per PR and a small `target`
+containing the claims present in the validated completed label. Its `diff` is
+nullable unless the corpus embeds it, the cache already contains it, or
+`--fetch-diffs` fetches and exclusively publishes it. Use `--scope all` when
+training a multi-surface model; the default `fastapi` scope keeps only
+HTTP/WebSocket claims addressable by this tool. The output is not a score, and a
+single-review or exploratory set must not be presented as canonical benchmark
+truth.
+
 ## Frozen 50-project expansion
 
 Issue #103 adds a disjoint, metadata-only expansion with 50 projects and 100
