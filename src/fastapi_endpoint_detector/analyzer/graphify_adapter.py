@@ -1,10 +1,9 @@
-"""Strict, opt-in adapter for pinned Graphify code-only snapshots.
+"""Strict, offline-only adapter for pinned Graphify code-graph snapshots.
 
-This module is deliberately not wired into the default analyzer.  It provides a
-bounded POC boundary that can invoke a separately installed, pinned Graphify
-binary in code-only mode and adapt its immutable ``graph.json`` bytes into a
-small source/provenance IR.  It never installs tools, starts servers, queries a
-semantic backend, or treats Graphify confidence as detector confidence.
+This module is deliberately not wired into the default analyzer. It never
+installs or executes Graphify. It only imports an operator-supplied ``graph.json``
+whose expected producer metadata and schema are pinned below. Execution remains
+deferred to the trusted sandbox gate tracked by issue #101.
 """
 
 from __future__ import annotations
@@ -14,87 +13,91 @@ import json
 import math
 import os
 import re
-import subprocess
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
 
 from fastapi_endpoint_detector.strict_data import DuplicateKeyError, load_json_unique
 
+GRAPHIFY_PACKAGE_NAME = "graphifyy"
 GRAPHIFY_PACKAGE_VERSION = "0.9.30"
+GRAPHIFY_COMMAND_NAME = "graphify"
+GRAPHIFY_EXPECTED_VERSION_OUTPUT = "graphify 0.9.30"
 GRAPHIFY_GRAPH_SCHEMA_VERSION = 1
-GRAPHIFY_OUTPUT_DIRECTORY = "graphify-out"
+GRAPHIFY_EXPECTED_DIRECTED = True
+GRAPHIFY_EXPECTED_MULTIGRAPH = True
 MAX_GRAPH_BYTES = 64 * 1024 * 1024
+MAX_SOURCE_BYTES = 16 * 1024 * 1024
 MAX_GRAPH_NODES = 250_000
 MAX_GRAPH_EDGES = 1_000_000
 MAX_TEXT_LENGTH = 16_384
 
 GraphSide = Literal["baseline", "target"]
 GraphifyStrength = Literal["EXTRACTED", "INFERRED", "AMBIGUOUS"]
+GraphifyRelationOrientation = Literal[
+    "caller-to-callee",
+    "importer-to-imported",
+    "subclass-to-base",
+    "referencer-to-referenced",
+    "exporter-to-exported",
+    "container-to-contained",
+    "symmetric",
+]
 
+_RELATION_ORIENTATIONS: dict[str, GraphifyRelationOrientation] = {
+    "calls": "caller-to-callee",
+    "imports": "importer-to-imported",
+    "imports_from": "importer-to-imported",
+    "inherits": "subclass-to-base",
+    "references": "referencer-to-referenced",
+    "re_exports": "exporter-to-exported",
+    "contains": "container-to-contained",
+    "related_to": "symmetric",
+}
 _TRAVERSABLE_RELATIONS = frozenset(
     {"calls", "imports", "imports_from", "inherits", "references", "re_exports"}
 )
 _TOP_LEVEL_KEYS = frozenset(
     {"directed", "multigraph", "graph", "nodes", "links", "hyperedges", "built_at_commit"}
 )
-_NODE_KEYS = frozenset(
-    {
-        "id",
-        "label",
-        "file_type",
-        "source_file",
-        "source_location",
-        "confidence",
-        "confidence_score",
-        "community",
-        "community_name",
-        "norm_label",
-        "type",
-        "kind",
-        "metadata",
-        "origin_file",
-        "scope_id",
-        "scope_kind",
-        "target_file",
-        "target_fqn",
-        "package",
-        "namespace",
-    }
-)
-_EDGE_KEYS = frozenset(
-    {
-        "source",
-        "target",
-        "relation",
-        "confidence",
-        "confidence_score",
-        "source_file",
-        "source_location",
-        "weight",
-        "context",
-        "metadata",
-        "key",
-        "target_file",
-        "target_fqn",
-        "origin_file",
-    }
-)
+_NODE_REQUIRED_KEYS = frozenset({"id", "label", "file_type", "source_file"})
+_NODE_KEYS = _NODE_REQUIRED_KEYS | {
+    "source_location",
+    "confidence",
+    "confidence_score",
+    "community",
+    "community_name",
+    "norm_label",
+    "type",
+    "kind",
+}
+_EDGE_REQUIRED_KEYS = frozenset({"source", "target", "relation", "confidence"})
+_EDGE_KEYS = _EDGE_REQUIRED_KEYS | {
+    "confidence_score",
+    "source_file",
+    "source_location",
+    "weight",
+    "context",
+    "key",
+}
 _LOCATION = re.compile(r"^(?:L)?(?P<start>[1-9][0-9]*)(?:-(?:L)?(?P<end>[1-9][0-9]*))?$")
 _GIT_OID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 class GraphifyAdapterError(RuntimeError):
-    """Raised when the explicit Graphify POC cannot produce trustworthy evidence."""
+    """Raised when an offline Graphify snapshot cannot be trusted."""
 
 
 @dataclass(frozen=True)
 class GraphifySourceSpan:
-    """One project-relative, one-based inclusive source span."""
+    """One source occurrence tied to the exact bounded source bytes checked."""
 
     file_path: Path
     start_line: int
     end_line: int
+    source_sha256: str
 
 
 @dataclass(frozen=True)
@@ -103,34 +106,42 @@ class GraphifyNode:
 
     node_id: str
     label: str
+    source_file: Path
+    source_sha256: str
     span: GraphifySourceSpan | None
     extractor_strength: GraphifyStrength | None
 
 
 @dataclass(frozen=True)
 class GraphifyEdge:
-    """A directed Graphify edge with extractor provenance kept separate."""
+    """A relation with its pinned source-to-target orientation."""
 
     source_id: str
     target_id: str
     relation: str
+    orientation: GraphifyRelationOrientation
     extractor_strength: GraphifyStrength
     span: GraphifySourceSpan | None
 
     @property
     def traversable(self) -> bool:
-        """Whether the relation is eligible for later evidence-bearing traversal."""
+        """Whether this source-backed relation may support future traversal."""
         return self.relation in _TRAVERSABLE_RELATIONS and self.span is not None
 
 
 @dataclass(frozen=True)
 class GraphifySnapshot:
-    """One immutable byte snapshot adapted from a pinned Graphify graph."""
+    """One immutable graph byte snapshot adapted without executing its producer."""
 
     side: GraphSide
     graph_sha256: str
     graph_schema_version: int
-    graphify_version: str
+    expected_graphify_package: str
+    expected_graphify_version: str
+    expected_graphify_command: str
+    expected_version_output: str
+    directed: bool
+    multigraph: bool
     built_at_commit: str | None
     nodes: tuple[GraphifyNode, ...]
     edges: tuple[GraphifyEdge, ...]
@@ -138,12 +149,17 @@ class GraphifySnapshot:
 
 @dataclass(frozen=True)
 class GraphifySnapshotReceipt:
-    """Durable receipt written beside a successfully validated graph snapshot."""
+    """Durable receipt for a successfully validated offline import."""
 
     side: GraphSide
     graph_sha256: str
     graph_schema_version: int
-    graphify_version: str
+    expected_graphify_package: str
+    expected_graphify_version: str
+    expected_graphify_command: str
+    expected_version_output: str
+    directed: bool
+    multigraph: bool
     node_count: int
     edge_count: int
 
@@ -152,10 +168,16 @@ class GraphifySnapshotReceipt:
         return (
             json.dumps(
                 {
+                    "directed": self.directed,
                     "edge_count": self.edge_count,
+                    "expected_graphify_command": self.expected_graphify_command,
+                    "expected_graphify_package": self.expected_graphify_package,
+                    "expected_graphify_version": self.expected_graphify_version,
+                    "expected_version_output": self.expected_version_output,
                     "graph_schema_version": self.graph_schema_version,
                     "graph_sha256": self.graph_sha256,
-                    "graphify_version": self.graphify_version,
+                    "import_mode": "offline-only",
+                    "multigraph": self.multigraph,
                     "node_count": self.node_count,
                     "side": self.side,
                 },
@@ -165,6 +187,15 @@ class GraphifySnapshotReceipt:
             )
             + "\n"
         )
+
+
+@dataclass(frozen=True)
+class _FileSnapshot:
+    path: Path
+    relative_path: Path | None
+    sha256: str
+    line_count: int
+    signature: tuple[int, int, int, int, int]
 
 
 def _bounded_string(value: object, location: str, *, allow_empty: bool = False) -> str:
@@ -182,6 +213,43 @@ def _finite_number(value: object, location: str) -> float:
     if not math.isfinite(result):
         raise GraphifyAdapterError(f"{location} must be finite")
     return result
+
+
+def _signature(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+
+def _read_regular_file(path: Path, limit: int, description: str) -> tuple[bytes, _FileSnapshot]:
+    """Read at most limit+1 bytes through one descriptor and detect path mutation."""
+    try:
+        with path.open("rb") as handle:
+            before = os.fstat(handle.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise GraphifyAdapterError(f"{description} is not a regular file: {path}")
+            raw = handle.read(limit + 1)
+            after = os.fstat(handle.fileno())
+        current = path.stat()
+    except GraphifyAdapterError:
+        raise
+    except (OSError, RuntimeError) as error:
+        raise GraphifyAdapterError(f"cannot read {description} {path}: {error}") from error
+
+    before_signature = _signature(before)
+    if _signature(after) != before_signature or _signature(current) != before_signature:
+        raise GraphifyAdapterError(f"{description} changed while it was being read")
+    if len(raw) > limit:
+        raise GraphifyAdapterError(f"{description} exceeds {limit} bytes")
+    if len(raw) != before.st_size:
+        raise GraphifyAdapterError(f"{description} changed while it was being read")
+    line_count = raw.count(b"\n") + (1 if raw and not raw.endswith(b"\n") else 0)
+    snapshot = _FileSnapshot(
+        path=path,
+        relative_path=None,
+        sha256=hashlib.sha256(raw).hexdigest(),
+        line_count=line_count,
+        signature=before_signature,
+    )
+    return raw, snapshot
 
 
 def _validate_json_numbers(value: object) -> None:
@@ -205,47 +273,76 @@ def _strict_json(raw: bytes, source: Path) -> dict[str, object]:
     _validate_json_numbers(value)
     if not isinstance(value, dict):
         raise GraphifyAdapterError("graph.json must contain an object")
-    if set(value) != _TOP_LEVEL_KEYS and set(value) != _TOP_LEVEL_KEYS - {"built_at_commit"}:
+    required = _TOP_LEVEL_KEYS - {"built_at_commit"}
+    if not required.issubset(value) or not set(value).issubset(_TOP_LEVEL_KEYS):
         extra = sorted(set(value) - _TOP_LEVEL_KEYS)
-        missing = sorted((_TOP_LEVEL_KEYS - {"built_at_commit"}) - set(value))
+        missing = sorted(required - set(value))
         raise GraphifyAdapterError(
             f"unsupported graph.json top-level schema; extra={extra}, missing={missing}"
         )
     return cast("dict[str, object]", value)
 
 
-def _relative_source(project_root: Path, value: object, location: str) -> Path | None:
-    source = _bounded_string(value, location, allow_empty=True)
-    if not source:
-        return None
-    supplied = Path(source)
-    try:
-        absolute = (
-            supplied.resolve(strict=False)
-            if supplied.is_absolute()
-            else (project_root / supplied).resolve(strict=False)
+class _SourceRegistry:
+    def __init__(self, project_root: Path):
+        self.project_root = project_root
+        self._snapshots: dict[Path, _FileSnapshot] = {}
+
+    def read(self, value: object, location: str) -> _FileSnapshot:
+        source = _bounded_string(value, location)
+        supplied = Path(source)
+        try:
+            absolute = (
+                supplied.resolve(strict=True)
+                if supplied.is_absolute()
+                else (self.project_root / supplied).resolve(strict=True)
+            )
+            relative = absolute.relative_to(self.project_root)
+        except (OSError, RuntimeError, ValueError) as error:
+            raise GraphifyAdapterError(
+                f"{location} does not identify a confined project file: {source!r}"
+            ) from error
+        if not relative.parts or ".." in relative.parts:
+            raise GraphifyAdapterError(f"{location} is not project relative: {source!r}")
+        cached = self._snapshots.get(relative)
+        if cached is not None:
+            return cached
+        _raw, snapshot = _read_regular_file(absolute, MAX_SOURCE_BYTES, "source file")
+        snapshot = _FileSnapshot(
+            path=absolute,
+            relative_path=relative,
+            sha256=snapshot.sha256,
+            line_count=snapshot.line_count,
+            signature=snapshot.signature,
         )
-        relative = absolute.relative_to(project_root)
-    except ValueError as error:
-        raise GraphifyAdapterError(f"{location} escapes the project root: {source!r}") from error
-    if not relative.parts or ".." in relative.parts:
-        raise GraphifyAdapterError(f"{location} is not project relative: {source!r}")
-    if not absolute.is_file():
-        raise GraphifyAdapterError(f"{location} does not identify a project file: {source!r}")
-    return relative
+        self._snapshots[relative] = snapshot
+        return snapshot
+
+    def verify_unchanged(self) -> None:
+        for snapshot in self._snapshots.values():
+            try:
+                current_path = snapshot.path.resolve(strict=True)
+                current = snapshot.path.stat()
+                current_path.relative_to(self.project_root)
+            except (OSError, RuntimeError, ValueError) as error:
+                raise GraphifyAdapterError(
+                    f"source file changed during import: {snapshot.relative_path}"
+                ) from error
+            if current_path != snapshot.path or _signature(current) != snapshot.signature:
+                raise GraphifyAdapterError(
+                    f"source file changed during import: {snapshot.relative_path}"
+                )
 
 
 def _source_span(
-    project_root: Path,
+    registry: _SourceRegistry,
     source_value: object,
     location_value: object,
     location: str,
-) -> GraphifySourceSpan | None:
-    file_path = _relative_source(project_root, source_value, f"{location}.source_file")
-    if location_value in {None, ""}:
-        return None
-    if file_path is None:
-        raise GraphifyAdapterError(f"{location} has a source location without a source file")
+) -> tuple[_FileSnapshot, GraphifySourceSpan | None]:
+    source = registry.read(source_value, f"{location}.source_file")
+    if location_value is None:
+        return source, None
     raw_location = _bounded_string(location_value, f"{location}.source_location")
     match = _LOCATION.fullmatch(raw_location)
     if match is None:
@@ -254,7 +351,31 @@ def _source_span(
     end_line = int(match.group("end") or start_line)
     if end_line < start_line:
         raise GraphifyAdapterError(f"{location}.source_location has a reversed range")
-    return GraphifySourceSpan(file_path, start_line, end_line)
+    if end_line > source.line_count:
+        raise GraphifyAdapterError(
+            f"{location}.source_location exceeds the exact source bytes "
+            f"({source.line_count} lines)"
+        )
+    assert source.relative_path is not None
+    return source, GraphifySourceSpan(
+        source.relative_path,
+        start_line,
+        end_line,
+        source.sha256,
+    )
+
+
+def _optional_edge_span(
+    registry: _SourceRegistry, edge: dict[str, object], location: str
+) -> GraphifySourceSpan | None:
+    has_source = "source_file" in edge
+    location_value = edge.get("source_location")
+    if not has_source:
+        if location_value is not None:
+            raise GraphifyAdapterError(f"{location} has a source location without a source file")
+        return None
+    _source, span = _source_span(registry, edge["source_file"], location_value, location)
+    return span
 
 
 def _strength(value: object, location: str, *, optional: bool = False) -> GraphifyStrength | None:
@@ -265,7 +386,7 @@ def _strength(value: object, location: str, *, optional: bool = False) -> Graphi
     return cast("GraphifyStrength", value)
 
 
-def _validate_common_optional_fields(item: dict[str, object], location: str) -> None:
+def _validate_optional_fields(item: dict[str, object], location: str) -> None:
     if "confidence_score" in item:
         score = _finite_number(item["confidence_score"], f"{location}.confidence_score")
         if not 0.0 <= score <= 1.0:
@@ -275,47 +396,48 @@ def _validate_common_optional_fields(item: dict[str, object], location: str) -> 
         if weight < 0.0:
             raise GraphifyAdapterError(f"{location}.weight must be non-negative")
     for field in ("context", "community_name", "norm_label", "type", "kind"):
-        if field in item and item[field] is not None:
+        if field in item:
             _bounded_string(item[field], f"{location}.{field}", allow_empty=True)
-    community = item.get("community")
-    if community is not None and (type(community) is not int or community < 0):
-        raise GraphifyAdapterError(f"{location}.community must be a non-negative integer or null")
-    key = item.get("key")
-    if key is not None and (isinstance(key, bool) or not isinstance(key, (int, str))):
-        raise GraphifyAdapterError(f"{location}.key must be an integer or string")
-    if "metadata" in item and not isinstance(item["metadata"], dict):
-        raise GraphifyAdapterError(f"{location}.metadata must be an object")
+    if "community" in item:
+        community = item["community"]
+        if community is not None and (type(community) is not int or community < 0):
+            raise GraphifyAdapterError(
+                f"{location}.community must be a non-negative integer or null"
+            )
+    if "key" in item:
+        key = item["key"]
+        if isinstance(key, bool) or not isinstance(key, (int, str)):
+            raise GraphifyAdapterError(f"{location}.key must be an integer or string")
+        if isinstance(key, str):
+            _bounded_string(key, f"{location}.key", allow_empty=True)
 
 
 def _read_graph_payload(
     graph_path: Path, expected_sha256: str | None
 ) -> tuple[str, dict[str, object]]:
-    try:
-        size = graph_path.stat().st_size
-        if size > MAX_GRAPH_BYTES:
-            raise GraphifyAdapterError(f"graph.json exceeds {MAX_GRAPH_BYTES} bytes")
-        raw = graph_path.read_bytes()
-    except OSError as error:
+    if expected_sha256 is not None and _SHA256.fullmatch(expected_sha256) is None:
+        raise GraphifyAdapterError("expected_sha256 must be a lowercase SHA-256 digest")
+    raw, snapshot = _read_regular_file(graph_path, MAX_GRAPH_BYTES, "Graphify snapshot")
+    if expected_sha256 is not None and snapshot.sha256 != expected_sha256:
         raise GraphifyAdapterError(
-            f"cannot read Graphify snapshot {graph_path}: {error}"
-        ) from error
-    if len(raw) != size:
-        raise GraphifyAdapterError("graph.json changed while it was being read")
-    graph_sha256 = hashlib.sha256(raw).hexdigest()
-    if expected_sha256 is not None and graph_sha256 != expected_sha256:
-        raise GraphifyAdapterError(
-            f"Graphify snapshot hash mismatch: expected {expected_sha256}, got {graph_sha256}"
+            f"Graphify snapshot hash mismatch: expected {expected_sha256}, got {snapshot.sha256}"
         )
-    return graph_sha256, _strict_json(raw, graph_path)
+    return snapshot.sha256, _strict_json(raw, graph_path)
 
 
 def _payload_collections(
     payload: dict[str, object],
 ) -> tuple[list[object], list[object], str | None]:
-    if type(payload["directed"]) is not bool or type(payload["multigraph"]) is not bool:
-        raise GraphifyAdapterError("graph.json directed and multigraph fields must be booleans")
-    if not isinstance(payload["graph"], dict):
-        raise GraphifyAdapterError("graph.json graph field must be an object")
+    if payload["directed"] is not GRAPHIFY_EXPECTED_DIRECTED:
+        raise GraphifyAdapterError(
+            f"graph.json directed must be attested value {GRAPHIFY_EXPECTED_DIRECTED}"
+        )
+    if payload["multigraph"] is not GRAPHIFY_EXPECTED_MULTIGRAPH:
+        raise GraphifyAdapterError(
+            f"graph.json multigraph must be attested value {GRAPHIFY_EXPECTED_MULTIGRAPH}"
+        )
+    if payload["graph"] != {}:
+        raise GraphifyAdapterError("graph.json graph field must be an empty object")
     hyperedges = payload["hyperedges"]
     if not isinstance(hyperedges, list) or hyperedges:
         raise GraphifyAdapterError("code-only Graphify snapshots must have no semantic hyperedges")
@@ -334,7 +456,7 @@ def _payload_collections(
 
 
 def _adapt_nodes(
-    raw_nodes: list[object], project_root: Path
+    raw_nodes: list[object], registry: _SourceRegistry
 ) -> tuple[tuple[GraphifyNode, ...], set[str]]:
     nodes: list[GraphifyNode] = []
     node_ids: set[str] = set()
@@ -344,29 +466,43 @@ def _adapt_nodes(
             raise GraphifyAdapterError(f"{location} must be an object")
         node = cast("dict[str, object]", raw_node)
         extra = set(node) - _NODE_KEYS
-        if extra:
-            raise GraphifyAdapterError(f"{location} has unsupported fields: {sorted(extra)}")
-        node_id = _bounded_string(node.get("id"), f"{location}.id")
+        missing = _NODE_REQUIRED_KEYS - set(node)
+        if extra or missing:
+            raise GraphifyAdapterError(
+                f"{location} has unsupported schema; "
+                f"extra={sorted(extra)}, missing={sorted(missing)}"
+            )
+        node_id = _bounded_string(node["id"], f"{location}.id")
         if node_id in node_ids:
             raise GraphifyAdapterError(f"duplicate Graphify node id: {node_id}")
         node_ids.add(node_id)
-        if node.get("file_type") != "code":
+        if node["file_type"] != "code":
             raise GraphifyAdapterError(f"{location} is not a code-only node")
-        label = _bounded_string(node.get("label"), f"{location}.label")
-        span = _source_span(
-            project_root,
-            node.get("source_file", ""),
+        label = _bounded_string(node["label"], f"{location}.label")
+        source, span = _source_span(
+            registry,
+            node["source_file"],
             node.get("source_location"),
             location,
         )
         strength = _strength(node.get("confidence"), f"{location}.confidence", optional=True)
-        _validate_common_optional_fields(node, location)
-        nodes.append(GraphifyNode(node_id, label, span, strength))
+        _validate_optional_fields(node, location)
+        assert source.relative_path is not None
+        nodes.append(
+            GraphifyNode(
+                node_id,
+                label,
+                source.relative_path,
+                source.sha256,
+                span,
+                strength,
+            )
+        )
     return tuple(nodes), node_ids
 
 
 def _adapt_edges(
-    raw_edges: list[object], project_root: Path, node_ids: set[str]
+    raw_edges: list[object], registry: _SourceRegistry, node_ids: set[str]
 ) -> tuple[GraphifyEdge, ...]:
     edges: list[GraphifyEdge] = []
     for index, raw_edge in enumerate(raw_edges):
@@ -375,24 +511,42 @@ def _adapt_edges(
             raise GraphifyAdapterError(f"{location} must be an object")
         edge = cast("dict[str, object]", raw_edge)
         extra = set(edge) - _EDGE_KEYS
-        if extra:
-            raise GraphifyAdapterError(f"{location} has unsupported fields: {sorted(extra)}")
-        source_id = _bounded_string(edge.get("source"), f"{location}.source")
-        target_id = _bounded_string(edge.get("target"), f"{location}.target")
+        missing = _EDGE_REQUIRED_KEYS - set(edge)
+        if extra or missing:
+            raise GraphifyAdapterError(
+                f"{location} has unsupported schema; "
+                f"extra={sorted(extra)}, missing={sorted(missing)}"
+            )
+        source_id = _bounded_string(edge["source"], f"{location}.source")
+        target_id = _bounded_string(edge["target"], f"{location}.target")
         if source_id not in node_ids or target_id not in node_ids:
             raise GraphifyAdapterError(f"{location} references an unknown node")
-        relation = _bounded_string(edge.get("relation"), f"{location}.relation")
-        strength = _strength(edge.get("confidence"), f"{location}.confidence")
+        relation = _bounded_string(edge["relation"], f"{location}.relation")
+        orientation = _RELATION_ORIENTATIONS.get(relation)
+        if orientation is None:
+            raise GraphifyAdapterError(
+                f"{location}.relation has no attested source-to-target orientation: {relation!r}"
+            )
+        strength = _strength(edge["confidence"], f"{location}.confidence")
         assert strength is not None
-        span = _source_span(
-            project_root,
-            edge.get("source_file", ""),
-            edge.get("source_location"),
-            location,
+        span = _optional_edge_span(registry, edge, location)
+        _validate_optional_fields(edge, location)
+        edges.append(
+            GraphifyEdge(source_id, target_id, relation, orientation, strength, span)
         )
-        _validate_common_optional_fields(edge, location)
-        edges.append(GraphifyEdge(source_id, target_id, relation, strength, span))
     return tuple(edges)
+
+
+def _resolve_project_root(project_root: Path) -> Path:
+    try:
+        root = project_root.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise GraphifyAdapterError(
+            f"Graphify project root does not exist: {project_root}"
+        ) from error
+    if not root.is_dir():
+        raise GraphifyAdapterError(f"Graphify project root is not a directory: {project_root}")
+    return root
 
 
 def load_graphify_snapshot(
@@ -400,144 +554,72 @@ def load_graphify_snapshot(
     *,
     project_root: Path,
     side: GraphSide,
-    graphify_version: str = GRAPHIFY_PACKAGE_VERSION,
     expected_sha256: str | None = None,
 ) -> GraphifySnapshot:
-    """Read one immutable graph.json byte snapshot and strictly adapt its evidence."""
+    """Read and validate one offline graph snapshot; never execute Graphify."""
     if side not in {"baseline", "target"}:
         raise GraphifyAdapterError(f"unsupported snapshot side: {side!r}")
-    if graphify_version != GRAPHIFY_PACKAGE_VERSION:
-        raise GraphifyAdapterError(
-            f"unsupported Graphify version {graphify_version!r}; "
-            f"expected {GRAPHIFY_PACKAGE_VERSION}"
-        )
+    root = _resolve_project_root(project_root)
     graph_sha256, payload = _read_graph_payload(graph_path, expected_sha256)
     raw_nodes, raw_edges, built_at_commit = _payload_collections(payload)
-    root = project_root.resolve(strict=True)
-    nodes, node_ids = _adapt_nodes(raw_nodes, root)
-    edges = _adapt_edges(raw_edges, root, node_ids)
+    registry = _SourceRegistry(root)
+    nodes, node_ids = _adapt_nodes(raw_nodes, registry)
+    edges = _adapt_edges(raw_edges, registry, node_ids)
+    registry.verify_unchanged()
     return GraphifySnapshot(
         side=side,
         graph_sha256=graph_sha256,
         graph_schema_version=GRAPHIFY_GRAPH_SCHEMA_VERSION,
-        graphify_version=graphify_version,
+        expected_graphify_package=GRAPHIFY_PACKAGE_NAME,
+        expected_graphify_version=GRAPHIFY_PACKAGE_VERSION,
+        expected_graphify_command=GRAPHIFY_COMMAND_NAME,
+        expected_version_output=GRAPHIFY_EXPECTED_VERSION_OUTPUT,
+        directed=GRAPHIFY_EXPECTED_DIRECTED,
+        multigraph=GRAPHIFY_EXPECTED_MULTIGRAPH,
         built_at_commit=built_at_commit,
         nodes=nodes,
         edges=edges,
     )
 
 
-class GraphifyRunner:
-    """Explicit pinned Graphify runner; construction never occurs in default analysis."""
+def _receipt_for(snapshot: GraphifySnapshot) -> GraphifySnapshotReceipt:
+    return GraphifySnapshotReceipt(
+        side=snapshot.side,
+        graph_sha256=snapshot.graph_sha256,
+        graph_schema_version=snapshot.graph_schema_version,
+        expected_graphify_package=snapshot.expected_graphify_package,
+        expected_graphify_version=snapshot.expected_graphify_version,
+        expected_graphify_command=snapshot.expected_graphify_command,
+        expected_version_output=snapshot.expected_version_output,
+        directed=snapshot.directed,
+        multigraph=snapshot.multigraph,
+        node_count=len(snapshot.nodes),
+        edge_count=len(snapshot.edges),
+    )
 
-    def __init__(self, project_root: Path, executable: Path, *, timeout: float = 300.0):
-        self.project_root = project_root.resolve(strict=True)
-        self.executable = executable.resolve(strict=True)
-        if not self.project_root.is_dir():
-            raise GraphifyAdapterError(f"Graphify project root is not a directory: {project_root}")
-        if not self.executable.is_file():
-            raise GraphifyAdapterError(f"Graphify executable is not a file: {executable}")
-        if timeout <= 0:
-            raise GraphifyAdapterError("Graphify timeout must be positive")
-        self.timeout = timeout
 
-    @staticmethod
-    def _environment(home: Path) -> dict[str, str]:
-        allowed = ("PATH", "SYSTEMROOT", "WINDIR", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL")
-        environment = {name: os.environ[name] for name in allowed if name in os.environ}
-        environment.update(
-            {
-                "GRAPHIFY_OUT": GRAPHIFY_OUTPUT_DIRECTORY,
-                "HOME": str(home),
-                "XDG_CONFIG_HOME": str(home / ".config"),
-            }
-        )
-        return environment
-
-    def _run(self, args: list[str], *, cwd: Path, home: Path) -> subprocess.CompletedProcess[str]:
-        try:
-            result = subprocess.run(
-                args,
-                cwd=cwd,
-                env=self._environment(home),
-                check=False,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="strict",
-                timeout=self.timeout,
-            )
-        except (OSError, subprocess.TimeoutExpired, UnicodeError) as error:
-            raise GraphifyAdapterError(f"Graphify command failed to execute: {error}") from error
-        if result.returncode:
-            detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic output"
-            raise GraphifyAdapterError(f"Graphify command failed ({result.returncode}): {detail}")
-        return result
-
-    def validate_tool(self, *, cwd: Path, home: Path) -> None:
-        """Require the exact separately installed POC version before extraction."""
-        result = self._run([str(self.executable), "--version"], cwd=cwd, home=home)
-        if result.stdout.strip() != f"graphify {GRAPHIFY_PACKAGE_VERSION}":
-            raise GraphifyAdapterError(
-                f"unsupported Graphify version {result.stdout.strip()!r}; "
-                f"expected graphify {GRAPHIFY_PACKAGE_VERSION}"
-            )
-
-    def extract_snapshot(self, side: GraphSide, output_root: Path) -> GraphifySnapshot:
-        """Run one explicit code-only extraction into a fresh side-qualified directory."""
-        if side not in {"baseline", "target"}:
-            raise GraphifyAdapterError(f"unsupported snapshot side: {side!r}")
-        root = output_root.expanduser().resolve(strict=False)
-        if root == self.project_root or root.is_relative_to(self.project_root):
-            raise GraphifyAdapterError("Graphify output must be outside the analyzed project")
-        side_directory = root / side
-        if side_directory.exists() or side_directory.is_symlink():
-            raise GraphifyAdapterError(
-                f"Graphify snapshot directory already exists: {side_directory}"
-            )
-        root.mkdir(parents=True, exist_ok=True)
-        side_directory.mkdir(mode=0o700)
-        home = side_directory / "home"
-        home.mkdir(mode=0o700)
-        self.validate_tool(cwd=side_directory, home=home)
-        command = [
-            str(self.executable),
-            "extract",
-            str(self.project_root),
-            "--code-only",
-            "--no-cluster",
-            "--force",
-            "--out",
-            str(side_directory),
-        ]
-        self._run(command, cwd=side_directory, home=home)
-        graph_path = side_directory / GRAPHIFY_OUTPUT_DIRECTORY / "graph.json"
-        try:
-            graph_path.resolve(strict=True).relative_to(side_directory.resolve(strict=True))
-        except (OSError, ValueError) as error:
-            raise GraphifyAdapterError("Graphify did not produce a confined graph.json") from error
-        snapshot = load_graphify_snapshot(
-            graph_path,
-            project_root=self.project_root,
-            side=side,
-            graphify_version=GRAPHIFY_PACKAGE_VERSION,
-        )
-        receipt = GraphifySnapshotReceipt(
-            side=snapshot.side,
-            graph_sha256=snapshot.graph_sha256,
-            graph_schema_version=snapshot.graph_schema_version,
-            graphify_version=snapshot.graphify_version,
-            node_count=len(snapshot.nodes),
-            edge_count=len(snapshot.edges),
-        )
-        receipt_path = side_directory / "snapshot-receipt.json"
-        try:
-            with receipt_path.open("x", encoding="utf-8") as handle:
-                handle.write(receipt.as_json())
-                handle.flush()
-                os.fsync(handle.fileno())
-        except OSError as error:
-            raise GraphifyAdapterError(
-                f"cannot publish Graphify snapshot receipt: {error}"
-            ) from error
-        return snapshot
+def import_graphify_snapshot(
+    graph_path: Path,
+    *,
+    project_root: Path,
+    side: GraphSide,
+    receipt_path: Path,
+    expected_sha256: str | None = None,
+) -> GraphifySnapshot:
+    """Validate an offline snapshot and exclusively publish its import receipt."""
+    snapshot = load_graphify_snapshot(
+        graph_path,
+        project_root=project_root,
+        side=side,
+        expected_sha256=expected_sha256,
+    )
+    try:
+        with receipt_path.open("x", encoding="utf-8") as handle:
+            handle.write(_receipt_for(snapshot).as_json())
+            handle.flush()
+            os.fsync(handle.fileno())
+    except (OSError, RuntimeError) as error:
+        raise GraphifyAdapterError(
+            f"cannot publish Graphify snapshot receipt {receipt_path}: {error}"
+        ) from error
+    return snapshot

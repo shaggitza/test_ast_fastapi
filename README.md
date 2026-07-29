@@ -177,12 +177,13 @@ escape, mutation, control flow, or dynamic registration as conditional evidence;
 no bootstrap/helper names are guessed. Dynamic behavior remains conservatively
 unresolved.
 
-The optional Graphify experiment is not a configured analyzer backend. A private
-POC adapter can explicitly run the separately installed, pinned
-`graphifyy==0.9.30` command in code-only mode and validate immutable
-baseline/target graph snapshots. It never runs by default, never uses semantic
-LLM/server features, and cannot promote Graphify communities or similarity into
-blast-radius evidence. See [the Graphify POC boundary](docs/graphify-poc.md).
+The optional Graphify experiment is not a configured analyzer backend. Its private,
+offline-only POC adapter validates operator-supplied `graph.json` snapshots against
+pinned expected `graphifyy==0.9.30` metadata; it does not install or execute
+Graphify. Isolated no-network execution is deferred to the trusted #101 sandbox
+gate. It never runs by default, makes no LLM/server/network request, and cannot
+promote Graphify communities or similarity into blast-radius evidence. See
+[the Graphify POC boundary](docs/graphify-poc.md).
 
 ### `list` - List Endpoints
 

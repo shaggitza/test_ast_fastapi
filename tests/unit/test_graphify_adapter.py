@@ -1,24 +1,27 @@
-"""Offline contract tests for the opt-in pinned Graphify POC boundary."""
+"""Offline contract tests for the pinned Graphify graph import boundary."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import os
-import shutil
-import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 
+from fastapi_endpoint_detector.analyzer import graphify_adapter
 from fastapi_endpoint_detector.analyzer.graphify_adapter import (
+    GRAPHIFY_EXPECTED_DIRECTED,
+    GRAPHIFY_EXPECTED_MULTIGRAPH,
     GRAPHIFY_GRAPH_SCHEMA_VERSION,
+    GRAPHIFY_PACKAGE_NAME,
     GRAPHIFY_PACKAGE_VERSION,
     GraphifyAdapterError,
-    GraphifyRunner,
     GraphifySourceSpan,
+    import_graphify_snapshot,
     load_graphify_snapshot,
 )
 
@@ -35,32 +38,43 @@ def _project(tmp_path: Path) -> Path:
     return project
 
 
+def _payload() -> dict[str, Any]:
+    return json.loads(FIXTURE.read_text(encoding="utf-8"))
+
+
 def _write_payload(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, allow_nan=False, sort_keys=True), encoding="utf-8")
 
 
-def _completed(
-    stdout: str = "", *, code: int = 0, stderr: str = ""
-) -> subprocess.CompletedProcess[str]:
-    return subprocess.CompletedProcess([], code, stdout, stderr)
-
-
-def test_loads_pinned_fixture_with_separate_provenance_and_direction(tmp_path: Path) -> None:
+def test_loads_pinned_fixture_with_exact_source_provenance_and_orientation(
+    tmp_path: Path,
+) -> None:
     project = _project(tmp_path)
     snapshot = load_graphify_snapshot(FIXTURE, project_root=project, side="target")
+    app_hash = hashlib.sha256((project / "app.py").read_bytes()).hexdigest()
 
     assert snapshot.side == "target"
-    assert snapshot.graphify_version == GRAPHIFY_PACKAGE_VERSION
+    assert snapshot.expected_graphify_package == GRAPHIFY_PACKAGE_NAME
+    assert snapshot.expected_graphify_version == GRAPHIFY_PACKAGE_VERSION
+    assert snapshot.expected_graphify_command == "graphify"
+    assert snapshot.expected_version_output == "graphify 0.9.30"
     assert snapshot.graph_schema_version == GRAPHIFY_GRAPH_SCHEMA_VERSION
     assert snapshot.graph_sha256 == hashlib.sha256(FIXTURE.read_bytes()).hexdigest()
+    assert snapshot.directed is GRAPHIFY_EXPECTED_DIRECTED
+    assert snapshot.multigraph is GRAPHIFY_EXPECTED_MULTIGRAPH
     assert snapshot.built_at_commit == "1" * 40
-    assert snapshot.nodes[1].span == GraphifySourceSpan(Path("app.py"), 2, 3)
+    assert snapshot.nodes[1].source_file == Path("app.py")
+    assert snapshot.nodes[1].source_sha256 == app_hash
+    assert snapshot.nodes[1].span == GraphifySourceSpan(Path("app.py"), 2, 3, app_hash)
     assert snapshot.nodes[1].extractor_strength == "EXTRACTED"
     assert snapshot.edges[1].source_id == "handler"
     assert snapshot.edges[1].target_id == "helper"
+    assert snapshot.edges[1].orientation == "caller-to-callee"
     assert snapshot.edges[1].traversable is True
+    assert snapshot.edges[2].orientation == "importer-to-imported"
     assert snapshot.edges[2].extractor_strength == "INFERRED"
     assert snapshot.edges[2].traversable is True
+    assert snapshot.edges[3].orientation == "symmetric"
     assert snapshot.edges[3].extractor_strength == "AMBIGUOUS"
     assert snapshot.edges[3].traversable is False
 
@@ -84,12 +98,12 @@ def test_snapshot_hash_is_checked_against_the_same_byte_snapshot(tmp_path: Path)
             side="baseline",
             expected_sha256="0" * 64,
         )
-    with pytest.raises(GraphifyAdapterError, match="unsupported Graphify version"):
+    with pytest.raises(GraphifyAdapterError, match="lowercase SHA-256"):
         load_graphify_snapshot(
             FIXTURE,
             project_root=project,
             side="baseline",
-            graphify_version="0.9.29",
+            expected_sha256="not-a-hash",
         )
 
 
@@ -101,11 +115,13 @@ def test_snapshot_hash_is_checked_against_the_same_byte_snapshot(tmp_path: Path)
         (lambda value: value["nodes"].append(dict(value["nodes"][0])), "duplicate"),
         (lambda value: value["links"][0].update({"target": "missing"}), "unknown node"),
         (lambda value: value["nodes"][0].update({"file_type": "document"}), "code-only"),
-        (lambda value: value["nodes"][0].update({"source_file": "missing.py"}), "project file"),
         (lambda value: value["nodes"][1].update({"source_location": "L9-L2"}), "reversed"),
         (lambda value: value["links"][0].update({"confidence_score": 2.0}), "between 0 and 1"),
         (lambda value: value.update({"built_at_commit": "ABC"}), "full Git OID"),
-        (lambda value: value["links"][0].update({"unexpected": "drift"}), "unsupported fields"),
+        (lambda value: value["links"][0].update({"unexpected": "drift"}), "unsupported schema"),
+        (lambda value: value.update({"graph": {"name": "unchecked"}}), "empty object"),
+        (lambda value: value["nodes"][0].update({"metadata": {}}), "unsupported schema"),
+        (lambda value: value["links"][0].update({"context": []}), "context"),
     ],
     ids=[
         "schema-drift",
@@ -113,20 +129,22 @@ def test_snapshot_hash_is_checked_against_the_same_byte_snapshot(tmp_path: Path)
         "duplicate-node",
         "dangling-edge",
         "non-code-node",
-        "missing-source",
         "reversed-span",
         "invalid-confidence-score",
         "invalid-commit",
         "edge-schema-drift",
+        "nonempty-graph-metadata",
+        "removed-unvalidated-field",
+        "malformed-known-field",
     ],
 )
-def test_strict_schema_rejects_unsupported_or_ambiguous_graphs(
+def test_strict_schema_rejects_unsupported_or_malformed_graphs(
     tmp_path: Path,
     mutation: Any,
     message: str,
 ) -> None:
     project = _project(tmp_path)
-    payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    payload = _payload()
     mutation(payload)
     graph = tmp_path / "graph.json"
     _write_payload(graph, payload)
@@ -135,10 +153,72 @@ def test_strict_schema_rejects_unsupported_or_ambiguous_graphs(
         load_graphify_snapshot(graph, project_root=project, side="target")
 
 
+@pytest.mark.parametrize("source_value", [None, ""])
+def test_nodes_require_nonempty_source_paths(tmp_path: Path, source_value: object) -> None:
+    project = _project(tmp_path)
+    payload = _payload()
+    if source_value is None:
+        del payload["nodes"][0]["source_file"]
+    else:
+        payload["nodes"][0]["source_file"] = source_value
+    graph = tmp_path / "missing-source.json"
+    _write_payload(graph, payload)
+
+    with pytest.raises(GraphifyAdapterError, match=r"source_file|missing"):
+        load_graphify_snapshot(graph, project_root=project, side="target")
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda value: value["nodes"][1].update({"source_location": "L999999"}),
+        lambda value: value["links"][1].update({"source_location": "L999999"}),
+    ],
+    ids=["node-occurrence", "edge-occurrence"],
+)
+def test_occurrences_cannot_exceed_exact_source_bytes(tmp_path: Path, mutate: Any) -> None:
+    project = _project(tmp_path)
+    payload = _payload()
+    mutate(payload)
+    graph = tmp_path / "out-of-range.json"
+    _write_payload(graph, payload)
+
+    with pytest.raises(GraphifyAdapterError, match="exceeds the exact source bytes"):
+        load_graphify_snapshot(graph, project_root=project, side="target")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("directed", False), ("multigraph", False), ("directed", 1)],
+)
+def test_requires_attested_graph_direction_values(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    project = _project(tmp_path)
+    payload = _payload()
+    payload[field] = value
+    graph = tmp_path / "direction.json"
+    _write_payload(graph, payload)
+
+    with pytest.raises(GraphifyAdapterError, match=field):
+        load_graphify_snapshot(graph, project_root=project, side="target")
+
+
+def test_rejects_relations_without_attested_orientation(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    payload = _payload()
+    payload["links"][1]["relation"] = "unknown_direction"
+    graph = tmp_path / "orientation.json"
+    _write_payload(graph, payload)
+
+    with pytest.raises(GraphifyAdapterError, match="no attested source-to-target orientation"):
+        load_graphify_snapshot(graph, project_root=project, side="target")
+
+
 def test_strict_json_rejects_duplicate_members_and_non_finite_numbers(tmp_path: Path) -> None:
     project = _project(tmp_path)
     duplicate = tmp_path / "duplicate.json"
-    duplicate.write_text('{"directed":false,"directed":true}', encoding="utf-8")
+    duplicate.write_text('{"directed":true,"directed":false}', encoding="utf-8")
     with pytest.raises(GraphifyAdapterError, match="duplicate"):
         load_graphify_snapshot(duplicate, project_root=project, side="target")
 
@@ -153,131 +233,118 @@ def test_strict_json_rejects_duplicate_members_and_non_finite_numbers(tmp_path: 
 
 def test_source_paths_must_remain_inside_the_analyzed_project(tmp_path: Path) -> None:
     project = _project(tmp_path)
-    payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    payload = _payload()
     payload["nodes"][0]["source_file"] = "../outside.py"
     graph = tmp_path / "escape.json"
     _write_payload(graph, payload)
 
-    with pytest.raises(GraphifyAdapterError, match="escapes the project root"):
+    with pytest.raises(GraphifyAdapterError, match="confined project file"):
         load_graphify_snapshot(graph, project_root=project, side="target")
 
 
-def test_runner_invokes_only_pinned_code_only_pipeline_and_writes_receipt(
-    tmp_path: Path,
+def test_graph_and_source_reads_enforce_exact_and_over_limit_boundaries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project = _project(tmp_path)
-    executable = tmp_path / "graphify"
-    executable.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
-    executable.chmod(0o700)
-    output_root = tmp_path / "snapshots"
-    calls: list[tuple[list[str], dict[str, object]]] = []
+    graph_size = len(FIXTURE.read_bytes())
+    source_size = max(len(path.read_bytes()) for path in project.glob("*.py"))
 
-    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        calls.append((args, kwargs))
-        if args[-1] == "--version":
-            return _completed(f"graphify {GRAPHIFY_PACKAGE_VERSION}\n")
-        graph = output_root / "target" / "graphify-out" / "graph.json"
-        graph.parent.mkdir(parents=True)
-        shutil.copyfile(FIXTURE, graph)
-        return _completed("code-only graph written\n")
+    monkeypatch.setattr(graphify_adapter, "MAX_GRAPH_BYTES", graph_size)
+    monkeypatch.setattr(graphify_adapter, "MAX_SOURCE_BYTES", source_size)
+    load_graphify_snapshot(FIXTURE, project_root=project, side="target")
 
-    with (
-        patch.dict(
-            os.environ,
-            {
-                "GEMINI_API_KEY": "must-not-pass",
-                "GOOGLE_API_KEY": "must-not-pass",
-                "HTTP_PROXY": "must-not-pass",
-            },
-        ),
-        patch("subprocess.run", side_effect=fake_run),
-    ):
-        snapshot = GraphifyRunner(project, executable, timeout=12).extract_snapshot(
-            "target", output_root
+    monkeypatch.setattr(graphify_adapter, "MAX_GRAPH_BYTES", graph_size - 1)
+    with pytest.raises(GraphifyAdapterError, match="Graphify snapshot exceeds"):
+        load_graphify_snapshot(FIXTURE, project_root=project, side="target")
+
+    monkeypatch.setattr(graphify_adapter, "MAX_GRAPH_BYTES", graph_size)
+    monkeypatch.setattr(graphify_adapter, "MAX_SOURCE_BYTES", source_size - 1)
+    with pytest.raises(GraphifyAdapterError, match="source file exceeds"):
+        load_graphify_snapshot(FIXTURE, project_root=project, side="target")
+
+
+def test_graph_read_rejects_non_regular_and_mutating_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _project(tmp_path)
+    with pytest.raises(GraphifyAdapterError, match="not a regular file"):
+        load_graphify_snapshot(Path(os.devnull), project_root=project, side="target")
+
+    real_fstat = os.fstat
+    calls = 0
+
+    def changing_fstat(fd: int) -> os.stat_result | SimpleNamespace:
+        nonlocal calls
+        calls += 1
+        result = real_fstat(fd)
+        if calls == 2:
+            return SimpleNamespace(
+                st_mode=result.st_mode,
+                st_dev=result.st_dev,
+                st_ino=result.st_ino,
+                st_size=result.st_size,
+                st_mtime_ns=result.st_mtime_ns + 1,
+                st_ctime_ns=result.st_ctime_ns,
+            )
+        return result
+
+    monkeypatch.setattr(graphify_adapter.os, "fstat", changing_fstat)
+    with pytest.raises(GraphifyAdapterError, match="changed while it was being read"):
+        load_graphify_snapshot(FIXTURE, project_root=project, side="target")
+
+
+def test_missing_graph_project_and_source_failures_are_adapter_errors(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    with pytest.raises(GraphifyAdapterError, match="cannot read Graphify snapshot"):
+        load_graphify_snapshot(tmp_path / "missing.json", project_root=project, side="target")
+    with pytest.raises(GraphifyAdapterError, match="project root does not exist"):
+        load_graphify_snapshot(
+            FIXTURE, project_root=tmp_path / "missing-project", side="target"
         )
 
-    assert snapshot.graph_sha256 == hashlib.sha256(FIXTURE.read_bytes()).hexdigest()
-    assert len(calls) == 2
-    extract_args, extract_kwargs = calls[1]
-    assert extract_args == [
-        str(executable.resolve()),
-        "extract",
-        str(project.resolve()),
-        "--code-only",
-        "--no-cluster",
-        "--force",
-        "--out",
-        str((output_root / "target").resolve()),
-    ]
-    assert extract_kwargs.get("shell", False) is False
-    environment = extract_kwargs["env"]
-    assert isinstance(environment, dict)
-    assert "GEMINI_API_KEY" not in environment
-    assert "GOOGLE_API_KEY" not in environment
-    assert "HTTP_PROXY" not in environment
-    assert "NO_PROXY" not in environment
-    assert all(
-        forbidden not in extract_args
-        for forbidden in ("--backend", "--mcp", "--wiki", "--watch", "--global")
-    )
-    receipt_path = output_root / "target" / "snapshot-receipt.json"
+    payload = _payload()
+    payload["nodes"][0]["source_file"] = "missing.py"
+    graph = tmp_path / "missing-source-file.json"
+    _write_payload(graph, payload)
+    with pytest.raises(GraphifyAdapterError, match="confined project file"):
+        load_graphify_snapshot(graph, project_root=project, side="target")
+
+
+def test_offline_import_writes_pinned_receipt_without_subprocess(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    receipt_path = tmp_path / "snapshot-receipt.json"
+
+    with patch("subprocess.run") as run:
+        snapshot = import_graphify_snapshot(
+            FIXTURE,
+            project_root=project,
+            side="target",
+            receipt_path=receipt_path,
+            expected_sha256=hashlib.sha256(FIXTURE.read_bytes()).hexdigest(),
+        )
+    run.assert_not_called()
+    assert not hasattr(graphify_adapter, "GraphifyRunner")
+
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     assert receipt == {
+        "directed": True,
         "edge_count": 4,
+        "expected_graphify_command": "graphify",
+        "expected_graphify_package": "graphifyy",
+        "expected_graphify_version": "0.9.30",
+        "expected_version_output": "graphify 0.9.30",
         "graph_schema_version": GRAPHIFY_GRAPH_SCHEMA_VERSION,
         "graph_sha256": snapshot.graph_sha256,
-        "graphify_version": GRAPHIFY_PACKAGE_VERSION,
+        "import_mode": "offline-only",
+        "multigraph": True,
         "node_count": 3,
         "side": "target",
     }
 
-
-def test_runner_is_no_clobber_and_rejects_project_local_output_before_execution(
-    tmp_path: Path,
-) -> None:
-    project = _project(tmp_path)
-    executable = tmp_path / "graphify"
-    executable.write_text("tool", encoding="utf-8")
-    executable.chmod(0o700)
-    runner = GraphifyRunner(project, executable)
-
-    with (
-        patch("subprocess.run") as run,
-        pytest.raises(GraphifyAdapterError, match="outside"),
-    ):
-        runner.extract_snapshot("target", project / "snapshots")
-    run.assert_not_called()
-
-    output_root = tmp_path / "snapshots"
-    (output_root / "baseline").mkdir(parents=True)
-    with (
-        patch("subprocess.run") as run,
-        pytest.raises(GraphifyAdapterError, match="already exists"),
-    ):
-        runner.extract_snapshot("baseline", output_root)
-    run.assert_not_called()
-
-
-def test_runner_rejects_unpinned_version_and_command_failure(tmp_path: Path) -> None:
-    project = _project(tmp_path)
-    executable = tmp_path / "graphify"
-    executable.write_text("tool", encoding="utf-8")
-    executable.chmod(0o700)
-    runner = GraphifyRunner(project, executable)
-
-    with (
-        patch("subprocess.run", return_value=_completed("graphify 9.9.9\n")),
-        pytest.raises(GraphifyAdapterError, match="unsupported Graphify version"),
-    ):
-        runner.extract_snapshot("target", tmp_path / "version-output")
-
-    def failed(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        if args[-1] == "--version":
-            return _completed(f"graphify {GRAPHIFY_PACKAGE_VERSION}\n")
-        return _completed(code=7, stderr="structural extraction failed")
-
-    with (
-        patch("subprocess.run", side_effect=failed),
-        pytest.raises(GraphifyAdapterError, match="structural extraction failed"),
-    ):
-        runner.extract_snapshot("baseline", tmp_path / "failure-output")
+    with pytest.raises(GraphifyAdapterError, match="cannot publish"):
+        import_graphify_snapshot(
+            FIXTURE,
+            project_root=project,
+            side="target",
+            receipt_path=receipt_path,
+        )

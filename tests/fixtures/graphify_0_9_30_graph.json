@@ -1,6 +1,6 @@
 {
   "built_at_commit": "1111111111111111111111111111111111111111",
-  "directed": false,
+  "directed": true,
   "graph": {},
   "hyperedges": [],
   "links": [

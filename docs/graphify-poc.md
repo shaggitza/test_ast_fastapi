@@ -3,87 +3,117 @@
 Issue #110 evaluates Graphify as an optional generic code-graph provider. This
 foundation is deliberately **not** connected to the default CLI or analyzer.
 Mypy remains the only default semantic backend. Importing this project never
-imports or installs Graphify, and missing Graphify tooling never causes fallback
-or changes ordinary analysis.
+imports, installs, or executes Graphify, and missing Graphify tooling never
+causes fallback or changes ordinary analysis.
 
-## Pinned, explicit execution
+## Offline-only foundation
 
-The only attested tool is the separately installed PyPI package
-`graphifyy==0.9.30`, whose console command reports exactly `graphify 0.9.30`.
-Installation is an operator-controlled prerequisite outside the analyzed
-checkout. `GraphifyRunner` takes the absolute executable path explicitly and
-invokes this fixed argv shape without a shell:
+The adapter accepts only an operator-supplied `graph.json`. It performs bounded,
+execution-free validation and can exclusively create a deterministic import
+receipt. There is no extraction launcher or ordinary host subprocess path.
+Graphify execution, including enforced no-network operation and a read-only
+source mount, is deferred to the trusted hardened sandbox gate tracked by
+[#101](https://github.com/shaggitza/test_ast_fastapi/issues/101). Do not run
+Graphify against a checkout through an ad hoc host subprocess.
 
-```text
-graphify extract <absolute-project-root> \
-  --code-only --no-cluster --force --out <fresh-side-directory>
-```
+The expected producer metadata is pinned as:
 
-The runner:
+| Item | Expected value |
+|---|---|
+| PyPI distribution | `graphifyy` |
+| distribution version | `0.9.30` |
+| console command | `graphify` |
+| exact version output | `graphify 0.9.30` |
+| adapter schema | `1` |
 
-- rejects every other tool version;
-- strips API keys and proxy variables from the child environment;
-- passes `--code-only`, so document/media semantic extraction is disabled;
-- never passes backend, model, MCP/server, wiki, watch, hook, global-graph, or
-  database flags;
-- requires a fresh `baseline/` or `target/` directory outside the analyzed
-  project and never overwrites it;
-- uses a private HOME/config directory inside that snapshot directory;
-- validates `graphify-out/graph.json` before publishing a deterministic
-  `snapshot-receipt.json`.
-
-This is process isolation, not a security sandbox. The Graphify executable still
-reads source on the host. Do not use the POC on untrusted source until it is
-placed behind the hardened runtime boundary.
+These are **expected provenance metadata**, not proof that an imported file was
+created by that executable. The future sandbox gate must attest the installed
+artifact and invocation before passing its output to this importer. The adapter
+does not install the package or call the command to obtain self-reported
+metadata.
 
 ## Supported `graph.json` contract
 
-The adapter version is `1`, bound to Graphify 0.9.30's NetworkX node-link JSON:
+The offline adapter is bound to the frozen, directed NetworkX node-link shape:
 
 | Level | Required contract |
 |---|---|
-| document | exactly `directed`, `multigraph`, `graph`, `nodes`, `links`, `hyperedges`, and optional `built_at_commit` |
-| node | unique string `id`, string `label`, `file_type: code`, project-confined `source_file`, optional one-based `source_location` |
-| link | existing `source` and `target` IDs, string `relation`, `confidence` in `EXTRACTED`, `INFERRED`, `AMBIGUOUS`, optional source span |
-| semantic data | `hyperedges` must be empty |
+| document | exactly required `directed`, `multigraph`, `graph`, `nodes`, `links`, `hyperedges`, plus optional `built_at_commit` |
+| graph mode | `directed: true`, `multigraph: true`, empty `graph`, empty `hyperedges` |
+| node | unique string `id`, string `label`, `file_type: code`, non-empty project-confined regular `source_file`, optional bounded `source_location` |
+| link | existing `source` and `target` IDs, an explicitly oriented relation, `confidence` in `EXTRACTED`, `INFERRED`, `AMBIGUOUS`, optional bounded source occurrence |
 
-Duplicate JSON members, non-finite numbers, invalid UTF-8, schema drift, dangling
-edges, duplicate node IDs, non-code nodes, paths outside the project, malformed
-or reversed ranges, oversized graphs, and unexpected fields fail closed.
-`source_location` accepts `L12`, `12`, or an inclusive range such as `L12-L18`.
+The attested relation orientation is always the JSON `source` ID to the JSON
+`target` ID:
 
-The adapter retains Graphify extraction strength separately from detector
-confidence. It marks only source-backed `calls`, `imports`, `imports_from`,
-`inherits`, `references`, and `re_exports` links as eligible for a future
-traversal. `contains`, communities, similarity, natural-language relations, and
-unknown relation types cannot become blast-radius evidence.
+| Relation | Orientation |
+|---|---|
+| `calls` | caller to callee |
+| `imports`, `imports_from` | importer to imported symbol/module |
+| `inherits` | subclass to base |
+| `references` | referencer to referenced symbol |
+| `re_exports` | exporter to exported symbol |
+| `contains` | container to contained node |
+| `related_to` | symmetric; never traversal evidence |
 
-## Immutable snapshot receipt
+Relations without a pinned orientation fail closed. Only source-backed `calls`,
+`imports`, `imports_from`, `inherits`, `references`, and `re_exports` may be
+eligible for future traversal. `contains`, similarity, community data, and
+natural-language relations cannot become blast-radius evidence.
 
-The adapter reads one bounded byte snapshot, hashes those exact bytes with
-SHA-256, then validates them. The exclusive receipt records:
+All allowlisted fields are validated. Former unchecked fields such as nested
+`metadata`, origin/target hints, scopes, package, and namespace are rejected.
+Duplicate JSON members, non-finite numbers, invalid UTF-8, schema drift,
+dangling edges, duplicate node IDs, non-code nodes, paths outside the project,
+malformed/reversed/out-of-file ranges, oversized files, non-regular files, and
+mutation during import fail closed. `source_location` accepts `L12`, `12`, or an
+inclusive range such as `L12-L18`.
+
+## Bounded exact-byte provenance and receipt
+
+`graph.json` is opened once, required to be a regular file, and read through
+that descriptor with a `MAX_GRAPH_BYTES + 1` bound. Descriptor/path identity,
+size, and timestamp checks detect replacement or mutation during the read. The
+SHA-256 is computed over those exact bytes.
+
+Each referenced source file is similarly confined, opened as a regular file,
+and read at most once with a `MAX_SOURCE_BYTES + 1` bound. Node and edge line
+occurrences must fit those exact bytes. Source SHA-256 values are retained on
+nodes and spans, and all source snapshots are checked again before import
+returns.
+
+`import_graphify_snapshot()` exclusively creates a receipt containing:
 
 - side (`baseline` or `target`);
-- Graphify package version and adapter schema version;
-- exact graph SHA-256;
-- node and edge counts.
+- graph SHA-256 and adapter schema version;
+- pinned **expected** Graphify package/version/command/version-output metadata;
+- attested directed/multigraph values;
+- node and edge counts;
+- explicit `offline-only` import mode.
 
-Baseline and target always occupy distinct fresh directories. A caller can pass
-an expected SHA-256 when reopening a snapshot; a mismatch is an explicit error.
+A caller may require an expected lowercase SHA-256 when importing. Graph,
+project, source, and receipt path failures are normalized to
+`GraphifyAdapterError`.
 
 ## Current decision and remaining gates
 
-**Decision: BUILD the isolated adapter foundation; do not ADOPT the backend.**
+**Decision: BUILD the offline adapter foundation; do not ADOPT or invoke the
+backend. Keep #110 open.**
 
-Before an ADOPT or HYBRID decision, a later tranche must still:
+Before an ADOPT or HYBRID decision, later work must still:
 
-1. verify Graphify 0.9.30 on controlled Python fixtures for aliases, methods,
-   inheritance, imports/re-exports, deleted source, and cross-file calls;
-2. overlay secure FastAPI handler/DI identity without modifying `graph.json`;
-3. calibrate EXTRACTED/INFERRED/AMBIGUOUS edges against HIGH/MEDIUM/LOW policy;
-4. run target and baseline corpus comparisons and report candidate gain, false
+1. use the trusted #101 sandbox gate to enforce no network, a read-only source
+   mount, resource bounds, and pinned executable/package identity;
+2. verify real Graphify 0.9.30 artifacts on controlled Python fixtures for
+   direction, ranges, aliases, methods, inheritance, imports/re-exports,
+   deleted source, and cross-file calls;
+3. overlay secure FastAPI handler/DI identity without modifying `graph.json`;
+4. calibrate EXTRACTED/INFERRED/AMBIGUOUS edges against HIGH/MEDIUM/LOW policy;
+5. run target and baseline corpus comparisons and report candidate gain, false
    positives, failures/abstentions, graph size, latency, and peak RSS;
-5. prove no regression relative to mypy and record ADOPT, HYBRID, or STOP.
+6. prove no regression relative to mypy and record ADOPT, HYBRID, or STOP.
 
 No community, proximity, semantic label, or natural-language query result may
-satisfy these gates.
+satisfy these gates. This foundation makes no LLM, server, or network request;
+its stronger no-network execution guarantee remains deferred because it does
+not execute Graphify at all.
