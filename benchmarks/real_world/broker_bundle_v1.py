@@ -14,9 +14,11 @@ import re
 import secrets
 import stat
 import threading
+from collections.abc import Mapping
 from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, cast
 
 from benchmarks.real_world import ground_truth_run_v1 as run_v1
@@ -24,7 +26,7 @@ from benchmarks.real_world import ground_truth_submit_v1 as submit_v1
 from benchmarks.real_world.ground_truth_v2.schema import canonical_json
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Iterator
 
 _MAX_FILE: Final = 8 * 1024 * 1024
 _MAX_FILES: Final = 64
@@ -233,6 +235,28 @@ def _false_authority_map() -> dict[str, bool]:
         "adjudication": False,
         "canonical_import": False,
     }
+
+
+def _immutable_data(value: Any) -> Any:
+    """Copy JSON-shaped data into recursively immutable Python API values."""
+    if isinstance(value, dict):
+        return MappingProxyType({key: _immutable_data(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_immutable_data(item) for item in value)
+    return value
+
+
+def _immutable_document(value: dict[str, Any]) -> Mapping[str, Any]:
+    return cast("Mapping[str, Any]", _immutable_data(value))
+
+
+def _plain_data(value: Any) -> Any:
+    """Convert immutable API values to plain JSON data at the CLI boundary."""
+    if isinstance(value, Mapping):
+        return {key: _plain_data(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_plain_data(item) for item in value]
+    return value
 
 
 def _false_authority(value: object, label: str) -> None:
@@ -794,7 +818,7 @@ def materialize_bundle(
     output: Path,
     *,
     lineage_id: str,
-) -> dict[str, Any]:
+) -> Mapping[str, Any]:
     """Atomically publish one enclosing object containing bundle and receipt."""
     _reject_protected_destination(output, "output path")
     if output.name in {"", ".", ".."}:
@@ -1079,7 +1103,7 @@ def _census(root_fd: int) -> tuple[set[str], set[str], list[tuple[int, os.stat_r
     return files, directories, retained
 
 
-def verify_bundle(receipt_path: Path) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
+def _verify_bundle(receipt_path: Path) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
     """Descriptor-scan and revalidate the exact bundle while holding its root lock."""
     _normalized_absolute(receipt_path, "receipt path")
     if receipt_path.name != _RECEIPT_NAME:
@@ -1210,6 +1234,11 @@ def verify_bundle(receipt_path: Path) -> dict[str, Any]:  # noqa: PLR0912, PLR09
         return receipt
 
 
+def verify_bundle(receipt_path: Path) -> Mapping[str, Any]:
+    """Verify a bundle and expose a recursively immutable receipt document."""
+    return _immutable_document(_verify_bundle(receipt_path))
+
+
 def _phase_path(freeze_path: Path, phase: str) -> Path:
     return freeze_path.with_name(f"{freeze_path.name}.{phase}.json")
 
@@ -1336,12 +1365,12 @@ def prepare_freeze(
     output: Path,
     *,
     clock: datetime | None = None,
-) -> dict[str, Any]:
+) -> Mapping[str, Any]:
     """Publish a false-authority freeze and durably claim its prepared phase."""
     _reject_protected_destination(output, "freeze output")
     for phase_name in _FREEZE_PHASES:
         _reject_protected_destination(_phase_path(output, phase_name), "freeze phase output")
-    receipt = verify_bundle(receipt_path)
+    receipt = _verify_bundle(receipt_path)
     root = Path(cast("str", receipt["lineage_root_path"]))
     if output.parent != root:
         _fail("freeze must be published in the bound lineage root")
@@ -1388,13 +1417,13 @@ def prepare_freeze(
         }
         freeze = {**body, "freeze_sha256": _sha(canonical_json(body))}
         _atomic_at(root, root_fd, root_status, output.name, freeze)
-    verify_freeze(
+    _verify_freeze(
         output, runtime_attestation, binding, production_profile, launch_profile, phase="prepared"
     )
-    return freeze
+    return _immutable_document(freeze)
 
 
-def verify_freeze(
+def _verify_freeze(
     freeze_path: Path,
     runtime_attestation: Path,
     binding: Path,
@@ -1428,7 +1457,7 @@ def verify_freeze(
         if phase != expected_phase:
             _fail("freeze phase replay or out-of-order transition")
         receipt_path = Path(cast("str", freeze["bundle_receipt_path"]))
-        receipt = verify_bundle(receipt_path)
+        receipt = _verify_bundle(receipt_path)
         for freeze_field, receipt_field in (
             ("lineage_id", "lineage_id"),
             ("bundle_id", "bundle_id"),
@@ -1475,6 +1504,28 @@ def verify_freeze(
             {**body, "phase_sha256": _sha(canonical_json(body))},
         )
         return freeze
+
+
+def verify_freeze(
+    freeze_path: Path,
+    runtime_attestation: Path,
+    binding: Path,
+    production_profile: Path,
+    launch_profile: Path,
+    *,
+    phase: Literal["prepared", "launch_claimed", "pre_escrow"],
+) -> Mapping[str, Any]:
+    """Verify a freeze phase and expose a recursively immutable freeze document."""
+    return _immutable_document(
+        _verify_freeze(
+            freeze_path,
+            runtime_attestation,
+            binding,
+            production_profile,
+            launch_profile,
+            phase=phase,
+        )
+    )
 
 
 def _sources(values: list[str]) -> dict[str, Path]:
@@ -1548,7 +1599,7 @@ def main(argv: list[str] | None = None) -> int:
             )
     except BrokerBundleError as error:
         _parser().error(str(error))
-    print(json.dumps(result, sort_keys=True))
+    print(json.dumps(_plain_data(result), sort_keys=True))
     return 0
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, cast
@@ -702,6 +703,65 @@ def test_authority_rebinding_and_mutation_cannot_authorize_artifacts(
         ):
             with pytest.raises(bundle.BrokerBundleError, match="authority map is invalid"):
                 bundle._false_authority(invalid, "probe")
+    finally:
+        _unlock(output)
+
+
+def test_public_returned_authority_maps_are_deeply_immutable(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    inputs, output, receipt = _materialize(tmp_path)
+    freeze = tmp_path / "prepare-freeze.json"
+    try:
+        verified_receipt = bundle.verify_bundle(receipt)
+        prepared_freeze = bundle.prepare_freeze(
+            receipt,
+            inputs["runtime"],
+            inputs["binding"],
+            inputs["profile"],
+            inputs["launch"],
+            freeze,
+            clock=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        verified_freeze = bundle.verify_freeze(
+            freeze,
+            inputs["runtime"],
+            inputs["binding"],
+            inputs["profile"],
+            inputs["launch"],
+            phase="launch_claimed",
+        )
+
+        returned_documents = (verified_receipt, prepared_freeze, verified_freeze)
+        for document in returned_documents:
+            assert isinstance(document, Mapping)
+            authority = cast("dict[str, bool]", document["authorizations"])
+            with pytest.raises(TypeError):
+                authority["escrow"] = True
+            with pytest.raises(TypeError):
+                cast("dict[str, Any]", document)["authorizations"] = {"escrow": True}
+            assert all(value is False for value in authority.values())
+
+        phase_scope = cast("list[str]", prepared_freeze["phase_scope"])
+        assert isinstance(phase_scope, tuple)
+        with pytest.raises(TypeError):
+            phase_scope[0] = "escrow"
+
+        artifacts = [
+            tmp_path / bundle._ROOT_MARKER,
+            output / "manifest.json",
+            receipt,
+            freeze,
+            bundle._phase_path(freeze, "prepared"),
+            bundle._phase_path(freeze, "launch_claimed"),
+        ]
+        for path in artifacts:
+            authority = json.loads(path.read_bytes())["authorizations"]
+            assert all(value is False for value in authority.values())
+
+        assert bundle.main(["verify-bundle", "--receipt", str(receipt)]) == 0
+        cli_receipt = json.loads(capsys.readouterr().out)
+        assert cli_receipt["authorizations"] == dict(verified_receipt["authorizations"])
     finally:
         _unlock(output)
 
