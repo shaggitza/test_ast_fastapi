@@ -1,0 +1,48 @@
+schema_version: 1
+preset:
+  id: python-message-bus-effects
+  version: 1.0.0
+  provenance:
+    kind: preset
+    source: fastapi-endpoint-detector/effects_message_bus_v1.yaml
+    revision: "1"
+contracts:
+  - id: aiokafka-send-and-wait
+    symbol: aiokafka.producer.producer.AIOKafkaProducer.send_and_wait
+    invocation: instance_method
+    operation: publish
+    channel: message_bus
+    resource: {kind: argument, index: 0}
+    value: {kind: argument, index: 1}
+    behavior: {async_mode: async, timing: await}
+    package: {distribution: aiokafka, version: ">=0.10,<1"}
+  - id: kafka-python-send
+    symbol: kafka.producer.kafka.KafkaProducer.send
+    invocation: instance_method
+    operation: publish
+    channel: message_bus
+    resource: {kind: argument, index: 0}
+    value: {kind: argument, index: 1}
+    package: {distribution: kafka-python, version: ">=2,<3"}
+  - id: confluent-kafka-produce
+    symbol: confluent_kafka.Producer.produce
+    invocation: instance_method
+    operation: publish
+    channel: message_bus
+    resource: {kind: argument, index: 0}
+    value: {kind: argument, index: 1}
+    package: {distribution: confluent-kafka, version: ">=2.3,<3"}
+  - id: pika-basic-publish
+    symbol: pika.channel.Channel.basic_publish
+    invocation: instance_method
+    operation: publish
+    channel: message_bus
+    value: {kind: argument, index: 2}
+    package: {distribution: pika, version: ">=1.3,<2"}
+  - id: kombu-producer-publish
+    symbol: kombu.messaging.Producer.publish
+    invocation: instance_method
+    operation: publish
+    channel: message_bus
+    value: {kind: argument, index: 0}
+    package: {distribution: kombu, version: ">=5.3,<6"}

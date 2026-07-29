@@ -1,11 +1,11 @@
 schema_version: 1
 preset:
   id: redis-py-effects
-  version: 1.0.0
+  version: 2.0.0
   provenance:
     kind: preset
     source: fastapi-endpoint-detector/effects_redis_v1.yaml
-    revision: "1"
+    revision: "2"
 contracts:
   - id: redis-get
     symbol: redis.commands.core.BasicKeyCommands.get
@@ -13,7 +13,7 @@ contracts:
     operation: read
     channel: redis
     resource: {kind: argument, index: 0}
-    package: {distribution: redis, version: ">=5,<7"}
+    package: &redis {distribution: redis, version: ">=5,<7"}
   - id: redis-set
     symbol: redis.commands.core.BasicKeyCommands.set
     invocation: instance_method
@@ -21,14 +21,69 @@ contracts:
     channel: redis
     resource: {kind: argument, index: 0}
     value: {kind: argument, index: 1}
-    package: {distribution: redis, version: ">=5,<7"}
+    package: *redis
   - id: redis-delete
     symbol: redis.commands.core.BasicKeyCommands.delete
     invocation: instance_method
     operation: delete
     channel: redis
     resource: {kind: argument, index: 0}
-    package: {distribution: redis, version: ">=5,<7"}
+    package: *redis
+  - id: redis-expire
+    symbol: redis.commands.core.BasicKeyCommands.expire
+    invocation: instance_method
+    operation: update
+    channel: redis
+    resource: {kind: argument, index: 0}
+    value: {kind: argument, index: 1}
+    package: *redis
+  - id: redis-incrby
+    symbol: redis.commands.core.BasicKeyCommands.incrby
+    invocation: instance_method
+    operation: update
+    channel: redis
+    resource: {kind: argument, index: 0}
+    value: {kind: argument, index: 1}
+    package: *redis
+  - id: redis-hget
+    symbol: redis.commands.core.HashCommands.hget
+    invocation: instance_method
+    operation: read
+    channel: redis
+    resource: {kind: argument, index: 0}
+    value: {kind: argument, index: 1}
+    package: *redis
+  - id: redis-hset
+    symbol: redis.commands.core.HashCommands.hset
+    invocation: instance_method
+    operation: update
+    channel: redis
+    resource: {kind: argument, index: 0}
+    package: *redis
+  - id: redis-hdel
+    symbol: redis.commands.core.HashCommands.hdel
+    invocation: instance_method
+    operation: update
+    channel: redis
+    resource: {kind: argument, index: 0}
+    value: {kind: argument, index: 1}
+    package: *redis
+  - id: redis-lpush
+    symbol: redis.commands.core.ListCommands.lpush
+    invocation: instance_method
+    operation: append
+    channel: redis
+    resource: {kind: argument, index: 0}
+    value: {kind: argument, index: 1}
+    package: *redis
+  - id: redis-rpush
+    symbol: redis.commands.core.ListCommands.rpush
+    invocation: instance_method
+    operation: append
+    channel: redis
+    resource: {kind: argument, index: 0}
+    value: {kind: argument, index: 1}
+    package: *redis
   - id: redis-publish
     symbol: redis.commands.core.PubSubCommands.publish
     invocation: instance_method
@@ -36,4 +91,4 @@ contracts:
     channel: message_bus
     resource: {kind: argument, index: 0}
     value: {kind: argument, index: 1}
-    package: {distribution: redis, version: ">=5,<7"}
+    package: *redis

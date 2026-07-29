@@ -1,11 +1,11 @@
 schema_version: 1
 preset:
   id: stdlib-filesystem-effects
-  version: 2.0.0
+  version: 3.0.0
   provenance:
     kind: preset
     source: fastapi-endpoint-detector/effects_filesystem_v1.yaml
-    revision: "2"
+    revision: "3"
 contracts:
   - id: pathlib-read-text
     symbol: pathlib.Path.read_text
@@ -13,44 +13,14 @@ contracts:
     operation: read
     channel: filesystem
     resource: {kind: receiver}
-    package: {python: ">=3.10,<3.14"}
+    package: &python {python: ">=3.10,<3.14"}
   - id: pathlib-read-bytes
     symbol: pathlib.Path.read_bytes
     invocation: instance_method
     operation: read
     channel: filesystem
     resource: {kind: receiver}
-    package: {python: ">=3.10,<3.14"}
-  - id: io-text-read
-    symbol: _io._TextIOBase.read
-    invocation: instance_method
-    operation: read
-    channel: filesystem
-    resource: {kind: receiver}
-    package: {python: ">=3.10,<3.14"}
-  - id: io-text-write
-    symbol: _io._TextIOBase.write
-    invocation: instance_method
-    operation: write
-    channel: filesystem
-    resource: {kind: receiver}
-    value: {kind: argument, index: 0}
-    package: {python: ">=3.10,<3.14"}
-  - id: io-buffered-read
-    symbol: _io._BufferedIOBase.read
-    invocation: instance_method
-    operation: read
-    channel: filesystem
-    resource: {kind: receiver}
-    package: {python: ">=3.10,<3.14"}
-  - id: io-buffered-write
-    symbol: _io.BufferedWriter.write
-    invocation: instance_method
-    operation: write
-    channel: filesystem
-    resource: {kind: receiver}
-    value: {kind: argument, index: 0}
-    package: {python: ">=3.10,<3.14"}
+    package: *python
   - id: pathlib-write-text
     symbol: pathlib.Path.write_text
     invocation: instance_method
@@ -58,7 +28,7 @@ contracts:
     channel: filesystem
     resource: {kind: receiver}
     value: {kind: argument, index: 0}
-    package: {python: ">=3.10,<3.14"}
+    package: *python
   - id: pathlib-write-bytes
     symbol: pathlib.Path.write_bytes
     invocation: instance_method
@@ -66,4 +36,171 @@ contracts:
     channel: filesystem
     resource: {kind: receiver}
     value: {kind: argument, index: 0}
-    package: {python: ">=3.10,<3.14"}
+    package: *python
+  - id: pathlib-touch
+    symbol: pathlib.Path.touch
+    invocation: instance_method
+    operation: write
+    channel: filesystem
+    resource: {kind: receiver}
+    package: *python
+  - id: pathlib-mkdir
+    symbol: pathlib.Path.mkdir
+    invocation: instance_method
+    operation: write
+    channel: filesystem
+    resource: {kind: receiver}
+    package: *python
+  - id: pathlib-unlink
+    symbol: pathlib.Path.unlink
+    invocation: instance_method
+    operation: delete
+    channel: filesystem
+    resource: {kind: receiver}
+    package: *python
+  - id: pathlib-rmdir
+    symbol: pathlib.Path.rmdir
+    invocation: instance_method
+    operation: delete
+    channel: filesystem
+    resource: {kind: receiver}
+    package: *python
+  - id: pathlib-rename
+    symbol: pathlib.Path.rename
+    invocation: instance_method
+    operation: update
+    channel: filesystem
+    resource: {kind: receiver}
+    value: {kind: argument, index: 0}
+    package: *python
+  - id: pathlib-replace
+    symbol: pathlib.Path.replace
+    invocation: instance_method
+    operation: update
+    channel: filesystem
+    resource: {kind: receiver}
+    value: {kind: argument, index: 0}
+    package: *python
+
+  - id: io-text-read
+    symbol: _io._TextIOBase.read
+    invocation: instance_method
+    operation: read
+    channel: filesystem
+    resource: {kind: receiver}
+    package: *python
+  - id: io-text-write
+    symbol: _io._TextIOBase.write
+    invocation: instance_method
+    operation: write
+    channel: filesystem
+    resource: {kind: receiver}
+    value: {kind: argument, index: 0}
+    package: *python
+  - id: io-buffered-read
+    symbol: _io._BufferedIOBase.read
+    invocation: instance_method
+    operation: read
+    channel: filesystem
+    resource: {kind: receiver}
+    package: *python
+  - id: io-buffered-write
+    symbol: _io.BufferedWriter.write
+    invocation: instance_method
+    operation: write
+    channel: filesystem
+    resource: {kind: receiver}
+    value: {kind: argument, index: 0}
+    package: *python
+
+  - id: os-remove
+    symbol: os.remove
+    invocation: function
+    operation: delete
+    channel: filesystem
+    resource: {kind: argument, index: 0}
+    package: *python
+  - id: os-unlink
+    symbol: os.unlink
+    invocation: function
+    operation: delete
+    channel: filesystem
+    resource: {kind: argument, index: 0}
+    package: *python
+  - id: os-rmdir
+    symbol: os.rmdir
+    invocation: function
+    operation: delete
+    channel: filesystem
+    resource: {kind: argument, index: 0}
+    package: *python
+  - id: os-mkdir
+    symbol: os.mkdir
+    invocation: function
+    operation: write
+    channel: filesystem
+    resource: {kind: argument, index: 0}
+    package: *python
+  - id: os-makedirs
+    symbol: os.makedirs
+    invocation: function
+    operation: write
+    channel: filesystem
+    resource: {kind: argument, index: 0}
+    package: *python
+  - id: os-rename
+    symbol: os.rename
+    invocation: function
+    operation: update
+    channel: filesystem
+    resource: {kind: argument, index: 0}
+    value: {kind: argument, index: 1}
+    package: *python
+  - id: os-replace
+    symbol: os.replace
+    invocation: function
+    operation: update
+    channel: filesystem
+    resource: {kind: argument, index: 0}
+    value: {kind: argument, index: 1}
+    package: *python
+
+  - id: shutil-copyfile
+    symbol: shutil.copyfile
+    invocation: function
+    operation: write
+    channel: filesystem
+    resource: {kind: argument, index: 1}
+    value: {kind: argument, index: 0}
+    package: *python
+  - id: shutil-copy
+    symbol: shutil.copy
+    invocation: function
+    operation: write
+    channel: filesystem
+    resource: {kind: argument, index: 1}
+    value: {kind: argument, index: 0}
+    package: *python
+  - id: shutil-copy2
+    symbol: shutil.copy2
+    invocation: function
+    operation: write
+    channel: filesystem
+    resource: {kind: argument, index: 1}
+    value: {kind: argument, index: 0}
+    package: *python
+  - id: shutil-move
+    symbol: shutil.move
+    invocation: function
+    operation: update
+    channel: filesystem
+    resource: {kind: argument, index: 0}
+    value: {kind: argument, index: 1}
+    package: *python
+  - id: shutil-rmtree
+    symbol: shutil.rmtree
+    invocation: function
+    operation: delete
+    channel: filesystem
+    resource: {kind: argument, index: 0}
+    package: *python

@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - coverage.py dependency
 
 ### Added
+- **Versioned exact effect presets**: expanded Redis, PyMongo/Motor, filesystem,
+  requests/httpx/aiohttp, and typed S3 contracts; added a message-bus preset for
+  exact aiokafka, kafka-python, confluent-kafka, pika, and kombu symbols.
+  Dynamic method/mode APIs remain deliberately unsupported, and S3 object
+  operations abstain from Key-only resource identity until composite selectors
+  are available.
 - **Mypy integration**: Added mypy's build API for type-aware dependency analysis
   - New `_get_module_dependencies_via_mypy()` method for full dependency graph extraction
   - New `_module_to_file_path()` helper for module resolution

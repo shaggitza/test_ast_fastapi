@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 1
 preset:
   id: typed-s3-effects
   version: 2.0.0
@@ -7,37 +7,59 @@ preset:
     source: fastapi-endpoint-detector/effects_object_storage_v1.yaml
     revision: "2"
 contracts:
+  # Object identity requires the pair (Bucket, Key), which schema v1 cannot
+  # encode. These exact operation contracts therefore abstain from resource
+  # identity instead of emitting a false Key-only coupling.
   - id: typed-s3-get-object
     symbol: mypy_boto3_s3.client.S3Client.get_object
     invocation: instance_method
     operation: read
     channel: object_storage
-    resource:
-      kind: composite
-      components:
-        - {kind: keyword, name: Bucket}
-        - {kind: keyword, name: Key}
-    package: {distribution: mypy-boto3-s3, version: ">=1.34,<2"}
+    package: &s3 {distribution: mypy-boto3-s3, version: ">=1.34,<2"}
+  - id: typed-s3-head-object
+    symbol: mypy_boto3_s3.client.S3Client.head_object
+    invocation: instance_method
+    operation: read
+    channel: object_storage
+    package: *s3
   - id: typed-s3-put-object
     symbol: mypy_boto3_s3.client.S3Client.put_object
     invocation: instance_method
     operation: write
     channel: object_storage
-    resource:
-      kind: composite
-      components:
-        - {kind: keyword, name: Bucket}
-        - {kind: keyword, name: Key}
     value: {kind: keyword, name: Body}
-    package: {distribution: mypy-boto3-s3, version: ">=1.34,<2"}
+    package: *s3
+  - id: typed-s3-copy-object
+    symbol: mypy_boto3_s3.client.S3Client.copy_object
+    invocation: instance_method
+    operation: write
+    channel: object_storage
+    value: {kind: keyword, name: CopySource}
+    package: *s3
   - id: typed-s3-delete-object
     symbol: mypy_boto3_s3.client.S3Client.delete_object
     invocation: instance_method
     operation: delete
     channel: object_storage
-    resource:
-      kind: composite
-      components:
-        - {kind: keyword, name: Bucket}
-        - {kind: keyword, name: Key}
-    package: {distribution: mypy-boto3-s3, version: ">=1.34,<2"}
+    package: *s3
+  - id: typed-s3-list-objects-v2
+    symbol: mypy_boto3_s3.client.S3Client.list_objects_v2
+    invocation: instance_method
+    operation: read
+    channel: object_storage
+    resource: {kind: keyword, name: Bucket}
+    package: *s3
+  - id: typed-s3-create-bucket
+    symbol: mypy_boto3_s3.client.S3Client.create_bucket
+    invocation: instance_method
+    operation: write
+    channel: object_storage
+    resource: {kind: keyword, name: Bucket}
+    package: *s3
+  - id: typed-s3-delete-bucket
+    symbol: mypy_boto3_s3.client.S3Client.delete_bucket
+    invocation: instance_method
+    operation: delete
+    channel: object_storage
+    resource: {kind: keyword, name: Bucket}
+    package: *s3

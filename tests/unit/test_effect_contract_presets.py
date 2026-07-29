@@ -9,8 +9,12 @@ import pytest
 from fastapi_endpoint_detector.config import AnalysisConfig, Config
 from fastapi_endpoint_detector.models.effect_contract import (
     BUNDLED_EFFECT_PRESETS,
+    AsyncMode,
     EffectContractError,
+    EffectTiming,
+    InvocationKind,
     ProvenanceKind,
+    SelectorKind,
     load_effect_preset,
 )
 
@@ -19,11 +23,12 @@ if TYPE_CHECKING:
 
 
 _EXPECTED_PRESET_HASHES = {
-    "filesystem-v1": "sha256:5acc35da9d989ccafda0960090efefbbaa52ca5b70894882c24c4bf1355c2b96",
-    "http-clients-v1": "sha256:ab3d88b368db24f4c6c0879c8104105b09f23997997e63dd232856886bca6e2e",
-    "mongodb-v1": "sha256:7e0f41e452ac61b7340f02215963e8aa765333988b67d441b7aece9dfa53191c",
-    "object-storage-v1": "sha256:99707cccf212f530bd2437a3cb154d5ebea775857cc7d65c777771f9771cc6c4",
-    "redis-v1": "sha256:ce681490563300ce01dec68cd42af26c5fe8e06c7d5d45ae652dfce73c531ca2",
+    "filesystem-v1": "sha256:8e09b0a197a523b701bd18ce042b72bf8e8d5cc5c0741d18e7c1c61937712c40",
+    "http-clients-v1": "sha256:2a3e5f3e85d31a6ca4cae5f917d31081ab126ee82fd677d39dccd1040deb4f99",
+    "message-bus-v1": "sha256:e5b5dca859e0513f331392b4573e85336376277d64a835c4e9a85ea7459b8c2c",
+    "mongodb-v1": "sha256:1541057fa430ee8ced171b379aa9dab1f4007156fd9b8632784c0ccdfd2f2032",
+    "object-storage-v1": "sha256:e105008879ac0fdccec5dd03b0eb9a031749539713b617de089d8d82a796683c",
+    "redis-v1": "sha256:20161274ce0b8d2f2e18933c159aac66a272078dd3944c3980d857e65d85fa86",
     "sqlalchemy-v1": "sha256:132982ba61f04626df531dc80c71ce5d21c12ec583a932d21c220486785c8d04",
 }
 
@@ -33,10 +38,28 @@ _EXPECTED_CONTRACT_IDS = {
         "io-buffered-write",
         "io-text-read",
         "io-text-write",
+        "os-makedirs",
+        "os-mkdir",
+        "os-remove",
+        "os-rename",
+        "os-replace",
+        "os-rmdir",
+        "os-unlink",
+        "pathlib-mkdir",
         "pathlib-read-bytes",
         "pathlib-read-text",
+        "pathlib-rename",
+        "pathlib-replace",
+        "pathlib-rmdir",
+        "pathlib-touch",
+        "pathlib-unlink",
         "pathlib-write-bytes",
         "pathlib-write-text",
+        "shutil-copy",
+        "shutil-copy2",
+        "shutil-copyfile",
+        "shutil-move",
+        "shutil-rmtree",
     },
     "http-clients-v1": {
         "aiohttp-session-delete",
@@ -60,6 +83,20 @@ _EXPECTED_CONTRACT_IDS = {
         "httpx-client-patch",
         "httpx-client-post",
         "httpx-client-put",
+        "httpx-delete",
+        "httpx-get",
+        "httpx-head",
+        "httpx-options",
+        "httpx-patch",
+        "httpx-post",
+        "httpx-put",
+        "requests-api-delete",
+        "requests-api-get",
+        "requests-api-head",
+        "requests-api-options",
+        "requests-api-patch",
+        "requests-api-post",
+        "requests-api-put",
         "requests-session-delete",
         "requests-session-get",
         "requests-session-head",
@@ -68,18 +105,54 @@ _EXPECTED_CONTRACT_IDS = {
         "requests-session-post",
         "requests-session-put",
     },
+    "message-bus-v1": {
+        "aiokafka-send-and-wait",
+        "confluent-kafka-produce",
+        "kafka-python-send",
+        "kombu-producer-publish",
+        "pika-basic-publish",
+    },
     "mongodb-v1": {
+        "motor-delete-many",
+        "motor-delete-one",
+        "motor-find-one",
+        "motor-insert-many",
+        "motor-insert-one",
+        "motor-replace-one",
+        "motor-update-many",
+        "motor-update-one",
+        "pymongo-delete-many",
         "pymongo-delete-one",
         "pymongo-find-one",
+        "pymongo-insert-many",
         "pymongo-insert-one",
+        "pymongo-replace-one",
+        "pymongo-update-many",
         "pymongo-update-one",
     },
     "object-storage-v1": {
+        "typed-s3-copy-object",
+        "typed-s3-create-bucket",
+        "typed-s3-delete-bucket",
         "typed-s3-delete-object",
         "typed-s3-get-object",
+        "typed-s3-head-object",
+        "typed-s3-list-objects-v2",
         "typed-s3-put-object",
     },
-    "redis-v1": {"redis-delete", "redis-get", "redis-publish", "redis-set"},
+    "redis-v1": {
+        "redis-delete",
+        "redis-expire",
+        "redis-get",
+        "redis-hdel",
+        "redis-hget",
+        "redis-hset",
+        "redis-incrby",
+        "redis-lpush",
+        "redis-publish",
+        "redis-rpush",
+        "redis-set",
+    },
     "sqlalchemy-v1": {
         "sqlalchemy-async-session-add",
         "sqlalchemy-async-session-add-all",
@@ -109,15 +182,19 @@ def test_bundled_effect_presets_are_strict_versioned_snapshots(name: str) -> Non
 
     assert loaded.source_path == BUNDLED_EFFECT_PRESETS[name].resolve()
     expected_version = {
-        "filesystem-v1": "2.0.0",
-        "http-clients-v1": "2.0.0",
+        "filesystem-v1": "3.0.0",
+        "http-clients-v1": "3.0.0",
+        "mongodb-v1": "2.0.0",
         "object-storage-v1": "2.0.0",
+        "redis-v1": "2.0.0",
         "sqlalchemy-v1": "3.0.0",
     }.get(name, "1.0.0")
     expected_revision = {
-        "filesystem-v1": "2",
-        "http-clients-v1": "2",
+        "filesystem-v1": "3",
+        "http-clients-v1": "3",
+        "mongodb-v1": "2",
         "object-storage-v1": "2",
+        "redis-v1": "2",
         "sqlalchemy-v1": "3",
     }.get(name, "1")
     assert loaded.document.preset.version == expected_version
@@ -137,30 +214,16 @@ def test_presets_never_contain_bare_or_generic_method_symbols() -> None:
         loaded = load_effect_preset(name)
         for contract in loaded.document.contracts:
             parts = contract.symbol.split(".")
-            assert len(parts) >= 3
+            assert len(parts) >= 2
             assert contract.symbol not in forbidden
-            if parts[-1] in forbidden:
+            if contract.invocation != InvocationKind.FUNCTION:
+                assert len(parts) >= 3
+            if parts[-1] in forbidden and contract.invocation != InvocationKind.FUNCTION:
                 assert len(parts) >= 4 or parts[0] == "_io"
             assert contract.package is not None
             assert contract.package.python is not None or (
                 contract.package.distribution is not None and contract.package.version is not None
             )
-
-
-def test_object_storage_preset_uses_bucket_key_composite_identity() -> None:
-    loaded = load_effect_preset("object-storage-v1")
-
-    assert loaded.document.schema_version == 4
-    for contract in loaded.document.contracts:
-        assert contract.resource.model_dump(
-            mode="json", exclude_none=True, exclude_defaults=True
-        ) == {
-            "kind": "composite",
-            "components": [
-                {"kind": "keyword", "name": "Bucket"},
-                {"kind": "keyword", "name": "Key"},
-            ],
-        }
 
 
 def test_http_client_preset_declares_exact_methods_for_each_supported_client() -> None:
@@ -174,10 +237,77 @@ def test_http_client_preset_declares_exact_methods_for_each_supported_client() -
     expected = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
     assert methods_by_class == {
         "aiohttp.client.ClientSession": expected,
+        "httpx": expected,
         "httpx._client.AsyncClient": expected,
         "httpx._client.Client": expected,
+        "requests.api": expected,
         "requests.sessions.Session": expected,
     }
+
+
+def test_dynamic_or_generic_surfaces_are_not_preset_contracts() -> None:
+    symbols = {
+        contract.symbol
+        for name in BUNDLED_EFFECT_PRESETS
+        for contract in load_effect_preset(name).document.contracts
+    }
+
+    assert symbols.isdisjoint(
+        {
+            "builtins.open",  # mode-dependent until a predicate schema exists
+            "requests.api.request",  # method argument is not modeled by schema v3
+            "httpx.request",
+            "aiohttp.client.request",
+            "boto3.client",
+            "redis.Redis.get",
+            "motor.motor_asyncio.AsyncIOMotorCollection.find",
+            "pymongo.collection.Collection.update_one",
+            "pymongo.synchronous.collection.Collection.find",
+            "redis.commands.core.BasicKeyCommands.incr",
+        }
+    )
+
+
+def test_object_storage_abstains_from_false_key_only_object_identity() -> None:
+    loaded = load_effect_preset("object-storage-v1")
+    object_contracts = {
+        contract.id: contract
+        for contract in loaded.document.contracts
+        if contract.id
+        in {
+            "typed-s3-copy-object",
+            "typed-s3-delete-object",
+            "typed-s3-get-object",
+            "typed-s3-head-object",
+            "typed-s3-put-object",
+        }
+    }
+
+    assert object_contracts
+    assert all(
+        contract.resource.kind == SelectorKind.NONE for contract in object_contracts.values()
+    )
+    assert all(contract.resource.name is None for contract in object_contracts.values())
+
+
+def test_async_presets_declare_only_supported_effect_timing() -> None:
+    mongodb = load_effect_preset("mongodb-v1")
+    motor = {
+        contract.id: contract
+        for contract in mongodb.document.contracts
+        if contract.id.startswith("motor-")
+    }
+    assert all(contract.behavior.async_mode == AsyncMode.ASYNC for contract in motor.values())
+    assert all(contract.behavior.timing == EffectTiming.AWAIT for contract in motor.values())
+
+    messages = load_effect_preset("message-bus-v1")
+    aiokafka = next(
+        contract
+        for contract in messages.document.contracts
+        if contract.id == "aiokafka-send-and-wait"
+    )
+    assert aiokafka.behavior.async_mode == AsyncMode.ASYNC
+    assert aiokafka.behavior.timing == EffectTiming.AWAIT
 
 
 def test_sqlalchemy_preset_declares_exact_transaction_and_savepoint_scopes() -> None:

@@ -1,11 +1,11 @@
 schema_version: 3
 preset:
   id: python-http-client-effects
-  version: 2.0.0
+  version: 3.0.0
   provenance:
     kind: preset
     source: fastapi-endpoint-detector/effects_http_clients_v1.yaml
-    revision: "2"
+    revision: "3"
 contracts:
   - id: requests-session-get
     symbol: requests.sessions.Session.get
@@ -248,3 +248,120 @@ contracts:
     http_method: OPTIONS
     behavior: *aiohttp_async
     package: *aiohttp
+
+  # Public convenience functions are separate exact symbols from Session methods.
+  # Generic request(method, url) APIs are deliberately absent because v3 has no
+  # selector for a bounded method argument.
+  - id: requests-api-get
+    symbol: requests.api.get
+    invocation: function
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: GET
+    package: *requests
+  - id: requests-api-post
+    symbol: requests.api.post
+    invocation: function
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: POST
+    package: *requests
+  - id: requests-api-put
+    symbol: requests.api.put
+    invocation: function
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: PUT
+    package: *requests
+  - id: requests-api-patch
+    symbol: requests.api.patch
+    invocation: function
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: PATCH
+    package: *requests
+  - id: requests-api-delete
+    symbol: requests.api.delete
+    invocation: function
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: DELETE
+    package: *requests
+  - id: requests-api-head
+    symbol: requests.api.head
+    invocation: function
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: HEAD
+    package: *requests
+  - id: requests-api-options
+    symbol: requests.api.options
+    invocation: function
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: OPTIONS
+    package: *requests
+
+  - id: httpx-get
+    symbol: httpx.get
+    invocation: function
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: GET
+    package: *httpx
+  - id: httpx-post
+    symbol: httpx.post
+    invocation: function
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: POST
+    package: *httpx
+  - id: httpx-put
+    symbol: httpx.put
+    invocation: function
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: PUT
+    package: *httpx
+  - id: httpx-patch
+    symbol: httpx.patch
+    invocation: function
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: PATCH
+    package: *httpx
+  - id: httpx-delete
+    symbol: httpx.delete
+    invocation: function
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: DELETE
+    package: *httpx
+  - id: httpx-head
+    symbol: httpx.head
+    invocation: function
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: HEAD
+    package: *httpx
+  - id: httpx-options
+    symbol: httpx.options
+    invocation: function
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: OPTIONS
+    package: *httpx

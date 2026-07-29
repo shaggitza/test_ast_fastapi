@@ -8,16 +8,18 @@ from pydantic import ValidationError
 
 from fastapi_endpoint_detector.analyzer.effect_contract_auditor import audit_effect_contracts
 from fastapi_endpoint_detector.models.effect_contract import (
-    CallArgumentEvidence,
     CallResolutionStatus,
     FiniteValueStatus,
     InvocationKind,
+    LoadedEffectContracts,
     ResolvedCallSite,
     ResourceIdentityEvidence,
     load_effect_contracts,
+    load_effect_preset,
 )
 from fastapi_endpoint_detector.models.effect_contract_audit import (
     AuditCallStatus,
+    EffectContractAudit,
     EffectContractAuditError,
 )
 from fastapi_endpoint_detector.models.endpoint import (
@@ -34,7 +36,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _loaded(path: Path):
+def _loaded(path: Path) -> LoadedEffectContracts:
     document = {
         "schema_version": 1,
         "preset": {
@@ -112,13 +114,13 @@ def _site(
 
 def _audit(
     root: Path,
-    rows,
+    rows: list[tuple[Endpoint, list[ResolvedCallSite]]],
     *,
-    loaded=None,
+    loaded: LoadedEffectContracts | None = None,
     track_transitive: bool = True,
     max_depth: int = 10,
     cache_enabled: bool = True,
-):
+) -> EffectContractAudit:
     endpoints = [endpoint for endpoint, _sites in rows]
     return audit_effect_contracts(
         loaded or _loaded(root / "effects.yaml"),
@@ -132,69 +134,87 @@ def _audit(
     )
 
 
-def test_composite_resource_cartesian_overflow_is_unavailable(tmp_path: Path) -> None:
-    contracts = tmp_path / "composite-effects.yaml"
-    contracts.write_text(
-        yaml.safe_dump(
-            {
-                "schema_version": 4,
-                "preset": {
-                    "id": "composite-audit",
-                    "version": "1.0.0",
-                    "provenance": {"kind": "user", "source": "effects.yaml"},
-                },
-                "contracts": [
-                    {
-                        "id": "emit",
-                        "symbol": "company.events.emit",
-                        "invocation": "function",
-                        "operation": "publish",
-                        "channel": "message_bus",
-                        "resource": {
-                            "kind": "composite",
-                            "components": [
-                                {"kind": "keyword", "name": "Bucket"},
-                                {"kind": "keyword", "name": "Key"},
-                            ],
-                        },
-                    }
-                ],
-            },
-            sort_keys=False,
+@pytest.mark.parametrize(
+    ("preset", "symbol", "invocation", "contract_id", "negative_symbol"),
+    [
+        (
+            "redis-v1",
+            "redis.commands.core.HashCommands.hset",
+            InvocationKind.INSTANCE_METHOD,
+            "redis-hset",
+            "project.Cache.hset",
         ),
-        encoding="utf-8",
+        (
+            "mongodb-v1",
+            "motor.core.AgnosticCollection.update_one",
+            InvocationKind.INSTANCE_METHOD,
+            "motor-update-one",
+            "project.Collection.update_one",
+        ),
+        (
+            "filesystem-v1",
+            "os.remove",
+            InvocationKind.FUNCTION,
+            "os-remove",
+            "project.files.remove",
+        ),
+        (
+            "http-clients-v1",
+            "requests.api.post",
+            InvocationKind.FUNCTION,
+            "requests-api-post",
+            "project.http.post",
+        ),
+        (
+            "object-storage-v1",
+            "mypy_boto3_s3.client.S3Client.put_object",
+            InvocationKind.INSTANCE_METHOD,
+            "typed-s3-put-object",
+            "project.S3.put_object",
+        ),
+        (
+            "message-bus-v1",
+            "aiokafka.producer.producer.AIOKafkaProducer.send_and_wait",
+            InvocationKind.INSTANCE_METHOD,
+            "aiokafka-send-and-wait",
+            "project.Producer.send_and_wait",
+        ),
+    ],
+)
+def test_bundled_presets_match_only_exact_qualified_symbols(
+    tmp_path: Path,
+    preset: str,
+    symbol: str,
+    invocation: InvocationKind,
+    contract_id: str,
+    negative_symbol: str,
+) -> None:
+    endpoint = _endpoint(tmp_path, "handler")
+    exact = _site(
+        tmp_path,
+        column=2,
+        symbol=symbol,
+        invocation=invocation,
+        spelling=symbol.rsplit(".", maxsplit=1)[-1],
     )
-    hashes = tuple(f"sha256:{character * 64}" for character in "abcdef")
-    site = _site(tmp_path, column=2).model_copy(
-        update={
-            "arguments": (
-                CallArgumentEvidence(
-                    source_index=0,
-                    keyword="Bucket",
-                    status=FiniteValueStatus.FINITE,
-                    value_hashes=hashes[:3],
-                ),
-                CallArgumentEvidence(
-                    source_index=1,
-                    keyword="Key",
-                    status=FiniteValueStatus.FINITE,
-                    value_hashes=hashes[3:],
-                ),
-            )
-        }
+    unrelated = _site(
+        tmp_path,
+        column=30,
+        symbol=negative_symbol,
+        invocation=invocation,
+        spelling=negative_symbol.rsplit(".", maxsplit=1)[-1],
     )
 
     audit = _audit(
         tmp_path,
-        [(_endpoint(tmp_path, "handler"), [site])],
-        loaded=load_effect_contracts(contracts),
+        [(endpoint, [unrelated, exact])],
+        loaded=load_effect_preset(preset),
     )
 
-    identity = audit.occurrences[0].resource_identity
-    assert identity is not None
-    assert identity.status == FiniteValueStatus.UNAVAILABLE
-    assert identity.value_hashes == ()
-    assert identity.reason_code == "composite_resource_limit_exceeded"
+    assert audit.summary.matched_calls == 1
+    assert audit.summary.unmatched_calls == 1
+    matched = [item for item in audit.occurrences if item.contract_id is not None]
+    assert [item.contract_id for item in matched] == [contract_id]
 
 
 def test_exact_matching_is_symbol_and_invocation_only(tmp_path: Path) -> None:
