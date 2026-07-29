@@ -282,6 +282,18 @@ def test_not_measured_attestations_suppress_quality_but_remain_operational(
     assert result["timing"]["secure"]["list"]["status"] == "not_measured"
 
 
+def test_not_measured_pair_rejects_malformed_success_artifact(tmp_path: Path) -> None:
+    secure = tmp_path / "secure.json"
+    runtime = tmp_path / "runtime.json"
+    malformed = _record("secure", measured=False)
+    malformed["inventory"].pop("endpoints")
+    _write(secure, malformed)
+    _write(runtime, _record("runtime"))
+
+    with pytest.raises(ComparisonError, match="inventory endpoints must be an array"):
+        compare(secure, runtime)
+
+
 @pytest.mark.parametrize(
     "phase",
     ["dependency", "import", "app_resolution", "extraction", "timeout", "unavailable"],
@@ -379,6 +391,24 @@ def test_matrix_keeps_failures_operational_and_excludes_them_from_quality(
     assert result["operational"]["failure_phase_counts"]["runtime"] == {"dependency": 1}
     assert result["paired_success_quality"]["eligible_snapshots"] == ["target"]
     assert result["lifecycle"]["runtime"] is None
+
+
+def test_matrix_rejects_malformed_success_with_failed_counterpart(tmp_path: Path) -> None:
+    paths = _matrix_paths(tmp_path)
+    malformed = _record("runtime", snapshot="target", lock=_digest("7"), measured=False)
+    malformed["impact"] = {}
+    failed = _record("runtime", snapshot="baseline", lock=_digest("8"))
+    failed.update(
+        status="failure",
+        failure={"phase": "dependency", "message": "lock install failed"},
+        inventory=None,
+        impact=None,
+    )
+    _write(paths[("target", "runtime")], malformed)
+    _write(paths[("baseline", "runtime")], failed)
+
+    with pytest.raises(ComparisonError, match="candidate_endpoints must be an array"):
+        _compare_matrix(paths)
 
 
 def test_matrix_rejects_snapshot_or_entry_configuration_mismatch(tmp_path: Path) -> None:

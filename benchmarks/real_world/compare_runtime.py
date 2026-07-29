@@ -224,7 +224,8 @@ def _validate(record: dict[str, Any], expected_mode: str) -> None:  # noqa: PLR0
     _validate_telemetry(record)
     if record["status"] == "success":
         inventory = record.get("inventory")
-        if not isinstance(inventory, dict) or not isinstance(record.get("impact"), dict):
+        impact = record.get("impact")
+        if not isinstance(inventory, dict) or not isinstance(impact, dict):
             raise ComparisonError("successful records require inventory and impact")
         inventory_status = inventory.get("inventory_status")
         allowed_inventory = (
@@ -234,6 +235,8 @@ def _validate(record: dict[str, Any], expected_mode: str) -> None:  # noqa: PLR0
         )
         if inventory_status not in allowed_inventory:
             raise ComparisonError(f"successful {expected_mode} inventory status is invalid")
+        _inventory_ids(inventory)
+        _impact_ids(impact)
         if record.get("failure") is not None:
             raise ComparisonError("successful records forbid failure metadata")
     else:
