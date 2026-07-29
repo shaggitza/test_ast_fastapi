@@ -36,6 +36,8 @@ from fastapi_endpoint_detector.models.effect_contract import (
 )
 from fastapi_endpoint_detector.models.endpoint import (
     DependencyCallableKind,
+    DependencyGraphLimitation,
+    DependencyGraphStatus,
     DependencyResolutionStatus,
     Endpoint,
 )
@@ -128,6 +130,15 @@ class _ProjectPathIndex:
         return selected
 
 
+@dataclass(frozen=True)
+class _StatementControl:
+    """Bounded control outcomes propagated by one statement subtree."""
+
+    falls_through: bool = True
+    breaks: bool = False
+    continues: bool = False
+
+
 @dataclass
 class EndpointDependencies:
     """Dependencies for a single endpoint determined by mypy."""
@@ -145,6 +156,8 @@ class EndpointDependencies:
     """Source-backed call occurrences reached from this endpoint."""
     source_root: str = ""
     project_files: set[str] | frozenset[str] = field(default_factory=set)
+    status: DependencyGraphStatus = DependencyGraphStatus.ESTABLISHED
+    limitations: list[DependencyGraphLimitation] = field(default_factory=list)
     _path_index: _ProjectPathIndex | None = field(default=None, repr=False, compare=False)
     _canonical_key_indexes: dict[str, dict[str, frozenset[str]]] = field(
         default_factory=dict, init=False, repr=False, compare=False
@@ -152,9 +165,37 @@ class EndpointDependencies:
     _resolved_call_site_set: set[ResolvedCallSite] = field(
         default_factory=set, init=False, repr=False, compare=False
     )
+    _limitation_codes: set[str] = field(default_factory=set, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self._resolved_call_site_set.update(self.resolved_call_sites)
+        self._limitation_codes.update(item.code for item in self.limitations)
+        self.status = (
+            DependencyGraphStatus.CONDITIONAL
+            if self.limitations
+            else DependencyGraphStatus.ESTABLISHED
+        )
+
+    def add_limitation(
+        self,
+        code: str,
+        source_path: str,
+        source_line: int,
+        reason: str,
+    ) -> None:
+        """Record one source-backed endpoint limitation per bounded cap."""
+        if code in self._limitation_codes:
+            return
+        self._limitation_codes.add(code)
+        self.limitations.append(
+            DependencyGraphLimitation(
+                code=code,
+                source_path=Path(source_path),
+                source_line=max(source_line, 1),
+                reason=reason,
+            )
+        )
+        self.status = DependencyGraphStatus.CONDITIONAL
 
     def add_reference(self, file_path: str, line: int, symbol_name: str = "") -> None:
         """Add a line reference to dependencies."""
@@ -376,12 +417,12 @@ class MypyAnalyzer:
     and extract precise file/line information for all references.
     """
 
-    CACHE_SCHEMA_VERSION = 19
+    CACHE_SCHEMA_VERSION = 20
     MAX_POINTS_TO_TARGETS = 8
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
     MAX_POINTS_TO_EDGES = 4096
-    EXECUTION_SUMMARY_VERSION = 5
+    EXECUTION_SUMMARY_VERSION = 6
     GENERATOR_CONSUMERS: ClassVar[dict[str, tuple[int, str, bool | None]]] = {
         "starlette.responses.StreamingResponse": (0, "content", None),
     }
@@ -1263,6 +1304,14 @@ class MypyAnalyzer:
                     visited,
                     self._import_map_for_tree(dependency_tree, dependency_module),
                     depth=dependency_depth,
+                )
+            else:
+                deps.add_limitation(
+                    "analysis_depth_exhausted",
+                    dependency_path,
+                    dependency_start,
+                    "Mypy dependency traversal reached its configured maximum depth; "
+                    "deeper references were not analyzed.",
                 )
 
         trace_roots: list[Any]
@@ -2926,10 +2975,12 @@ class MypyAnalyzer:
             AssignmentStmt,
             AwaitExpr,
             Block,
+            BreakStmt,
             CallExpr,
             ClassDef,
             ComparisonExpr,
             ConditionalExpr,
+            ContinueStmt,
             Decorator,
             DictExpr,
             DictionaryComprehension,
@@ -2945,6 +2996,7 @@ class MypyAnalyzer:
             LambdaExpr,
             ListComprehension,
             ListExpr,
+            MatchStmt,
             MemberExpr,
             NameExpr,
             OpExpr,
@@ -2959,6 +3011,15 @@ class MypyAnalyzer:
             WithStmt,
             YieldExpr,
             YieldFromExpr,
+        )
+        from mypy.patterns import (
+            AsPattern,
+            ClassPattern,
+            MappingPattern,
+            OrPattern,
+            SequencePattern,
+            StarredPattern,
+            ValuePattern,
         )
 
         flow_environment: dict[str, _FinitePointsTo] = dict(initial_environment or {})
@@ -2984,9 +3045,23 @@ class MypyAnalyzer:
             """Resolve a fullname and preserve LOW provenance through descendants."""
             target_depth = depth + 1
             if target_depth > self.max_depth:
+                deps.add_limitation(
+                    "analysis_depth_exhausted",
+                    current_file,
+                    call_line,
+                    "Mypy dependency traversal reached its configured maximum depth; "
+                    "deeper references were not analyzed.",
+                )
                 return
             if low_confidence_edge:
                 if finite_edge_budget[0] >= self.MAX_POINTS_TO_EDGES:
+                    deps.add_limitation(
+                        "points_to_edge_cap_exhausted",
+                        current_file,
+                        call_line,
+                        "Mypy finite points-to traversal reached its edge cap; "
+                        "additional low-confidence references were not analyzed.",
+                    )
                     return
                 finite_edge_budget[0] += 1
             target_low_confidence = low_confidence_path or low_confidence_edge
@@ -3078,6 +3153,14 @@ class MypyAnalyzer:
                         initial_environment=target_environment,
                         finite_edge_budget=finite_edge_budget,
                     )
+                elif should_recurse:
+                    deps.add_limitation(
+                        "analysis_depth_exhausted",
+                        current_file,
+                        call_line,
+                        "Mypy dependency traversal reached its configured maximum depth; "
+                        "deeper references were not analyzed.",
+                    )
             else:
                 class_candidates = [
                     definition
@@ -3136,6 +3219,14 @@ class MypyAnalyzer:
                                 initial_environment=target_environment,
                                 finite_edge_budget=finite_edge_budget,
                             )
+                        elif should_recurse:
+                            deps.add_limitation(
+                                "analysis_depth_exhausted",
+                                current_file,
+                                call_line,
+                                "Mypy dependency traversal reached its configured maximum depth; "
+                                "deeper references were not analyzed.",
+                            )
                 # Ambiguous or unresolved symbols are not converted into
                 # fabricated module ranges; doing so creates unrelated impacts.
 
@@ -3185,6 +3276,12 @@ class MypyAnalyzer:
             if isinstance(expression, UnaryExpr) and expression.op == "not":
                 nested = literal_truth(expression.expr)
                 return None if nested is None else not nested
+            return None
+
+        def literal_iterable_empty(expression: Any) -> bool | None:
+            """Return exact emptiness for side-effect-free literal loop iterables."""
+            if isinstance(expression, (TupleExpr, ListExpr, SetExpr)):
+                return not expression.items
             return None
 
         def call_is_unawaited_coroutine(call: CallExpr, call_site: ResolvedCallSite | None) -> bool:
@@ -3285,15 +3382,25 @@ class MypyAnalyzer:
                 traced = True
 
             local_function = (
-                deferred_local_functions.get(callee.name) if isinstance(callee, NameExpr) else None
+                deferred_local_functions.get(callee.name)
+                if isinstance(callee, NameExpr)
+                else callee
+                if isinstance(callee, LambdaExpr)
+                else None
             )
             if local_function is not None:
                 traced = True
                 function = self._actual_function(local_function)
                 local_fullname = (
                     callee.fullname if isinstance(callee, NameExpr) else None
-                ) or f"{current_module}.{function.name}"
+                ) or (
+                    f"{current_module}.<lambda>@{function.line}"
+                    if isinstance(function, LambdaExpr)
+                    else f"{current_module}.{function.name}"
+                )
                 start, end = self._get_func_lines(function)
+                if isinstance(function, LambdaExpr):
+                    end = start
                 is_deferred_coroutine = (
                     bool(getattr(function, "is_coroutine", False))
                     and id(call) not in awaited_call_ids
@@ -3331,6 +3438,14 @@ class MypyAnalyzer:
                         low_confidence_path=low_confidence_path,
                         initial_environment=dict(flow_environment),
                         finite_edge_budget=finite_edge_budget,
+                    )
+                elif not is_deferred_coroutine:
+                    deps.add_limitation(
+                        "analysis_depth_exhausted",
+                        current_file,
+                        call.line,
+                        "Mypy dependency traversal reached its configured maximum depth; "
+                        "deeper references were not analyzed.",
                     )
 
             callback_binding = (
@@ -3443,11 +3558,11 @@ class MypyAnalyzer:
             flow_environment.clear()
             deferred_environment.clear()
 
-        def walk_node(n: Any) -> None:
-            """Recursively walk a mypy AST node with a bounded local environment."""
+        def walk_node(n: Any) -> _StatementControl:
+            """Recursively walk a mypy AST node and propagate bounded control outcomes."""
             nonlocal deferred_environment, flow_environment
             if n is None:
-                return
+                return _StatementControl()
 
             if isinstance(n, CallExpr):
                 handle_call_expr(n)
@@ -3486,10 +3601,17 @@ class MypyAnalyzer:
                         walk_node(decorator)
 
             elif isinstance(n, Block):
+                result = _StatementControl()
                 for stmt in n.body:
-                    walk_node(stmt)
-                    if isinstance(stmt, (ReturnStmt, RaiseStmt)):
+                    if not result.falls_through:
                         break
+                    statement_result = walk_node(stmt)
+                    result = _StatementControl(
+                        falls_through=statement_result.falls_through,
+                        breaks=result.breaks or statement_result.breaks,
+                        continues=result.continues or statement_result.continues,
+                    )
+                return result
 
             elif isinstance(n, ExpressionStmt):
                 walk_node(n.expr)
@@ -3501,6 +3623,13 @@ class MypyAnalyzer:
                     import_map,
                     (),
                     finite_budget,
+                )
+                local_callable = (
+                    n.rvalue
+                    if isinstance(n.rvalue, LambdaExpr)
+                    else deferred_local_functions.get(n.rvalue.name)
+                    if isinstance(n.rvalue, NameExpr)
+                    else None
                 )
                 deferred_value = (
                     self._deferred_generator_call(
@@ -3520,7 +3649,10 @@ class MypyAnalyzer:
                 walk_node(n.rvalue)
                 for lv in n.lvalues:
                     if isinstance(lv, NameExpr):
-                        deferred_local_functions.pop(lv.name, None)
+                        if local_callable is None:
+                            deferred_local_functions.pop(lv.name, None)
+                        else:
+                            deferred_local_functions[lv.name] = local_callable
                         if value is None:
                             flow_environment.pop(lv.name, None)
                         else:
@@ -3538,12 +3670,14 @@ class MypyAnalyzer:
 
             elif isinstance(n, ReturnStmt):
                 walk_node(n.expr)
+                return _StatementControl(falls_through=False)
 
             elif isinstance(n, IfStmt):
                 base_environment = dict(flow_environment)
                 base_deferred = dict(deferred_environment)
                 branch_environments: list[dict[str, _FinitePointsTo]] = []
                 branch_deferred: list[dict[str, _DeferredGenerator]] = []
+                branch_results: list[_StatementControl] = []
                 false_path_remains = True
                 for expr, body in zip(n.expr, n.body, strict=True):
                     if not false_path_remains:
@@ -3553,42 +3687,65 @@ class MypyAnalyzer:
                     walk_node(expr)
                     truth = literal_truth(expr)
                     if truth is not False:
-                        walk_node(body)
-                        branch_environments.append(dict(flow_environment))
-                        branch_deferred.append(dict(deferred_environment))
+                        branch_result = walk_node(body)
+                        branch_results.append(branch_result)
+                        if branch_result.falls_through:
+                            branch_environments.append(dict(flow_environment))
+                            branch_deferred.append(dict(deferred_environment))
                     if truth is True:
                         false_path_remains = False
                 if false_path_remains:
                     flow_environment = dict(base_environment)
                     deferred_environment = dict(base_deferred)
-                    if n.else_body:
-                        walk_node(n.else_body)
+                    branch_result = (
+                        walk_node(n.else_body) if n.else_body else _StatementControl()
+                    )
+                    branch_results.append(branch_result)
+                    if branch_result.falls_through:
                         branch_environments.append(dict(flow_environment))
                         branch_deferred.append(dict(deferred_environment))
-                    else:
-                        branch_environments.append(base_environment)
-                        branch_deferred.append(base_deferred)
-                if not branch_environments:
-                    branch_environments.append(base_environment)
-                    branch_deferred.append(base_deferred)
-                flow_environment = self._join_finite_environments(branch_environments)
-                common_deferred = set.intersection(*(set(branch) for branch in branch_deferred))
-                deferred_environment = {
-                    name: branch_deferred[0][name]
-                    for name in common_deferred
-                    if all(
-                        branch[name] == branch_deferred[0][name] for branch in branch_deferred[1:]
+                if branch_environments:
+                    flow_environment = self._join_finite_environments(branch_environments)
+                    common_deferred = set.intersection(
+                        *(set(branch) for branch in branch_deferred)
                     )
-                }
+                    deferred_environment = {
+                        name: branch_deferred[0][name]
+                        for name in common_deferred
+                        if all(
+                            branch[name] == branch_deferred[0][name]
+                            for branch in branch_deferred[1:]
+                        )
+                    }
+                else:
+                    flow_environment.clear()
+                    deferred_environment.clear()
+                return _StatementControl(
+                    falls_through=any(result.falls_through for result in branch_results),
+                    breaks=any(result.breaks for result in branch_results),
+                    continues=any(result.continues for result in branch_results),
+                )
 
             elif isinstance(n, WhileStmt):
                 walk_node(n.expr)
-                if literal_truth(n.expr) is not False:
+                truth = literal_truth(n.expr)
+                body_result = _StatementControl()
+                if truth is not False:
                     flow_environment.clear()
                     deferred_environment.clear()
-                    walk_node(n.body)
+                    body_result = walk_node(n.body)
+                else_result = _StatementControl()
+                if truth is not True and n.else_body:
+                    flow_environment.clear()
+                    deferred_environment.clear()
+                    else_result = walk_node(n.else_body)
                 flow_environment.clear()
                 deferred_environment.clear()
+                if truth is True:
+                    return _StatementControl(falls_through=body_result.breaks)
+                return _StatementControl(
+                    falls_through=body_result.breaks or else_result.falls_through
+                )
 
             elif isinstance(n, ForStmt):
                 consume_generator_expression(
@@ -3597,51 +3754,186 @@ class MypyAnalyzer:
                     require_async=bool(n.is_async),
                 )
                 walk_node(n.expr)
+                empty = literal_iterable_empty(n.expr)
+                body_result = _StatementControl()
+                if empty is not True:
+                    flow_environment.clear()
+                    deferred_environment.clear()
+                    body_result = walk_node(n.body)
                 flow_environment.clear()
                 deferred_environment.clear()
-                walk_node(n.body)
+                else_reachable = (
+                    empty is not False
+                    or body_result.falls_through
+                    or body_result.continues
+                )
+                else_result = (
+                    walk_node(n.else_body)
+                    if else_reachable and n.else_body
+                    else _StatementControl(falls_through=else_reachable)
+                )
                 flow_environment.clear()
                 deferred_environment.clear()
+                return _StatementControl(
+                    falls_through=body_result.breaks or else_result.falls_through
+                )
 
             elif isinstance(n, WithStmt):
                 for expr in n.expr:
                     walk_node(expr)
                 flow_environment.clear()
                 deferred_environment.clear()
-                walk_node(n.body)
+                result = walk_node(n.body)
                 flow_environment.clear()
                 deferred_environment.clear()
+                return result
 
             elif isinstance(n, TryStmt):
                 flow_environment.clear()
                 deferred_environment.clear()
-                walk_node(n.body)
-                for handler in n.handlers:
-                    flow_environment.clear()
-                    deferred_environment.clear()
-                    walk_node(handler)
+                body_result = walk_node(n.body)
+                incoming_results: list[_StatementControl] = []
+                if body_result.falls_through:
+                    if n.else_body:
+                        flow_environment.clear()
+                        deferred_environment.clear()
+                        incoming_results.append(walk_node(n.else_body))
+                    else:
+                        incoming_results.append(_StatementControl())
+                incoming_results.append(
+                    _StatementControl(
+                        falls_through=False,
+                        breaks=body_result.breaks,
+                        continues=body_result.continues,
+                    )
+                )
                 if hasattr(n, "types") and n.types:
                     for exc_type in n.types:
                         if exc_type:
                             walk_node(exc_type)
-                if n.else_body:
+                for handler in n.handlers:
                     flow_environment.clear()
                     deferred_environment.clear()
-                    walk_node(n.else_body)
+                    incoming_results.append(walk_node(handler))
+                incoming = _StatementControl(
+                    falls_through=any(result.falls_through for result in incoming_results),
+                    breaks=any(result.breaks for result in incoming_results),
+                    continues=any(result.continues for result in incoming_results),
+                )
                 if n.finally_body:
                     flow_environment.clear()
                     deferred_environment.clear()
-                    walk_node(n.finally_body)
+                    final_result = walk_node(n.finally_body)
+                    incoming = _StatementControl(
+                        falls_through=(
+                            incoming.falls_through and final_result.falls_through
+                        ),
+                        breaks=(
+                            final_result.breaks
+                            or (final_result.falls_through and incoming.breaks)
+                        ),
+                        continues=(
+                            final_result.continues
+                            or (final_result.falls_through and incoming.continues)
+                        ),
+                    )
                 flow_environment.clear()
                 deferred_environment.clear()
+                return incoming
+
+            elif isinstance(n, MatchStmt):
+                walk_node(n.subject)
+                base_environment = dict(flow_environment)
+                base_deferred = dict(deferred_environment)
+                match_results: list[_StatementControl] = []
+                match_environments: list[dict[str, _FinitePointsTo]] = []
+                match_deferred: list[dict[str, _DeferredGenerator]] = []
+                unmatched_path_remains = True
+
+                def walk_pattern(pattern: Any) -> None:
+                    if isinstance(pattern, ValuePattern):
+                        walk_node(pattern.expr)
+                    elif isinstance(pattern, ClassPattern):
+                        walk_node(pattern.class_ref)
+                        for nested in (*pattern.positionals, *pattern.keyword_values):
+                            walk_pattern(nested)
+                    elif isinstance(pattern, MappingPattern):
+                        for key in pattern.keys:
+                            walk_node(key)
+                        for nested in pattern.values:
+                            walk_pattern(nested)
+                    elif isinstance(pattern, (SequencePattern, OrPattern)):
+                        for nested in pattern.patterns:
+                            walk_pattern(nested)
+                    elif isinstance(pattern, AsPattern) and pattern.pattern is not None:
+                        walk_pattern(pattern.pattern)
+                    elif isinstance(pattern, StarredPattern):
+                        return
+
+                for pattern, guard, body in zip(
+                    n.patterns, n.guards, n.bodies, strict=True
+                ):
+                    if not unmatched_path_remains:
+                        break
+                    flow_environment = dict(base_environment)
+                    deferred_environment = dict(base_deferred)
+                    walk_pattern(pattern)
+                    guard_truth = None
+                    if guard is not None:
+                        walk_node(guard)
+                        guard_truth = literal_truth(guard)
+                    if guard_truth is not False:
+                        match_result = walk_node(body)
+                        match_results.append(match_result)
+                        if match_result.falls_through:
+                            match_environments.append(dict(flow_environment))
+                            match_deferred.append(dict(deferred_environment))
+                    irrefutable = isinstance(pattern, AsPattern) and pattern.pattern is None
+                    if irrefutable and (guard is None or guard_truth is True):
+                        unmatched_path_remains = False
+                if unmatched_path_remains:
+                    match_results.append(_StatementControl())
+                    match_environments.append(base_environment)
+                    match_deferred.append(base_deferred)
+                if match_environments:
+                    flow_environment = self._join_finite_environments(match_environments)
+                    common_deferred = set.intersection(
+                        *(set(branch) for branch in match_deferred)
+                    )
+                    deferred_environment = {
+                        name: match_deferred[0][name]
+                        for name in common_deferred
+                        if all(
+                            branch[name] == match_deferred[0][name]
+                            for branch in match_deferred[1:]
+                        )
+                    }
+                else:
+                    flow_environment.clear()
+                    deferred_environment.clear()
+                return _StatementControl(
+                    falls_through=any(result.falls_through for result in match_results),
+                    breaks=any(result.breaks for result in match_results),
+                    continues=any(result.continues for result in match_results),
+                )
 
             elif isinstance(n, AwaitExpr):
                 if isinstance(n.expr, CallExpr):
                     awaited_call_ids.add(id(n.expr))
                 walk_node(n.expr)
 
-            elif isinstance(n, (RaiseStmt, AssertStmt)):
+            elif isinstance(n, RaiseStmt):
                 walk_node(n.expr)
+                return _StatementControl(falls_through=False)
+
+            elif isinstance(n, AssertStmt):
+                walk_node(n.expr)
+
+            elif isinstance(n, BreakStmt):
+                return _StatementControl(falls_through=False, breaks=True)
+
+            elif isinstance(n, ContinueStmt):
+                return _StatementControl(falls_through=False, continues=True)
 
             elif isinstance(n, IndexExpr):
                 walk_node(n.base)
@@ -3755,6 +4047,8 @@ class MypyAnalyzer:
                 if hasattr(n, "func"):
                     deferred_local_functions[n.func.name] = n.func
                     walk_node(n.func)
+
+            return _StatementControl()
 
         # Start walking from the function
         # Walk decorators first
@@ -3894,6 +4188,10 @@ class MypyAnalyzer:
                 "endpoint_id": deps.endpoint_id,
                 "methods": deps.methods,
                 "path": deps.path,
+                "status": deps.status.value,
+                "limitations": [
+                    item.model_dump(mode="json") for item in deps.limitations
+                ],
                 "referenced_files": {f: list(lines) for f, lines in deps.referenced_files.items()},
                 "referenced_symbols": [
                     {
@@ -4024,6 +4322,25 @@ class MypyAnalyzer:
                 if not isinstance(endpoint_id, str):
                     self._endpoint_deps.clear()
                     return False
+                limitations_data = deps_data.get("limitations", [])
+                if not isinstance(limitations_data, list):
+                    self._endpoint_deps.clear()
+                    return False
+                limitations = [
+                    DependencyGraphLimitation.model_validate(item)
+                    for item in limitations_data
+                ]
+                status = DependencyGraphStatus(
+                    deps_data.get(
+                        "status",
+                        DependencyGraphStatus.CONDITIONAL.value
+                        if limitations
+                        else DependencyGraphStatus.ESTABLISHED.value,
+                    )
+                )
+                if bool(limitations) != (status == DependencyGraphStatus.CONDITIONAL):
+                    self._endpoint_deps.clear()
+                    return False
                 self._endpoint_deps[analysis_key] = EndpointDependencies(
                     endpoint_id=endpoint_id,
                     methods=deps_data["methods"],
@@ -4036,6 +4353,8 @@ class MypyAnalyzer:
                     resolved_call_sites=resolved_call_sites,
                     source_root=str(self.source_root),
                     project_files=path_index.project_files,
+                    status=status,
+                    limitations=limitations,
                     _path_index=path_index,
                 )
             return True
