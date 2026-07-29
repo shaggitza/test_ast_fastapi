@@ -215,7 +215,7 @@ def test_constructor_parameter_to_self_field_delegation_is_finite_and_low(
     assert deps.references_lines_low_only("services.py", {2})
 
 
-def test_conflicting_finite_overrides_fail_closed_without_partial_fanout(
+def test_exact_singleton_receiver_overrides_fan_out_at_low_confidence(
     tmp_path: Path,
 ) -> None:
     implementations = tmp_path / "implementations.py"
@@ -239,8 +239,7 @@ def test_conflicting_finite_overrides_fail_closed_without_partial_fanout(
 
     deps = MypyAnalyzer(tmp_path, max_depth=4).analyze_endpoint(_endpoint(main))
 
-    assert deps.references_symbol_at_line("implementations.py", 2) is None
-    assert deps.references_symbol_at_line("implementations.py", 6) is None
+    assert deps.references_lines_low_only("implementations.py", {2, 6})
 
 
 def test_exact_finite_mro_dispatch_selects_concrete_override_only(tmp_path: Path) -> None:
