@@ -918,6 +918,46 @@ def test_schema_v3_rejects_unknown_fields_float_versions_and_malformed_adapter_c
             read_primary_jsonl(path, "prediction")
 
 
+@pytest.mark.parametrize(
+    ("state", "message"),
+    [
+        ({"status": "measured"}, "requires only seconds"),
+        (
+            {"status": "not_measured", "reason": "missing", "seconds": 1.0},
+            "forbids samples",
+        ),
+        ({"status": "measured", "seconds": float("nan")}, "finite non-negative"),
+        ({"status": "unknown"}, "status is invalid"),
+    ],
+)
+def test_schema_v4_phase_states_reject_malformed_measured_statuses(
+    state: dict[str, object], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        evaluate._validate_measurement_state(state, "prs.phase_telemetry.cold_build")
+
+
+def test_schema_v4_aggregate_rejects_mixed_or_dropped_measured_samples() -> None:
+    with pytest.raises(ValueError, match="drops measured PR telemetry"):
+        evaluate._validate_aggregate_phase_state(
+            {"status": "not_measured", "reason": "missing"},
+            [1.0],
+            "timing.phases.cold_build",
+        )
+    with pytest.raises(ValueError, match="do not match PR telemetry"):
+        evaluate._validate_aggregate_phase_state(
+            {"status": "measured", "samples": [2.0]},
+            [1.0],
+            "timing.phases.cold_build",
+        )
+    with pytest.raises(ValueError, match="forbids samples"):
+        evaluate._validate_aggregate_phase_state(
+            {"status": "not_measured", "reason": "missing", "samples": []},
+            [],
+            "timing.phases.warm_no_change",
+        )
+
+
 def test_explicit_empty_candidate_list_does_not_fall_back_to_affected() -> None:
     record = {
         "affected_entrypoints": [{"id": "HTTP GET /selected", "kind": "http"}],

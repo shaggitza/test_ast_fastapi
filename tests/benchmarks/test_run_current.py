@@ -163,6 +163,18 @@ class ResolutionAndSkipTests(unittest.TestCase):
         self.assertEqual(add_worktree.call_args.args[2], SHA_A)
         self.assertEqual(prediction["unresolved"], [])
         self.assertEqual(manifest["status"], "completed")
+        self.assertEqual(
+            manifest["phase_telemetry"]["baseline_target_preparation"]["status"],
+            "measured",
+        )
+        self.assertEqual(
+            manifest["phase_telemetry"]["cold_build"],
+            {"status": "measured", "seconds": 0.25},
+        )
+        self.assertEqual(
+            manifest["phase_telemetry"]["warm_no_change"]["status"],
+            "not_measured",
+        )
 
     def test_scip_materializes_and_cleans_target_and_baseline(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_name:
@@ -400,6 +412,17 @@ class AnalyzerFailureTests(unittest.TestCase):
 
 
 class OutputCardinalityTests(unittest.TestCase):
+    def test_phase_aggregation_rejects_malformed_or_partial_states(self) -> None:
+        telemetry = run_current.new_phase_telemetry()
+        telemetry["cold_build"] = {"status": "measured", "seconds": float("nan")}
+        with self.assertRaisesRegex(run_current.RunnerError, "measured phase cold_build"):
+            run_current.aggregate_phase_telemetry([{"phase_telemetry": telemetry}])
+
+        telemetry = run_current.new_phase_telemetry()
+        telemetry.pop("warm_no_change")
+        with self.assertRaisesRegex(run_current.RunnerError, "telemetry is incomplete"):
+            run_current.aggregate_phase_telemetry([{"phase_telemetry": telemetry}])
+
     def test_main_rejects_colliding_artifact_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_name:
             corpus = Path(temporary_name) / "corpus.json"
@@ -415,6 +438,26 @@ class OutputCardinalityTests(unittest.TestCase):
                         str(Path(temporary_name) / "manifest.json"),
                     ]
                 )
+
+    def test_main_rejects_frozen_result_destinations_before_writing(self) -> None:
+        frozen_output = run_current.PROJECT_ROOT / "benchmarks/results/runner-must-not-write.jsonl"
+        self.assertFalse(frozen_output.exists())
+        with tempfile.TemporaryDirectory() as temporary_name:
+            temporary = Path(temporary_name)
+            corpus = temporary / "corpus.json"
+            corpus.write_text('{"entries": []}', encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                run_current.main(
+                    [
+                        "--corpus",
+                        str(corpus),
+                        "--output",
+                        str(frozen_output),
+                        "--manifest",
+                        str(temporary / "manifest.json"),
+                    ]
+                )
+        self.assertFalse(frozen_output.exists())
 
     def test_main_writes_one_unique_row_per_selected_pr(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_name:
@@ -482,7 +525,7 @@ class OutputCardinalityTests(unittest.TestCase):
         )
         self.assertEqual(manifest_data["selection_count"], 2)
         self.assertEqual(len(manifest_data["prs"]), 2)
-        self.assertEqual(manifest_data["schema_version"], 3)
+        self.assertEqual(manifest_data["schema_version"], 4)
         self.assertEqual(manifest_data["prediction_schema_version"], 3)
         self.assertEqual(manifest_data["prediction_output"]["records"], 2)
         self.assertEqual(
@@ -497,8 +540,122 @@ class OutputCardinalityTests(unittest.TestCase):
             ],
         )
         self.assertFalse(manifest_data["timing"]["incremental_valid"])
+        self.assertEqual(
+            set(manifest_data["timing"]["phases"]), set(run_current.PERFORMANCE_PHASES)
+        )
+        self.assertTrue(
+            all(
+                item["status"] == "not_measured"
+                for item in manifest_data["timing"]["resources"].values()
+            )
+        )
         self.assertEqual(manifest_binding["candidate"], "candidate")
         self.assertEqual(manifest_binding["prediction_sha256"], prediction_artifact.sha256)
+
+    def test_completed_schema_v4_manifest_round_trips_measured_phases(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_name:
+            temporary = Path(temporary_name)
+            corpus = temporary / "corpus.json"
+            output = temporary / "predictions.jsonl"
+            manifest = temporary / "manifest.json"
+            corpus.write_text(json.dumps({"entries": [entry("owner/repo", 1)]}), encoding="utf-8")
+            candidate = {
+                "id": "candidate/v1",
+                "name": "fastapi-endpoint-detector",
+                "version": "test",
+                "adapter": "fastapi-adapter-v1",
+                "git_sha": SHA_A,
+                "config_hash": "d" * 12,
+                "dirty": False,
+                "dirty_sha256": None,
+                "uv_lock_sha256": "b" * 64,
+                "uv_version": "uv test",
+                "command": "uv run --frozen fastapi-endpoint-detector analyze --no-cache",
+                "performance_protocol": {
+                    "id": "cold-no-cache-analyzer-wall-v1",
+                    "cache_enabled": False,
+                    "incremental_valid": False,
+                },
+            }
+            prediction = {
+                "schema_version": 3,
+                "repository": "owner/repo",
+                "pr": 1,
+                "candidate": "candidate/v1",
+                "adapter": "fastapi-adapter-v1",
+                "status": "completed",
+                "affected_entrypoints": [],
+                "candidate_entrypoints": [],
+                "unresolved": [],
+                "timing_seconds": {"cold_no_cache_analyzer_wall": 2.0},
+            }
+            record = {
+                "repository": "owner/repo",
+                "pr": 1,
+                "configured_app_root": ".",
+                "configured_app_entry": None,
+                "configured_bootstrap_entry": None,
+                "merge_sha": SHA_A,
+                "base_sha": SHA_B,
+                "status": "completed",
+                "timing_seconds": {
+                    "baseline_target_preparation": 1.0,
+                    "analyzer": 2.0,
+                    "total": 3.0,
+                },
+                "phase_telemetry": {
+                    "baseline_target_preparation": {"status": "measured", "seconds": 1.0},
+                    "cold_build": {"status": "measured", "seconds": 2.0},
+                    "warm_no_change": {
+                        "status": "not_measured",
+                        "reason": "backend_cache_reuse_not_implemented",
+                    },
+                    "one_file_incremental_update": {
+                        "status": "not_measured",
+                        "reason": "backend_invalidation_telemetry_not_implemented",
+                    },
+                },
+            }
+            with (
+                mock.patch.object(run_current, "candidate_metadata", return_value=candidate),
+                mock.patch.object(run_current, "process_entry", return_value=(prediction, record)),
+            ):
+                result = run_current.main(
+                    [
+                        "--corpus",
+                        str(corpus),
+                        "--output",
+                        str(output),
+                        "--manifest",
+                        str(manifest),
+                    ]
+                )
+            artifact = read_primary_artifact(output, "prediction")
+            binding = evaluate.read_prediction_manifest(manifest, artifact)
+            manifest_data = json.loads(manifest.read_text(encoding="utf-8"))
+
+        self.assertEqual(result, 0)
+        self.assertEqual(manifest_data["schema_version"], 4)
+        self.assertEqual(
+            manifest_data["timing"]["phases"]["baseline_target_preparation"],
+            {"status": "measured", "samples": [1.0]},
+        )
+        self.assertEqual(
+            binding["performance_telemetry"]["phases"]["cold_build"],
+            {
+                "status": "measured",
+                "samples": 1,
+                "mean": 2.0,
+                "p50": 2.0,
+                "p95": 2.0,
+                "max": 2.0,
+            },
+        )
+        self.assertFalse(binding["performance_telemetry"]["incremental_valid"])
+        self.assertEqual(
+            binding["performance_telemetry"]["resources"]["peak_rss_bytes"]["status"],
+            "not_measured",
+        )
 
 
 if __name__ == "__main__":
