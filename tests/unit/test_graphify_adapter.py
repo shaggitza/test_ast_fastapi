@@ -393,9 +393,7 @@ def test_missing_graph_project_and_source_failures_are_adapter_errors(tmp_path: 
     with pytest.raises(GraphifyAdapterError, match="cannot read Graphify snapshot"):
         load_graphify_snapshot(tmp_path / "missing.json", project_root=project, side="target")
     with pytest.raises(GraphifyAdapterError, match="project root does not exist"):
-        load_graphify_snapshot(
-            FIXTURE, project_root=tmp_path / "missing-project", side="target"
-        )
+        load_graphify_snapshot(FIXTURE, project_root=tmp_path / "missing-project", side="target")
 
     payload = _payload()
     payload["nodes"][0]["source_file"] = "missing.py"

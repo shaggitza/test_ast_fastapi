@@ -372,8 +372,7 @@ def _source_span(
         raise GraphifyAdapterError(f"{location}.source_location has a reversed range")
     if end_line > source.line_count:
         raise GraphifyAdapterError(
-            f"{location}.source_location exceeds the exact source bytes "
-            f"({source.line_count} lines)"
+            f"{location}.source_location exceeds the exact source bytes ({source.line_count} lines)"
         )
     assert source.relative_path is not None
     return source, GraphifySourceSpan(
@@ -550,9 +549,7 @@ def _adapt_edges(
         assert strength is not None
         span = _optional_edge_span(registry, edge, location)
         _validate_optional_fields(edge, location)
-        edges.append(
-            GraphifyEdge(source_id, target_id, relation, orientation, strength, span)
-        )
+        edges.append(GraphifyEdge(source_id, target_id, relation, orientation, strength, span))
     return tuple(edges)
 
 
