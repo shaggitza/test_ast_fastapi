@@ -1050,6 +1050,24 @@ class CustomSurfaceExtractor:
             "framework."
         )
 
+    @staticmethod
+    def _framework_include_ancestors(
+        token: _FrameworkToken,
+        included_by: dict[_FrameworkToken, set[_FrameworkToken]],
+    ) -> tuple[_FrameworkToken, ...]:
+        """Return prior include ancestors in deterministic, graph-bounded order."""
+        ancestors: list[_FrameworkToken] = []
+        seen = {token}
+        pending = sorted(included_by.get(token, ()), reverse=True)
+        while pending:
+            ancestor = pending.pop()
+            if ancestor in seen:
+                continue
+            seen.add(ancestor)
+            ancestors.append(ancestor)
+            pending.extend(sorted(included_by.get(ancestor, ()), reverse=True))
+        return tuple(ancestors)
+
     def _filter_framework_surfaces(self) -> None:
         """Apply selected-app identity and APIRouter copy-at-include semantics."""
         if not self._scope_framework_surfaces:
@@ -1062,21 +1080,22 @@ class CustomSurfaceExtractor:
                 live.setdefault(event.token, []).append(event.endpoint)
                 surface = event.endpoint.surface
                 if surface is not None:
-                    for parent in included_by.get(event.token, ()):
-                        conditions.setdefault(parent, []).append(
-                            EndpointDiscoveryCondition(
-                                source_path=surface.registration_file,
-                                source_line=surface.registration_line,
-                                reason=(
-                                    "router lifecycle registered after include_router has "
-                                    "runtime-version-dependent execution"
-                                ),
-                            )
-                        )
+                    condition = EndpointDiscoveryCondition(
+                        source_path=surface.registration_file,
+                        source_line=surface.registration_line,
+                        reason=(
+                            "router lifecycle registered after include_router has "
+                            "runtime-version-dependent execution"
+                        ),
+                    )
+                    for ancestor in self._framework_include_ancestors(event.token, included_by):
+                        conditions.setdefault(ancestor, []).append(condition)
                 continue
             if event.child is None:
                 if event.condition is not None:
                     conditions.setdefault(event.parent, []).append(event.condition)
+                    for ancestor in self._framework_include_ancestors(event.parent, included_by):
+                        conditions.setdefault(ancestor, []).append(event.condition)
                 continue
             live.setdefault(event.parent, []).extend(live.get(event.child, ()))
             conditions.setdefault(event.parent, []).extend(conditions.get(event.child, ()))

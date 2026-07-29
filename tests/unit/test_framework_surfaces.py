@@ -219,6 +219,31 @@ def test_router_lifecycle_uses_copy_at_include_order(tmp_path: Path) -> None:
     assert any("runtime-version-dependent" in item.reason for item in inventory.limitations)
 
 
+def test_nested_router_lifecycle_late_registration_reaches_selected_app(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import APIRouter, FastAPI\n\n"
+        "child = APIRouter()\n"
+        "@child.on_event('startup')\n"
+        "async def copied(): pass\n\n"
+        "parent = APIRouter()\n"
+        "parent.include_router(child)\n"
+        "app = FastAPI()\n"
+        "app.include_router(parent)\n\n"
+        "@child.on_event('shutdown')\n"
+        "async def too_late(): pass\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert [endpoint.handler.name for endpoint in inventory.endpoints] == ["copied"]
+    assert inventory.endpoints[0].identifier == "FRAMEWORK.LIFECYCLE event:startup"
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any("runtime-version-dependent" in item.reason for item in inventory.limitations)
+
+
 def test_rebound_default_app_does_not_leave_stale_framework_surface(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text(
         "from fastapi import FastAPI\n\n"
@@ -267,6 +292,23 @@ def test_dynamic_include_on_selected_app_fails_closed(tmp_path: Path) -> None:
     assert inventory.endpoints == []
     assert inventory.status == InventoryStatus.CONDITIONAL
     assert any("include_router target is dynamic" in item.reason for item in inventory.limitations)
+
+
+def test_nested_dynamic_include_reaches_already_included_selected_app(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import APIRouter, FastAPI\n\n"
+        "parent = APIRouter()\n"
+        "app = FastAPI()\n"
+        "app.include_router(parent)\n"
+        "parent.include_router(build_router())\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.endpoints == []
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any("inventory is incomplete" in item.reason for item in inventory.limitations)
 
 
 def test_fastapi_http_middleware_is_exact_async_surface(tmp_path: Path) -> None:
