@@ -25,6 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - coverage.py dependency
 
 ### Added
+- **Versioned exact effect presets**: expanded resolver-attested PyMongo/Motor,
+  filesystem, typed requests/httpx/aiohttp, and typed S3 contracts. Added a
+  message-bus preset containing only typed confluent-kafka `Producer.produce`,
+  with staged queue timing. Untyped message clients and Redis's timing-ambiguous
+  shared sync/async owners are omitted; receiver HTTP clients and S3 object
+  operations abstain from incomplete URL or Key-only resource identities.
+  This preset tranche does not include real-world evaluation, and Issue #97
+  remains open for unsupported families and evaluation.
 - **Mypy integration**: Added mypy's build API for type-aware dependency analysis
   - New `_get_module_dependencies_via_mypy()` method for full dependency graph extraction
   - New `_module_to_file_path()` helper for module resolution

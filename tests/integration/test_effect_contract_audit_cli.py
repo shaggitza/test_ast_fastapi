@@ -61,21 +61,21 @@ def test_validate_effect_preset_and_reject_dual_cli_sources(tmp_path: Path) -> N
 
     valid = runner.invoke(
         cli,
-        ["validate-effect-contracts", "--preset", "redis-v1", "--format", "json"],
+        ["validate-effect-contracts", "--preset", "filesystem-v1", "--format", "json"],
     )
     conflict = runner.invoke(
         cli,
         [
             "validate-effect-contracts",
             "--preset",
-            "redis-v1",
+            "filesystem-v1",
             "--contracts",
             str(contracts),
         ],
     )
 
     assert valid.exit_code == 0, valid.output
-    assert json.loads(valid.output)["preset"]["id"] == "redis-py-effects"
+    assert json.loads(valid.output)["preset"]["id"] == "stdlib-filesystem-effects"
     assert conflict.exit_code != 0
     assert "exactly one" in conflict.output
 
@@ -228,7 +228,7 @@ def test_audit_loads_configured_effect_preset(tmp_path: Path) -> None:
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
-    assert data["summary"]["contracts"] == 8
+    assert data["summary"]["contracts"] == 26
     assert data["provenance"]["preset_hash"].startswith("sha256:")
 
 

@@ -127,47 +127,62 @@ differ from the analyzed snapshot.
 
 Six conservative, independently versioned exact-symbol presets are bundled:
 
-- `redis-v1`
 - `mongodb-v1`
 - `filesystem-v1`
 - `http-clients-v1`
+- `message-bus-v1`
 - `object-storage-v1`
 - `sqlalchemy-v1`
 
 Validate one without copying package data:
 
 ```bash
-fastapi-endpoint-detector validate-effect-contracts --preset redis-v1 --format json
+fastapi-endpoint-detector validate-effect-contracts --preset filesystem-v1 --format json
 ```
 
 Select exactly one preset in configuration:
 
 ```yaml
 analysis:
-  effect_preset: redis-v1
+  effect_preset: filesystem-v1
 ```
 
 `effect_preset` and `effect_contracts` are mutually exclusive. Presets preserve the
 same exact `(canonical symbol, invocation)` matcher and evidence-only behavior as
 user documents. Version ranges are audited support metadata, not runtime package
 checks. Direct positional/keyword finite strings produce hashed resource
-identities. `filesystem-v1` 2.0 additionally traces an exact `pathlib.Path(...)`
+identities. `filesystem-v1` additionally traces an exact `pathlib.Path(...)`
 or `builtins.open(...)` constructor through one unconditional local assignment
 or active `with` binding into exact `_io`/`Path` instance methods. Reassignment,
 escaped handles, control flow, aliases, captured handles, composition, dynamic
 arguments, and unsupported factories fail closed.
 
 Dynamic boto3 clients without `mypy-boto3-s3`, generic HTTP `request`/`send`,
-mode-specific append classification, deferred cursors, Redis pipelines, and bare
-method names are intentionally absent.
+mode-specific `open()` classification, deferred cursor consumption, Redis, and
+bare method names are intentionally absent. Redis sync and async clients share
+mypy declaration owners, but their immediate-versus-await timing cannot be
+expressed by the current exact contract schema. Direct typed-S3 get, put, and
+delete operations use the ordered schema-v4 `(Bucket, Key)` composite identity;
+copy-source and other compound identities continue to abstain when every
+component cannot be represented exactly. Untyped aiokafka, kafka-python, pika,
+and kombu rows are also omitted. The message-bus preset contains only typed
+confluent-kafka `Producer.produce`, conservatively declared as a staged queue
+operation.
 
-Each family has an independent identity and semantic hash. Filesystem receiver
-origins, exact HTTP verb tables, and composite typed-S3 `(Bucket, Key)` identities
-are version `2.0.0`; MongoDB and Redis remain `1.0.0`. HTTP contracts preserve
-`GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, or `OPTIONS` as structured
-contract semantics while finite URLs remain hashed resource evidence. Typed S3
-contracts fail closed unless both bucket and key are finite. The v1 changelog and
-known exclusions are frozen in `benchmarks/results/effect-presets-v1/README.md`.
+Each family has an independent identity and semantic hash. Filesystem and HTTP
+contracts are version `3.0.0`; MongoDB/Motor and typed S3 contracts are version
+`2.0.0`; message bus starts at `1.0.0`. Requests support starts at its resolver-
+typed `2.34` release. HTTP receiver-client contracts abstain from URL resource
+identity because constructor `base_url` can make the call argument incomplete;
+top-level requests/httpx convenience calls retain finite URL evidence. aiohttp
+request timing is conservatively `await`. HTTP contracts preserve `GET`, `POST`,
+`PUT`, `PATCH`, `DELETE`, `HEAD`, or `OPTIONS` as structured semantics. The v1
+changelog and known exclusions are frozen in
+`benchmarks/results/effect-presets-v1/README.md`. That historical artifact is not
+real-world evaluation and is not modified by this tranche. Issue #97 remains open
+for unsupported package families, additional compound/base-URL identities,
+applicability enforcement, version-matrix expansion, and controlled or real-world
+evaluation.
 Multiple presets are not silently merged because the current provenance model has
 one authoritative contract source per analysis.
 

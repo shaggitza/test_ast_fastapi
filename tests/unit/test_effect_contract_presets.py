@@ -9,8 +9,12 @@ import pytest
 from fastapi_endpoint_detector.config import AnalysisConfig, Config
 from fastapi_endpoint_detector.models.effect_contract import (
     BUNDLED_EFFECT_PRESETS,
+    AsyncMode,
     EffectContractError,
+    EffectTiming,
+    InvocationKind,
     ProvenanceKind,
+    SelectorKind,
     load_effect_preset,
 )
 
@@ -19,11 +23,11 @@ if TYPE_CHECKING:
 
 
 _EXPECTED_PRESET_HASHES = {
-    "filesystem-v1": "sha256:5acc35da9d989ccafda0960090efefbbaa52ca5b70894882c24c4bf1355c2b96",
-    "http-clients-v1": "sha256:ab3d88b368db24f4c6c0879c8104105b09f23997997e63dd232856886bca6e2e",
-    "mongodb-v1": "sha256:7e0f41e452ac61b7340f02215963e8aa765333988b67d441b7aece9dfa53191c",
-    "object-storage-v1": "sha256:99707cccf212f530bd2437a3cb154d5ebea775857cc7d65c777771f9771cc6c4",
-    "redis-v1": "sha256:ce681490563300ce01dec68cd42af26c5fe8e06c7d5d45ae652dfce73c531ca2",
+    "filesystem-v1": "sha256:8e09b0a197a523b701bd18ce042b72bf8e8d5cc5c0741d18e7c1c61937712c40",
+    "http-clients-v1": "sha256:c1f6bcb56e06525f20e2eac5a68c9bc5812c281c054209fb6feb3c7df63cc890",
+    "message-bus-v1": "sha256:05c2d745da13fc39984d20b6cd260221eeac40ba7049a492cef6979488ac81a1",
+    "mongodb-v1": "sha256:1541057fa430ee8ced171b379aa9dab1f4007156fd9b8632784c0ccdfd2f2032",
+    "object-storage-v1": "sha256:6f33763d1502349481bca4b470f991e4c5a49d6a9b82e34df74a0f4b174161f9",
     "sqlalchemy-v1": "sha256:132982ba61f04626df531dc80c71ce5d21c12ec583a932d21c220486785c8d04",
 }
 
@@ -33,10 +37,28 @@ _EXPECTED_CONTRACT_IDS = {
         "io-buffered-write",
         "io-text-read",
         "io-text-write",
+        "os-makedirs",
+        "os-mkdir",
+        "os-remove",
+        "os-rename",
+        "os-replace",
+        "os-rmdir",
+        "os-unlink",
+        "pathlib-mkdir",
         "pathlib-read-bytes",
         "pathlib-read-text",
+        "pathlib-rename",
+        "pathlib-replace",
+        "pathlib-rmdir",
+        "pathlib-touch",
+        "pathlib-unlink",
         "pathlib-write-bytes",
         "pathlib-write-text",
+        "shutil-copy",
+        "shutil-copy2",
+        "shutil-copyfile",
+        "shutil-move",
+        "shutil-rmtree",
     },
     "http-clients-v1": {
         "aiohttp-session-delete",
@@ -60,6 +82,20 @@ _EXPECTED_CONTRACT_IDS = {
         "httpx-client-patch",
         "httpx-client-post",
         "httpx-client-put",
+        "httpx-delete",
+        "httpx-get",
+        "httpx-head",
+        "httpx-options",
+        "httpx-patch",
+        "httpx-post",
+        "httpx-put",
+        "requests-api-delete",
+        "requests-api-get",
+        "requests-api-head",
+        "requests-api-options",
+        "requests-api-patch",
+        "requests-api-post",
+        "requests-api-put",
         "requests-session-delete",
         "requests-session-get",
         "requests-session-head",
@@ -68,18 +104,35 @@ _EXPECTED_CONTRACT_IDS = {
         "requests-session-post",
         "requests-session-put",
     },
+    "message-bus-v1": {"confluent-kafka-produce"},
     "mongodb-v1": {
+        "motor-delete-many",
+        "motor-delete-one",
+        "motor-find-one",
+        "motor-insert-many",
+        "motor-insert-one",
+        "motor-replace-one",
+        "motor-update-many",
+        "motor-update-one",
+        "pymongo-delete-many",
         "pymongo-delete-one",
         "pymongo-find-one",
+        "pymongo-insert-many",
         "pymongo-insert-one",
+        "pymongo-replace-one",
+        "pymongo-update-many",
         "pymongo-update-one",
     },
     "object-storage-v1": {
+        "typed-s3-copy-object",
+        "typed-s3-create-bucket",
+        "typed-s3-delete-bucket",
         "typed-s3-delete-object",
         "typed-s3-get-object",
+        "typed-s3-head-object",
+        "typed-s3-list-objects-v2",
         "typed-s3-put-object",
     },
-    "redis-v1": {"redis-delete", "redis-get", "redis-publish", "redis-set"},
     "sqlalchemy-v1": {
         "sqlalchemy-async-session-add",
         "sqlalchemy-async-session-add-all",
@@ -109,14 +162,16 @@ def test_bundled_effect_presets_are_strict_versioned_snapshots(name: str) -> Non
 
     assert loaded.source_path == BUNDLED_EFFECT_PRESETS[name].resolve()
     expected_version = {
-        "filesystem-v1": "2.0.0",
-        "http-clients-v1": "2.0.0",
+        "filesystem-v1": "3.0.0",
+        "http-clients-v1": "3.0.0",
+        "mongodb-v1": "2.0.0",
         "object-storage-v1": "2.0.0",
         "sqlalchemy-v1": "3.0.0",
     }.get(name, "1.0.0")
     expected_revision = {
-        "filesystem-v1": "2",
-        "http-clients-v1": "2",
+        "filesystem-v1": "3",
+        "http-clients-v1": "3",
+        "mongodb-v1": "2",
         "object-storage-v1": "2",
         "sqlalchemy-v1": "3",
     }.get(name, "1")
@@ -137,30 +192,16 @@ def test_presets_never_contain_bare_or_generic_method_symbols() -> None:
         loaded = load_effect_preset(name)
         for contract in loaded.document.contracts:
             parts = contract.symbol.split(".")
-            assert len(parts) >= 3
+            assert len(parts) >= 2
             assert contract.symbol not in forbidden
-            if parts[-1] in forbidden:
+            if contract.invocation != InvocationKind.FUNCTION:
+                assert len(parts) >= 3
+            if parts[-1] in forbidden and contract.invocation != InvocationKind.FUNCTION:
                 assert len(parts) >= 4 or parts[0] == "_io"
             assert contract.package is not None
             assert contract.package.python is not None or (
                 contract.package.distribution is not None and contract.package.version is not None
             )
-
-
-def test_object_storage_preset_uses_bucket_key_composite_identity() -> None:
-    loaded = load_effect_preset("object-storage-v1")
-
-    assert loaded.document.schema_version == 4
-    for contract in loaded.document.contracts:
-        assert contract.resource.model_dump(
-            mode="json", exclude_none=True, exclude_defaults=True
-        ) == {
-            "kind": "composite",
-            "components": [
-                {"kind": "keyword", "name": "Bucket"},
-                {"kind": "keyword", "name": "Key"},
-            ],
-        }
 
 
 def test_http_client_preset_declares_exact_methods_for_each_supported_client() -> None:
@@ -174,10 +215,118 @@ def test_http_client_preset_declares_exact_methods_for_each_supported_client() -
     expected = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
     assert methods_by_class == {
         "aiohttp.client.ClientSession": expected,
+        "httpx._api": expected,
         "httpx._client.AsyncClient": expected,
         "httpx._client.Client": expected,
+        "requests.api": expected,
         "requests.sessions.Session": expected,
     }
+
+
+def test_dynamic_or_generic_surfaces_are_not_preset_contracts() -> None:
+    symbols = {
+        contract.symbol
+        for name in BUNDLED_EFFECT_PRESETS
+        for contract in load_effect_preset(name).document.contracts
+    }
+
+    assert symbols.isdisjoint(
+        {
+            "builtins.open",  # mode-dependent until a predicate schema exists
+            "requests.api.request",  # method argument is not modeled by schema v3
+            "httpx.request",
+            "httpx.get",  # public spelling resolves to the declaration owner below the facade
+            "aiohttp.client.request",
+            "boto3.client",
+            "redis.commands.core.BasicKeyCommands.get",  # shared sync/async owner
+            "redis.Redis.get",
+            "motor.motor_asyncio.AsyncIOMotorCollection.find",
+            "pymongo.collection.Collection.update_one",
+            "pymongo.synchronous.collection.Collection.find",
+            "redis.commands.core.BasicKeyCommands.incr",
+            "aiokafka.producer.producer.AIOKafkaProducer.send_and_wait",
+            "kafka.producer.kafka.KafkaProducer.send",
+            "pika.channel.Channel.basic_publish",
+            "kombu.messaging.Producer.publish",
+        }
+    )
+
+
+def test_receiver_http_clients_abstain_from_incomplete_url_identity() -> None:
+    loaded = load_effect_preset("http-clients-v1")
+    contracts = {contract.id: contract for contract in loaded.document.contracts}
+
+    receiver_ids = {
+        contract_id
+        for contract_id in contracts
+        if contract_id.startswith(("httpx-client-", "httpx-async-client-", "aiohttp-session-"))
+    }
+    assert receiver_ids
+    assert all(contracts[item].resource.kind == SelectorKind.NONE for item in receiver_ids)
+    assert contracts["httpx-get"].resource.kind == SelectorKind.ARGUMENT
+    assert contracts["requests-api-get"].resource.kind == SelectorKind.ARGUMENT
+    assert contracts["requests-api-get"].package is not None
+    assert contracts["requests-api-get"].package.version == ">=2.34,<3"
+
+
+def test_object_storage_uses_only_complete_resource_identities() -> None:
+    loaded = load_effect_preset("object-storage-v1")
+    contracts = {contract.id: contract for contract in loaded.document.contracts}
+
+    for contract_id in (
+        "typed-s3-delete-object",
+        "typed-s3-get-object",
+        "typed-s3-put-object",
+    ):
+        resource = contracts[contract_id].resource
+        assert resource.kind == "composite"
+        assert [(item.kind, item.name) for item in resource.components] == [
+            (SelectorKind.KEYWORD, "Bucket"),
+            (SelectorKind.KEYWORD, "Key"),
+        ]
+
+    for contract_id in ("typed-s3-copy-object", "typed-s3-head-object"):
+        resource = contracts[contract_id].resource
+        assert resource.kind == SelectorKind.NONE
+        assert resource.name is None
+
+    for contract_id in (
+        "typed-s3-create-bucket",
+        "typed-s3-delete-bucket",
+        "typed-s3-list-objects-v2",
+    ):
+        resource = contracts[contract_id].resource
+        assert resource.kind == SelectorKind.KEYWORD
+        assert resource.name == "Bucket"
+
+
+def test_async_presets_declare_only_supported_effect_timing() -> None:
+    mongodb = load_effect_preset("mongodb-v1")
+    motor = {
+        contract.id: contract
+        for contract in mongodb.document.contracts
+        if contract.id.startswith("motor-")
+    }
+    assert all(contract.behavior.async_mode == AsyncMode.ASYNC for contract in motor.values())
+    assert all(contract.behavior.timing == EffectTiming.AWAIT for contract in motor.values())
+
+    http = load_effect_preset("http-clients-v1")
+    aiohttp = [
+        contract for contract in http.document.contracts if contract.id.startswith("aiohttp-")
+    ]
+    assert aiohttp
+    assert all(contract.behavior.async_mode == AsyncMode.ASYNC for contract in aiohttp)
+    assert all(contract.behavior.timing == EffectTiming.AWAIT for contract in aiohttp)
+
+    messages = load_effect_preset("message-bus-v1")
+    assert len(messages.document.contracts) == 1
+    confluent = messages.document.contracts[0]
+    assert confluent.id == "confluent-kafka-produce"
+    assert confluent.symbol == "confluent_kafka.cimpl.Producer.produce"
+    assert confluent.behavior.async_mode == AsyncMode.SYNC
+    assert confluent.behavior.timing == EffectTiming.STAGED
+    assert confluent.package is not None
+    assert confluent.package.version == ">=2.13,<3"
 
 
 def test_sqlalchemy_preset_declares_exact_transaction_and_savepoint_scopes() -> None:
@@ -224,7 +373,7 @@ def test_effect_preset_and_user_document_are_mutually_exclusive(tmp_path: Path) 
     with pytest.raises(ValueError, match="mutually exclusive"):
         AnalysisConfig(
             effect_contracts=tmp_path / "effects.yaml",
-            effect_preset="redis-v1",
+            effect_preset="filesystem-v1",
         )
 
 

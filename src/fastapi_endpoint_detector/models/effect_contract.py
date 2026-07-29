@@ -28,11 +28,11 @@ from fastapi_endpoint_detector.strict_data import (
 BUNDLED_EFFECT_PRESETS = {
     "filesystem-v1": Path(__file__).parent.parent / "presets" / "effects_filesystem_v1.yaml",
     "http-clients-v1": Path(__file__).parent.parent / "presets" / "effects_http_clients_v1.yaml",
+    "message-bus-v1": Path(__file__).parent.parent / "presets" / "effects_message_bus_v1.yaml",
     "mongodb-v1": Path(__file__).parent.parent / "presets" / "effects_mongodb_v1.yaml",
     "object-storage-v1": (
         Path(__file__).parent.parent / "presets" / "effects_object_storage_v1.yaml"
     ),
-    "redis-v1": Path(__file__).parent.parent / "presets" / "effects_redis_v1.yaml",
     "sqlalchemy-v1": Path(__file__).parent.parent / "presets" / "effects_sqlalchemy_v1.yaml",
 }
 

@@ -12,12 +12,15 @@ from fastapi_endpoint_detector.models.effect_contract import (
     CallResolutionStatus,
     FiniteValueStatus,
     InvocationKind,
+    LoadedEffectContracts,
     ResolvedCallSite,
     ResourceIdentityEvidence,
     load_effect_contracts,
+    load_effect_preset,
 )
 from fastapi_endpoint_detector.models.effect_contract_audit import (
     AuditCallStatus,
+    EffectContractAudit,
     EffectContractAuditError,
 )
 from fastapi_endpoint_detector.models.endpoint import (
@@ -34,7 +37,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _loaded(path: Path):
+def _loaded(path: Path) -> LoadedEffectContracts:
     document = {
         "schema_version": 1,
         "preset": {
@@ -112,13 +115,13 @@ def _site(
 
 def _audit(
     root: Path,
-    rows,
+    rows: list[tuple[Endpoint, list[ResolvedCallSite]]],
     *,
-    loaded=None,
+    loaded: LoadedEffectContracts | None = None,
     track_transitive: bool = True,
     max_depth: int = 10,
     cache_enabled: bool = True,
-):
+) -> EffectContractAudit:
     endpoints = [endpoint for endpoint, _sites in rows]
     return audit_effect_contracts(
         loaded or _loaded(root / "effects.yaml"),
@@ -195,6 +198,82 @@ def test_composite_resource_cartesian_overflow_is_unavailable(tmp_path: Path) ->
     assert identity.status == FiniteValueStatus.UNAVAILABLE
     assert identity.value_hashes == ()
     assert identity.reason_code == "composite_resource_limit_exceeded"
+
+
+@pytest.mark.parametrize(
+    ("preset", "symbol", "invocation", "contract_id", "negative_symbol"),
+    [
+        (
+            "mongodb-v1",
+            "motor.core.AgnosticCollection.update_one",
+            InvocationKind.INSTANCE_METHOD,
+            "motor-update-one",
+            "project.Collection.update_one",
+        ),
+        (
+            "filesystem-v1",
+            "os.remove",
+            InvocationKind.FUNCTION,
+            "os-remove",
+            "project.files.remove",
+        ),
+        (
+            "http-clients-v1",
+            "requests.api.post",
+            InvocationKind.FUNCTION,
+            "requests-api-post",
+            "project.http.post",
+        ),
+        (
+            "object-storage-v1",
+            "mypy_boto3_s3.client.S3Client.put_object",
+            InvocationKind.INSTANCE_METHOD,
+            "typed-s3-put-object",
+            "project.S3.put_object",
+        ),
+        (
+            "message-bus-v1",
+            "confluent_kafka.cimpl.Producer.produce",
+            InvocationKind.INSTANCE_METHOD,
+            "confluent-kafka-produce",
+            "confluent_kafka.Producer.produce",
+        ),
+    ],
+)
+def test_bundled_presets_match_only_exact_qualified_symbols(
+    tmp_path: Path,
+    preset: str,
+    symbol: str,
+    invocation: InvocationKind,
+    contract_id: str,
+    negative_symbol: str,
+) -> None:
+    endpoint = _endpoint(tmp_path, "handler")
+    exact = _site(
+        tmp_path,
+        column=2,
+        symbol=symbol,
+        invocation=invocation,
+        spelling=symbol.rsplit(".", maxsplit=1)[-1],
+    )
+    unrelated = _site(
+        tmp_path,
+        column=30,
+        symbol=negative_symbol,
+        invocation=invocation,
+        spelling=negative_symbol.rsplit(".", maxsplit=1)[-1],
+    )
+
+    audit = _audit(
+        tmp_path,
+        [(endpoint, [unrelated, exact])],
+        loaded=load_effect_preset(preset),
+    )
+
+    assert audit.summary.matched_calls == 1
+    assert audit.summary.unmatched_calls == 1
+    matched = [item for item in audit.occurrences if item.contract_id is not None]
+    assert [item.contract_id for item in matched] == [contract_id]
 
 
 def test_exact_matching_is_symbol_and_invocation_only(tmp_path: Path) -> None:

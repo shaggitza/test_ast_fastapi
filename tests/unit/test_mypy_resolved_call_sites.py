@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+
+import pytest
 
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import (
     EndpointDependencies,
@@ -36,6 +39,80 @@ def _endpoint(path: Path, *, line: int, name: str = "handler") -> Endpoint:
 
 def _site_by_spelling(sites: list[ResolvedCallSite], spelling: str) -> list[ResolvedCallSite]:
     return [site for site in sites if site.source_spelling == spelling]
+
+
+def _require_distribution(distribution: str, minimum: tuple[int, int]) -> None:
+    try:
+        installed = version(distribution)
+    except PackageNotFoundError:
+        pytest.skip(f"resolver fixture requires {distribution}")
+    numeric = tuple(int(part) for part in installed.split(".")[:2])
+    if numeric < minimum:
+        pytest.skip(f"resolver fixture requires {distribution}>={minimum[0]}.{minimum[1]}")
+
+
+def test_httpx_public_imports_resolve_to_declaration_owner(tmp_path: Path) -> None:
+    _require_distribution("httpx", (0, 27))
+    main = tmp_path / "main.py"
+    main.write_text(
+        "import httpx\n"
+        "from httpx import get as public_get\n\n"
+        "def handler() -> None:\n"
+        "    httpx.get('https://example.test/qualified')\n"
+        "    public_get('https://example.test/imported')\n",
+        encoding="utf-8",
+    )
+
+    sites = MypyAnalyzer(tmp_path).analyze_endpoint(_endpoint(main, line=4)).resolved_call_sites
+    calls = [*_site_by_spelling(sites, "httpx.get"), *_site_by_spelling(sites, "public_get")]
+
+    assert len(calls) == 2
+    assert all(site.status == CallResolutionStatus.EXACT for site in calls)
+    assert all(site.invocation == InvocationKind.FUNCTION for site in calls)
+    assert {site.canonical_symbol for site in calls} == {"httpx._api.get"}
+    assert all(site.canonical_symbol != "httpx.get" for site in calls)
+
+
+def test_requests_public_imports_resolve_to_typed_declaration_owner(tmp_path: Path) -> None:
+    _require_distribution("requests", (2, 34))
+    main = tmp_path / "main.py"
+    main.write_text(
+        "import requests\n"
+        "from requests import post as public_post\n\n"
+        "def handler() -> None:\n"
+        "    requests.post('https://example.test/qualified')\n"
+        "    public_post('https://example.test/imported')\n",
+        encoding="utf-8",
+    )
+
+    sites = MypyAnalyzer(tmp_path).analyze_endpoint(_endpoint(main, line=4)).resolved_call_sites
+    calls = [*_site_by_spelling(sites, "requests.post"), *_site_by_spelling(sites, "public_post")]
+
+    assert len(calls) == 2
+    assert all(site.status == CallResolutionStatus.EXACT for site in calls)
+    assert all(site.invocation == InvocationKind.FUNCTION for site in calls)
+    assert {site.canonical_symbol for site in calls} == {"requests.api.post"}
+    assert all(site.canonical_symbol != "requests.post" for site in calls)
+
+
+def test_confluent_public_producer_resolves_to_cimpl_owner(tmp_path: Path) -> None:
+    _require_distribution("confluent-kafka", (2, 13))
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from confluent_kafka import Producer\n\n"
+        "def handler(producer: Producer) -> None:\n"
+        "    producer.produce('orders', b'value')\n",
+        encoding="utf-8",
+    )
+
+    sites = MypyAnalyzer(tmp_path).analyze_endpoint(_endpoint(main, line=3)).resolved_call_sites
+    produce = _site_by_spelling(sites, "producer.produce")
+
+    assert len(produce) == 1
+    assert produce[0].status == CallResolutionStatus.EXACT
+    assert produce[0].invocation == InvocationKind.INSTANCE_METHOD
+    assert produce[0].canonical_symbol == "confluent_kafka.cimpl.Producer.produce"
+    assert produce[0].canonical_symbol != "confluent_kafka.Producer.produce"
 
 
 def test_captures_exact_functions_constructors_and_method_kinds(tmp_path: Path) -> None:

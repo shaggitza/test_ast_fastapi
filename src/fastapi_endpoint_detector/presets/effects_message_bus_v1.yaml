@@ -1,0 +1,20 @@
+schema_version: 1
+preset:
+  id: python-message-bus-effects
+  version: 1.0.0
+  provenance:
+    kind: preset
+    source: fastapi-endpoint-detector/effects_message_bus_v1.yaml
+    revision: "1"
+contracts:
+  # produce() synchronously queues a record for later delivery. Staged timing
+  # records that boundary without claiming immediate broker publication.
+  - id: confluent-kafka-produce
+    symbol: confluent_kafka.cimpl.Producer.produce
+    invocation: instance_method
+    operation: publish
+    channel: message_bus
+    resource: {kind: argument, index: 0}
+    value: {kind: argument, index: 1}
+    behavior: {async_mode: sync, timing: staged}
+    package: {distribution: confluent-kafka, version: ">=2.13,<3"}
