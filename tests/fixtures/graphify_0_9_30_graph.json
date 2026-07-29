@@ -1,0 +1,83 @@
+{
+  "built_at_commit": "1111111111111111111111111111111111111111",
+  "directed": false,
+  "graph": {},
+  "hyperedges": [],
+  "links": [
+    {
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "definition",
+      "relation": "contains",
+      "source": "app_file",
+      "source_file": "app.py",
+      "source_location": "L2",
+      "target": "handler",
+      "weight": 1.0
+    },
+    {
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "call",
+      "relation": "calls",
+      "source": "handler",
+      "source_file": "app.py",
+      "source_location": "L3",
+      "target": "helper",
+      "weight": 1.0
+    },
+    {
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "context": "import",
+      "relation": "imports",
+      "source": "app_file",
+      "source_file": "app.py",
+      "source_location": "L1-L1",
+      "target": "helper",
+      "weight": 1.0
+    },
+    {
+      "confidence": "AMBIGUOUS",
+      "confidence_score": 0.5,
+      "context": "similarity",
+      "relation": "related_to",
+      "source": "handler",
+      "source_file": "app.py",
+      "source_location": "L2",
+      "target": "helper",
+      "weight": 0.5
+    }
+  ],
+  "multigraph": true,
+  "nodes": [
+    {
+      "community": null,
+      "file_type": "code",
+      "id": "app_file",
+      "label": "app.py",
+      "norm_label": "app.py",
+      "source_file": "app.py",
+      "source_location": null
+    },
+    {
+      "community": null,
+      "confidence": "EXTRACTED",
+      "file_type": "code",
+      "id": "handler",
+      "label": "handler",
+      "norm_label": "handler",
+      "source_file": "app.py",
+      "source_location": "L2-L3"
+    },
+    {
+      "community": null,
+      "file_type": "code",
+      "id": "helper",
+      "label": "helper",
+      "norm_label": "helper",
+      "source_file": "helpers.py",
+      "source_location": "L1"
+    }
+  ]
+}

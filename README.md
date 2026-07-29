@@ -177,6 +177,13 @@ escape, mutation, control flow, or dynamic registration as conditional evidence;
 no bootstrap/helper names are guessed. Dynamic behavior remains conservatively
 unresolved.
 
+The optional Graphify experiment is not a configured analyzer backend. A private
+POC adapter can explicitly run the separately installed, pinned
+`graphifyy==0.9.30` command in code-only mode and validate immutable
+baseline/target graph snapshots. It never runs by default, never uses semantic
+LLM/server features, and cannot promote Graphify communities or similarity into
+blast-radius evidence. See [the Graphify POC boundary](docs/graphify-poc.md).
+
 ### `list` - List Endpoints
 
 List all FastAPI endpoints discovered in the application.
