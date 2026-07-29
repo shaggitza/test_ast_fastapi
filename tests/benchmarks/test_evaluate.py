@@ -12,6 +12,7 @@ from benchmarks.real_world.benchmark_schema import read_primary_artifact, read_p
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+    from typing import Any
 
 
 def test_ranked_kind_preserves_declared_non_http_kind() -> None:
@@ -916,6 +917,365 @@ def test_schema_v3_rejects_unknown_fields_float_versions_and_malformed_adapter_c
         path.write_text(json.dumps(record) + "\n")
         with pytest.raises(ValueError, match=message):
             read_primary_jsonl(path, "prediction")
+
+
+@pytest.mark.parametrize(
+    ("state", "message"),
+    [
+        ({"status": "measured"}, "requires only seconds"),
+        (
+            {"status": "not_measured", "reason": "missing", "seconds": 1.0},
+            "forbids samples",
+        ),
+        ({"status": "measured", "seconds": float("nan")}, "finite non-negative"),
+        ({"status": "unknown"}, "status is invalid"),
+    ],
+)
+def test_schema_v4_phase_states_reject_malformed_measured_statuses(
+    state: dict[str, object], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        evaluate._validate_measurement_state(state, "prs.phase_telemetry.cold_build")
+
+
+def test_schema_v4_aggregate_rejects_mixed_or_dropped_measured_samples() -> None:
+    with pytest.raises(ValueError, match="drops measured PR telemetry"):
+        evaluate._validate_aggregate_phase_state(
+            {"status": "not_measured", "reason": "missing"},
+            [1.0],
+            "timing.phases.cold_build",
+        )
+    with pytest.raises(ValueError, match="do not match PR telemetry"):
+        evaluate._validate_aggregate_phase_state(
+            {"status": "measured", "samples": [2.0]},
+            [1.0],
+            "timing.phases.cold_build",
+        )
+    with pytest.raises(ValueError, match="forbids samples"):
+        evaluate._validate_aggregate_phase_state(
+            {"status": "not_measured", "reason": "missing", "samples": []},
+            [],
+            "timing.phases.warm_no_change",
+        )
+
+
+def _schema_v4_manifest_fixture(
+    tmp_path: Path,
+) -> tuple[Path, Path, dict[str, Any], dict[str, Any]]:
+    predictions = tmp_path / "predictions.jsonl"
+    manifest_path = tmp_path / "manifest.json"
+    prediction = {
+        "schema_version": 3,
+        "repository": "owner/repo",
+        "pr": 1,
+        "candidate": "candidate/v1",
+        "adapter": "fastapi-adapter-v1",
+        "status": "completed",
+        "affected_entrypoints": [],
+        "candidate_entrypoints": [],
+        "unresolved": [],
+        "timing_seconds": {"cold_no_cache_analyzer_wall": 2.0},
+    }
+    manifest = {
+        "schema_version": 4,
+        "prediction_schema_version": 3,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "candidate": {
+            "id": "candidate/v1",
+            "name": "fastapi-endpoint-detector",
+            "version": "test",
+            "adapter": "fastapi-adapter-v1",
+            "git_sha": "a" * 40,
+            "config_hash": "d" * 12,
+            "dirty": False,
+            "dirty_sha256": None,
+            "uv_lock_sha256": "b" * 64,
+            "uv_version": "uv test",
+            "command": "uv run --frozen fastapi-endpoint-detector analyze --no-cache",
+            "performance_protocol": {
+                "id": "cold-no-cache-analyzer-wall-v1",
+                "cache_enabled": False,
+                "incremental_valid": False,
+            },
+        },
+        "git": {"candidate_sha": "a" * 40},
+        "prediction_output": {"path": str(predictions), "sha256": "", "records": 1},
+        "selected_keys": [{"repository": "owner/repo", "pr": 1}],
+        "python": "Python test",
+        "platform": "test-platform",
+        "corpus": {"path": "corpus.json", "sha256": "c" * 64},
+        "root_config": {"default": ".", "repositories": {}},
+        "app_entry_config": {},
+        "bootstrap_entry_config": {},
+        "configuration": {
+            "cache": "/tmp/cache",
+            "output": str(predictions),
+            "manifest": str(manifest_path),
+            "timeout_seconds": 60.0,
+            "dry_run": False,
+            "allow_upstream_execution": False,
+            "use_scip": False,
+            "filters": {"limit": None, "repositories": [], "prs": []},
+        },
+        "selection_count": 1,
+        "prs": [
+            {
+                "repository": "owner/repo",
+                "pr": 1,
+                "configured_app_root": ".",
+                "configured_app_entry": None,
+                "configured_bootstrap_entry": None,
+                "merge_sha": "a" * 40,
+                "base_sha": "e" * 40,
+                "status": "completed",
+                "timing_seconds": {
+                    "baseline_target_preparation": 1.0,
+                    "analyzer": 2.0,
+                    "total": 3.0,
+                },
+                "phase_telemetry": {
+                    "baseline_target_preparation": {"status": "measured", "seconds": 1.0},
+                    "cold_build": {"status": "measured", "seconds": 2.0},
+                    "warm_no_change": {
+                        "status": "not_measured",
+                        "reason": "backend_cache_reuse_not_implemented",
+                    },
+                    "one_file_incremental_update": {
+                        "status": "not_measured",
+                        "reason": "backend_invalidation_telemetry_not_implemented",
+                    },
+                },
+            }
+        ],
+        "timing": {
+            "started_at": "2026-01-01T00:00:00+00:00",
+            "finished_at": "2026-01-01T00:00:03+00:00",
+            "total_seconds": 3.0,
+            "protocol": "phase-telemetry-v1",
+            "incremental_valid": False,
+            "phases": {
+                "baseline_target_preparation": {"status": "measured", "samples": [1.0]},
+                "cold_build": {"status": "measured", "samples": [2.0]},
+                "warm_no_change": {"status": "not_measured", "reason": "no_samples"},
+                "one_file_incremental_update": {
+                    "status": "not_measured",
+                    "reason": "no_samples",
+                },
+            },
+            "resources": {
+                "peak_rss_bytes": {"status": "not_measured", "reason": "not_sampled"},
+                "cache_size_bytes": {"status": "not_measured", "reason": "not_sampled"},
+            },
+        },
+    }
+    return predictions, manifest_path, prediction, manifest
+
+
+def _write_schema_v4_manifest_fixture(
+    predictions: Path,
+    manifest_path: Path,
+    prediction: dict[str, Any],
+    manifest: dict[str, Any],
+) -> None:
+    prediction_content = json.dumps(prediction) + "\n"
+    predictions.write_text(prediction_content)
+    manifest["prediction_output"]["sha256"] = hashlib.sha256(
+        prediction_content.encode()
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
+
+
+def test_schema_v4_manifest_rejects_fabricated_warm_telemetry(tmp_path: Path) -> None:
+    predictions, manifest_path, prediction, manifest = _schema_v4_manifest_fixture(tmp_path)
+    manifest["prs"][0]["phase_telemetry"]["warm_no_change"] = {
+        "status": "measured",
+        "seconds": 123.0,
+    }
+    manifest["timing"]["phases"]["warm_no_change"] = {
+        "status": "measured",
+        "samples": [123.0],
+    }
+    _write_schema_v4_manifest_fixture(predictions, manifest_path, prediction, manifest)
+
+    with pytest.raises(ValueError, match="warm_no_change must be not_measured"):
+        evaluate.read_prediction_manifest(
+            manifest_path, read_primary_artifact(predictions, "prediction")
+        )
+
+
+def test_schema_v4_manifest_rejects_completed_with_all_phases_not_measured(
+    tmp_path: Path,
+) -> None:
+    predictions, manifest_path, prediction, manifest = _schema_v4_manifest_fixture(tmp_path)
+    for phase in evaluate._PERFORMANCE_PHASES:
+        manifest["prs"][0]["phase_telemetry"][phase] = {
+            "status": "not_measured",
+            "reason": "fabricated_missing_sample",
+        }
+        manifest["timing"]["phases"][phase] = {
+            "status": "not_measured",
+            "reason": "fabricated_missing_sample",
+        }
+    manifest["prs"][0]["timing_seconds"] = {"total": 3.0}
+    _write_schema_v4_manifest_fixture(predictions, manifest_path, prediction, manifest)
+
+    with pytest.raises(ValueError, match="must measure preparation and cold phases"):
+        evaluate.read_prediction_manifest(
+            manifest_path, read_primary_artifact(predictions, "prediction")
+        )
+
+
+def test_schema_v4_manifest_rejects_prediction_status_disagreement(tmp_path: Path) -> None:
+    predictions, manifest_path, prediction, manifest = _schema_v4_manifest_fixture(tmp_path)
+    manifest["prs"][0]["status"] = "completed_with_unresolved"
+    _write_schema_v4_manifest_fixture(predictions, manifest_path, prediction, manifest)
+
+    with pytest.raises(ValueError, match="PR status does not match prediction"):
+        evaluate.read_prediction_manifest(
+            manifest_path, read_primary_artifact(predictions, "prediction")
+        )
+
+
+def test_schema_v4_manifest_rejects_prediction_cold_timing_disagreement(tmp_path: Path) -> None:
+    predictions, manifest_path, prediction, manifest = _schema_v4_manifest_fixture(tmp_path)
+    prediction["timing_seconds"]["cold_no_cache_analyzer_wall"] = 9.0
+    _write_schema_v4_manifest_fixture(predictions, manifest_path, prediction, manifest)
+
+    with pytest.raises(ValueError, match="PR cold timing does not match prediction"):
+        evaluate.read_prediction_manifest(
+            manifest_path, read_primary_artifact(predictions, "prediction")
+        )
+
+
+def test_schema_v4_manifest_rejects_completed_prediction_extra_timing(tmp_path: Path) -> None:
+    predictions, manifest_path, prediction, manifest = _schema_v4_manifest_fixture(tmp_path)
+    prediction["timing_seconds"]["warm_no_change"] = 123.0
+    _write_schema_v4_manifest_fixture(predictions, manifest_path, prediction, manifest)
+
+    with pytest.raises(ValueError, match="prediction timing keys do not match status"):
+        evaluate.read_prediction_manifest(
+            manifest_path, read_primary_artifact(predictions, "prediction")
+        )
+
+
+def test_schema_v4_manifest_rejects_unresolved_prediction_extra_timing(tmp_path: Path) -> None:
+    predictions, manifest_path, prediction, manifest = _schema_v4_manifest_fixture(tmp_path)
+    prediction["status"] = "unresolved"
+    prediction["unresolved"] = ["fabricated failure"]
+    prediction["timing_seconds"] = {"one_file_incremental_update": 456.0}
+    manifest_pr = manifest["prs"][0]
+    manifest_pr["status"] = "unresolved"
+    manifest_pr["reason"] = "fabricated failure"
+    for phase, timing_name in evaluate._MEASURED_PHASE_TIMING_FIELDS.items():
+        manifest_pr["timing_seconds"].pop(timing_name)
+        manifest_pr["phase_telemetry"][phase] = {
+            "status": "not_measured",
+            "reason": "run_unresolved",
+        }
+        manifest["timing"]["phases"][phase] = {
+            "status": "not_measured",
+            "reason": "no_measured_pr_samples",
+        }
+    _write_schema_v4_manifest_fixture(predictions, manifest_path, prediction, manifest)
+
+    with pytest.raises(ValueError, match="prediction timing keys do not match status"):
+        evaluate.read_prediction_manifest(
+            manifest_path, read_primary_artifact(predictions, "prediction")
+        )
+
+
+def test_schema_v4_evaluator_outputs_only_attested_prediction_timing(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    predictions, manifest_path, prediction, manifest = _schema_v4_manifest_fixture(tmp_path)
+    truth = tmp_path / "truth.jsonl"
+    truth.write_text(
+        json.dumps(
+            {
+                "repository": "owner/repo",
+                "pr": 1,
+                "status": "adjudicated",
+                "affected_entrypoints": [],
+            }
+        )
+        + "\n"
+    )
+    _write_schema_v4_manifest_fixture(predictions, manifest_path, prediction, manifest)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "evaluate.py",
+            "--ground-truth",
+            str(truth),
+            "--predictions",
+            str(predictions),
+            "--prediction-manifest",
+            str(manifest_path),
+        ],
+    )
+
+    evaluate.main()
+
+    result = json.loads(capsys.readouterr().out)
+    performance = result["performance"]
+    assert set(performance["protocols"]) == {"cold_no_cache_analyzer_wall"}
+    assert performance["protocols"]["cold_no_cache_analyzer_wall"]["samples"] == 1
+    phases = performance["manifest_phase_telemetry"]["phases"]
+    for phase in ("warm_no_change", "one_file_incremental_update"):
+        assert phases[phase]["status"] == "not_measured"
+        assert phase not in performance["protocols"]
+
+
+def test_schema_v4_manifest_rejects_unresolved_cold_without_preparation(
+    tmp_path: Path,
+) -> None:
+    predictions, manifest_path, prediction, manifest = _schema_v4_manifest_fixture(tmp_path)
+    prediction["status"] = "unresolved"
+    prediction["unresolved"] = ["fabricated failure"]
+    manifest_pr = manifest["prs"][0]
+    manifest_pr["status"] = "unresolved"
+    manifest_pr["reason"] = "fabricated failure"
+    manifest_pr["timing_seconds"].pop("baseline_target_preparation")
+    manifest_pr["phase_telemetry"]["baseline_target_preparation"] = {
+        "status": "not_measured",
+        "reason": "fabricated_missing_preparation",
+    }
+    manifest["timing"]["phases"]["baseline_target_preparation"] = {
+        "status": "not_measured",
+        "reason": "fabricated_missing_preparation",
+    }
+    _write_schema_v4_manifest_fixture(predictions, manifest_path, prediction, manifest)
+
+    with pytest.raises(ValueError, match="cold phase requires measured preparation"):
+        evaluate.read_prediction_manifest(
+            manifest_path, read_primary_artifact(predictions, "prediction")
+        )
+
+
+def test_schema_v4_manifest_rejects_unresolved_measured_preparation(tmp_path: Path) -> None:
+    predictions, manifest_path, prediction, manifest = _schema_v4_manifest_fixture(tmp_path)
+    prediction["status"] = "unresolved"
+    prediction["unresolved"] = ["fabricated failure"]
+    prediction["timing_seconds"] = {}
+    manifest_pr = manifest["prs"][0]
+    manifest_pr["status"] = "unresolved"
+    manifest_pr["reason"] = "fabricated failure"
+    manifest_pr["timing_seconds"].pop("analyzer")
+    manifest_pr["phase_telemetry"]["cold_build"] = {
+        "status": "not_measured",
+        "reason": "fabricated_missing_cold",
+    }
+    manifest["timing"]["phases"]["cold_build"] = {
+        "status": "not_measured",
+        "reason": "fabricated_missing_cold",
+    }
+    _write_schema_v4_manifest_fixture(predictions, manifest_path, prediction, manifest)
+
+    with pytest.raises(ValueError, match=r"unresolved.*must not attest measured phases"):
+        evaluate.read_prediction_manifest(
+            manifest_path, read_primary_artifact(predictions, "prediction")
+        )
 
 
 def test_explicit_empty_candidate_list_does_not_fall_back_to_affected() -> None:

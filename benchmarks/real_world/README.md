@@ -248,18 +248,29 @@ scoring, so a candidate cannot improve its score by omitting hard PRs. Missing,
 `unknown`, and `not_evaluable` labels are never treated as negatives. Versioned
 scope membership and source hashes live under `scopes/`.
 
-Schema-v3 runner output calls its current measurement
-`cold_no_cache_analyzer_wall`. It is the wall time of a one-shot analyzer process
-run with `--no-cache`; it is **not incremental latency** and is ineligible for the
-incremental p95 gate. Historical `incremental_seconds` values are accepted only
-through the legacy adapter and reported as unattested. Real warm no-change and
-one-file update measurements require backend cache-reuse/invalidation telemetry.
-Checked-in legacy prediction JSONL remains scoreable through the strict legacy
-adapter, but historical schema-v1/v2 manifests cannot be supplied as a
-schema-v3 `--prediction-manifest`; those evaluations explicitly remain
-unattested. A schema-v3 manifest records and validates secure execution flags;
-dry-run or `--allow-upstream-execution` output is explicitly ineligible for the
-official secure score.
+Prediction rows remain schema v3 and call their current measurement
+`cold_no_cache_analyzer_wall`. It is the wall time of the one-shot analyzer
+subprocess run with `--no-cache`; it is **not incremental latency**. Runner
+manifest schema v4 records exactly four phase states. `baseline_target_preparation`
+starts immediately before detached target/baseline worktree materialization and
+ends after the local diff is written. `cold_build` is the analyzer subprocess wall
+time. `warm_no_change` and `one_file_incremental_update` are explicitly
+`not_measured` until a backend attests cache reuse and invalidation. Peak process-
+tree RSS and backend cache size are likewise `not_measured`; they are never
+inferred from unrelated process counters or filesystem size. Preparation must be
+measured before cold analysis can be measured. A PR run with status `unresolved`
+attests no measured phases: failures clear preparation/cold telemetry and their
+corresponding timing fields while retaining truthful total and internal runner
+diagnostics. Only measured, finite samples from completed or partial predictions
+are aggregated, and `incremental_valid` remains false.
+
+Historical `incremental_seconds` values are accepted only through the legacy
+adapter and reported as unattested. Checked-in legacy prediction JSONL remains
+scoreable, and schema-v3 manifests remain readable, but historical schema-v1/v2
+manifests cannot be supplied as `--prediction-manifest`. Manifest v4 continues
+to record and validate secure execution flags; dry-run or
+`--allow-upstream-execution` output is explicitly ineligible for the official
+secure score.
 
 ### Current candidate runner
 

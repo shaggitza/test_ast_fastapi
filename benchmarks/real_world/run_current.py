@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import importlib.metadata
 import json
+import math
 import os
 import platform
 import re
@@ -34,6 +35,19 @@ HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parents[1]
 SHA_RE = re.compile(r"[0-9a-fA-F]{40}")
 REPOSITORY_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+PERFORMANCE_PHASES = (
+    "baseline_target_preparation",
+    "cold_build",
+    "warm_no_change",
+    "one_file_incremental_update",
+)
+FROZEN_OUTPUT_FILES = (
+    HERE / "corpus.json",
+    HERE / "adjudicated.jsonl",
+    HERE / "review-a.jsonl",
+    HERE / "review-b.jsonl",
+)
+FROZEN_OUTPUT_ROOTS = (PROJECT_ROOT / "benchmarks" / "results",)
 
 
 class RunnerError(RuntimeError):
@@ -61,6 +75,17 @@ class RunConfig:
 def utc_now() -> str:
     """Return an auditable UTC timestamp."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def validate_output_destination(path: Path, field: str) -> None:
+    """Reject runner output aliases into frozen benchmark artifacts."""
+    resolved = path.resolve(strict=False)
+    if resolved in {item.resolve(strict=False) for item in FROZEN_OUTPUT_FILES} or any(
+        resolved == root.resolve(strict=False)
+        or resolved.is_relative_to(root.resolve(strict=False))
+        for root in FROZEN_OUTPUT_ROOTS
+    ):
+        raise RunnerError(f"{field} cannot target a frozen benchmark artifact: {path}")
 
 
 def atomic_write(path: Path, content: str) -> None:
@@ -519,6 +544,79 @@ def prediction_identity(entry: dict[str, Any]) -> tuple[str, int]:
     return repository, number
 
 
+def _not_measured(reason: str) -> dict[str, str]:
+    return {"status": "not_measured", "reason": reason}
+
+
+def _measured(seconds: float) -> dict[str, str | float]:
+    return {"status": "measured", "seconds": seconds}
+
+
+def new_phase_telemetry() -> dict[str, dict[str, Any]]:
+    """Return the complete truthful phase contract before any work is measured."""
+    return {
+        "baseline_target_preparation": _not_measured("source_preparation_not_completed"),
+        "cold_build": _not_measured("cold_analyzer_not_completed"),
+        "warm_no_change": _not_measured("backend_cache_reuse_not_implemented"),
+        "one_file_incremental_update": _not_measured(
+            "backend_invalidation_telemetry_not_implemented"
+        ),
+    }
+
+
+def normalize_unresolved_phase_telemetry(
+    timings: dict[str, float], phase_telemetry: dict[str, dict[str, Any]]
+) -> None:
+    """Clear phase attestations when the enclosing PR run does not complete."""
+    timings.pop("baseline_target_preparation", None)
+    timings.pop("analyzer", None)
+    phase_telemetry["baseline_target_preparation"] = _not_measured("run_unresolved")
+    phase_telemetry["cold_build"] = _not_measured("run_unresolved")
+
+
+def aggregate_phase_telemetry(
+    records: Sequence[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Validate and aggregate measured PR samples without inventing values."""
+    samples_by_phase: dict[str, list[float]] = {phase: [] for phase in PERFORMANCE_PHASES}
+    for record in records:
+        telemetry = record.get("phase_telemetry")
+        if not isinstance(telemetry, dict) or set(telemetry) != set(PERFORMANCE_PHASES):
+            raise RunnerError("manifest PR phase telemetry is incomplete")
+        for phase in PERFORMANCE_PHASES:
+            state = telemetry[phase]
+            if not isinstance(state, dict):
+                raise RunnerError(f"manifest PR phase {phase} must be an object")
+            if state.get("status") == "measured":
+                seconds = state.get("seconds")
+                if (
+                    set(state) != {"status", "seconds"}
+                    or isinstance(seconds, bool)
+                    or not isinstance(seconds, (int, float))
+                    or not math.isfinite(seconds)
+                    or seconds < 0
+                ):
+                    raise RunnerError(f"manifest PR measured phase {phase} is invalid")
+                samples_by_phase[phase].append(float(seconds))
+            elif state.get("status") == "not_measured":
+                if (
+                    set(state) != {"status", "reason"}
+                    or not isinstance(state.get("reason"), str)
+                    or not state["reason"].strip()
+                ):
+                    raise RunnerError(f"manifest PR not_measured phase {phase} is invalid")
+            else:
+                raise RunnerError(f"manifest PR phase {phase} status is invalid")
+    return {
+        phase: (
+            {"status": "measured", "samples": samples}
+            if (samples := samples_by_phase[phase])
+            else _not_measured("no_measured_pr_samples")
+        )
+        for phase in PERFORMANCE_PHASES
+    }
+
+
 def unresolved_prediction(
     repository: str, pr: int, candidate_id: str, reason: str
 ) -> dict[str, Any]:
@@ -544,6 +642,7 @@ def process_entry(  # noqa: PLR0915
     started = time.monotonic()
     phase_started = started
     timings: dict[str, float] = {}
+    phase_telemetry = new_phase_telemetry()
     merge_sha: str | None = None
     base_sha: str | None = None
     configured_root = config.app_roots.get(repository, config.default_app_root)
@@ -559,6 +658,7 @@ def process_entry(  # noqa: PLR0915
         "base_sha": None,
         "status": "unresolved",
         "timing_seconds": timings,
+        "phase_telemetry": phase_telemetry,
     }
     merge_data = entry.get("mergeCommit")
     if isinstance(merge_data, dict):
@@ -597,6 +697,7 @@ def process_entry(  # noqa: PLR0915
         timings["parent_resolution"] = time.monotonic() - phase_started
         phase_started = time.monotonic()
 
+        preparation_started = time.monotonic()
         with tempfile.TemporaryDirectory(prefix="current-analyzer-") as temporary_name:
             temporary = Path(temporary_name)
             worktree = temporary / "target"
@@ -620,7 +721,9 @@ def process_entry(  # noqa: PLR0915
 
                 write_local_diff(repository_cache, base_sha, merge_sha, patch_path)
                 timings["diff"] = time.monotonic() - phase_started
-                phase_started = time.monotonic()
+                preparation_seconds = time.monotonic() - preparation_started
+                timings["baseline_target_preparation"] = preparation_seconds
+                phase_telemetry["baseline_target_preparation"] = _measured(preparation_seconds)
 
                 endpoints, candidates, unresolved, analyzer_seconds = invoke_analyzer(
                     config.candidate_root,
@@ -634,6 +737,7 @@ def process_entry(  # noqa: PLR0915
                     baseline_app_root=baseline_app_root,
                 )
                 timings["analyzer"] = analyzer_seconds
+                phase_telemetry["cold_build"] = _measured(analyzer_seconds)
             finally:
                 if baseline_worktree_added:
                     remove_worktree(repository_cache, baseline_worktree)
@@ -667,6 +771,7 @@ def process_entry(  # noqa: PLR0915
     except (RunnerError, OSError) as error:
         elapsed = time.monotonic() - started
         timings["total"] = elapsed
+        normalize_unresolved_phase_telemetry(timings, phase_telemetry)
         reason = str(error)
         manifest_record["merge_sha"] = merge_sha
         manifest_record["base_sha"] = base_sha
@@ -892,6 +997,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
         if len(artifact_paths) != 3:
             raise RunnerError("--corpus, --output, and --manifest must be distinct paths")
+        validate_output_destination(args.output, "--output")
+        validate_output_destination(args.manifest, "--manifest")
         app_roots = parse_app_roots(args.app_root)
         app_entries = parse_app_entries(args.app_entry)
         bootstrap_entries = parse_app_entries(args.bootstrap_entry, "--bootstrap-entry")
@@ -945,7 +1052,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     jsonl = "".join(json.dumps(item, sort_keys=True) + "\n" for item in predictions)
     prediction_sha256 = hashlib.sha256(jsonl.encode()).hexdigest()
     manifest = {
-        "schema_version": 3,
+        "schema_version": 4,
         "prediction_schema_version": 3,
         "created_at": utc_now(),
         "candidate": candidate,
@@ -990,14 +1097,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             "started_at": started_wall,
             "finished_at": utc_now(),
             "total_seconds": time.monotonic() - started,
-            "protocol": "cold-no-cache-analyzer-wall-v1",
+            "protocol": "phase-telemetry-v1",
             "incremental_valid": False,
-            "not_measured": [
-                "warm_no_change",
-                "one_file_incremental_update",
-                "peak_rss",
-                "cache_size",
-            ],
+            "phases": aggregate_phase_telemetry(pr_manifest),
+            "resources": {
+                "peak_rss_bytes": _not_measured("process_tree_rss_not_sampled"),
+                "cache_size_bytes": _not_measured("backend_cache_size_not_measured"),
+            },
         },
     }
     atomic_write(config.output, jsonl)
