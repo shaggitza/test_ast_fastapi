@@ -72,6 +72,25 @@ class _ResolvedResources:
     reason: str
 
 
+_FrameworkToken = tuple[str, int, int]
+
+
+@dataclass(frozen=True)
+class _FrameworkRegistrationEvent:
+    token: _FrameworkToken
+    endpoint: Endpoint
+
+
+@dataclass(frozen=True)
+class _FrameworkIncludeEvent:
+    parent: _FrameworkToken
+    child: _FrameworkToken | None
+    condition: EndpointDiscoveryCondition | None
+
+
+_FrameworkEvent = _FrameworkRegistrationEvent | _FrameworkIncludeEvent
+
+
 @dataclass(frozen=True)
 class _StartupRouteResult:
     route: (
@@ -688,10 +707,15 @@ class CustomSurfaceExtractor:
         app_path: Path,
         contracts: LoadedSurfaceContracts,
         bootstrap_entry: str | None = None,
+        *,
+        app_variable: str = "app",
+        app_entry: str | None = None,
     ) -> None:
         self.app_path = app_path.resolve()
         self.contracts = contracts
         self.bootstrap_entry = bootstrap_entry
+        self.app_variable = app_variable
+        self.app_entry = app_entry
         if self.app_path.is_dir():
             self.root = self.app_path
         elif self.app_path.is_file():
@@ -714,6 +738,13 @@ class CustomSurfaceExtractor:
         self._function_scope_states: list[_FunctionScopeFrame] = []
         self._building_states = False
         self._inventory_unavailable = False
+        self._framework_events: list[_FrameworkEvent] = []
+        self._framework_selected_tokens: set[_FrameworkToken] = set()
+        self._framework_root_condition: EndpointDiscoveryCondition | None = None
+        self._framework_factory: tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef] | None = (
+            None
+        )
+        self._scope_framework_surfaces = contracts.document.preset.id == "framework-callbacks"
         self._declared_receiver_types = {
             contract.registration.receiver_type
             for contract in contracts.document.contracts
@@ -749,6 +780,7 @@ class CustomSurfaceExtractor:
                 self._module_states[module.name] = state
         finally:
             self._building_states = False
+        self._resolve_framework_root()
         for module in self._modules.values():
             self._process_statements(
                 module,
@@ -757,7 +789,9 @@ class CustomSurfaceExtractor:
                 (),
                 evaluate_variable_annotations=not module.postponed_annotations,
             )
+        self._process_app_factory()
         self._process_bootstrap()
+        self._filter_framework_surfaces()
         collapsed: dict[tuple[str, str, int], Endpoint] = {}
         for endpoint in self._endpoints:
             key = (
@@ -844,6 +878,273 @@ class CustomSurfaceExtractor:
             limitations=limitations,
             route_conditions=route_conditions,
         )
+
+    @staticmethod
+    def _framework_receiver_token(binding: _Binding | None) -> _FrameworkToken | None:
+        if binding is None or binding.kind != "receiver" or binding.instance_token is None:
+            return None
+        if binding.identity not in {
+            "fastapi.FastAPI",
+            "starlette.applications.Starlette",
+            "fastapi.APIRouter",
+        }:
+            return None
+        return binding.instance_token
+
+    def _framework_condition(self, module: _Module, line: int, reason: str) -> None:
+        condition = EndpointDiscoveryCondition(
+            source_path=module.path,
+            source_line=line,
+            reason=reason,
+        )
+        self._framework_root_condition = condition
+
+    def _resolve_framework_root(self) -> None:  # noqa: PLR0912
+        """Resolve the exact selected application after source-ordered module binding."""
+        if not self._scope_framework_surfaces:
+            return
+        candidates: list[tuple[_Module, str]] = []
+        if self.app_entry is not None:
+            parts = self.app_entry.split(":")
+            if (
+                len(parts) != 2
+                or not parts[0]
+                or not parts[1]
+                or any(not item.isidentifier() for item in parts[0].split("."))
+                or not parts[1].isidentifier()
+            ):
+                raise CustomSurfaceExtractorError(
+                    "app_entry must use an exact project-local MODULE:SYMBOL"
+                )
+            module = self._modules.get(parts[0])
+            if module is None:
+                raise CustomSurfaceExtractorError(
+                    f"custom surface app entry {self.app_entry!r} has no project module"
+                )
+            candidates.append((module, parts[1]))
+        elif self.app_path.is_file():
+            module = next(
+                (item for item in self._modules.values() if item.path == self.app_path),
+                None,
+            )
+            if module is not None:
+                candidates.append((module, self.app_variable))
+        else:
+            candidates.extend((module, self.app_variable) for module in self._modules.values())
+
+        selected: set[_FrameworkToken] = set()
+        unresolved: list[tuple[_Module, str]] = []
+        for module, symbol in candidates:
+            binding = self._module_states.get(module.name, {}).get(symbol)
+            if binding is not None:
+                binding = self._follow_project_binding(binding)
+            token = self._framework_receiver_token(binding)
+            if (
+                token is not None
+                and binding is not None
+                and binding.identity != "fastapi.APIRouter"
+            ):
+                selected.add(token)
+                continue
+            function_candidates = self._functions.get(f"{module.name}.{symbol}", [])
+            if self.app_entry is not None and len(function_candidates) == 1:
+                self._framework_factory = function_candidates[0]
+                continue
+            if self.app_entry is not None or binding is not None:
+                unresolved.append((module, symbol))
+
+        if len(selected) == 1:
+            self._framework_selected_tokens = selected
+            return
+        if len(selected) > 1:
+            module, _symbol = candidates[0]
+            self._framework_condition(
+                module,
+                1,
+                "selected framework application binding is ambiguous across project modules",
+            )
+            return
+        if self._framework_factory is not None:
+            return
+        module, symbol = (
+            unresolved or candidates or [(next(iter(self._modules.values())), self.app_variable)]
+        )[0]
+        rebound_lines: list[int] = []
+        for statement in module.tree.body:
+            visitor = _EagerStateMutationVisitor()
+            visitor.visit(statement)
+            if symbol in visitor.rebound_names:
+                rebound_lines.append(statement.lineno)
+        line = max(rebound_lines, default=1)
+        self._framework_condition(
+            module,
+            line,
+            "selected framework application binding is unresolved or was rebound",
+        )
+
+    def _process_app_factory(self) -> None:
+        """Interpret one explicitly selected zero-argument factory and retain its return token."""
+        if self._framework_factory is None:
+            return
+        module, function = self._framework_factory
+        if isinstance(function, ast.AsyncFunctionDef) or function.decorator_list:
+            raise CustomSurfaceExtractorError(
+                "custom surface app factory must be synchronous and undecorated"
+            )
+        positional = [*function.args.posonlyargs, *function.args.args]
+        if (
+            len(positional) - len(function.args.defaults)
+            or any(default is None for default in function.args.kw_defaults)
+            or function.args.vararg is not None
+            or function.args.kwarg is not None
+        ):
+            raise CustomSurfaceExtractorError(
+                "custom surface app factory must be callable with zero arguments and not variadic"
+            )
+        returns = [item for item in function.body if isinstance(item, ast.Return)]
+        if len(returns) != 1 or function.body[-1] is not returns[0] or returns[0].value is None:
+            self._framework_condition(
+                module,
+                function.lineno,
+                "selected framework app factory has unsupported return control flow",
+            )
+            return
+
+        state = dict(self._module_states[module.name])
+        scope = _FunctionScopeBindingVisitor(function)
+        scope.visit(function)
+        local_names = scope.rebound_names - scope.globals - scope.nonlocals
+        for name in local_names:
+            state[name] = None
+        frame = _FunctionScopeFrame(
+            local_state=state,
+            global_state=self._module_states[module.name],
+            local_names=frozenset(local_names),
+        )
+        self._function_scope_states.append(frame)
+        try:
+            self._process_statements(
+                module,
+                function.body,
+                state,
+                (),
+                evaluate_variable_annotations=False,
+            )
+        finally:
+            self._function_scope_states.pop()
+        token = self._framework_receiver_token(
+            self._binding_from_expression(returns[0].value, state, module.name)
+        )
+        if token is None:
+            self._framework_condition(
+                module,
+                returns[0].lineno,
+                "selected framework app factory return is unresolved or not an application",
+            )
+            return
+        self._framework_selected_tokens = {token}
+
+    @staticmethod
+    def _is_framework_endpoint(endpoint: Endpoint) -> bool:
+        return endpoint.surface is not None and endpoint.surface.surface_kind.startswith(
+            "framework."
+        )
+
+    @staticmethod
+    def _framework_include_ancestors(
+        token: _FrameworkToken,
+        included_by: dict[_FrameworkToken, set[_FrameworkToken]],
+    ) -> tuple[_FrameworkToken, ...]:
+        """Return prior include ancestors in deterministic, graph-bounded order."""
+        ancestors: list[_FrameworkToken] = []
+        seen = {token}
+        pending = sorted(included_by.get(token, ()), reverse=True)
+        while pending:
+            ancestor = pending.pop()
+            if ancestor in seen:
+                continue
+            seen.add(ancestor)
+            ancestors.append(ancestor)
+            pending.extend(sorted(included_by.get(ancestor, ()), reverse=True))
+        return tuple(ancestors)
+
+    @staticmethod
+    def _framework_copied_lifecycle_conditions(
+        endpoints: tuple[Endpoint, ...],
+    ) -> tuple[EndpointDiscoveryCondition, ...]:
+        """Describe lifecycle copies whose ancestor execution varies by runtime."""
+        conditions: list[EndpointDiscoveryCondition] = []
+        for endpoint in endpoints:
+            surface = endpoint.surface
+            if surface is None or surface.surface_kind != "framework.lifecycle":
+                continue
+            conditions.append(
+                EndpointDiscoveryCondition(
+                    source_path=surface.registration_file,
+                    source_line=surface.registration_line,
+                    reason=(
+                        "router lifecycle copied into an already-included router has "
+                        "runtime-version-dependent execution"
+                    ),
+                )
+            )
+        return tuple(conditions)
+
+    def _filter_framework_surfaces(self) -> None:
+        """Apply selected-app identity and APIRouter copy-at-include semantics."""
+        if not self._scope_framework_surfaces:
+            return
+        live: dict[_FrameworkToken, list[Endpoint]] = {}
+        conditions: dict[_FrameworkToken, list[EndpointDiscoveryCondition]] = {}
+        included_by: dict[_FrameworkToken, set[_FrameworkToken]] = {}
+        for event in self._framework_events:
+            if isinstance(event, _FrameworkRegistrationEvent):
+                live.setdefault(event.token, []).append(event.endpoint)
+                surface = event.endpoint.surface
+                if surface is not None:
+                    condition = EndpointDiscoveryCondition(
+                        source_path=surface.registration_file,
+                        source_line=surface.registration_line,
+                        reason=(
+                            "router lifecycle registered after include_router has "
+                            "runtime-version-dependent execution"
+                        ),
+                    )
+                    for ancestor in self._framework_include_ancestors(event.token, included_by):
+                        conditions.setdefault(ancestor, []).append(condition)
+                continue
+            if event.child is None:
+                if event.condition is not None:
+                    conditions.setdefault(event.parent, []).append(event.condition)
+                    for ancestor in self._framework_include_ancestors(event.parent, included_by):
+                        conditions.setdefault(ancestor, []).append(event.condition)
+                continue
+            copied_endpoints = tuple(live.get(event.child, ()))
+            copied_conditions = tuple(conditions.get(event.child, ()))
+            live.setdefault(event.parent, []).extend(copied_endpoints)
+            conditions.setdefault(event.parent, []).extend(copied_conditions)
+            copied_lifecycle_conditions = self._framework_copied_lifecycle_conditions(
+                copied_endpoints
+            )
+            for ancestor in self._framework_include_ancestors(event.parent, included_by):
+                conditions.setdefault(ancestor, []).extend(copied_conditions)
+                conditions[ancestor].extend(copied_lifecycle_conditions)
+            included_by.setdefault(event.child, set()).add(event.parent)
+
+        accepted = {
+            id(endpoint)
+            for token in self._framework_selected_tokens
+            for endpoint in live.get(token, ())
+        }
+        self._endpoints = [
+            endpoint
+            for endpoint in self._endpoints
+            if not self._is_framework_endpoint(endpoint) or id(endpoint) in accepted
+        ]
+        for token in self._framework_selected_tokens:
+            self._limitations.extend(conditions.get(token, ()))
+        if self._framework_root_condition is not None:
+            self._limitations.append(self._framework_root_condition)
 
     def _process_bootstrap(self) -> None:
         if self.bootstrap_entry is None:
@@ -2103,6 +2404,86 @@ class CustomSurfaceExtractor:
             required_base,
         )
 
+    def _framework_call_token(
+        self,
+        call: ast.Call,
+        evaluation: _CallEvaluation | None,
+        state: dict[str, _Binding | None],
+    ) -> _FrameworkToken | None:
+        if not isinstance(call.func, ast.Attribute):
+            return None
+        lookup = evaluation.callable_state if evaluation is not None else state
+        return self._framework_receiver_token(self._expression_binding(call.func.value, lookup))
+
+    def _record_framework_include(
+        self,
+        module: _Module,
+        call: ast.Call,
+        state: dict[str, _Binding | None],
+        evaluation: _CallEvaluation | None,
+    ) -> None:
+        if not self._scope_framework_surfaces or not isinstance(call.func, ast.Attribute):
+            return
+        if call.func.attr != "include_router":
+            return
+        parent = self._framework_call_token(call, evaluation, state)
+        if parent is None:
+            return
+        capture = (
+            evaluation.positional[0] if evaluation is not None and evaluation.positional else None
+        )
+        if capture is None and evaluation is not None:
+            capture = next(
+                (
+                    item
+                    for keyword, item in zip(call.keywords, evaluation.keywords, strict=True)
+                    if keyword.arg == "router"
+                ),
+                None,
+            )
+        child = self._framework_receiver_token(capture.binding if capture is not None else None)
+        condition = None
+        if child is None:
+            condition = EndpointDiscoveryCondition(
+                source_path=module.path,
+                source_line=call.lineno,
+                reason=(
+                    "selected application include_router target is dynamic or unresolved; "
+                    "framework surface inventory is incomplete"
+                ),
+            )
+        self._framework_events.append(
+            _FrameworkIncludeEvent(parent=parent, child=child, condition=condition)
+        )
+
+    def _record_framework_registration(
+        self,
+        module: _Module,
+        call: ast.Call,
+        state: dict[str, _Binding | None],
+        evaluation: _CallEvaluation | None,
+        endpoint: Endpoint,
+    ) -> None:
+        if not self._scope_framework_surfaces or not self._is_framework_endpoint(endpoint):
+            return
+        token = (
+            self._framework_call_token(call, evaluation, state)
+            if isinstance(call.func, ast.Attribute)
+            else None
+        )
+        if (
+            token is None
+            and endpoint.surface is not None
+            and endpoint.surface.registration_symbol
+            in {
+                "fastapi.FastAPI",
+                "starlette.applications.Starlette",
+            }
+        ):
+            token = (module.name, call.lineno, call.col_offset)
+        if token is not None:
+            self._framework_events.append(_FrameworkRegistrationEvent(token, endpoint))
+
     def _inspect_registration(  # noqa: PLR0912, PLR0915
         self,
         module: _Module,
@@ -2144,6 +2525,7 @@ class CustomSurfaceExtractor:
                 )
             return
         symbol, invocation, receiver_type = resolved
+        self._record_framework_include(module, call, state, evaluation)
         for contract in self.contracts.document.contracts:
             if not self._matches(contract, symbol, invocation, receiver_type):
                 continue
@@ -2177,6 +2559,12 @@ class CustomSurfaceExtractor:
                         handler_expression = call.keywords[keyword_index].value
                         if evaluation is not None and keyword_index < len(evaluation.keywords):
                             capture = evaluation.keywords[keyword_index]
+                if (
+                    contract.handler_optional
+                    and isinstance(handler_expression, ast.Constant)
+                    and handler_expression.value is None
+                ):
+                    continue
                 if handler_expression is not None and capture is not None:
                     if contract.handler.kind == HandlerSelectorKind.ARGUMENT_CLASS_METHOD:
                         handler_result = self._resolve_captured_class_method(
@@ -2286,26 +2674,26 @@ class CustomSurfaceExtractor:
                     contract_hash=self.contracts.contract_hashes[contract.id],
                     conditions=contract.conditions,
                 )
-                self._endpoints.append(
-                    Endpoint(
-                        path=surface_id,
-                        methods=[EndpointMethod.CUSTOM],
-                        handler=HandlerInfo(
-                            name=function.name,
-                            module=handler_module.name,
-                            file_path=handler_module.path,
-                            line_number=handler_range[0],
-                            end_line_number=handler_range[1],
-                        ),
-                        discovery_status=(
-                            EndpointDiscoveryStatus.CONDITIONAL
-                            if merged
-                            else EndpointDiscoveryStatus.ESTABLISHED
-                        ),
-                        discovery_conditions=merged,
-                        surface=evidence,
-                    )
+                endpoint = Endpoint(
+                    path=surface_id,
+                    methods=[EndpointMethod.CUSTOM],
+                    handler=HandlerInfo(
+                        name=function.name,
+                        module=handler_module.name,
+                        file_path=handler_module.path,
+                        line_number=handler_range[0],
+                        end_line_number=handler_range[1],
+                    ),
+                    discovery_status=(
+                        EndpointDiscoveryStatus.CONDITIONAL
+                        if merged
+                        else EndpointDiscoveryStatus.ESTABLISHED
+                    ),
+                    discovery_conditions=merged,
+                    surface=evidence,
                 )
+                self._endpoints.append(endpoint)
+                self._record_framework_registration(module, call, state, evaluation, endpoint)
                 if contract.activates_routes and resources == ("startup",):
                     self._emit_startup_routes(
                         contract,
