@@ -36,10 +36,18 @@ _EXACT_AXIOS_IMPORT = re.compile(
     r"(?P<quote>['\"])axios(?P=quote)[ \t]*;?[ \t]*(?://[^\n]*)?$"
 )
 _EXACT_AXIOS_REQUIRE = re.compile(
-    r"(?m)^[ \t]*const[ \t]+(?P<local>axios)[ \t]*=[ \t]*require\([ \t]*"
+    r"(?m)^[ \t]*(?:const|let|var)[ \t]+(?P<local>axios)[ \t]*=[ \t]*require\([ \t]*"
     r"(?P<quote>['\"])axios(?P=quote)[ \t]*\)[ \t]*;?[ \t]*(?://[^\n]*)?$"
 )
 _UUID_SEGMENT = r"[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}"
+
+
+@dataclass(frozen=True)
+class _AxiosBinding:
+    """One exact axios binding and its source-order activation point."""
+
+    definition_start: int
+    activation_offset: int | None
 
 
 @dataclass(frozen=True)
@@ -197,6 +205,22 @@ def _skip_space(source: str, index: int, end: int) -> int:
     return index
 
 
+def _skip_trivia(source: str, index: int, end: int) -> int:
+    """Skip whitespace and JavaScript comments between grammar tokens."""
+    while index < end:
+        index = _skip_space(source, index, end)
+        if source.startswith("//", index):
+            newline = source.find("\n", index + 2, end)
+            index = end if newline < 0 else newline + 1
+            continue
+        if source.startswith("/*", index):
+            closing = source.find("*/", index + 2, end)
+            index = end if closing < 0 else closing + 2
+            continue
+        return index
+    return end
+
+
 def _identifier_at(source: str, mask: list[bool], index: int) -> tuple[str, int] | None:
     match = _IDENTIFIER.match(source, index)
     if match is None or not all(mask[position] for position in range(match.start(), match.end())):
@@ -341,38 +365,43 @@ def _require_binding_is_unambiguous(source: str, mask: list[bool]) -> bool:
     )
 
 
-def _axios_binding(source: str, mask: list[bool]) -> tuple[bool, tuple[int, int] | None]:
-    definitions: list[tuple[int, int]] = []
-    patterns = [_EXACT_AXIOS_IMPORT]
+def _axios_binding(source: str, mask: list[bool]) -> _AxiosBinding | None:
+    definitions: list[_AxiosBinding] = []
+    patterns: list[tuple[re.Pattern[str], bool]] = [(_EXACT_AXIOS_IMPORT, False)]
     if _require_binding_is_unambiguous(source, mask):
-        patterns.append(_EXACT_AXIOS_REQUIRE)
-    for pattern in patterns:
+        patterns.append((_EXACT_AXIOS_REQUIRE, True))
+    for pattern, source_ordered in patterns:
         for match in pattern.finditer(source):
             start, end = match.span("local")
             if (
                 all(mask[index] for index in range(start, end))
                 and _brace_depth(mask, source, start) == 0
             ):
-                definitions.append((start, end))
+                definitions.append(
+                    _AxiosBinding(
+                        definition_start=start,
+                        activation_offset=match.end() if source_ordered else None,
+                    )
+                )
     if len(definitions) != 1:
-        return False, None
+        return None
     definition = definitions[0]
     for start in _code_identifier_offsets(source, mask, "axios"):
-        if start == definition[0]:
+        if start == definition.definition_start:
             continue
         previous = _previous_code_index(mask, start)
         if previous is not None and source[previous] == ".":
-            return False, None
+            return None
         dot = _skip_space(source, start + len("axios"), len(source))
         if dot >= len(source) or source[dot] != ".":
-            return False, None
+            return None
         method = _identifier_at(source, mask, dot + 1)
         if method is None or method[0] not in _AXIOS_METHODS:
-            return False, None
+            return None
         opening = _skip_space(source, method[1], len(source))
         if opening >= len(source) or source[opening] != "(":
-            return False, None
-    return True, definition
+            return None
+    return definition
 
 
 def _method_option(  # noqa: PLR0911, PLR0912, PLR0915
@@ -382,12 +411,12 @@ def _method_option(  # noqa: PLR0911, PLR0912, PLR0915
     end: int,
 ) -> tuple[bool, str | None]:
     """Return whether method semantics are present and their exact value, if safe."""
-    cursor = _skip_space(source, start, end)
+    cursor = _skip_trivia(source, start, end)
     if cursor >= end or source[cursor] == ")":
         return False, None
     if source[cursor] != ",":
         return True, None
-    cursor = _skip_space(source, cursor + 1, end)
+    cursor = _skip_trivia(source, cursor + 1, end)
     if cursor >= end or source[cursor] != "{":
         return True, None
 
@@ -395,15 +424,18 @@ def _method_option(  # noqa: PLR0911, PLR0912, PLR0915
     method_occurrences = 0
     brace_depth = 0
     while cursor < end:
+        if source.startswith(("//", "/*"), cursor):
+            cursor = _skip_trivia(source, cursor, end)
+            continue
         if not mask[cursor]:
             if brace_depth == 1 and source[cursor] in {"'", '"', "`"}:
                 key = _literal_at(source, cursor, end)
                 if key is None:
                     return True, None
-                after_key = _skip_space(source, key[1], end)
+                after_key = _skip_trivia(source, key[1], end)
                 if key[0] == "method" and after_key < end and source[after_key] == ":":
                     method_occurrences += 1
-                    value_start = _skip_space(source, after_key + 1, end)
+                    value_start = _skip_trivia(source, after_key + 1, end)
                     literal = _literal_at(source, value_start, end)
                     if literal is not None:
                         methods.append(literal[0].upper())
@@ -436,10 +468,10 @@ def _method_option(  # noqa: PLR0911, PLR0912, PLR0915
         if brace_depth != 1 or name != "method":
             continue
         method_occurrences += 1
-        value_start = _skip_space(source, after_name, end)
+        value_start = _skip_trivia(source, after_name, end)
         if value_start >= end or source[value_start] != ":":
             continue
-        value_start = _skip_space(source, value_start + 1, end)
+        value_start = _skip_trivia(source, value_start + 1, end)
         literal = _literal_at(source, value_start, end)
         if literal is not None:
             methods.append(literal[0].upper())
@@ -550,7 +582,7 @@ def extract_client_references(  # noqa: PLR0912, PLR0915
 
     fetch_is_global = _global_binding_is_unambiguous(source, mask, "fetch")
     websocket_is_global = _global_binding_is_unambiguous(source, mask, "WebSocket")
-    axios_is_imported, _axios_definition = _axios_binding(source, mask)
+    axios_binding = _axios_binding(source, mask)
     if _code_identifier_offsets(source, mask, "fetch") and not fetch_is_global:
         limitation(0, "fetch binding is shadowed or ambiguous; fetch calls were not resolved")
     if _code_identifier_offsets(source, mask, "WebSocket") and not websocket_is_global:
@@ -558,7 +590,7 @@ def extract_client_references(  # noqa: PLR0912, PLR0915
             0,
             "WebSocket binding is shadowed or ambiguous; constructor calls were not resolved",
         )
-    if _code_identifier_offsets(source, mask, "axios") and not axios_is_imported:
+    if _code_identifier_offsets(source, mask, "axios") and axios_binding is None:
         limitation(
             0,
             "axios binding is not one exact unshadowed axios import; calls were not resolved",
@@ -596,7 +628,20 @@ def extract_client_references(  # noqa: PLR0912, PLR0915
                 cursor = call_end
                 continue
             method = EndpointMethod(option_method or "GET")
-        elif name == "axios" and axios_is_imported:
+        elif name == "axios" and axios_binding is not None:
+            if cursor == axios_binding.definition_start:
+                cursor = after_name
+                continue
+            if (
+                axios_binding.activation_offset is not None
+                and cursor < axios_binding.activation_offset
+            ):
+                limitation(
+                    cursor,
+                    "axios CommonJS binding is not initialized at this use; call was not resolved",
+                )
+                cursor = after_name
+                continue
             dot = _skip_space(source, after_name, len(source))
             if dot >= len(source) or source[dot] != ".":
                 cursor = after_name

@@ -106,6 +106,37 @@ def test_fetch_parses_exact_quoted_method_keys(key: str) -> None:
 @pytest.mark.parametrize(
     "options",
     [
+        ", {'method' /* key */ : /* value */ 'POST'}",
+        ", {'method' // key\n : // value\n 'POST'}",
+        ", {method /* key */ : // value\n 'POST'}",
+        "/* before comma */, /* before options */ {'method': 'POST'}",
+    ],
+)
+def test_fetch_parses_method_options_with_comment_trivia(options: str) -> None:
+    references, limitations = extract_client_references(
+        f"fetch('/items' {options})", Path("client.ts")
+    )
+
+    assert [(item.method.value, item.normalized_path) for item in references] == [
+        ("POST", "/items")
+    ]
+    assert limitations == ()
+
+
+def test_fetch_ignores_quoted_method_text_inside_comments() -> None:
+    references, limitations = extract_client_references(
+        "fetch('/items', {/* 'method': 'POST' */ headers: {}})", Path("client.ts")
+    )
+
+    assert [(item.method.value, item.normalized_path) for item in references] == [
+        ("GET", "/items")
+    ]
+    assert limitations == ()
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
         "{method: 'GET', 'method': 'POST'}",
         "{'method': 'POST', method: 'POST'}",
         "{'method': dynamicMethod}",
@@ -372,6 +403,38 @@ def test_axios_requires_an_exact_import_or_require_binding() -> None:
     assert alias == ()
 
 
+@pytest.mark.parametrize("binding_kind", ["const", "let", "var"])
+def test_commonjs_axios_binding_activates_only_after_initialization(
+    binding_kind: str,
+) -> None:
+    references, limitations = extract_client_references(
+        "axios.get('/before');\n"
+        f"{binding_kind} axios = require('axios');\n"
+        "axios.post('/after')",
+        Path("cjs.js"),
+    )
+
+    assert [(item.method.value, item.normalized_path) for item in references] == [
+        ("POST", "/after")
+    ]
+    assert any("not initialized at this use" in item for item in limitations)
+
+
+def test_esm_axios_import_remains_available_before_its_declaration() -> None:
+    references, limitations = extract_client_references(
+        "axios.get('/before');\n"
+        "import axios from 'axios';\n"
+        "axios.post('/after')",
+        Path("esm.ts"),
+    )
+
+    assert [(item.method.value, item.normalized_path) for item in references] == [
+        ("GET", "/before"),
+        ("POST", "/after"),
+    ]
+    assert limitations == ()
+
+
 @pytest.mark.parametrize(
     "source",
     [
@@ -381,6 +444,7 @@ def test_axios_requires_an_exact_import_or_require_binding() -> None:
         ),
         "import axios from 'axios';\naxios.GET('/health')",
         "const axios = require('axios');\naxios.Post('/items')",
+        "const axios = require('axios');\naxios = client;\naxios.get('/health')",
     ],
 )
 def test_axios_abstains_on_shadowed_require_or_non_lowercase_methods(source: str) -> None:
