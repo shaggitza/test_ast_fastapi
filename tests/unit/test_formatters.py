@@ -41,6 +41,7 @@ from fastapi_endpoint_detector.output.json_output import JsonFormatter
 from fastapi_endpoint_detector.output.markdown_output import MarkdownFormatter
 from fastapi_endpoint_detector.output.text_output import TextFormatter
 from fastapi_endpoint_detector.output.yaml_output import YamlFormatter
+from fastapi_endpoint_detector.parser.secure_ast_extractor import SecureASTExtractor
 
 
 def test_inventory_strength_is_structured_and_visible() -> None:
@@ -57,7 +58,7 @@ def test_inventory_strength_is_structured_and_visible() -> None:
 
     json_result = json.loads(JsonFormatter().format_inventory(inventory))
     yaml_result = yaml.safe_load(YamlFormatter().format_inventory(inventory))
-    assert json_result["schema_version"] == 3
+    assert json_result["schema_version"] == 4
     assert json_result["inventory_status"] == "conditional"
     assert json_result["inventory_limitations"][0]["reason"] == limitation.reason
     assert json_result["route_conditions"][0]["reason"] == limitation.reason
@@ -127,6 +128,44 @@ def test_json_and_yaml_preserve_optional_dependency_graph() -> None:
         "occurrences": [],
         "limitations": [],
     }
+
+
+def test_schema_v4_json_and_yaml_preserve_nested_native_provenance(
+    tmp_path: Path,
+) -> None:
+    app_file = tmp_path / "main.py"
+    app_file.write_text(
+        "from fastapi import APIRouter, FastAPI\n"
+        "app = FastAPI()\n"
+        "mounted = FastAPI()\n"
+        "router = APIRouter()\n"
+        "@router.get('/items')\n"
+        "def items(): pass\n"
+        "mounted.include_router(router)\n"
+        "app.mount('/service', mounted)\n",
+        encoding="utf-8",
+    )
+    inventory = SecureASTExtractor(app_file).extract_inventory()
+
+    json_result = json.loads(JsonFormatter().format_inventory(inventory))
+    yaml_result = yaml.safe_load(YamlFormatter().format_inventory(inventory))
+    assert json_result["schema_version"] == yaml_result["schema_version"] == 4
+    json_provenance = json_result["endpoints"][0]["native_provenance"]
+    yaml_provenance = yaml_result["endpoints"][0]["native_provenance"]
+    assert json_provenance == yaml_provenance
+    assert [edge["operation"] for edge in json_provenance["assembly_chain"]] == [
+        "mount",
+        "include_router",
+    ]
+    assert [edge["mode"] for edge in json_provenance["assembly_chain"]] == [
+        "live",
+        "copy",
+    ]
+    assert [item["object_kind"] for item in json_provenance["object_chain"]] == [
+        "app",
+        "app",
+        "router",
+    ]
 
 
 def test_json_and_yaml_preserve_startup_activation_evidence() -> None:
