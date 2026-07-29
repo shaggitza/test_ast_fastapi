@@ -131,7 +131,7 @@ def test_semantic_change_changes_hash(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "mutation,match",
     [
-        (lambda data: data.update(schema_version=4), "schema_version"),
+        (lambda data: data.update(schema_version=5), "schema_version"),
         (lambda data: data.update(unknown=True), "Extra inputs"),
         (
             lambda data: data["contracts"][0].update(symbol="redis.client.Redis.*"),
@@ -152,6 +152,47 @@ def test_rejects_unsafe_or_malformed_contracts(mutation: object, match: str) -> 
     mutation(data)  # type: ignore[operator]
 
     with pytest.raises(ValidationError, match=match):
+        EffectContractDocument.model_validate(data)
+
+
+def test_composite_resources_require_schema_v4_and_bounded_real_components() -> None:
+    data = _document()
+    contract = data["contracts"][0]  # type: ignore[index]
+    contract["resource"] = {
+        "kind": "composite",
+        "components": [
+            {"kind": "keyword", "name": "Bucket"},
+            {"kind": "keyword", "name": "Key"},
+        ],
+    }
+
+    with pytest.raises(ValidationError, match="schema_version 4"):
+        EffectContractDocument.model_validate(data)
+
+    data["schema_version"] = 4
+    document = EffectContractDocument.model_validate(data)
+    assert (
+        document.contracts[0].resource.model_dump(
+            mode="json", exclude_none=True, exclude_defaults=True
+        )
+        == contract["resource"]
+    )
+
+    contract["resource"] = {
+        "kind": "composite",
+        "components": [{"kind": "keyword", "name": "Bucket"}],
+    }
+    with pytest.raises(ValidationError, match="at least 2"):
+        EffectContractDocument.model_validate(data)
+
+    contract["resource"] = {
+        "kind": "composite",
+        "components": [
+            {"kind": "none"},
+            {"kind": "keyword", "name": "Key"},
+        ],
+    }
+    with pytest.raises(ValidationError, match="cannot be none"):
         EffectContractDocument.model_validate(data)
 
 

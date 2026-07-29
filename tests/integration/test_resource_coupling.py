@@ -113,6 +113,91 @@ def _project(
     return contracts, coupling, diff
 
 
+def _composite_project(root: Path, reader_bucket: str) -> tuple[Path, Path, Path]:
+    (root / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n\n"
+        "def write_state(*, Bucket: str, Key: str) -> None: pass\n"
+        "def read_state(*, Bucket: str, Key: str) -> str: return Key\n\n"
+        "@app.post('/write')\n"
+        "def writer() -> None:\n"
+        "    write_state(Bucket='bucket-a', Key='shared-key')\n\n"
+        "@app.get('/read')\n"
+        "def reader() -> str:\n"
+        f"    return read_state(Bucket={reader_bucket}, Key='shared-key')\n",
+        encoding="utf-8",
+    )
+    selector = {
+        "kind": "composite",
+        "components": [
+            {"kind": "keyword", "name": "Bucket"},
+            {"kind": "keyword", "name": "Key"},
+        ],
+    }
+    contracts = root / "effects.yaml"
+    contracts.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 4,
+                "preset": {
+                    "id": "composite-test",
+                    "version": "1.0.0",
+                    "provenance": {"kind": "user", "source": "effects.yaml"},
+                },
+                "contracts": [
+                    {
+                        "id": "read-state",
+                        "symbol": f"{root.name}.main.read_state",
+                        "invocation": "function",
+                        "operation": "read",
+                        "channel": "custom",
+                        "resource": selector,
+                    },
+                    {
+                        "id": "write-state",
+                        "symbol": f"{root.name}.main.write_state",
+                        "invocation": "function",
+                        "operation": "write",
+                        "channel": "custom",
+                        "resource": selector,
+                    },
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    coupling = root / "coupling.yaml"
+    coupling.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "mode": "report_only",
+                "groups": [
+                    {
+                        "id": "composite-state",
+                        "resource_space": "composite-test-namespace",
+                        "producer_contract_ids": ["write-state"],
+                        "consumer_contract_ids": ["read-state"],
+                    }
+                ],
+                "limits": {"max_endpoint_links_per_resource": 8, "max_edges": 16},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    diff = root / "change.diff"
+    diff.write_text(
+        "diff --git a/main.py b/main.py\n--- a/main.py\n+++ b/main.py\n"
+        "@@ -5,1 +5,1 @@\n"
+        "-def write_state(*, Bucket: str, Key: str) -> None: pass\n"
+        "+def write_state(*, Bucket: str, Key: str) -> None: return None\n",
+        encoding="utf-8",
+    )
+    return contracts, coupling, diff
+
+
 def _candidate_projection(report: AnalysisReport) -> list[dict[str, object]]:
     return [item.model_dump(mode="json") for item in report.candidate_endpoints]
 
@@ -163,6 +248,64 @@ def test_report_only_graph_is_exact_and_never_changes_candidates(tmp_path: Path)
     serialized = json.dumps(configured.model_dump(mode="json"))
     assert "orders:1" not in serialized
     assert "orders-test-namespace" not in serialized
+
+
+@pytest.mark.parametrize(
+    ("reader_bucket", "expected_edges"),
+    [
+        ("'bucket-a'", 1),
+        ("'bucket-b'", 0),
+        ("dynamic_bucket", 0),
+    ],
+)
+def test_composite_resource_identity_requires_every_exact_component(
+    tmp_path: Path,
+    reader_bucket: str,
+    expected_edges: int,
+) -> None:
+    contracts, coupling, diff = _composite_project(tmp_path, reader_bucket)
+    if reader_bucket == "dynamic_bucket":
+        main = tmp_path / "main.py"
+        main.write_text(
+            main.read_text(encoding="utf-8").replace(
+                "@app.get('/read')",
+                "dynamic_bucket = input()\n\n@app.get('/read')",
+            ),
+            encoding="utf-8",
+        )
+
+    report = ChangeMapper(
+        app_path=tmp_path,
+        config=Config(
+            analysis=AnalysisConfig(
+                effect_contracts=contracts,
+                resource_coupling=coupling,
+            )
+        ),
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+
+    assert report.resource_coupling_graph is not None
+    assert len(report.resource_coupling_graph.edges) == expected_edges
+    audit = report.effect_contract_audit
+    assert audit is not None
+    identities = {
+        occurrence.contract_id: occurrence.resource_identity
+        for occurrence in audit.occurrences
+        if occurrence.contract_id is not None
+    }
+    if reader_bucket == "dynamic_bucket":
+        assert identities["read-state"] is not None
+        assert identities["read-state"].status.value == "unavailable"
+        assert identities["read-state"].reason_code == "composite_component_unavailable"
+    else:
+        assert identities["write-state"] is not None
+        assert identities["write-state"].status.value == "exact"
+        assert identities["read-state"] is not None
+        assert identities["read-state"].status.value == "exact"
+        if reader_bucket == "'bucket-b'":
+            assert identities["write-state"].value_hashes != identities["read-state"].value_hashes
 
 
 def test_exact_added_writer_callsite_adds_one_low_nonrecursive_reader(

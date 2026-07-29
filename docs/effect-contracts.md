@@ -42,7 +42,7 @@ Source spelling, receiver candidates, suffixes, bare method names, package metad
 
 Equivalent YAML/JSON/TOML key and contract ordering produces the same semantic hashes. Formatting changes can change only the raw hash.
 
-## Schema v1, v2, and v3
+## Schema v1 through v4
 
 ```yaml
 schema_version: 1
@@ -101,6 +101,14 @@ Schema v3 adds optional structured `http_method` metadata for exact
 `PUT`, `PATCH`, `DELETE`, `HEAD`, and `OPTIONS` are accepted. A method is
 contract semantics, not runtime observation or a fallback match key.
 
+Schema v4 adds ordered `composite` resource selectors with two through four
+ordinary selector components. Every component must resolve to finite evidence;
+the bounded Cartesian product may contain at most eight identities. Each result
+hash includes the ordered selector domains and component hashes, so `(Bucket,
+Key)` cannot collide across buckets or with a reversed selector. Missing,
+dynamic, path-based, or over-budget components make the complete resource
+identity unavailable rather than partially matching it.
+
 Selectors are deliberately bounded:
 
 - `none`
@@ -154,10 +162,11 @@ mode-specific append classification, deferred cursors, Redis pipelines, and bare
 method names are intentionally absent.
 
 Each family has an independent identity and semantic hash. Filesystem receiver
-origins and exact HTTP verb tables are version `2.0.0`; the other non-SQL
-families remain `1.0.0`. HTTP contracts preserve `GET`, `POST`, `PUT`, `PATCH`,
-`DELETE`, `HEAD`, or `OPTIONS` as structured contract semantics while finite
-URLs remain hashed resource evidence. The v1 changelog and
+origins, exact HTTP verb tables, and composite typed-S3 `(Bucket, Key)` identities
+are version `2.0.0`; MongoDB and Redis remain `1.0.0`. HTTP contracts preserve
+`GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, or `OPTIONS` as structured
+contract semantics while finite URLs remain hashed resource evidence. Typed S3
+contracts fail closed unless both bucket and key are finite. The v1 changelog and
 known exclusions are frozen in `benchmarks/results/effect-presets-v1/README.md`.
 Multiple presets are not silently merged because the current provenance model has
 one authoritative contract source per analysis.

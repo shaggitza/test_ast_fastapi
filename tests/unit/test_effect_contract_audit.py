@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from fastapi_endpoint_detector.analyzer.effect_contract_auditor import audit_effect_contracts
 from fastapi_endpoint_detector.models.effect_contract import (
+    CallArgumentEvidence,
     CallResolutionStatus,
     FiniteValueStatus,
     InvocationKind,
@@ -129,6 +130,71 @@ def _audit(
         cache_enabled=cache_enabled,
         resolver_versions=("mypy@1.19.1",),
     )
+
+
+def test_composite_resource_cartesian_overflow_is_unavailable(tmp_path: Path) -> None:
+    contracts = tmp_path / "composite-effects.yaml"
+    contracts.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 4,
+                "preset": {
+                    "id": "composite-audit",
+                    "version": "1.0.0",
+                    "provenance": {"kind": "user", "source": "effects.yaml"},
+                },
+                "contracts": [
+                    {
+                        "id": "emit",
+                        "symbol": "company.events.emit",
+                        "invocation": "function",
+                        "operation": "publish",
+                        "channel": "message_bus",
+                        "resource": {
+                            "kind": "composite",
+                            "components": [
+                                {"kind": "keyword", "name": "Bucket"},
+                                {"kind": "keyword", "name": "Key"},
+                            ],
+                        },
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    hashes = tuple(f"sha256:{character * 64}" for character in "abcdef")
+    site = _site(tmp_path, column=2).model_copy(
+        update={
+            "arguments": (
+                CallArgumentEvidence(
+                    source_index=0,
+                    keyword="Bucket",
+                    status=FiniteValueStatus.FINITE,
+                    value_hashes=hashes[:3],
+                ),
+                CallArgumentEvidence(
+                    source_index=1,
+                    keyword="Key",
+                    status=FiniteValueStatus.FINITE,
+                    value_hashes=hashes[3:],
+                ),
+            )
+        }
+    )
+
+    audit = _audit(
+        tmp_path,
+        [(_endpoint(tmp_path, "handler"), [site])],
+        loaded=load_effect_contracts(contracts),
+    )
+
+    identity = audit.occurrences[0].resource_identity
+    assert identity is not None
+    assert identity.status == FiniteValueStatus.UNAVAILABLE
+    assert identity.value_hashes == ()
+    assert identity.reason_code == "composite_resource_limit_exceeded"
 
 
 def test_exact_matching_is_symbol_and_invocation_only(tmp_path: Path) -> None:

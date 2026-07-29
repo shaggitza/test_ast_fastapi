@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+from itertools import product
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fastapi_endpoint_detector.models.effect_contract import (
     CallResolutionStatus,
+    CompositeEffectSelector,
     EffectContract,
+    EffectSelector,
     FiniteValueStatus,
     LoadedEffectContracts,
     ResolvedCallSite,
@@ -130,11 +133,10 @@ def _call_payload(site: ResolvedCallSite, relative_path: str) -> dict[str, Any]:
     }
 
 
-def _resource_identity(
-    contract: EffectContract,
+def _selector_identity(
+    selector: EffectSelector,
     site_payload: dict[str, Any],
 ) -> ResourceIdentityEvidence:
-    selector = contract.resource
     if selector.path:
         return ResourceIdentityEvidence(
             status=FiniteValueStatus.UNAVAILABLE,
@@ -173,6 +175,59 @@ def _resource_identity(
         status=FiniteValueStatus(selected["status"]),
         value_hashes=tuple(selected["value_hashes"]),
         reason_code=selected.get("reason_code"),
+    )
+
+
+def _resource_identity(
+    contract: EffectContract,
+    site_payload: dict[str, Any],
+) -> ResourceIdentityEvidence:
+    selector = contract.resource
+    if not isinstance(selector, CompositeEffectSelector):
+        return _selector_identity(selector, site_payload)
+
+    component_evidence = [
+        _selector_identity(component, site_payload) for component in selector.components
+    ]
+    if any(item.status == FiniteValueStatus.UNAVAILABLE for item in component_evidence):
+        return ResourceIdentityEvidence(
+            status=FiniteValueStatus.UNAVAILABLE,
+            reason_code="composite_component_unavailable",
+        )
+    cardinality = 1
+    for item in component_evidence:
+        cardinality *= len(item.value_hashes)
+        if cardinality > 8:
+            return ResourceIdentityEvidence(
+                status=FiniteValueStatus.UNAVAILABLE,
+                reason_code="composite_resource_limit_exceeded",
+            )
+
+    component_domains = [
+        component.model_dump(mode="json", exclude_none=True) for component in selector.components
+    ]
+    value_hashes = tuple(
+        sorted(
+            {
+                _semantic_hash(
+                    {
+                        "schema_version": 1,
+                        "kind": "composite_resource_identity",
+                        "components": [
+                            {"selector": domain, "value_hash": value_hash}
+                            for domain, value_hash in zip(
+                                component_domains, combination, strict=True
+                            )
+                        ],
+                    }
+                )
+                for combination in product(*(item.value_hashes for item in component_evidence))
+            }
+        )
+    )
+    return ResourceIdentityEvidence(
+        status=(FiniteValueStatus.EXACT if len(value_hashes) == 1 else FiniteValueStatus.FINITE),
+        value_hashes=value_hashes,
     )
 
 
