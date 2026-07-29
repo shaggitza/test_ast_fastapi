@@ -1,11 +1,11 @@
 schema_version: 5
 preset:
   id: framework-callbacks
-  version: "4"
+  version: "5"
   provenance:
     kind: preset
     source: fastapi-endpoint-detector
-    revision: "4"
+    revision: "5"
 contracts:
   - id: fastapi-lifespan-startup
     registration:
@@ -63,6 +63,32 @@ contracts:
     callback_mode: either
     execution_mode: framework
     activates_routes: true
+
+  - id: fastapi-router-on-event
+    registration:
+      symbol: fastapi.APIRouter.on_event
+      invocation: instance_method
+      receiver_type: fastapi.APIRouter
+    handler: {kind: decorated_function}
+    surface:
+      kind: framework.lifecycle
+      id_template: "event:{resource}"
+      resource: {kind: argument, index: 0}
+    callback_mode: either
+    execution_mode: framework
+
+  - id: fastapi-router-add-event-handler
+    registration:
+      symbol: fastapi.APIRouter.add_event_handler
+      invocation: instance_method
+      receiver_type: fastapi.APIRouter
+    handler: {kind: argument, index: 1}
+    surface:
+      kind: framework.lifecycle
+      id_template: "event:{resource}"
+      resource: {kind: argument, index: 0}
+    callback_mode: either
+    execution_mode: framework
 
   - id: starlette-on-event
     registration:

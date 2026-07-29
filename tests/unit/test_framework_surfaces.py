@@ -1,8 +1,10 @@
 """Exact FastAPI and Starlette lifecycle/middleware surface contracts."""
 
+import asyncio
 from pathlib import Path
 
 import pytest
+from fastapi import APIRouter, FastAPI
 
 from fastapi_endpoint_detector.config import AnalysisConfig, Config
 from fastapi_endpoint_detector.models.endpoint import (
@@ -20,10 +22,11 @@ from fastapi_endpoint_detector.parser.custom_surface_extractor import (
 )
 
 
-def _extract(tmp_path: Path) -> EndpointInventory:
+def _extract(tmp_path: Path, *, app_entry: str | None = None) -> EndpointInventory:
     return CustomSurfaceExtractor(
         tmp_path,
         load_surface_preset("framework-v1"),
+        app_entry=app_entry,
     ).extract_inventory()
 
 
@@ -54,6 +57,27 @@ def test_fastapi_lifespan_splits_exact_pre_and_post_yield_ranges(tmp_path: Path)
     assert startup.surface.callback_range.value == "before_yield"
     assert shutdown.surface is not None
     assert shutdown.surface.callback_range.value == "after_yield"
+
+
+def test_module_qualified_lifespan_selected_and_literal_none_is_absent(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from contextlib import asynccontextmanager\n"
+        "import fastapi\n\n"
+        "@asynccontextmanager\n"
+        "async def lifespan(app):\n"
+        "    yield\n\n"
+        "unused = fastapi.FastAPI(lifespan=None)\n"
+        "app = fastapi.FastAPI(lifespan=lifespan)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == [
+        "FRAMEWORK.LIFECYCLE lifespan:shutdown",
+        "FRAMEWORK.LIFECYCLE lifespan:startup",
+    ]
+    assert inventory.status == InventoryStatus.ESTABLISHED
 
 
 def test_lifespan_with_conditional_yield_fails_closed(tmp_path: Path) -> None:
@@ -115,6 +139,134 @@ def test_starlette_imperative_lifecycle_callbacks_resolve_exact_handlers(
     inventory = _extract(tmp_path)
 
     assert [endpoint.handler.name for endpoint in inventory.endpoints] == ["stop", "start"]
+
+
+def test_runtime_oracle_mount_excludes_child_lifespan_and_router_include_copies() -> None:
+    calls: list[str] = []
+    child = FastAPI()
+
+    @child.on_event("startup")
+    async def child_startup() -> None:
+        calls.append("child")
+
+    parent = FastAPI()
+    parent.mount("/child", child)
+
+    router = APIRouter()
+
+    @router.on_event("startup")
+    async def copied() -> None:
+        calls.append("copied")
+
+    parent.include_router(router)
+
+    @router.on_event("startup")
+    async def too_late() -> None:
+        calls.append("too-late")
+
+    async def enter_lifespan() -> None:
+        async with parent.router.lifespan_context(parent):
+            pass
+
+    asyncio.run(enter_lifespan())
+
+    # Mounted applications do not contribute child lifespan execution. Router
+    # lifecycle behavior after inclusion differs across supported FastAPI versions,
+    # so the static adapter treats that later registration as conditional.
+    assert "child" not in calls
+    assert "copied" in calls
+
+
+def test_framework_surfaces_are_scoped_to_selected_app_not_mounted_lifespan(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "child = FastAPI()\n"
+        "@child.on_event('startup')\n"
+        "async def child_startup(): pass\n\n"
+        "app = FastAPI()\n"
+        "@app.on_event('startup')\n"
+        "async def parent_startup(): pass\n"
+        "app.mount('/child', child)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert [endpoint.handler.name for endpoint in inventory.endpoints] == ["parent_startup"]
+    assert inventory.status == InventoryStatus.ESTABLISHED
+
+
+def test_router_lifecycle_uses_copy_at_include_order(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import APIRouter, FastAPI\n\n"
+        "router = APIRouter()\n"
+        "@router.on_event('startup')\n"
+        "async def copied(): pass\n\n"
+        "app = FastAPI()\n"
+        "app.include_router(router=router)\n\n"
+        "@router.on_event('shutdown')\n"
+        "async def too_late(): pass\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert [endpoint.handler.name for endpoint in inventory.endpoints] == ["copied"]
+    assert inventory.endpoints[0].identifier == "FRAMEWORK.LIFECYCLE event:startup"
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any("runtime-version-dependent" in item.reason for item in inventory.limitations)
+
+
+def test_rebound_default_app_does_not_leave_stale_framework_surface(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "@app.on_event('startup')\n"
+        "async def stale(): pass\n"
+        "app = build_app()\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.endpoints == []
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any("unresolved or was rebound" in item.reason for item in inventory.limitations)
+
+
+def test_explicit_factory_root_selects_only_returned_app_surfaces(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "unused = FastAPI()\n"
+        "@unused.on_event('startup')\n"
+        "async def unused_startup(): pass\n\n"
+        "def create_app():\n"
+        "    selected = FastAPI()\n"
+        "    @selected.on_event('startup')\n"
+        "    async def selected_startup(): pass\n"
+        "    return selected\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path, app_entry="main:create_app")
+
+    assert [endpoint.handler.name for endpoint in inventory.endpoints] == ["selected_startup"]
+    assert inventory.status == InventoryStatus.ESTABLISHED
+
+
+def test_dynamic_include_on_selected_app_fails_closed(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\napp = FastAPI()\napp.include_router(build_router())\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.endpoints == []
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any("include_router target is dynamic" in item.reason for item in inventory.limitations)
 
 
 def test_fastapi_http_middleware_is_exact_async_surface(tmp_path: Path) -> None:
@@ -381,10 +533,8 @@ def test_startup_route_receiver_rebinding_fails_closed(tmp_path: Path) -> None:
 
     inventory = _extract(tmp_path)
 
-    assert [endpoint.identifier for endpoint in inventory.endpoints] == [
-        "FRAMEWORK.LIFECYCLE event:startup"
-    ]
-    assert any("receiver was rebound" in item.reason for item in inventory.limitations)
+    assert inventory.endpoints == []
+    assert any("unresolved or was rebound" in item.reason for item in inventory.limitations)
 
 
 def test_lifespan_adds_pre_yield_route_but_not_shutdown_route(tmp_path: Path) -> None:
