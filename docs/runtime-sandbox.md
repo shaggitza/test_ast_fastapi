@@ -14,24 +14,32 @@ Set the immutable image explicitly:
 ```bash
 export FASTAPI_ENDPOINT_DETECTOR_VM_IMAGE='registry.example/detector@sha256:<64-hex>'
 export FASTAPI_ENDPOINT_DETECTOR_VM_LOCK_SHA256='sha256:<64-hex>'
+export FASTAPI_ENDPOINT_DETECTOR_VM_SNAPSHOT_SHA256='sha256:<64-hex>'
 export FASTAPI_ENDPOINT_DETECTOR_VM_SBOM_SHA256='sha256:<64-hex>'
 fastapi-endpoint-detector list --vm --app ./application
 ```
 
-The image must already contain all snapshot-pinned dependencies. The CLI no
-longer builds a mutable image automatically. A content-addressed dependency lock
-and SBOM attestation are mandatory launch inputs. Their production remains a
-release-pipeline responsibility; benchmark manifests record both hashes, the
-image digest, and `VMExecutor.policy_provenance()`.
+The image must already contain all snapshot-pinned dependencies and is never
+pulled during a comparator launch. The CLI no longer builds a mutable image
+automatically. Content-addressed dependency-lock, source-snapshot-lock, and SBOM
+attestations are mandatory launch inputs. Their production remains a
+release-pipeline responsibility; benchmark manifests record all three hashes,
+the image digest, and `VMExecutor.policy_provenance()`. The packaged seccomp
+profile has a pinned digest in the executor; a custom profile requires
+`FASTAPI_ENDPOINT_DETECTOR_VM_SECCOMP_SHA256` and must match it exactly.
 
 ## Policy v1
 
 Every launch uses argv without a shell and enforces:
 
-- gVisor/Kata runtime rather than the default OCI runtime;
-- no network, devices, host sockets, privileges, or added capabilities;
+- an explicit allowlist of gVisor/Kata runtime names rather than arbitrary or
+  default OCI runtimes;
+- no daemon image pull, network, IPC sharing, retained container logs, devices,
+  host sockets, privileges, or added capabilities;
 - non-root UID/GID `65532:65532` and `no-new-privileges`;
-- a read-only root and exact, read-only, non-recursive app/diff mounts;
+- a read-only root and exact, read-only, non-recursive app/diff mounts; symlinked,
+  special-file, filesystem-root, home-root, and other broad system mounts fail
+  before Docker starts;
 - a 64 MiB `noexec,nosuid,nodev` tmpfs;
 - memory=swap, CPU, PID, `nofile`, `nproc`, `fsize`, core, timeout, and combined
   stdout/stderr limits;
