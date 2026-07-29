@@ -376,12 +376,12 @@ class MypyAnalyzer:
     and extract precise file/line information for all references.
     """
 
-    CACHE_SCHEMA_VERSION = 18
+    CACHE_SCHEMA_VERSION = 19
     MAX_POINTS_TO_TARGETS = 8
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
     MAX_POINTS_TO_EDGES = 4096
-    EXECUTION_SUMMARY_VERSION = 4
+    EXECUTION_SUMMARY_VERSION = 5
     GENERATOR_CONSUMERS: ClassVar[dict[str, tuple[int, str, bool | None]]] = {
         "starlette.responses.StreamingResponse": (0, "content", None),
     }
@@ -2941,6 +2941,7 @@ class MypyAnalyzer:
             Import,
             ImportFrom,
             IndexExpr,
+            IntExpr,
             LambdaExpr,
             ListComprehension,
             ListExpr,
@@ -2969,6 +2970,7 @@ class MypyAnalyzer:
         awaited_call_ids: set[int] = set()
         consumed_generator_call_kinds: dict[int, bool | None] = {}
         deferred_environment: dict[str, _DeferredGenerator] = {}
+        deferred_local_functions: dict[str, Any] = {}
 
         def resolve_and_trace(
             fullname: str,
@@ -3170,6 +3172,39 @@ class MypyAnalyzer:
                 ):
                     consume_deferred_generator(generator, line)
 
+        def literal_truth(expression: Any) -> bool | None:
+            """Return the truth of a side-effect-free literal condition when exact."""
+            if isinstance(expression, NameExpr):
+                fullname = expression.fullname or import_map.get(expression.name)
+                if fullname == "builtins.True" or expression.name == "True":
+                    return True
+                if fullname == "builtins.False" or expression.name == "False":
+                    return False
+            if isinstance(expression, IntExpr):
+                return bool(expression.value)
+            if isinstance(expression, UnaryExpr) and expression.op == "not":
+                nested = literal_truth(expression.expr)
+                return None if nested is None else not nested
+            return None
+
+        def call_is_unawaited_coroutine(call: CallExpr, call_site: ResolvedCallSite | None) -> bool:
+            """Identify exact coroutine creation whose body is not consumed here."""
+            if (
+                id(call) in awaited_call_ids
+                or call_site is None
+                or call_site.status != CallResolutionStatus.EXACT
+                or call_site.canonical_symbol is None
+            ):
+                return False
+            resolved = self._function_node_for_fullname(call_site.canonical_symbol)
+            if resolved is None:
+                return False
+            function = self._actual_function(resolved[0])
+            return bool(getattr(function, "is_coroutine", False)) and not any(
+                bool(getattr(function, attribute, False))
+                for attribute in ("is_generator", "is_async_generator")
+            )
+
         def handle_call_expr(call: CallExpr) -> None:
             """Trace exact calls, adding bounded finite receiver edges as LOW only."""
             call_site = self._resolved_call_site(call, current_file, import_map)
@@ -3249,6 +3284,55 @@ class MypyAnalyzer:
             }:
                 traced = True
 
+            local_function = (
+                deferred_local_functions.get(callee.name) if isinstance(callee, NameExpr) else None
+            )
+            if local_function is not None:
+                traced = True
+                function = self._actual_function(local_function)
+                local_fullname = (
+                    callee.fullname if isinstance(callee, NameExpr) else None
+                ) or f"{current_module}.{function.name}"
+                start, end = self._get_func_lines(function)
+                is_deferred_coroutine = (
+                    bool(getattr(function, "is_coroutine", False))
+                    and id(call) not in awaited_call_ids
+                )
+                deps.add_symbol_reference(
+                    current_file,
+                    local_fullname,
+                    start,
+                    end,
+                    low_confidence=is_deferred_coroutine,
+                )
+                local_frame = CallFrame(
+                    current_file,
+                    start,
+                    local_fullname,
+                    code_context=(
+                        "Execution summary: deferred_coroutine_creation"
+                        if is_deferred_coroutine
+                        else ""
+                    ),
+                    caller_file_path=current_file,
+                    caller_line_number=call.line,
+                )
+                deps.add_call_stack(current_file, [*call_stack, local_frame])
+                if not is_deferred_coroutine and depth + 1 < self.max_depth:
+                    self._trace_references(
+                        function,
+                        deps,
+                        current_file,
+                        current_module,
+                        [*call_stack, local_frame],
+                        visited,
+                        import_map,
+                        depth=depth + 1,
+                        low_confidence_path=low_confidence_path,
+                        initial_environment=dict(flow_environment),
+                        finite_edge_budget=finite_edge_budget,
+                    )
+
             callback_binding = (
                 self._callback_binding(call, callback_summary)
                 if callback_summary is not None
@@ -3320,7 +3404,15 @@ class MypyAnalyzer:
                 and call_site.canonical_symbol is not None
             ):
                 deps.add_reference(current_file, call.line, call_site.canonical_symbol)
-                resolve_and_trace(call_site.canonical_symbol, call.line)
+                if call_is_unawaited_coroutine(call, call_site):
+                    resolve_and_trace(
+                        call_site.canonical_symbol,
+                        call.line,
+                        low_confidence_edge=True,
+                        edge_kind="deferred_coroutine_creation",
+                    )
+                else:
+                    resolve_and_trace(call_site.canonical_symbol, call.line)
 
             # FastAPI dependency injection passes callables as values rather
             # than invoking them in the handler body. Treat the callable given
@@ -3380,26 +3472,24 @@ class MypyAnalyzer:
                     # Decorators are handled specially by walking them explicitly
 
             elif isinstance(n, FuncDef):
-                # Walk function arguments for default values and annotations
+                # A nested definition executes only its eager signature expressions.
+                # Its body is deferred until an exact local call resolves back to it.
+                deferred_local_functions[n.name] = n
                 if hasattr(n, "arguments"):
                     for arg in n.arguments:
-                        # Walk default argument values
                         if hasattr(arg, "initializer") and arg.initializer:
                             walk_node(arg.initializer)
-                        # Walk type annotations
                         if hasattr(arg, "type_annotation") and arg.type_annotation:
                             walk_node(arg.type_annotation)
-                # Walk decorators
                 if hasattr(n, "decorators"):
                     for decorator in n.decorators:
                         walk_node(decorator)
-                # Walk function body
-                if hasattr(n, "body"):
-                    walk_node(n.body)
 
             elif isinstance(n, Block):
                 for stmt in n.body:
                     walk_node(stmt)
+                    if isinstance(stmt, (ReturnStmt, RaiseStmt)):
+                        break
 
             elif isinstance(n, ExpressionStmt):
                 walk_node(n.expr)
@@ -3430,6 +3520,7 @@ class MypyAnalyzer:
                 walk_node(n.rvalue)
                 for lv in n.lvalues:
                     if isinstance(lv, NameExpr):
+                        deferred_local_functions.pop(lv.name, None)
                         if value is None:
                             flow_environment.pop(lv.name, None)
                         else:
@@ -3453,20 +3544,31 @@ class MypyAnalyzer:
                 base_deferred = dict(deferred_environment)
                 branch_environments: list[dict[str, _FinitePointsTo]] = []
                 branch_deferred: list[dict[str, _DeferredGenerator]] = []
+                false_path_remains = True
                 for expr, body in zip(n.expr, n.body, strict=True):
+                    if not false_path_remains:
+                        break
                     flow_environment = dict(base_environment)
                     deferred_environment = dict(base_deferred)
                     walk_node(expr)
-                    walk_node(body)
-                    branch_environments.append(dict(flow_environment))
-                    branch_deferred.append(dict(deferred_environment))
-                flow_environment = dict(base_environment)
-                deferred_environment = dict(base_deferred)
-                if n.else_body:
-                    walk_node(n.else_body)
-                    branch_environments.append(dict(flow_environment))
-                    branch_deferred.append(dict(deferred_environment))
-                else:
+                    truth = literal_truth(expr)
+                    if truth is not False:
+                        walk_node(body)
+                        branch_environments.append(dict(flow_environment))
+                        branch_deferred.append(dict(deferred_environment))
+                    if truth is True:
+                        false_path_remains = False
+                if false_path_remains:
+                    flow_environment = dict(base_environment)
+                    deferred_environment = dict(base_deferred)
+                    if n.else_body:
+                        walk_node(n.else_body)
+                        branch_environments.append(dict(flow_environment))
+                        branch_deferred.append(dict(deferred_environment))
+                    else:
+                        branch_environments.append(base_environment)
+                        branch_deferred.append(base_deferred)
+                if not branch_environments:
                     branch_environments.append(base_environment)
                     branch_deferred.append(base_deferred)
                 flow_environment = self._join_finite_environments(branch_environments)
@@ -3481,9 +3583,10 @@ class MypyAnalyzer:
 
             elif isinstance(n, WhileStmt):
                 walk_node(n.expr)
-                flow_environment.clear()
-                deferred_environment.clear()
-                walk_node(n.body)
+                if literal_truth(n.expr) is not False:
+                    flow_environment.clear()
+                    deferred_environment.clear()
+                    walk_node(n.body)
                 flow_environment.clear()
                 deferred_environment.clear()
 
@@ -3546,7 +3649,11 @@ class MypyAnalyzer:
 
             elif isinstance(n, OpExpr):
                 walk_node(n.left)
-                walk_node(n.right)
+                left_truth = literal_truth(n.left)
+                if not (
+                    (n.op == "and" and left_truth is False) or (n.op == "or" and left_truth is True)
+                ):
+                    walk_node(n.right)
 
             elif isinstance(n, ComparisonExpr):
                 for op in n.operands:
@@ -3556,17 +3663,23 @@ class MypyAnalyzer:
                 walk_node(n.expr)
 
             elif isinstance(n, ConditionalExpr):
-                # mypy uses cond/if_true/if_false but some versions use different names
-                if hasattr(n, "cond"):
-                    walk_node(n.cond)
-                if hasattr(n, "if_true"):
-                    walk_node(n.if_true)
-                elif hasattr(n, "then"):
-                    walk_node(n.then)
-                if hasattr(n, "if_false"):
-                    walk_node(n.if_false)
-                elif hasattr(n, "else_"):
-                    walk_node(n.else_)
+                condition = getattr(n, "cond", None)
+                walk_node(condition)
+                truth = literal_truth(condition)
+                true_branch = getattr(
+                    n,
+                    "if_expr",
+                    getattr(n, "if_true", getattr(n, "then", None)),
+                )
+                false_branch = getattr(
+                    n,
+                    "else_expr",
+                    getattr(n, "if_false", getattr(n, "else_", None)),
+                )
+                if truth is not False:
+                    walk_node(true_branch)
+                if truth is not True:
+                    walk_node(false_branch)
 
             elif isinstance(n, (ListExpr, TupleExpr, SetExpr)):
                 for item in n.items:
@@ -3615,13 +3728,11 @@ class MypyAnalyzer:
                     walk_node(n.sequences[0])
 
             elif isinstance(n, LambdaExpr):
-                # Walk lambda arguments (for default values)
+                # Lambda creation evaluates defaults, but its body is deferred.
                 if hasattr(n, "arguments"):
                     for arg in n.arguments:
                         if hasattr(arg, "initializer") and arg.initializer:
                             walk_node(arg.initializer)
-                # Walk lambda body
-                walk_node(n.body)
 
             elif isinstance(n, YieldFromExpr):
                 consume_generator_expression(n.expr, n.line, require_async=False)
@@ -3637,12 +3748,12 @@ class MypyAnalyzer:
                 pass
 
             elif isinstance(n, Decorator):
-                # Walk decorator arguments
+                # Decorator expressions execute eagerly; the wrapped body remains deferred.
                 if hasattr(n, "decorators"):
                     for decorator in n.decorators:
                         walk_node(decorator)
-                # Walk the decorated function
                 if hasattr(n, "func"):
+                    deferred_local_functions[n.func.name] = n.func
                     walk_node(n.func)
 
         # Start walking from the function
