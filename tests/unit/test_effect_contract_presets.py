@@ -27,7 +27,7 @@ _EXPECTED_PRESET_HASHES = {
     "http-clients-v1": "sha256:c1f6bcb56e06525f20e2eac5a68c9bc5812c281c054209fb6feb3c7df63cc890",
     "message-bus-v1": "sha256:05c2d745da13fc39984d20b6cd260221eeac40ba7049a492cef6979488ac81a1",
     "mongodb-v1": "sha256:1541057fa430ee8ced171b379aa9dab1f4007156fd9b8632784c0ccdfd2f2032",
-    "object-storage-v1": "sha256:e105008879ac0fdccec5dd03b0eb9a031749539713b617de089d8d82a796683c",
+    "object-storage-v1": "sha256:6f33763d1502349481bca4b470f991e4c5a49d6a9b82e34df74a0f4b174161f9",
     "sqlalchemy-v1": "sha256:132982ba61f04626df531dc80c71ce5d21c12ec583a932d21c220486785c8d04",
 }
 
@@ -269,26 +269,35 @@ def test_receiver_http_clients_abstain_from_incomplete_url_identity() -> None:
     assert contracts["requests-api-get"].package.version == ">=2.34,<3"
 
 
-def test_object_storage_abstains_from_false_key_only_object_identity() -> None:
+def test_object_storage_uses_only_complete_resource_identities() -> None:
     loaded = load_effect_preset("object-storage-v1")
-    object_contracts = {
-        contract.id: contract
-        for contract in loaded.document.contracts
-        if contract.id
-        in {
-            "typed-s3-copy-object",
-            "typed-s3-delete-object",
-            "typed-s3-get-object",
-            "typed-s3-head-object",
-            "typed-s3-put-object",
-        }
-    }
+    contracts = {contract.id: contract for contract in loaded.document.contracts}
 
-    assert object_contracts
-    assert all(
-        contract.resource.kind == SelectorKind.NONE for contract in object_contracts.values()
-    )
-    assert all(contract.resource.name is None for contract in object_contracts.values())
+    for contract_id in (
+        "typed-s3-delete-object",
+        "typed-s3-get-object",
+        "typed-s3-put-object",
+    ):
+        resource = contracts[contract_id].resource
+        assert resource.kind == "composite"
+        assert [(item.kind, item.name) for item in resource.components] == [
+            (SelectorKind.KEYWORD, "Bucket"),
+            (SelectorKind.KEYWORD, "Key"),
+        ]
+
+    for contract_id in ("typed-s3-copy-object", "typed-s3-head-object"):
+        resource = contracts[contract_id].resource
+        assert resource.kind == SelectorKind.NONE
+        assert resource.name is None
+
+    for contract_id in (
+        "typed-s3-create-bucket",
+        "typed-s3-delete-bucket",
+        "typed-s3-list-objects-v2",
+    ):
+        resource = contracts[contract_id].resource
+        assert resource.kind == SelectorKind.KEYWORD
+        assert resource.name == "Bucket"
 
 
 def test_async_presets_declare_only_supported_effect_timing() -> None:

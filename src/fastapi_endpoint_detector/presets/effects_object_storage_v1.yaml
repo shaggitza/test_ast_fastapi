@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 4
 preset:
   id: typed-s3-effects
   version: 2.0.0
@@ -7,14 +7,19 @@ preset:
     source: fastapi-endpoint-detector/effects_object_storage_v1.yaml
     revision: "2"
 contracts:
-  # Object identity requires the pair (Bucket, Key), which schema v1 cannot
-  # encode. These exact operation contracts therefore abstain from resource
-  # identity instead of emitting a false Key-only coupling.
+  # Direct object operations use the ordered (Bucket, Key) composite identity.
+  # CopySource and other compound identities remain unavailable until each
+  # component can be represented without guessing.
   - id: typed-s3-get-object
     symbol: mypy_boto3_s3.client.S3Client.get_object
     invocation: instance_method
     operation: read
     channel: object_storage
+    resource:
+      kind: composite
+      components:
+        - {kind: keyword, name: Bucket}
+        - {kind: keyword, name: Key}
     package: &s3 {distribution: mypy-boto3-s3, version: ">=1.34,<2"}
   - id: typed-s3-head-object
     symbol: mypy_boto3_s3.client.S3Client.head_object
@@ -27,6 +32,11 @@ contracts:
     invocation: instance_method
     operation: write
     channel: object_storage
+    resource:
+      kind: composite
+      components:
+        - {kind: keyword, name: Bucket}
+        - {kind: keyword, name: Key}
     value: {kind: keyword, name: Body}
     package: *s3
   - id: typed-s3-copy-object
@@ -41,6 +51,11 @@ contracts:
     invocation: instance_method
     operation: delete
     channel: object_storage
+    resource:
+      kind: composite
+      components:
+        - {kind: keyword, name: Bucket}
+        - {kind: keyword, name: Key}
     package: *s3
   - id: typed-s3-list-objects-v2
     symbol: mypy_boto3_s3.client.S3Client.list_objects_v2
