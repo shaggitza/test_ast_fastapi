@@ -42,7 +42,7 @@ Source spelling, receiver candidates, suffixes, bare method names, package metad
 
 Equivalent YAML/JSON/TOML key and contract ordering produces the same semantic hashes. Formatting changes can change only the raw hash.
 
-## Schema v1, v2, and v3
+## Schema v1 through v4
 
 ```yaml
 schema_version: 1
@@ -100,6 +100,14 @@ Schema v3 adds optional structured `http_method` metadata for exact
 `channel: outbound_http`, `operation: request` contracts. Only `GET`, `POST`,
 `PUT`, `PATCH`, `DELETE`, `HEAD`, and `OPTIONS` are accepted. A method is
 contract semantics, not runtime observation or a fallback match key.
+
+Schema v4 adds ordered `composite` resource selectors with two through four
+ordinary selector components. Every component must resolve to finite evidence;
+the bounded Cartesian product may contain at most eight identities. Each result
+hash includes the ordered selector domains and component hashes, so `(Bucket,
+Key)` cannot collide across buckets or with a reversed selector. Missing,
+dynamic, path-based, or over-budget components make the complete resource
+identity unavailable rather than partially matching it.
 
 Selectors are deliberately bounded:
 
