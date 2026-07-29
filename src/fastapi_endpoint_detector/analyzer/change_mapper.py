@@ -17,6 +17,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from fastapi_endpoint_detector.analyzer.client_surface_adapter import (
+    analyze_client_source,
+    is_client_source,
+)
 from fastapi_endpoint_detector.analyzer.effect_analyzer import EffectAnalyzer
 from fastapi_endpoint_detector.analyzer.effect_contract_auditor import (
     audit_effect_contracts,
@@ -1319,6 +1323,91 @@ class ChangeMapper:
             )
         return enriched
 
+    def _analyze_client_surface_changes(
+        self,
+        diff_files: list[DiffFile],
+        warnings: list[str],
+    ) -> tuple[list[AffectedEndpoint], list[OrphanChange]]:
+        """Map changed literal client calls only to unique established server surfaces."""
+        if not self.config.analysis.typescript_client_adapter:
+            return [], []
+
+        root = self.target_project_root.resolve()
+        endpoints = self.registry.get_all()
+        affected: dict[tuple[str, str, int, str, str], _AffectedAccumulator] = {}
+        orphan_evidence: dict[str, _OrphanAccumulator] = {}
+        for diff_file in diff_files:
+            if not is_client_source(diff_file.path):
+                continue
+            added_lines, removed_lines = DiffParser.get_changed_line_numbers(diff_file)
+            evidence = orphan_evidence.setdefault(
+                _normalized_diff_path(diff_file.path),
+                _OrphanAccumulator(
+                    file_path=str(diff_file.path),
+                    reason=(
+                        "Client-language changes did not contain a bounded literal reference "
+                        "to one unique established server surface"
+                    ),
+                ),
+            )
+            evidence.added.update(added_lines)
+            evidence.removed.update(removed_lines)
+            if not added_lines:
+                continue
+
+            client_path = Path(str(diff_file.path).replace("\\", "/"))
+            candidate_path = client_path if client_path.is_absolute() else root / client_path
+            try:
+                source_path = candidate_path.resolve()
+                source_path.relative_to(root)
+                source = source_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError, ValueError) as error:
+                warnings.append(f"Client adapter could not read {diff_file.path}: {error}")
+                continue
+
+            analysis = analyze_client_source(
+                source,
+                diff_file.path,
+                endpoints,
+                allowed_hosts=self.config.analysis.client_surface_allowed_hosts,
+                max_references=self.config.analysis.client_surface_max_references,
+            )
+            warnings.extend(f"Client adapter limitation: {item}" for item in analysis.limitations)
+            for match in analysis.matches:
+                changed = sorted(
+                    line
+                    for line in added_lines
+                    if match.reference.start_line <= line <= match.reference.end_line
+                )
+                if not changed:
+                    continue
+                evidence.processed_added.update(changed)
+                reference_id = f"{match.reference.method.value} {match.reference.raw_url}"
+                _merge_affected(
+                    affected,
+                    AffectedEndpoint(
+                        endpoint=match.endpoint,
+                        confidence=ConfidenceLevel.MEDIUM,
+                        reason=(
+                            f"Changed client reference {reference_id} at "
+                            f"{diff_file.path}:{match.reference.start_line} uniquely joins "
+                            f"established server surface {match.endpoint.identifier}"
+                        ),
+                        dependency_chain=[
+                            f"client:{reference_id}",
+                            f"server:{match.endpoint.identifier}",
+                        ],
+                        changed_files=[str(diff_file.path)],
+                    ),
+                )
+
+        orphans = [
+            orphan
+            for evidence in orphan_evidence.values()
+            if (orphan := evidence.materialize()) is not None
+        ]
+        return [item.materialize() for item in affected.values()], orphans
+
     def analyze_diff(
         self,
         diff_source: Path | str,
@@ -1370,6 +1459,14 @@ class ChangeMapper:
             scip_affected, scip_orphans = self._analyze_with_scip(
                 python_files, warnings, progress_callback
             )
+            client_affected, client_orphans = self._analyze_client_surface_changes(
+                diff_files, warnings
+            )
+            combined: dict[tuple[str, str, int, str, str], _AffectedAccumulator] = {}
+            for candidate in (*scip_affected, *client_affected):
+                _merge_affected(combined, candidate)
+            scip_affected = [item.materialize() for item in combined.values()]
+            scip_orphans.extend(client_orphans)
             threshold = self.config.analysis.confidence_threshold
             filtered = [
                 item for item in scip_affected if _CONFIDENCE_SCORE[item.confidence] >= threshold
@@ -1462,6 +1559,10 @@ class ChangeMapper:
             except Exception as e:
                 warnings.append(f"Error analyzing {diff_file.path}: {e}")
 
+        client_affected, client_orphans = self._analyze_client_surface_changes(diff_files, warnings)
+        for candidate in client_affected:
+            _merge_affected(all_affected, candidate)
+
         # Filter by confidence threshold
         report_progress(95, 100, "Filtering results...")
         threshold = self.config.analysis.confidence_threshold
@@ -1479,6 +1580,7 @@ class ChangeMapper:
             for evidence in orphan_evidence.values()
             if (orphan := evidence.materialize()) is not None
         ]
+        orphan_changes.extend(client_orphans)
 
         # Calculate duration
         duration_ms = (time.time() - start_time) * 1000

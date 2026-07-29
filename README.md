@@ -237,6 +237,10 @@ parser:
   max_depth: 10
 analysis:
   confidence_threshold: 0.5
+  # Opt-in, literal-only TypeScript/Svelte HTTP and WebSocket references.
+  typescript_client_adapter: false
+  client_surface_allowed_hosts: ["api.example.test"] # exact absolute-URL hosts
+  client_surface_max_references: 256                 # per source file
   effect_contracts: effects.yaml       # optional, config-relative
   surface_contracts: surfaces.yaml     # optional, requires --secure-ast
   # surface_preset: event-listeners-v1 # alternatives: mcp-v1, workers-v1, framework-v1
@@ -246,6 +250,16 @@ output:
 integrations:
   use_mypy: true
 ```
+
+The TypeScript client adapter recognizes only direct literal `fetch`,
+`axios.<method>`, and `new WebSocket` calls in `.js`, `.jsx`, `.ts`, `.tsx`, and
+`.svelte` files. Root-relative URLs are local; absolute URLs require an exact
+allowlisted host. Query strings remain in evidence but are removed from route
+identity. A reference is joined only when it matches one established native
+server surface uniquely. Dynamic variables, computed methods, ambiguous route
+templates, external hosts, deployment configuration, and environment expansion
+remain explicit orphan/limitation evidence rather than causing cross-language
+fanout.
 
 ## Use Cases
 

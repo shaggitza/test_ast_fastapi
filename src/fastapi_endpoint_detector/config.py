@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from fastapi_endpoint_detector.models.effect_contract import (
     LoadedEffectContracts,
@@ -74,6 +74,26 @@ class AnalysisConfig(BaseModel):
         default=False,
         description="Include test endpoints in analysis.",
     )
+    typescript_client_adapter: bool = Field(
+        default=False,
+        description=(
+            "Opt in to bounded literal TypeScript/Svelte HTTP and WebSocket client joins."
+        ),
+    )
+    client_surface_allowed_hosts: tuple[str, ...] = Field(
+        default=(),
+        max_length=32,
+        description=(
+            "Exact lowercase hosts permitted for absolute client URLs; root-relative URLs "
+            "do not require a host."
+        ),
+    )
+    client_surface_max_references: int = Field(
+        default=256,
+        ge=1,
+        le=4096,
+        description="Per-file bound for literal client references.",
+    )
     effect_contracts: Path | None = Field(
         default=None,
         description="Path to a strict versioned effect-contract document.",
@@ -120,6 +140,22 @@ class AnalysisConfig(BaseModel):
             description="Named package-owned custom-surface adapter preset.",
         )
     )
+
+    @field_validator("client_surface_allowed_hosts")
+    @classmethod
+    def validate_client_surface_hosts(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(host.casefold() for host in value)
+        if len(set(normalized)) != len(normalized) or any(
+            not host
+            or host != host.strip()
+            or "/" in host
+            or "\\" in host
+            or "*" in host
+            or len(host) > 253
+            for host in normalized
+        ):
+            raise ValueError("client_surface_allowed_hosts must contain unique exact hosts")
+        return normalized
 
     @model_validator(mode="after")
     def validate_contract_sources(self) -> "AnalysisConfig":
