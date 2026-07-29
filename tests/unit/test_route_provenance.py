@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
+
+import pytest
+from pydantic import ValidationError
 
 from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
 from fastapi_endpoint_detector.analyzer.endpoint_registry import EndpointRegistry
@@ -10,6 +14,7 @@ from fastapi_endpoint_detector.models.diff import ChangeType, DiffFile, DiffHunk
 from fastapi_endpoint_detector.models.endpoint import (
     NativeRegistrationKind,
     NativeRootSelectionKind,
+    NativeRouteProvenance,
     SnapshotSide,
 )
 from fastapi_endpoint_detector.models.report import (
@@ -43,6 +48,24 @@ def _write_composed_app(path: Path, *, prefix: str = "/new") -> None:
         "app.include_router(second, prefix='/other')\n",
         encoding="utf-8",
     )
+
+
+def _nested_provenance_payload(tmp_path: Path) -> dict[str, Any]:
+    app_file = tmp_path / "nested.py"
+    app_file.write_text(
+        "from fastapi import APIRouter, FastAPI\n"
+        "app = FastAPI()\n"
+        "mounted = FastAPI()\n"
+        "router = APIRouter()\n"
+        "@router.get('/items')\n"
+        "def items(): pass\n"
+        "mounted.include_router(router)\n"
+        "app.mount('/service', mounted)\n",
+        encoding="utf-8",
+    )
+    endpoint = SecureASTExtractor(app_file).extract_endpoints()[0]
+    assert endpoint.native_provenance is not None
+    return endpoint.native_provenance.model_dump(mode="python")
 
 
 def test_secure_provenance_preserves_multiline_registration_and_exact_chain(
@@ -138,6 +161,72 @@ def test_snapshot_side_and_factory_bootstrap_roots_are_explicit(tmp_path: Path) 
         bootstrap_endpoint.native_provenance.registration.kind == NativeRegistrationKind.IMPERATIVE
     )
     assert bootstrap_endpoint.native_provenance.registration.source_span.start_line == 5
+
+
+def test_native_provenance_rejects_root_disconnected_from_object_chain(
+    tmp_path: Path,
+) -> None:
+    payload = _nested_provenance_payload(tmp_path)
+    payload["root"]["symbol"] = "not_the_selected_root"
+
+    with pytest.raises(ValidationError, match="root must be the first object"):
+        NativeRouteProvenance.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("selection_kind", "incompatible_kind"),
+    [
+        (NativeRootSelectionKind.APP_VARIABLE, "router"),
+        (NativeRootSelectionKind.APP_ENTRY_OBJECT, "router"),
+        (NativeRootSelectionKind.APP_ENTRY_FACTORY, "router"),
+        (NativeRootSelectionKind.ROUTER_VARIABLE, "app"),
+    ],
+)
+def test_native_provenance_rejects_incompatible_root_object_role(
+    tmp_path: Path,
+    selection_kind: NativeRootSelectionKind,
+    incompatible_kind: str,
+) -> None:
+    payload = _nested_provenance_payload(tmp_path)
+    payload["root"]["selection_kind"] = selection_kind
+    payload["object_chain"][0]["object_kind"] = incompatible_kind
+
+    with pytest.raises(ValidationError, match="root selection must match"):
+        NativeRouteProvenance.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("edge_index", "incompatible_mode"),
+    [(0, "copy"), (1, "live")],
+    ids=["mount-copy", "include-router-live"],
+)
+def test_native_provenance_rejects_incompatible_assembly_mode(
+    tmp_path: Path,
+    edge_index: int,
+    incompatible_mode: str,
+) -> None:
+    payload = _nested_provenance_payload(tmp_path)
+    payload["assembly_chain"][edge_index]["mode"] = incompatible_mode
+
+    with pytest.raises(ValidationError, match="operation must use its declared composition mode"):
+        NativeRouteProvenance.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("object_index", "incompatible_kind"),
+    [(1, "router"), (2, "app")],
+    ids=["mount-router", "include-router-app"],
+)
+def test_native_provenance_rejects_incompatible_assembly_object_role(
+    tmp_path: Path,
+    object_index: int,
+    incompatible_kind: str,
+) -> None:
+    payload = _nested_provenance_payload(tmp_path)
+    payload["object_chain"][object_index]["object_kind"] = incompatible_kind
+
+    with pytest.raises(ValidationError, match="operation must target a compatible object role"):
+        NativeRouteProvenance.model_validate(payload)
 
 
 def test_registry_maps_include_change_only_to_exact_descendants(tmp_path: Path) -> None:

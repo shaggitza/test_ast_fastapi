@@ -413,6 +413,19 @@ class NativeRouteProvenance(BaseModel):
             raise ValueError("native route provenance cannot mix snapshot sides")
         if len(self.object_chain) != len(self.assembly_chain) + 1:
             raise ValueError("native object chain must contain one object per assembly hop")
+        root_object = self.object_chain[0]
+        if (self.root.module, self.root.symbol) != (
+            root_object.module,
+            root_object.symbol,
+        ):
+            raise ValueError("native route root must be the first object occurrence")
+        expected_root_kind = (
+            "router"
+            if self.root.selection_kind == NativeRootSelectionKind.ROUTER_VARIABLE
+            else "app"
+        )
+        if root_object.object_kind != expected_root_kind:
+            raise ValueError("native route root selection must match the first object role")
         for index, edge in enumerate(self.assembly_chain):
             parent = self.object_chain[index]
             child = self.object_chain[index + 1]
@@ -421,6 +434,16 @@ class NativeRouteProvenance(BaseModel):
                 edge.child_symbol,
             ) != (child.module, child.symbol):
                 raise ValueError("native assembly edge must connect adjacent object occurrences")
+            expected_mode = (
+                NativeAssemblyMode.COPY
+                if edge.operation == "include_router"
+                else NativeAssemblyMode.LIVE
+            )
+            if edge.mode != expected_mode:
+                raise ValueError("native assembly operation must use its declared composition mode")
+            expected_child_kind = "router" if edge.operation == "include_router" else "app"
+            if child.object_kind != expected_child_kind:
+                raise ValueError("native assembly operation must target a compatible object role")
         owner = self.object_chain[-1]
         if (self.registration.owner_module, self.registration.owner_symbol) != (
             owner.module,
