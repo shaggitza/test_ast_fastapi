@@ -70,6 +70,11 @@ from fastapi_endpoint_detector.parser.custom_surface_extractor import (
 from fastapi_endpoint_detector.parser.diff_parser import DiffParser
 from fastapi_endpoint_detector.parser.fastapi_extractor import FastAPIExtractor
 from fastapi_endpoint_detector.parser.secure_ast_extractor import SecureASTExtractor
+from fastapi_endpoint_detector.source_inventory import (
+    SourceInventory,
+    SourceInventoryError,
+    source_root_for_app,
+)
 
 if TYPE_CHECKING:
     from fastapi_endpoint_detector.models.diff import DiffFile
@@ -441,6 +446,22 @@ class ChangeMapper:
         """
         self.app_path = app_path.resolve()
         self.config = config or Config()
+        if self.config.has_custom_source_scope and not secure_ast:
+            raise ChangeMapperError("non-default parser source patterns require secure_ast=True")
+        if self.config.has_custom_source_scope and use_scip:
+            raise ChangeMapperError("non-default parser source patterns are unsupported by SCIP")
+        try:
+            self.source_inventory = SourceInventory.build(
+                source_root_for_app(self.app_path),
+                include_patterns=tuple(self.config.parser.include_patterns),
+                exclude_patterns=tuple(self.config.parser.exclude_patterns),
+            )
+        except SourceInventoryError as error:
+            raise ChangeMapperError(str(error)) from error
+        if self.app_path.is_file() and not self.source_inventory.contains(self.app_path):
+            raise ChangeMapperError(
+                "configured source patterns exclude the selected application entry file"
+            )
         self._effect_contracts: LoadedEffectContracts | None = (
             self.config.load_effect_contract_snapshot()
         )
@@ -472,6 +493,22 @@ class ChangeMapper:
         if baseline_app_path is not None and not use_scip:
             raise ChangeMapperError("baseline_app_path is valid only with use_scip=True")
         self.baseline_app_path = baseline_app_path.resolve() if baseline_app_path else None
+        self.baseline_source_inventory: SourceInventory | None = None
+        if self.baseline_app_path is not None:
+            try:
+                self.baseline_source_inventory = SourceInventory.build(
+                    source_root_for_app(self.baseline_app_path),
+                    include_patterns=tuple(self.config.parser.include_patterns),
+                    exclude_patterns=tuple(self.config.parser.exclude_patterns),
+                )
+            except SourceInventoryError as error:
+                raise ChangeMapperError(str(error)) from error
+            if self.baseline_app_path.is_file() and not self.baseline_source_inventory.contains(
+                self.baseline_app_path
+            ):
+                raise ChangeMapperError(
+                    "configured source patterns exclude the baseline application entry file"
+                )
         target_project_root = self.app_path.parent if self.app_path.is_file() else self.app_path
         self.target_project_root = target_project_root
         baseline_project_root = (
@@ -498,6 +535,46 @@ class ChangeMapper:
         self._baseline_registry: EndpointRegistry | None = None
         self._baseline_scip_analyzer: SCIPAnalyzer | None = None
 
+    def _partition_changed_files(
+        self,
+        diff_files: list[DiffFile],
+    ) -> tuple[list[DiffFile], list[DiffFile], list[OrphanChange]]:
+        """Separate canonical Python inputs from explicit unresolved changes."""
+        all_python = DiffParser.get_python_files(diff_files)
+        in_scope: list[DiffFile] = []
+        unresolved: list[OrphanChange] = []
+        for diff_file in diff_files:
+            added_lines, removed_lines = DiffParser.get_changed_line_numbers(diff_file)
+            if not diff_file.is_python_file:
+                unresolved.append(
+                    OrphanChange(
+                        file_path=str(diff_file.path),
+                        added_lines=added_lines,
+                        removed_lines=removed_lines,
+                        reason=(
+                            "Unsupported non-Python/configuration change; "
+                            "no finite dependency contract is configured"
+                        ),
+                    )
+                )
+                continue
+            source_allowed = (
+                diff_file.source_path is not None
+                and self.source_inventory.allows_diff_path(diff_file.source_path)
+            )
+            if self.source_inventory.allows_diff_path(diff_file.path) or source_allowed:
+                in_scope.append(diff_file)
+            else:
+                unresolved.append(
+                    OrphanChange(
+                        file_path=str(diff_file.path),
+                        added_lines=added_lines,
+                        removed_lines=removed_lines,
+                        reason="Python change is outside the configured canonical source inventory",
+                    )
+                )
+        return in_scope, all_python, unresolved
+
     @property
     def extractor(self) -> FastAPIExtractor | SecureASTExtractor:
         """Get the configured endpoint extractor, initializing if needed."""
@@ -508,6 +585,7 @@ class ChangeMapper:
                     app_variable=self.app_variable,
                     app_entry=self.app_entry,
                     bootstrap_entry=self.bootstrap_entry,
+                    source_inventory=self.source_inventory,
                 )
             else:
                 self._extractor = FastAPIExtractor(
@@ -572,6 +650,7 @@ class ChangeMapper:
                 app_variable=self.app_variable,
                 app_entry=self.app_entry,
                 bootstrap_entry=self.bootstrap_entry,
+                source_inventory=self.baseline_source_inventory,
             )
             self._baseline_registry = EndpointRegistry()
             native = extractor.extract_inventory()
@@ -602,7 +681,11 @@ class ChangeMapper:
             effective_depth = (
                 self.config.parser.max_depth if self.config.analysis.track_transitive else 1
             )
-            self._mypy_analyzer = MypyAnalyzer(package_path, max_depth=effective_depth)
+            self._mypy_analyzer = MypyAnalyzer(
+                package_path,
+                max_depth=effective_depth,
+                source_inventory=self.source_inventory,
+            )
             # NOTE: We don't pre-analyze here - that's done in _preanalyze_mypy
             # with progress reporting
         return self._mypy_analyzer
@@ -1357,8 +1440,10 @@ class ChangeMapper:
             diff_files = []
             diff_source_str = str(diff_source)
 
-        # Filter to Python files
-        python_files = DiffParser.get_python_files(diff_files)
+        # Partition through the same canonical source scope used by AST and mypy.
+        python_files, all_python_files, unresolved_changes = self._partition_changed_files(
+            diff_files
+        )
 
         # Initialize endpoints
         report_progress(5, 100, "Extracting endpoints...")
@@ -1388,9 +1473,9 @@ class ChangeMapper:
                 ),
                 affected_endpoints=filtered,
                 candidate_endpoints=scip_affected,
-                orphan_changes=scip_orphans,
+                orphan_changes=[*scip_orphans, *unresolved_changes],
                 total_files_changed=len(diff_files),
-                python_files_changed=len(python_files),
+                python_files_changed=len(all_python_files),
                 analysis_duration_ms=duration_ms,
                 errors=errors,
                 warnings=warnings,
@@ -1494,9 +1579,9 @@ class ChangeMapper:
             ),
             affected_endpoints=filtered_affected,
             candidate_endpoints=materialized,
-            orphan_changes=orphan_changes,
+            orphan_changes=[*orphan_changes, *unresolved_changes],
             total_files_changed=len(diff_files),
-            python_files_changed=len(python_files),
+            python_files_changed=len(all_python_files),
             analysis_duration_ms=duration_ms,
             errors=errors,
             warnings=warnings,
@@ -1566,5 +1651,8 @@ class ChangeMapper:
         else:
             # Initialize and clear the cache file even if analyzer not loaded
             package_path = self.app_path.parent if self.app_path.is_file() else self.app_path
-            temp_analyzer = MypyAnalyzer(package_path)
+            temp_analyzer = MypyAnalyzer(
+                package_path,
+                source_inventory=self.source_inventory,
+            )
             temp_analyzer.clear_cache()

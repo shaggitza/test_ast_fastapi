@@ -40,6 +40,7 @@ from fastapi_endpoint_detector.models.endpoint import (
     Endpoint,
 )
 from fastapi_endpoint_detector.models.surface_contract import CallbackRangeMode
+from fastapi_endpoint_detector.source_inventory import SourceInventory
 
 # Type alias for line-level progress callback (file_path, line_number, symbol_name)
 LineProgressCallback = Callable[[str, int, str], None]
@@ -400,12 +401,23 @@ class MypyAnalyzer:
         "starlette.concurrency.run_in_threadpool": _ExecutorSummary(0, True, True),
     }
 
-    def __init__(self, app_path: Path, *, max_depth: int = 10) -> None:
+    def __init__(
+        self,
+        app_path: Path,
+        *,
+        max_depth: int = 10,
+        source_inventory: SourceInventory | None = None,
+    ) -> None:
         """Initialize the mypy analyzer."""
         if max_depth < 1:
             raise ValueError("max_depth must be at least 1")
         self.app_path = app_path.resolve()
-        self.source_root = self.app_path.parent if self.app_path.is_file() else self.app_path
+        self.source_inventory = source_inventory
+        self.source_root = (
+            source_inventory.root
+            if source_inventory is not None
+            else (self.app_path.parent if self.app_path.is_file() else self.app_path)
+        )
         self.max_depth = max_depth
         self._endpoint_deps: dict[str, EndpointDependencies] = {}
         self._mypy_available = self._check_mypy_available()
@@ -489,12 +501,12 @@ class MypyAnalyzer:
 
         source_root = self._get_source_root()
 
-        # Collect all Python files
+        # Consume the same canonical inventory as execution-free route discovery.
+        inventory = self.source_inventory or SourceInventory.build(source_root)
+        if self.source_inventory is not None:
+            inventory.verify()
         sources: list[BuildSource] = []
-        for py_file in source_root.rglob("*.py"):
-            if any(part.startswith((".", "__pycache__")) for part in py_file.parts):
-                continue
-
+        for py_file in inventory.python_paths:
             try:
                 rel_path = py_file.relative_to(source_root.parent)
                 if rel_path.name == "__init__.py":
@@ -1113,7 +1125,8 @@ class MypyAnalyzer:
             if self._module_to_path:
                 candidates = (Path(path) for path in self._module_to_path.values())
             else:
-                candidates = self.source_root.rglob("*.py")
+                inventory = self.source_inventory or SourceInventory.build(self.source_root)
+                candidates = inventory.python_paths
             for path in candidates:
                 try:
                     canonical = path.resolve()
@@ -3721,14 +3734,10 @@ class MypyAnalyzer:
 
     def _cache_fingerprint(self) -> tuple[str, dict[str, str]]:
         """Fingerprint all Python inputs and analysis semantics."""
-        sources: dict[str, str] = {}
-        for discovered in sorted(self.source_root.rglob("*.py")):
-            try:
-                path = discovered.resolve()
-                relative = path.relative_to(self.source_root).as_posix()
-                sources[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
-            except (OSError, ValueError):
-                continue
+        inventory = self.source_inventory or SourceInventory.build(self.source_root)
+        if self.source_inventory is not None:
+            inventory.verify()
+        sources = {item.relative_path: item.sha256 for item in inventory.python_entries}
         mypy_version = self._resolver_version
         payload = json.dumps(
             {
@@ -3768,6 +3777,7 @@ class MypyAnalyzer:
                 "mypy": mypy_version,
                 "python": list(sys.version_info[:3]),
                 "source_root": str(self.source_root.resolve()),
+                "source_inventory": inventory.fingerprint,
                 "sources": sources,
             },
             sort_keys=True,

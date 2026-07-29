@@ -27,6 +27,14 @@ from fastapi_endpoint_detector.models.surface_contract import (
 )
 from fastapi_endpoint_detector.strict_data import load_yaml_unique
 
+DEFAULT_INCLUDE_PATTERNS = ("**/*.py",)
+DEFAULT_EXCLUDE_PATTERNS = (
+    "**/test_*.py",
+    "**/*_test.py",
+    "**/tests/**",
+    "**/__pycache__/**",
+)
+
 
 class ParserConfig(BaseModel):
     """Configuration for the code parser."""
@@ -34,11 +42,11 @@ class ParserConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     include_patterns: list[str] = Field(
-        default=["**/*.py"],
+        default_factory=lambda: list(DEFAULT_INCLUDE_PATTERNS),
         description="Glob patterns for files to include in analysis.",
     )
     exclude_patterns: list[str] = Field(
-        default=["**/test_*.py", "**/*_test.py", "**/tests/**", "**/__pycache__/**"],
+        default_factory=lambda: list(DEFAULT_EXCLUDE_PATTERNS),
         description="Glob patterns for files to exclude from analysis.",
     )
     follow_imports: bool = Field(
@@ -50,6 +58,26 @@ class ParserConfig(BaseModel):
         ge=1,
         description="Maximum depth for dependency traversal.",
     )
+
+    @model_validator(mode="after")
+    def validate_source_scope(self) -> "ParserConfig":
+        if not self.include_patterns:
+            raise ValueError("include_patterns must contain at least one project-relative glob")
+        for field_name, patterns in (
+            ("include_patterns", self.include_patterns),
+            ("exclude_patterns", self.exclude_patterns),
+        ):
+            for pattern in patterns:
+                normalized = pattern.replace("\\", "/")
+                if (
+                    not pattern.strip()
+                    or normalized.startswith("/")
+                    or ".." in normalized.split("/")
+                ):
+                    raise ValueError(
+                        f"{field_name} entries must be non-empty project-relative globs"
+                    )
+        return self
 
 
 class AnalysisConfig(BaseModel):
@@ -190,6 +218,29 @@ class Config(BaseModel):
     analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
     integrations: IntegrationConfig = Field(default_factory=IntegrationConfig)
+
+    @model_validator(mode="after")
+    def reject_unimplemented_controls(self) -> "Config":
+        """Fail closed instead of advertising configuration that is ignored."""
+        if not self.parser.follow_imports:
+            raise ValueError("parser.follow_imports=false is not implemented")
+        if self.analysis.include_test_endpoints:
+            raise ValueError("analysis.include_test_endpoints=true is not implemented")
+        if not self.integrations.use_mypy:
+            raise ValueError(
+                "integrations.use_mypy=false is not implemented; use --scip explicitly"
+            )
+        if self.integrations.mypy_config is not None:
+            raise ValueError("integrations.mypy_config is not implemented")
+        return self
+
+    @property
+    def has_custom_source_scope(self) -> bool:
+        """Whether source globs differ from the canonical default policy."""
+        return (
+            tuple(self.parser.include_patterns) != DEFAULT_INCLUDE_PATTERNS
+            or tuple(self.parser.exclude_patterns) != DEFAULT_EXCLUDE_PATTERNS
+        )
 
     def load_surface_contract_snapshot(self) -> LoadedSurfaceContracts | None:
         """Load configured custom surfaces once to prevent analysis-time drift."""

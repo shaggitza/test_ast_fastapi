@@ -247,6 +247,17 @@ integrations:
   use_mypy: true
 ```
 
+In `--secure-ast` mode, `include_patterns` and `exclude_patterns` define one
+canonical, deterministic project-local source inventory consumed by native AST
+discovery, mypy input construction, cache fingerprints, and changed-file
+scoping. Changes outside that inventory—and non-Python/configuration changes
+without a finite contract—remain explicit unresolved/orphan evidence rather than
+silently disappearing. Runtime and SCIP modes reject non-default source globs
+because they do not yet consume this inventory. The previously advertised
+`follow_imports: false`, `include_test_endpoints: true`, `use_mypy: false`, and
+`mypy_config` settings are rejected when non-default until they have end-to-end
+semantics; use the explicit `--scip` backend selector instead.
+
 ## Use Cases
 
 ### CI/CD Integration

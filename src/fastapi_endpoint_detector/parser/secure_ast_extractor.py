@@ -25,6 +25,7 @@ from fastapi_endpoint_detector.parser._static_evaluation import (
     MAX_STATIC_STRING_CHARS,
     StaticStringEvaluator,
 )
+from fastapi_endpoint_detector.source_inventory import SourceInventory, SourceInventoryError
 
 
 class SecureASTExtractorError(Exception):
@@ -675,11 +676,13 @@ class SecureASTExtractor:
         app_variable: str = "app",
         app_entry: str | None = None,
         bootstrap_entry: str | None = None,
+        source_inventory: SourceInventory | None = None,
     ) -> None:
         self.app_path = app_path.resolve()
         self.app_variable = app_variable
         self.app_entry = app_entry
         self.bootstrap_entry = bootstrap_entry
+        self.source_inventory = source_inventory
         self._app_entry_parts = self._parse_entry(app_entry, "--app-entry")
         self._bootstrap_entry_parts = self._parse_entry(bootstrap_entry, "--bootstrap-entry")
 
@@ -1109,11 +1112,12 @@ class SecureASTExtractor:
         return package
 
     def _find_python_files(self, root: Path) -> list[Path]:
-        if self.app_path.is_dir():
-            return sorted(root.rglob("*.py"))
-        # Parsing project-local files is execution-free. Exact root selection below
-        # prevents unrelated modules from becoming public endpoints.
-        return sorted(root.rglob("*.py"))
+        inventory = self.source_inventory or SourceInventory.build(root)
+        if self.source_inventory is not None:
+            inventory.verify()
+        if inventory.root != root.resolve():
+            raise SecureASTExtractorError("source inventory root does not match the AST root")
+        return list(inventory.python_paths)
 
     def _load_modules(
         self,
@@ -1124,7 +1128,7 @@ class SecureASTExtractor:
         parse_failures: list[EndpointDiscoveryCondition] = []
         try:
             paths = self._find_python_files(root)
-        except OSError as error:
+        except (OSError, SourceInventoryError) as error:
             return (
                 {},
                 None,
@@ -1132,7 +1136,19 @@ class SecureASTExtractor:
                     EndpointDiscoveryCondition(
                         source_path=self.app_path,
                         source_line=1,
-                        reason=f"project-local Python sources could not be enumerated: {error}",
+                        reason=f"canonical source inventory could not be verified: {error}",
+                    ),
+                ),
+            )
+        if not paths:
+            return (
+                {},
+                None,
+                (
+                    EndpointDiscoveryCondition(
+                        source_path=self.app_path,
+                        source_line=1,
+                        reason="canonical source inventory contains no Python sources",
                     ),
                 ),
             )
