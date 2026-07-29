@@ -166,11 +166,14 @@ class TestSecurityDependencies:
 
         assert result.exit_code == 0, f"CLI failed: {result.output}"
 
+        # require_scope returns check_scope, whose dependency path is now proven as
+        # check_scope -> get_current_user -> decode_token for POST /items.
         assert affected_ids(result.output) == {
             "DELETE /users/{user_id}",
             "GET /protected",
             "GET /users/me",
             "GET /users/me/items",
+            "POST /items",
         }
 
 

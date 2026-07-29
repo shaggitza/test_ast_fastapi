@@ -101,6 +101,14 @@ fastapi-endpoint-detector list --app path/to/main.py --format markdown
 fastapi-endpoint-detector list --app path/to/main.py --format html -o endpoints.html
 ```
 
+### Machine-readable endpoint provenance
+
+JSON and YAML inventories and analysis reports use schema version 3. Each endpoint may
+include the additive, nullable `dependency_graph` field: schema-v1 bounded evidence for
+the declared FastAPI dependency tree, with explicit status and limitations. Trusted
+runtime extraction transports this evidence through the private protocol-v2 worker;
+consumers should use the public inventory/report schema rather than that worker protocol.
+
 ## Commands
 
 ### `analyze` - Analyze Code Changes

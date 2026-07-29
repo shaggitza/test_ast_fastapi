@@ -12,7 +12,7 @@ from typing import Any
 
 from fastapi_endpoint_detector.parser.fastapi_extractor import FastAPIExtractor
 
-_PROTOCOL_VERSION = 1
+_PROTOCOL_VERSION = 2
 _DEFAULT_OUTPUT_LIMIT_BYTES = 4 * 1024 * 1024
 
 
@@ -30,6 +30,13 @@ def _required_string(request: dict[str, Any], field: str) -> str:
     value = request.get(field)
     if not isinstance(value, str) or not value:
         raise ValueError(f"runtime worker request requires {field}")
+    return value
+
+
+def _positive_integer(request: dict[str, Any], field: str) -> int:
+    value = request.get(field)
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError(f"runtime worker request requires positive integer {field}")
     return value
 
 
@@ -64,6 +71,9 @@ def _run(result_path: Path) -> int:
             Path(_required_string(request, "app_path")),
             app_variable=_required_string(request, "app_variable"),
             module_name=module_name,
+            dependency_max_depth=_positive_integer(request, "dependency_max_depth"),
+            dependency_max_nodes=_positive_integer(request, "dependency_max_nodes"),
+            dependency_max_work=_positive_integer(request, "dependency_max_work"),
         )
         with (
             Path(os.devnull).open("w", encoding="utf-8") as sink,

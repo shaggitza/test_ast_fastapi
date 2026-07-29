@@ -43,7 +43,17 @@ from fastapi_endpoint_detector.models.effect_contract_audit import (
     EffectContractCoverage,
 )
 from fastapi_endpoint_detector.models.endpoint import (
+    DependencyCallableKind,
+    DependencyCallableStructure,
+    DependencyDeclarationKind,
+    DependencyDeclarationScope,
+    DependencyGraphLimitation,
+    DependencyGraphStatus,
+    DependencyResolutionStatus,
+    DependencySourceSpan,
     Endpoint,
+    EndpointDependencyGraph,
+    EndpointDependencyOccurrence,
     EndpointDiscoveryCondition,
     EndpointDiscoveryStatus,
     EndpointInventory,
@@ -104,7 +114,17 @@ from fastapi_endpoint_detector.models.surface_contract import (
 
 __all__ = [  # noqa: RUF022 - grouped by public model domain
     # Endpoint models
+    "DependencyCallableKind",
+    "DependencyCallableStructure",
+    "DependencyDeclarationKind",
+    "DependencyDeclarationScope",
+    "DependencyGraphLimitation",
+    "DependencyGraphStatus",
+    "DependencyResolutionStatus",
+    "DependencySourceSpan",
     "Endpoint",
+    "EndpointDependencyGraph",
+    "EndpointDependencyOccurrence",
     "EndpointDiscoveryCondition",
     "EndpointDiscoveryStatus",
     "EndpointInventory",

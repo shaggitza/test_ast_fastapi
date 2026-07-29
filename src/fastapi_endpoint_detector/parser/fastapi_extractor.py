@@ -6,6 +6,7 @@ endpoint information using app.routes, which is more reliable than
 AST parsing as it handles all FastAPI patterns automatically.
 """
 
+import functools
 import importlib.util
 import inspect
 import json
@@ -25,7 +26,17 @@ from fastapi.routing import APIRoute, APIWebSocketRoute
 from starlette.routing import Mount
 
 from fastapi_endpoint_detector.models.endpoint import (
+    DependencyCallableKind,
+    DependencyCallableStructure,
+    DependencyDeclarationKind,
+    DependencyDeclarationScope,
+    DependencyGraphLimitation,
+    DependencyGraphStatus,
+    DependencyResolutionStatus,
+    DependencySourceSpan,
     Endpoint,
+    EndpointDependencyGraph,
+    EndpointDependencyOccurrence,
     EndpointMethod,
     HandlerInfo,
 )
@@ -53,6 +64,9 @@ class FastAPIExtractor:
         *,
         timeout_seconds: float = 60.0,
         output_limit_bytes: int = 4 * 1024 * 1024,
+        dependency_max_depth: int = 32,
+        dependency_max_nodes: int = 2048,
+        dependency_max_work: int = 8192,
     ) -> None:
         """
         Initialize the extractor.
@@ -64,6 +78,9 @@ class FastAPIExtractor:
                         will be derived from app_path.
             timeout_seconds: Maximum time allowed for runtime import and extraction.
             output_limit_bytes: Maximum serialized worker response size.
+            dependency_max_depth: Maximum recursive dependency depth retained.
+            dependency_max_nodes: Maximum dependency occurrences retained per endpoint.
+            dependency_max_work: Maximum dependency traversal work units per endpoint.
         """
         try:
             normalized_timeout = float(timeout_seconds)
@@ -80,13 +97,30 @@ class FastAPIExtractor:
             isinstance(output_limit_bytes, bool)
             or not isinstance(output_limit_bytes, int)
             or output_limit_bytes <= 0
+            or output_limit_bytes > 64 * 1024 * 1024
         ):
-            raise ValueError("output_limit_bytes must be a positive integer")
+            raise ValueError("output_limit_bytes must be a positive integer not exceeding 67108864")
         self.app_path = app_path.resolve()
         self.app_variable = app_variable
         self.module_name = module_name
         self.timeout_seconds = normalized_timeout
+        for name, value in (
+            ("dependency_max_depth", dependency_max_depth),
+            ("dependency_max_nodes", dependency_max_nodes),
+            ("dependency_max_work", dependency_max_work),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        if dependency_max_depth > 64:
+            raise ValueError("dependency_max_depth must not exceed 64")
+        if dependency_max_nodes > 4096:
+            raise ValueError("dependency_max_nodes must not exceed 4096")
+        if dependency_max_work > 65536:
+            raise ValueError("dependency_max_work must not exceed 65536")
         self.output_limit_bytes = output_limit_bytes
+        self.dependency_max_depth = dependency_max_depth
+        self.dependency_max_nodes = dependency_max_nodes
+        self.dependency_max_work = dependency_max_work
         self._app: Any = None
         self._original_sys_path: list[str] = []
 
@@ -271,6 +305,463 @@ class FastAPIExtractor:
         return dependencies
 
     @staticmethod
+    def _physical_callable(value: Any) -> Any:
+        """Return the actual function implementing a callable without decorator unwrapping."""
+        candidate = value.func if isinstance(value, functools.partial) else value
+        if inspect.ismethod(candidate):
+            return candidate.__func__
+        if inspect.isfunction(candidate):
+            return candidate
+        if callable(candidate) and not inspect.isclass(candidate):
+            return type(candidate).__call__
+        return candidate
+
+    @classmethod
+    def _dependency_source_span(cls, value: Any) -> DependencySourceSpan | None:
+        """Return source coordinates for the physical callable, never ``__wrapped__``."""
+        try:
+            candidate = cls._physical_callable(value)
+            source_lines, start_line = inspect.getsourcelines(candidate)
+            file_path = Path(
+                inspect.getsourcefile(candidate) or inspect.getfile(candidate)
+            ).resolve()
+        except Exception:
+            return None
+        if start_line < 1:
+            return None
+        return DependencySourceSpan(
+            file_path=file_path,
+            start_line=start_line,
+            end_line=start_line + len(source_lines) - 1,
+        )
+
+    @classmethod
+    def _callable_identity(cls, value: Any) -> tuple[str | None, str | None]:
+        """Derive physical identity from code/globals, not copyable wrapper metadata."""
+        try:
+            candidate = cls._physical_callable(value)
+            if not inspect.isfunction(candidate):
+                return None, None
+            globals_dict = getattr(candidate, "__globals__", None)
+            code = getattr(candidate, "__code__", None)
+            module = globals_dict.get("__name__") if isinstance(globals_dict, dict) else None
+            qualname = getattr(code, "co_qualname", None)
+            if qualname is None:
+                # ``code.co_qualname`` was added in Python 3.11. On 3.10,
+                # accept ``__qualname__`` only when copied decorator metadata
+                # has not changed the physical code object's function name.
+                runtime_name = getattr(candidate, "__name__", None)
+                code_name = getattr(code, "co_name", None)
+                declared_qualname = getattr(candidate, "__qualname__", None)
+                if runtime_name == code_name:
+                    qualname = declared_qualname
+            if not isinstance(module, str) or not module or len(module) > 512:
+                return None, None
+            if not isinstance(qualname, str) or not qualname or len(qualname) > 1024:
+                return None, None
+        except Exception:
+            return None, None
+        return module, qualname
+
+    @staticmethod
+    def _callable_kind(value: Any) -> DependencyCallableKind:
+        if isinstance(value, functools.partial):
+            return DependencyCallableKind.PARTIAL
+        if inspect.ismethod(value) and value.__self__ is not None:
+            return DependencyCallableKind.BOUND_METHOD
+        if inspect.isfunction(value):
+            return DependencyCallableKind.FUNCTION
+        if callable(value) and not inspect.isclass(value):
+            return DependencyCallableKind.CALLABLE_INSTANCE
+        return DependencyCallableKind.UNKNOWN
+
+    def _callable_structure(  # noqa: PLR0912, PLR0915
+        self, value: Any
+    ) -> tuple[tuple[DependencyCallableStructure, ...], tuple[str, ...]]:
+        """Describe callable shape without scanning metadata beyond retention bounds."""
+        layers: list[DependencyCallableStructure] = []
+        limitations: list[str] = []
+        current = value
+
+        def note(code: str) -> None:
+            if code not in limitations:
+                limitations.append(code)
+
+        while len(layers) < 8:
+            kind = self._callable_kind(current)
+            module, qualname = self._callable_identity(current)
+            positional_count = 0
+            keyword_names: tuple[str, ...] = ()
+            if isinstance(current, functools.partial):
+                args_available, raw_args = self._safe_attribute(current, "args")
+                if not args_available or type(raw_args) is not tuple:
+                    note("callable_arguments_invalid_shape")
+                else:
+                    positional_count = len(raw_args)
+                    if positional_count > 1024:
+                        note("callable_positional_count_truncated")
+
+                keywords_available, raw_keywords = self._safe_attribute(current, "keywords")
+                if not keywords_available or (
+                    raw_keywords is not None and type(raw_keywords) is not dict
+                ):
+                    note("callable_keywords_invalid_shape")
+                elif raw_keywords is not None:
+                    keyword_count = len(raw_keywords)
+                    if keyword_count > 128:
+                        # Count first: over-cap maps retain no key-level evidence and are
+                        # never iterated, materialized, or sorted.
+                        note("callable_keyword_names_truncated")
+                    else:
+                        bounded_names: list[str] = []
+                        invalid_name = False
+                        for name in raw_keywords:
+                            if type(name) is not str or not name:
+                                invalid_name = True
+                            else:
+                                bounded_names.append(name)
+                        if invalid_name:
+                            note("callable_keyword_names_invalid_shape")
+                        else:
+                            bounded_names.sort()
+                            if any(len(name) > 256 for name in bounded_names):
+                                note("callable_keyword_name_truncated")
+                            keyword_names = tuple(name[:256] for name in bounded_names)
+
+            layers.append(
+                DependencyCallableStructure(
+                    kind=kind,
+                    module=module,
+                    qualname=qualname,
+                    bound_positional_count=min(positional_count, 1024),
+                    bound_keyword_names=keyword_names,
+                )
+            )
+            if not isinstance(current, functools.partial):
+                break
+            func_available, next_callable = self._safe_attribute(current, "func")
+            if not func_available:
+                note("callable_structure_invalid_shape")
+                break
+            current = next_callable
+        if len(layers) == 8 and layers[-1].kind == DependencyCallableKind.PARTIAL:
+            note("callable_structure_truncated")
+        return tuple(layers), tuple(limitations)
+
+    @staticmethod
+    def _safe_attribute(value: Any, name: str) -> tuple[bool, Any]:
+        try:
+            return True, getattr(value, name)
+        except Exception:
+            return False, None
+
+    @classmethod
+    def _dependency_children(cls, node: Any) -> list[Any] | tuple[Any, ...] | None:
+        available, raw_children = cls._safe_attribute(node, "dependencies")
+        if not available:
+            return None
+        if raw_children is None:
+            return ()
+        # FastAPI's supported Dependant implementations expose exact ordered
+        # list/tuple children. Never probe or materialize arbitrary iterables.
+        if type(raw_children) not in {list, tuple}:
+            return None
+        return cast("list[Any] | tuple[Any, ...]", raw_children)
+
+    @staticmethod
+    def _limitation_source(handler: HandlerInfo) -> tuple[Path, int]:
+        return handler.file_path, max(handler.line_number, 1)
+
+    def _extract_dependency_graph(  # noqa: PLR0915
+        self, route: Any, handler: HandlerInfo
+    ) -> EndpointDependencyGraph:
+        """Collect the declared FastAPI Dependant tree with deterministic hard bounds."""
+        _effective_available, effective_route = self._safe_attribute(route, "starlette_route")
+        _original_available, original_route = self._safe_attribute(route, "original_route")
+        candidates: list[Any] = []
+        for candidate in (effective_route, route, original_route):
+            if candidate is not None and all(candidate is not seen for seen in candidates):
+                candidates.append(candidate)
+        root = None
+        for candidate in candidates:
+            available, candidate_root = self._safe_attribute(candidate, "dependant")
+            if available and candidate_root is not None:
+                root = candidate_root
+                break
+        source_path, source_line = self._limitation_source(handler)
+        if root is None:
+            return EndpointDependencyGraph(
+                status=DependencyGraphStatus.UNAVAILABLE,
+                limitations=(
+                    DependencyGraphLimitation(
+                        code="dependant_unavailable",
+                        source_path=source_path,
+                        source_line=source_line,
+                        reason="FastAPI route exposes no effective dependant graph",
+                    ),
+                ),
+            )
+        roots = self._dependency_children(root)
+        if roots is None:
+            return EndpointDependencyGraph(
+                status=DependencyGraphStatus.UNAVAILABLE,
+                limitations=(
+                    DependencyGraphLimitation(
+                        code="dependencies_unavailable",
+                        source_path=source_path,
+                        source_line=source_line,
+                        reason="FastAPI dependant exposes no traversable dependencies",
+                    ),
+                ),
+            )
+
+        occurrences: list[EndpointDependencyOccurrence] = []
+        limitations: list[DependencyGraphLimitation] = []
+        work = 0
+        capped = False
+
+        def limit(code: str, reason: str, span: DependencySourceSpan | None = None) -> None:
+            path = span.file_path if span is not None else source_path
+            line = span.start_line if span is not None else source_line
+            limitations.append(
+                DependencyGraphLimitation(
+                    code=code,
+                    source_path=path,
+                    source_line=line,
+                    reason=reason,
+                )
+            )
+
+        def visit(  # noqa: PLR0912, PLR0915
+            node: Any, index_path: tuple[int, ...], ancestors: frozenset[int]
+        ) -> None:
+            nonlocal work, capped
+            if capped:
+                return
+            work += 1
+
+            has_call, call = self._safe_attribute(node, "call")
+            if not has_call:
+                call = None
+            callable_kind = self._callable_kind(call)
+            module, qualname = self._callable_identity(call)
+            span = self._dependency_source_span(call)
+            _display_available, display = self._safe_attribute(call, "__name__")
+            if not isinstance(display, str) or not display:
+                display = type(call).__name__ if call is not None else "<unknown>"
+            if len(display) > 512:
+                limit(
+                    "display_name_truncated",
+                    f"dependency {index_path} display name exceeded its retention bound",
+                    span,
+                )
+                display = display[:512]
+            established = (
+                has_call
+                and callable_kind != DependencyCallableKind.UNKNOWN
+                and module is not None
+                and qualname is not None
+                and "<locals>" not in qualname
+                and span is not None
+            )
+            resolution = (
+                DependencyResolutionStatus.ESTABLISHED
+                if established
+                else DependencyResolutionStatus.UNAVAILABLE
+                if not has_call
+                else DependencyResolutionStatus.CONDITIONAL
+            )
+
+            own_available, raw_own_scopes = self._safe_attribute(node, "own_oauth_scopes")
+            legacy_available, raw_legacy_scopes = self._safe_attribute(node, "security_scopes")
+            scopes_available = own_available or legacy_available
+            declaration_local = own_available
+            raw_scopes = raw_own_scopes if own_available else raw_legacy_scopes
+            raw_scope_count = 0
+            invalid_scope_member = False
+            truncated_scope = False
+            scopes_list: list[str] = []
+            if raw_scopes is None:
+                pass
+            elif type(raw_scopes) in {list, tuple, set, frozenset}:
+                raw_scope_count = len(raw_scopes)
+                unordered = type(raw_scopes) in {set, frozenset}
+                if unordered:
+                    limit(
+                        "security_scopes_unordered_shape",
+                        f"dependency {index_path} exposes unordered security scopes",
+                        span,
+                    )
+                if raw_scope_count > 256:
+                    # Count first: every supported over-cap shape retains no
+                    # member-level evidence and is never iterated or sorted.
+                    limit(
+                        "security_scope_count_truncated",
+                        f"dependency {index_path} security-scope count exceeded 256",
+                        span,
+                    )
+                else:
+                    bounded_scopes: list[str] = []
+                    for raw_scope in raw_scopes:
+                        if type(raw_scope) is not str or not raw_scope:
+                            invalid_scope_member = True
+                        else:
+                            if len(raw_scope) > 512:
+                                truncated_scope = True
+                            bounded_scopes.append(raw_scope)
+                    # Validate the complete bounded collection before sorting or
+                    # retaining any member-level evidence.
+                    if not invalid_scope_member:
+                        if unordered:
+                            bounded_scopes.sort()
+                        scopes_list = [scope[:512] for scope in bounded_scopes]
+            else:
+                limit(
+                    "security_scopes_invalid_shape",
+                    f"dependency {index_path} exposes invalid security-scope metadata",
+                    span,
+                )
+            if invalid_scope_member:
+                limit(
+                    "security_scope_member_invalid",
+                    f"dependency {index_path} contains a non-string or blank security scope",
+                    span,
+                )
+            if truncated_scope:
+                limit(
+                    "security_scope_string_truncated",
+                    f"dependency {index_path} contains an overlong security scope",
+                    span,
+                )
+            scopes = tuple(scopes_list)
+            declaration_kind = (
+                DependencyDeclarationKind.SECURITY
+                if declaration_local and scopes
+                else DependencyDeclarationKind.DEPENDS_OR_SECURITY
+                if scopes_available
+                else DependencyDeclarationKind.UNKNOWN
+            )
+            has_use_cache, raw_use_cache = self._safe_attribute(node, "use_cache")
+            use_cache = raw_use_cache if isinstance(raw_use_cache, bool) else None
+            _name_available, raw_name = self._safe_attribute(node, "name")
+            scope = (
+                DependencyDeclarationScope.NESTED
+                if len(index_path) > 1
+                else DependencyDeclarationScope.PARAMETER
+                if isinstance(raw_name, str) and raw_name
+                else DependencyDeclarationScope.ASSEMBLY
+            )
+            callable_structure, structure_limitations = self._callable_structure(call)
+            for structure_limitation in structure_limitations:
+                limit(
+                    structure_limitation,
+                    f"dependency {index_path} callable structure metadata was malformed "
+                    "or exceeded a retention bound",
+                    span,
+                )
+            occurrences.append(
+                EndpointDependencyOccurrence(
+                    index_path=index_path,
+                    parent_path=index_path[:-1],
+                    depth=len(index_path),
+                    order=len(occurrences),
+                    declaration_scope=scope,
+                    declaration_kind=declaration_kind,
+                    callable_kind=callable_kind,
+                    resolution_status=resolution,
+                    display_name=display,
+                    module=module,
+                    qualname=qualname,
+                    source_span=span,
+                    security_scopes=scopes,
+                    use_cache=use_cache,
+                    callable_structure=callable_structure,
+                )
+            )
+            if not established:
+                limit(
+                    "callable_identity_unavailable",
+                    f"dependency {index_path} has no source-attested qualified callable identity",
+                    span,
+                )
+            if not scopes_available:
+                limit(
+                    "declaration_kind_unavailable",
+                    f"dependency {index_path} does not expose security-scope metadata",
+                    span,
+                )
+            if not has_use_cache or use_cache is None:
+                limit(
+                    "cache_semantics_unavailable",
+                    f"dependency {index_path} does not expose boolean use_cache semantics",
+                    span,
+                )
+
+            node_id = id(node)
+            if node_id in ancestors:
+                limit("cycle", f"dependency {index_path} closes an internal dependant cycle", span)
+                return
+            children = self._dependency_children(node)
+            if children is None:
+                limit(
+                    "nested_dependencies_unavailable",
+                    f"dependency {index_path} exposes no traversable nested dependencies",
+                    span,
+                )
+                return
+            if len(index_path) >= self.dependency_max_depth:
+                if children:
+                    limit("depth_cap", f"dependency {index_path} reached the depth cap", span)
+                return
+            next_ancestors = ancestors | {node_id}
+            for child_index in range(len(children)):
+                if work >= self.dependency_max_work:
+                    capped = True
+                    limit("work_cap", "dependency graph traversal reached its work cap", span)
+                    break
+                if len(occurrences) >= self.dependency_max_nodes:
+                    capped = True
+                    limit("node_cap", "dependency graph traversal reached its node cap", span)
+                    break
+                visit(children[child_index], (*index_path, child_index), next_ancestors)
+                if capped:
+                    break
+
+        for root_index in range(len(roots)):
+            if work >= self.dependency_max_work:
+                capped = True
+                limit("work_cap", "dependency graph traversal reached its work cap")
+                break
+            if len(occurrences) >= self.dependency_max_nodes:
+                capped = True
+                limit("node_cap", "dependency graph traversal reached its node cap")
+                break
+            visit(roots[root_index], (root_index,), frozenset())
+            if capped:
+                break
+
+        overrides = getattr(self._app, "dependency_overrides", None)
+        try:
+            overrides_visible = bool(overrides)
+        except Exception:
+            overrides_visible = True
+        if overrides_visible:
+            limit(
+                "dependency_overrides_visible",
+                "dependency overrides are visible; only the declared graph is modeled",
+            )
+
+        return EndpointDependencyGraph(
+            status=(
+                DependencyGraphStatus.CONDITIONAL
+                if limitations
+                else DependencyGraphStatus.ESTABLISHED
+            ),
+            occurrences=tuple(occurrences),
+            limitations=tuple(limitations),
+        )
+
+    @staticmethod
     def _join_paths(prefix: str, path: str) -> str:
         """Join effective include and mount paths without losing root slashes."""
         if not prefix:
@@ -346,23 +837,28 @@ class FastAPIExtractor:
     def _http_endpoint(self, route: Any, original_route: Any, prefix: str) -> Endpoint:
         path = self._require_route_path(route, original_route)
         endpoint = self._require_route_endpoint(route, original_route)
+        handler = self._get_handler_info(endpoint)
         return Endpoint(
             path=self._join_paths(prefix, path),
             methods=self._http_methods(route, original_route),
-            handler=self._get_handler_info(endpoint),
+            handler=handler,
             name=getattr(route, "name", None),
             tags=list(getattr(route, "tags", None) or []),
             dependencies=self._extract_dependencies(route),
+            dependency_graph=self._extract_dependency_graph(route, handler),
         )
 
     def _websocket_endpoint(self, route: Any, original_route: Any, prefix: str) -> Endpoint:
         metadata = self._effective_route_metadata(route)
+        endpoint = self._require_route_endpoint(metadata, original_route)
+        handler = self._get_handler_info(endpoint)
         return Endpoint(
             path=self._join_paths(prefix, self._require_route_path(metadata, original_route)),
             methods=[EndpointMethod.WEBSOCKET],
-            handler=self._get_handler_info(self._require_route_endpoint(metadata, original_route)),
+            handler=handler,
             name=getattr(metadata, "name", None),
             dependencies=self._extract_dependencies(metadata),
+            dependency_graph=self._extract_dependency_graph(route, handler),
         )
 
     def _endpoints_from_route(
@@ -462,7 +958,7 @@ class FastAPIExtractor:
             payload = json.loads(result_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise FastAPIExtractorError("Runtime worker returned an invalid response") from exc
-        if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        if not isinstance(payload, dict) or payload.get("schema_version") != 2:
             raise FastAPIExtractorError("Runtime worker returned an unsupported response")
         if payload.get("status") == "error":
             message = payload.get("message")
@@ -490,11 +986,14 @@ class FastAPIExtractor:
                 "Runtime subprocess isolation requires POSIX; use secure AST or VM mode"
             )
         request = {
-            "schema_version": 1,
+            "schema_version": 2,
             "app_path": str(self.app_path),
             "app_variable": self.app_variable,
             "module_name": self.module_name,
             "output_limit_bytes": self.output_limit_bytes,
+            "dependency_max_depth": self.dependency_max_depth,
+            "dependency_max_nodes": self.dependency_max_nodes,
+            "dependency_max_work": self.dependency_max_work,
         }
         with tempfile.TemporaryDirectory(prefix="fastapi-endpoint-runtime-") as temp_dir:
             result_path = Path(temp_dir) / "result.json"

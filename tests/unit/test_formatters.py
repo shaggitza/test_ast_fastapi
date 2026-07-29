@@ -10,7 +10,9 @@ import pytest
 import yaml
 
 from fastapi_endpoint_detector.models.endpoint import (
+    DependencyGraphStatus,
     Endpoint,
+    EndpointDependencyGraph,
     EndpointDiscoveryCondition,
     EndpointDiscoveryStatus,
     EndpointInventory,
@@ -55,7 +57,7 @@ def test_inventory_strength_is_structured_and_visible() -> None:
 
     json_result = json.loads(JsonFormatter().format_inventory(inventory))
     yaml_result = yaml.safe_load(YamlFormatter().format_inventory(inventory))
-    assert json_result["schema_version"] == 2
+    assert json_result["schema_version"] == 3
     assert json_result["inventory_status"] == "conditional"
     assert json_result["inventory_limitations"][0]["reason"] == limitation.reason
     assert json_result["route_conditions"][0]["reason"] == limitation.reason
@@ -103,6 +105,28 @@ def test_unavailable_report_inventory_is_visible_in_all_formats() -> None:
         assert "/app/broken.py" in rendered
         assert "17" in rendered
         assert limitation.reason in rendered
+
+
+def test_json_and_yaml_preserve_optional_dependency_graph() -> None:
+    endpoint = Endpoint(
+        path="/graph",
+        methods=[EndpointMethod.GET],
+        handler=HandlerInfo(
+            name="graph", module="main", file_path=Path("/app/main.py"), line_number=3
+        ),
+        dependency_graph=EndpointDependencyGraph(status=DependencyGraphStatus.ESTABLISHED),
+    )
+
+    json_endpoint = json.loads(JsonFormatter().format_endpoints([endpoint]))["endpoints"][0]
+    yaml_endpoint = yaml.safe_load(YamlFormatter().format_endpoints([endpoint]))["endpoints"][0]
+    assert json_endpoint["dependency_graph"] == yaml_endpoint["dependency_graph"]
+    assert json_endpoint["dependency_graph"] == {
+        "schema_version": 1,
+        "status": "established",
+        "semantics": "declared",
+        "occurrences": [],
+        "limitations": [],
+    }
 
 
 def test_json_and_yaml_preserve_startup_activation_evidence() -> None:
