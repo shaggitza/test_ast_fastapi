@@ -234,9 +234,7 @@ def test_spoofed_mode_or_digest_provenance_fails_closed(tmp_path: Path) -> None:
         ("resources", {"rss_mib": 100}),
     ],
 )
-def test_arbitrary_telemetry_fails_closed(
-    tmp_path: Path, field: str, value: object
-) -> None:
+def test_arbitrary_telemetry_fails_closed(tmp_path: Path, field: str, value: object) -> None:
     secure = tmp_path / "secure.json"
     runtime = tmp_path / "runtime.json"
     secure_record = _record("secure")
@@ -252,9 +250,7 @@ def test_arbitrary_telemetry_fails_closed(
     ("mode", "status"),
     [("secure", "invented"), ("runtime", "established"), ("runtime", "invented")],
 )
-def test_arbitrary_inventory_status_fails_closed(
-    tmp_path: Path, mode: str, status: str
-) -> None:
+def test_arbitrary_inventory_status_fails_closed(tmp_path: Path, mode: str, status: str) -> None:
     secure = tmp_path / "secure.json"
     runtime = tmp_path / "runtime.json"
     records = {name: _record(name) for name in ("secure", "runtime")}
@@ -346,9 +342,10 @@ def test_target_baseline_permits_snapshot_specific_environments(tmp_path: Path) 
 
     result = _compare_matrix(paths)
 
-    assert result["configuration"]["snapshots"]["target"]["dependency_lock_sha256"] != result[
-        "configuration"
-    ]["snapshots"]["baseline"]["dependency_lock_sha256"]
+    assert (
+        result["configuration"]["snapshots"]["target"]["dependency_lock_sha256"]
+        != result["configuration"]["snapshots"]["baseline"]["dependency_lock_sha256"]
+    )
     assert result["operational"]["peak_rss_bytes"] == {
         "secure": {"status": "measured", "bytes": 104857600},
         "runtime": {"status": "measured", "bytes": 104857600},

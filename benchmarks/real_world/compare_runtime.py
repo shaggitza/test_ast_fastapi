@@ -87,9 +87,9 @@ class ComparisonError(ValueError):
 
 
 def _canonical_digest(value: object) -> str:
-    encoded = json.dumps(
-        value, sort_keys=True, separators=(",", ":"), allow_nan=False
-    ).encode("utf-8")
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(
+        "utf-8"
+    )
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
@@ -229,9 +229,7 @@ def _validate(record: dict[str, Any], expected_mode: str) -> None:  # noqa: PLR0
             raise ComparisonError("successful records require inventory and impact")
         inventory_status = inventory.get("inventory_status")
         allowed_inventory = (
-            _SECURE_INVENTORY_STATES
-            if expected_mode == "secure"
-            else _RUNTIME_INVENTORY_STATES
+            _SECURE_INVENTORY_STATES if expected_mode == "secure" else _RUNTIME_INVENTORY_STATES
         )
         if inventory_status not in allowed_inventory:
             raise ComparisonError(f"successful {expected_mode} inventory status is invalid")
@@ -498,17 +496,14 @@ def compare_target_baseline(
         hashes[(snapshot, mode)] = digest
 
     for snapshot in ("target", "baseline"):
-        _validate_pair_equivalence(
-            records[(snapshot, "secure")], records[(snapshot, "runtime")]
-        )
+        _validate_pair_equivalence(records[(snapshot, "secure")], records[(snapshot, "runtime")])
     entry_configuration = {
         field: records[("target", "secure")]["configuration"][field]
         for field in sorted(_ENTRY_CONFIGURATION_FIELDS)
     }
     for record in records.values():
         if any(
-            record["configuration"][field] != value
-            for field, value in entry_configuration.items()
+            record["configuration"][field] != value for field, value in entry_configuration.items()
         ):
             raise ComparisonError(
                 "target/baseline records must use identical entry/backend configuration"
