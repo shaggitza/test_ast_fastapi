@@ -171,8 +171,11 @@ benchmark). `--app-entry` and `--bootstrap-entry` require `--secure-ast` and
 never execute application code. Bootstrap interpretation is explicitly seeded,
 bounded to project-local straight-line helpers, and records unsupported object
 escape, mutation, control flow, or dynamic registration as conditional evidence;
-no bootstrap/helper names are guessed. Dynamic behavior remains conservatively
-unresolved.
+no bootstrap/helper names are guessed. The bundled `framework-v1` surface preset
+uses the same selected app/app-factory identity: unused and mounted child app
+lifecycles are excluded, router lifecycle handlers use include-time copy evidence,
+and dynamic router inclusion makes the surface inventory conditional. Dynamic
+behavior remains conservatively unresolved.
 
 ### `list` - List Endpoints
 
