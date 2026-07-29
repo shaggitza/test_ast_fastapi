@@ -36,6 +36,8 @@ ObjectKind = Literal["app", "router"]
 CompositionMode = Literal["copy", "live"]
 EndpointImpact = Literal["none", "prior", "subsequent", "all"]
 _ORDER_SCALE = 1_000_000
+_EAGER_DEFINITION_MAX_WORK = 2_048
+_EAGER_DEFINITION_MAX_DEPTH = 32
 
 _HTTP_ROUTE_METADATA_KEYWORDS = frozenset(
     {
@@ -156,6 +158,90 @@ def _registration_call_shape(
     return _SHARED_REGISTRATION_CALL_SHAPES[operation]
 
 
+def _route_decorator_metadata_is_statically_safe(  # noqa: PLR0911, PLR0912
+    arguments: dict[str, ast.expr],
+) -> bool:
+    """Accept only exact metadata shapes harmless during decorator application."""
+    optional_string_keywords = {
+        "description",
+        "name",
+        "operation_id",
+        "summary",
+    }
+    boolean_keywords = {
+        "include_in_schema",
+        "response_model_by_alias",
+        "response_model_exclude_defaults",
+        "response_model_exclude_none",
+        "response_model_exclude_unset",
+    }
+    optional_mapping_keywords = {
+        "openapi_extra",
+        "response_model_exclude",
+        "response_model_include",
+        "responses",
+    }
+
+    for keyword, value in arguments.items():
+        if keyword == "path":
+            if not isinstance(value, ast.Constant) or type(value.value) is not str:
+                return False
+            continue
+        if keyword == "methods":
+            if not isinstance(value, (ast.List, ast.Set, ast.Tuple)) or any(
+                not isinstance(item, ast.Constant) or type(item.value) is not str
+                for item in value.elts
+            ):
+                return False
+            continue
+        is_none = isinstance(value, ast.Constant) and value.value is None
+        if keyword in {"callbacks", "dependencies"}:
+            if not (is_none or (isinstance(value, (ast.List, ast.Tuple)) and not value.elts)):
+                return False
+            continue
+        if keyword in optional_string_keywords:
+            if not (is_none or (isinstance(value, ast.Constant) and type(value.value) is str)):
+                return False
+            continue
+        if keyword == "response_description":
+            if not (isinstance(value, ast.Constant) and type(value.value) is str):
+                return False
+            continue
+        if keyword == "deprecated":
+            if not (is_none or (isinstance(value, ast.Constant) and type(value.value) is bool)):
+                return False
+            continue
+        if keyword in boolean_keywords:
+            if not (isinstance(value, ast.Constant) and type(value.value) is bool):
+                return False
+            continue
+        if keyword == "status_code":
+            if not (is_none or (isinstance(value, ast.Constant) and type(value.value) is int)):
+                return False
+            continue
+        if keyword == "tags":
+            if is_none:
+                continue
+            if not isinstance(value, (ast.List, ast.Tuple)) or any(
+                not isinstance(item, ast.Constant) or type(item.value) is not str
+                for item in value.elts
+            ):
+                return False
+            continue
+        if keyword in optional_mapping_keywords:
+            if not (
+                is_none or (isinstance(value, ast.Dict) and not value.keys and not value.values)
+            ):
+                return False
+            continue
+        if keyword == "response_model" and is_none:
+            continue
+        # Class/model/callable metadata is intentionally opaque, including
+        # response_class and generate_unique_id_function.
+        return False
+    return True
+
+
 @dataclass(frozen=True)
 class _Route:
     owner: ObjectKey
@@ -216,6 +302,322 @@ class _NativeEffects:
 @dataclass(frozen=True)
 class _DirectEffectResult:
     status: Literal["modeled", "limited", "unrecognized"]
+
+
+@dataclass(frozen=True)
+class _EagerDefinitionRisk:
+    evidence: ast.AST
+    reason: str
+    receiver_only: bool = False
+
+
+class _EagerDefinitionRiskAnalyzer:
+    """Bound eager definition analysis shared by factory and bootstrap slices."""
+
+    def __init__(
+        self,
+        *,
+        resolves_tracked_object: Callable[[ast.expr], bool],
+        is_exact_route_decorator: Callable[[ast.expr], bool],
+        evaluate_annotations: bool,
+        budget: list[int],
+        reason_prefix: str,
+    ) -> None:
+        self._resolves_tracked_object = resolves_tracked_object
+        self._is_exact_route_decorator = is_exact_route_decorator
+        self._evaluate_annotations = evaluate_annotations
+        self._budget = budget
+        self._reason_prefix = reason_prefix
+
+    def _reason(self, detail: str) -> str:
+        return f"{self._reason_prefix} {detail}"
+
+    @staticmethod
+    def _type_parameter_names(node: ast.AST) -> frozenset[str]:
+        return frozenset(
+            name
+            for parameter in getattr(node, "type_params", ())
+            if isinstance((name := getattr(parameter, "name", None)), str)
+        )
+
+    def _spend(self, evidence: ast.AST) -> _EagerDefinitionRisk | None:
+        self._budget[0] -= 1
+        if self._budget[0] < 0:
+            return _EagerDefinitionRisk(
+                evidence,
+                self._reason("eager-definition analysis budget is exhausted"),
+            )
+        return None
+
+    def expression_risk(  # noqa: PLR0911 - explicit conservative allowlist
+        self,
+        expression: ast.AST,
+        *,
+        exempt_registration: bool = False,
+        shadowed: frozenset[str] = frozenset(),
+    ) -> _EagerDefinitionRisk | None:
+        """Accept only eager expressions that cannot dispatch user protocols."""
+        pending: list[tuple[ast.AST, bool, frozenset[str]]] = [
+            (expression, exempt_registration, shadowed)
+        ]
+        while pending:
+            current, exempt, current_shadowed = pending.pop()
+            if exhausted := self._spend(expression):
+                return exhausted
+            if isinstance(current, ast.Constant):
+                continue
+            if isinstance(current, ast.Name):
+                if current.id not in current_shadowed and self._resolves_tracked_object(current):
+                    return _EagerDefinitionRisk(
+                        current,
+                        self._reason("eager definition may rebind or escape a route object"),
+                    )
+                continue
+            if isinstance(current, ast.NamedExpr):
+                return _EagerDefinitionRisk(
+                    current,
+                    self._reason("eager named expression invalidates route-object bindings"),
+                )
+            if isinstance(current, ast.Call):
+                if not exempt:
+                    return _EagerDefinitionRisk(
+                        current,
+                        self._reason("eager definition invokes an unresolved call"),
+                    )
+                pending.extend(
+                    (argument, False, current_shadowed) for argument in reversed(current.args)
+                )
+                pending.extend(
+                    (keyword.value, False, current_shadowed)
+                    for keyword in reversed(current.keywords)
+                )
+                continue
+            if isinstance(current, (ast.Tuple, ast.List)):
+                if any(isinstance(item, ast.Starred) for item in current.elts):
+                    return _EagerDefinitionRisk(
+                        current,
+                        self._reason("eager expression may dispatch a user protocol"),
+                    )
+                pending.extend((item, False, current_shadowed) for item in reversed(current.elts))
+                continue
+            if isinstance(current, ast.Lambda):
+                pending.extend(
+                    (item, False, current_shadowed)
+                    for item in reversed(current.args.kw_defaults)
+                    if item is not None
+                )
+                pending.extend(
+                    (item, False, current_shadowed) for item in reversed(current.args.defaults)
+                )
+                continue
+            return _EagerDefinitionRisk(
+                current,
+                self._reason("eager expression may dispatch a user protocol"),
+            )
+        return None
+
+    def function_risk(
+        self,
+        definition: ast.FunctionDef | ast.AsyncFunctionDef,
+        *,
+        allow_exact_decorators: bool,
+        shadowed: frozenset[str] = frozenset(),
+    ) -> _EagerDefinitionRisk | None:
+        receiver_only_risk: _EagerDefinitionRisk | None = None
+        for decorator in definition.decorator_list:
+            if not self._is_exact_route_decorator(decorator):
+                return _EagerDefinitionRisk(
+                    decorator,
+                    self._reason("function decorator application is unresolved"),
+                )
+            if risk := self.expression_risk(
+                decorator,
+                exempt_registration=True,
+                shadowed=shadowed,
+            ):
+                return risk
+            if not allow_exact_decorators:
+                if receiver_only_risk is not None:
+                    return _EagerDefinitionRisk(
+                        decorator,
+                        self._reason("multiple function decorator applications are unresolved"),
+                    )
+                receiver_only_risk = _EagerDefinitionRisk(
+                    decorator,
+                    self._reason("function decorator application is unresolved"),
+                    receiver_only=True,
+                )
+        for default in [
+            *definition.args.defaults,
+            *(item for item in definition.args.kw_defaults if item is not None),
+        ]:
+            if risk := self.expression_risk(default, shadowed=shadowed):
+                return risk
+        if self._evaluate_annotations:
+            annotation_shadowed = shadowed | self._type_parameter_names(definition)
+            for annotation in [
+                *(item.annotation for item in definition.args.args),
+                *(item.annotation for item in definition.args.posonlyargs),
+                *(item.annotation for item in definition.args.kwonlyargs),
+                definition.args.vararg.annotation if definition.args.vararg is not None else None,
+                definition.args.kwarg.annotation if definition.args.kwarg is not None else None,
+                definition.returns,
+            ]:
+                if annotation is not None and (
+                    risk := self.expression_risk(
+                        annotation,
+                        shadowed=annotation_shadowed,
+                    )
+                ):
+                    return risk
+        return receiver_only_risk
+
+    @staticmethod
+    def _class_external_names(definition: ast.ClassDef) -> set[str]:
+        names: set[str] = set()
+        pending: list[ast.AST] = list(reversed(definition.body))
+        while pending:
+            current = pending.pop()
+            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            if isinstance(current, (ast.Global, ast.Nonlocal)):
+                names.update(current.names)
+                continue
+            pending.extend(reversed(list(ast.iter_child_nodes(current))))
+        return names
+
+    @staticmethod
+    def _descriptor_safe(expression: ast.expr) -> bool:
+        if isinstance(expression, ast.Constant):
+            return True
+        if isinstance(expression, (ast.Tuple, ast.List)):
+            return all(
+                not isinstance(item, ast.Starred)
+                and _EagerDefinitionRiskAnalyzer._descriptor_safe(item)
+                for item in expression.elts
+            )
+        return False
+
+    def class_risk(  # noqa: PLR0911, PLR0912 - explicit class execution cases
+        self,
+        definition: ast.ClassDef,
+        *,
+        depth: int = 0,
+    ) -> _EagerDefinitionRisk | None:
+        if depth >= _EAGER_DEFINITION_MAX_DEPTH:
+            return _EagerDefinitionRisk(
+                definition,
+                self._reason("eager-definition recursion budget is exhausted"),
+            )
+        if definition.decorator_list:
+            return _EagerDefinitionRisk(
+                definition.decorator_list[0],
+                self._reason("class decorator application is unresolved"),
+            )
+        if definition.bases or definition.keywords:
+            evidence: ast.AST = definition.bases[0] if definition.bases else definition.keywords[0]
+            return _EagerDefinitionRisk(
+                evidence,
+                self._reason("class base or metaclass execution is unresolved"),
+            )
+
+        class_bound: set[str] = set(self._type_parameter_names(definition))
+        class_external = self._class_external_names(definition)
+        control_flow = (
+            ast.If,
+            ast.For,
+            ast.AsyncFor,
+            ast.While,
+            ast.With,
+            ast.AsyncWith,
+            ast.Try,
+            ast.Match,
+        )
+        for statement in definition.body:
+            if exhausted := self._spend(statement):
+                return exhausted
+            direct_bound = _scope_bound_names(
+                statement,
+                evaluate_annotations=self._evaluate_annotations,
+            )
+            runtime_bound = direct_bound
+            if isinstance(statement, ast.AnnAssign) and statement.value is None:
+                runtime_bound = direct_bound - _bound_names(statement.target)
+            if runtime_bound & class_external:
+                return _EagerDefinitionRisk(
+                    statement,
+                    self._reason("class body may rebind outer route state"),
+                )
+            if isinstance(statement, (ast.Global, ast.Nonlocal, ast.Pass)):
+                continue
+            if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Constant):
+                continue
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if risk := self.function_risk(
+                    statement,
+                    allow_exact_decorators=False,
+                    shadowed=frozenset(class_bound),
+                ):
+                    return risk
+                class_bound.update(runtime_bound - class_external)
+                continue
+            if isinstance(statement, ast.ClassDef):
+                if risk := self.class_risk(statement, depth=depth + 1):
+                    return risk
+                class_bound.update(runtime_bound - class_external)
+                continue
+            if isinstance(statement, control_flow) or _is_try_star(statement):
+                evidence = _nested_eager_definition(statement) or statement
+                return _EagerDefinitionRisk(
+                    evidence,
+                    self._reason("class control flow is unresolved"),
+                )
+            if isinstance(statement, ast.Import | ast.ImportFrom):
+                return _EagerDefinitionRisk(
+                    statement,
+                    self._reason("class import execution is unresolved"),
+                )
+            if _is_type_alias(statement):
+                class_bound.update(runtime_bound - class_external)
+                continue
+            if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                targets = (
+                    [statement.target]
+                    if isinstance(statement, ast.AnnAssign)
+                    else statement.targets
+                )
+                if any(not isinstance(target, ast.Name) for target in targets):
+                    return _EagerDefinitionRisk(
+                        statement,
+                        self._reason("class assignment target is unresolved"),
+                    )
+                value = statement.value
+                shadowed = frozenset(class_bound)
+                if value is not None and (risk := self.expression_risk(value, shadowed=shadowed)):
+                    return risk
+                if value is not None and not self._descriptor_safe(value):
+                    return _EagerDefinitionRisk(
+                        value,
+                        self._reason("class descriptor initialization is unresolved"),
+                    )
+                if (
+                    isinstance(statement, ast.AnnAssign)
+                    and self._evaluate_annotations
+                    and (
+                        risk := self.expression_risk(
+                            statement.annotation,
+                            shadowed=shadowed,
+                        )
+                    )
+                ):
+                    return risk
+                class_bound.update(runtime_bound - class_external)
+                continue
+            return _EagerDefinitionRisk(
+                statement,
+                self._reason("class body execution is unresolved"),
+            )
+        return None
 
 
 @dataclass
@@ -739,7 +1141,7 @@ class SecureASTExtractor:
                 with tokenize.open(path) as source_file:
                     source = source_file.read()
                 tree = ast.parse(source, filename=str(path))
-            except (OSError, RecursionError, SyntaxError, UnicodeError) as error:
+            except (MemoryError, OSError, RecursionError, SyntaxError, UnicodeError) as error:
                 parse_failures.append(
                     EndpointDiscoveryCondition(
                         source_path=path.resolve(),
@@ -1221,6 +1623,7 @@ class SecureASTExtractor:
             isinstance(function, ast.AsyncFunctionDef)
             or function.decorator_list
             or function_identity in stack
+            or len(stack) >= _EAGER_DEFINITION_MAX_DEPTH
         ):
             return None
         resolver = argument_resolver or (
@@ -1276,6 +1679,8 @@ class SecureASTExtractor:
             for history in candidate_module.objects.values()
             for item in history
         }
+        eager_work = [_EAGER_DEFINITION_MAX_WORK]
+        evaluate_annotations = not _uses_future_annotations(module.tree)
 
         def resolve_literal_name(name: str) -> str | None:
             if name in local_strings:
@@ -1500,6 +1905,31 @@ class SecureASTExtractor:
 
             return inspect(node)
 
+        def exact_route_decorator(decorator: ast.expr) -> bool:
+            if not (
+                isinstance(decorator, ast.Call)
+                and isinstance(decorator.func, ast.Attribute)
+                and decorator.func.attr in {*self.HTTP_METHODS, "api_route"}
+            ):
+                return False
+            receiver = decorator.func.value
+            owner = object_for(receiver)
+            if owner is None:
+                return False
+            arguments = _validated_call_arguments(
+                decorator,
+                *_decorator_call_shape(decorator.func.attr, owner, receiver),
+            )
+            return arguments is not None and _route_decorator_metadata_is_statically_safe(arguments)
+
+        eager_analyzer = _EagerDefinitionRiskAnalyzer(
+            resolves_tracked_object=lambda expression: object_for(expression) is not None,
+            is_exact_route_decorator=exact_route_decorator,
+            evaluate_annotations=evaluate_annotations,
+            budget=eager_work,
+            reason_prefix="factory",
+        )
+
         for statement in meaningful:
             if isinstance(statement, ast.Return):
                 break
@@ -1637,7 +2067,10 @@ class SecureASTExtractor:
                 local_strings[assigned] = literal(value, statement.lineno)
                 continue
             if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                local_functions[statement.name] = statement
+                if risk := eager_analyzer.function_risk(statement, allow_exact_decorators=True):
+                    if not allow_conditional:
+                        return None
+                    conditionalize(risk.evidence, risk.reason)
                 handler = self._handler(module, statement)
                 for decorator in statement.decorator_list:
                     if not (
@@ -1679,6 +2112,13 @@ class SecureASTExtractor:
                             "factory decorated route arguments are ambiguous",
                         )
                         continue
+                    if not _route_decorator_metadata_is_statically_safe(arguments):
+                        limit_registration(
+                            owner,
+                            decorator,
+                            "factory decorated route metadata is not statically safe",
+                        )
+                        continue
                     path = literal(arguments.get("path"), statement.lineno)
                     if path is None:
                         limit_registration(
@@ -1712,6 +2152,20 @@ class SecureASTExtractor:
                                 call_order,
                             )
                         )
+                local_objects.pop(statement.name, None)
+                local_router_views.discard(statement.name)
+                local_strings.pop(statement.name, None)
+                local_functions[statement.name] = statement
+                continue
+            if isinstance(statement, ast.ClassDef):
+                if risk := eager_analyzer.class_risk(statement):
+                    if not allow_conditional:
+                        return None
+                    conditionalize(risk.evidence, risk.reason)
+                local_functions.pop(statement.name, None)
+                local_objects.pop(statement.name, None)
+                local_router_views.discard(statement.name)
+                local_strings.pop(statement.name, None)
                 continue
             if (
                 isinstance(statement, ast.Expr)
@@ -1732,6 +2186,16 @@ class SecureASTExtractor:
                 and isinstance(statement.value, ast.Call)
                 and isinstance(statement.value.func, ast.Attribute)
             ):
+                # Definitions below control flow execute eager headers or class
+                # bodies conditionally and are outside this straight-line slice.
+                if nested_definition := _nested_eager_definition(statement):
+                    if not allow_conditional:
+                        return None
+                    conditionalize(
+                        nested_definition,
+                        "factory eager definition under control flow is unresolved",
+                    )
+                    continue
                 # Ignore unrelated setup, but reject control-flow or helpers that
                 # can rebind/mutate an object whose public routes we are proving.
                 if touches_modeled_binding(statement):
@@ -1998,6 +2462,7 @@ class SecureASTExtractor:
     ) -> None:
         """Interpret one explicitly attested, bounded registration call slice."""
         budget = [max(32, min(512, len(modules) * 8))]
+        eager_work = [_EAGER_DEFINITION_MAX_WORK]
         operation_order = [_line_end_order(2**31 - 2)]
 
         def next_order() -> int:
@@ -2032,6 +2497,7 @@ class SecureASTExtractor:
             if (
                 budget[0] <= 0
                 or identity in stack
+                or len(stack) >= _EAGER_DEFINITION_MAX_DEPTH
                 or isinstance(current, ast.AsyncFunctionDef)
                 or current.decorator_list
                 or current.args.vararg is not None
@@ -2053,7 +2519,7 @@ class SecureASTExtractor:
             local_modules: dict[str, _Module] = {}
             local_functions: dict[str, tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef]] = {}
             local_handlers: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
-            global_names: set[str] = set()
+            global_names = _scope_global_names(current.body)
             bound_names = {
                 parameter.arg
                 for parameter in [
@@ -2150,11 +2616,114 @@ class SecureASTExtractor:
                     isinstance(item, ast.Name) and item.id in tracked for item in ast.walk(node)
                 )
 
+            evaluate_annotations = not _uses_future_annotations(current_module.tree)
+
+            def exact_route_decorator(decorator: ast.expr) -> bool:
+                if not (
+                    isinstance(decorator, ast.Call)
+                    and isinstance(decorator.func, ast.Attribute)
+                    and decorator.func.attr in {*self.HTTP_METHODS, "api_route"}
+                ):
+                    return False
+                receiver = decorator.func.value
+                owner = object_for(receiver, decorator.lineno)
+                if owner is None:
+                    return False
+                arguments = _validated_call_arguments(
+                    decorator,
+                    *_decorator_call_shape(decorator.func.attr, owner, receiver),
+                )
+                return arguments is not None and _route_decorator_metadata_is_statically_safe(
+                    arguments
+                )
+
+            eager_analyzer = _EagerDefinitionRiskAnalyzer(
+                resolves_tracked_object=lambda expression: (
+                    object_for(
+                        expression,
+                        getattr(expression, "lineno", current.lineno),
+                    )
+                    is not None
+                ),
+                is_exact_route_decorator=exact_route_decorator,
+                evaluate_annotations=evaluate_annotations,
+                budget=eager_work,
+                reason_prefix="bootstrap",
+            )
+
+            def limit_ordered(
+                owners: set[_Object],
+                evidence: ast.AST,
+                reason: str,
+            ) -> None:
+                order = next_order()
+                condition = EndpointDiscoveryCondition(
+                    source_path=current_module.path,
+                    source_line=getattr(evidence, "lineno", current.lineno),
+                    reason=reason,
+                )
+                for owner in sorted(owners, key=lambda item: item.key):
+                    limitation = _OrderedInventoryLimitation(
+                        origin_module=current_module.name,
+                        order=order,
+                        condition=condition,
+                        endpoint_impact="all",
+                    )
+                    limitations = current_module.ordered_inventory_limitations.setdefault(
+                        owner.key, []
+                    )
+                    if limitation not in limitations:
+                        limitations.append(limitation)
+
+            def limit_eager_risk(risk: _EagerDefinitionRisk) -> None:
+                owners = set(local_objects.values()) | {root}
+                if risk.receiver_only and isinstance(risk.evidence, ast.Call):
+                    assert isinstance(risk.evidence.func, ast.Attribute)
+                    resolved_owner = object_for(
+                        risk.evidence.func.value,
+                        risk.evidence.lineno,
+                    )
+                    if resolved_owner is not None:
+                        owners = {resolved_owner}
+                limit_ordered(owners, risk.evidence, risk.reason)
+
+            def displace_global_binding(
+                name: str,
+                evidence: ast.AST,
+                replacement: _Object | None = None,
+                *,
+                replacement_is_router_view: bool = False,
+            ) -> None:
+                displaced = local_objects.get(name)
+                if displaced is None and name in global_names and name not in bound_names:
+                    displaced = object_for(
+                        ast.Name(id=name, ctx=ast.Load()),
+                        getattr(evidence, "lineno", current.lineno),
+                    )
+                same_binding = displaced is replacement and (
+                    (name in local_router_views) == replacement_is_router_view
+                )
+                if name in global_names and displaced is not None and not same_binding:
+                    limit_ordered(
+                        {displaced},
+                        evidence,
+                        "bootstrap global binding displaces a route object",
+                    )
+
+            def clear_binding(name: str) -> None:
+                local_objects.pop(name, None)
+                local_router_views.discard(name)
+                local_strings.pop(name, None)
+                local_modules.pop(name, None)
+                local_handlers.pop(name, None)
+                local_functions.pop(name, None)
+
             for statement in current.body:
                 if isinstance(statement, (ast.Global, ast.Nonlocal)):
-                    global_names.update(statement.names)
                     continue
                 if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if risk := eager_analyzer.function_risk(statement, allow_exact_decorators=True):
+                        limit_eager_risk(risk)
                     decorator_handler = self._handler(current_module, statement)
                     for decorator in statement.decorator_list:
                         if not (
@@ -2180,9 +2749,13 @@ class SecureASTExtractor:
                                 operation, decorator_owner, decorator.func.value
                             ),
                         )
+                        metadata_is_safe = (
+                            arguments is not None
+                            and _route_decorator_metadata_is_statically_safe(arguments)
+                        )
                         path = (
                             None
-                            if arguments is None
+                            if arguments is None or not metadata_is_safe
                             else literal(arguments.get("path"), decorator.lineno)
                         )
                         methods_expr = _keyword_expr(decorator, "methods")
@@ -2205,11 +2778,16 @@ class SecureASTExtractor:
                             )
                         )
                         if arguments is None or path is None or not decorator_methods:
+                            reason = (
+                                "bootstrap decorated route metadata is not statically safe"
+                                if arguments is not None and not metadata_is_safe
+                                else "bootstrap decorated route is unresolved"
+                            )
                             limit(
                                 current_module,
                                 decorator_owner,
                                 decorator,
-                                "bootstrap decorated route is unresolved",
+                                reason,
                                 inventory_only=True,
                             )
                             continue
@@ -2222,13 +2800,18 @@ class SecureASTExtractor:
                                 next_order(),
                             )
                         )
-                    local_objects.pop(statement.name, None)
-                    local_router_views.discard(statement.name)
-                    local_strings.pop(statement.name, None)
-                    local_modules.pop(statement.name, None)
+                    displace_global_binding(statement.name, statement)
+                    clear_binding(statement.name)
                     bound_names.add(statement.name)
                     local_handlers[statement.name] = statement
                     local_functions[statement.name] = (current_module, statement)
+                    continue
+                if isinstance(statement, ast.ClassDef):
+                    if risk := eager_analyzer.class_risk(statement):
+                        limit_eager_risk(risk)
+                    displace_global_binding(statement.name, statement)
+                    clear_binding(statement.name)
+                    bound_names.add(statement.name)
                     continue
                 if isinstance(statement, ast.ImportFrom):
                     target_name = self._absolute_import(current_module, statement)
@@ -2238,52 +2821,63 @@ class SecureASTExtractor:
                                 limit(current_module, owner, statement, "wildcard bootstrap import")
                             continue
                         local = imported_alias.asname or imported_alias.name
-                        bound_names.add(local)
-                        local_router_views.discard(local)
+                        imported_object: _Object | None = None
+                        imported_submodule: _Module | None = None
+                        imported_target: (
+                            tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef] | None
+                        ) = None
                         submodule_name = aliases.get(f"{target_name}.{imported_alias.name}")
                         if submodule_name in modules:
-                            local_modules[local] = modules[submodule_name]
-                            continue
-                        imported_module = modules.get(aliases.get(target_name, target_name))
-                        if imported_module is None:
-                            continue
-                        exported = self._resolve_exported_object(
-                            imported_module,
-                            imported_alias.name,
-                            2**31 - 1,
-                            aliases,
-                            modules,
-                            frozenset(),
-                            min(len(modules) + 1, 64),
-                        )
-                        if exported is not None:
-                            local_objects[local] = exported
-                            continue
-                        imported_function = self._function_at(
-                            imported_module, imported_alias.name, 2**31 - 1
-                        )
-                        if imported_function is not None:
-                            local_functions[local] = (
-                                imported_module,
-                                imported_function,
-                            )
+                            imported_submodule = modules[submodule_name]
+                        else:
+                            imported_module = modules.get(aliases.get(target_name, target_name))
+                            if imported_module is not None:
+                                imported_object = self._resolve_exported_object(
+                                    imported_module,
+                                    imported_alias.name,
+                                    2**31 - 1,
+                                    aliases,
+                                    modules,
+                                    frozenset(),
+                                    min(len(modules) + 1, 64),
+                                )
+                                imported_function = self._function_at(
+                                    imported_module,
+                                    imported_alias.name,
+                                    2**31 - 1,
+                                )
+                                if imported_function is not None:
+                                    imported_target = imported_module, imported_function
+                        displace_global_binding(local, statement, imported_object)
+                        clear_binding(local)
+                        bound_names.add(local)
+                        if imported_object is not None:
+                            local_objects[local] = imported_object
+                        elif imported_submodule is not None:
+                            local_modules[local] = imported_submodule
+                        elif imported_target is not None:
+                            local_functions[local] = imported_target
                     continue
                 if isinstance(statement, ast.Import):
                     for imported_alias in statement.names:
                         local = imported_alias.asname or imported_alias.name.split(".")[0]
-                        bound_names.add(local)
-                        local_router_views.discard(local)
                         target_name = aliases.get(imported_alias.name, imported_alias.name)
                         imported_module = modules.get(target_name)
+                        displace_global_binding(local, statement)
+                        clear_binding(local)
+                        bound_names.add(local)
                         if imported_module is not None:
                             local_modules[local] = imported_module
-                        local_functions.pop(local, None)
-                        local_objects.pop(local, None)
                     continue
                 if isinstance(statement, (ast.Assign, ast.AnnAssign)):
                     name = _assignment_name(statement)
                     value = statement.value
-                    if name is None or value is None:
+                    if name is None:
+                        rebound_globals = _scope_bound_names(statement) & global_names
+                        for rebound in sorted(rebound_globals):
+                            displace_global_binding(rebound, statement)
+                            clear_binding(rebound)
+                            bound_names.add(rebound)
                         if touches_tracked(statement):
                             for owner in set(local_objects.values()):
                                 limit(
@@ -2293,14 +2887,24 @@ class SecureASTExtractor:
                                     "unsupported bootstrap assignment",
                                 )
                         continue
-                    bound_names.add(name)
-                    local_functions.pop(name, None)
-                    local_modules.pop(name, None)
-                    local_handlers.pop(name, None)
+                    if value is None:
+                        clear_binding(name)
+                        bound_names.add(name)
+                        continue
                     aliased = object_for(value, statement.lineno)
                     aliases_router_view = aliased is not None and denotes_router_view(
                         value, statement.lineno
                     )
+                    displace_global_binding(
+                        name,
+                        statement,
+                        aliased,
+                        replacement_is_router_view=aliases_router_view,
+                    )
+                    bound_names.add(name)
+                    local_functions.pop(name, None)
+                    local_modules.pop(name, None)
+                    local_handlers.pop(name, None)
                     if aliased is not None:
                         if name in global_names:
                             limit(
@@ -2349,6 +2953,19 @@ class SecureASTExtractor:
                             )
                     break
                 if not (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call)):
+                    rebound_globals = _scope_bound_names(statement) & global_names
+                    for rebound in sorted(rebound_globals):
+                        displace_global_binding(rebound, statement)
+                        clear_binding(rebound)
+                        bound_names.add(rebound)
+                    if nested_definition := _nested_eager_definition(statement):
+                        limit_eager_risk(
+                            _EagerDefinitionRisk(
+                                nested_definition,
+                                "bootstrap eager definition under control flow is unresolved",
+                            )
+                        )
+                        continue
                     if touches_tracked(statement):
                         for owner in set(local_objects.values()):
                             limit(
@@ -2358,6 +2975,11 @@ class SecureASTExtractor:
                                 "unsupported bootstrap control flow",
                             )
                     continue
+                rebound_globals = _scope_bound_names(statement) & global_names
+                for rebound in sorted(rebound_globals):
+                    displace_global_binding(rebound, statement)
+                    clear_binding(rebound)
+                    bound_names.add(rebound)
                 call = statement.value
                 line = statement.lineno
                 registration_receiver = (
@@ -3750,6 +4372,21 @@ class _IterativeBinOpVisitor(ast.NodeVisitor):
                 self.visit(operand)
 
 
+def _nested_eager_definition(
+    node: ast.AST,
+) -> ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | None:
+    """Find a definition executed below control flow without entering deferred bodies."""
+    pending = list(reversed(list(ast.iter_child_nodes(node))))
+    while pending:
+        current = pending.pop()
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return current
+        if isinstance(current, ast.Lambda) or _is_type_alias(current):
+            continue
+        pending.extend(reversed(list(ast.iter_child_nodes(current))))
+    return None
+
+
 def _function_bindings(
     function: ast.FunctionDef | ast.AsyncFunctionDef,
 ) -> set[str]:
@@ -4071,6 +4708,21 @@ def _has_executed_expression_control(
     visitor = ControlVisitor()
     visitor.visit(node)
     return visitor.found
+
+
+def _scope_global_names(statements: list[ast.stmt]) -> set[str]:
+    """Return lexical global declarations without entering nested scopes."""
+    names: set[str] = set()
+    pending: list[ast.AST] = list(reversed(statements))
+    while pending:
+        current = pending.pop()
+        if isinstance(current, ast.Global):
+            names.update(current.names)
+            continue
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        pending.extend(reversed(list(ast.iter_child_nodes(current))))
+    return names
 
 
 def _scope_bound_names(

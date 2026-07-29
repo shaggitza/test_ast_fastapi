@@ -3439,9 +3439,9 @@ def test_factory_and_bootstrap_local_literals_use_bounded_evaluation(tmp_path: P
         "from fastapi import FastAPI\n"
         "def create():\n"
         "    app = FastAPI()\n"
-        f"    path = {bomb}\n"
-        "    @app.get(path)\n"
         "    def route(): pass\n"
+        f"    path = {bomb}\n"
+        "    app.add_api_route(path, route)\n"
         "    return app\n",
         encoding="utf-8",
     )
@@ -3449,9 +3449,7 @@ def test_factory_and_bootstrap_local_literals_use_bounded_evaluation(tmp_path: P
 
     assert factory_inventory.endpoints == []
     assert factory_inventory.status == InventoryStatus.CONDITIONAL
-    assert any(
-        "factory decorated route path" in item.reason for item in factory_inventory.limitations
-    )
+    assert any("factory imperative route" in item.reason for item in factory_inventory.limitations)
 
     (tmp_path / "bootstrap.py").write_text(
         "from fastapi import FastAPI\n"
@@ -3583,10 +3581,19 @@ def test_malformed_native_registration_call_shapes_fail_closed(
 
     inventory = SecureASTExtractor(tmp_path, **kwargs).extract_inventory()
 
+    if context == "implicit-factory" and operation == "decorator":
+        assert inventory.endpoints == []
+        assert inventory.status == InventoryStatus.UNAVAILABLE
+        return
     assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /safe"]
-    assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.ESTABLISHED
+    expected_status = (
+        EndpointDiscoveryStatus.CONDITIONAL
+        if context == "explicit-factory" and operation == "decorator"
+        else EndpointDiscoveryStatus.ESTABLISHED
+    )
+    assert inventory.endpoints[0].discovery_status == expected_status
     assert inventory.status == InventoryStatus.CONDITIONAL
-    assert len(inventory.limitations) == 1
+    assert inventory.limitations
     assert "could not be modeled" not in inventory.limitations[0].reason
 
 
@@ -3799,10 +3806,18 @@ def test_factory_app_router_view_repeated_router_fails_closed(
 
     inventory = SecureASTExtractor(tmp_path, **kwargs).extract_inventory()
 
+    if context == "implicit-factory" and "@" in invalid_registration:
+        assert inventory.endpoints == []
+        assert inventory.status == InventoryStatus.UNAVAILABLE
+        return
     assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /positive"]
-    assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.ESTABLISHED
+    assert inventory.endpoints[0].discovery_status == (
+        EndpointDiscoveryStatus.CONDITIONAL
+        if "@" in invalid_registration
+        else EndpointDiscoveryStatus.ESTABLISHED
+    )
     assert inventory.status == InventoryStatus.CONDITIONAL
-    assert len(inventory.limitations) == 1
+    assert inventory.limitations
 
 
 @pytest.mark.parametrize("context", ["implicit-factory", "explicit-factory"])
@@ -3859,9 +3874,13 @@ def test_bootstrap_app_router_view_repeated_router_fails_closed(
     inventory = SecureASTExtractor(tmp_path, bootstrap_entry="main:run").extract_inventory()
 
     assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /positive"]
-    assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.ESTABLISHED
+    assert inventory.endpoints[0].discovery_status == (
+        EndpointDiscoveryStatus.CONDITIONAL
+        if "@" in invalid_registration
+        else EndpointDiscoveryStatus.ESTABLISHED
+    )
     assert inventory.status == InventoryStatus.CONDITIONAL
-    assert len(inventory.limitations) == 1
+    assert inventory.limitations
 
 
 @pytest.mark.parametrize("registration", ["imperative", "decorator"])
@@ -3986,10 +4005,22 @@ def test_invalid_native_registration_surfaces_are_additive(
 
     inventory = SecureASTExtractor(tmp_path, **kwargs).extract_inventory()
 
+    eager_decorator = case in {
+        "unknown-decorator-keyword",
+        "router-router-decorator",
+    }
+    if context == "implicit-factory" and eager_decorator:
+        assert inventory.endpoints == []
+        assert inventory.status == InventoryStatus.UNAVAILABLE
+        return
     assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /safe"]
-    assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.ESTABLISHED
+    assert inventory.endpoints[0].discovery_status == (
+        EndpointDiscoveryStatus.CONDITIONAL
+        if context == "explicit-factory" and eager_decorator
+        else EndpointDiscoveryStatus.ESTABLISHED
+    )
     assert inventory.status == InventoryStatus.CONDITIONAL
-    assert len(inventory.limitations) == 1
+    assert inventory.limitations
 
 
 @pytest.mark.parametrize(
@@ -4077,10 +4108,18 @@ def test_fastapi_api_route_callbacks_are_an_additive_limitation(
 
     inventory = SecureASTExtractor(tmp_path, **kwargs).extract_inventory()
 
+    if context == "implicit-factory":
+        assert inventory.endpoints == []
+        assert inventory.status == InventoryStatus.UNAVAILABLE
+        return
     assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /safe"]
-    assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.ESTABLISHED
+    assert inventory.endpoints[0].discovery_status == (
+        EndpointDiscoveryStatus.CONDITIONAL
+        if context == "explicit-factory"
+        else EndpointDiscoveryStatus.ESTABLISHED
+    )
     assert inventory.status == InventoryStatus.CONDITIONAL
-    assert len(inventory.limitations) == 1
+    assert inventory.limitations
 
 
 @pytest.mark.parametrize(
@@ -4394,3 +4433,1277 @@ def test_secure_module_parser_recursion_error_is_fail_closed(
     assert inventory.status == InventoryStatus.UNAVAILABLE
     assert inventory.endpoints == []
     assert "could not be read, decoded, or parsed" in inventory.limitations[0].reason
+
+
+def test_secure_module_real_parser_complexity_error_is_fail_closed(tmp_path: Path) -> None:
+    nesting = 200
+    expression = "(lambda value=" * nesting + "1" + ": value)" * nesting
+    source = tmp_path / "main.py"
+    source.write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "def run():\n"
+        f"    def nested(value={expression}): pass\n",
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(source, bootstrap_entry="main:run").extract_inventory()
+
+    assert inventory.status == InventoryStatus.UNAVAILABLE
+    assert inventory.endpoints == []
+    assert "could not be read, decoded, or parsed" in inventory.limitations[0].reason
+
+
+@pytest.mark.parametrize(
+    "context",
+    ["implicit-factory", "explicit-factory", "bootstrap"],
+)
+def test_route_decorator_malformed_dependencies_fail_closed(tmp_path: Path, context: str) -> None:
+    registrations = (
+        "@app.get('/before')\n"
+        "def before(): pass\n"
+        "@app.get('/bad', dependencies=['oops'])\n"
+        "def bad(): pass\n"
+        "@app.get('/after')\n"
+        "def after(): pass\n"
+    )
+    kwargs: dict[str, str] = {}
+    if context == "bootstrap":
+        source = "from fastapi import FastAPI\napp = FastAPI()\ndef run():\n" + "".join(
+            f"    {line}\n" for line in registrations.splitlines()
+        )
+        kwargs["bootstrap_entry"] = "main:run"
+    else:
+        source = (
+            "from fastapi import FastAPI\n"
+            "def create():\n"
+            "    app = FastAPI()\n"
+            + "".join(f"    {line}\n" for line in registrations.splitlines())
+            + "    return app\n"
+            + "app = create()\n"
+        )
+        if context == "explicit-factory":
+            kwargs["app_entry"] = "main:create"
+    (tmp_path / "main.py").write_text(source, encoding="utf-8")
+
+    inventory = SecureASTExtractor(tmp_path, **kwargs).extract_inventory()
+
+    if context == "implicit-factory":
+        assert inventory.status == InventoryStatus.UNAVAILABLE
+        assert inventory.endpoints == []
+        return
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == [
+        "GET /after",
+        "GET /before",
+    ]
+    assert all(
+        endpoint.discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+        for endpoint in inventory.endpoints
+    )
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any("metadata is not statically safe" in item.reason for item in inventory.limitations)
+    assert any(
+        "decorator application is unresolved" in item.reason for item in inventory.limitations
+    )
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        "name=metadata",
+        "tags=metadata",
+        "include_in_schema=1",
+        "status_code='200'",
+        "responses={'200': {}}",
+        "response_model=Model",
+        "response_class=Model",
+        "generate_unique_id_function=metadata",
+    ],
+)
+def test_factory_route_decorator_unsafe_adjacent_metadata_is_conditional(
+    tmp_path: Path, metadata: str
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "metadata = object()\n"
+        "class Model: pass\n"
+        "def create():\n"
+        "    app = FastAPI()\n"
+        f"    @app.get('/bad', {metadata})\n"
+        "    def bad(): pass\n"
+        "    @app.get('/safe')\n"
+        "    def safe(): pass\n"
+        "    return app\n",
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(tmp_path, app_entry="main:create").extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /safe"]
+    assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+    assert inventory.status == InventoryStatus.CONDITIONAL
+
+
+def test_bootstrap_imported_iterable_metadata_does_not_execute_and_conditions_prior_route(
+    tmp_path: Path,
+) -> None:
+    imported_marker = tmp_path / "imported"
+    iterated_marker = tmp_path / "iterated"
+    (tmp_path / "metadata.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(imported_marker)!r}).write_text('imported')\n"
+        "class ClearingDependencies:\n"
+        "    def __iter__(self):\n"
+        f"        Path({str(iterated_marker)!r}).write_text('iterated')\n"
+        "        from main import app\n"
+        "        app.routes.clear()\n"
+        "        return iter(())\n"
+        "dependencies = ClearingDependencies()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "main.py").write_text(
+        "from fastapi import APIRouter, FastAPI\n"
+        "from metadata import dependencies\n"
+        "app = FastAPI()\n"
+        "router = APIRouter()\n"
+        "@app.get('/stale')\n"
+        "def stale(): pass\n"
+        "def run():\n"
+        "    @router.get('/route', dependencies=dependencies)\n"
+        "    def route(): pass\n"
+        "    app.include_router(router)\n",
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(tmp_path, bootstrap_entry="main:run").extract_inventory()
+
+    assert not imported_marker.exists()
+    assert not iterated_marker.exists()
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /stale"]
+    assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any(
+        "decorator application is unresolved" in item.reason for item in inventory.limitations
+    )
+
+
+@pytest.mark.parametrize(
+    "context",
+    ["implicit-factory", "explicit-factory", "bootstrap"],
+)
+def test_route_decorator_nonliteral_path_fails_closed_without_execution(
+    tmp_path: Path, context: str
+) -> None:
+    imported_marker = tmp_path / "imported"
+    accessed_marker = tmp_path / "accessed"
+    (tmp_path / "payload.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(imported_marker)!r}).write_text('imported')\n"
+        "class Trigger:\n"
+        "    def __getattribute__(self, name):\n"
+        f"        Path({str(accessed_marker)!r}).write_text('accessed')\n"
+        "        from main import app\n"
+        "        app.routes.clear()\n"
+        "        return lambda *args: True\n"
+        "trigger = Trigger()\n",
+        encoding="utf-8",
+    )
+    registration = "@app.get('/stale')\ndef stale(): pass\n@router.get(trigger)\ndef bad(): pass\n"
+    kwargs: dict[str, str] = {}
+    if context == "bootstrap":
+        source = (
+            "from fastapi import APIRouter, FastAPI\n"
+            "from payload import trigger\n"
+            "app = FastAPI()\n"
+            "router = APIRouter()\n"
+            "@app.get('/stale')\n"
+            "def stale(): pass\n"
+            "def run():\n"
+            "    @router.get(trigger)\n"
+            "    def bad(): pass\n"
+        )
+        kwargs["bootstrap_entry"] = "main:run"
+    else:
+        source = (
+            "from fastapi import APIRouter, FastAPI\n"
+            "from payload import trigger\n"
+            "def create():\n"
+            "    app = FastAPI()\n"
+            "    router = APIRouter()\n"
+            + "".join(f"    {line}\n" for line in registration.splitlines())
+            + "    return app\n"
+            + "app = create()\n"
+        )
+        if context == "explicit-factory":
+            kwargs["app_entry"] = "main:create"
+    (tmp_path / "main.py").write_text(source, encoding="utf-8")
+
+    inventory = SecureASTExtractor(tmp_path, **kwargs).extract_inventory()
+
+    assert not imported_marker.exists()
+    assert not accessed_marker.exists()
+    if context == "implicit-factory":
+        assert inventory.status == InventoryStatus.UNAVAILABLE
+        assert inventory.endpoints == []
+        return
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /stale"]
+    assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any(
+        "decorator application is unresolved" in item.reason for item in inventory.limitations
+    )
+
+
+@pytest.mark.parametrize("explicit", [False, True], ids=["implicit", "explicit"])
+@pytest.mark.parametrize(
+    "definition",
+    [
+        "def nested(value=app.routes.clear()): pass",
+        "def nested(*, value=app.routes.clear()): pass",
+        "def nested(value=(app := None)): pass",
+        "@decorate(app)\n    def nested(): pass",
+        "def nested(value: annotate(app)): pass",
+        "async def nested(value=app.routes.clear()): pass",
+    ],
+    ids=["default", "kw-default", "rebind", "decorator", "annotation", "async-default"],
+)
+def test_factory_nested_definition_eager_effects_fail_closed(
+    tmp_path: Path, explicit: bool, definition: str
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "def create():\n"
+        "    app = FastAPI()\n"
+        "    @app.get('/before')\n"
+        "    def before(): pass\n"
+        f"    {definition}\n"
+        "    @app.get('/after')\n"
+        "    def after(): pass\n"
+        "    return app\n"
+        "app = create()\n",
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(
+        tmp_path, app_entry="main:create" if explicit else None
+    ).extract_inventory()
+
+    if not explicit:
+        assert inventory.endpoints == []
+        assert inventory.status == InventoryStatus.UNAVAILABLE
+        return
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == [
+        "GET /after",
+        "GET /before",
+    ]
+    assert all(
+        endpoint.discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+        for endpoint in inventory.endpoints
+    )
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    eager_lines = {6, 7} if definition.startswith("@") else {6}
+    assert any(
+        item.source_path.name == "main.py" and item.source_line in eager_lines
+        for item in inventory.limitations
+    )
+
+
+def test_factory_definition_binding_shadows_returned_route_object(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "def create():\n"
+        "    app = FastAPI()\n"
+        "    @app.get('/stale')\n"
+        "    def app(): pass\n"
+        "    return app\n"
+        "app = create()\n",
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(tmp_path).extract_inventory()
+
+    assert inventory.endpoints == []
+    assert inventory.status == InventoryStatus.UNAVAILABLE
+
+
+@pytest.mark.parametrize(
+    "definition",
+    [
+        "def nested(value=app.routes.clear()): pass",
+        "def nested(*, value=app.routes.clear()): pass",
+        "def nested(value=(app := None)): pass",
+        "@decorate(app)\n    def nested(): pass",
+        "def nested(value: annotate(app)): pass",
+        "async def nested(value=app.routes.clear()): pass",
+    ],
+    ids=["default", "kw-default", "rebind", "decorator", "annotation", "async-default"],
+)
+def test_bootstrap_nested_definition_eager_effects_condition_known_routes(
+    tmp_path: Path, definition: str
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "def run():\n"
+        "    @app.get('/before')\n"
+        "    def before(): pass\n"
+        f"    {definition}\n"
+        "    @app.get('/after')\n"
+        "    def after(): pass\n",
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(tmp_path, bootstrap_entry="main:run").extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == [
+        "GET /after",
+        "GET /before",
+    ]
+    assert all(
+        endpoint.discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+        for endpoint in inventory.endpoints
+    )
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    eager_lines = {6, 7} if definition.startswith("@") else {6}
+    assert any(
+        item.source_path.name == "main.py" and item.source_line in eager_lines
+        for item in inventory.limitations
+    )
+
+
+def test_bootstrap_exact_nested_routes_remain_established(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "def run():\n"
+        "    @app.get('/sync')\n"
+        "    def sync_handler(value='safe'): pass\n"
+        "    @app.websocket('/async')\n"
+        "    async def async_handler(): pass\n",
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(tmp_path, bootstrap_entry="main:run").extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == [
+        "GET /sync",
+        "WEBSOCKET /async",
+    ]
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert inventory.limitations == ()
+
+
+def test_postponed_annotations_and_deferred_bodies_remain_unvisited(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from __future__ import annotations\n"
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "def run():\n"
+        "    def nested(value: app.routes.clear()):\n"
+        "        app.routes.clear()\n"
+        "    class Plain:\n"
+        "        marker: app.routes.clear()\n"
+        "        def method(self):\n"
+        "            app.routes.clear()\n"
+        "    @app.get('/safe')\n"
+        "    async def safe(): pass\n",
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(tmp_path, bootstrap_entry="main:run").extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /safe"]
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert inventory.limitations == ()
+
+
+@pytest.mark.parametrize(
+    ("class_definition", "evidence_line", "reason_category"),
+    [
+        ("@decorate(app)\n    class Routes: pass", 6, "class decorator"),
+        ("class Routes(base(app)): pass", 6, "class base"),
+        ("class Routes(metaclass=meta(app)): pass", 6, "class base"),
+        ("class Routes:\n        app.routes.clear()", 7, "class body execution"),
+        (
+            "class Routes:\n        class Nested:\n            app.routes.clear()",
+            8,
+            "class body execution",
+        ),
+        ("class Routes:\n        marker = descriptor", 7, "descriptor"),
+        ("class Routes:\n        marker: annotate(app)", 7, "unresolved call"),
+    ],
+    ids=[
+        "decorator",
+        "base",
+        "metaclass",
+        "body",
+        "nested-body",
+        "descriptor",
+        "active-annotation",
+    ],
+)
+def test_bootstrap_nested_class_eager_effects_are_source_backed(
+    tmp_path: Path,
+    class_definition: str,
+    evidence_line: int,
+    reason_category: str,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "def run():\n"
+        "    @app.get('/before')\n"
+        "    def before(): pass\n"
+        f"    {class_definition}\n"
+        "    @app.get('/after')\n"
+        "    def after(): pass\n",
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(tmp_path, bootstrap_entry="main:run").extract_inventory()
+
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == [
+        "GET /after",
+        "GET /before",
+    ]
+    assert all(
+        endpoint.discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+        for endpoint in inventory.endpoints
+    )
+    assert any(
+        item.source_path.name == "main.py"
+        and item.source_line == evidence_line
+        and reason_category in item.reason
+        for item in inventory.limitations
+    )
+
+
+@pytest.mark.parametrize("explicit", [False, True], ids=["implicit", "explicit"])
+@pytest.mark.parametrize(
+    ("class_definition", "evidence_line", "reason_category"),
+    [
+        ("@decorate(app)\n    class Routes: pass", 6, "class decorator"),
+        ("class Routes(base(app)): pass", 6, "class base"),
+        ("class Routes(metaclass=meta(app)): pass", 6, "class base"),
+        ("class Routes:\n        app.routes.clear()", 7, "class body execution"),
+        (
+            "class Routes:\n        class Nested:\n            app.routes.clear()",
+            8,
+            "class body execution",
+        ),
+        ("class Routes:\n        marker = descriptor", 7, "descriptor"),
+        ("class Routes:\n        marker: annotate(app)", 7, "unresolved call"),
+    ],
+    ids=[
+        "decorator",
+        "base",
+        "metaclass",
+        "body",
+        "nested-body",
+        "descriptor",
+        "active-annotation",
+    ],
+)
+def test_factory_nested_class_eager_effects_fail_closed(
+    tmp_path: Path,
+    explicit: bool,
+    class_definition: str,
+    evidence_line: int,
+    reason_category: str,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "def create():\n"
+        "    app = FastAPI()\n"
+        "    @app.get('/before')\n"
+        "    def before(): pass\n"
+        f"    {class_definition}\n"
+        "    @app.get('/after')\n"
+        "    def after(): pass\n"
+        "    return app\n"
+        "app = create()\n",
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(
+        tmp_path, app_entry="main:create" if explicit else None
+    ).extract_inventory()
+
+    if not explicit:
+        assert inventory.endpoints == []
+        assert inventory.status == InventoryStatus.UNAVAILABLE
+        return
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == [
+        "GET /after",
+        "GET /before",
+    ]
+    assert all(
+        endpoint.discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+        for endpoint in inventory.endpoints
+    )
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any(
+        item.source_path.name == "main.py"
+        and item.source_line == evidence_line
+        and reason_category in item.reason
+        for item in inventory.limitations
+    )
+
+
+def test_bootstrap_class_body_registration_then_include_is_not_established_empty(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import APIRouter, FastAPI\n"
+        "app = FastAPI()\n"
+        "router = APIRouter()\n"
+        "def run():\n"
+        "    class Routes:\n"
+        "        @router.get('/class-body')\n"
+        "        def route(): pass\n"
+        "    app.include_router(router)\n",
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(tmp_path, bootstrap_entry="main:run").extract_inventory()
+
+    assert inventory.endpoints == []
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any(
+        item.source_path.name == "main.py" and item.source_line == 6 and "decorator" in item.reason
+        for item in inventory.limitations
+    )
+
+
+def test_class_local_shadowing_and_deferred_method_do_not_taint_outer_app(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "def run():\n"
+        "    class Local:\n"
+        "        app = None\n"
+        "        def method(self):\n"
+        "            app.routes.clear()\n"
+        "    @app.get('/safe')\n"
+        "    def safe(): pass\n",
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(tmp_path, bootstrap_entry="main:run").extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /safe"]
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert inventory.limitations == ()
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 695 requires Python 3.12")
+def test_type_parameter_bounds_are_lazy_and_shadow_outer_app(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "def run():\n"
+        "    def nested[app: app.routes.clear()](value: app): pass\n"
+        "    class Local[app: app.routes.clear()]:\n"
+        "        marker: app\n"
+        "    @app.get('/safe')\n"
+        "    def safe(): pass\n",
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(tmp_path, bootstrap_entry="main:run").extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /safe"]
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert inventory.limitations == ()
+
+
+@pytest.mark.parametrize("context", ["factory", "bootstrap"])
+def test_eager_definition_work_budget_fails_closed_without_recursion_error(
+    tmp_path: Path, context: str
+) -> None:
+    expression = "[" + ", ".join(repr("x") for _ in range(2_200)) + "]"
+    if context == "factory":
+        source = (
+            "from fastapi import FastAPI\n"
+            "def create():\n"
+            "    app = FastAPI()\n"
+            f"    def nested(value={expression}): pass\n"
+            "    @app.get('/after')\n"
+            "    def after(): pass\n"
+            "    return app\n"
+            "app = create()\n"
+        )
+        kwargs = {"app_entry": "main:create"}
+    else:
+        source = (
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "def run():\n"
+            f"    def nested(value={expression}): pass\n"
+            "    @app.get('/after')\n"
+            "    def after(): pass\n"
+        )
+        kwargs = {"bootstrap_entry": "main:run"}
+    (tmp_path / "main.py").write_text(source, encoding="utf-8")
+
+    inventory = SecureASTExtractor(tmp_path, **kwargs).extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /after"]
+    assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any(
+        item.source_path.name == "main.py" and item.source_line == 4 and "budget" in item.reason
+        for item in inventory.limitations
+    )
+
+
+@pytest.mark.parametrize("context", ["factory", "bootstrap"])
+def test_eager_definition_depth_budget_has_factory_bootstrap_parity(
+    tmp_path: Path, context: str
+) -> None:
+    nested = ""
+    for depth in range(34):
+        nested += "    " * (depth + 1) + f"class Level{depth}:\n"
+    nested += "    " * 35 + "pass\n"
+    if context == "factory":
+        source = (
+            "from fastapi import FastAPI\n"
+            "def create():\n"
+            "    app = FastAPI()\n"
+            + nested
+            + "    @app.get('/safe')\n"
+            + "    def safe(): pass\n"
+            + "    return app\n"
+            + "app = create()\n"
+        )
+        kwargs = {"app_entry": "main:create"}
+    else:
+        source = (
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "def run():\n" + nested + "    @app.get('/safe')\n" + "    def safe(): pass\n"
+        )
+        kwargs = {"bootstrap_entry": "main:run"}
+    (tmp_path / "main.py").write_text(source, encoding="utf-8")
+
+    inventory = SecureASTExtractor(tmp_path, **kwargs).extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /safe"]
+    assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+    assert any("recursion budget" in item.reason for item in inventory.limitations)
+
+
+@pytest.mark.parametrize("context", ["implicit", "explicit", "bootstrap"])
+def test_descriptor_lookup_in_eager_default_never_establishes_stale_routes(
+    tmp_path: Path, context: str
+) -> None:
+    executed = tmp_path / "descriptor-lookup-executed"
+    (tmp_path / "trigger.py").write_text(
+        "from pathlib import Path\n"
+        "class Trigger:\n"
+        "    def __getattribute__(self, name):\n"
+        "        from main import app\n"
+        "        app.routes.clear()\n"
+        "        return None\n"
+        "trigger = Trigger()\n"
+        f"Path({str(executed)!r}).touch()\n",
+        encoding="utf-8",
+    )
+    common = "from fastapi import FastAPI\nfrom trigger import trigger\n"
+    if context == "bootstrap":
+        source = (
+            common
+            + "app = FastAPI()\n"
+            + "def run():\n"
+            + "    @app.get('/before')\n"
+            + "    def before(): pass\n"
+            + "    def nested(value=trigger.fire): pass\n"
+            + "    @app.get('/after')\n"
+            + "    def after(): pass\n"
+        )
+        kwargs = {"bootstrap_entry": "main:run"}
+    else:
+        source = (
+            common
+            + "def create():\n"
+            + "    app = FastAPI()\n"
+            + "    @app.get('/before')\n"
+            + "    def before(): pass\n"
+            + "    def nested(value=trigger.fire): pass\n"
+            + "    @app.get('/after')\n"
+            + "    def after(): pass\n"
+            + "    return app\n"
+            + "app = create()\n"
+        )
+        kwargs = {"app_entry": "main:create"} if context == "explicit" else {}
+    (tmp_path / "main.py").write_text(source, encoding="utf-8")
+
+    inventory = SecureASTExtractor(tmp_path, **kwargs).extract_inventory()
+
+    if context == "implicit":
+        assert inventory.endpoints == []
+        assert inventory.status == InventoryStatus.UNAVAILABLE
+    else:
+        assert [endpoint.identifier for endpoint in inventory.endpoints] == [
+            "GET /after",
+            "GET /before",
+        ]
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert all(
+            endpoint.discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+            for endpoint in inventory.endpoints
+        )
+        assert any(
+            item.source_line == 7 and "protocol" in item.reason for item in inventory.limitations
+        )
+    assert not executed.exists()
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "trigger[0]",
+        "trigger + 1",
+        "trigger == 1",
+        "f'{trigger}'",
+        "[item for item in trigger]",
+    ],
+    ids=["subscript", "operator", "comparison", "formatting", "iteration"],
+)
+@pytest.mark.parametrize("context", ["factory", "bootstrap"])
+def test_protocol_dispatch_eager_defaults_are_conditional(
+    tmp_path: Path, expression: str, context: str
+) -> None:
+    common = "from fastapi import FastAPI\ntrigger = object()\n"
+    if context == "factory":
+        source = (
+            common
+            + "def create():\n"
+            + "    app = FastAPI()\n"
+            + f"    def nested(value={expression}): pass\n"
+            + "    @app.get('/safe')\n"
+            + "    def safe(): pass\n"
+            + "    return app\n"
+            + "app = create()\n"
+        )
+        kwargs = {"app_entry": "main:create"}
+    else:
+        source = (
+            common
+            + "app = FastAPI()\n"
+            + "def run():\n"
+            + f"    def nested(value={expression}): pass\n"
+            + "    @app.get('/safe')\n"
+            + "    def safe(): pass\n"
+        )
+        kwargs = {"bootstrap_entry": "main:run"}
+    (tmp_path / "main.py").write_text(source, encoding="utf-8")
+
+    inventory = SecureASTExtractor(tmp_path, **kwargs).extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /safe"]
+    assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+    assert any("protocol" in item.reason for item in inventory.limitations)
+
+
+@pytest.mark.parametrize("context", ["implicit", "explicit", "bootstrap"])
+def test_descriptor_assignment_target_never_establishes_stale_routes(
+    tmp_path: Path, context: str
+) -> None:
+    executed = tmp_path / "descriptor-assignment-executed"
+    (tmp_path / "trigger.py").write_text(
+        "from pathlib import Path\n"
+        "class Trigger:\n"
+        "    def __setattr__(self, name, value):\n"
+        "        from main import app\n"
+        "        app.routes.clear()\n"
+        "trigger = Trigger()\n"
+        f"Path({str(executed)!r}).touch()\n",
+        encoding="utf-8",
+    )
+    common = "from fastapi import FastAPI\nfrom trigger import trigger\n"
+    body = (
+        "    @app.get('/before')\n"
+        "    def before(): pass\n"
+        "    class Local:\n"
+        "        trigger.fire = None\n"
+        "    @app.get('/after')\n"
+        "    def after(): pass\n"
+    )
+    if context == "bootstrap":
+        source = common + "app = FastAPI()\ndef run():\n" + body
+        kwargs = {"bootstrap_entry": "main:run"}
+    else:
+        source = (
+            common
+            + "def create():\n"
+            + "    app = FastAPI()\n"
+            + body
+            + "    return app\n"
+            + "app = create()\n"
+        )
+        kwargs = {"app_entry": "main:create"} if context == "explicit" else {}
+    (tmp_path / "main.py").write_text(source, encoding="utf-8")
+
+    inventory = SecureASTExtractor(tmp_path, **kwargs).extract_inventory()
+
+    if context == "implicit":
+        assert inventory.status == InventoryStatus.UNAVAILABLE
+        assert inventory.endpoints == []
+    else:
+        assert [endpoint.identifier for endpoint in inventory.endpoints] == [
+            "GET /after",
+            "GET /before",
+        ]
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert any(
+            item.source_line == 8 and "assignment target" in item.reason
+            for item in inventory.limitations
+        )
+    assert not executed.exists()
+
+
+@pytest.mark.parametrize("context", ["implicit", "explicit"])
+def test_factory_control_nested_eager_definitions_fail_closed(tmp_path: Path, context: str) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import APIRouter, FastAPI\n"
+        "def create():\n"
+        "    app = FastAPI()\n"
+        "    router = APIRouter()\n"
+        "    if True:\n"
+        "        class Routes:\n"
+        "            @router.get('/conditional')\n"
+        "            def route(): pass\n"
+        "    app.include_router(router)\n"
+        "    return app\n"
+        "app = create()\n",
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(
+        tmp_path,
+        app_entry="main:create" if context == "explicit" else None,
+    ).extract_inventory()
+
+    assert inventory.endpoints == []
+    assert inventory.status == (
+        InventoryStatus.CONDITIONAL if context == "explicit" else InventoryStatus.UNAVAILABLE
+    )
+    if context == "explicit":
+        assert any(
+            item.source_line == 6 and "under control flow" in item.reason
+            for item in inventory.limitations
+        )
+
+
+@pytest.mark.parametrize("context", ["implicit", "explicit"])
+@pytest.mark.parametrize(
+    "control",
+    [
+        "if True:\n    def nested(value=trigger.fire): pass",
+        "for _ in [1]:\n    def nested(value=trigger.fire): pass",
+        "with manager:\n    def nested(value=trigger.fire): pass",
+        "try:\n    def nested(value=trigger.fire): pass\nexcept Exception:\n    pass",
+        "match 1:\n    case 1:\n        def nested(value=trigger.fire): pass",
+    ],
+    ids=["if", "loop", "with", "try", "match"],
+)
+def test_factory_control_statement_definitions_are_detected(
+    tmp_path: Path, context: str, control: str
+) -> None:
+    source = (
+        "from fastapi import FastAPI\n"
+        "trigger = object()\n"
+        "manager = trigger\n"
+        "def create():\n"
+        "    app = FastAPI()\n"
+        + "\n".join(f"    {line}" for line in control.splitlines())
+        + "\n    @app.get('/safe')\n"
+        + "    def safe(): pass\n"
+        + "    return app\n"
+        + "app = create()\n"
+    )
+    (tmp_path / "main.py").write_text(source, encoding="utf-8")
+
+    inventory = SecureASTExtractor(
+        tmp_path,
+        app_entry="main:create" if context == "explicit" else None,
+    ).extract_inventory()
+
+    if context == "implicit":
+        assert inventory.status == InventoryStatus.UNAVAILABLE
+        assert inventory.endpoints == []
+    else:
+        assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /safe"]
+        assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+        assert any("under control flow" in item.reason for item in inventory.limitations)
+
+
+@pytest.mark.parametrize("context", ["factory", "bootstrap"])
+def test_class_external_definition_binding_conditions_routes(tmp_path: Path, context: str) -> None:
+    if context == "factory":
+        source = (
+            "from fastapi import FastAPI\n"
+            "def create():\n"
+            "    app = FastAPI()\n"
+            "    class Scope:\n"
+            "        nonlocal app\n"
+            "        def app(): pass\n"
+            "    @app.get('/after')\n"
+            "    def after(): pass\n"
+            "    return app\n"
+            "app = create()\n"
+        )
+        kwargs = {"app_entry": "main:create"}
+        evidence_line = 6
+    else:
+        source = (
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "def run():\n"
+            "    class Scope:\n"
+            "        global app\n"
+            "        def app(): pass\n"
+            "    @app.get('/after')\n"
+            "    def after(): pass\n"
+        )
+        kwargs = {"bootstrap_entry": "main:run"}
+        evidence_line = 6
+    (tmp_path / "main.py").write_text(source, encoding="utf-8")
+
+    inventory = SecureASTExtractor(tmp_path, **kwargs).extract_inventory()
+
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert all(
+        endpoint.discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+        for endpoint in inventory.endpoints
+    )
+    assert any(
+        item.source_line == evidence_line and "rebind outer route state" in item.reason
+        for item in inventory.limitations
+    )
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        "def app(): pass",
+        "class app: pass",
+        "import replacement as app",
+        "from replacement import value as app",
+        "app = None",
+        "del app",
+        "(app := None)",
+        "if True:\n            def app(): pass",
+    ],
+    ids=[
+        "function",
+        "class",
+        "import",
+        "from-import",
+        "assignment",
+        "delete",
+        "walrus",
+        "compound",
+    ],
+)
+def test_bootstrap_class_global_direct_and_compound_bindings_are_detected(
+    tmp_path: Path, binding: str
+) -> None:
+    (tmp_path / "replacement.py").write_text("value = None\n", encoding="utf-8")
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "def run():\n"
+        "    class Scope:\n"
+        "        global app\n"
+        f"        {binding}\n"
+        "    @app.get('/after')\n"
+        "    def after(): pass\n",
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(tmp_path, bootstrap_entry="main:run").extract_inventory()
+
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert all(
+        endpoint.discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+        for endpoint in inventory.endpoints
+    )
+    assert any(
+        item.source_line == 6 and "rebind outer route state" in item.reason
+        for item in inventory.limitations
+    )
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 695 requires Python 3.12")
+def test_bootstrap_class_global_type_alias_binding_is_detected(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "def run():\n"
+        "    class Scope:\n"
+        "        global app\n"
+        "        type app = None\n"
+        "    @app.get('/after')\n"
+        "    def after(): pass\n",
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(tmp_path, bootstrap_entry="main:run").extract_inventory()
+
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any(
+        item.source_line == 6 and "rebind outer route state" in item.reason
+        for item in inventory.limitations
+    )
+
+
+@pytest.mark.parametrize("reexported", [False, True], ids=["direct", "reexported"])
+@pytest.mark.parametrize("context", ["implicit", "explicit", "bootstrap"])
+def test_eager_walrus_invalidates_imported_router_binding(
+    tmp_path: Path, reexported: bool, context: str
+) -> None:
+    (tmp_path / "provider.py").write_text(
+        "from fastapi import APIRouter\n"
+        "router = APIRouter()\n"
+        "empty_router = APIRouter()\n"
+        "@router.get('/stale')\n"
+        "def stale(): pass\n",
+        encoding="utf-8",
+    )
+    import_module = "public" if reexported else "provider"
+    if reexported:
+        (tmp_path / "public.py").write_text(
+            "from provider import empty_router, router\n", encoding="utf-8"
+        )
+    imports = f"from {import_module} import empty_router, router\n"
+    if context == "bootstrap":
+        source = (
+            "from fastapi import FastAPI\n"
+            + imports
+            + "app = FastAPI()\n"
+            + "def run():\n"
+            + "    def nested(value=(router := empty_router)): pass\n"
+            + "    app.include_router(router)\n"
+        )
+        kwargs = {"bootstrap_entry": "main:run"}
+    else:
+        source = (
+            "from fastapi import FastAPI\n"
+            + imports
+            + "def create():\n"
+            + "    app = FastAPI()\n"
+            + "    def nested(value=(router := empty_router)): pass\n"
+            + "    app.include_router(router)\n"
+            + "    return app\n"
+            + "app = create()\n"
+        )
+        kwargs = {"app_entry": "main:create"} if context == "explicit" else {}
+    (tmp_path / "main.py").write_text(source, encoding="utf-8")
+
+    inventory = SecureASTExtractor(tmp_path, **kwargs).extract_inventory()
+
+    if context == "implicit":
+        assert inventory.status == InventoryStatus.UNAVAILABLE
+        assert inventory.endpoints == []
+    else:
+        assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /stale"]
+        assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+        assert any(
+            item.source_line == 5 and "named expression" in item.reason
+            for item in inventory.limitations
+        )
+
+
+def test_bootstrap_include_before_class_uncertainty_preserves_copied_endpoint(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import APIRouter, FastAPI\n"
+        "app = FastAPI()\n"
+        "router = APIRouter()\n"
+        "@router.get('/before')\n"
+        "def before(): pass\n"
+        "def run():\n"
+        "    app.include_router(router)\n"
+        "    class Routes:\n"
+        "        @router.get('/late')\n"
+        "        def late(): pass\n",
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(tmp_path, bootstrap_entry="main:run").extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /before"]
+    assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.ESTABLISHED
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert inventory.limitations == ()
+
+
+@pytest.mark.parametrize("context", ["factory", "bootstrap"])
+@pytest.mark.parametrize(
+    ("class_binding", "expected_status"),
+    [
+        ("app: object", InventoryStatus.CONDITIONAL),
+        ("app: object = None", InventoryStatus.ESTABLISHED),
+    ],
+    ids=["annotation-only-uses-outer", "value-shadows-outer"],
+)
+def test_class_local_method_eager_headers_respect_runtime_annotation_binding(
+    tmp_path: Path,
+    context: str,
+    class_binding: str,
+    expected_status: InventoryStatus,
+) -> None:
+    body = (
+        "    class Local:\n"
+        f"        {class_binding}\n"
+        "        def method(self, value=app, *, other: app = app): pass\n"
+        "    @app.get('/safe')\n"
+        "    def safe(): pass\n"
+    )
+    if context == "factory":
+        source = (
+            "from fastapi import FastAPI\n"
+            "def create():\n"
+            "    app = FastAPI()\n" + body + "    return app\n" + "app = create()\n"
+        )
+        kwargs = {"app_entry": "main:create"}
+    else:
+        source = "from fastapi import FastAPI\napp = FastAPI()\ndef run():\n" + body
+        kwargs = {"bootstrap_entry": "main:run"}
+    (tmp_path / "main.py").write_text(source, encoding="utf-8")
+
+    inventory = SecureASTExtractor(tmp_path, **kwargs).extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /safe"]
+    assert inventory.status == expected_status
+    if expected_status == InventoryStatus.CONDITIONAL:
+        assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+        assert any(
+            item.source_line == 6 and "escape a route object" in item.reason
+            for item in inventory.limitations
+        )
+    else:
+        assert inventory.limitations == ()
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        "def app(): pass",
+        "class app: pass",
+        "import replacement as app",
+        "from replacement import value as app",
+        "app = None",
+        "del app",
+        "(app := None)",
+        "if True:\n    app = None",
+    ],
+    ids=[
+        "function",
+        "class",
+        "import",
+        "from-import",
+        "assignment",
+        "delete",
+        "walrus",
+        "compound",
+    ],
+)
+def test_bootstrap_lexical_global_binding_displacement_conditions_prior_routes(
+    tmp_path: Path,
+    binding: str,
+) -> None:
+    (tmp_path / "replacement.py").write_text("value = None\n", encoding="utf-8")
+    indented_binding = "\n".join(f"    {line}" for line in binding.splitlines())
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "@app.get('/before')\n"
+        "def before(): pass\n"
+        "def run():\n"
+        "    if False:\n"
+        "        global app\n"
+        f"{indented_binding}\n"
+        "    @app.get('/after')\n"
+        "    def after(): pass\n",
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(tmp_path, bootstrap_entry="main:run").extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /before"]
+    assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any(
+        item.source_line == 8 and "global binding displaces" in item.reason
+        for item in inventory.limitations
+    )
+
+
+def test_bootstrap_global_router_displacement_after_include_preserves_copy_cutoff(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import APIRouter, FastAPI\n"
+        "app = FastAPI()\n"
+        "router = APIRouter()\n"
+        "@router.get('/copied')\n"
+        "def copied(): pass\n"
+        "def run():\n"
+        "    global router\n"
+        "    app.include_router(router)\n"
+        "    router = None\n",
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(tmp_path, bootstrap_entry="main:run").extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /copied"]
+    assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.ESTABLISHED
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert inventory.limitations == ()
+
+
+@pytest.mark.parametrize(
+    ("definition", "evidence_line"),
+    [
+        (
+            "    @router.get('/route', app.routes.clear())\n    def route(): pass\n",
+            7,
+        ),
+        (
+            "    class Routes:\n"
+            "        @router.get('/route')\n"
+            "        def route(value=app.routes.clear()): pass\n",
+            9,
+        ),
+    ],
+    ids=["decorator-argument", "class-method-default"],
+)
+def test_bootstrap_route_shaped_eager_risk_keeps_root_owner(
+    tmp_path: Path,
+    definition: str,
+    evidence_line: int,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import APIRouter, FastAPI\n"
+        "app = FastAPI()\n"
+        "router = APIRouter()\n"
+        "@app.get('/stale')\n"
+        "def stale(): pass\n"
+        "def run():\n" + definition,
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(tmp_path, bootstrap_entry="main:run").extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /stale"]
+    assert inventory.endpoints[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any(item.source_line == evidence_line for item in inventory.limitations)
