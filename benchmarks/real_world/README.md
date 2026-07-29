@@ -82,6 +82,36 @@ HTTP/WebSocket claims addressable by this tool. The output is not a score, and a
 single-review or exploratory set must not be presented as canonical benchmark
 truth.
 
+## Secure AST/runtime comparison protocol
+
+`compare_runtime.py` compares positive observations from isolated runtime
+introspection with secure static results. Runtime output is a **comparator, not
+truth**: `secure_only` and `runtime_only` are disagreements for source review,
+not false positives or false negatives.
+
+A target/baseline comparison consumes four independently generated schema-v1
+artifacts. All four must declare byte-identical app/factory/bootstrap/backend
+configuration and the same `dependency_lock_sha256`; otherwise comparison
+abstains with an error rather than mixing environments.
+
+```bash
+python benchmarks/real_world/compare_runtime.py \
+  --secure-target /results/secure-target.json \
+  --runtime-target /results/runtime-target.json \
+  --secure-baseline /results/secure-baseline.json \
+  --runtime-baseline /results/runtime-baseline.json \
+  --output /results/secure-runtime-comparison.json
+```
+
+The report keeps all-corpus operational evidence (success/abstention, structured
+failure phases, inventory strength, timing, and peak RSS) separate from the
+paired-success quality subset. Inventory and impact disagreements are reported
+exactly and with normalized path parameters; target/baseline lifecycle deltas
+are computed separately for secure and runtime modes. A failed artifact never
+contributes partial quality metrics. Comparison output is no-clobber and cannot
+replace the source artifacts or canonical ground truth. Its secure publisher
+currently requires the same Linux/POSIX filesystem semantics documented above.
+
 ## Frozen 50-project expansion
 
 Issue #103 adds a disjoint, metadata-only expansion with 50 projects and 100
