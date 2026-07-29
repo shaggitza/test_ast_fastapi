@@ -238,7 +238,7 @@ class SQLTransactionPathError(ValueError):
 class SQLTransactionOrderedPath(_StrictModel):
     """One same-scope, same-receiver straight-line stage-to-boundary relation."""
 
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     id: Digest
     endpoint_id: Digest
     file_path: str = Field(min_length=1)
@@ -248,7 +248,7 @@ class SQLTransactionOrderedPath(_StrictModel):
     begin_scope: TransactionScope | None = None
     stage_occurrence_id: Digest
     boundary_occurrence_id: Digest
-    boundary: Literal["commit", "rollback"]
+    boundary: Literal["flush", "commit", "rollback"]
     ordering: Literal["same_scope_straight_line"] = "same_scope_straight_line"
     status: Literal["ordered_boundary_reachable"] = "ordered_boundary_reachable"
     persistence_status: Literal["not_established"] = "not_established"
@@ -343,6 +343,7 @@ class SQLTransactionPathDiagnostic(_StrictModel):
 
 class SQLTransactionPathSummary(_StrictModel):
     ordered_paths: int = Field(ge=0)
+    ordered_flushes: int = Field(ge=0)
     ordered_commits: int = Field(ge=0)
     ordered_rollbacks: int = Field(ge=0)
     context_manager_paths: int = Field(ge=0)
@@ -352,7 +353,10 @@ class SQLTransactionPathSummary(_StrictModel):
 
     @model_validator(mode="after")
     def validate_counts(self) -> SQLTransactionPathSummary:
-        if self.ordered_commits + self.ordered_rollbacks != self.ordered_paths:
+        if (
+            self.ordered_flushes + self.ordered_commits + self.ordered_rollbacks
+            != self.ordered_paths
+        ):
             raise ValueError("ordered SQL path counts are inconsistent")
         if self.context_transactions + self.context_savepoints != self.context_manager_paths:
             raise ValueError("context-managed SQL path counts are inconsistent")
@@ -362,7 +366,7 @@ class SQLTransactionPathSummary(_StrictModel):
 class SQLTransactionPathReport(_StrictModel):
     """Content-addressed bounded straight-line and context-exit evidence."""
 
-    schema_version: Literal[3] = 3
+    schema_version: Literal[4] = 4
     status: Literal["diagnostic_only"] = "diagnostic_only"
     effect_audit_hash: Digest
     transaction_report_hash: Digest
@@ -400,6 +404,7 @@ class SQLTransactionPathReport(_StrictModel):
             raise ValueError("SQL path diagnostics must be sorted and unique")
         expected = SQLTransactionPathSummary(
             ordered_paths=len(self.ordered_paths),
+            ordered_flushes=sum(item.boundary == "flush" for item in self.ordered_paths),
             ordered_commits=sum(item.boundary == "commit" for item in self.ordered_paths),
             ordered_rollbacks=sum(item.boundary == "rollback" for item in self.ordered_paths),
             context_manager_paths=len(self.context_paths),
@@ -431,7 +436,7 @@ def build_sql_transaction_ordered_path(
     receiver_hash: str,
     stage_occurrence_id: str,
     boundary_occurrence_id: str,
-    boundary: Literal["commit", "rollback"],
+    boundary: Literal["flush", "commit", "rollback"],
     begin_occurrence_id: str | None = None,
     begin_scope: TransactionScope | None = None,
     limitations: tuple[str, ...],
@@ -535,6 +540,7 @@ def build_sql_transaction_path_report(
     )
     summary = SQLTransactionPathSummary(
         ordered_paths=len(sorted_paths),
+        ordered_flushes=sum(item.boundary == "flush" for item in sorted_paths),
         ordered_commits=sum(item.boundary == "commit" for item in sorted_paths),
         ordered_rollbacks=sum(item.boundary == "rollback" for item in sorted_paths),
         context_manager_paths=len(sorted_context_paths),

@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     )
 
 _MAX_SOURCE_BYTES = 2 * 1024 * 1024
-_BOUNDARY = Literal["commit", "rollback"]
+_BOUNDARY = Literal["flush", "commit", "rollback"]
 _REASON = Literal[
     "different_source_scope",
     "source_call_unavailable",
@@ -453,6 +453,7 @@ def build_sql_transaction_path_diagnostics(  # noqa: PLR0912, PLR0915
         len(item.stage_occurrence_ids)
         * (
             len(item.begin_occurrence_ids)
+            + len(item.flush_occurrence_ids)
             + len(item.commit_occurrence_ids)
             + len(item.rollback_occurrence_ids)
         )
@@ -468,6 +469,7 @@ def build_sql_transaction_path_diagnostics(  # noqa: PLR0912, PLR0915
         for evidence in transaction_report.endpoint_evidence
         for occurrence_id in (
             *evidence.stage_occurrence_ids,
+            *evidence.flush_occurrence_ids,
             *evidence.begin_occurrence_ids,
             *evidence.commit_occurrence_ids,
             *evidence.rollback_occurrence_ids,
@@ -482,10 +484,9 @@ def build_sql_transaction_path_diagnostics(  # noqa: PLR0912, PLR0915
     paths: list[SQLTransactionOrderedPath] = []
     context_paths: list[SQLTransactionContextPath] = []
     diagnostics: list[SQLTransactionPathDiagnostic] = []
-    limitations = (
+    common_limitations = (
         "Ordering proves only lexical source order in one direct function body; runtime "
         "execution, exceptions, aliases, and transaction identity are not established.",
-        "A reachable ordered commit is not proof of commit success or durable persistence.",
         "Receiver equality is a stable finite source expression, not runtime object identity.",
     )
     for evidence in transaction_report.endpoint_evidence:
@@ -499,9 +500,11 @@ def build_sql_transaction_path_diagnostics(  # noqa: PLR0912, PLR0915
         )
         begins = tuple(occurrence_by_id[item] for item in evidence.begin_occurrence_ids)
         begin_scope_by_id = {item.occurrence_id: item.scope for item in evidence.begin_scopes}
-        boundaries: tuple[tuple[str, _BOUNDARY], ...] = tuple(
-            (item, "commit") for item in evidence.commit_occurrence_ids
-        ) + tuple((item, "rollback") for item in evidence.rollback_occurrence_ids)
+        boundaries: tuple[tuple[str, _BOUNDARY], ...] = (
+            tuple((item, "flush") for item in evidence.flush_occurrence_ids)
+            + tuple((item, "commit") for item in evidence.commit_occurrence_ids)
+            + tuple((item, "rollback") for item in evidence.rollback_occurrence_ids)
+        )
         for stage_id in evidence.stage_occurrence_ids:
             stage = contexts.get(stage_id)
             for boundary_id, boundary_kind in boundaries:
@@ -621,7 +624,16 @@ def build_sql_transaction_path_diagnostics(  # noqa: PLR0912, PLR0915
                         stage_occurrence_id=stage_id,
                         boundary_occurrence_id=boundary_id,
                         boundary=boundary_kind,
-                        limitations=limitations,
+                        limitations=(
+                            *common_limitations,
+                            (
+                                "A reachable ordered flush may issue pending SQL but is not proof "
+                                "of transaction commit or durable persistence."
+                                if boundary_kind == "flush"
+                                else "A reachable ordered commit or rollback is not proof of "
+                                "boundary success or durable persistence."
+                            ),
+                        ),
                     )
                 )
     unique_paths = {item.id: item for item in paths}

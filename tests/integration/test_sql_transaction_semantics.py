@@ -206,8 +206,11 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
         "    def begin(self) -> None: pass\n"
         "    def begin_nested(self) -> None: pass\n"
         "    def add(self, value: str) -> None: pass\n"
+        "    def flush(self) -> None: pass\n"
         "    def commit(self) -> None: pass\n"
         "    def rollback(self) -> None: pass\n\n"
+        "class Other:\n"
+        "    def flush(self) -> None: pass\n\n"
         "class AsyncSession:\n"
         "    def begin(self): return self\n"
         "    async def __aenter__(self): return self\n"
@@ -223,7 +226,14 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
         "    session = Session()\n"
         "    session.begin()\n"
         "    session.add('ordered')\n"
+        "    session.flush()\n"
         "    session.commit()\n\n"
+        "@app.post('/generic-flush')\n"
+        "def generic_flush() -> None:\n"
+        "    session = Session()\n"
+        "    other = Other()\n"
+        "    session.add('generic')\n"
+        "    other.flush()\n\n"
         "@app.post('/nested')\n"
         "def nested() -> None:\n"
         "    session = Session()\n"
@@ -328,7 +338,14 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
                             else {}
                         ),
                     }
-                    for operation in ("add", "begin", "begin_nested", "commit", "rollback")
+                    for operation in (
+                        "add",
+                        "flush",
+                        "begin",
+                        "begin_nested",
+                        "commit",
+                        "rollback",
+                    )
                 ]
                 + [
                     {
@@ -399,9 +416,10 @@ def test_ordered_paths_require_same_scope_receiver_and_straight_line(tmp_path: P
     assert configured.orphan_changes == baseline.orphan_changes
     paths = configured.sql_transaction_path_report
     assert paths is not None
-    assert paths.schema_version == 3
+    assert paths.schema_version == 4
     assert paths.summary.model_dump() == {
-        "ordered_paths": 3,
+        "ordered_paths": 4,
+        "ordered_flushes": 1,
         "ordered_commits": 3,
         "ordered_rollbacks": 0,
         "context_manager_paths": 3,
@@ -415,6 +433,14 @@ def test_ordered_paths_require_same_scope_receiver_and_straight_line(tmp_path: P
         "nested",
         "ordered",
     }
+    ordered_flush = next(
+        item
+        for item in paths.ordered_paths
+        if item.function_name == "ordered" and item.boundary == "flush"
+    )
+    assert ordered_flush.persistence_status == "not_established"
+    assert any("pending sql" in item.lower() for item in ordered_flush.limitations)
+    assert all(item.function_name != "generic_flush" for item in paths.ordered_paths)
     assert ordered.begin_occurrence_id is not None
     assert ordered.begin_scope is not None and ordered.begin_scope.value == "transaction"
     nested = next(item for item in paths.ordered_paths if item.function_name == "nested")
@@ -460,6 +486,8 @@ def test_ordered_paths_require_same_scope_receiver_and_straight_line(tmp_path: P
     for output_format in ("json", "yaml", "text", "markdown", "html"):
         rendered = get_formatter(output_format).format(configured).lower()
         assert "sql_transaction_path_report" in rendered or "sql ordered paths" in rendered
+    for output_format in ("text", "markdown", "html"):
+        assert "flushes" in get_formatter(output_format).format(configured).lower()
 
 
 def test_ordered_paths_are_explicit_and_atomically_bounded(tmp_path: Path) -> None:

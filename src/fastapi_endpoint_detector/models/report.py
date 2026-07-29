@@ -511,6 +511,7 @@ class AnalysisReport(BaseModel):
             for evidence in transaction_report.endpoint_evidence
             for stage_id in evidence.stage_occurrence_ids
             for boundary_id in (
+                *evidence.flush_occurrence_ids,
                 *evidence.commit_occurrence_ids,
                 *evidence.rollback_occurrence_ids,
             )
@@ -522,7 +523,9 @@ class AnalysisReport(BaseModel):
                 raise ValueError("SQL ordered path references unknown endpoint evidence")
             begin_scope_by_id = {item.occurrence_id: item.scope for item in evidence.begin_scopes}
             expected_boundaries = (
-                evidence.commit_occurrence_ids
+                evidence.flush_occurrence_ids
+                if path.boundary == "flush"
+                else evidence.commit_occurrence_ids
                 if path.boundary == "commit"
                 else evidence.rollback_occurrence_ids
             )

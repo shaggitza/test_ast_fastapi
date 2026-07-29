@@ -36,8 +36,8 @@ User-defined unit-of-work wrappers can opt into the same classification through
 effect-contract schema v2. Unclassified schema-v1 begin contracts remain
 explicitly `none`; method spelling never supplies scope.
 
-A second explicit option adds strictly lexical stage-to-boundary and
-context-manager exit evidence:
+A second explicit option adds strictly lexical stage-to-flush, stage-to-outcome,
+and context-manager exit evidence:
 
 ```yaml
 analysis:
@@ -47,8 +47,11 @@ analysis:
   sql_transaction_path_max_pairs: 1024
 ```
 
-An ordered path requires exact audited stage and commit/rollback occurrences in
-the same source file, direct function body, and lexical order. Both calls must
+An ordered path requires exact audited stage and flush/commit/rollback
+occurrences in the same source file, direct function body, and lexical order.
+A stage-to-flush path establishes only that pending SQL may be issued before a
+later transaction outcome; it never promotes the evidence to durable persistence.
+Both calls must
 use the same finite `Name`/`Attribute` receiver expression, with no intervening
 assignment to that expression or one of its lexical ancestors. A nearest prior
 same-receiver `begin` may be attached together with its declared transaction or
