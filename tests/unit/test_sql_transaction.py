@@ -25,6 +25,7 @@ _HASH_A = f"sha256:{'a' * 64}"
 _HASH_B = f"sha256:{'b' * 64}"
 _HASH_C = f"sha256:{'c' * 64}"
 _HASH_D = f"sha256:{'d' * 64}"
+_HASH_E = f"sha256:{'e' * 64}"
 
 
 def test_outcome_is_derived_from_reachable_boundaries() -> None:
@@ -127,14 +128,29 @@ def test_ordered_paths_are_content_addressed_and_bounded() -> None:
         boundary="commit",
         limitations=("lexical ordering only",),
     )
+    flush_path = build_sql_transaction_ordered_path(
+        endpoint_id=_HASH_A,
+        file_path="main.py",
+        function_name="handler",
+        receiver_hash=_HASH_B,
+        begin_occurrence_id=_HASH_C,
+        begin_scope=TransactionScope.TRANSACTION,
+        stage_occurrence_id=_HASH_B,
+        boundary_occurrence_id=_HASH_E,
+        boundary="flush",
+        limitations=("pending persistence only",),
+    )
     report = build_sql_transaction_path_report(
         _HASH_A,
         _HASH_B,
-        (path,),
+        (path, flush_path),
         (),
         max_pairs=4,
     )
 
+    assert report.schema_version == 4
+    assert flush_path.schema_version == 3
+    assert report.summary.ordered_flushes == 1
     assert report.summary.ordered_commits == 1
     assert report.max_pairs == 4
     payload = report.model_dump(mode="json")
