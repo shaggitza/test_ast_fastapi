@@ -10,15 +10,20 @@ execution. It deliberately publishes no secure-vs-runtime quality numbers.
 The command builder and lifecycle tests attest:
 
 - immutable repository-digest resolution with ambiguity rejection;
-- mandatory dependency-lock and SBOM SHA-256 attestations;
-- gVisor/Kata requirement (`runc` is rejected);
-- no network, host environment inheritance, devices, privileges, capabilities,
-  sockets, or writable checkout/root;
-- non-root execution, read-only non-recursive mounts, deny-by-default seccomp,
-  and bounded noexec tmpfs;
+- mandatory dependency-lock, source-snapshot-lock, SBOM, and seccomp SHA-256
+  attestations;
+- an explicit gVisor/Kata runtime allowlist (`runc` and unknown runtime names are
+  rejected);
+- no image pull, network, host environment inheritance, IPC sharing, retained
+  logs, devices, privileges, capabilities, sockets, or writable checkout/root;
+- non-root execution, Docker 29+ `bind-recursive=disabled` read-only mounts,
+  image `Config.Volumes` rejection, deny-by-default seccomp, and bounded noexec
+  tmpfs;
 - memory/swap, CPU, PID, nofile, nproc, fsize, core, timeout, and output limits;
-- unique name/CID cleanup with post-removal inspection;
-- deterministic content-addressed policy provenance;
+- unique name/CID cleanup with successful bounded absence queries;
+- deterministic content-addressed policy provenance and rejection of mutated
+  policy bytes, mount-grammar metacharacters, broad/symlinked/unreadable mounts,
+  special files, and malformed CID values;
 - malformed output and endpoint schema rejection.
 
 The wheel build contains

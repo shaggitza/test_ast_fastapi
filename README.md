@@ -148,9 +148,10 @@ Use default runtime discovery only for trusted applications. The bounded host
 subprocess currently requires POSIX; on other platforms use `--secure-ast` for
 execution-free discovery or `--vm` for the hardened untrusted-code boundary.
 
-`--vm` requires a prebuilt immutable image digest and a configured gVisor/Kata
-runtime. It never builds an image or imports application code on the host; see
-the [runtime sandbox policy](docs/runtime-sandbox.md).
+`--vm` requires a prebuilt immutable image digest, dependency/snapshot/SBOM
+attestations, and a configured gVisor/Kata runtime. It never pulls or builds an
+image or imports application code on the host; see the
+[runtime sandbox policy](docs/runtime-sandbox.md).
 
 `--scip` requires pinned external tools on `PATH`: `scip-query` 0.16.0,
 `@sourcegraph/scip-python` 0.6.6, and SCIP CLI. Install Node tooling outside the
