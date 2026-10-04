@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 import pytest
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 from benchmarks.real_world.ground_truth_v2 import GroundTruthError
