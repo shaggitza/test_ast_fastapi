@@ -218,6 +218,14 @@ the one selected-rank receipt rather than repeating full campaign Git semantics.
 fails closed and cleans the attempt.
 Preparation also enforces three global durable active slots, writes the inode-keyed
 private registry descriptor, and starts only the resource-bounded local broker.
+Runtime attestation copies the authenticated production profile and Python broker
+package into a mode-read-only execution bundle. Its exact file inventory and digest
+are recorded in the custody receipt, which the runtime attestation and each lane
+binding already hash. The broker executes from that bundle; preparation, readiness,
+launch claim, and escrow finalization recheck bundle, current code/profile, receipt,
+binding, and runtime identity. Any drift fails closed. Historic profiles remain
+available to audit paths and cannot prepare or claim a launch. The ledger event format
+is unchanged.
 `native-launch-plan` validates the complete call against pinned Pi 0.35.1
 `SubagentParams` before atomically recording the ordered attempt/task-index mapping in
 one batch `launch_claimed` successor and emitting data for the supervisor's native

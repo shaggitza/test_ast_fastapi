@@ -53,13 +53,15 @@
       "type": "object"
     },
     "production_files_sha256": {"$ref": "#/$defs/digest"},
+    "broker_bundle_path": {"pattern": "^/", "type": "string"},
+    "broker_bundle_sha256": {"$ref": "#/$defs/digest"},
     "production_profile_sha256": {"$ref": "#/$defs/digest"},
     "protocol": {"const": "ground-truth-runtime-custody-receipt-v1"},
     "schema_version": {"const": 1},
     "source_bindings_path": {"pattern": "^/", "type": "string"},
     "source_bindings_sha256": {"$ref": "#/$defs/digest"}
   },
-  "required": ["schema_version", "protocol", "campaign_id", "campaign_path", "campaign_manifest_sha256", "source_bindings_path", "source_bindings_sha256", "cache", "ledger_root", "packets", "production_profile_sha256", "production_files_sha256", "authorizations"],
+  "required": ["schema_version", "protocol", "campaign_id", "campaign_path", "campaign_manifest_sha256", "source_bindings_path", "source_bindings_sha256", "cache", "ledger_root", "packets", "production_profile_sha256", "production_files_sha256", "broker_bundle_path", "broker_bundle_sha256", "authorizations"],
   "title": "Ground truth production runtime custody receipt v1",
   "type": "object"
 }
