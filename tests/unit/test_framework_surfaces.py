@@ -456,6 +456,31 @@ def test_fastapi_class_middleware_resolves_exact_local_dispatch(tmp_path: Path) 
     assert endpoint.surface.schema_version == 5
 
 
+def test_fastapi_class_middleware_resolves_bounded_indirect_base_method(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "from starlette.middleware.base import BaseHTTPMiddleware\n\n"
+        "class BaseAudit(BaseHTTPMiddleware):\n"
+        "    async def dispatch(self, request, call_next):\n"
+        "        return await call_next(request)\n\n"
+        "class AuditMiddleware(BaseAudit):\n"
+        "    pass\n\n"
+        "app = FastAPI()\n"
+        "app.add_middleware(AuditMiddleware)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == [
+        "FRAMEWORK.MIDDLEWARE protocol:http"
+    ]
+    assert inventory.endpoints[0].handler.name == "dispatch"
+
+
 def test_starlette_class_middleware_resolves_imported_local_class(tmp_path: Path) -> None:
     (tmp_path / "middleware.py").write_text(
         "from starlette.middleware.base import BaseHTTPMiddleware\n\n"

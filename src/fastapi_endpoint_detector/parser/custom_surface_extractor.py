@@ -4262,37 +4262,66 @@ class CustomSurfaceExtractor:
         identity = self._symbol_identity(expression, state)
         return self._resolve_class_method_identity(identity, method_name, required_base)
 
-    def _resolve_class_method_identity(
+    def _resolve_class_method_identity(  # noqa: PLR0911, PLR0912
         self,
         identity: str | None,
         method_name: str,
         required_base: str,
     ) -> tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef] | None:
-        """Resolve a method from an already captured exact class identity."""
-        candidates = self._classes.get(identity or "", [])
-        if len(candidates) != 1 or self._class_bases.get(identity or "") != (required_base,):
+        """Resolve a method through a bounded, exact local class MRO."""
+        pending = [identity] if identity is not None else []
+        seen: set[str] = set()
+        method_definitions: list[tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef]] = []
+        matched_base = False
+        for _depth in range(16):
+            if not pending:
+                break
+            current = pending.pop(0)
+            if current in seen:
+                return None
+            seen.add(current)
+            candidates = self._classes.get(current, [])
+            if len(candidates) != 1:
+                return None
+            module, class_node = candidates[0]
+            if class_node.decorator_list or class_node.keywords:
+                return None
+            methods = [
+                item
+                for item in class_node.body
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and item.name == method_name
+                and not item.decorator_list
+            ]
+            mutation = _ClassAttributeMutationVisitor(method_name)
+            for item in class_node.body:
+                if item not in methods:
+                    mutation.visit(item)
+            if mutation.found or len(methods) > 1:
+                return None
+            if methods and not method_definitions:
+                method_definitions.extend((module, item) for item in methods)
+            bases = self._class_bases.get(current)
+            if bases is None or len(bases) != 1:
+                return None
+            if required_base in bases:
+                matched_base = True
+            for base in bases:
+                if base in self._classes:
+                    pending.append(base)
+                elif base == required_base:
+                    matched_base = True
+        else:
+            if pending:
+                return None
+        if not matched_base or len(method_definitions) != 1:
             return None
-        module, class_node = candidates[0]
-        if class_node.decorator_list or class_node.keywords:
-            return None
-        methods = [
-            item
-            for item in class_node.body
-            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and item.name == method_name
-            and not item.decorator_list
-        ]
-        mutation = _ClassAttributeMutationVisitor(method_name)
-        for item in class_node.body:
-            if item not in methods:
-                mutation.visit(item)
-        if len(methods) != 1 or mutation.found:
-            return None
+        module, method = method_definitions[0]
         header_risk = _ClassAttributeMutationVisitor("__surface_dynamic_header__")
-        header_risk._visit_function_header(methods[0])
+        header_risk._visit_function_header(method)
         if header_risk.found:
             return None
-        return module, methods[0]
+        return module, method
 
     def _direct_symbol_identity(
         self, expression: ast.expr, state: dict[str, _Binding | None]
