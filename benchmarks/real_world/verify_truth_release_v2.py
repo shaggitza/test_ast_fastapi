@@ -6,9 +6,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path, PurePosixPath
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -68,7 +69,7 @@ REQUIRED_CANONICAL_TABLES = {
 }
 
 
-def _fail(message: str) -> None:
+def _fail(message: str) -> NoReturn:
     raise GroundTruthError(message)
 
 
@@ -282,6 +283,7 @@ def verify_release(  # noqa: PLR0912, PLR0915
     if len(records) != selected or actual_counts != counts:
         _fail("broad-truth rows do not match selected and terminal denominators")
     expected_release = _release_truth(verified_contents, manifest, selected)
+    _verify_product_scopes(verified_contents, manifest)
     if set(records) != set(expected_release):
         _fail("broad-truth identities do not match release membership")
     for identity, terminal in records.items():
@@ -477,6 +479,208 @@ def _release_truth(  # noqa: PLR0912, PLR0915
     if len(expected) != len([row for row in memberships if row.get("release_id") == release_id]):
         _fail("release membership contains duplicate pull request identities")
     return expected
+
+
+def _verify_product_scopes(  # noqa: PLR0912, PLR0915
+    contents: dict[str, bytes], manifest: dict[str, Any]
+) -> None:
+    """Reconcile public product-scope sidecars with canonical table snapshots."""
+    release_id = manifest.get("release_id")
+    corpus_id = manifest.get("corpus_id")
+    if not isinstance(release_id, str) or not isinstance(corpus_id, str):
+        _fail("release identity is missing while verifying product scopes")
+    repositories: dict[str, str] = {}
+    for row in _jsonl_rows(contents["tables/repository.jsonl"], "tables/repository.jsonl"):
+        repository_id, full_name = row.get("repository_id"), row.get("full_name")
+        if (
+            not isinstance(repository_id, str)
+            or not isinstance(full_name, str)
+            or not full_name
+            or repository_id in repositories
+        ):
+            _fail("repository table contains a malformed product-scope identity")
+        repositories[repository_id] = full_name
+    pull_requests: dict[str, tuple[str | None, object, object]] = {}
+    for row in _jsonl_rows(contents["tables/pull_request.jsonl"], "tables/pull_request.jsonl"):
+        pr_id, repository_id = row.get("pr_id"), row.get("repository_id")
+        if (
+            not isinstance(pr_id, str)
+            or not isinstance(repository_id, str)
+            or pr_id in pull_requests
+        ):
+            _fail("pull request table contains a malformed product-scope identity")
+        pull_requests[pr_id] = (
+            repositories.get(repository_id),
+            row.get("number"),
+            row.get("rank"),
+        )
+    selected_rows: list[tuple[str, str, int, int]] = []
+    adjudications: dict[str, str] = {}
+    adjudication_prs: dict[str, str] = {}
+    adjudication_terminals: dict[str, str] = {}
+    for row in _jsonl_rows(contents["tables/adjudication.jsonl"], "tables/adjudication.jsonl"):
+        adjudication_id, terminal, pr_id = (
+            row.get("adjudication_id"),
+            row.get("terminal_status"),
+            row.get("pr_id"),
+        )
+        if (
+            not isinstance(adjudication_id, str)
+            or not isinstance(terminal, str)
+            or not isinstance(pr_id, str)
+            or terminal not in TERMINAL
+            or adjudication_id in adjudication_terminals
+        ):
+            _fail("canonical adjudication table contains a malformed or duplicate row")
+        adjudication_prs[adjudication_id] = pr_id
+        adjudication_terminals[adjudication_id] = terminal
+    for row in _jsonl_rows(contents["tables/release_pr.jsonl"], "tables/release_pr.jsonl"):
+        if row.get("release_id") != release_id:
+            continue
+        if row.get("corpus_id") != corpus_id:
+            _fail("release product-scope membership has the wrong corpus")
+        pr_id, adjudication_id = row.get("pr_id"), row.get("adjudication_id")
+        if not isinstance(pr_id, str) or not isinstance(adjudication_id, str):
+            _fail("release product-scope membership is malformed")
+        identity = pull_requests.get(pr_id)
+        if (
+            identity is None
+            or not isinstance(identity[0], str)
+            or type(identity[1]) is not int
+            or type(identity[2]) is not int
+            or adjudication_id in adjudications
+            or adjudication_terminals.get(adjudication_id) not in TERMINAL
+        ):
+            _fail("release product-scope membership is malformed")
+        if adjudication_prs.get(adjudication_id) != pr_id:
+            _fail("release product-scope membership references the wrong adjudication PR")
+        adjudications[adjudication_id] = pr_id
+        selected_rows.append((adjudication_id, identity[0], identity[1], identity[2]))
+    selected_rows.sort(key=lambda item: (item[1].casefold(), item[3]))
+
+    canonical_entrypoints: dict[str, tuple[str, str, dict[str, str]]] = {}
+    for row in _jsonl_rows(
+        contents["tables/canonical_entrypoint.jsonl"], "tables/canonical_entrypoint.jsonl"
+    ):
+        decision_id = row.get("decision_id")
+        public_id, kind, confidence = (
+            row.get("public_id"),
+            row.get("kind"),
+            row.get("confidence"),
+        )
+        adjudication_id, pr_id = row.get("adjudication_id"), row.get("pr_id")
+        if (
+            not isinstance(decision_id, str)
+            or not isinstance(adjudication_id, str)
+            or not isinstance(pr_id, str)
+            or not isinstance(public_id, str)
+            or not isinstance(kind, str)
+            or not isinstance(confidence, str)
+            or decision_id in canonical_entrypoints
+        ):
+            _fail("canonical entrypoint table contains a malformed or duplicate row")
+        canonical_entrypoints[decision_id] = (
+            adjudication_id,
+            pr_id,
+            {"id": public_id, "kind": kind, "confidence": confidence},
+        )
+
+    definitions: dict[tuple[str, int], tuple[str, str]] = {}
+    for row in _jsonl_rows(
+        contents["tables/scope_definition.jsonl"], "tables/scope_definition.jsonl"
+    ):
+        scope_id, version = row.get("scope_id"), row.get("scope_version")
+        product, digest = row.get("product"), row.get("definition_sha256")
+        if (
+            not isinstance(scope_id, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", scope_id) is None
+            or type(version) is not int
+            or version < 1
+            or not isinstance(product, str)
+            or not product
+            or not isinstance(digest, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
+            or (scope_id, version) in definitions
+        ):
+            _fail("product scope definition table contains a malformed or duplicate row")
+        definitions[(scope_id, version)] = (product, digest)
+
+    in_scope: dict[tuple[str, int, str], list[dict[str, str]]] = {}
+    defined_scopes: set[tuple[str, int]] = set()
+    seen_memberships: set[tuple[str, str, str, int]] = set()
+    for row in _jsonl_rows(
+        contents["tables/scope_membership.jsonl"], "tables/scope_membership.jsonl"
+    ):
+        adjudication_id = row.get("adjudication_id")
+        if not isinstance(adjudication_id, str) or adjudication_id not in adjudications:
+            continue
+        decision_id = row.get("decision_id")
+        pr_id = row.get("pr_id")
+        scope_id, version, status = (
+            row.get("scope_id"),
+            row.get("scope_version"),
+            row.get("status"),
+        )
+        if (
+            not isinstance(decision_id, str)
+            or not isinstance(pr_id, str)
+            or not isinstance(scope_id, str)
+            or type(version) is not int
+            or (scope_id, version) not in definitions
+            or status not in {"in_scope", "out_of_scope"}
+        ):
+            _fail("product scope membership table contains a malformed selected row")
+        membership_key = (adjudication_id, decision_id, scope_id, version)
+        if membership_key in seen_memberships:
+            _fail("product scope membership table contains a duplicate selected row")
+        seen_memberships.add(membership_key)
+        defined_scopes.add((scope_id, version))
+        entrypoint_record = canonical_entrypoints.get(decision_id)
+        if (
+            entrypoint_record is None
+            or entrypoint_record[0] != adjudication_id
+            or entrypoint_record[1] != pr_id
+            or adjudication_prs.get(adjudication_id) != pr_id
+        ):
+            _fail("product scope membership references a missing canonical entrypoint")
+        if status == "in_scope":
+            in_scope.setdefault((scope_id, version, adjudication_id), []).append(
+                entrypoint_record[2]
+            )
+
+    expected_files: dict[str, list[dict[str, Any]]] = {}
+    for scope_id, version in sorted(defined_scopes):
+        product, digest = definitions[(scope_id, version)]
+        filename = f"product-scopes/{scope_id}-v{version}.jsonl"
+        projection: list[dict[str, Any]] = []
+        for adjudication_id, repository, number, _rank in selected_rows:
+            entrypoints = sorted(
+                in_scope.get((scope_id, version, adjudication_id), ()),
+                key=lambda item: (item["id"], item["kind"], item["confidence"]),
+            )
+            projection.append(
+                {
+                    "repository": repository,
+                    "pr": number,
+                    "terminal_status": adjudication_terminals.get(adjudication_id),
+                    "scope_id": scope_id,
+                    "scope_version": version,
+                    "product": product,
+                    "definition_sha256": digest,
+                    "affected_entrypoints": entrypoints,
+                }
+            )
+        expected_files[filename] = projection
+
+    observed_names = {name for name in contents if name.startswith("product-scopes/")}
+    if observed_names != set(expected_files):
+        _fail("product-scope files do not match canonical scope memberships")
+    for name, expected_rows in expected_files.items():
+        actual_rows = _jsonl_rows(contents[name], name)
+        if sorted(canonical_json(row) for row in actual_rows) != sorted(
+            canonical_json(row) for row in expected_rows
+        ):
+            _fail("product-scope projection does not match canonical scope membership")
 
 
 def main() -> None:

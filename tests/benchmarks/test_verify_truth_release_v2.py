@@ -326,6 +326,30 @@ def test_truth_terminal_must_match_canonical_adjudication(tmp_path: Path, termin
         verify_release(root)
 
 
+def test_release_membership_denominator_must_match_canonical_corpus(tmp_path: Path) -> None:
+    root = _release(tmp_path)
+    corpus_path = root / "tables/corpus.jsonl"
+    corpus_row = json.loads(corpus_path.read_text())
+    corpus_row["selected_count"] = 0
+    corpus_path.write_bytes(canonical_json(corpus_row))
+    manifest = json.loads((root / "manifest.json").read_text())
+    _reseal(root, manifest)
+    with pytest.raises(GroundTruthError, match="canonical corpus table"):
+        verify_release(root)
+
+
+def test_product_scope_projection_must_match_canonical_membership(tmp_path: Path) -> None:
+    root = _release(tmp_path)
+    sidecar = next((root / "product-scopes").glob("*.jsonl"))
+    row = json.loads(sidecar.read_text())
+    row["affected_entrypoints"] = []
+    sidecar.write_bytes(canonical_json(row))
+    manifest = json.loads((root / "manifest.json").read_text())
+    _reseal(root, manifest)
+    with pytest.raises(GroundTruthError, match="product-scope projection"):
+        verify_release(root)
+
+
 @pytest.mark.parametrize(
     "member",
     [
