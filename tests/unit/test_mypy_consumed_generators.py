@@ -79,6 +79,25 @@ def test_generator_expression_creation_does_not_execute_element(tmp_path: Path) 
     assert deps.references_symbol_at_line("worker.py", 1) is None
 
 
+def test_exact_eager_builtin_consumes_generator_expression(tmp_path: Path) -> None:
+    (tmp_path / "worker.py").write_text(
+        "def changed() -> int:\n    return 1\n",
+        encoding="utf-8",
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from worker import changed\n\n"
+        "def handler():\n"
+        "    return list(changed() for _ in range(1))\n",
+        encoding="utf-8",
+    )
+
+    deps = MypyAnalyzer(tmp_path, max_depth=5).analyze_endpoint(_endpoint(main, line=3))
+
+    assert deps.references_symbol_at_line("worker.py", 1) is not None
+    assert deps.references_lines_low_only("worker.py", {1})
+
+
 @pytest.mark.parametrize(
     ("function_header", "expression"),
     [
@@ -255,7 +274,7 @@ def test_protocol_mismatch_does_not_consume_generator(
     "intervening",
     [
         "    pending = 0\n",
-        "    unknown()\n",
+            "    unknown(pending)\n",
     ],
 )
 def test_reassignment_or_unknown_call_invalidates_generator_alias(
