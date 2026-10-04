@@ -8,7 +8,7 @@ from fastapi_endpoint_detector.analyzer.client_observations import (
 
 
 def test_extracts_finite_http_websocket_calls_and_keeps_query_evidence() -> None:
-    source = """
+    source = r"""
 fetch("https://api.example.test/items?limit=10");
 axios.post('/items', payload);
 axios({ url: '/items', method: 'PATCH' });
@@ -44,6 +44,7 @@ def test_scanner_skips_comments_strings_dynamic_calls_receivers_and_unknown_opti
     source = """
 // fetch('/admin')
 const text = "fetch('/admin')";
+const pattern = /fetch[(].*admin[)]/g;
 fetch('/items' + suffix);
 client.fetch('/admin');
 fetch('/items', dynamicOptions);

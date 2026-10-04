@@ -58,7 +58,7 @@ class _Token:
 _IDENT = re.compile(r"[A-Za-z_$][\w$]*")
 
 
-def _tokens(source: str) -> list[_Token]:
+def _tokens(source: str) -> list[_Token]:  # noqa: PLR0912, PLR0915
     out: list[_Token] = []
     i, n = 0, len(source)
     while i < n:
@@ -73,6 +73,39 @@ def _tokens(source: str) -> list[_Token]:
         if source.startswith("/*", i):
             j = source.find("*/", i + 2)
             i = n if j < 0 else j + 2
+            continue
+        regex_prefix = not out or (out[-1].kind == "punct" and out[-1].value in "=(:,[!&|?{};>")
+        regex_prefix = regex_prefix or (
+            out[-1].kind == "id" and out[-1].value in {"return", "case", "throw", "yield", "await"}
+        )
+        if c == "/" and regex_prefix:
+            # A slash in expression-start position can begin a regex literal.
+            # Consume through its unescaped closing slash so contents are never
+            # mistaken for executable calls. Division after an expression is
+            # left as punctuation.
+            start = i
+            i += 1
+            escaped = False
+            in_class = False
+            while i < n:
+                ch = source[i]
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == "[":
+                    in_class = True
+                elif ch == "]":
+                    in_class = False
+                elif ch == "/" and not in_class:
+                    i += 1
+                    while i < n and source[i].isalpha():
+                        i += 1
+                    break
+                elif ch == "\n":
+                    break
+                i += 1
+            out.append(_Token("regex", "", start, i))
             continue
         if c in "'\"`":
             quote, start = c, i
