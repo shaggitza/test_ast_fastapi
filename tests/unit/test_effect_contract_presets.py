@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 
 _EXPECTED_PRESET_HASHES = {
-    "filesystem-v1": "sha256:8e09b0a197a523b701bd18ce042b72bf8e8d5cc5c0741d18e7c1c61937712c40",
+    "filesystem-v1": "sha256:1b34e5936c78ded78b7ffafce66278db263795661238aa5f7bf98ae990b4f2c2",
     "http-clients-v1": "sha256:c1f6bcb56e06525f20e2eac5a68c9bc5812c281c054209fb6feb3c7df63cc890",
     "message-bus-v1": "sha256:05c2d745da13fc39984d20b6cd260221eeac40ba7049a492cef6979488ac81a1",
     "mongodb-v1": "sha256:1541057fa430ee8ced171b379aa9dab1f4007156fd9b8632784c0ccdfd2f2032",
@@ -40,15 +40,11 @@ _EXPECTED_CONTRACT_IDS = {
         "os-makedirs",
         "os-mkdir",
         "os-remove",
-        "os-rename",
-        "os-replace",
         "os-rmdir",
         "os-unlink",
         "pathlib-mkdir",
         "pathlib-read-bytes",
         "pathlib-read-text",
-        "pathlib-rename",
-        "pathlib-replace",
         "pathlib-rmdir",
         "pathlib-touch",
         "pathlib-unlink",
@@ -57,7 +53,6 @@ _EXPECTED_CONTRACT_IDS = {
         "shutil-copy",
         "shutil-copy2",
         "shutil-copyfile",
-        "shutil-move",
         "shutil-rmtree",
     },
     "http-clients-v1": {
@@ -162,14 +157,14 @@ def test_bundled_effect_presets_are_strict_versioned_snapshots(name: str) -> Non
 
     assert loaded.source_path == BUNDLED_EFFECT_PRESETS[name].resolve()
     expected_version = {
-        "filesystem-v1": "3.0.0",
+        "filesystem-v1": "4.0.0",
         "http-clients-v1": "3.0.0",
         "mongodb-v1": "2.0.0",
         "object-storage-v1": "2.0.0",
         "sqlalchemy-v1": "3.0.0",
     }.get(name, "1.0.0")
     expected_revision = {
-        "filesystem-v1": "3",
+        "filesystem-v1": "4",
         "http-clients-v1": "3",
         "mongodb-v1": "2",
         "object-storage-v1": "2",
@@ -385,3 +380,25 @@ def test_config_loads_effect_preset_once() -> None:
     assert first is config.load_effect_contract_snapshot()
     assert first is not None
     assert first.document.preset.id == "stdlib-filesystem-effects"
+
+
+def test_filesystem_preset_abstains_from_multi_resource_renames_and_moves() -> None:
+    loaded = load_effect_preset("filesystem-v1")
+    symbols = {contract.symbol for contract in loaded.document.contracts}
+    ids = {contract.id for contract in loaded.document.contracts}
+
+    # The schema binds exactly one resource selector to an operation. A rename/move
+    # needs source deletion and destination production, so these are intentionally
+    # absent until the contract can express both identities.
+    assert symbols.isdisjoint(
+        {
+            "os.rename",
+            "os.replace",
+            "pathlib.Path.rename",
+            "pathlib.Path.replace",
+            "shutil.move",
+        }
+    )
+    assert ids.isdisjoint(
+        {"os-rename", "os-replace", "pathlib-rename", "pathlib-replace", "shutil-move"}
+    )
