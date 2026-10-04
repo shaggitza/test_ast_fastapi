@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import pytest
 
@@ -99,6 +99,56 @@ def test_verify_release_rejects_tampered_declared_file(tmp_path: Path) -> None:
         handle.write(b" ")
     with pytest.raises(GroundTruthError, match="metadata mismatch"):
         verify_release(root)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda row: row.clear(),
+        lambda row: row.update(secrets_reviewed=False),
+        lambda row: row.update(release_id="different-release"),
+    ],
+    ids=["malformed", "non-affirmative", "wrong-release"],
+)
+def test_rejects_invalid_publication_review(
+    tmp_path: Path, mutate: Callable[[dict[str, object]], None]
+) -> None:
+    root = _release(tmp_path)
+    review_path = root / "publication-review.json"
+    row = json.loads(review_path.read_text())
+    mutate(row)
+    review_path.write_bytes(canonical_json(row))
+    manifest = json.loads((root / "manifest.json").read_text())
+    manifest["publication_review_sha256"] = artifact_sha256(review_path.read_bytes())
+    _reseal(root, manifest)
+    with pytest.raises(GroundTruthError, match="publication review"):
+        verify_release(root)
+
+
+def test_publication_review_hash_must_match_manifest(tmp_path: Path) -> None:
+    root = _release(tmp_path)
+    manifest = json.loads((root / "manifest.json").read_text())
+    manifest["publication_review_sha256"] = "sha256:" + "0" * 64
+    _resign(root, manifest)
+    with pytest.raises(GroundTruthError, match="publication review hash"):
+        verify_release(root)
+
+
+def test_broad_truth_is_parsed_from_verified_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _release(tmp_path)
+    truth_path = root / "broad-truth.jsonl"
+    original_read_text = type(truth_path).read_text
+
+    def replaced_read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == truth_path:
+            return "{}\\n"
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(truth_path), "read_text", replaced_read_text)
+    result = verify_release(root)
+    assert result["truth_rows_verified"] == 1
 
 
 def test_verify_release_rejects_manifest_root_tampering(tmp_path: Path) -> None:

@@ -8,7 +8,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, cast
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -18,7 +18,12 @@ from benchmarks.real_world.benchmark_schema import (
     _validate_record,
 )
 from benchmarks.real_world.ground_truth_v2 import GroundTruthError
-from benchmarks.real_world.ground_truth_v2.schema import canonical_json
+from benchmarks.real_world.ground_truth_v2.schema import (
+    PublicationReviewV1,
+    artifact_sha256,
+    canonical_json,
+    parse_artifact,
+)
 
 TERMINAL = {"positive", "negative_control", "unknown", "not_evaluable"}
 COUNTS = set(TERMINAL)
@@ -154,6 +159,7 @@ def verify_release(  # noqa: PLR0912, PLR0915
         _fail("canonical table metadata does not match the release file inventory")
     expected_names = {"manifest.json"} | set(files)
     observed_names: set[str] = set()
+    verified_contents: dict[str, bytes] = {}
     for name, metadata in files.items():
         relative = PurePosixPath(name) if isinstance(name, str) else None
         if (
@@ -189,6 +195,7 @@ def verify_release(  # noqa: PLR0912, PLR0915
         ):
             _fail(f"release file metadata mismatch: {name}")
         observed_names.add(name)
+        verified_contents[name] = content
     actual_names: set[str] = set()
     for path in root.rglob("*"):
         if path.is_symlink():
@@ -197,6 +204,21 @@ def verify_release(  # noqa: PLR0912, PLR0915
             actual_names.add(path.relative_to(root).as_posix())
     if actual_names != expected_names:
         _fail("release directory has undeclared or missing files")
+
+    publication_raw = verified_contents.get("publication-review.json")
+    if publication_raw is None:
+        _fail("release publication review is missing")
+    try:
+        publication = cast(
+            "PublicationReviewV1",
+            parse_artifact(publication_raw, PublicationReviewV1),
+        )
+    except GroundTruthError as exc:
+        raise GroundTruthError("publication review is invalid") from exc
+    if publication.release_id != manifest.get("release_id"):
+        _fail("publication review release identity mismatch")
+    if manifest.get("publication_review_sha256") != artifact_sha256(publication_raw):
+        _fail("publication review hash does not match manifest")
 
     counts = manifest.get("terminal_counts")
     selected = manifest.get("selected_prs")
@@ -209,13 +231,13 @@ def verify_release(  # noqa: PLR0912, PLR0915
         or sum(counts.values()) != selected
     ):
         _fail("release terminal denominators are incomplete")
-    truth_path = root / "broad-truth.jsonl"
-    records: dict[tuple[str, int], str] = {}
-    if "broad-truth.jsonl" not in files:
+    truth_raw = verified_contents.get("broad-truth.jsonl")
+    if truth_raw is None:
         _fail("release manifest does not declare broad truth")
+    records: dict[tuple[str, int], str] = {}
     try:
-        truth_lines = truth_path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeDecodeError) as exc:
+        truth_lines = truth_raw.decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
         raise GroundTruthError("broad-truth artifact is missing or unreadable") from exc
     for line_number, line in enumerate(truth_lines, 1):
         if not line:
