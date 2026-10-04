@@ -141,6 +141,75 @@ def test_unknown_copy_method_does_not_claim_defensive_copy(tmp_path: Path) -> No
     assert EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 2)]) is None
 
 
+def test_literal_dead_branch_mutation_does_not_qualify_copy(tmp_path: Path) -> None:
+    service = tmp_path / "service.py"
+    service.write_text(
+        "def dispatch(payload):\n"
+        "    payload = {**payload}\n"
+        "    if False:\n"
+        "        payload.update({'x': 1})\n"
+        "    return {'ok': True}\n"
+    )
+    main = tmp_path / "main.py"
+    main.write_text("def endpoint():\n    return dispatch({'x': 0})\n")
+
+    assert EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 2)]) is None
+
+
+def test_shadowed_dict_constructor_does_not_qualify_copy(tmp_path: Path) -> None:
+    service = tmp_path / "service.py"
+    service.write_text(
+        "def dispatch(payload):\n"
+        "    dict = custom_copy\n"
+        "    payload = dict(payload)\n"
+        "    payload.update({'x': 1})\n"
+        "    return payload\n"
+    )
+    main = tmp_path / "main.py"
+    main.write_text("def endpoint():\n    return dispatch({'x': 0})\n")
+
+    assert EffectAnalyzer(tmp_path).analyze(str(service), {3}, [_stack(main, service, 2)]) is None
+
+
+def test_invoked_local_helper_mutation_qualifies_copy(tmp_path: Path) -> None:
+    service = tmp_path / "service.py"
+    service.write_text(
+        "def dispatch(payload):\n"
+        "    payload = {**payload}\n"
+        "    def mutate_captured():\n"
+        "        payload.update({'x': 1})\n"
+        "    mutate_captured()\n"
+        "    return payload\n"
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def endpoint():\n"
+        "    payload = {'x': 0}\n"
+        "    dispatch(payload)\n"
+        "    return payload\n"
+    )
+
+    result = EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 3)])
+
+    assert result is not None
+    assert result.confidence == ConfidenceLevel.HIGH
+
+
+def test_uninvoked_local_helper_mutation_does_not_qualify_copy(tmp_path: Path) -> None:
+    service = tmp_path / "service.py"
+    service.write_text(
+        "def dispatch(payload):\n"
+        "    payload = {**payload}\n"
+        "    def mutate_captured():\n"
+        "        payload.update({'x': 1})\n"
+        "    return {'ok': True}\n"
+    )
+    main = tmp_path / "main.py"
+    main.write_text("def endpoint():\n    return dispatch({'x': 0})\n")
+
+    assert EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 2)]) is None
+
+
 def test_defensive_copy_distinguishes_logging_from_public_response(tmp_path: Path) -> None:
     service = _service(tmp_path)
     main = tmp_path / "main.py"

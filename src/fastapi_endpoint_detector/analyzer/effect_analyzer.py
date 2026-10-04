@@ -110,6 +110,15 @@ class EffectAnalyzer:
                     conditions=["The path must select the changed callable at runtime."],
                     limitations=[
                         "The copy is shallow; nested mutable values remain aliased.",
+                        (
+                            "Copy mutation qualification follows at most eight directly invoked "
+                            "local helpers, one level deep; aliases and dynamic dispatch "
+                            "are unresolved."
+                        ),
+                        (
+                            "Only literal True/False if-branches are excluded as unreachable; "
+                            "other conditions are conservatively treated as reachable."
+                        ),
                         *limitations,
                     ],
                 )
@@ -193,6 +202,13 @@ class EffectAnalyzer:
                 subject = node.targets[0].id
                 if subject not in parameters or not self._copies_name(node.value, subject):
                     continue
+                if (
+                    isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Name)
+                    and node.value.func.id == "dict"
+                    and not self._dict_is_unshadowed(tree)
+                ):
+                    continue
                 if self._has_later_top_level_mutation(function, subject, node.lineno):
                     matches.append((function, subject, node.lineno))
         return matches[0] if len(matches) == 1 else None
@@ -215,7 +231,37 @@ class EffectAnalyzer:
             and value.args[0].id == subject
         )
 
-    def _has_later_top_level_mutation(
+    @staticmethod
+    def _dict_is_unshadowed(tree: ast.Module) -> bool:
+        # Any module binding may shadow builtins for a nested function too.
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and node.id == "dict" and isinstance(node.ctx, ast.Store):
+                return False
+            if isinstance(node, ast.arg) and node.arg == "dict":
+                return False
+            if isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            ) and node.name == "dict":
+                return False
+            if isinstance(node, ast.alias) and (node.asname or node.name.split(".")[0]) == "dict":
+                return False
+        return True
+
+    @staticmethod
+    def _dead_literal_branch(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> bool:
+        child = node
+        parent = parents.get(child)
+        while parent is not None:
+            if isinstance(parent, ast.If) and isinstance(parent.test, ast.Constant):
+                if parent.test.value is False and child in parent.body:
+                    return True
+                if parent.test.value is True and child in parent.orelse:
+                    return True
+            child = parent
+            parent = parents.get(child)
+        return False
+
+    def _has_later_top_level_mutation(  # noqa: PLR0912 - explicit fail-closed mutation forms
         self,
         function: ast.FunctionDef | ast.AsyncFunctionDef,
         subject: str,
@@ -235,9 +281,20 @@ class EffectAnalyzer:
             "sort",
             "update",
         }
-        for node in self._same_scope_nodes(function):
+        scope_nodes = self._same_scope_nodes(function)
+        parents: dict[ast.AST, ast.AST] = {}
+        scope_set = set(scope_nodes)
+        for parent in scope_nodes:
+            for child in ast.iter_child_nodes(parent):
+                if child in scope_set:
+                    parents[child] = parent
+        live_nodes: list[ast.AST] = []
+        for node in scope_nodes:
             if getattr(node, "lineno", 0) <= copy_line:
                 continue
+            if self._dead_literal_branch(node, parents):
+                continue
+            live_nodes.append(node)
             targets: list[ast.expr] = []
             if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
                 target = node.target if not isinstance(node, ast.Assign) else node.targets[0]
@@ -253,6 +310,60 @@ class EffectAnalyzer:
                 and self._root_name(node.func.value) == subject
             ):
                 return True
+        # Correlate direct, statically named local helper calls only. The
+        # bounded one-level scan deliberately excludes aliases, recursion,
+        # dynamic dispatch, and helpers passed as values.
+        helper_defs = [
+            child
+            for parent in scope_nodes
+            for child in ast.iter_child_nodes(parent)
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ][:8]
+        for helper in helper_defs:
+            helper_args = [
+                *helper.args.posonlyargs,
+                *helper.args.args,
+                *helper.args.kwonlyargs,
+            ]
+            if any(argument.arg == subject for argument in helper_args):
+                continue
+            calls = [
+                node
+                for node in live_nodes
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == helper.name
+            ]
+            if not calls:
+                continue
+            helper_nodes = self._same_scope_nodes(helper)
+            if any(
+                isinstance(node, ast.Name)
+                and node.id == subject
+                and isinstance(node.ctx, ast.Store)
+                for node in helper_nodes
+            ):
+                continue
+            for node in helper_nodes:
+                if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                    target = (
+                        node.targets[0]
+                        if isinstance(node, ast.Assign) and node.targets
+                        else node.target
+                    )
+                    if self._root_name(target) == subject:
+                        return True
+                if isinstance(node, ast.Delete) and any(
+                    self._root_name(target) == subject for target in node.targets
+                ):
+                    return True
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in mutators
+                    and self._root_name(node.func.value) == subject
+                ):
+                    return True
         return False
 
     @staticmethod
