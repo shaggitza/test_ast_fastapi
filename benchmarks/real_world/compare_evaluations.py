@@ -60,10 +60,40 @@ def _sha256(value: object) -> bool:
     )
 
 
+def _selection_keys(evidence: dict[str, Any]) -> list[tuple[str, int]]:
+    raw_keys = evidence.get("selection_keys")
+    if not isinstance(raw_keys, list):
+        raise ValueError("selection_keys must be a list")
+    keys: list[tuple[str, int]] = []
+    for item in raw_keys:
+        if not isinstance(item, dict):
+            raise ValueError("malformed selected PR identity")
+        repository, pr = item.get("repository"), item.get("pr")
+        if (
+            not isinstance(repository, str)
+            or not repository.strip()
+            or type(pr) is not int
+            or pr < 0
+        ):
+            raise ValueError("malformed selected PR identity")
+        keys.append((repository, pr))
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate selected PR identity")
+    canonical = [{"repository": repository, "pr": pr} for repository, pr in sorted(keys)]
+    digest = hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    if evidence.get("selection_sha256") != digest:
+        raise ValueError("selection digest does not match selected PR identities")
+    return keys
+
+
 def compare(  # noqa: PLR0912, PLR0915
     baseline: dict[str, Any], candidate: dict[str, Any], *, seed: int = 283
 ) -> dict[str, Any]:
     left, right = baseline["comparison_evidence"], candidate["comparison_evidence"]
+    left_selection = _selection_keys(left)
+    right_selection = _selection_keys(right)
     compatibility_fields = ("scope", "normalization_version", "truth_sha256", "selection_sha256")
     mismatches = [name for name in compatibility_fields if left.get(name) != right.get(name)]
     if mismatches:
@@ -72,7 +102,7 @@ def compare(  # noqa: PLR0912, PLR0915
         for name in ("truth_sha256", "selection_sha256", "prediction_sha256"):
             if not _sha256(evidence.get(name)):
                 raise ValueError(f"{side_name} has invalid or missing {name} provenance")
-    if left.get("selection_keys") != right.get("selection_keys"):
+    if set(left_selection) != set(right_selection):
         raise ValueError("selected PR identities differ")
     a, b = _rows(baseline), _rows(candidate)
     if set(a) != set(b):
@@ -80,9 +110,7 @@ def compare(  # noqa: PLR0912, PLR0915
     keys = sorted(a)
     if not keys:
         raise ValueError("no paired PR evidence")
-    if set(keys) != {
-        (item.get("repository"), item.get("pr")) for item in left.get("selection_keys", [])
-    }:
+    if set(keys) != set(left_selection):
         raise ValueError("per-PR evidence does not exactly cover selected PRs")
     for key in keys:
         if not _sha256(a[key].get("truth_sha256")):
@@ -94,8 +122,12 @@ def compare(  # noqa: PLR0912, PLR0915
             or b[key].get("truth_status") != "adjudicated"
         ):
             raise ValueError(f"unresolved or not-evaluable truth coverage for {key}")
-        if a[key].get("unresolved_count") or b[key].get("unresolved_count"):
-            raise ValueError(f"unresolved prediction coverage for {key}")
+        for row in (a[key], b[key]):
+            unresolved_count = row.get("unresolved_count")
+            if type(unresolved_count) is not int or unresolved_count < 0:
+                raise ValueError(f"invalid unresolved prediction count for {key}")
+            if unresolved_count != 0 or row.get("prediction_status") != "completed":
+                raise ValueError(f"unresolved prediction coverage for {key}")
         for row in (a[key], b[key]):
             for metric in ("raw", "normalized"):
                 counts = row.get(metric)
@@ -104,6 +136,12 @@ def compare(  # noqa: PLR0912, PLR0915
                     for name in ("tp", "fp", "fn")
                 ):
                     raise ValueError(f"invalid {metric} confusion evidence for {key}")
+        for metric in ("raw", "normalized"):
+            if (
+                a[key][metric]["tp"] + a[key][metric]["fn"]
+                != b[key][metric]["tp"] + b[key][metric]["fn"]
+            ):
+                raise ValueError(f"paired {metric} truth denominators differ for {key}")
     attested = all(
         evidence.get("attested")
         and report.get("integrity", {}).get("fully_attested") is True
