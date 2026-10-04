@@ -183,10 +183,7 @@ def test_invoked_local_helper_mutation_qualifies_copy(tmp_path: Path) -> None:
     )
     main = tmp_path / "main.py"
     main.write_text(
-        "def endpoint():\n"
-        "    payload = {'x': 0}\n"
-        "    dispatch(payload)\n"
-        "    return payload\n"
+        "def endpoint():\n    payload = {'x': 0}\n    dispatch(payload)\n    return payload\n"
     )
 
     result = EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 3)])

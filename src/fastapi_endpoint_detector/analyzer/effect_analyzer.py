@@ -239,9 +239,10 @@ class EffectAnalyzer:
                 return False
             if isinstance(node, ast.arg) and node.arg == "dict":
                 return False
-            if isinstance(
-                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-            ) and node.name == "dict":
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                and node.name == "dict"
+            ):
                 return False
             if isinstance(node, ast.alias) and (node.asname or node.name.split(".")[0]) == "dict":
                 return False
