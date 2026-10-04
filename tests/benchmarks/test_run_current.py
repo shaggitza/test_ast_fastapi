@@ -100,6 +100,17 @@ class NormalizeEndpointsTests(unittest.TestCase):
         self.assertEqual(candidates[0]["confidence"], "medium")
 
 
+class ExplicitPerformanceModeTests(unittest.TestCase):
+    def test_explicit_mode_routes_to_synthetic_harness_before_corpus_loading(self) -> None:
+        with mock.patch(
+            "benchmarks.real_world.measure_incremental.main", return_value=0
+        ) as performance_main:
+            result = run_current.main(["--performance-mode", "--performance-repeats", "3"])
+
+        self.assertEqual(result, 0)
+        performance_main.assert_called_once_with(["--repeats", "3"])
+
+
 class ResolutionAndSkipTests(unittest.TestCase):
     def config(self, temporary: Path, **overrides: object) -> run_current.RunConfig:
         values: dict[str, object] = {
