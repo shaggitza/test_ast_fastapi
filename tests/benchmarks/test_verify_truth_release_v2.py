@@ -76,9 +76,12 @@ def _reseal(root: Path, manifest: dict[str, object]) -> None:
 
 def _resign(root: Path, manifest: dict[str, object]) -> None:
     payload = {key: value for key, value in manifest.items() if key != "content_root"}
-    manifest["content_root"] = "sha256:" + hashlib.sha256(
-        b"ground-truth-release-manifest-v2\0" + canonical_json(payload)
-    ).hexdigest()
+    manifest["content_root"] = (
+        "sha256:"
+        + hashlib.sha256(
+            b"ground-truth-release-manifest-v2\0" + canonical_json(payload)
+        ).hexdigest()
+    )
     (root / "manifest.json").write_bytes(canonical_json(manifest))
 
 
@@ -211,10 +214,7 @@ def test_duplicate_truth_identity_and_distinct_unknown_counts(tmp_path: Path) ->
     first["status"] = "unknown"
     second = dict(first, pr=2, terminal_status="not_evaluable", status="not_evaluable")
     (root / "broad-truth.jsonl").write_bytes(
-        canonical_json(first).rstrip(b"\n")
-        + b"\n"
-        + canonical_json(second).rstrip(b"\n")
-        + b"\n"
+        canonical_json(first).rstrip(b"\n") + b"\n" + canonical_json(second).rstrip(b"\n") + b"\n"
     )
     manifest["terminal_counts"] = {
         "positive": 0,
