@@ -1675,6 +1675,51 @@ def test_broker_freeze_lease_fails_closed_without_trusted_provider() -> None:
         run._require_exclusive_broker_freeze_lease()
 
 
+def test_serve_broker_api_fails_closed_before_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(run, "_broker_limits", pytest.fail)
+    with pytest.raises(
+        run.GroundTruthRunError,
+        match="trusted exclusive broker freeze lease unavailable",
+    ):
+        run.serve_broker(
+            tmp_path,
+            tmp_path / "broker.sock",
+            tmp_path / "binding.json",
+            1,
+            tmp_path / "ledger",
+            tmp_path / "execution",
+        )
+
+
+def test_serve_broker_cli_fails_closed_at_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(run, "_broker_limits", pytest.fail)
+    with pytest.raises(
+        run.GroundTruthRunError,
+        match="trusted exclusive broker freeze lease unavailable",
+    ):
+        run.main(
+            [
+                "--root",
+                str(tmp_path),
+                "serve-broker",
+                "--socket",
+                str(tmp_path / "broker.sock"),
+                "--binding",
+                str(tmp_path / "binding.json"),
+                "--ledger-root",
+                str(tmp_path / "ledger"),
+                "--execution-root",
+                str(tmp_path / "execution"),
+                "--deadline-unix-ms",
+                "1",
+            ]
+        )
+
+
 def _generation2_attempt(execution: Path) -> tuple[Path, dict[str, Any]]:
     attempts = _private(execution / "attempts")
     attempt = _private(attempts / A)

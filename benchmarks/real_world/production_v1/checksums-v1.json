@@ -2,11 +2,11 @@
   "files": {
     "benchmarks/real_world/ground_truth_campaign_v1.py": "sha256:994b6c8f1c3e03021fa461d7bd07cbfaf471c26dfbd330998219e766568a3f44",
     "benchmarks/real_world/ground_truth_packet_v1.py": "sha256:76d7efe22dbb91136d975afe71c1d66e317d76fd0c45b53247a240cd608f28d6",
-    "benchmarks/real_world/ground_truth_run_v1.py": "sha256:89a09c20bd1023b557f2a0a1ca8a3436349915e5e8f6f1804bd7748223381a7b",
+    "benchmarks/real_world/ground_truth_run_v1.py": "sha256:574a851dd78f7518a15ab6f3d21f480c888b4ebf779b770fd6c0d13335bbf40a",
     "benchmarks/real_world/ground_truth_source_v1.py": "sha256:aa94e387d7f3477e48e7b4e9b4d2396820088f3403cb01bac03ef468e123cd43",
     "benchmarks/real_world/ground_truth_submit_v1.py": "sha256:1dcd23c2d9869e3802c31e37c0aab99b1bde922390a4990f4abcdcb7a1d7f27b",
     "benchmarks/real_world/pilot_packet_v2.py": "sha256:7347c6fa91afb7122707980369c273c50419d4de654bdd9c4e57b3d006651895",
-    "benchmarks/real_world/production_v1/README.md": "sha256:891bdc04f16246bf91ed8ddb89e9fbbed22e1dba8752bd5ac03c77687ffe7fc9",
+    "benchmarks/real_world/production_v1/README.md": "sha256:1e998176be7a9b958888e5ddc9c8bf4fb632d2aeaa0090eb252ec4e22749a6f7",
     "benchmarks/real_world/production_v1/assignments-v1.json": "sha256:93daeb3aa957737a24b48345e753201f616cd9fefd968ee593461896a41e5f87",
     "benchmarks/real_world/production_v1/campaign-manifest-schema-v1.json": "sha256:28ffac7ec5fc52774fee4eb78c62eb91f0daf799feec9e9ab9e20af3f1629be4",
     "benchmarks/real_world/production_v1/campaign-policy-v1.json": "sha256:49dde2c0a0b1d38586f0219af0bc3cfeb484672ab28f749d487eff783050a630",

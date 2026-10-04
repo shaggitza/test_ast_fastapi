@@ -4456,6 +4456,7 @@ def serve_broker(
     ledger: Path,
     execution_root: Path,
 ) -> int:
+    _require_exclusive_broker_freeze_lease()
     _broker_limits()
     attestation = _runtime_attestation(root, execution_root)
     _require_current_broker_bundle(root, execution_root, attestation)

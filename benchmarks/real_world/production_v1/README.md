@@ -112,7 +112,12 @@ host has no trusted exclusive freeze-lease provider or enforced read-only mount
 that can protect the bundle from prepare through finalization. Owner-controlled
 mode bits and point-in-time hashes do not satisfy that requirement. Runtime
 execution must remain disabled until an externally trusted mechanism can issue
-and hold an attested exclusive freeze lease across that entire interval.
+and hold an attested exclusive freeze lease across that entire interval. The
+Python interpreter, standard library, dynamically linked runtime, and installed
+dependency closure are also outside the bundle and are not content-pinned or
+attested. Those remain separate runtime-integrity blockers even if a bundle
+freeze provider is later added. The `serve-broker` API and CLI enforce the same
+fail-closed lease gate before broker startup.
 
 Authorization is single-use. Every fallible source, cache, profile, output-parent,
 and inventory check completes before its durable ledger append. Build requires that
