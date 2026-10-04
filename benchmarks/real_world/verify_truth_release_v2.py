@@ -281,7 +281,7 @@ def verify_release(  # noqa: PLR0912, PLR0915
     actual_counts = {terminal: list(records.values()).count(terminal) for terminal in TERMINAL}
     if len(records) != selected or actual_counts != counts:
         _fail("broad-truth rows do not match selected and terminal denominators")
-    expected_release = _release_truth(verified_contents, manifest)
+    expected_release = _release_truth(verified_contents, manifest, selected)
     if set(records) != set(expected_release):
         _fail("broad-truth identities do not match release membership")
     for identity, terminal in records.items():
@@ -349,24 +349,53 @@ def _jsonl_adjudications(raw: bytes) -> dict[tuple[str, int], str]:
     return adjudications
 
 
-def _release_truth(
-    contents: dict[str, bytes], manifest: dict[str, Any]
+def _release_truth(  # noqa: PLR0912
+    contents: dict[str, bytes], manifest: dict[str, Any], selected: int
 ) -> dict[tuple[str, int], tuple[str, list[dict[str, Any]]]]:
     release_id, corpus_id = manifest.get("release_id"), manifest.get("corpus_id")
     if not isinstance(release_id, str) or not release_id:
         _fail("release id is missing")
     if not isinstance(corpus_id, str) or not corpus_id:
         _fail("release corpus id is missing")
-    repositories = {
-        row.get("repository_id"): row.get("full_name")
-        for row in _jsonl_rows(contents["tables/repository.jsonl"], "tables/repository.jsonl")
-        if isinstance(row.get("repository_id"), str)
-    }
-    pull_requests = {
-        row.get("pr_id"): (repositories.get(row.get("repository_id")), row.get("number"))
-        for row in _jsonl_rows(contents["tables/pull_request.jsonl"], "tables/pull_request.jsonl")
-        if isinstance(row.get("pr_id"), str)
-    }
+    corpus_rows = _jsonl_rows(contents["tables/corpus.jsonl"], "tables/corpus.jsonl")
+    if (
+        len(corpus_rows) != 1
+        or corpus_rows[0].get("corpus_id") != corpus_id
+        or type(corpus_rows[0].get("selected_count")) is not int
+        or corpus_rows[0]["selected_count"] != selected
+    ):
+        _fail("canonical corpus table does not match release identity and count")
+    repositories: dict[str, str] = {}
+    for row in _jsonl_rows(contents["tables/repository.jsonl"], "tables/repository.jsonl"):
+        repository_id, full_name = row.get("repository_id"), row.get("full_name")
+        if (
+            not isinstance(repository_id, str)
+            or not repository_id
+            or not isinstance(full_name, str)
+            or not full_name
+            or row.get("corpus_id") != corpus_id
+            or repository_id in repositories
+        ):
+            _fail("canonical repository row has invalid or foreign corpus identity")
+        repositories[repository_id] = full_name
+    pull_requests: dict[str, tuple[str, int]] = {}
+    for row in _jsonl_rows(contents["tables/pull_request.jsonl"], "tables/pull_request.jsonl"):
+        pr_id = row.get("pr_id")
+        repository = repositories.get(row.get("repository_id"))
+        number = row.get("number")
+        if (
+            not isinstance(pr_id, str)
+            or not pr_id
+            or pr_id in pull_requests
+            or row.get("corpus_id") != corpus_id
+            or not isinstance(repository, str)
+            or type(number) is not int
+            or number < 1
+        ):
+            _fail("canonical pull-request row has invalid or foreign corpus identity")
+        pull_requests[pr_id] = (repository, number)
+    if len(pull_requests) != selected:
+        _fail("canonical pull-request rows do not match selected corpus count")
     adjudications = {
         row.get("adjudication_id"): row
         for row in _jsonl_rows(contents["tables/adjudication.jsonl"], "tables/adjudication.jsonl")

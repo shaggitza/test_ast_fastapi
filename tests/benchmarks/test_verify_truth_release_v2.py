@@ -72,6 +72,9 @@ def _reseal(root: Path, manifest: dict[str, object]) -> None:
         metadata["bytes"] = len(content)
         metadata["rows"] = content.count(b"\n")
         metadata["sha256"] = "sha256:" + hashlib.sha256(content).hexdigest()
+        if name.startswith("tables/"):
+            table = name.removeprefix("tables/").removesuffix(".jsonl")
+            manifest["canonical_tables"][table] = dict(metadata)
     _resign(root, manifest)
 
 
@@ -285,6 +288,18 @@ def test_self_consistent_release_rejects_entrypoints_changed_from_canonical(
     manifest = json.loads((root / "manifest.json").read_text())
     _reseal(root, manifest)
     with pytest.raises(GroundTruthError, match="entrypoints do not match canonical adjudication"):
+        verify_release(root)
+
+
+def test_release_membership_rejects_pull_request_from_another_corpus(tmp_path: Path) -> None:
+    root = _release(tmp_path)
+    pull_requests_path = root / "tables/pull_request.jsonl"
+    pull_request = json.loads(pull_requests_path.read_text())
+    pull_request["corpus_id"] = "different-corpus"
+    pull_requests_path.write_bytes(canonical_json(pull_request))
+    manifest = json.loads((root / "manifest.json").read_text())
+    _reseal(root, manifest)
+    with pytest.raises(GroundTruthError, match="foreign corpus identity"):
         verify_release(root)
 
 
