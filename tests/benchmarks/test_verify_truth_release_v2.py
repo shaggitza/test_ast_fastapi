@@ -17,7 +17,7 @@ from benchmarks.real_world.ground_truth_v2.store import (
     initialize_database,
     release,
 )
-from benchmarks.real_world.verify_truth_release_v2 import verify_release
+from benchmarks.real_world.verify_truth_release_v2 import main, verify_release
 from tests.benchmarks.ground_truth_helpers import (
     adjudication,
     corpus,
@@ -107,6 +107,28 @@ def test_verify_release_rejects_manifest_root_tampering(tmp_path: Path) -> None:
     manifest["selected_prs"] = 2
     (root / "manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(GroundTruthError, match="content root mismatch"):
+        verify_release(root)
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        "publication-review.json",
+        "reviews.jsonl",
+        "adjudications.jsonl",
+        "artifact-index.jsonl",
+        "tables/release_pr.jsonl",
+    ],
+)
+def test_self_consistent_release_requires_mandatory_members(tmp_path: Path, member: str) -> None:
+    root = _release(tmp_path)
+    manifest = json.loads((root / "manifest.json").read_text())
+    manifest["files"].pop(member)
+    (root / member).unlink()
+    if member.startswith("tables/"):
+        manifest["canonical_tables"].pop("release_pr")
+    _resign(root, manifest)
+    with pytest.raises(GroundTruthError, match="mandatory"):
         verify_release(root)
 
 
@@ -201,7 +223,57 @@ def test_expected_content_root_and_symlink_aliases(tmp_path: Path) -> None:
         verify_release(alias)
 
 
-def test_duplicate_truth_identity_and_distinct_unknown_counts(tmp_path: Path) -> None:
+def test_rejects_truth_identity_not_in_released_corpus(tmp_path: Path) -> None:
+    root = _release(tmp_path)
+    row = json.loads((root / "broad-truth.jsonl").read_text())
+    row["pr"] = 999
+    (root / "broad-truth.jsonl").write_bytes(canonical_json(row))
+    manifest = json.loads((root / "manifest.json").read_text())
+    _reseal(root, manifest)
+    with pytest.raises(GroundTruthError, match="identities do not match release membership"):
+        verify_release(root)
+
+
+@pytest.mark.parametrize("member", ["publication-review.json", "tables/release_pr.jsonl"])
+def test_rejects_missing_mandatory_release_members(tmp_path: Path, member: str) -> None:
+    root = _release(tmp_path)
+    (root / member).unlink()
+    manifest = json.loads((root / "manifest.json").read_text())
+    manifest["files"].pop(member)
+    if member.startswith("tables/"):
+        table = member.removeprefix("tables/").removesuffix(".jsonl")
+        manifest["canonical_tables"].pop(table)
+    _resign(root, manifest)
+    with pytest.raises(GroundTruthError, match="mandatory"):
+        verify_release(root)
+
+
+def test_cli_accepts_independently_trusted_content_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _release(tmp_path)
+    manifest = json.loads((root / "manifest.json").read_text())
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "verify_truth_release_v2.py",
+            str(root),
+            "--expected-content-root",
+            manifest["content_root"],
+        ],
+    )
+    main()
+    assert json.loads(capsys.readouterr().out)["content_root"] == manifest["content_root"]
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["verify_truth_release_v2.py", str(root), "--expected-content-root", "sha256:wrong"],
+    )
+    with pytest.raises(GroundTruthError, match="trusted expected root"):
+        main()
+
+
+def test_duplicate_truth_identity_and_membership_substitution_rejected(tmp_path: Path) -> None:
     root = _release(tmp_path)
     first = json.loads((root / "broad-truth.jsonl").read_text())
     duplicate = dict(first)
@@ -222,21 +294,3 @@ def test_duplicate_truth_identity_and_distinct_unknown_counts(tmp_path: Path) ->
     _reseal(root, manifest)
     with pytest.raises(GroundTruthError, match="duplicate broad-truth record"):
         verify_release(root)
-
-    first["pr"] = 1
-    first["terminal_status"] = "unknown"
-    first["status"] = "unknown"
-    second = dict(first, pr=2, terminal_status="not_evaluable", status="not_evaluable")
-    (root / "broad-truth.jsonl").write_bytes(
-        canonical_json(first).rstrip(b"\n") + b"\n" + canonical_json(second).rstrip(b"\n") + b"\n"
-    )
-    manifest["terminal_counts"] = {
-        "positive": 0,
-        "negative_control": 0,
-        "unknown": 1,
-        "not_evaluable": 1,
-    }
-    _reseal(root, manifest)
-    result = verify_release(root)
-    assert result["terminal_counts"]["unknown"] == 1
-    assert result["terminal_counts"]["not_evaluable"] == 1

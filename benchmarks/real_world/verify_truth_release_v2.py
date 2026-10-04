@@ -22,6 +22,45 @@ from benchmarks.real_world.ground_truth_v2.schema import canonical_json
 
 TERMINAL = {"positive", "negative_control", "unknown", "not_evaluable"}
 COUNTS = set(TERMINAL)
+REQUIRED_RELEASE_FILES = {
+    "broad-truth.jsonl",
+    "reviews.jsonl",
+    "adjudications.jsonl",
+    "artifact-index.jsonl",
+    "publication-review.json",
+}
+REQUIRED_CANONICAL_TABLES = {
+    "schema_migration",
+    "corpus",
+    "repository",
+    "pull_request",
+    "snapshot",
+    "remote_diff",
+    "import_batch",
+    "evidence_location",
+    "reviewer_run",
+    "review_changed_symbol",
+    "review_claim",
+    "review_entrypoint",
+    "review_evidence_edge",
+    "review_unknown",
+    "review_negative_assessment",
+    "adjudication",
+    "adjudication_decision",
+    "decision_source_claim",
+    "decision_source_terminal",
+    "decision_source_unknown",
+    "decision_source_negative",
+    "canonical_entrypoint",
+    "adjudication_evidence_edge",
+    "adjudication_unknown",
+    "adjudication_negative_assessment",
+    "scope_definition",
+    "scope_membership",
+    "publication_review",
+    "release",
+    "release_pr",
+}
 
 
 def _fail(message: str) -> None:
@@ -97,6 +136,22 @@ def verify_release(  # noqa: PLR0912, PLR0915
     files = manifest.get("files")
     if not isinstance(files, dict) or not files:
         _fail("release manifest file inventory is missing")
+    if not REQUIRED_RELEASE_FILES.issubset(files):
+        _fail("release manifest is missing mandatory release members")
+    canonical_tables = manifest.get("canonical_tables")
+    table_names = {
+        name.removeprefix("tables/").removesuffix(".jsonl")
+        for name in files
+        if isinstance(name, str) and name.startswith("tables/") and name.endswith(".jsonl")
+    }
+    if (
+        not isinstance(canonical_tables, dict)
+        or set(canonical_tables) != table_names
+        or not REQUIRED_CANONICAL_TABLES.issubset(table_names)
+    ):
+        _fail("release manifest is missing mandatory canonical tables")
+    if any(canonical_tables[name] != files[f"tables/{name}.jsonl"] for name in canonical_tables):
+        _fail("canonical table metadata does not match the release file inventory")
     expected_names = {"manifest.json"} | set(files)
     observed_names: set[str] = set()
     for name, metadata in files.items():
@@ -202,6 +257,12 @@ def verify_release(  # noqa: PLR0912, PLR0915
     actual_counts = {terminal: list(records.values()).count(terminal) for terminal in TERMINAL}
     if len(records) != selected or actual_counts != counts:
         _fail("broad-truth rows do not match selected and terminal denominators")
+    expected_identities = _release_membership(root, manifest)
+    if set(records) != expected_identities:
+        _fail("broad-truth identities do not match release membership")
+    adjudication_records = _jsonl_adjudications(root / "adjudications.jsonl")
+    if adjudication_records != records:
+        _fail("broad-truth rows do not match adjudication projection")
     return {
         "release_id": manifest.get("release_id"),
         "content_root": root_hash,
@@ -212,11 +273,102 @@ def verify_release(  # noqa: PLR0912, PLR0915
     }
 
 
+def _jsonl_rows(path: Path) -> list[dict[str, Any]]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise GroundTruthError(f"release table is missing or unreadable: {path.name}") from exc
+    rows: list[dict[str, Any]] = []
+    for line_number, line in enumerate(lines, 1):
+        try:
+            row = _loads(line)
+        except (json.JSONDecodeError, GroundTruthError) as exc:
+            raise GroundTruthError(
+                f"invalid release table row at {path.name}:{line_number}"
+            ) from exc
+        if not isinstance(row, dict):
+            _fail(f"malformed release table row at {path.name}:{line_number}")
+        rows.append(row)
+    return rows
+
+
+def _jsonl_adjudications(path: Path) -> dict[tuple[str, int], str]:
+    adjudications: dict[tuple[str, int], str] = {}
+    for row in _jsonl_rows(path):
+        repository, number, terminal = (
+            row.get("repository"),
+            row.get("pr"),
+            row.get("terminal_status"),
+        )
+        if (
+            not isinstance(repository, str)
+            or not repository
+            or type(number) is not int
+            or number < 1
+            or not isinstance(terminal, str)
+            or terminal not in TERMINAL
+        ):
+            _fail(f"invalid adjudication row in {path.name}")
+        identity = (repository, number)
+        if identity in adjudications:
+            _fail(f"duplicate adjudication identity in {path.name}: {identity}")
+        adjudications[identity] = terminal
+    return adjudications
+
+
+def _release_membership(root: Path, manifest: dict[str, Any]) -> set[tuple[str, int]]:
+    release_id, corpus_id = manifest.get("release_id"), manifest.get("corpus_id")
+    if not isinstance(release_id, str) or not release_id:
+        _fail("release id is missing")
+    if not isinstance(corpus_id, str) or not corpus_id:
+        _fail("release corpus id is missing")
+    repositories = {
+        row.get("repository_id"): row.get("full_name")
+        for row in _jsonl_rows(root / "tables/repository.jsonl")
+        if isinstance(row.get("repository_id"), str)
+    }
+    pull_requests = {
+        row.get("pr_id"): (repositories.get(row.get("repository_id")), row.get("number"))
+        for row in _jsonl_rows(root / "tables/pull_request.jsonl")
+        if isinstance(row.get("pr_id"), str)
+    }
+    memberships = _jsonl_rows(root / "tables/release_pr.jsonl")
+    identities: set[tuple[str, int]] = set()
+    for row in memberships:
+        if row.get("release_id") != release_id:
+            continue
+        if row.get("corpus_id") != corpus_id:
+            _fail("release membership has the wrong corpus id")
+        identity = pull_requests.get(row.get("pr_id"))
+        if (
+            identity is None
+            or not isinstance(identity[0], str)
+            or not identity[0]
+            or type(identity[1]) is not int
+            or identity[1] < 1
+        ):
+            _fail("release membership references an unknown pull request")
+        identities.add((identity[0], identity[1]))
+    if len(identities) != len([row for row in memberships if row.get("release_id") == release_id]):
+        _fail("release membership contains duplicate pull request identities")
+    return identities
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("release", type=Path, help="directory containing manifest.json")
+    parser.add_argument(
+        "--expected-content-root",
+        help="independently trusted sha256 content root to require",
+    )
     args = parser.parse_args()
-    print(json.dumps(verify_release(args.release), sort_keys=True, indent=2))
+    print(
+        json.dumps(
+            verify_release(args.release, expected_content_root=args.expected_content_root),
+            sort_keys=True,
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":
