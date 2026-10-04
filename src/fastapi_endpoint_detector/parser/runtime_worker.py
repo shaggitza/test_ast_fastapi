@@ -67,10 +67,18 @@ def _run(result_path: Path) -> int:
         module_name = request.get("module_name")
         if module_name is not None and not isinstance(module_name, str):
             raise ValueError("runtime worker module_name must be a string or null")
+        app_entry = request.get("app_entry")
+        bootstrap_entry = request.get("bootstrap_entry")
+        if app_entry is not None and not isinstance(app_entry, str):
+            raise ValueError("runtime worker app_entry must be a string or null")
+        if bootstrap_entry is not None and not isinstance(bootstrap_entry, str):
+            raise ValueError("runtime worker bootstrap_entry must be a string or null")
         extractor = FastAPIExtractor(
             Path(_required_string(request, "app_path")),
             app_variable=_required_string(request, "app_variable"),
             module_name=module_name,
+            app_entry=app_entry,
+            bootstrap_entry=bootstrap_entry,
             dependency_max_depth=_positive_integer(request, "dependency_max_depth"),
             dependency_max_nodes=_positive_integer(request, "dependency_max_nodes"),
             dependency_max_work=_positive_integer(request, "dependency_max_work"),

@@ -405,6 +405,58 @@ def test_list_and_analyze_preserve_equivalent_app_configuration(tmp_path: Path) 
     assert "analyze" in analyzed
 
 
+def test_selected_runtime_entry_is_explicit_in_worker_argv(tmp_path: Path) -> None:
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "main.py").write_text("app = None\n", encoding="utf-8")
+    executor = _executor(tmp_path)
+    executor._resolved_image = _DIGEST
+    command = executor._container_command(
+        app,
+        None,
+        "application",
+        "json",
+        tmp_path / "cid",
+        "selected-entry",
+        "project.factory:create_app",
+        "project.bootstrap:register_routes",
+    )
+    assert command[-13:] == [
+        "python",
+        "-m",
+        "fastapi_endpoint_detector.parser.produce_runtime",
+        "--app",
+        "/workspace/app",
+        "--app-var",
+        "application",
+        "--output-limit-bytes",
+        str(executor.policy.output_limit_bytes),
+        "--app-entry",
+        "project.factory:create_app",
+        "--bootstrap-entry",
+        "project.bootstrap:register_routes",
+    ]
+
+
+def test_selected_entry_with_diff_fails_explicitly(tmp_path: Path) -> None:
+    app = tmp_path / "app"
+    app.mkdir()
+    diff = tmp_path / "change.diff"
+    diff.write_text("", encoding="utf-8")
+    executor = _executor(tmp_path)
+    executor._resolved_image = _DIGEST
+    with pytest.raises(VMExecutorError, match="CLI integration"):
+        executor._container_command(
+            app,
+            diff,
+            "app",
+            "json",
+            tmp_path / "cid",
+            "selected-entry",
+            "project.factory:create_app",
+        )
+
+
 def test_policy_provenance_attests_digest_seccomp_and_environment(tmp_path: Path) -> None:
     executor = _executor(tmp_path)
     executor._resolved_image = _DIGEST

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
+from benchmarks.real_world import _secure_publish
 from benchmarks.real_world.compare_runtime import compare, compare_target_baseline
 from benchmarks.real_world.produce_runtime import (
     CommandRunner,
@@ -152,7 +154,7 @@ def test_default_runtime_gate_abstains_without_calling_runtime(tmp_path: Path) -
     runtime = json.loads(outputs["runtime"].read_text(encoding="utf-8"))
     assert runtime["status"] == "failure"
     assert runtime["failure"]["phase"] == "unavailable"
-    assert "trusted host" in runtime["failure"]["message"]
+    assert "independently trusted" in runtime["failure"]["message"]
     comparison = compare(outputs["secure"], outputs["runtime"])
     assert comparison["quality_eligible"] is False
 
@@ -192,7 +194,7 @@ def test_runner_failures_are_accounted_without_partial_claims(
         assert secure["timing"]["list"]["status"] == "not_measured"
 
 
-def test_matching_host_evidence_allows_fake_runtime_lane(tmp_path: Path) -> None:
+def test_caller_supplied_matching_json_cannot_open_runtime_lane(tmp_path: Path) -> None:
     runner = FakeRunner()
     first = produce_snapshot_pair(
         _inputs(tmp_path),
@@ -209,20 +211,73 @@ def test_matching_host_evidence_allows_fake_runtime_lane(tmp_path: Path) -> None
         runtime_evidence=evidence,
     )
 
-    assert runner.calls[-4:] == [
-        ("secure", "list"),
-        ("secure", "impact"),
-        ("runtime", "list"),
-        ("runtime", "impact"),
-    ]
-    result = compare(outputs["secure"], outputs["runtime"])
-    assert result["paired_success"] is True
-    assert result["quality_eligible"] is True
+    assert runner.calls[-2:] == [("secure", "list"), ("secure", "impact")]
     runtime = json.loads(outputs["runtime"].read_text(encoding="utf-8"))
-    assert runtime["timing"]["list"] == {"status": "measured", "seconds": 0.25}
+    assert runtime["status"] == "failure"
+    assert "independently trusted" in runtime["failure"]["message"]
+    assert compare(outputs["secure"], outputs["runtime"])["quality_eligible"] is False
 
 
-def test_runtime_factory_configuration_is_kept_as_structured_abstention(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        lambda receipt: replace(receipt, canary_receipt_sha256="sha256:" + "f" * 64),
+        lambda receipt: replace(receipt, runtime_version="stale runtime version"),
+        lambda receipt: replace(receipt, image_digest="registry.invalid/image@sha256:" + "0" * 64),
+        lambda receipt: replace(receipt, host_boundary="caller-claimed-gvisor"),
+    ],
+    ids=["forged-digest", "stale", "mismatched-image", "forged-host"],
+)
+def test_forged_stale_and_mismatched_receipts_never_open_lane(
+    tmp_path: Path, tamper: Any
+) -> None:
+    runner = FakeRunner()
+    initial = produce_snapshot_pair(
+        _inputs(tmp_path),
+        EntryConfiguration(None, None, "app", "mypy"),
+        tmp_path / "initial",
+        runner=runner,
+    )
+    receipt = tamper(_evidence(initial, _inputs(tmp_path)))
+    outputs = produce_snapshot_pair(
+        _inputs(tmp_path),
+        EntryConfiguration(None, None, "app", "mypy"),
+        tmp_path / "tampered",
+        runner=runner,
+        runtime_evidence=receipt,
+    )
+
+    assert runner.calls[-2:] == [("secure", "list"), ("secure", "impact")]
+    runtime = json.loads(outputs["runtime"].read_text(encoding="utf-8"))
+    assert runtime["status"] == "failure"
+    assert "independently trusted" in runtime["failure"]["message"]
+
+
+def test_source_mutation_between_phases_aborts_before_next_lane(tmp_path: Path) -> None:
+    spec = _inputs(tmp_path)
+
+    class MutatingRunner(FakeRunner):
+        def __call__(self, mode: str, phase: str, request: Any) -> InvocationResult:
+            result = super().__call__(mode, phase, request)
+            if mode == "secure" and phase == "list":
+                (spec.app_path / "main.py").write_text("app = None\n", encoding="utf-8")
+            return result
+
+    runner = MutatingRunner()
+    outputs = produce_snapshot_pair(
+        spec,
+        EntryConfiguration(None, None, "app", "mypy"),
+        tmp_path / "mutation",
+        runner=runner,
+    )
+
+    secure = json.loads(outputs["secure"].read_text(encoding="utf-8"))
+    assert secure["failure"]["phase"] == "unavailable"
+    assert "snapshot checkout has uncommitted" in secure["failure"]["message"]
+    assert runner.calls == [("secure", "list")]
+
+
+def test_runtime_factory_configuration_is_kept_behind_closed_trust_gate(tmp_path: Path) -> None:
     runner = FakeRunner()
     initial = produce_snapshot_pair(
         _inputs(tmp_path),
@@ -242,7 +297,8 @@ def test_runtime_factory_configuration_is_kept_as_structured_abstention(tmp_path
     runtime = json.loads(outputs["runtime"].read_text(encoding="utf-8"))
     assert runtime["configuration"]["app_entry"] == "main:create_app"
     assert runtime["configuration"]["bootstrap_entry"] == "main:bootstrap"
-    assert runtime["failure"]["phase"] == "app_resolution"
+    assert runtime["failure"]["phase"] == "unavailable"
+    assert "independently trusted" in runtime["failure"]["message"]
     assert runner.calls[-2:] == [("secure", "list"), ("secure", "impact")]
     comparison = compare(outputs["secure"], outputs["runtime"])
     assert comparison["quality_eligible"] is False
@@ -262,6 +318,28 @@ def test_publication_never_overwrites_existing_artifact(tmp_path: Path) -> None:
         )
     assert existing.read_text(encoding="utf-8") == "canonical"
     assert not (out / "target-secure.json").exists()
+
+
+def test_matrix_publication_rolls_back_earlier_new_files_on_late_collision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    real_publish = _secure_publish.publish_exclusive_bytes
+    calls = 0
+
+    def collide_late(path: Path, content: bytes, **kwargs: Any) -> tuple[int, int]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise _secure_publish.SecurePathError("late collision")
+        return real_publish(path, content, **kwargs)
+
+    monkeypatch.setattr(_secure_publish, "publish_exclusive_bytes", collide_late)
+    with pytest.raises(_secure_publish.SecurePathError, match="rolled back 1"):
+        _secure_publish.publish_exclusive_batch([(first, b"a"), (second, b"b")])
+    assert not first.exists()
+    assert not second.exists()
 
 
 def test_target_baseline_orchestrator_publishes_comparator_valid_matrix(tmp_path: Path) -> None:

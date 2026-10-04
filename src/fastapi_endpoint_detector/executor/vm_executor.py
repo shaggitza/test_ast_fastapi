@@ -396,6 +396,8 @@ class VMExecutor:
         output_format: str,
         cidfile: Path,
         name: str,
+        app_entry: str | None = None,
+        bootstrap_entry: str | None = None,
     ) -> list[str]:
         self._verified_seccomp_hash()
         self._validated_hash(self.dependency_lock_hash, "dependency lock")
@@ -456,11 +458,42 @@ class VMExecutor:
             "--entrypoint",
             "/usr/bin/env",
         ]
-        cli = ["list", "--app", app_target, "--format", output_format, "--app-var", app_variable]
+        if app_entry is not None or bootstrap_entry is not None:
+            if diff_path is not None:
+                raise VMExecutorError(
+                    "selected runtime entries with diff analysis require CLI integration"
+                )
+            cli = [
+                "python",
+                "-m",
+                "fastapi_endpoint_detector.parser.produce_runtime",
+                "--app",
+                app_target,
+                "--app-var",
+                app_variable,
+                "--output-limit-bytes",
+                str(self.policy.output_limit_bytes),
+            ]
+            if app_entry is not None:
+                cli.extend(["--app-entry", app_entry])
+            if bootstrap_entry is not None:
+                cli.extend(["--bootstrap-entry", bootstrap_entry])
+        else:
+            cli = [
+                "fastapi-endpoint-detector",
+                "list",
+                "--app",
+                app_target,
+                "--format",
+                output_format,
+                "--app-var",
+                app_variable,
+            ]
         if diff_path is not None:
             diff = self._validated_mount_source(diff_path, "diff", allow_directory=False)
             command.extend(["--mount", self._mount(diff, "/workspace/change.diff")])
             cli = [
+                "fastapi-endpoint-detector",
                 "analyze",
                 "--app",
                 app_target,
@@ -474,7 +507,6 @@ class VMExecutor:
         command.append(self._resolve_image())
         command.append("-i")
         command.extend(f"{key}={value}" for key, value in sorted(self.CLEAN_ENV.items()))
-        command.append("fastapi-endpoint-detector")
         command.extend(cli)
         return command
 
@@ -623,6 +655,8 @@ class VMExecutor:
         diff_path: Path | None = None,
         app_variable: str = "app",
         output_format: str = "json",
+        app_entry: str | None = None,
+        bootstrap_entry: str | None = None,
     ) -> Any:
         """Run list/analyze with no host import and return bounded output."""
         with tempfile.TemporaryDirectory(prefix="endpoint-detector-cid-") as directory:
@@ -635,6 +669,8 @@ class VMExecutor:
                 output_format,
                 cidfile,
                 name,
+                app_entry,
+                bootstrap_entry,
             )
             stdout, _stderr = self._execute_bounded(command, cidfile, name)
         if output_format != "json":
@@ -648,9 +684,17 @@ class VMExecutor:
         self,
         app_path: Path,
         app_variable: str = "app",
+        app_entry: str | None = None,
+        bootstrap_entry: str | None = None,
     ) -> list[Endpoint]:
         """Deserialize runtime-list output into endpoint models when available."""
-        result = self.analyze_in_vm(app_path, app_variable=app_variable, output_format="json")
+        result = self.analyze_in_vm(
+            app_path,
+            app_variable=app_variable,
+            output_format="json",
+            app_entry=app_entry,
+            bootstrap_entry=bootstrap_entry,
+        )
         if not isinstance(result, dict) or not isinstance(result.get("endpoints"), list):
             raise VMExecutorError("runtime list output does not contain an endpoints array")
         try:

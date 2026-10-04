@@ -24,7 +24,7 @@ from typing import Any, Literal, Protocol
 from benchmarks.real_world._secure_publish import (
     SecurePathError,
     ensure_publishable,
-    publish_exclusive_bytes,
+    publish_exclusive_batch,
 )
 from benchmarks.real_world.benchmark_schema import BenchmarkSchemaError, strict_json_loads
 from benchmarks.real_world.compare_runtime import (
@@ -36,7 +36,6 @@ from benchmarks.real_world.compare_runtime import (
 Mode = Literal["secure", "runtime"]
 Snapshot = Literal["target", "baseline"]
 MODES: tuple[Mode, ...] = ("secure", "runtime")
-SHA = re.compile(r"sha256:[0-9a-f]{64}")
 IMAGE = re.compile(r"[^\s@]+@sha256:[0-9a-f]{64}")
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PROTECTED_ROOTS = (PROJECT_ROOT / "benchmarks",)
@@ -58,6 +57,7 @@ class SnapshotInput:
     source_snapshot_lock: Path
     runtime_image: str
     sbom: Path
+    diff_path_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -324,7 +324,62 @@ def _verify_source_revision(app_path: Path, expected: str) -> Path:
 
 def _tool_digest() -> str:
     package = PROJECT_ROOT / "src" / "fastapi_endpoint_detector"
-    return _source_digest(package)
+    digest = hashlib.sha256()
+    inputs = [
+        package,
+        PROJECT_ROOT / "benchmarks/real_world/produce_runtime.py",
+        PROJECT_ROOT / "benchmarks/real_world/compare_runtime.py",
+        PROJECT_ROOT / "benchmarks/real_world/benchmark_schema.py",
+        PROJECT_ROOT / "benchmarks/real_world/_secure_publish.py",
+        PROJECT_ROOT / "pyproject.toml",
+        PROJECT_ROOT / "uv.lock",
+    ]
+    for path in inputs:
+        if path.is_dir():
+            content = _source_digest(path).encode()
+            name = path.relative_to(PROJECT_ROOT).as_posix()
+        else:
+            content = path.read_bytes()
+            name = path.relative_to(PROJECT_ROOT).as_posix()
+        encoded = name.encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _revalidate_lane(request: RunRequest, source_hash: str, tool_hash: str) -> None:
+    """Recheck every pinned input immediately before each list/impact invocation."""
+    source_root = _verify_source_revision(
+        request.snapshot.app_path, request.snapshot.source_revision
+    )
+    if _source_digest(source_root) != source_hash:
+        raise ProducerError("snapshot source changed after producer preflight")
+    if _tool_digest() != tool_hash:
+        raise ProducerError("producer tool changed after producer preflight")
+    if (
+        _hash_file(request.snapshot.diff_path, "impact diff")
+        != request.snapshot.diff_path_sha256
+    ):
+        raise ProducerError("impact diff changed after producer preflight")
+    if (
+        _hash_file(request.snapshot.dependency_lock, "dependency lock")
+        != request.dependency_lock_sha256
+    ):
+        raise ProducerError("dependency lock changed after producer preflight")
+    if (
+        _hash_file(request.snapshot.source_snapshot_lock, "source snapshot lock")
+        != request.snapshot_lock_sha256
+    ):
+        raise ProducerError("source snapshot lock changed after producer preflight")
+    if _hash_file(request.snapshot.sbom, "snapshot SBOM") != request.sbom_sha256:
+        raise ProducerError("snapshot SBOM changed after producer preflight")
+    seccomp = (
+        PROJECT_ROOT / "src/fastapi_endpoint_detector/executor/policies/runtime-seccomp-v1.json"
+    )
+    if _hash_file(seccomp, "packaged seccomp policy") != request.seccomp_sha256:
+        raise ProducerError("packaged seccomp policy changed after producer preflight")
 
 
 def _runtime_policy_digest(request_values: dict[str, str]) -> str:
@@ -367,29 +422,13 @@ def _runtime_policy_digest(request_values: dict[str, str]) -> str:
 
 
 def _validate_evidence(evidence: TrustedRuntimeEvidence | None, request: RunRequest) -> None:
-    if evidence is None:
-        raise ProducerError(
-            "runtime gate closed: trusted host and image canary evidence is required"
-        )
-    if evidence.status != "passed" or evidence.host_boundary not in {"gvisor", "kata"}:
-        raise ProducerError("runtime gate closed: trusted gVisor/Kata canary has not passed")
-    if not evidence.runtime_version.strip():
-        raise ProducerError("runtime gate closed: runtime version is absent")
-    expected = {
-        "image_digest": request.runtime_image,
-        "dependency_lock_sha256": request.dependency_lock_sha256,
-        "snapshot_lock_sha256": request.snapshot_lock_sha256,
-        "sbom_sha256": request.sbom_sha256,
-        "seccomp_sha256": request.seccomp_sha256,
-        "policy_sha256": request.runtime_policy_sha256,
-    }
-    for field, value in expected.items():
-        if getattr(evidence, field) != value:
-            raise ProducerError(
-                f"runtime gate closed: canary evidence {field} does not match snapshot"
-            )
-    if not SHA.fullmatch(evidence.canary_receipt_sha256):
-        raise ProducerError("runtime gate closed: canary receipt digest is invalid")
+    # Evidence is intentionally rejected until an independently configured trust
+    # provider can authenticate receipt provenance, freshness, and host identity.
+    # A caller-written JSON record and its self-reported digest are not authority.
+    del evidence, request
+    raise ProducerError(
+        "runtime gate closed: no independently trusted canary receipt verifier is configured"
+    )
 
 
 def _measured(seconds: float | None) -> dict[str, Any]:
@@ -471,12 +510,16 @@ def _record(  # noqa: PLR0911
     results: dict[str, InvocationResult] = {}
     for phase in ("list", "impact"):
         try:
+            _revalidate_lane(request, source_hash, tool_hash)
             result = runner(mode, phase, request)
             if result.seconds is not None:
                 record["timing"][phase] = _measured(result.seconds)
             results[phase] = result
         except PhaseFailure as error:
             record["failure"] = {"phase": error.phase, "message": str(error)[:4096]}
+            return record
+        except ProducerError as error:
+            record["failure"] = {"phase": "unavailable", "message": str(error)[:4096]}
             return record
         except (OSError, TimeoutError) as error:
             phase_name = "timeout" if isinstance(error, TimeoutError) else "unavailable"
@@ -506,7 +549,7 @@ def _record(  # noqa: PLR0911
     return record
 
 
-def produce_snapshot_pair(  # noqa: PLR0912
+def produce_snapshot_pair(
     snapshot: SnapshotInput,
     configuration: EntryConfiguration,
     output_directory: Path,
@@ -550,8 +593,14 @@ def produce_snapshot_pair(  # noqa: PLR0912
             "seccomp_sha256": seccomp_hash,
         }
     )
+    diff_hash = _hash_file(diff_path, "impact diff")
     request = RunRequest(
-        snapshot=replace(snapshot, app_path=app_path, diff_path=diff_path),
+        snapshot=replace(
+            snapshot,
+            app_path=app_path,
+            diff_path=diff_path,
+            diff_path_sha256=diff_hash,
+        ),
         configuration=configuration,
         dependency_lock_sha256=lock_hash,
         snapshot_lock_sha256=source_snapshot_lock_hash,
@@ -566,7 +615,7 @@ def produce_snapshot_pair(  # noqa: PLR0912
         "mode_options": {"secure": ["--secure-ast"], "runtime": ["--vm"]},
         "app_path": str(app_path),
         "diff_path": str(diff_path),
-        "diff_sha256": _hash_file(diff_path, "impact diff"),
+        "diff_sha256": diff_hash,
         "configuration": {
             "app_entry": configuration.app_entry,
             "bootstrap_entry": configuration.bootstrap_entry,
@@ -611,13 +660,15 @@ def produce_snapshot_pair(  # noqa: PLR0912
         }
         for destination in destinations.values():
             ensure_publishable(destination, forbidden_roots=PROTECTED_ROOTS)
-        for mode, record in artifacts.items():
-            destination = destinations[mode]
-            content = (
-                json.dumps(record, indent=2, sort_keys=True, allow_nan=False) + "\n"
-            ).encode()
-            publish_exclusive_bytes(destination, content, forbidden_roots=PROTECTED_ROOTS)
-            published[mode] = destination
+        batch = [
+            (
+                destinations[mode],
+                (json.dumps(record, indent=2, sort_keys=True, allow_nan=False) + "\n").encode(),
+            )
+            for mode, record in artifacts.items()
+        ]
+        publish_exclusive_batch(batch, forbidden_roots=PROTECTED_ROOTS)
+        published.update(destinations)
     except (SecurePathError, OSError, TypeError, ValueError) as error:
         # Exclusive publication ensures no existing artifact was overwritten. A
         # second-file collision can leave the first new artifact in place, so report it.
@@ -667,12 +718,13 @@ def produce_target_baseline(
         try:
             for destination in destinations.values():
                 ensure_publishable(destination, forbidden_roots=PROTECTED_ROOTS)
-            for key, source in staged.items():
-                publish_exclusive_bytes(
-                    destinations[key],
-                    source.read_bytes(),
-                    forbidden_roots=PROTECTED_ROOTS,
-                )
+            publish_exclusive_batch(
+                [
+                    (destinations[key], source.read_bytes())
+                    for key, source in staged.items()
+                ],
+                forbidden_roots=PROTECTED_ROOTS,
+            )
         except (SecurePathError, OSError) as error:
             raise ProducerError(
                 f"could not publish complete target/baseline matrix: {error}"

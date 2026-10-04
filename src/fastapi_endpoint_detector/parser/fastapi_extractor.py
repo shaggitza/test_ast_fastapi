@@ -40,6 +40,7 @@ from fastapi_endpoint_detector.models.endpoint import (
     EndpointMethod,
     HandlerInfo,
 )
+from fastapi_endpoint_detector.parser.runtime_entry import select_runtime_app
 
 
 class FastAPIExtractorError(Exception):
@@ -62,6 +63,8 @@ class FastAPIExtractor:
         app_variable: str = "app",
         module_name: str | None = None,
         *,
+        app_entry: str | None = None,
+        bootstrap_entry: str | None = None,
         timeout_seconds: float = 60.0,
         output_limit_bytes: int = 4 * 1024 * 1024,
         dependency_max_depth: int = 32,
@@ -103,6 +106,8 @@ class FastAPIExtractor:
         self.app_path = app_path.resolve()
         self.app_variable = app_variable
         self.module_name = module_name
+        self.app_entry = app_entry
+        self.bootstrap_entry = bootstrap_entry
         self.timeout_seconds = normalized_timeout
         for name, value in (
             ("dependency_max_depth", dependency_max_depth),
@@ -182,6 +187,19 @@ class FastAPIExtractor:
             FastAPIExtractorError: If the app cannot be loaded.
         """
         if self._app is not None:
+            return self._app
+
+        if self.app_entry is not None or self.bootstrap_entry is not None:
+            _module_name, import_root = self._import_context()
+            if self.app_path.is_dir():
+                import_root = self.app_path
+            self._app = select_runtime_app(
+                import_root,
+                app_path=self.app_path,
+                app_variable=self.app_variable,
+                app_entry=self.app_entry,
+                bootstrap_entry=self.bootstrap_entry,
+            )
             return self._app
 
         module_name, import_root = self._import_context()
@@ -990,6 +1008,8 @@ class FastAPIExtractor:
             "app_path": str(self.app_path),
             "app_variable": self.app_variable,
             "module_name": self.module_name,
+            "app_entry": self.app_entry,
+            "bootstrap_entry": self.bootstrap_entry,
             "output_limit_bytes": self.output_limit_bytes,
             "dependency_max_depth": self.dependency_max_depth,
             "dependency_max_nodes": self.dependency_max_nodes,
