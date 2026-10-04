@@ -1,7 +1,7 @@
-"""Finite source-only observations of HTTP and WebSocket clients.
+"""Bounded, source-only observations of literal JavaScript/TypeScript calls.
 
-This deliberately recognizes a small literal subset. It never executes client
-code and never infers server routes from arbitrary URLs.
+This scanner intentionally supports a small grammar instead of trying to
+interpret JavaScript. Unknown syntax is skipped or rejected conservatively.
 """
 
 from __future__ import annotations
@@ -17,31 +17,9 @@ from fastapi_endpoint_detector.models.endpoint import (
     EndpointMethod,
 )
 
-_LITERAL = r"(?P<quote>['\"])(?P<url>(?:https?://|wss?://|/|\./|\.\./)[^'\"`$\\]*)['\"]"
-_FETCH = re.compile(r"\bfetch\s*\(\s*" + _LITERAL)
-_FETCH_METHOD = re.compile(
-    r"\bfetch\s*\(\s*" + _LITERAL
-    + r"\s*,\s*\{[^}]*?\bmethod\s*:\s*(['\"])(?P<fetch_method>"
-    + r"get|post|put|patch|delete|head|options)\3",
-    re.I | re.S,
-)
-_AXIOS_METHOD = re.compile(
-    r"\baxios\.(?P<method>get|post|put|patch|delete|head|options)\s*\(\s*"
-    + _LITERAL,
-    re.I,
-)
-_WEBSOCKET = re.compile(r"\bnew\s+WebSocket\s*\(\s*" + _LITERAL)
-_AXIOS_CONFIG = re.compile(
-    r"\baxios\s*\(\s*\{[^}]*?\burl\s*:\s*" + _LITERAL
-    + r"[^}]*?\bmethod\s*:\s*(['\"])(?P<config_method>get|post|put|patch|delete|head|options)\3",
-    re.I | re.S,
-)
-
 
 @dataclass(frozen=True)
 class ClientObservation:
-    """One finite client call with query retained outside route identity."""
-
     source_path: Path
     line: int
     protocol: str
@@ -49,15 +27,18 @@ class ClientObservation:
     route_path: str
     query: str | None
     literal_url: str
+    start_offset: int = 0
+    end_offset: int = 0
+    origin: str | None = None
 
 
 @dataclass(frozen=True)
 class EstablishedSurface:
-    """Explicit server surface identifier and its established public method/path."""
-
     surface_id: str
     path: str
     method: str
+    origin: str | None = None
+    trusted: bool = False
 
 
 @dataclass(frozen=True)
@@ -66,98 +47,312 @@ class ClientSurfaceMatch:
     surface_id: str
 
 
-def _parse_url(value: str) -> tuple[str, str, str, str | None] | None:
-    parsed = urlsplit(value)
-    scheme = parsed.scheme.lower()
-    if scheme not in {"", "http", "https", "ws", "wss"} or parsed.fragment:
-        return None
-    if scheme in {"ws", "wss"}:
-        protocol, method = "websocket", "WEBSOCKET"
-    else:
-        protocol, method = "http", "GET"
-    path = parsed.path or "/"
-    if not path.startswith("/") or "//" in path or any(
-        part in {".", ".."} for part in path.split("/")
-    ):
-        return None
-    return protocol, method, path, parsed.query or None
+@dataclass(frozen=True)
+class _Token:
+    kind: str
+    value: str
+    start: int
+    end: int
 
 
-def extract_client_observations(
-    source: str,
-    source_path: Path | str = "<memory>",
-) -> tuple[ClientObservation, ...]:
-    """Extract literal fetch/axios/WebSocket calls from TS/JS source.
+_IDENT = re.compile(r"[A-Za-z_$][\w$]*")
 
-    Dynamic templates, concatenations and unsupported call shapes are omitted.
-    Query strings are retained in ``query`` and excluded from ``route_path``.
-    """
-    path = Path(source_path)
-    found: list[ClientObservation] = []
-    patterns = (
-        (_FETCH, "GET", "http"),
-        (_FETCH_METHOD, None, "http"),
-        (_AXIOS_METHOD, None, "http"),
-        (_WEBSOCKET, "WEBSOCKET", "websocket"),
-        (_AXIOS_CONFIG, None, "http"),
-    )
-    for pattern, fixed_method, fixed_protocol in patterns:
-        for match in pattern.finditer(source):
-            if pattern is _FETCH and re.match(
-                r"\s*,\s*\{[^}]*?\bmethod\s*:", source[match.end() :], re.S
-            ):
-                continue
-            parsed = _parse_url(match.group("url"))
-            if parsed is None:
-                continue
-            protocol, default_method, route_path, query = parsed
-            if fixed_protocol != protocol:
-                continue
-            method = (
-                fixed_method
-                or match.groupdict().get("method")
-                or match.groupdict().get("fetch_method")
-                or match.groupdict().get("config_method")
-                or default_method
-            )
-            start = match.start()
-            found.append(
-                ClientObservation(
-                    path,
-                    source.count("\n", 0, start) + 1,
-                    protocol,
-                    method.upper(),
-                    route_path,
-                    query,
-                    match.group("url"),
+
+def _tokens(source: str) -> list[_Token]:
+    out: list[_Token] = []
+    i, n = 0, len(source)
+    while i < n:
+        c = source[i]
+        if c.isspace():
+            i += 1
+            continue
+        if source.startswith("//", i):
+            j = source.find("\n", i + 2)
+            i = n if j < 0 else j + 1
+            continue
+        if source.startswith("/*", i):
+            j = source.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        if c in "'\"`":
+            quote, start = c, i
+            i += 1
+            escaped = False
+            while i < n:
+                ch = source[i]
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == quote:
+                    i += 1
+                    break
+                i += 1
+            else:
+                out.append(_Token("invalid", "", start, n))
+                break
+            raw = source[start + 1 : i - 1]
+            # Templates are only accepted if they contain no interpolation.
+            out.append(
+                _Token(
+                    "string"
+                    if quote != "`" or ("${" not in raw and "`" not in raw)
+                    else "template",
+                    raw,
+                    start,
+                    i,
                 )
             )
-    # Overlapping syntax is possible; preserve one observation per source occurrence.
-    unique = {(item.line, item.protocol, item.method, item.literal_url): item for item in found}
-    return tuple(
-        sorted(unique.values(), key=lambda item: (item.line, item.method, item.literal_url))
-    )
+            continue
+        m = _IDENT.match(source, i)
+        if m:
+            out.append(_Token("id", m.group(), i, m.end()))
+            i = m.end()
+            continue
+        out.append(_Token("punct", c, i, i + 1))
+        i += 1
+    return out
+
+
+def _split_args(tokens: list[_Token], opening: int) -> tuple[list[list[_Token]], int] | None:
+    pairs = {"(": ")", "{": "}", "[": "]"}
+    if opening >= len(tokens) or tokens[opening].value != "(":
+        return None
+    stack = [")"]
+    args: list[list[_Token]] = []
+    begin = opening + 1
+    for pos in range(opening + 1, len(tokens)):
+        v = tokens[pos].value
+        if v in pairs:
+            stack.append(pairs[v])
+        elif v in ")}]":
+            if not stack or stack[-1] != v:
+                return None
+            stack.pop()
+            if not stack:
+                if pos > begin or args:
+                    args.append(tokens[begin:pos])
+                return args, pos
+        elif v == "," and len(stack) == 1:
+            args.append(tokens[begin:pos])
+            begin = pos + 1
+    return None
+
+
+def _literal(arg: list[_Token]) -> str | None:
+    if len(arg) == 1 and arg[0].kind == "string":
+        return arg[0].value
+    return None
+
+
+def _parse_url(  # noqa: PLR0911
+    value: str,
+) -> tuple[str, str, str, str | None, str | None] | None:
+    try:
+        parsed = urlsplit(value)
+        scheme = parsed.scheme.lower()
+        if (
+            scheme not in {"", "http", "https", "ws", "wss"}
+            or parsed.fragment
+            or parsed.username
+            or parsed.password
+        ):
+            return None
+        if scheme and not parsed.netloc:
+            return None
+        if not scheme and (parsed.netloc or not value.startswith(("/", "./", "../"))):
+            return None
+        protocol = "websocket" if scheme in {"ws", "wss"} else "http"
+        if protocol == "websocket" and scheme not in {"ws", "wss"}:
+            return None
+        path = parsed.path or "/"
+        if (
+            not path.startswith("/")
+            or "//" in path
+            or any(p in {".", ".."} for p in path.split("/"))
+        ):
+            return None
+        origin = f"{scheme}://{parsed.netloc.lower()}" if scheme else None
+        return (
+            protocol,
+            "WEBSOCKET" if protocol == "websocket" else "GET",
+            path,
+            parsed.query or None,
+            origin,
+        )
+    except (ValueError, UnicodeError):
+        return None
+
+
+def _method_option(arg: list[_Token]) -> str | None:
+    # Deliberately allow only an object containing the single literal method.
+    if len(arg) < 5 or arg[0].value != "{" or arg[-1].value != "}":
+        return None
+    inner = arg[1:-1]
+    if (
+        len(inner) == 3
+        and inner[0].value == "method"
+        and inner[1].value == ":"
+        and inner[2].kind == "string"
+    ):
+        method = inner[2].value.upper()
+        return (
+            method
+            if method in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
+            else None
+        )
+    return None
+
+
+def extract_client_observations(  # noqa: PLR0912, PLR0915
+    source: str, source_path: Path | str = "<memory>"
+) -> tuple[ClientObservation, ...]:
+    """Extract exactly supported call forms; unsupported expressions are omitted."""
+    path = Path(source_path)
+    lexical_source = source
+    if path.suffix.lower() == ".svelte":
+        # Preserve offsets and line numbers while excluding markup and text.
+        mask = list(source)
+        for match in re.finditer(r"(?is)<script\b[^>]*>(.*?)</script\s*>", source):
+            for pos in range(match.start(), match.start(1)):
+                if mask[pos] != "\n":
+                    mask[pos] = " "
+            for pos in range(match.end(1), match.end()):
+                if mask[pos] != "\n":
+                    mask[pos] = " "
+        covered = [False] * len(source)
+        for match in re.finditer(r"(?is)<script\b[^>]*>(.*?)</script\s*>", source):
+            covered[match.start(1) : match.end(1)] = [True] * (match.end(1) - match.start(1))
+        for pos, is_code in enumerate(covered):
+            if not is_code and mask[pos] != "\n":
+                mask[pos] = " "
+        lexical_source = "".join(mask)
+    ts = _tokens(lexical_source)
+    found: list[ClientObservation] = []
+    i = 0
+    while i < len(ts):
+        start_i = i
+        name, fixed, protocol = "", None, "http"
+        if (
+            ts[i].kind == "id"
+            and ts[i].value == "fetch"
+            and (i == 0 or ts[i - 1].value != ".")
+            and i + 1 < len(ts)
+            and ts[i + 1].value == "("
+        ):
+            name, opening = "fetch", i + 1
+        elif (
+            ts[i].kind == "id"
+            and ts[i].value == "new"
+            and i + 3 < len(ts)
+            and ts[i + 1].value == "WebSocket"
+            and ts[i + 2].value == "("
+        ):
+            name, opening, fixed, protocol = "websocket", i + 2, "WEBSOCKET", "websocket"
+        elif (
+            ts[i].kind == "id"
+            and ts[i].value == "axios"
+            and i + 3 < len(ts)
+            and ts[i + 1].value == "."
+            and ts[i + 2].value.lower()
+            in {"get", "post", "put", "patch", "delete", "head", "options"}
+            and ts[i + 3].value == "("
+        ):
+            name, opening, fixed = "axios_method", i + 3, ts[i + 2].value.upper()
+        elif (
+            ts[i].kind == "id"
+            and ts[i].value == "axios"
+            and i + 1 < len(ts)
+            and ts[i + 1].value == "("
+        ):
+            name, opening = "axios_config", i + 1
+        else:
+            i += 1
+            continue
+        parsed_args = _split_args(ts, opening)
+        if parsed_args is None:
+            i += 1
+            continue
+        args, close_i = parsed_args
+        url = None
+        method = fixed or "GET"
+        if name in {"fetch", "websocket"}:
+            if 1 <= len(args) <= 2:
+                url = _literal(args[0])
+                if len(args) == 2:
+                    method = _method_option(args[1]) or ""
+        elif name == "axios_method":
+            if 1 <= len(args) <= 2:
+                url = _literal(args[0])
+        elif name == "axios_config" and len(args) == 1:
+            a = args[0]
+            # Only {url: literal, method: literal} in either order.
+            if a and a[0].value == "{" and a[-1].value == "}":
+                props = a[1:-1]
+                if (
+                    len(props) == 7
+                    and props[0].value == "url"
+                    and props[1].value == ":"
+                    and props[2].kind == "string"
+                    and props[3].value == ","
+                    and props[4].value == "method"
+                    and props[5].value == ":"
+                    and props[6].kind == "string"
+                ):
+                    url = props[2].value
+                    method = props[6].value.upper()
+        parsed_url = _parse_url(url) if url is not None else None
+        if parsed_url and method:
+            pr, default, route, query, origin = parsed_url
+            if pr == protocol and (
+                method in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "WEBSOCKET"}
+            ):
+                first = ts[start_i]
+                last = ts[close_i]
+                found.append(
+                    ClientObservation(
+                        path,
+                        source.count("\n", 0, first.start) + 1,
+                        pr,
+                        method or default,
+                        route,
+                        query,
+                        url or "",
+                        first.start,
+                        last.end,
+                        origin,
+                    )
+                )
+        i = close_i + 1
+    return tuple(found)
 
 
 def join_established_surfaces(
-    observations: tuple[ClientObservation, ...],
-    surfaces: tuple[EstablishedSurface, ...],
+    observations: tuple[ClientObservation, ...], surfaces: tuple[EstablishedSurface, ...]
 ) -> tuple[ClientSurfaceMatch, ...]:
-    """Join exact path/method matches to caller-supplied established surface IDs."""
-    by_key: dict[tuple[str, str], list[str]] = {}
+    """Join only trusted server IDs with explicit origins and exact path/method."""
+    index: dict[tuple[str, str, str], list[str]] = {}
     for surface in surfaces:
-        by_key.setdefault((surface.path, surface.method.upper()), []).append(surface.surface_id)
-    matches: list[ClientSurfaceMatch] = []
-    for observation in observations:
-        for surface_id in sorted(set(by_key.get((observation.route_path, observation.method), ()))):
-            matches.append(ClientSurfaceMatch(observation, surface_id))
-    return tuple(matches)
+        if surface.trusted and surface.origin:
+            index.setdefault(
+                (surface.origin.lower(), surface.path, surface.method.upper()), []
+            ).append(surface.surface_id)
+    out: list[ClientSurfaceMatch] = []
+    for obs in observations:
+        if obs.origin is None:
+            continue
+        for sid in sorted(set(index.get((obs.origin.lower(), obs.route_path, obs.method), ()))):
+            out.append(ClientSurfaceMatch(obs, sid))
+    return tuple(out)
 
 
 def established_surfaces(
     endpoints: tuple[Endpoint, ...] | list[Endpoint],
+    *,
+    origin: str | None = None,
+    trusted: bool = False,
 ) -> tuple[EstablishedSurface, ...]:
-    """Project only established endpoints with native provenance to explicit IDs."""
+    """Project established native surfaces; callers must attest origin and trust."""
     result: list[EstablishedSurface] = []
     for endpoint in endpoints:
         provenance = endpoint.native_provenance
@@ -175,5 +370,7 @@ def established_surfaces(
         )
         for method in endpoint.methods:
             if method != EndpointMethod.CUSTOM:
-                result.append(EstablishedSurface(surface_id, endpoint.path, method.value))
+                result.append(
+                    EstablishedSurface(surface_id, endpoint.path, method.value, origin, trusted)
+                )
     return tuple(result)

@@ -1,21 +1,32 @@
 # Finite client observations
 
 `fastapi_endpoint_detector.analyzer.client_observations` provides an opt-in,
-source-only extraction primitive for literal JavaScript and TypeScript client
-calls. It recognizes literal `fetch`, common `axios` methods/config objects, and
-`WebSocket` construction. Dynamic templates, concatenation, computed methods,
-and unsupported call shapes are omitted.
+source-only recognizer for a deliberately small TypeScript, JavaScript, and
+Svelte-script subset. It tokenizes comments and quoted strings away before
+recognition, consumes balanced calls, and accepts only literal URL arguments
+and complete supported call forms. It handles `fetch`, common `axios` methods,
+the literal `{url, method}` axios config form, and `new WebSocket(...)`.
 
-Each observation retains the source file, line, literal URL, and query string.
-The route path excludes the query string. HTTP calls with no explicit method
-are recorded as `GET`; WebSocket calls use `WEBSOCKET`.
+Dynamic templates, concatenations, receiver calls such as `client.fetch`,
+unknown fetch options, malformed calls, and unsupported config fields produce
+no exact observation. Svelte markup is masked; only script block contents are
+scanned. Each result retains the exact source offsets, line, literal URL, and
+query. Repeated identical calls remain separate observations.
 
-`join_established_surfaces` performs exact method/path matching only against
-surface identifiers supplied by the caller. `established_surfaces` projects
-only established endpoints with secure native route provenance. The primitive
-does not create endpoint candidates, infer server routes from client URLs,
-expand dynamic base URLs, or fan out matches across languages.
+Relative URLs have no origin and cannot be correlated. Absolute URLs retain a
+normalized origin. A join requires the caller to provide an established server
+surface ID, an explicit origin, and a `trusted=True` attestation; only exact
+origin, method, and path matches are returned. Endpoint projection alone does
+not imply trust or origin. No global URL fanout or inferred server candidate
+is produced.
 
-Dockerfiles, environment-variable indirection, subprocess observations,
-repository-level integration, and the audited non-Python case evaluation remain
-outside this initial bounded extractor.
+This module is an extraction primitive, not yet a repository-wide client
+inventory. CLI/configuration and analyzer integration must preserve the same
+origin and trust gates. Dockerfile, environment-variable, and subprocess source
+observations are not inferred by this parser. The existing isolated runtime
+comparator remains a separate explicit tool with its Docker, environment, and
+subprocess policy contracts.
+
+The current checked-in benchmark corpus has no nine-case source-grounded,
+audited TypeScript/Svelte evaluation set. Evaluation is therefore pending; no
+precision/recall result is claimed from the general PR corpus.

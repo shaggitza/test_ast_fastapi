@@ -8,14 +8,14 @@ from fastapi_endpoint_detector.analyzer.client_observations import (
 
 
 def test_extracts_finite_http_websocket_calls_and_keeps_query_evidence() -> None:
-    source = '''
+    source = """
 fetch("https://api.example.test/items?limit=10");
 axios.post('/items', payload);
 axios({ url: '/items', method: 'PATCH' });
 new WebSocket('wss://socket.example.test/events?token=abc');
 fetch(`/items/${item}`);
 fetch(baseUrl + "/items");
-'''
+"""
     observations = extract_client_observations(source, Path("client.ts"))
     assert [(item.method, item.route_path, item.query) for item in observations] == [
         ("GET", "/items", "limit=10"),
@@ -27,12 +27,60 @@ fetch(baseUrl + "/items");
 
 
 def test_join_requires_exact_explicit_surface_id_and_method() -> None:
-    observations = extract_client_observations("fetch('/items?q=1'); fetch('/admin');")
+    observations = extract_client_observations(
+        "fetch('https://api.test/items?q=1'); fetch('/admin');"
+    )
     surfaces = (
-        EstablishedSurface("server:items:get", "/items", "GET"),
-        EstablishedSurface("server:items:post", "/items", "POST"),
+        EstablishedSurface("server:items:get", "/items", "GET", "https://api.test", True),
+        EstablishedSurface("server:items:post", "/items", "POST", "https://api.test", True),
     )
     matches = join_established_surfaces(observations, surfaces)
     assert [(item.surface_id, item.observation.query) for item in matches] == [
         ("server:items:get", "q=1")
     ]
+
+
+def test_scanner_skips_comments_strings_dynamic_calls_receivers_and_unknown_options() -> None:
+    source = """
+// fetch('/admin')
+const text = "fetch('/admin')";
+fetch('/items' + suffix);
+client.fetch('/admin');
+fetch('/items', dynamicOptions);
+fetch('/real'); fetch('/real');
+"""
+    calls = extract_client_observations(source)
+    assert [item.route_path for item in calls] == ["/real", "/real"]
+    assert calls[0].start_offset != calls[1].start_offset
+
+
+def test_fetch_requires_exact_literal_method_options_and_join_needs_origin_trust() -> None:
+    calls = extract_client_observations(
+        "fetch('/items', {method: 'POST'}); fetch('/x', {method:'GET', headers: h}); fetch('https://api.test/items?q=1');"
+    )
+    assert [(item.method, item.route_path) for item in calls] == [
+        ("POST", "/items"),
+        ("GET", "/items"),
+    ]
+    relative = calls[0]
+    absolute = calls[1]
+    surfaces = (
+        EstablishedSurface("untrusted", "/items", "POST", "https://api.test", False),
+        EstablishedSurface("trusted", "/items", "GET", "https://api.test", True),
+    )
+    assert [
+        item.surface_id for item in join_established_surfaces((relative, absolute), surfaces)
+    ] == ["trusted"]
+    calls = extract_client_observations("fetch('https://api.test/items?q=1');")
+    matches = join_established_surfaces(calls, surfaces)
+    assert [item.surface_id for item in matches] == ["trusted"]
+
+
+def test_svelte_scans_script_blocks_only() -> None:
+    source = """<p>fetch('/markup')</p>
+<script lang="ts">
+fetch('https://api.test/from-script');
+</script>"""
+    calls = extract_client_observations(source, Path("Component.svelte"))
+    assert [item.route_path for item in calls] == ["/from-script"]
+    assert calls[0].line == 3
