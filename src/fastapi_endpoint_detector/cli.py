@@ -742,6 +742,7 @@ def list_endpoints(
                 app_variable=app_var,
                 app_entry=app_entry,
                 bootstrap_entry=bootstrap_entry,
+                source_paths=config.source_inventory(app).paths,
             )
             inventory = extractor_obj.extract_inventory()
             loaded_surfaces = config.load_surface_contract_snapshot()

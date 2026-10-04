@@ -23,6 +23,7 @@ from fastapi_endpoint_detector.analyzer.effect_contract_auditor import (
     build_audit_endpoint,
 )
 from fastapi_endpoint_detector.analyzer.endpoint_registry import EndpointRegistry
+from fastapi_endpoint_detector.analyzer.evidence_graph import EvidenceGraph, source_evidence_graph
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.analyzer.resource_coupling import build_resource_coupling_graph
 from fastapi_endpoint_detector.analyzer.scip_analyzer import (
@@ -485,6 +486,10 @@ class ChangeMapper:
         self.use_cache = use_cache
         self.secure_ast = secure_ast
         self.use_scip = use_scip
+        if not self.config.integrations.use_mypy and not use_scip:
+            raise ChangeMapperError(
+                "integrations.use_mypy=false requires the explicitly selected --scip backend"
+            )
         if app_entry is not None and not secure_ast:
             raise ChangeMapperError("app_entry requires secure_ast=True")
         if bootstrap_entry is not None and not secure_ast:
@@ -517,6 +522,7 @@ class ChangeMapper:
         self._scip_analyzer: SCIPAnalyzer | None = None
         self._baseline_registry: EndpointRegistry | None = None
         self._baseline_scip_analyzer: SCIPAnalyzer | None = None
+        self.source_inventory = self.config.source_inventory(self.app_path)
 
     @property
     def extractor(self) -> FastAPIExtractor | SecureASTExtractor:
@@ -528,6 +534,7 @@ class ChangeMapper:
                     app_variable=self.app_variable,
                     app_entry=self.app_entry,
                     bootstrap_entry=self.bootstrap_entry,
+                    source_paths=self.source_inventory.paths,
                 )
             else:
                 self._extractor = FastAPIExtractor(
@@ -578,7 +585,9 @@ class ChangeMapper:
         """Get the SCIP analyzer, initializing if needed."""
         if self._scip_analyzer is None:
             package_path = self.app_path.parent if self.app_path.is_file() else self.app_path
-            self._scip_analyzer = SCIPAnalyzer(package_path, use_cache=self.use_cache)
+            self._scip_analyzer = SCIPAnalyzer(
+                package_path, use_cache=self.use_cache, source_inventory=self.source_inventory
+            )
         return self._scip_analyzer
 
     @property
@@ -593,6 +602,7 @@ class ChangeMapper:
                 app_entry=self.app_entry,
                 bootstrap_entry=self.bootstrap_entry,
                 snapshot_side=SnapshotSide.BASELINE,
+                source_paths=self.config.source_inventory(self.baseline_app_path).paths,
             )
             self._baseline_registry = EndpointRegistry()
             native = extractor.extract_inventory()
@@ -611,7 +621,10 @@ class ChangeMapper:
                 if self.baseline_app_path.is_file()
                 else self.baseline_app_path
             )
-            self._baseline_scip_analyzer = SCIPAnalyzer(package_path, use_cache=self.use_cache)
+            baseline_inventory = self.config.source_inventory(self.baseline_app_path)
+            self._baseline_scip_analyzer = SCIPAnalyzer(
+                package_path, use_cache=self.use_cache, source_inventory=baseline_inventory
+            )
         return self._baseline_scip_analyzer
 
     @property
@@ -1490,6 +1503,24 @@ class ChangeMapper:
 
         # Filter to Python files
         python_files = DiffParser.get_python_files(diff_files)
+        unsupported_changes = [
+            item.path.as_posix() for item in diff_files if item not in python_files
+        ]
+        if unsupported_changes:
+            warnings.extend(
+                f"Unresolved non-Python/configuration change: {path}; "
+                "no finite dependency contract was applied"
+                for path in unsupported_changes
+            )
+        target_source_graph = source_evidence_graph(self.source_inventory)
+        if self.baseline_app_path is not None:
+            baseline_graph = source_evidence_graph(
+                self.config.source_inventory(self.baseline_app_path), side="baseline"
+            )
+            target_source_graph = EvidenceGraph(
+                nodes=(*baseline_graph.nodes, *target_source_graph.nodes),
+                edges=(*baseline_graph.edges, *target_source_graph.edges),
+            )
 
         # Initialize endpoints
         report_progress(5, 100, "Extracting endpoints...")
@@ -1525,6 +1556,7 @@ class ChangeMapper:
                 analysis_duration_ms=duration_ms,
                 errors=errors,
                 warnings=warnings,
+                source_evidence_graph=target_source_graph,
             )
 
         # Pre-analyze endpoints with mypy
@@ -1631,6 +1663,7 @@ class ChangeMapper:
             analysis_duration_ms=duration_ms,
             errors=errors,
             warnings=warnings,
+            source_evidence_graph=target_source_graph,
             effect_contract_audit=self._effect_contract_audit,
             resource_coupling_graph=self._resource_coupling_graph,
             sql_transaction_report=self._sql_transaction_report,
