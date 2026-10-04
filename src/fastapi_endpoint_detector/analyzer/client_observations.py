@@ -237,6 +237,16 @@ def _method_option(arg: list[_Token]) -> str | None:
     return None
 
 
+def _is_global_axios(tokens: list[_Token], index: int) -> bool:
+    """Reject axios references selected through an object/property receiver."""
+    if index == 0:
+        return True
+    previous = tokens[index - 1]
+    # Covers obj.axios, obj?.axios, obj[axios], and obj?.[axios]. A string
+    # property such as obj["axios"] never has an axios identifier token.
+    return previous.value not in {".", "["}
+
+
 def extract_client_observations(  # noqa: PLR0912, PLR0915
     source: str, source_path: Path | str = "<memory>"
 ) -> tuple[ClientObservation, ...]:
@@ -285,6 +295,7 @@ def extract_client_observations(  # noqa: PLR0912, PLR0915
         elif (
             ts[i].kind == "id"
             and ts[i].value == "axios"
+            and _is_global_axios(ts, i)
             and i + 3 < len(ts)
             and ts[i + 1].value == "."
             and ts[i + 2].value.lower()
@@ -295,6 +306,7 @@ def extract_client_observations(  # noqa: PLR0912, PLR0915
         elif (
             ts[i].kind == "id"
             and ts[i].value == "axios"
+            and _is_global_axios(ts, i)
             and i + 1 < len(ts)
             and ts[i + 1].value == "("
         ):
@@ -356,7 +368,10 @@ def extract_client_observations(  # noqa: PLR0912, PLR0915
                         origin,
                     )
                 )
-        i = close_i + 1
+        # Continue inside the argument list. An unsupported outer call may
+        # contain an independently supported nested call that remains useful
+        # evidence (for example, fetch(makeRequest(axios.get('/inner')))).
+        i += 1
     return tuple(found)
 
 

@@ -85,3 +85,33 @@ fetch('https://api.test/from-script');
     calls = extract_client_observations(source, Path("Component.svelte"))
     assert [item.route_path for item in calls] == ["/from-script"]
     assert calls[0].line == 3
+
+
+def test_axios_receiver_access_is_not_misclassified_as_global() -> None:
+    source = """
+axios.get('/global-method');
+axios({url: '/global-config', method: 'GET'});
+client.axios.get('/member-method');
+client?.axios.get('/optional-method');
+client[axios].get('/computed-method');
+client?.[axios].get('/optional-computed-method');
+client.axios({url: '/member-config', method: 'GET'});
+client?.axios({url: '/optional-config', method: 'GET'});
+client['axios']({url: '/computed-config', method: 'GET'});
+client?.[axios]({url: '/optional-computed-config', method: 'GET'});
+"""
+    calls = extract_client_observations(source)
+    assert [item.route_path for item in calls] == ["/global-method", "/global-config"]
+
+
+def test_nested_supported_calls_survive_rejected_dynamic_outer_calls() -> None:
+    source = """
+fetch(buildUrl(axios.get('/nested-axios'), suffix));
+axios({url: chooseUrl(), method: 'GET', extra: fetch('/nested-fetch')});
+fetch('/unrelated' + suffix);
+"""
+    calls = extract_client_observations(source)
+    assert [(item.method, item.route_path) for item in calls] == [
+        ("GET", "/nested-axios"),
+        ("GET", "/nested-fetch"),
+    ]

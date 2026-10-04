@@ -22,10 +22,16 @@ is produced.
 
 This module is an extraction primitive, not yet a repository-wide client
 inventory. CLI/configuration and analyzer integration must preserve the same
-origin and trust gates. Dockerfile, environment-variable, and subprocess source
-observations are not inferred by this parser. The existing isolated runtime
-comparator remains a separate explicit tool with its Docker, environment, and
-subprocess policy contracts.
+origin and trust gates. `analyzer.deployment_observations` separately records
+simple `.env` and Dockerfile route settings, exposed ports, exec-form startup
+argv, and direct Python `subprocess` calls with literal argv. Only allowlisted
+route environment keys retain their values; unknown keys are redacted. URL
+values containing credentials, query strings, or fragments are also redacted.
+Variable expansion, shell-form Docker commands, shell subprocess calls, and
+dynamic argv are recorded as uncertain. These observations are evidence only:
+they do not execute commands, resolve environment expansion, or create route
+joins. The isolated runtime comparator remains separate, with its Docker,
+environment, and subprocess policy contracts.
 
 The current checked-in benchmark corpus has no nine-case source-grounded,
 audited TypeScript/Svelte evaluation set. Evaluation is therefore pending; no
