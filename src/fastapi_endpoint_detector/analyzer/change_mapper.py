@@ -54,6 +54,8 @@ from fastapi_endpoint_detector.models.report import (
     ContractEffectEvidence,
     EffectDisposition,
     EffectEvidence,
+    EndpointLifecycle,
+    EndpointLifecycleKind,
     EvidenceProducer,
     EvidenceStatus,
     ImpactChannel,
@@ -489,8 +491,6 @@ class ChangeMapper:
             raise ChangeMapperError("app_entry requires secure_ast=True")
         if bootstrap_entry is not None and not secure_ast:
             raise ChangeMapperError("bootstrap_entry requires secure_ast=True")
-        if baseline_app_path is not None and not use_scip:
-            raise ChangeMapperError("baseline_app_path is valid only with use_scip=True")
         self.baseline_app_path = baseline_app_path.resolve() if baseline_app_path else None
         target_project_root = self.app_path.parent if self.app_path.is_file() else self.app_path
         self.target_project_root = target_project_root
@@ -513,10 +513,58 @@ class ChangeMapper:
         self._sql_transaction_report: SQLTransactionReport | None = None
         self._sql_transaction_path_report: SQLTransactionPathReport | None = None
         self._mypy_analyzer: MypyAnalyzer | None = None
+        self._baseline_mypy_analyzer: MypyAnalyzer | None = None
         self._effect_analyzer = EffectAnalyzer(target_project_root)
         self._scip_analyzer: SCIPAnalyzer | None = None
         self._baseline_registry: EndpointRegistry | None = None
         self._baseline_scip_analyzer: SCIPAnalyzer | None = None
+        self._baseline_extractor: FastAPIExtractor | SecureASTExtractor | None = None
+
+    @property
+    def baseline_mypy_analyzer(self) -> MypyAnalyzer:
+        """Get an independent typed analyzer rooted at the baseline snapshot."""
+        if self.baseline_app_path is None:
+            raise ChangeMapperError("Mypy removals require an explicit --baseline-app snapshot")
+        if self._baseline_mypy_analyzer is None:
+            package_path = (
+                self.baseline_app_path.parent
+                if self.baseline_app_path.is_file()
+                else self.baseline_app_path
+            )
+            effective_depth = (
+                self.config.parser.max_depth if self.config.analysis.track_transitive else 1
+            )
+            self._baseline_mypy_analyzer = MypyAnalyzer(package_path, max_depth=effective_depth)
+        return self._baseline_mypy_analyzer
+
+    @property
+    def baseline_mypy_registry(self) -> EndpointRegistry:
+        """Discover baseline endpoints independently from the target registry."""
+        if self.baseline_app_path is None:
+            raise ChangeMapperError("Mypy removals require an explicit --baseline-app snapshot")
+        if self._baseline_registry is None:
+            if self.secure_ast:
+                extractor: FastAPIExtractor | SecureASTExtractor = SecureASTExtractor(
+                    app_path=self.baseline_app_path,
+                    app_variable=self.app_variable,
+                    app_entry=self.app_entry,
+                    bootstrap_entry=self.bootstrap_entry,
+                    snapshot_side=SnapshotSide.BASELINE,
+                )
+                self._baseline_inventory = self._merge_surface_inventory(
+                    self.baseline_app_path, extractor.extract_inventory()
+                )
+                endpoints = self._baseline_inventory.endpoints
+            else:
+                extractor = FastAPIExtractor(
+                    app_path=self.baseline_app_path,
+                    app_variable=self.app_variable,
+                )
+                endpoints = extractor.extract_endpoints()
+            self._baseline_extractor = extractor
+            self._baseline_registry = EndpointRegistry()
+            self._baseline_registry.register_many(endpoints)
+        return self._baseline_registry
 
     @property
     def extractor(self) -> FastAPIExtractor | SecureASTExtractor:
@@ -564,6 +612,63 @@ class ChangeMapper:
             bootstrap_entry=self.bootstrap_entry,
         ).extract_inventory()
         return merge_surface_inventory(native, custom)
+
+    def _endpoint_lifecycle(self) -> list[EndpointLifecycle]:
+        """Reconcile endpoint inventories by public route identity, failing closed."""
+        if self.baseline_app_path is None:
+            return []
+        baseline = self.baseline_mypy_registry.get_all()
+        target = self.registry.get_all()
+        identities = sorted({item.identifier for item in baseline + target})
+        records: list[EndpointLifecycle] = []
+        for identity in identities:
+            old = [item for item in baseline if item.identifier == identity]
+            new = [item for item in target if item.identifier == identity]
+            if len(old) > 1 or len(new) > 1:
+                records.append(
+                    EndpointLifecycle(
+                        identity=identity,
+                        lifecycle=EndpointLifecycleKind.AMBIGUOUS,
+                    )
+                )
+            elif not old:
+                records.append(
+                    EndpointLifecycle(
+                        identity=identity,
+                        lifecycle=EndpointLifecycleKind.TARGET,
+                        target_endpoint=new[0],
+                    )
+                )
+            elif not new:
+                records.append(
+                    EndpointLifecycle(
+                        identity=identity,
+                        lifecycle=EndpointLifecycleKind.REMOVED,
+                        baseline_endpoint=old[0],
+                    )
+                )
+            else:
+                previous, current = old[0], new[0]
+                prior, present = previous.handler, current.handler
+                lifecycle = EndpointLifecycleKind.TARGET
+                if prior.file_path.resolve() != present.file_path.resolve():
+                    lifecycle = EndpointLifecycleKind.MOVED
+                elif (prior.name, prior.module) != (present.name, present.module):
+                    lifecycle = EndpointLifecycleKind.RENAMED
+                records.append(
+                    EndpointLifecycle(
+                        identity=identity,
+                        lifecycle=lifecycle,
+                        baseline_endpoint=previous,
+                        target_endpoint=current,
+                    )
+                )
+        return records
+
+    def _target_equivalent_endpoint(self, endpoint: Endpoint) -> Endpoint:
+        """Map baseline evidence onto a unique public target identity only."""
+        matches = [item for item in self.registry if item.identifier == endpoint.identifier]
+        return matches[0] if len(matches) == 1 else endpoint
 
     @property
     def inventory(self) -> EndpointInventory:
@@ -689,6 +794,7 @@ class ChangeMapper:
         diff_file: DiffFile,
         added_lines: list[int],
         removed_lines: list[int],
+        analyzer: MypyAnalyzer | None = None,
     ) -> AffectedEndpoint | None:
         """
         Check if an endpoint's dependencies (via mypy analysis) intersect with changes.
@@ -704,7 +810,7 @@ class ChangeMapper:
         Returns:
             AffectedEndpoint if dependencies intersect, None otherwise.
         """
-        deps = self.mypy_analyzer.get_endpoint_dependencies(endpoint)
+        deps = (analyzer or self.mypy_analyzer).get_endpoint_dependencies(endpoint)
 
         if not deps:
             return None
@@ -906,6 +1012,52 @@ class ChangeMapper:
         # Get changed lines
         added_lines, removed_lines = DiffParser.get_changed_line_numbers(diff_file)
 
+        # Git can report a semantic file change without text hunks (pure rename,
+        # move, or mode-only update). Seed endpoints by exact registered file
+        # ownership so these changes cannot disappear from accounting.
+        if not added_lines and not removed_lines:
+            for side_registry, changed_path, side in (
+                (self.registry, diff_file.path, "target"),
+                (
+                    self.baseline_mypy_registry
+                    if self.baseline_app_path is not None
+                    else None,
+                    diff_file.source_path or diff_file.path,
+                    "baseline",
+                ),
+            ):
+                if side_registry is None:
+                    continue
+                for endpoint in side_registry.get_by_file(changed_path):
+                    _merge_affected(
+                        affected,
+                        AffectedEndpoint(
+                            endpoint=endpoint,
+                            confidence=ConfidenceLevel.HIGH,
+                            reason=f"Line-less {side} file change affects endpoint source",
+                            dependency_chain=[str(changed_path), endpoint.handler.name],
+                            changed_files=[str(changed_path)],
+                            effect_evidence=[
+                                EffectEvidence(
+                                    producer=EvidenceProducer.DIRECT,
+                                    status=EvidenceStatus.ESTABLISHED,
+                                    effect=ChangeEffectKind.UNKNOWN,
+                                    channel=ImpactChannel.UNKNOWN,
+                                    disposition=EffectDisposition.INTERNAL_EFFECT,
+                                    summary=(
+                                        f"Git reported a {side} file change without line hunks; "
+                                        "the endpoint handler is defined by that file."
+                                    ),
+                                    changed_location=CodeReference(
+                                        file_path=str(changed_path),
+                                        line_number=endpoint.handler.line_number,
+                                        symbol=endpoint.handler.name,
+                                    ),
+                                )
+                            ],
+                        ),
+                    )
+
         # Native route registrations and exact include/mount/object occurrences own
         # their materialized descendants. Only target additions are queried here:
         # removed coordinates require the explicit baseline path handled by SCIP.
@@ -953,7 +1105,7 @@ class ChangeMapper:
         # Check for direct handler changes
         for endpoint in file_endpoints:
             result = self._check_direct_handler_change(
-                endpoint, diff_file, added_lines, removed_lines
+                endpoint, diff_file, added_lines, []
             )
             if result:
                 _merge_affected(affected, result)
@@ -966,21 +1118,39 @@ class ChangeMapper:
 
         # Use mypy for type-aware dependency analysis
         for endpoint in self.registry:
-            result = self._check_mypy_dependency(endpoint, diff_file, added_lines, removed_lines)
+            result = self._check_mypy_dependency(endpoint, diff_file, added_lines, [])
             if result:
                 _merge_affected(affected, result)
                 # Mark lines as processed - get the actual lines that were referenced
                 deps = self.mypy_analyzer.get_endpoint_dependencies(endpoint)
                 if deps:
                     file_path = str(diff_file.path)
-                    changed_lines = set(added_lines) | set(removed_lines)
+                    changed_lines = set(added_lines)
                     referenced = deps.references_lines(file_path, changed_lines)
                     if referenced:
                         # Only mark the directly changed lines as processed
                         processed_added_lines.update(ln for ln in added_lines if ln in referenced)
-                        processed_removed_lines.update(
-                            ln for ln in removed_lines if ln in referenced
-                        )
+
+        # Removals are interpreted exclusively against an independently built
+        # baseline graph. Without a baseline, leave them unresolved for reporting.
+        if removed_lines and self.baseline_app_path is not None:
+            source_path = diff_file.source_path or diff_file.path
+            baseline_file = diff_file.model_copy(update={"path": source_path})
+            for endpoint in self.baseline_mypy_registry:
+                result = self._check_mypy_dependency(
+                    endpoint, baseline_file, [], removed_lines, self.baseline_mypy_analyzer
+                )
+                if result:
+                    result = result.model_copy(
+                        update={
+                            "endpoint": self._target_equivalent_endpoint(result.endpoint),
+                        }
+                    )
+                    _merge_affected(affected, result)
+                    deps = self.baseline_mypy_analyzer.get_endpoint_dependencies(endpoint)
+                    if deps:
+                        referenced = deps.references_lines(str(source_path), set(removed_lines))
+                        processed_removed_lines.update(referenced)
 
         return (
             [item.materialize() for item in affected.values()],
@@ -1519,17 +1689,42 @@ class ChangeMapper:
                 ),
                 affected_endpoints=filtered,
                 candidate_endpoints=scip_affected,
+                endpoint_lifecycle=self._endpoint_lifecycle(),
                 orphan_changes=scip_orphans,
                 total_files_changed=len(diff_files),
                 python_files_changed=len(python_files),
                 analysis_duration_ms=duration_ms,
                 errors=errors,
                 warnings=warnings,
+                analysis_completeness=(
+                    "partial"
+                    if errors
+                    or any(
+                        marker in warning.lower()
+                        for warning in warnings
+                        for marker in ("unresolved", "incomplete", "error analyzing")
+                    )
+                    else "complete"
+                ),
             )
 
         # Pre-analyze endpoints with mypy
         report_progress(10, 100, f"Analyzing {total_endpoints} endpoints (mypy)...")
         self._preanalyze_mypy(progress_callback)
+        has_mypy_removals = any(
+            DiffParser.get_changed_line_numbers(item)[1]
+            or (item.source_path is not None and item.source_path != item.path)
+            for item in python_files
+        )
+        if has_mypy_removals and self.baseline_app_path is None:
+            warnings.append(
+                "Mypy baseline analysis is incomplete: removed or renamed source requires "
+                "baseline_app_path; removed lines are retained as unresolved orphan evidence."
+            )
+        elif has_mypy_removals and self.baseline_app_path is not None:
+            self._preanalyze_mypy_registry(
+                self.baseline_mypy_registry, self.baseline_mypy_analyzer, progress_callback
+            )
         self._effect_contract_audit = self._build_effect_contract_audit()
         if self.config.analysis.sql_transaction_diagnostics:
             if self._effect_contracts is None or self._effect_contract_audit is None:
@@ -1575,23 +1770,50 @@ class ChangeMapper:
                     _merge_affected(all_affected, candidate)
 
                 added_lines, removed_lines = DiffParser.get_changed_line_numbers(diff_file)
-                orphan_key = _normalized_diff_path(diff_file.path)
-                evidence = orphan_evidence.setdefault(
-                    orphan_key,
+                source_path = diff_file.source_path or diff_file.path
+                target_evidence = orphan_evidence.setdefault(
+                    _normalized_diff_path(diff_file.path),
                     _OrphanAccumulator(
                         file_path=str(diff_file.path),
                         reason=(
-                            "Code changes not related to any endpoint "
-                            "(possibly unused, unrelated, or has type issues)"
+                            "Target-side code changes are unrelated or could not be resolved"
                         ),
                     ),
                 )
-                evidence.added.update(added_lines)
-                evidence.removed.update(removed_lines)
-                evidence.processed_added.update(processed_added)
-                evidence.processed_removed.update(processed_removed)
+                target_evidence.added.update(added_lines)
+                target_evidence.processed_added.update(processed_added)
+                source_evidence = orphan_evidence.setdefault(
+                    _normalized_diff_path(source_path),
+                    _OrphanAccumulator(
+                        file_path=str(source_path),
+                        reason=(
+                            "Baseline-side code changes are unrelated or could not be resolved"
+                        ),
+                    ),
+                )
+                source_evidence.removed.update(removed_lines)
+                source_evidence.processed_removed.update(processed_removed)
             except Exception as e:
                 warnings.append(f"Error analyzing {diff_file.path}: {e}")
+                # Preserve all line evidence when an analyzer fails after parsing.
+                added_lines, removed_lines = DiffParser.get_changed_line_numbers(diff_file)
+                target_evidence = orphan_evidence.setdefault(
+                    _normalized_diff_path(diff_file.path),
+                    _OrphanAccumulator(
+                        file_path=str(diff_file.path),
+                        reason=f"Analysis unresolved after per-file failure: {e}",
+                    ),
+                )
+                target_evidence.added.update(added_lines)
+                source_path = diff_file.source_path or diff_file.path
+                source_evidence = orphan_evidence.setdefault(
+                    _normalized_diff_path(source_path),
+                    _OrphanAccumulator(
+                        file_path=str(source_path),
+                        reason=f"Analysis unresolved after per-file failure: {e}",
+                    ),
+                )
+                source_evidence.removed.update(removed_lines)
 
         # Filter by confidence threshold
         report_progress(95, 100, "Filtering results...")
@@ -1625,12 +1847,23 @@ class ChangeMapper:
             ),
             affected_endpoints=filtered_affected,
             candidate_endpoints=materialized,
+            endpoint_lifecycle=self._endpoint_lifecycle(),
             orphan_changes=orphan_changes,
             total_files_changed=len(diff_files),
             python_files_changed=len(python_files),
             analysis_duration_ms=duration_ms,
             errors=errors,
             warnings=warnings,
+            analysis_completeness=(
+                "partial"
+                if errors
+                or any(
+                    marker in warning.lower()
+                    for warning in warnings
+                    for marker in ("unresolved", "incomplete", "error analyzing")
+                )
+                else "complete"
+            ),
             effect_contract_audit=self._effect_contract_audit,
             resource_coupling_graph=self._resource_coupling_graph,
             sql_transaction_report=self._sql_transaction_report,
@@ -1679,6 +1912,24 @@ class ChangeMapper:
         # Save cache after analysis
         if self.use_cache:
             self.mypy_analyzer._save_cache()
+
+    def _preanalyze_mypy_registry(
+        self,
+        registry: EndpointRegistry,
+        analyzer: MypyAnalyzer,
+        progress_callback: ProgressCallback | None = None,
+    ) -> None:
+        """Build typed dependencies for every endpoint in one source snapshot."""
+        endpoints = registry.get_all()
+        for index, endpoint in enumerate(endpoints, 1):
+            if progress_callback:
+                progress_callback(
+                    10 + int(55 * index / max(len(endpoints), 1)),
+                    100,
+                    f"Analyzing baseline endpoint {index}/{len(endpoints)}: {endpoint.path}",
+                )
+            if analyzer.get_endpoint_dependencies(endpoint) is None:
+                analyzer.analyze_endpoint(endpoint)
 
     def get_endpoints(self) -> list[Endpoint]:
         """Get all endpoints in the application."""

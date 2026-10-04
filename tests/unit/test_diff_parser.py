@@ -2,6 +2,7 @@
 Unit tests for the diff parser module.
 """
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,47 @@ from fastapi_endpoint_detector.parser.diff_parser import DiffParser, DiffParserE
 
 
 class TestDiffParser:
+    def test_side_qualified_line_numbers_from_git_quoted_rename(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True
+        )
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+        original = repo / "caf\N{LATIN SMALL LETTER E WITH ACUTE}\told.py"
+        original.write_bytes(b"def old():\n    return 1\n# retained\n")
+        subprocess.run(["git", "-C", str(repo), "add", "--", str(original.name)], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "baseline"], check=True)
+        renamed = repo / "caf\N{LATIN SMALL LETTER E WITH ACUTE}\tnew.py"
+        original.rename(renamed)
+        renamed.write_bytes(b"def new():\n    return 1\n# retained\n")
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+        diff = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "-c",
+                "core.quotePath=true",
+                "diff",
+                "--cached",
+                "--no-ext-diff",
+                "--find-renames",
+                "HEAD",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+
+        parsed = DiffParser.parse_string(diff)
+
+        assert len(parsed) == 1
+        assert parsed[0].path == Path("café\tnew.py")
+        assert parsed[0].source_path == Path("café\told.py")
+        assert parsed[0].get_side_qualified_lines() == ([1], [1])
+
     def test_rename_preserves_old_path_and_python_identity(self) -> None:
         diff = """diff --git a/old.py b/new.txt
 similarity index 100%

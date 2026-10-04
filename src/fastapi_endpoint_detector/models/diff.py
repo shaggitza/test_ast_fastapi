@@ -77,6 +77,12 @@ class DiffFile(BaseModel):
                 ranges.append((hunk.source_start, hunk.source_start + hunk.source_length))
         return ranges
 
+    def get_side_qualified_lines(self) -> tuple[list[int], list[int]]:
+        """Return (baseline removals, target additions) without mixing coordinates."""
+        removed = [line for hunk in self.hunks for line in hunk.removed_lines]
+        added = [line for hunk in self.hunks for line in hunk.added_lines]
+        return removed, added
+
 
 class FileChange(BaseModel):
     """Aggregated information about changes in a file."""
