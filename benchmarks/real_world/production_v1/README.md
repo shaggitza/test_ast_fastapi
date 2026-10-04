@@ -99,6 +99,21 @@ frozen digest; only the old packet-module self-digest is non-authoritative becau
 current `checksums-v1.json` authenticates that executable module. Unknown or edited
 phase profiles fail closed.
 
+## Broker source isolation and freeze prerequisite
+
+The broker subprocess uses Python isolated mode and loads its entry module from
+the attested bundle path. Benchmark Python modules and JSON resources are
+captured in the bundle; the current working directory, `PYTHONPATH`, and
+bytecode caches cannot select broker source. A source-only hostile-directory
+test covers shadow modules.
+
+Production broker launch and escrow finalization are currently blocked. This
+host has no trusted exclusive freeze-lease provider or enforced read-only mount
+that can protect the bundle from prepare through finalization. Owner-controlled
+mode bits and point-in-time hashes do not satisfy that requirement. Runtime
+execution must remain disabled until an externally trusted mechanism can issue
+and hold an attested exclusive freeze lease across that entire interval.
+
 Authorization is single-use. Every fallible source, cache, profile, output-parent,
 and inventory check completes before its durable ledger append. Build requires that
 unused authorization as the current head. Each Git command receives a fresh

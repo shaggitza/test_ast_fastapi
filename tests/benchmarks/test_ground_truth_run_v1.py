@@ -1641,6 +1641,40 @@ def test_broker_bundle_detects_code_mutation_across_execution_freeze(
         run._verify_broker_bundle(bundle_root, execution, profile)
 
 
+def test_broker_subprocess_import_isolated_from_hostile_cwd_and_pythonpath(
+    tmp_path: Path,
+) -> None:
+    bundle = tmp_path / "bundle"
+    module = bundle / "benchmarks/real_world/ground_truth_run_v1.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "from pathlib import Path\ndef main():\n print(Path(__file__).resolve())\n return 0\n"
+    )
+    hostile = tmp_path / "hostile"
+    shadow = hostile / "benchmarks/real_world"
+    shadow.mkdir(parents=True)
+    (shadow / "ground_truth_run_v1.py").write_text(
+        "raise RuntimeError('mutable cwd module imported')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", run._BROKER_BOOTSTRAP, str(bundle)],
+        cwd=hostile,
+        env={"PATH": os.environ["PATH"], "PYTHONPATH": str(hostile)},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout.strip() == str(module.resolve())
+
+
+def test_broker_freeze_lease_fails_closed_without_trusted_provider() -> None:
+    with pytest.raises(
+        run.GroundTruthRunError,
+        match="trusted exclusive broker freeze lease unavailable",
+    ):
+        run._require_exclusive_broker_freeze_lease()
+
+
 def _generation2_attempt(execution: Path) -> tuple[Path, dict[str, Any]]:
     attempts = _private(execution / "attempts")
     attempt = _private(attempts / A)
@@ -2102,6 +2136,7 @@ def test_prepare_attempt_cannot_cross_authorization_generation(
         "runtime_custody_receipt_sha256": "sha256:" + "4" * 64,
     }
     installation: dict[str, Any] = {}
+    monkeypatch.setattr(run, "_require_exclusive_broker_freeze_lease", lambda: None)
     monkeypatch.setattr(run, "_runtime_attestation", lambda *_args: attestation)
     monkeypatch.setattr(run, "_installed_agent", lambda *_args: installation)
     monkeypatch.setattr(campaign, "_private_root", lambda path: path)

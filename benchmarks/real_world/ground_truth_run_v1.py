@@ -63,6 +63,20 @@ _MAX_RSS: Final = 4 * 1024 * 1024 * 1024
 _MAX_OUTPUT: Final = 2 * 1024 * 1024
 _RUNTIME_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _ATTEMPT = re.compile(r"^prod-v1-i[0-9]{3}-rank[0-9]{3}-pr[0-9]+-[AB]$")
+_BROKER_BOOTSTRAP: Final = (
+    "import importlib.util, pathlib, sys, types; "
+    "root=pathlib.Path(sys.argv.pop(1)); "
+    "bench=types.ModuleType('benchmarks'); bench.__path__=[str(root/'benchmarks')]; "
+    "sys.modules['benchmarks']=bench; "
+    "real=types.ModuleType('benchmarks.real_world'); "
+    "real.__path__=[str(root/'benchmarks/real_world')]; "
+    "sys.modules['benchmarks.real_world']=real; "
+    "name='benchmarks.real_world.ground_truth_run_v1'; "
+    "entry=root/'benchmarks/real_world/ground_truth_run_v1.py'; "
+    "spec=importlib.util.spec_from_file_location(name, entry); "
+    "module=importlib.util.module_from_spec(spec); sys.modules[name]=module; "
+    "spec.loader.exec_module(module); raise SystemExit(module.main())"
+)
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _ZERO_HASH: Final = "sha256:" + "0" * 64
 _EVENT_FILE = re.compile(
@@ -313,7 +327,10 @@ def _build_broker_bundle(
     """Capture the exact authenticated profile and Python package used by the broker."""
     bundle = runtime / "broker-bundle"
     files: dict[str, bytes] = dict(profile.files)
-    for path in (root / "benchmarks/real_world").rglob("*.py"):
+    source_root = root / "benchmarks/real_world"
+    for path in source_root.rglob("*"):
+        if not path.is_file() or path.suffix not in {".py", ".json"}:
+            continue
         relative = path.relative_to(root).as_posix()
         raw = submit_v1._owned_file(path, max_bytes=_MAX_FILE, allowed_modes={0o644})
         prior = files.get(relative)
@@ -351,8 +368,12 @@ def _verify_broker_bundle(
         _strict_keys(
             value,
             {
-                "schema_version", "protocol", "production_profile_sha256",
-                "production_files_sha256", "files", "bundle_sha256",
+                "schema_version",
+                "protocol",
+                "production_profile_sha256",
+                "production_files_sha256",
+                "files",
+                "bundle_sha256",
             },
             "broker bundle manifest",
         )
@@ -367,10 +388,12 @@ def _verify_broker_bundle(
     ):
         _fail("immutable broker bundle manifest changed")
     current: dict[str, str] = {}
-    for path in (root / "benchmarks/real_world").rglob("*.py"):
-        current[path.relative_to(root).as_posix()] = _sha(
-            submit_v1._owned_file(path, max_bytes=_MAX_FILE, allowed_modes={0o644})
-        )
+    source_root = root / "benchmarks/real_world"
+    for path in source_root.rglob("*"):
+        if path.is_file() and path.suffix in {".py", ".json"}:
+            current[path.relative_to(root).as_posix()] = _sha(
+                submit_v1._owned_file(path, max_bytes=_MAX_FILE, allowed_modes={0o644})
+            )
     for name, content in profile.files.items():
         digest = _sha(content)
         if name in current and current[name] != digest:
@@ -4137,6 +4160,17 @@ def _runtime_boundary(
     return fresh_attestation, fresh_installation
 
 
+def _require_exclusive_broker_freeze_lease() -> NoReturn:
+    """Fail closed until a trusted host can enforce an exclusive freeze lease.
+
+    File modes and digest checks cannot prevent an owner or privileged process
+    from changing and restoring bytes between checks. This host has no trusted
+    read-only mount or signed freeze-lease provider, so production broker work
+    must remain blocked rather than claim immutability.
+    """
+    _fail("trusted exclusive broker freeze lease unavailable; production broker execution blocked")
+
+
 def _require_current_broker_bundle(
     root: Path, execution_root: Path, attestation: dict[str, Any]
 ) -> dict[str, Any]:
@@ -4144,14 +4178,11 @@ def _require_current_broker_bundle(
     if attestation.get("production_profile_sha256") != profile.checksum_sha256:
         _fail("historical runtime profile is audit-only")
     bundle = _verify_broker_bundle(root, execution_root, profile)
-    receipt, _ = _json_raw(
-        execution_root / "runtime/custody-receipt.json", modes={0o400}
-    )
+    receipt, _ = _json_raw(execution_root / "runtime/custody-receipt.json", modes={0o400})
     if (
         receipt.get("broker_bundle_path") != bundle["path"]
         or receipt.get("broker_bundle_sha256") != bundle["sha256"]
-        or attestation.get("runtime_custody_receipt_sha256")
-        != _sha(canonical_json(receipt))
+        or attestation.get("runtime_custody_receipt_sha256") != _sha(canonical_json(receipt))
     ):
         _fail("runtime, broker bundle, and custody receipt differ")
     return bundle
@@ -4162,8 +4193,7 @@ def _require_binding_bundle(
 ) -> None:
     if (
         record.runtime_attestation_entry_hash != attestation.get("entry_hash")
-        or record.runtime_custody_receipt_path
-        != attestation.get("runtime_custody_receipt_path")
+        or record.runtime_custody_receipt_path != attestation.get("runtime_custody_receipt_path")
         or record.runtime_custody_receipt_sha256
         != attestation.get("runtime_custody_receipt_sha256")
         or state.get("runtime_attestation_entry_hash") != attestation.get("entry_hash")
@@ -4646,6 +4676,7 @@ def prepare_attempt(  # noqa: PLR0912,PLR0915
 ) -> dict[str, Any]:
     if not _ATTEMPT.fullmatch(attempt_id):
         _fail("attempt id is invalid")
+    _require_exclusive_broker_freeze_lease()
     attestation = _runtime_attestation(root, execution_root)
     installation = _installed_agent(root, execution_root)
     private = campaign_v1._private_root(ledger)
@@ -4739,8 +4770,11 @@ def prepare_attempt(  # noqa: PLR0912,PLR0915
         bundle = _require_current_broker_bundle(root, execution_root, fresh_attestation)
         argv = [
             sys.executable,
-            "-m",
-            "benchmarks.real_world.ground_truth_run_v1",
+            "-I",
+            "-B",
+            "-c",
+            _BROKER_BOOTSTRAP,
+            bundle["path"],
             "--root",
             str(root),
             "serve-broker",
@@ -4758,7 +4792,6 @@ def prepare_attempt(  # noqa: PLR0912,PLR0915
         env = {
             "PATH": _attested_broker_path(fresh_attestation),
             "HOME": str(Path.home()),
-            "PYTHONPATH": bundle["path"],
             "LANG": "C",
             "LC_ALL": "C",
         }
@@ -5188,6 +5221,7 @@ def finalize_attempt(
 ) -> dict[str, Any]:
     attestation = _runtime_attestation(root, execution_root)
     _require_current_broker_bundle(root, execution_root, attestation)
+    _require_exclusive_broker_freeze_lease()
     _installed_agent(root, execution_root)
     state = _state(execution_root, attempt_id)
     private = campaign_v1._private_root(ledger)
