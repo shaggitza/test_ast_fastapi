@@ -14,7 +14,7 @@ from typing import Any, Literal
 if sys.version_info >= (3, 11):
     import tomllib
 else:
-    import tomli as tomllib  # type: ignore[import-not-found]
+    import tomli as tomllib
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
