@@ -219,6 +219,11 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
         "class Holder:\n"
         "    def __init__(self) -> None:\n"
         "        self.session = Session()\n\n"
+        "class UnitOfWork:\n"
+        "    def begin(self): return self\n"
+        "    def __enter__(self): return self\n"
+        "    def __exit__(self, exc_type, exc, tb): return False\n"
+        "    def add(self, value: str) -> None: pass\n\n"
         "def stage_helper(session: Session) -> None:\n"
         "    session.add('helper')\n\n"
         "@app.post('/ordered')\n"
@@ -292,7 +297,21 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
         "def helper() -> None:\n"
         "    session = Session()\n"
         "    stage_helper(session)\n"
-        "    session.commit()\n",
+        "    session.commit()\n\n"
+        "@app.post('/wrapper-context')\n"
+        "def wrapper_context() -> None:\n"
+        "    work = UnitOfWork()\n"
+        "    with work.begin():\n"
+        "        work.add('wrapped')\n\n"
+        "@app.post('/exception-path')\n"
+        "def exception_path() -> None:\n"
+        "    session = Session()\n"
+        "    session.add('exception')\n"
+        "    try:\n"
+        "        session.flush()\n"
+        "        session.commit()\n"
+        "    except Exception:\n"
+        "        session.rollback()\n",
         encoding="utf-8",
     )
     contracts = root / "ordered-effects.yaml"
@@ -346,6 +365,27 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
                         "commit",
                         "rollback",
                     )
+                ]
+                + [
+                    {
+                        "id": "uow-begin",
+                        "symbol": f"{root.name}.main.UnitOfWork.begin",
+                        "invocation": "instance_method",
+                        "operation": "begin",
+                        "channel": "sql",
+                        "behavior": {
+                            "timing": "context_enter",
+                            "transaction_scope": "transaction",
+                            "context_exit": "transaction_commit_rollback",
+                        },
+                    },
+                    {
+                        "id": "uow-add",
+                        "symbol": f"{root.name}.main.UnitOfWork.add",
+                        "invocation": "instance_method",
+                        "operation": "stage",
+                        "channel": "sql",
+                    },
                 ]
                 + [
                     {
@@ -422,10 +462,10 @@ def test_ordered_paths_require_same_scope_receiver_and_straight_line(tmp_path: P
         "ordered_flushes": 1,
         "ordered_commits": 3,
         "ordered_rollbacks": 0,
-        "context_manager_paths": 3,
-        "context_transactions": 2,
+        "context_manager_paths": 4,
+        "context_transactions": 3,
         "context_savepoints": 1,
-        "unresolved_pairs": 5,
+        "unresolved_pairs": 8,
     }
     ordered = next(item for item in paths.ordered_paths if item.function_name == "ordered")
     assert {item.function_name for item in paths.ordered_paths} == {
@@ -450,11 +490,19 @@ def test_ordered_paths_require_same_scope_receiver_and_straight_line(tmp_path: P
         "managed_async_context",
         "managed_context",
         "managed_savepoint",
+        "wrapper_context",
     }
     managed = next(item for item in paths.context_paths if item.function_name == "managed_context")
     assert managed.normal_exit == "commit_reachable"
     assert managed.exceptional_exit == "rollback_reachable"
     assert managed.status == "conditional_on_context_exit"
+    wrapper = next(item for item in paths.context_paths if item.function_name == "wrapper_context")
+    assert wrapper.normal_exit == "commit_reachable"
+    assert wrapper.exceptional_exit == "rollback_reachable"
+    assert all(item.persistence_status == "not_established" for item in paths.context_paths)
+    assert sum(
+        item.reason_code == "control_flow_unavailable" for item in paths.diagnostics
+    ) >= 4  # Branch flow plus all three try/except boundaries stay unresolved.
     savepoint = next(
         item for item in paths.context_paths if item.function_name == "managed_savepoint"
     )
