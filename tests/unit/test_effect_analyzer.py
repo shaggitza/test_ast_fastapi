@@ -75,6 +75,72 @@ def test_defensive_copy_with_returned_original_argument_is_high(tmp_path: Path) 
     assert result.evidence[0].disposition == EffectDisposition.OBSERVABLE_BEHAVIOR
 
 
+def test_never_called_nested_mutation_does_not_qualify_copy_change(tmp_path: Path) -> None:
+    service = tmp_path / "service.py"
+    service.write_text(
+        "def dispatch(payload):\n"
+        "    payload = payload.copy()\n"
+        "    def deferred():\n"
+        "        payload.update({'x': 1})\n"
+        "    return {'ok': True}\n"
+    )
+    main = tmp_path / "main.py"
+    main.write_text("def endpoint():\n    return dispatch({'x': 0})\n")
+
+    assert EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 2)]) is None
+
+
+def test_reassignment_kills_returned_alias_observation(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def endpoint():\n"
+        "    payload = {'model': 'preset'}\n"
+        "    dispatch(payload)\n"
+        "    payload = {'model': 'replacement'}\n"
+        "    return payload\n"
+    )
+
+    result = EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 3)])
+
+    assert result is not None
+    assert result.confidence == ConfidenceLevel.LOW
+    assert result.evidence[0].observations == [DataObservationKind.NOT_OBSERVED_AFTER_CALL]
+
+
+def test_branch_reassignment_does_not_join_old_alias_as_definite(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def endpoint(flag):\n"
+        "    payload = {'model': 'preset'}\n"
+        "    dispatch(payload)\n"
+        "    if flag:\n"
+        "        payload = {'model': 'replacement'}\n"
+        "    return payload\n"
+    )
+
+    result = EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 3)])
+
+    assert result is not None
+    assert result.confidence == ConfidenceLevel.LOW
+    assert result.evidence[0].observations == [DataObservationKind.NOT_OBSERVED_AFTER_CALL]
+
+
+def test_unknown_copy_method_does_not_claim_defensive_copy(tmp_path: Path) -> None:
+    service = tmp_path / "service.py"
+    service.write_text(
+        "def dispatch(payload):\n"
+        "    payload = payload.copy()\n"
+        "    payload.update({'x': 1})\n"
+        "    return payload\n"
+    )
+    main = tmp_path / "main.py"
+    main.write_text("def endpoint():\n    return dispatch({'x': 0})\n")
+
+    assert EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 2)]) is None
+
+
 def test_defensive_copy_distinguishes_logging_from_public_response(tmp_path: Path) -> None:
     service = _service(tmp_path)
     main = tmp_path / "main.py"

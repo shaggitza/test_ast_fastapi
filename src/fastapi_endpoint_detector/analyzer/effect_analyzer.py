@@ -185,7 +185,7 @@ class EffectAnalyzer:
                 parameters.add(function.args.vararg.arg)
             if function.args.kwarg:
                 parameters.add(function.args.kwarg.arg)
-            for node in ast.walk(function):
+            for node in self._same_scope_nodes(function):
                 if not isinstance(node, ast.Assign) or node.lineno not in changed_lines:
                     continue
                 if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
@@ -204,24 +204,16 @@ class EffectAnalyzer:
                 key is None and isinstance(item, ast.Name) and item.id == subject
                 for key, item in zip(value.keys, value.values, strict=True)
             )
-        if isinstance(value, ast.Call):
-            if (
-                isinstance(value.func, ast.Attribute)
-                and value.func.attr == "copy"
-                and isinstance(value.func.value, ast.Name)
-                and value.func.value.id == subject
-                and not value.args
-            ):
-                return True
-            if (
-                isinstance(value.func, ast.Name)
-                and value.func.id == "dict"
-                and len(value.args) == 1
-                and isinstance(value.args[0], ast.Name)
-                and value.args[0].id == subject
-            ):
-                return True
-        return False
+        # A method named copy is not proof of built-in container semantics.
+        # Keep only constructors whose target type is explicit below.
+        return (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == "dict"
+            and len(value.args) == 1
+            and isinstance(value.args[0], ast.Name)
+            and value.args[0].id == subject
+        )
 
     def _has_later_top_level_mutation(
         self,
@@ -243,7 +235,7 @@ class EffectAnalyzer:
             "sort",
             "update",
         }
-        for node in ast.walk(function):
+        for node in self._same_scope_nodes(function):
             if getattr(node, "lineno", 0) <= copy_line:
                 continue
             targets: list[ast.expr] = []
@@ -610,36 +602,53 @@ class EffectAnalyzer:
                 and node.value.id in aliases
             ):
                 aliases.add(node.targets[0].id)
-        changed = True
-        while changed:
-            changed = False
-            for node in scope_nodes:
-                if (
-                    not isinstance(node, (ast.Assign, ast.AnnAssign))
-                    or getattr(node, "lineno", 0) <= call_line
-                ):
-                    continue
-                value = node.value
-                if value is None:
-                    continue
-                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                if not any(
-                    isinstance(name, ast.Name)
-                    and isinstance(name.ctx, ast.Load)
-                    and name.id in aliases
-                    for name in ast.walk(value)
-                ):
-                    continue
+        # Follow straight-line assignments after the call. A write kills that
+        # local's old identity; branch assignments are left conditional by the
+        # control-region classifier rather than joined as definite aliases.
+        killed_at: dict[str, int] = {}
+        ordered_statements = sorted(
+            (node for node in scope_nodes if isinstance(node, ast.stmt)),
+            key=lambda node: (getattr(node, "lineno", 0), getattr(node, "col_offset", 0)),
+        )
+        for statement in ordered_statements:
+            if getattr(statement, "lineno", 0) <= call_line:
+                continue
+            control, _ = self._control_relationship(call, statement, parents)
+            value = getattr(statement, "value", None)
+            targets: list[ast.expr] = []
+            if isinstance(statement, ast.Assign):
+                targets.extend(statement.targets)
+            elif isinstance(statement, (ast.AnnAssign, ast.AugAssign)):
+                targets.append(statement.target)
+            if control:
+                # An assignment in an opposite if arm cannot define a definite
+                # alias on the call's path.
                 for target in targets:
-                    if isinstance(target, ast.Name) and target.id not in aliases:
-                        aliases.add(target.id)
-                        changed = True
+                    if isinstance(target, ast.Name) and target.id in aliases:
+                        killed_at[target.id] = statement.lineno
+                continue
+            source_alias = value is not None and any(
+                isinstance(name, ast.Name) and isinstance(name.ctx, ast.Load) and name.id in aliases
+                for name in ast.walk(value)
+            )
+            for target in targets:
+                if not isinstance(target, ast.Name):
+                    continue
+                if target.id in aliases:
+                    killed_at[target.id] = statement.lineno
+                if source_alias:
+                    aliases.add(target.id)
+                    killed_at.pop(target.id, None)
 
         observations: list[_Observation] = []
         for node in scope_nodes:
             if not isinstance(node, ast.Name) or not isinstance(node.ctx, ast.Load):
                 continue
-            if node.id not in aliases or node.lineno <= call_line:
+            if (
+                node.id not in aliases
+                or node.lineno <= call_line
+                or node.lineno >= killed_at.get(node.id, 10**12)
+            ):
                 continue
             exclusive, conditional = self._control_relationship(call, node, parents)
             if exclusive:
