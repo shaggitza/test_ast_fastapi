@@ -1913,6 +1913,32 @@ class MypyAnalyzer:
             declaration[0], expression, environment, import_map, stack, budget
         )
 
+    @staticmethod
+    def _literal_boolean(expression: Any) -> bool | None:
+        """Return the truth value of a source literal condition, when exact."""
+        from mypy.nodes import IntExpr, NameExpr, StrExpr, UnaryExpr
+
+        if isinstance(expression, NameExpr) and expression.name in {"True", "False"}:
+            return expression.name == "True"
+        if isinstance(expression, (IntExpr, StrExpr)):
+            return bool(expression.value)
+        if isinstance(expression, UnaryExpr) and expression.op == "not":
+            value = MypyAnalyzer._literal_boolean(expression.expr)
+            return None if value is None else not value
+        return None
+
+    @staticmethod
+    def _returned_nested_function(parent: Any, nested: Any) -> bool:
+        """Recognize closures returned by their defining callable as escaping."""
+        from mypy.nodes import NameExpr, ReturnStmt
+
+        body = getattr(parent, "body", None)
+        for statement in getattr(body, "body", ()):
+            if isinstance(statement, ReturnStmt) and isinstance(statement.expr, NameExpr):
+                if statement.expr.name == getattr(nested, "name", None):
+                    return True
+        return False
+
     def _finite_constructor_value(
         self,
         info: Any,
@@ -3345,6 +3371,8 @@ class MypyAnalyzer:
                     )
 
             # Walk nested calls before invalidating mutable local object state.
+            if isinstance(callee, LambdaExpr):
+                walk_node(callee.body)
             walk_node(callee)
             for arg in call.args:
                 walk_node(arg)
@@ -3393,13 +3421,19 @@ class MypyAnalyzer:
                 if hasattr(n, "decorators"):
                     for decorator in n.decorators:
                         walk_node(decorator)
-                # Walk function body
-                if hasattr(n, "body"):
-                    walk_node(n.body)
+                # A nested function definition evaluates its signature and
+                # decorators here; its body executes only through a call edge.
+                if n is function_node or self._returned_nested_function(function_node, n):
+                    if hasattr(n, "body"):
+                        walk_node(n.body)
 
             elif isinstance(n, Block):
                 for stmt in n.body:
                     walk_node(stmt)
+                    # Statements following an unconditional terminal cannot
+                    # contribute executable references in this block.
+                    if isinstance(stmt, (ReturnStmt, RaiseStmt)):
+                        break
 
             elif isinstance(n, ExpressionStmt):
                 walk_node(n.expr)
@@ -3453,31 +3487,53 @@ class MypyAnalyzer:
                 base_deferred = dict(deferred_environment)
                 branch_environments: list[dict[str, _FinitePointsTo]] = []
                 branch_deferred: list[dict[str, _DeferredGenerator]] = []
+                selected: int | None = None
+                unknown_before_selection = False
                 for expr, body in zip(n.expr, n.body, strict=True):
+                    literal = self._literal_boolean(expr)
+                    if literal is False:
+                        # Evaluating the condition is harmless; the body is
+                        # statically unreachable.
+                        walk_node(expr)
+                        continue
+                    if selected is not None:
+                        continue
                     flow_environment = dict(base_environment)
                     deferred_environment = dict(base_deferred)
                     walk_node(expr)
                     walk_node(body)
                     branch_environments.append(dict(flow_environment))
                     branch_deferred.append(dict(deferred_environment))
+                    if literal is True:
+                        selected = len(branch_environments) - 1
+                    else:
+                        unknown_before_selection = True
                 flow_environment = dict(base_environment)
                 deferred_environment = dict(base_deferred)
-                if n.else_body:
+                if n.else_body and selected is None:
                     walk_node(n.else_body)
                     branch_environments.append(dict(flow_environment))
                     branch_deferred.append(dict(deferred_environment))
-                else:
+                elif not n.else_body and selected is None:
                     branch_environments.append(base_environment)
                     branch_deferred.append(base_deferred)
-                flow_environment = self._join_finite_environments(branch_environments)
-                common_deferred = set.intersection(*(set(branch) for branch in branch_deferred))
-                deferred_environment = {
-                    name: branch_deferred[0][name]
-                    for name in common_deferred
-                    if all(
-                        branch[name] == branch_deferred[0][name] for branch in branch_deferred[1:]
-                    )
-                }
+                if selected is not None and not unknown_before_selection:
+                    flow_environment = branch_environments[selected]
+                    deferred_environment = branch_deferred[selected]
+                else:
+                    flow_environment = self._join_finite_environments(branch_environments)
+                    if branch_deferred:
+                        common_deferred = set.intersection(
+                            *(set(branch) for branch in branch_deferred)
+                        )
+                        deferred_environment = {
+                            name: branch_deferred[0][name]
+                            for name in common_deferred
+                            if all(
+                                branch[name] == branch_deferred[0][name]
+                                for branch in branch_deferred[1:]
+                            )
+                        }
 
             elif isinstance(n, WhileStmt):
                 walk_node(n.expr)
@@ -3620,8 +3676,7 @@ class MypyAnalyzer:
                     for arg in n.arguments:
                         if hasattr(arg, "initializer") and arg.initializer:
                             walk_node(arg.initializer)
-                # Walk lambda body
-                walk_node(n.body)
+                # The body is deferred until the lambda is invoked.
 
             elif isinstance(n, YieldFromExpr):
                 consume_generator_expression(n.expr, n.line, require_async=False)

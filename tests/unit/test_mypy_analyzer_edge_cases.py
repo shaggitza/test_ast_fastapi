@@ -514,3 +514,47 @@ def handler():
         assert deps.references_file(builders_file), (
             "Functions used to build unpacked arguments should be traced"
         )
+
+
+class TestExecutionReachability:
+    def test_dead_and_deferred_bodies_are_not_reported(self, tmp_path: Path) -> None:
+        (tmp_path / "effects.py").write_text("def changed():\n    return 1\n")
+        main = tmp_path / "main.py"
+        main.write_text('''from effects import changed
+
+def handler():
+    if False:
+        changed()
+    return None
+    changed()
+    def unused():
+        changed()
+    callback = lambda: changed()
+''')
+        analyzer = MypyAnalyzer(tmp_path)
+        endpoint = Endpoint(
+            path="/test",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="main", file_path=main, line_number=3),
+        )
+
+        assert not analyzer.analyze_endpoint(endpoint).references_file(str(tmp_path / "effects.py"))
+
+    def test_live_branch_and_invoked_lambda_are_traced(self, tmp_path: Path) -> None:
+        (tmp_path / "effects.py").write_text("def changed():\n    return 1\n")
+        main = tmp_path / "main.py"
+        main.write_text('''from effects import changed
+
+def handler(flag: bool):
+    if flag:
+        changed()
+    (lambda: changed())()
+''')
+        analyzer = MypyAnalyzer(tmp_path)
+        endpoint = Endpoint(
+            path="/test",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="main", file_path=main, line_number=3),
+        )
+
+        assert analyzer.analyze_endpoint(endpoint).references_file(str(tmp_path / "effects.py"))
