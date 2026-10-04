@@ -731,7 +731,7 @@ class CustomSurfaceExtractor:
         self._endpoints: list[Endpoint] = []
         self._limitations: list[EndpointDiscoveryCondition] = []
         self._route_conditions: list[EndpointDiscoveryCondition] = []
-        self._seen: set[tuple[str, int, int, str, str, str]] = set()
+        self._seen: set[tuple[str, int, int, str, str, str, str]] = set()
         self._startup_route_seen: set[tuple[str, int, str, tuple[EndpointMethod, ...], str]] = set()
         self._module_states: dict[str, dict[str, _Binding | None]] = {}
         self._class_scope_frames: list[_ClassScopeFrame] = []
@@ -2478,6 +2478,7 @@ class CustomSurfaceExtractor:
             in {
                 "fastapi.FastAPI",
                 "starlette.applications.Starlette",
+                "fastapi.APIRouter",
             }
         ):
             token = (module.name, call.lineno, call.col_offset)
@@ -2526,9 +2527,75 @@ class CustomSurfaceExtractor:
             return
         symbol, invocation, receiver_type = resolved
         self._record_framework_include(module, call, state, evaluation)
+        endpoint_count_before = len(self._endpoints)
         for contract in self.contracts.document.contracts:
             if not self._matches(contract, symbol, invocation, receiver_type):
                 continue
+            if (
+                contract.id.endswith(("-on-startup-list", "-on-shutdown-list"))
+                and contract.handler.kind == HandlerSelectorKind.KEYWORD
+            ):
+                keyword_index = next(
+                    (
+                        i
+                        for i, item in enumerate(call.keywords)
+                        if item.arg == contract.handler.name
+                    ),
+                    None,
+                )
+                if keyword_index is not None and isinstance(
+                    call.keywords[keyword_index].value, (ast.List, ast.Tuple)
+                ):
+                    sequence = call.keywords[keyword_index].value
+                    assert isinstance(sequence, (ast.List, ast.Tuple))
+                    captures = list(evaluation.keywords) if evaluation is not None else []
+                    original = captures[keyword_index] if keyword_index < len(captures) else None
+                    for item in sequence.elts:
+                        if original is None:
+                            list_capture = _EvaluatedArgument(
+                                item,
+                                dict(state),
+                                self._binding_from_expression(item, state, module.name),
+                            )
+                        else:
+                            list_capture = _EvaluatedArgument(
+                                item,
+                                original.state,
+                                self._binding_from_expression(item, original.state, module.name),
+                            )
+                        narrowed = ast.copy_location(
+                            ast.Call(
+                                func=call.func,
+                                args=list(call.args),
+                                keywords=[
+                                    ast.keyword(
+                                        arg=keyword.arg,
+                                        value=(item if i == keyword_index else keyword.value),
+                                    )
+                                    for i, keyword in enumerate(call.keywords)
+                                ],
+                            ),
+                            call,
+                        )
+                        narrowed_evaluation = evaluation
+                        if evaluation is not None:
+                            narrowed_keywords = list(evaluation.keywords)
+                            narrowed_keywords[keyword_index] = list_capture
+                            narrowed_evaluation = _CallEvaluation(
+                                evaluation.callable_state,
+                                evaluation.callable_resolution,
+                                evaluation.positional,
+                                tuple(narrowed_keywords),
+                            )
+                        self._inspect_registration(
+                            module,
+                            narrowed,
+                            state,
+                            inherited_conditions,
+                            decorated_handler=None,
+                            evaluation=narrowed_evaluation,
+                        )
+                    continue
             handler_expression: ast.expr | None = None
             if contract.handler.kind == HandlerSelectorKind.DECORATED_FUNCTION:
                 handler_result = (
@@ -2546,6 +2613,28 @@ class CustomSurfaceExtractor:
                         handler_expression = call.args[index]
                         if evaluation is not None and index < len(evaluation.positional):
                             capture = evaluation.positional[index]
+                    elif (
+                        index == 1
+                        and isinstance(call.func, ast.Attribute)
+                        and call.func.attr in {"add_event_handler", "add_exception_handler"}
+                    ):
+                        accepted_names = (
+                            {"handler", "func"}
+                            if call.func.attr == "add_event_handler"
+                            else {"handler"}
+                        )
+                        keyword_index = next(
+                            (
+                                i
+                                for i, item in enumerate(call.keywords)
+                                if item.arg in accepted_names
+                            ),
+                            None,
+                        )
+                        if keyword_index is not None:
+                            handler_expression = call.keywords[keyword_index].value
+                            if evaluation is not None and keyword_index < len(evaluation.keywords):
+                                capture = evaluation.keywords[keyword_index]
                 else:
                     keyword_index = next(
                         (
@@ -2592,6 +2681,36 @@ class CustomSurfaceExtractor:
                 )
                 continue
             handler_module, function = handler_result
+            if contract.callback_range != CallbackRangeMode.FULL and not self._trusted_lifespan(
+                handler_module, function
+            ):
+                self._limitations.append(
+                    EndpointDiscoveryCondition(
+                        source_path=handler_module.path,
+                        source_line=function.lineno,
+                        reason=(
+                            f"custom surface contract {contract.id!r} requires a trusted "
+                            "contextlib.asynccontextmanager callback"
+                        ),
+                    )
+                )
+                continue
+            if (
+                decorated_handler is not None
+                and contract.handler.kind == HandlerSelectorKind.DECORATED_FUNCTION
+                and len(function.decorator_list) != 1
+            ):
+                self._limitations.append(
+                    EndpointDiscoveryCondition(
+                        source_path=handler_module.path,
+                        source_line=function.lineno,
+                        reason=(
+                            f"custom surface contract {contract.id!r} callback has "
+                            "additional decorators with unknown replacement behavior"
+                        ),
+                    )
+                )
+                continue
             handler_range = self._handler_range(contract.callback_range, function)
             if handler_range is None:
                 self._limitations.append(
@@ -2605,7 +2724,12 @@ class CustomSurfaceExtractor:
                     )
                 )
                 continue
-            resource_result = self._resources(contract, call, function)
+            resource_result = self._resources(
+                contract,
+                call,
+                function,
+                evaluation.callable_state if evaluation is not None else state,
+            )
             resources = resource_result.values
             if resources is None:
                 self._limitations.append(
@@ -2645,6 +2769,7 @@ class CustomSurfaceExtractor:
                     call.col_offset,
                     contract.id,
                     handler_module.name,
+                    function.name,
                     resource,
                 )
                 if key in self._seen:
@@ -2705,6 +2830,33 @@ class CustomSurfaceExtractor:
                         evidence,
                         evaluation.callable_state if evaluation is not None else None,
                     )
+        if (
+            len(self._endpoints) > endpoint_count_before
+            and symbol.rsplit(".", maxsplit=1)[-1] == "add_middleware"
+        ):
+            self._limitations = [
+                item
+                for item in self._limitations
+                if not (
+                    item.source_path == module.path
+                    and item.source_line == call.lineno
+                    and "matched but handler was unresolved" in item.reason
+                )
+            ]
+
+    def _trusted_lifespan(
+        self,
+        module: _Module,
+        function: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> bool:
+        """Require the exact stdlib asynccontextmanager decorator before splitting phases."""
+        if len(function.decorator_list) != 1:
+            return False
+        decorator = function.decorator_list[0]
+        if isinstance(decorator, ast.Call):
+            return False
+        state = self._module_states.get(module.name, {})
+        return self._symbol_identity(decorator, state) == "contextlib.asynccontextmanager"
 
     def _emit_startup_routes(  # noqa: PLR0912, PLR0915
         self,
@@ -4269,6 +4421,40 @@ class CustomSurfaceExtractor:
         required_base: str,
     ) -> tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef] | None:
         """Resolve a method through a bounded, exact local class MRO."""
+        if required_base == "starlette.types.ASGIApp":
+            candidates = self._classes.get(identity or "", [])
+            if len(candidates) != 1:
+                return None
+            module, class_node = candidates[0]
+            if class_node.decorator_list or class_node.keywords:
+                return None
+            pure_methods = [
+                item
+                for item in class_node.body
+                if isinstance(item, ast.AsyncFunctionDef)
+                and item.name == method_name
+                and not item.decorator_list
+            ]
+            mutation = _ClassAttributeMutationVisitor(method_name)
+            for item in class_node.body:
+                if item not in pure_methods:
+                    mutation.visit(item)
+            if mutation.found or len(pure_methods) != 1:
+                return None
+            pure_method = pure_methods[0]
+            positional = [*pure_method.args.posonlyargs, *pure_method.args.args]
+            if (
+                len(positional) != 4
+                or positional[0].arg != "self"
+                or tuple(item.arg for item in positional[1:]) != ("scope", "receive", "send")
+                or pure_method.args.vararg is not None
+                or pure_method.args.kwarg is not None
+                or pure_method.args.kwonlyargs
+            ):
+                return None
+            header_risk = _ClassAttributeMutationVisitor("__surface_dynamic_header__")
+            header_risk._visit_function_header(pure_method)
+            return None if header_risk.found else (module, pure_method)
         pending = [identity] if identity is not None else []
         seen: set[str] = set()
         method_definitions: list[tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef]] = []
@@ -4421,17 +4607,50 @@ class CustomSurfaceExtractor:
         return boundary.lineno, function.end_lineno or boundary.lineno
 
     @classmethod
-    def _resources(  # noqa: PLR0911, PLR0912 - selector forms stay explicit
+    def _resources(  # noqa: PLR0911, PLR0912, PLR0915 - selector forms stay explicit
         cls,
         contract: SurfaceContract,
         call: ast.Call,
         handler: ast.FunctionDef | ast.AsyncFunctionDef,
+        state: dict[str, _Binding | None],
     ) -> _ResolvedResources:
         """Resolve one bounded literal resource set without widening dynamic values."""
         selector = contract.surface.resource
         values: tuple[str, ...]
         failure = "resource set was not finite literal data"
-        if selector.kind == ResourceSelectorKind.HANDLER_NAME:
+        if contract.surface.kind == "framework.exception_handler":
+            expression = call.args[0] if call.args else None
+            if expression is None and isinstance(call.func, ast.Attribute):
+                expression = next(
+                    (
+                        item.value
+                        for item in call.keywords
+                        if item.arg in {"exc_class", "exc", "exception_class"}
+                    ),
+                    None,
+                )
+            identity = cls._symbol_identity_from_state(expression, state)
+            if (
+                identity is None
+                and isinstance(expression, ast.Name)
+                and expression.id
+                in {
+                    "Exception",
+                    "BaseException",
+                    "RuntimeError",
+                    "ValueError",
+                    "TypeError",
+                    "LookupError",
+                    "KeyError",
+                    "AssertionError",
+                    "OSError",
+                }
+            ):
+                identity = f"builtins.{expression.id}"
+            if identity is None:
+                return _ResolvedResources(None, "exception class identity was unresolved")
+            values = (identity,)
+        elif selector.kind == ResourceSelectorKind.HANDLER_NAME:
             values = (cls._handler_resource(handler.name, selector.handler_name_normalization),)
         elif selector.kind == ResourceSelectorKind.LITERAL:
             if selector.value is None:
@@ -4475,6 +4694,16 @@ class CustomSurfaceExtractor:
             if selector.kind == ResourceSelectorKind.ARGUMENT:
                 index = selector.index or 0
                 selected_expression = call.args[index] if index < len(call.args) else None
+                if (
+                    selected_expression is None
+                    and index == 0
+                    and isinstance(call.func, ast.Attribute)
+                    and call.func.attr == "add_event_handler"
+                ):
+                    selected_expression = next(
+                        (item.value for item in call.keywords if item.arg == "event_type"),
+                        None,
+                    )
             elif selector.kind == ResourceSelectorKind.ARGUMENT_OR_KEYWORD:
                 index = selector.index or 0
                 selected_expression = (
@@ -4502,6 +4731,24 @@ class CustomSurfaceExtractor:
         ):
             return _ResolvedResources(None, failure)
         return _ResolvedResources(normalized, "")
+
+    @classmethod
+    def _symbol_identity_from_state(
+        cls, expression: ast.expr | None, state: dict[str, _Binding | None]
+    ) -> str | None:
+        """Return a stable project/import identity for an exception class expression."""
+        if isinstance(expression, ast.Name):
+            binding = state.get(expression.id)
+            return binding.identity if binding is not None and binding.kind == "symbol" else None
+        if isinstance(expression, ast.Attribute):
+            parent = cls._symbol_identity_from_state(expression.value, state)
+            if parent is not None:
+                return f"{parent}.{expression.attr}"
+            if isinstance(expression.value, ast.Name):
+                binding = state.get(expression.value.id)
+                if binding is not None and binding.kind == "module":
+                    return f"{binding.identity}.{expression.attr}"
+        return None
 
     @staticmethod
     def _handler_resource(name: str, normalization: HandlerNameNormalization) -> str:

@@ -94,6 +94,113 @@ def test_module_qualified_lifespan_selected_and_literal_none_is_absent(tmp_path:
     assert inventory.status == InventoryStatus.ESTABLISHED
 
 
+def test_constructor_lifecycle_lists_keep_all_selected_app_callbacks(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import APIRouter, FastAPI\n\n"
+        "async def first(): pass\n"
+        "async def second(): pass\n"
+        "async def unused_only(): pass\n"
+        "unused = FastAPI(on_startup=[unused_only])\n"
+        "router = APIRouter(on_startup=[first, second], on_shutdown=[second])\n"
+        "app = FastAPI(on_startup=[first, second], on_shutdown=[second])\n"
+        "app.include_router(router)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert [(item.identifier, item.handler.name) for item in inventory.endpoints] == [
+        ("FRAMEWORK.LIFECYCLE event:shutdown", "second"),
+        ("FRAMEWORK.LIFECYCLE event:startup", "first"),
+        ("FRAMEWORK.LIFECYCLE event:startup", "second"),
+    ]
+    assert "unused_only" not in {item.handler.name for item in inventory.endpoints}
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert all(item.surface is not None for item in inventory.endpoints)
+
+
+def test_keyword_add_event_handler_resolves_positional_or_keyword_parameters(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "async def startup(): pass\n"
+        "app = FastAPI()\n"
+        "app.add_event_handler(event_type='startup', handler=startup)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert len(inventory.endpoints) == 1
+    assert inventory.endpoints[0].identifier == "FRAMEWORK.LIFECYCLE event:startup"
+    assert inventory.endpoints[0].handler.name == "startup"
+    assert inventory.status == InventoryStatus.ESTABLISHED
+
+
+def test_exception_handlers_are_keyed_and_selected_app_scoped(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "unused = FastAPI()\n"
+        "@unused.exception_handler(KeyError)\n"
+        "async def unused_error(request, exc): return None\n\n"
+        "app = FastAPI()\n"
+        "@app.exception_handler(ValueError)\n"
+        "async def value_error(request, exc): return None\n"
+        "async def type_error(request, exc): return None\n"
+        "app.add_exception_handler(exc_class=TypeError, handler=type_error)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert [(item.identifier, item.handler.name) for item in inventory.endpoints] == [
+        ("FRAMEWORK.EXCEPTION_HANDLER exception:builtins.TypeError", "type_error"),
+        ("FRAMEWORK.EXCEPTION_HANDLER exception:builtins.ValueError", "value_error"),
+    ]
+    assert inventory.status == InventoryStatus.ESTABLISHED
+
+
+def test_pure_asgi_middleware_resolves_local_call_protocol(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "class AuditMiddleware:\n"
+        "    async def __call__(self, scope, receive, send): pass\n\n"
+        "app = FastAPI()\n"
+        "app.add_middleware(AuditMiddleware)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert len(inventory.endpoints) == 1
+    assert inventory.endpoints[0].identifier == "FRAMEWORK.MIDDLEWARE protocol:http"
+    assert inventory.endpoints[0].handler.name == "__call__"
+
+
+def test_untrusted_extra_lifespan_decorator_does_not_split_phases(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from contextlib import asynccontextmanager\n"
+        "from fastapi import FastAPI\n\n"
+        "def replace(fn): return other\n\n"
+        "@replace\n"
+        "@asynccontextmanager\n"
+        "async def lifespan(app):\n"
+        "    yield\n\n"
+        "app = FastAPI(lifespan=lifespan)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.endpoints == []
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any(
+        "trusted contextlib.asynccontextmanager" in item.reason for item in inventory.limitations
+    )
+
+
 def test_lifespan_with_conditional_yield_fails_closed(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text(
         "from contextlib import asynccontextmanager\n"
@@ -579,7 +686,7 @@ def test_class_middleware_unsafe_base_and_dispatch_shapes_fail_closed(
     inventory = _extract(tmp_path)
 
     assert inventory.endpoints == []
-    assert len(inventory.limitations) == 10
+    assert len(inventory.limitations) == 20
 
 
 def test_imported_class_rebound_in_defining_module_fails_closed(tmp_path: Path) -> None:

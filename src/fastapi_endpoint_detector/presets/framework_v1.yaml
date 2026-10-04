@@ -1,12 +1,65 @@
 schema_version: 5
 preset:
   id: framework-callbacks
-  version: "5"
+  version: "6"
   provenance:
     kind: preset
     source: fastapi-endpoint-detector
-    revision: "5"
+    revision: "6"
 contracts:
+  - id: fastapi-constructor-on-startup-list
+    registration:
+      symbol: fastapi.FastAPI
+      invocation: constructor
+    handler: {kind: keyword, name: on_startup}
+    handler_optional: true
+    surface:
+      kind: framework.lifecycle
+      id_template: "event:{resource}"
+      resource: {kind: literal, value: startup}
+    callback_mode: either
+    execution_mode: framework
+    activates_routes: true
+
+  - id: fastapi-constructor-on-shutdown-list
+    registration:
+      symbol: fastapi.FastAPI
+      invocation: constructor
+    handler: {kind: keyword, name: on_shutdown}
+    handler_optional: true
+    surface:
+      kind: framework.lifecycle
+      id_template: "event:{resource}"
+      resource: {kind: literal, value: shutdown}
+    callback_mode: either
+    execution_mode: framework
+
+  - id: fastapi-router-constructor-on-startup-list
+    registration:
+      symbol: fastapi.APIRouter
+      invocation: constructor
+    handler: {kind: keyword, name: on_startup}
+    handler_optional: true
+    surface:
+      kind: framework.lifecycle
+      id_template: "event:{resource}"
+      resource: {kind: literal, value: startup}
+    callback_mode: either
+    execution_mode: framework
+
+  - id: fastapi-router-constructor-on-shutdown-list
+    registration:
+      symbol: fastapi.APIRouter
+      invocation: constructor
+    handler: {kind: keyword, name: on_shutdown}
+    handler_optional: true
+    surface:
+      kind: framework.lifecycle
+      id_template: "event:{resource}"
+      resource: {kind: literal, value: shutdown}
+    callback_mode: either
+    execution_mode: framework
+
   - id: fastapi-lifespan-startup
     registration:
       symbol: fastapi.FastAPI
@@ -163,4 +216,90 @@ contracts:
       id_template: "protocol:{resource}"
       resource: {kind: literal, value: http}
     callback_mode: async
+    execution_mode: framework
+
+  - id: fastapi-pure-asgi-middleware
+    registration:
+      symbol: fastapi.FastAPI.add_middleware
+      invocation: instance_method
+      receiver_type: fastapi.FastAPI
+    handler:
+      kind: argument_class_method
+      index: 0
+      name: __call__
+      base: starlette.types.ASGIApp
+    surface:
+      kind: framework.middleware
+      id_template: "protocol:{resource}"
+      resource: {kind: literal, value: http}
+    callback_mode: async
+    execution_mode: framework
+
+  - id: starlette-pure-asgi-middleware
+    registration:
+      symbol: starlette.applications.Starlette.add_middleware
+      invocation: instance_method
+      receiver_type: starlette.applications.Starlette
+    handler:
+      kind: argument_class_method
+      index: 0
+      name: __call__
+      base: starlette.types.ASGIApp
+    surface:
+      kind: framework.middleware
+      id_template: "protocol:{resource}"
+      resource: {kind: literal, value: http}
+    callback_mode: async
+    execution_mode: framework
+
+  - id: fastapi-exception-handler
+    registration:
+      symbol: fastapi.FastAPI.exception_handler
+      invocation: instance_method
+      receiver_type: fastapi.FastAPI
+    handler: {kind: decorated_function}
+    surface:
+      kind: framework.exception_handler
+      id_template: "exception:{resource}"
+      resource: {kind: literal, value: registered}
+    callback_mode: either
+    execution_mode: framework
+
+  - id: fastapi-add-exception-handler
+    registration:
+      symbol: fastapi.FastAPI.add_exception_handler
+      invocation: instance_method
+      receiver_type: fastapi.FastAPI
+    handler: {kind: argument, index: 1}
+    surface:
+      kind: framework.exception_handler
+      id_template: "exception:{resource}"
+      resource: {kind: literal, value: registered}
+    callback_mode: either
+    execution_mode: framework
+
+  - id: starlette-exception-handler
+    registration:
+      symbol: starlette.applications.Starlette.exception_handler
+      invocation: instance_method
+      receiver_type: starlette.applications.Starlette
+    handler: {kind: decorated_function}
+    surface:
+      kind: framework.exception_handler
+      id_template: "exception:{resource}"
+      resource: {kind: literal, value: registered}
+    callback_mode: either
+    execution_mode: framework
+
+  - id: starlette-add-exception-handler
+    registration:
+      symbol: starlette.applications.Starlette.add_exception_handler
+      invocation: instance_method
+      receiver_type: starlette.applications.Starlette
+    handler: {kind: argument, index: 1}
+    surface:
+      kind: framework.exception_handler
+      id_template: "exception:{resource}"
+      resource: {kind: literal, value: registered}
+    callback_mode: either
     execution_mode: framework
