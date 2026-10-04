@@ -264,6 +264,21 @@ def test_self_consistent_release_rejects_invalid_truth_entrypoints(
         verify_release(root)
 
 
+def test_self_consistent_release_rejects_entrypoints_changed_from_canonical(
+    tmp_path: Path,
+) -> None:
+    root = _release(tmp_path)
+    truth_path = root / "broad-truth.jsonl"
+    row = json.loads(truth_path.read_text())
+    assert row["affected_entrypoints"]
+    row["affected_entrypoints"] = []
+    truth_path.write_bytes(canonical_json(row))
+    manifest = json.loads((root / "manifest.json").read_text())
+    _reseal(root, manifest)
+    with pytest.raises(GroundTruthError, match="entrypoints do not match canonical adjudication"):
+        verify_release(root)
+
+
 def test_expected_content_root_and_symlink_aliases(tmp_path: Path) -> None:
     root = _release(tmp_path)
     with pytest.raises(GroundTruthError, match="trusted expected root"):

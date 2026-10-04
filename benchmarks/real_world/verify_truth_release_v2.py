@@ -235,6 +235,7 @@ def verify_release(  # noqa: PLR0912, PLR0915
     if truth_raw is None:
         _fail("release manifest does not declare broad truth")
     records: dict[tuple[str, int], str] = {}
+    truth_entrypoints: dict[tuple[str, int], list[dict[str, Any]]] = {}
     try:
         truth_lines = truth_raw.decode("utf-8").splitlines()
     except UnicodeDecodeError as exc:
@@ -276,13 +277,23 @@ def verify_release(  # noqa: PLR0912, PLR0915
         if key in records:
             _fail(f"duplicate broad-truth record: {key}")
         records[key] = terminal
+        truth_entrypoints[key] = row["affected_entrypoints"]
     actual_counts = {terminal: list(records.values()).count(terminal) for terminal in TERMINAL}
     if len(records) != selected or actual_counts != counts:
         _fail("broad-truth rows do not match selected and terminal denominators")
-    expected_identities = _release_membership(root, manifest)
-    if set(records) != expected_identities:
+    expected_release = _release_truth(verified_contents, manifest)
+    if set(records) != set(expected_release):
         _fail("broad-truth identities do not match release membership")
-    adjudication_records = _jsonl_adjudications(root / "adjudications.jsonl")
+    for identity, terminal in records.items():
+        expected_terminal, expected_entrypoints = expected_release[identity]
+        if terminal != expected_terminal:
+            _fail("broad-truth terminal status does not match canonical adjudication")
+        if truth_entrypoints[identity] != expected_entrypoints:
+            _fail("broad-truth entrypoints do not match canonical adjudication")
+    adjudication_raw = verified_contents.get("adjudications.jsonl")
+    if adjudication_raw is None:
+        _fail("release adjudication projection is missing")
+    adjudication_records = _jsonl_adjudications(adjudication_raw)
     if adjudication_records != records:
         _fail("broad-truth rows do not match adjudication projection")
     return {
@@ -295,28 +306,29 @@ def verify_release(  # noqa: PLR0912, PLR0915
     }
 
 
-def _jsonl_rows(path: Path) -> list[dict[str, Any]]:
+def _jsonl_rows(raw: bytes, name: str) -> list[dict[str, Any]]:
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeDecodeError) as exc:
-        raise GroundTruthError(f"release table is missing or unreadable: {path.name}") from exc
+        lines = raw.decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise GroundTruthError(f"release table is missing or unreadable: {name}") from exc
     rows: list[dict[str, Any]] = []
     for line_number, line in enumerate(lines, 1):
         try:
             row = _loads(line)
         except (json.JSONDecodeError, GroundTruthError) as exc:
             raise GroundTruthError(
-                f"invalid release table row at {path.name}:{line_number}"
+                f"invalid release table row at {name}:{line_number}"
             ) from exc
         if not isinstance(row, dict):
-            _fail(f"malformed release table row at {path.name}:{line_number}")
+            _fail(f"malformed release table row at {name}:{line_number}")
         rows.append(row)
     return rows
 
 
-def _jsonl_adjudications(path: Path) -> dict[tuple[str, int], str]:
+def _jsonl_adjudications(raw: bytes) -> dict[tuple[str, int], str]:
     adjudications: dict[tuple[str, int], str] = {}
-    for row in _jsonl_rows(path):
+    name = "adjudications.jsonl"
+    for row in _jsonl_rows(raw, name):
         repository, number, terminal = (
             row.get("repository"),
             row.get("pr"),
@@ -330,15 +342,17 @@ def _jsonl_adjudications(path: Path) -> dict[tuple[str, int], str]:
             or not isinstance(terminal, str)
             or terminal not in TERMINAL
         ):
-            _fail(f"invalid adjudication row in {path.name}")
+            _fail(f"invalid adjudication row in {name}")
         identity = (repository, number)
         if identity in adjudications:
-            _fail(f"duplicate adjudication identity in {path.name}: {identity}")
+            _fail(f"duplicate adjudication identity in {name}: {identity}")
         adjudications[identity] = terminal
     return adjudications
 
 
-def _release_membership(root: Path, manifest: dict[str, Any]) -> set[tuple[str, int]]:
+def _release_truth(
+    contents: dict[str, bytes], manifest: dict[str, Any]
+) -> dict[tuple[str, int], tuple[str, list[dict[str, Any]]]]:
     release_id, corpus_id = manifest.get("release_id"), manifest.get("corpus_id")
     if not isinstance(release_id, str) or not release_id:
         _fail("release id is missing")
@@ -346,16 +360,43 @@ def _release_membership(root: Path, manifest: dict[str, Any]) -> set[tuple[str, 
         _fail("release corpus id is missing")
     repositories = {
         row.get("repository_id"): row.get("full_name")
-        for row in _jsonl_rows(root / "tables/repository.jsonl")
+        for row in _jsonl_rows(contents["tables/repository.jsonl"], "tables/repository.jsonl")
         if isinstance(row.get("repository_id"), str)
     }
     pull_requests = {
         row.get("pr_id"): (repositories.get(row.get("repository_id")), row.get("number"))
-        for row in _jsonl_rows(root / "tables/pull_request.jsonl")
+        for row in _jsonl_rows(contents["tables/pull_request.jsonl"], "tables/pull_request.jsonl")
         if isinstance(row.get("pr_id"), str)
     }
-    memberships = _jsonl_rows(root / "tables/release_pr.jsonl")
-    identities: set[tuple[str, int]] = set()
+    adjudications = {
+        row.get("adjudication_id"): row
+        for row in _jsonl_rows(contents["tables/adjudication.jsonl"], "tables/adjudication.jsonl")
+        if isinstance(row.get("adjudication_id"), str)
+    }
+    entrypoints: dict[str, list[dict[str, Any]]] = {}
+    for row in _jsonl_rows(
+        contents["tables/canonical_entrypoint.jsonl"], "tables/canonical_entrypoint.jsonl"
+    ):
+        adjudication_id = row.get("adjudication_id")
+        public_id, kind, confidence = (
+            row.get("public_id"),
+            row.get("kind"),
+            row.get("confidence"),
+        )
+        if (
+            not isinstance(adjudication_id, str)
+            or not isinstance(public_id, str)
+            or not isinstance(kind, str)
+            or not isinstance(confidence, str)
+        ):
+            _fail("canonical entrypoint table contains a malformed row")
+        entrypoints.setdefault(adjudication_id, []).append(
+            {"id": public_id, "kind": kind, "confidence": confidence}
+        )
+    for rows in entrypoints.values():
+        rows.sort(key=lambda item: (item["id"], item["kind"], item["confidence"]))
+    memberships = _jsonl_rows(contents["tables/release_pr.jsonl"], "tables/release_pr.jsonl")
+    expected: dict[tuple[str, int], tuple[str, list[dict[str, Any]]]] = {}
     for row in memberships:
         if row.get("release_id") != release_id:
             continue
@@ -370,10 +411,25 @@ def _release_membership(root: Path, manifest: dict[str, Any]) -> set[tuple[str, 
             or identity[1] < 1
         ):
             _fail("release membership references an unknown pull request")
-        identities.add((identity[0], identity[1]))
-    if len(identities) != len([row for row in memberships if row.get("release_id") == release_id]):
+        adjudication_id = row.get("adjudication_id")
+        adjudication = adjudications.get(adjudication_id)
+        if (
+            not isinstance(adjudication_id, str)
+            or adjudication is None
+            or adjudication.get("pr_id") != row.get("pr_id")
+            or adjudication.get("terminal_status") not in TERMINAL
+        ):
+            _fail("release membership references an invalid canonical adjudication")
+        key = (identity[0], identity[1])
+        if key in expected:
+            _fail(f"release membership contains duplicate pull request identities: {key}")
+        expected[key] = (
+            adjudication["terminal_status"],
+            entrypoints.get(adjudication_id, []),
+        )
+    if len(expected) != len([row for row in memberships if row.get("release_id") == release_id]):
         _fail("release membership contains duplicate pull request identities")
-    return identities
+    return expected
 
 
 def main() -> None:
