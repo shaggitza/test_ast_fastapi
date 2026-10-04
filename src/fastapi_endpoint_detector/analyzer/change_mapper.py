@@ -896,12 +896,29 @@ class ChangeMapper:
 
                             # Try to get the function name from symbol references
                             function_name = "module"
-                            for sym_ref in deps.referenced_symbols:
-                                if sym_ref.file_path == file_path and sym_ref.contains_line(
-                                    first_line
-                                ):
-                                    function_name = sym_ref.symbol_name
-                                    break
+                            symbol_paths = deps._matching_paths(
+                                file_path,
+                                (item.file_path for item in deps.referenced_symbols),
+                                "referenced_symbols",
+                            )
+                            containing_symbols = [
+                                sym_ref
+                                for sym_ref in deps.referenced_symbols
+                                if sym_ref.file_path in symbol_paths
+                                and sym_ref.contains_line(first_line)
+                            ]
+                            if containing_symbols:
+                                # Mypy may report both a module/class range and a
+                                # nested callable range. Attribute a changed line to
+                                # the most specific definition containing it.
+                                function_name = min(
+                                    containing_symbols,
+                                    key=lambda ref: (
+                                        ref.end_line - ref.start_line,
+                                        -ref.start_line,
+                                        ref.symbol_name,
+                                    ),
+                                ).symbol_name
 
                             # Try to get code context from the file
                             # For ranges, show all lines in the group
