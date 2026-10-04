@@ -279,6 +279,54 @@ def test_self_consistent_release_rejects_entrypoints_changed_from_canonical(
         verify_release(root)
 
 
+def test_truth_terminal_must_match_canonical_adjudication(tmp_path: Path) -> None:
+    root = _release(tmp_path)
+    truth = json.loads((root / "broad-truth.jsonl").read_text())
+    truth["terminal_status"] = "negative_control"
+    truth["status"] = "adjudicated"
+    (root / "broad-truth.jsonl").write_bytes(canonical_json(truth))
+    adjudication_projection = root / "adjudications.jsonl"
+    adjudication = json.loads(adjudication_projection.read_text())
+    adjudication["terminal_status"] = "negative_control"
+    adjudication_projection.write_bytes(canonical_json(adjudication))
+    manifest = json.loads((root / "manifest.json").read_text())
+    manifest["terminal_counts"] = {
+        "positive": 0,
+        "negative_control": 1,
+        "unknown": 0,
+        "not_evaluable": 0,
+    }
+    _reseal(root, manifest)
+    with pytest.raises(GroundTruthError, match="terminal status does not match canonical"):
+        verify_release(root)
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        "adjudications.jsonl",
+        "tables/release_pr.jsonl",
+        "tables/adjudication.jsonl",
+        "tables/canonical_entrypoint.jsonl",
+    ],
+)
+def test_reconciliation_uses_verified_member_snapshots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, member: str
+) -> None:
+    root = _release(tmp_path)
+    path_type = type(root)
+    original_read_bytes = path_type.read_bytes
+
+    def replace_after_read(path: Path) -> bytes:
+        content = original_read_bytes(path)
+        if path == root / member:
+            path.write_bytes(b"{}\n")
+        return content
+
+    monkeypatch.setattr(path_type, "read_bytes", replace_after_read)
+    assert verify_release(root)["truth_rows_verified"] == 1
+
+
 def test_expected_content_root_and_symlink_aliases(tmp_path: Path) -> None:
     root = _release(tmp_path)
     with pytest.raises(GroundTruthError, match="trusted expected root"):
