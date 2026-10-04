@@ -24,20 +24,49 @@ def _fail(message: str) -> None:
     raise GroundTruthError(message)
 
 
-def verify_release(directory: Path) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            _fail(f"duplicate JSON object key: {key}")
+        result[key] = value
+    return result
+
+
+def _loads(raw: str | bytes) -> Any:
+    return json.loads(raw, object_pairs_hook=_unique_object)
+
+
+def verify_release(  # noqa: PLR0912, PLR0915
+    directory: Path, *, expected_content_root: str | None = None
+) -> dict[str, Any]:
     """Validate release self-hash, every declared file, and terminal denominators."""
-    root = directory.resolve(strict=True)
-    if not root.is_dir() or directory.is_symlink():
+    # Check the supplied path before resolving it: resolving first hides symlink aliases.
+    supplied = Path(directory).absolute()
+    if any(part.is_symlink() for part in (supplied, *supplied.parents)):
+        _fail("release path and its ancestors must not be symlinks")
+    try:
+        root = supplied.resolve(strict=True)
+    except OSError as exc:
+        raise GroundTruthError("release directory is missing or inaccessible") from exc
+    if not root.is_dir():
         _fail("release path must be a real directory")
     manifest_path = root / "manifest.json"
     if not manifest_path.is_file() or manifest_path.is_symlink():
         _fail("release manifest is missing or not a regular file")
-    raw_manifest = manifest_path.read_bytes()
     try:
-        manifest = json.loads(raw_manifest)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raw_manifest = manifest_path.read_bytes()
+    except OSError as exc:
+        raise GroundTruthError("release manifest is missing or unreadable") from exc
+    try:
+        manifest = _loads(raw_manifest)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise GroundTruthError("release manifest is invalid JSON") from exc
-    if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
+    if (
+        not isinstance(manifest, dict)
+        or type(manifest.get("schema_version")) is not int
+        or manifest["schema_version"] != 1
+    ):
         _fail("expected ground-truth release schema version 1")
     if manifest.get("content_root_algorithm") != "sha256-canonical-manifest-payload-v2":
         _fail("unsupported release content-root algorithm")
@@ -48,6 +77,8 @@ def verify_release(directory: Path) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
     ).hexdigest()
     if root_hash != expected_root:
         _fail("release manifest content root mismatch")
+    if expected_content_root is not None and root_hash != expected_content_root:
+        _fail("release content root does not match trusted expected root")
     files = manifest.get("files")
     if not isinstance(files, dict) or not files:
         _fail("release manifest file inventory is missing")
@@ -60,29 +91,40 @@ def verify_release(directory: Path) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
             or relative.is_absolute()
             or ".." in relative.parts
             or not relative.parts
+            or relative.as_posix() != name
+            or any(part in {"", "."} for part in name.split("/"))
             or not isinstance(metadata, dict)
         ):
             _fail("release manifest contains an unsafe file entry")
         path = root.joinpath(*relative.parts)
         try:
+            cursor = root
+            for component in relative.parts:
+                cursor = cursor / component
+                if cursor.is_symlink():
+                    _fail(f"release path contains a symlink: {name}")
             resolved = path.resolve(strict=True)
-        except FileNotFoundError as exc:
+        except OSError as exc:
             raise GroundTruthError(f"release file is missing: {name}") from exc
-        if root not in resolved.parents or path.is_symlink() or not resolved.is_file():
+        if root not in resolved.parents or not resolved.is_file():
             _fail(f"release file is not a contained regular file: {name}")
         content = resolved.read_bytes()
         if (
-            metadata.get("bytes") != len(content)
+            type(metadata.get("bytes")) is not int
+            or metadata["bytes"] != len(content)
+            or not isinstance(metadata.get("sha256"), str)
             or metadata.get("sha256") != "sha256:" + hashlib.sha256(content).hexdigest()
-            or metadata.get("rows") != content.count(b"\n")
+            or type(metadata.get("rows")) is not int
+            or metadata["rows"] != content.count(b"\n")
         ):
             _fail(f"release file metadata mismatch: {name}")
         observed_names.add(name)
-    actual_names = {
-        path.relative_to(root).as_posix()
-        for path in root.rglob("*")
-        if path.is_file() or path.is_symlink()
-    }
+    actual_names: set[str] = set()
+    for path in root.rglob("*"):
+        if path.is_symlink():
+            _fail("release directory contains a symlink")
+        if path.is_file():
+            actual_names.add(path.relative_to(root).as_posix())
     if actual_names != expected_names:
         _fail("release directory has undeclared or missing files")
 
@@ -99,11 +141,17 @@ def verify_release(directory: Path) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
         _fail("release terminal denominators are incomplete")
     truth_path = root / "broad-truth.jsonl"
     records: dict[tuple[str, int], str] = {}
-    for line_number, line in enumerate(truth_path.read_text(encoding="utf-8").splitlines(), 1):
+    if "broad-truth.jsonl" not in files:
+        _fail("release manifest does not declare broad truth")
+    try:
+        truth_lines = truth_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise GroundTruthError("broad-truth artifact is missing or unreadable") from exc
+    for line_number, line in enumerate(truth_lines, 1):
         if not line:
             _fail(f"blank broad-truth row at line {line_number}")
         try:
-            row = json.loads(line)
+            row = _loads(line)
         except json.JSONDecodeError as exc:
             raise GroundTruthError(f"invalid broad-truth JSON at line {line_number}") from exc
         if not isinstance(row, dict):
@@ -116,7 +164,9 @@ def verify_release(directory: Path) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
             or not repo
             or type(pr) is not int
             or pr < 1
+            or not isinstance(terminal, str)
             or terminal not in TERMINAL
+            or not isinstance(status, str)
             or status
             != ("adjudicated" if terminal in {"positive", "negative_control"} else terminal)
         ):
