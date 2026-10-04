@@ -303,6 +303,7 @@ def verify_release(  # noqa: PLR0912, PLR0915
         "terminal_counts": counts,
         "files_verified": len(files),
         "truth_rows_verified": len(records),
+        "verification_mode": "anchored" if expected_content_root is not None else "integrity_only",
     }
 
 

@@ -92,6 +92,7 @@ def test_verify_release_checks_manifest_and_files(tmp_path: Path) -> None:
     assert result["selected_prs"] == 1
     assert result["terminal_counts"]["positive"] == 1
     assert result["truth_rows_verified"] == 1
+    assert result["verification_mode"] == "integrity_only"
 
 
 def test_verify_release_rejects_tampered_declared_file(tmp_path: Path) -> None:
@@ -264,14 +265,22 @@ def test_self_consistent_release_rejects_invalid_truth_entrypoints(
         verify_release(root)
 
 
+@pytest.mark.parametrize("mutation", ["added", "removed", "changed"])
 def test_self_consistent_release_rejects_entrypoints_changed_from_canonical(
-    tmp_path: Path,
+    tmp_path: Path, mutation: str
 ) -> None:
     root = _release(tmp_path)
     truth_path = root / "broad-truth.jsonl"
     row = json.loads(truth_path.read_text())
     assert row["affected_entrypoints"]
-    row["affected_entrypoints"] = []
+    if mutation == "removed":
+        row["affected_entrypoints"] = []
+    elif mutation == "added":
+        row["affected_entrypoints"].append(
+            {"id": "HTTP GET /forged", "kind": "http", "confidence": "high"}
+        )
+    else:
+        row["affected_entrypoints"][0]["confidence"] = "low"
     truth_path.write_bytes(canonical_json(row))
     manifest = json.loads((root / "manifest.json").read_text())
     _reseal(root, manifest)
@@ -279,22 +288,23 @@ def test_self_consistent_release_rejects_entrypoints_changed_from_canonical(
         verify_release(root)
 
 
-def test_truth_terminal_must_match_canonical_adjudication(tmp_path: Path) -> None:
+@pytest.mark.parametrize("terminal", ["negative_control", "unknown", "not_evaluable"])
+def test_truth_terminal_must_match_canonical_adjudication(tmp_path: Path, terminal: str) -> None:
     root = _release(tmp_path)
     truth = json.loads((root / "broad-truth.jsonl").read_text())
-    truth["terminal_status"] = "negative_control"
-    truth["status"] = "adjudicated"
+    truth["terminal_status"] = terminal
+    truth["status"] = "adjudicated" if terminal == "negative_control" else terminal
     (root / "broad-truth.jsonl").write_bytes(canonical_json(truth))
     adjudication_projection = root / "adjudications.jsonl"
     adjudication = json.loads(adjudication_projection.read_text())
-    adjudication["terminal_status"] = "negative_control"
+    adjudication["terminal_status"] = terminal
     adjudication_projection.write_bytes(canonical_json(adjudication))
     manifest = json.loads((root / "manifest.json").read_text())
     manifest["terminal_counts"] = {
         "positive": 0,
-        "negative_control": 1,
-        "unknown": 0,
-        "not_evaluable": 0,
+        "negative_control": int(terminal == "negative_control"),
+        "unknown": int(terminal == "unknown"),
+        "not_evaluable": int(terminal == "not_evaluable"),
     }
     _reseal(root, manifest)
     with pytest.raises(GroundTruthError, match="terminal status does not match canonical"):
@@ -305,6 +315,7 @@ def test_truth_terminal_must_match_canonical_adjudication(tmp_path: Path) -> Non
     "member",
     [
         "adjudications.jsonl",
+        "tables/corpus.jsonl",
         "tables/release_pr.jsonl",
         "tables/adjudication.jsonl",
         "tables/canonical_entrypoint.jsonl",
@@ -314,6 +325,8 @@ def test_reconciliation_uses_verified_member_snapshots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, member: str
 ) -> None:
     root = _release(tmp_path)
+    manifest = json.loads((root / "manifest.json").read_text())
+    trusted_root = manifest["content_root"]
     path_type = type(root)
     original_read_bytes = path_type.read_bytes
 
@@ -324,7 +337,9 @@ def test_reconciliation_uses_verified_member_snapshots(
         return content
 
     monkeypatch.setattr(path_type, "read_bytes", replace_after_read)
-    assert verify_release(root)["truth_rows_verified"] == 1
+    result = verify_release(root, expected_content_root=trusted_root)
+    assert result["truth_rows_verified"] == 1
+    assert result["verification_mode"] == "anchored"
 
 
 def test_expected_content_root_and_symlink_aliases(tmp_path: Path) -> None:
