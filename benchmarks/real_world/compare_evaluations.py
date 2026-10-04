@@ -1,7 +1,8 @@
 """Paired PR bootstrap gate for evaluator JSON reports.
 
 Run with ``python -m benchmarks.real_world.compare_evaluations BASELINE CANDIDATE``.
-Artifacts are report-only unless both carry trusted complete provenance evidence.
+Artifacts are report-only because this comparator has no independent trust anchor
+for report claims or their embedded per-PR evidence.
 """
 
 from __future__ import annotations
@@ -142,21 +143,17 @@ def compare(  # noqa: PLR0912, PLR0915
                 != b[key][metric]["tp"] + b[key][metric]["fn"]
             ):
                 raise ValueError(f"paired {metric} truth denominators differ for {key}")
-    attested = all(
-        evidence.get("attested")
-        and report.get("integrity", {}).get("fully_attested") is True
-        and report.get("integrity", {}).get("official_scoring_eligible") is True
-        for evidence, report in ((left, baseline), (right, candidate))
-    )
+    # Reports are the only inputs available here. Their attestation and integrity
+    # booleans are self-asserted, and the comparator cannot verify them against an
+    # independent trust root or the original artifact bytes.
+    attested = False
     rng = random.Random(seed)
     intervals: dict[str, dict[str, Any]] = {}
-    decisions: list[bool] = []
     for metric in ("raw", "normalized"):
         base_precision = _precision([a[key] for key in keys], metric)
         candidate_precision = _precision([b[key] for key in keys], metric)
         if base_precision is None or candidate_precision is None:
             intervals[metric] = {"supported": False, "reason": "undefined aggregate precision"}
-            decisions.append(False)
             continue
         deltas: list[float] = []
         undefined = 0
@@ -174,7 +171,6 @@ def compare(  # noqa: PLR0912, PLR0915
                 "reason": "bootstrap samples contained undefined precision",
                 "undefined_samples": undefined,
             }
-            decisions.append(False)
             continue
         deltas.sort()
         # Conservative nearest-rank two-sided percentile interval.
@@ -192,7 +188,6 @@ def compare(  # noqa: PLR0912, PLR0915
             "decision": "pass" if passed else "fail",
             "lower_bound_equal_to_threshold_passes": True,
         }
-        decisions.append(passed)
     return {
         "schema_version": 1,
         "method": "paired PR bootstrap percentile interval",
@@ -200,7 +195,7 @@ def compare(  # noqa: PLR0912, PLR0915
         "seed": seed,
         "pairing": "same selected repository/PR identities and truth record hashes",
         "metrics": intervals,
-        "gate_decision": "report_only" if not attested else ("pass" if all(decisions) else "fail"),
+        "gate_decision": "report_only",
         "attested": attested,
         "provenance": {
             "baseline_prediction_sha256": left.get("prediction_sha256"),
@@ -214,9 +209,10 @@ def compare(  # noqa: PLR0912, PLR0915
                 json.dumps(right, sort_keys=True).encode()
             ).hexdigest(),
         },
-        "report_only_reason": None
-        if attested
-        else "one or both artifacts lack trusted full provenance attestation",
+        "report_only_reason": (
+            "no independently trusted attestation or artifact-byte binding is "
+            "available to the comparator"
+        ),
     }
 
 

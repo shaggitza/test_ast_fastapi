@@ -59,7 +59,8 @@ def test_known_precision_regression_fails_and_repeats_with_seed():
     assert first == second
     assert first["samples"] == 10_000
     assert first["metrics"]["raw"]["decision"] == "fail"
-    assert first["gate_decision"] == "fail"
+    assert first["gate_decision"] == "report_only"
+    assert first["attested"] is False
 
 
 def test_two_point_tie_passes_threshold():
@@ -71,6 +72,8 @@ def test_two_point_tie_passes_threshold():
     result = compare(baseline, candidate)
     assert result["metrics"]["raw"]["interval"][0] == pytest.approx(-0.02)
     assert result["metrics"]["raw"]["decision"] == "pass"
+    assert result["gate_decision"] == "report_only"
+    assert result["attested"] is False
 
 
 def test_changed_pairing_truth_and_unresolved_coverage_fail_closed():
@@ -145,4 +148,31 @@ def test_all_negative_corpus_has_undefined_precision_and_fails_closed():
         "supported": False,
         "reason": "undefined aggregate precision",
     }
-    assert result["gate_decision"] == "fail"
+    assert result["gate_decision"] == "report_only"
+
+
+def test_self_asserted_attestation_claims_cannot_enable_official_gate():
+    baseline, candidate = reports(attested=True)
+    for report in (baseline, candidate):
+        report["integrity"]["fully_attested"] = True
+        report["integrity"]["official_scoring_eligible"] = True
+        report["comparison_evidence"]["attested"] = True
+    result = compare(baseline, candidate)
+    assert result["attested"] is False
+    assert result["gate_decision"] == "report_only"
+    assert "no independently trusted attestation" in result["report_only_reason"]
+
+
+def test_changed_rows_without_changed_artifact_hash_remain_report_only():
+    baseline, candidate = reports(attested=True)
+    original_prediction_hash = candidate["comparison_evidence"]["prediction_sha256"]
+    candidate["comparison_evidence"]["per_pr"][0]["raw"] = {
+        "tp": 10,
+        "fp": 0,
+        "fn": 1,
+    }
+    result = compare(baseline, candidate)
+    assert candidate["comparison_evidence"]["prediction_sha256"] == original_prediction_hash
+    assert result["provenance"]["candidate_prediction_sha256"] == original_prediction_hash
+    assert result["attested"] is False
+    assert result["gate_decision"] == "report_only"
