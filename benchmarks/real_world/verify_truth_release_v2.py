@@ -316,9 +316,7 @@ def _jsonl_rows(raw: bytes, name: str) -> list[dict[str, Any]]:
         try:
             row = _loads(line)
         except (json.JSONDecodeError, GroundTruthError) as exc:
-            raise GroundTruthError(
-                f"invalid release table row at {name}:{line_number}"
-            ) from exc
+            raise GroundTruthError(f"invalid release table row at {name}:{line_number}") from exc
         if not isinstance(row, dict):
             _fail(f"malformed release table row at {name}:{line_number}")
         rows.append(row)
