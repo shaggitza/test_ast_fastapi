@@ -130,6 +130,20 @@ def test_rejects_duplicate_manifest_and_truth_keys(tmp_path: Path) -> None:
         verify_release(root)
 
 
+@pytest.mark.parametrize("constant", [b"NaN", b"Infinity", b"-Infinity"])
+def test_rejects_non_finite_constants_in_self_consistent_truth(
+    tmp_path: Path, constant: bytes
+) -> None:
+    root = _release(tmp_path)
+    truth_path = root / "broad-truth.jsonl"
+    row = truth_path.read_bytes().rstrip(b"\n")
+    truth_path.write_bytes(row[:-1] + b',"extension":' + constant + b"}\n")
+    manifest = json.loads((root / "manifest.json").read_text())
+    _reseal(root, manifest)
+    with pytest.raises(GroundTruthError, match="non-finite JSON constant"):
+        verify_release(root)
+
+
 @pytest.mark.parametrize("field,value", [("bytes", True), ("rows", True)])
 def test_rejects_boolean_file_metadata(tmp_path: Path, field: str, value: object) -> None:
     root = _release(tmp_path)

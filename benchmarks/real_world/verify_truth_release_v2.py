@@ -37,8 +37,16 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _reject_non_finite(token: str) -> None:
+    _fail(f"non-finite JSON constant: {token}")
+
+
 def _loads(raw: str | bytes) -> Any:
-    return json.loads(raw, object_pairs_hook=_unique_object)
+    return json.loads(
+        raw,
+        object_pairs_hook=_unique_object,
+        parse_constant=_reject_non_finite,
+    )
 
 
 def verify_release(  # noqa: PLR0912, PLR0915
@@ -76,9 +84,12 @@ def verify_release(  # noqa: PLR0912, PLR0915
         _fail("unsupported release content-root algorithm")
     root_hash = manifest.get("content_root")
     payload = {key: value for key, value in manifest.items() if key != "content_root"}
-    expected_root = "sha256:" + hashlib.sha256(
-        b"ground-truth-release-manifest-v2\0" + canonical_json(payload)
-    ).hexdigest()
+    expected_root = (
+        "sha256:"
+        + hashlib.sha256(
+            b"ground-truth-release-manifest-v2\0" + canonical_json(payload)
+        ).hexdigest()
+    )
     if root_hash != expected_root:
         _fail("release manifest content root mismatch")
     if expected_content_root is not None and root_hash != expected_content_root:
@@ -161,7 +172,10 @@ def verify_release(  # noqa: PLR0912, PLR0915
         if not isinstance(row, dict):
             _fail(f"malformed broad-truth row at line {line_number}")
         repo, pr, status, terminal = (
-            row.get("repository"), row.get("pr"), row.get("status"), row.get("terminal_status")
+            row.get("repository"),
+            row.get("pr"),
+            row.get("status"),
+            row.get("terminal_status"),
         )
         if (
             not isinstance(repo, str)
