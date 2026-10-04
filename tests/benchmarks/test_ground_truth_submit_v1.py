@@ -1036,7 +1036,7 @@ def _exchange(path: Path, payload: dict[str, object]) -> dict[str, Any]:
             try:
                 client.connect(str(path))
                 break
-            except FileNotFoundError:
+            except (FileNotFoundError, ConnectionRefusedError):
                 if time.monotonic() >= deadline:
                     raise
                 time.sleep(0.01)
