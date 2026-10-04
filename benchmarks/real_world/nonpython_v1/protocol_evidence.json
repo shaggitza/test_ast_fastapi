@@ -1,0 +1,25 @@
+{
+  "issue": "https://github.com/shaggitza/test_ast_fastapi/issues/108",
+  "issue_body": "## Goal\nCover truth outside the Python server adapter: TypeScript/Svelte HTTP/WebSocket clients and deployment/Docker/runtime configuration that changes externally observed route behavior.\n\n## Acceptance criteria\n- [ ] finite normalized client URL/method extraction\n- [ ] join only to established/explicit server surface IDs\n- [ ] query strings retained as evidence but normalized out of route identity\n- [ ] WebSocket client support\n- [ ] Docker/env/subprocess observation contracts\n- [ ] no cross-language global URL fanout\n- [ ] evaluate the nine audited non-Python cases separately",
+  "issue_comments_endpoint": "https://api.github.com/repos/shaggitza/test_ast_fastapi/issues/108/comments",
+  "issue_comment_count": 0,
+  "protocol_snapshot": {
+    "commit": "1d9242d0d1d411b529c3227918aa2d05e98e8943",
+    "path": "docs/client-observations.md",
+    "sha256": "d4d3151d3e6f9d3fba78227040be1f7ddcbeb4364114d5fa93c30f3b6af8ca2b"
+  },
+  "audit_index": {
+    "base_commit": "50f0c4dfa675c23f392d0f379cd44ddaa4248efa",
+    "path": "benchmarks/results/ranked/per-pr-audit/summary.md",
+    "sha256": "e85e56b42abdd8f4c00f7cde4d20d5884488404e715c4d5e7b7428eb42e641ca",
+    "non_python_pr_identities": [
+      "khoj-ai/khoj#1216",
+      "khoj-ai/khoj#1221",
+      "khoj-ai/khoj#1235",
+      "open-webui/open-webui#26384",
+      "open-webui/open-webui#26405",
+      "langflow-ai/langflow#13992"
+    ]
+  },
+  "conclusion": "The public issue body requires nine audited cases; issue comments are empty. The frozen client-observations protocol explicitly says its available corpus has no complete nine-case source-grounded set. The ranked audit index enumerates six non-Python cases. No other identities are inferred."
+}
