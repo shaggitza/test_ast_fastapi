@@ -1,10 +1,11 @@
-"""
-FastAPI endpoint extractor using runtime introspection.
+"""FastAPI endpoint extractor using runtime introspection.
 
 This module dynamically imports a FastAPI application and extracts
 endpoint information using app.routes, which is more reliable than
 AST parsing as it handles all FastAPI patterns automatically.
 """
+
+from __future__ import annotations
 
 import functools
 import importlib.util
@@ -16,10 +17,9 @@ import signal
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import fastapi.routing as fastapi_routing
 from fastapi.routing import APIRoute, APIWebSocketRoute
@@ -40,6 +40,11 @@ from fastapi_endpoint_detector.models.endpoint import (
     EndpointMethod,
     HandlerInfo,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from fastapi_endpoint_detector.analyzer.source_inventory import SourceInventory
 
 
 class FastAPIExtractorError(Exception):
@@ -67,6 +72,7 @@ class FastAPIExtractor:
         dependency_max_depth: int = 32,
         dependency_max_nodes: int = 2048,
         dependency_max_work: int = 8192,
+        source_inventory: SourceInventory | None = None,
     ) -> None:
         """
         Initialize the extractor.
@@ -103,6 +109,7 @@ class FastAPIExtractor:
         self.app_path = app_path.resolve()
         self.app_variable = app_variable
         self.module_name = module_name
+        self.source_inventory = source_inventory
         self.timeout_seconds = normalized_timeout
         for name, value in (
             ("dependency_max_depth", dependency_max_depth),
@@ -1029,7 +1036,26 @@ class FastAPIExtractor:
             returncode = process.returncode
             if returncode is None:
                 raise FastAPIExtractorError("Runtime worker did not terminate")
-            return self._read_runtime_result(result_path, returncode)
+            endpoints = self._read_runtime_result(result_path, returncode)
+            if self.source_inventory is not None:
+                allowed = {path.resolve() for path in self.source_inventory.paths}
+                endpoints = [
+                    endpoint
+                    for endpoint in endpoints
+                    if endpoint.handler.file_path.resolve() in allowed
+                ]
+            return endpoints
+
+    @property
+    def source_inventory_limitations(self) -> tuple[str, ...]:
+        """Limitations when a canonical inventory governs returned runtime endpoints."""
+        if self.source_inventory is None:
+            return ()
+        return (
+            "Runtime import still executes Python imports outside the inventory; the inventory "
+            "filters returned endpoint handlers but does not sandbox or constrain import side "
+            "effects.",
+        )
 
     def get_endpoint_handler_files(self) -> dict[Path, list[Endpoint]]:
         """

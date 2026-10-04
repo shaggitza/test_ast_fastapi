@@ -58,16 +58,25 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
     """Build an ordered inventory, following only resolvable project-local imports."""
     source = source.resolve()
     root = source.parent if source.is_file() else source
-    candidates = sorted(root.rglob("*.py"))
+    # Do not let pathlib's file-symlink handling pull files from outside the
+    # selected tree (or count the same source through an alias).
+    candidates = sorted(
+        path
+        for path in root.rglob("*.py")
+        if not path.is_symlink()
+        and not any(parent.is_symlink() for parent in path.parents if parent != root.parent)
+        and path.resolve().is_relative_to(root)
+    )
     by_module: dict[str, Path] = {}
     rel_by_path: dict[Path, str] = {}
+    package_prefix = root.name if (root / "__init__.py").is_file() else ""
     for path in candidates:
         rel = path.relative_to(root).as_posix()
         stem = Path(rel).with_suffix("")
         parts = list(stem.parts)
         if parts[-1] == "__init__":
             parts.pop()
-        module = ".".join(parts) or path.parent.name
+        module = ".".join(([package_prefix] if package_prefix else []) + parts) or path.parent.name
         by_module[module] = path
         rel_by_path[path] = rel
 
@@ -90,7 +99,7 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
         parts = list(relative_path.parts)
         if parts[-1] == "__init__":
             parts.pop()
-        current = ".".join(parts)
+        current = ".".join(([package_prefix] if package_prefix else []) + parts)
         found: set[str] = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -139,10 +148,9 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
         parts = list(relative_path.parts)
         if parts[-1] == "__init__":
             parts.pop()
+        module = ".".join(([package_prefix] if package_prefix else []) + parts)
         records.append(
-            SourceFile(
-                path, rel_by_path[path], ".".join(parts), digest, imports_by_path.get(path, ())
-            )
+            SourceFile(path, rel_by_path[path], module, digest, imports_by_path.get(path, ()))
         )
     return SourceInventory(
         root,

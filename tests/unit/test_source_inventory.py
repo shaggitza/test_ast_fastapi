@@ -43,3 +43,29 @@ def test_include_tests_and_follow_imports_are_consumed(tmp_path: Path) -> None:
 def test_unsupported_mypy_configuration_is_rejected() -> None:
     with pytest.raises(ValueError, match="mypy_config is not supported"):
         Config(integrations={"mypy_config": "mypy.ini"})
+
+
+def test_inventory_rejects_symlink_escapes_and_symlink_aliases(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    outside = tmp_path / "outside.py"
+    outside.write_text("secret = True\n", encoding="utf-8")
+    (root / "app.py").write_text("import outside\n", encoding="utf-8")
+    (root / "outside.py").symlink_to(outside)
+    (root / "alias.py").symlink_to(root / "app.py")
+
+    inventory = build_source_inventory(root, include_patterns=("**/*.py",))
+
+    assert {item.relative_path for item in inventory.files} == {"app.py"}
+    assert all(item.path.resolve().is_relative_to(root.resolve()) for item in inventory.files)
+
+
+def test_package_root_keeps_package_prefix_for_absolute_imports(tmp_path: Path) -> None:
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("from pkg.helper import value\n", encoding="utf-8")
+    (package / "helper.py").write_text("value = 1\n", encoding="utf-8")
+
+    inventory = build_source_inventory(package, include_patterns=("__init__.py",))
+
+    assert {item.module for item in inventory.files} == {"pkg", "pkg.helper"}
