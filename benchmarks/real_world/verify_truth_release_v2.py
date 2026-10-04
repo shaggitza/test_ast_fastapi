@@ -13,6 +13,10 @@ from typing import Any
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from benchmarks.real_world.benchmark_schema import (
+    BenchmarkSchemaError,
+    _validate_record,
+)
 from benchmarks.real_world.ground_truth_v2 import GroundTruthError
 from benchmarks.real_world.ground_truth_v2.schema import canonical_json
 
@@ -171,6 +175,12 @@ def verify_release(  # noqa: PLR0912, PLR0915
             != ("adjudicated" if terminal in {"positive", "negative_control"} else terminal)
         ):
             _fail(f"invalid terminal truth row at line {line_number}")
+        try:
+            _validate_record(row, "ground_truth", f"broad-truth line {line_number}")
+        except BenchmarkSchemaError as exc:
+            raise GroundTruthError(
+                f"invalid broad-truth record at line {line_number}: {exc}"
+            ) from exc
         key = (repo, pr)
         if key in records:
             _fail(f"duplicate broad-truth record: {key}")

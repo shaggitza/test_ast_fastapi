@@ -153,6 +153,27 @@ def test_malformed_truth_scalars_fail_closed(
         verify_release(root)
 
 
+@pytest.mark.parametrize(
+    "entrypoints",
+    [None, "not-a-list", [{"id": ""}]],
+    ids=["missing", "wrong-type", "malformed-item"],
+)
+def test_self_consistent_release_rejects_invalid_truth_entrypoints(
+    tmp_path: Path, entrypoints: object
+) -> None:
+    root = _release(tmp_path)
+    row = json.loads((root / "broad-truth.jsonl").read_text())
+    if entrypoints is None:
+        row.pop("affected_entrypoints", None)
+    else:
+        row["affected_entrypoints"] = entrypoints
+    (root / "broad-truth.jsonl").write_bytes(canonical_json(row))
+    manifest = json.loads((root / "manifest.json").read_text())
+    _reseal(root, manifest)
+    with pytest.raises(GroundTruthError, match="invalid broad-truth record"):
+        verify_release(root)
+
+
 def test_expected_content_root_and_symlink_aliases(tmp_path: Path) -> None:
     root = _release(tmp_path)
     with pytest.raises(GroundTruthError, match="trusted expected root"):
