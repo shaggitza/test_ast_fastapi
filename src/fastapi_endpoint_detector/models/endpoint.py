@@ -340,6 +340,7 @@ class NativeRouteRegistrationEvidence(BaseModel):
     owner_symbol: str = Field(min_length=1, max_length=2048)
     occurrence_order: int = Field(ge=0)
     source_span: NativeSourceSpan
+    dependency_expressions: tuple["NativeRouteDependencyExpressionEvidence", ...] = ()
 
     class Config:
         frozen = True
@@ -358,6 +359,7 @@ class NativeRouteAssemblyEdgeEvidence(BaseModel):
     occurrence_order: int = Field(ge=0)
     resolved_prefix: str = Field(max_length=4096)
     source_span: NativeSourceSpan
+    dependency_expressions: tuple["NativeRouteDependencyExpressionEvidence", ...] = ()
 
     class Config:
         frozen = True
@@ -372,6 +374,7 @@ class NativeRouteObjectEvidence(BaseModel):
     symbol: str = Field(min_length=1, max_length=2048)
     resolved_prefix: str | None = Field(default=None, max_length=4096)
     source_span: NativeSourceSpan
+    dependency_expressions: tuple["NativeRouteDependencyExpressionEvidence", ...] = ()
 
     class Config:
         frozen = True
@@ -386,6 +389,33 @@ class NativeRouteRootEvidence(BaseModel):
     symbol: str = Field(min_length=1, max_length=2048)
     source_span: NativeSourceSpan | None = None
     bootstrap_span: NativeSourceSpan | None = None
+
+    class Config:
+        frozen = True
+
+
+class NativeRouteDependencyExpressionEvidence(BaseModel):
+    """Source-only dependency declaration retained at its FastAPI assembly scope."""
+
+    side: SnapshotSide
+    scope: Literal["app", "router", "include", "route"]
+    expression: str = Field(min_length=1, max_length=4096)
+    callable_expressions: tuple[str, ...] = Field(default=(), max_length=128)
+    kind: Literal["depends", "security", "ambiguous"]
+    confidence: Literal["established", "conditional"]
+    source_span: NativeSourceSpan
+
+    class Config:
+        frozen = True
+
+
+class NativeRouteStructuralOwnerEvidence(BaseModel):
+    """One exact route occurrence structurally owned by a changed source span."""
+
+    endpoint_identifier: str = Field(min_length=1, max_length=4096)
+    role: Literal["registration", "assembly", "object", "root", "dependency"]
+    source_span: NativeSourceSpan
+    side: SnapshotSide
 
     class Config:
         frozen = True
@@ -411,6 +441,19 @@ class NativeRouteProvenance(BaseModel):
         ]
         if any(side != self.side for side in evidence):
             raise ValueError("native route provenance cannot mix snapshot sides")
+        dependency_evidence = [
+            dependency
+            for item in self.object_chain
+            for dependency in item.dependency_expressions
+        ]
+        dependency_evidence.extend(
+            dependency
+            for item in self.assembly_chain
+            for dependency in item.dependency_expressions
+        )
+        dependency_evidence.extend(self.registration.dependency_expressions)
+        if any(dependency.side != self.side for dependency in dependency_evidence):
+            raise ValueError("native dependency provenance cannot mix snapshot sides")
         if len(self.object_chain) != len(self.assembly_chain) + 1:
             raise ValueError("native object chain must contain one object per assembly hop")
         root_object = self.object_chain[0]

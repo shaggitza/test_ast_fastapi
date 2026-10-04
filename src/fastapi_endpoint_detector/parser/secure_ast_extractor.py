@@ -24,10 +24,12 @@ from fastapi_endpoint_detector.models.endpoint import (
     NativeRegistrationKind,
     NativeRootSelectionKind,
     NativeRouteAssemblyEdgeEvidence,
+    NativeRouteDependencyExpressionEvidence,
     NativeRouteObjectEvidence,
     NativeRouteProvenance,
     NativeRouteRegistrationEvidence,
     NativeRouteRootEvidence,
+    NativeRouteStructuralOwnerEvidence,
     NativeSourceSpan,
     SnapshotSide,
 )
@@ -39,6 +41,45 @@ from fastapi_endpoint_detector.parser._static_evaluation import (
 
 class SecureASTExtractorError(Exception):
     """Error during secure AST extraction."""
+
+
+def native_route_structural_owners(
+    endpoint: Endpoint, source_path: Path, changed_lines: set[int]
+) -> tuple[NativeRouteStructuralOwnerEvidence, ...]:
+    """Return exact native evidence occurrences that own changed source lines.
+
+    This small public seam lets change mappers consume structural ownership while
+    keeping route parsing and endpoint assembly inside the secure extractor.
+    """
+    provenance = endpoint.native_provenance
+    if provenance is None or not changed_lines:
+        return ()
+    matches: list[NativeRouteStructuralOwnerEvidence] = []
+
+    def add(role: str, span: NativeSourceSpan) -> None:
+        if span.file_path != source_path or not span.overlaps_lines(changed_lines):
+            return
+        record = NativeRouteStructuralOwnerEvidence(
+            endpoint_identifier=endpoint.identifier,
+            role=role,  # type: ignore[arg-type]
+            source_span=span,
+            side=provenance.side,
+        )
+        if record not in matches:
+            matches.append(record)
+
+    add("registration", provenance.registration.source_span)
+    for edge in provenance.assembly_chain:
+        add("assembly", edge.source_span)
+        for dependency in edge.dependency_expressions:
+            add("dependency", dependency.source_span)
+    for index, item in enumerate(provenance.object_chain):
+        add("root" if index == 0 else "object", item.source_span)
+        for dependency in item.dependency_expressions:
+            add("dependency", dependency.source_span)
+    for dependency in provenance.registration.dependency_expressions:
+        add("dependency", dependency.source_span)
+    return tuple(matches)
 
 
 ObjectKey = tuple[str, str]
@@ -65,6 +106,54 @@ def _native_span(path: Path, node: ast.AST) -> NativeSourceSpan:
         end_line=end_line,
         end_column=end_column,
     )
+
+
+def _native_dependency_expressions(
+    path: Path, side: SnapshotSide, scope: str, expression: ast.expr | None
+) -> tuple[NativeRouteDependencyExpressionEvidence, ...]:
+    """Keep dependency declarations as source evidence without evaluating them."""
+    if expression is None:
+        return ()
+    values = expression.elts if isinstance(expression, (ast.List, ast.Tuple)) else (expression,)
+
+    def dotted_name(node: ast.expr) -> str | None:
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            prefix = dotted_name(node.value)
+            return f"{prefix}.{node.attr}" if prefix else None
+        return None
+
+    result: list[NativeRouteDependencyExpressionEvidence] = []
+    for value in values:
+        rendered = ast.unparse(value)
+        if len(rendered) > 4096:
+            rendered = rendered[:4096]
+        kind = "ambiguous"
+        callable_expressions: tuple[str, ...] = ()
+        confidence = "conditional"
+        if isinstance(value, ast.Call):
+            function = dotted_name(value.func)
+            constructor = function.rsplit(".", 1)[-1] if function else None
+            if constructor in {"Depends", "Security"}:
+                kind = "security" if constructor == "Security" else "depends"
+                if value.args:
+                    callable_name = dotted_name(value.args[0])
+                    if callable_name is not None:
+                        callable_expressions = (callable_name,)
+                        confidence = "established" if len(value.args) == 1 else "conditional"
+        result.append(
+            NativeRouteDependencyExpressionEvidence(
+                side=side,
+                scope=scope,  # type: ignore[arg-type]
+                expression=rendered,
+                callable_expressions=callable_expressions,
+                kind=kind,  # type: ignore[arg-type]
+                confidence=confidence,  # type: ignore[arg-type]
+                source_span=_native_span(path, value),
+            )
+        )
+    return tuple(result)
 
 
 _HTTP_ROUTE_METADATA_KEYWORDS = frozenset(
@@ -152,6 +241,7 @@ class _Object:
     line: int
     discovery_conditions: tuple[EndpointDiscoveryCondition, ...] = ()
     source_span: NativeSourceSpan | None = None
+    dependency_expressions: tuple[NativeRouteDependencyExpressionEvidence, ...] = ()
 
 
 def _uses_router_receiver(owner: _Object, receiver: ast.expr | None) -> bool:
@@ -282,6 +372,7 @@ class _Route:
     registration_kind: NativeRegistrationKind | None = None
     operation: str | None = None
     source_span: NativeSourceSpan | None = None
+    dependency_expressions: tuple[NativeRouteDependencyExpressionEvidence, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -295,6 +386,7 @@ class _Edge:
     mode: CompositionMode
     operation: Literal["include_router", "mount"] | None = None
     source_span: NativeSourceSpan | None = None
+    dependency_expressions: tuple[NativeRouteDependencyExpressionEvidence, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1001,6 +1093,7 @@ class SecureASTExtractor:
                 symbol=item.key[1],
                 resolved_prefix=item.prefix,
                 source_span=source_span,
+                dependency_expressions=item.dependency_expressions,
             )
 
         def visit(
@@ -1111,6 +1204,7 @@ class SecureASTExtractor:
                             owner_symbol=route.owner[1],
                             occurrence_order=route.line,
                             source_span=route.source_span,
+                            dependency_expressions=route.dependency_expressions,
                         ),
                         object_chain=current_object_chain,
                         assembly_chain=assembly_chain,
@@ -1179,6 +1273,7 @@ class SecureASTExtractor:
                             occurrence_order=edge.line,
                             resolved_prefix=edge.prefix,
                             source_span=edge.source_span,
+                            dependency_expressions=edge.dependency_expressions,
                         ),
                     )
                 visit(
@@ -1463,6 +1558,10 @@ class SecureASTExtractor:
                         prefix=prefix,
                         line=node.lineno,
                         source_span=_native_span(module.path, node),
+                        dependency_expressions=_native_dependency_expressions(
+                            module.path, self.snapshot_side, constructor,
+                            _keyword_expr(value, "dependencies"),
+                        ),
                     )
                     module.objects.setdefault(assigned_name, []).append(item)
                 elif isinstance(value, ast.Call):
@@ -2140,6 +2239,10 @@ class SecureASTExtractor:
                         prefix,
                         call_line,
                         source_span=_native_span(module.path, statement),
+                        dependency_expressions=_native_dependency_expressions(
+                            module.path, self.snapshot_side, constructor,
+                            _keyword_expr(value, "dependencies"),
+                        ),
                     )
                     local_objects[assigned] = item
                     local_router_views.discard(assigned)
@@ -3974,6 +4077,10 @@ class SecureASTExtractor:
                         registration_kind=NativeRegistrationKind.DECORATOR,
                         operation=operation,
                         source_span=_native_span(module.path, call),
+                        dependency_expressions=_native_dependency_expressions(
+                            module.path, self.snapshot_side, "route",
+                            _keyword_expr(call, "dependencies"),
+                        ),
                     )
                 )
                 return _DirectEffectResult("modeled")
@@ -4019,6 +4126,10 @@ class SecureASTExtractor:
                         registration_kind=NativeRegistrationKind.IMPERATIVE,
                         operation=operation,
                         source_span=_native_span(module.path, call),
+                        dependency_expressions=_native_dependency_expressions(
+                            module.path, self.snapshot_side, "route",
+                            _keyword_expr(call, "dependencies"),
+                        ),
                     )
                 )
                 return _DirectEffectResult("modeled")
@@ -4063,6 +4174,10 @@ class SecureASTExtractor:
                         "copy",
                         "include_router",
                         _native_span(module.path, call),
+                        _native_dependency_expressions(
+                            module.path, self.snapshot_side, "include",
+                            _keyword_expr(call, "dependencies"),
+                        ),
                     )
                 )
                 return _DirectEffectResult("modeled")
@@ -4091,6 +4206,10 @@ class SecureASTExtractor:
                     "live",
                     "mount",
                     _native_span(module.path, call),
+                    _native_dependency_expressions(
+                        module.path, self.snapshot_side, "include",
+                        _keyword_expr(call, "dependencies"),
+                    ),
                 )
             )
             return _DirectEffectResult("modeled")
