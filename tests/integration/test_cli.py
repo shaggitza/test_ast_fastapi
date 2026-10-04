@@ -213,11 +213,18 @@ contracts:
         assert result.exit_code != 0
         assert "--vm and --scip cannot be used together" in result.output
 
-    def test_baseline_app_requires_scip(self, runner: CliRunner, tmp_path: Path) -> None:
-        app_file = tmp_path / "app.py"
+    def test_baseline_app_is_supported_by_default_mypy(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        app = tmp_path / "target"
+        baseline = tmp_path / "baseline"
+        app.mkdir()
+        baseline.mkdir()
+        app_file = app / "app.py"
         app_file.write_text("from fastapi import FastAPI\napp = FastAPI()\n")
+        (baseline / "app.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n")
         diff_file = tmp_path / "test.diff"
-        diff_file.write_text("dummy diff\n")
+        diff_file.write_text("")
 
         result = runner.invoke(
             cli,
@@ -226,14 +233,43 @@ contracts:
                 "--app",
                 str(app_file),
                 "--baseline-app",
-                str(app_file),
+                str(baseline / "app.py"),
                 "--diff",
                 str(diff_file),
+                "--format",
+                "json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+
+    def test_baseline_app_rejected_by_runtime_mode(self, runner: CliRunner, tmp_path: Path) -> None:
+        app = tmp_path / "app"
+        baseline = tmp_path / "baseline"
+        app.mkdir()
+        baseline.mkdir()
+        app_file = app / "app.py"
+        app_file.write_text("from fastapi import FastAPI\napp = FastAPI()\n")
+        (baseline / "app.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n")
+        diff_file = tmp_path / "test.diff"
+        diff_file.write_text("")
+
+        result = runner.invoke(
+            cli,
+            [
+                "analyze",
+                "--app",
+                str(app_file),
+                "--baseline-app",
+                str(baseline),
+                "--diff",
+                str(diff_file),
+                "--vm",
             ],
         )
 
         assert result.exit_code != 0
-        assert "--baseline-app requires --scip" in result.output
+        assert "--baseline-app is unavailable with --vm" in result.output
 
     def test_vm_and_secure_ast_mutually_exclusive_list(
         self, runner: CliRunner, tmp_path: Path

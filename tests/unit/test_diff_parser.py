@@ -12,6 +12,57 @@ from fastapi_endpoint_detector.parser.diff_parser import DiffParser, DiffParserE
 
 
 class TestDiffParser:
+    @staticmethod
+    def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "-C", str(repo), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_real_git_mode_binary_and_rename_changes_keep_file_identity(
+        self, tmp_path: Path
+    ) -> None:
+        repo = tmp_path / "repo with spaces"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        self._git(repo, "config", "user.email", "test@example.com")
+        self._git(repo, "config", "user.name", "Test")
+        (repo / "pkg").mkdir()
+        (repo / "pkg" / "mode.py").write_text("value = 1\n", encoding="utf-8")
+        (repo / "pkg" / "binary.py").write_bytes(b"\x00python\xff")
+        (repo / "pkg" / "old.py").write_text("def route():\n    return 1\n", encoding="utf-8")
+        self._git(repo, "add", "--", "pkg")
+        self._git(repo, "commit", "-qm", "baseline")
+
+        (repo / "pkg" / "mode.py").chmod(0o755)
+        (repo / "pkg" / "new.py").write_text("def route():\n    return 1\n", encoding="utf-8")
+        (repo / "pkg" / "old.py").unlink()
+        (repo / "pkg" / "binary.py").write_bytes(b"\x00changed\xff")
+        self._git(repo, "add", "-A")
+        diff = self._git(
+            repo,
+            "-c",
+            "core.quotePath=true",
+            "diff",
+            "--cached",
+            "--no-ext-diff",
+            "--find-renames",
+            "--summary",
+            "--patch",
+            "HEAD",
+        ).stdout
+
+        parsed = DiffParser.parse_string(diff)
+        by_path = {str(item.path): item for item in parsed}
+
+        assert "pkg/mode.py" in by_path
+        assert "pkg/binary.py" in by_path
+        assert by_path["pkg/binary.py"].is_python_file
+        assert any(item.source_path == Path("pkg/old.py") for item in parsed)
+        assert all(item.get_side_qualified_lines() == ([], []) for item in parsed)
+
     def test_side_qualified_line_numbers_from_git_quoted_rename(self, tmp_path: Path) -> None:
         repo = tmp_path / "repo"
         repo.mkdir()

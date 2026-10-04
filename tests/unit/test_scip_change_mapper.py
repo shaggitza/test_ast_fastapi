@@ -179,9 +179,15 @@ class FakeSCIPAnalyzer:
         )
 
 
-def test_programmatic_baseline_requires_scip(tmp_path: Path) -> None:
-    with pytest.raises(ChangeMapperError, match="only with use_scip"):
-        ChangeMapper(tmp_path, baseline_app_path=tmp_path)
+def test_programmatic_baseline_is_supported_by_mypy(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    baseline = tmp_path / "baseline"
+    target.mkdir()
+    baseline.mkdir()
+
+    mapper = ChangeMapper(target, baseline_app_path=baseline)
+
+    assert mapper.baseline_app_path == baseline.resolve()
 
 
 def test_scip_expands_proven_override_to_base_method_callers(tmp_path: Path) -> None:

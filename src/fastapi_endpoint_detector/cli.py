@@ -63,7 +63,7 @@ def cli(ctx: click.Context, config: Path | None) -> None:
 @click.option(
     "--baseline-app",
     type=click.Path(exists=True, path_type=Path),
-    help="Explicit baseline snapshot for SCIP analysis of removed Python lines.",
+    help="Explicit baseline snapshot for mypy or SCIP analysis of removed Python lines.",
 )
 @click.option(
     "--diff",
@@ -184,8 +184,8 @@ def analyze(
     if bootstrap_entry is not None and not secure_ast:
         console.print("[red]Error:[/red] --bootstrap-entry requires --secure-ast")
         raise click.Abort()
-    if baseline_app is not None and not scip:
-        console.print("[red]Error:[/red] --baseline-app requires --scip")
+    if baseline_app is not None and vm:
+        console.print("[red]Error:[/red] --baseline-app is unavailable with --vm")
         raise click.Abort()
 
     if verbose:

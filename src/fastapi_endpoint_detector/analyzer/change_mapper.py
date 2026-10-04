@@ -519,6 +519,7 @@ class ChangeMapper:
         self._baseline_registry: EndpointRegistry | None = None
         self._baseline_scip_analyzer: SCIPAnalyzer | None = None
         self._baseline_extractor: FastAPIExtractor | SecureASTExtractor | None = None
+        self._baseline_failure: str | None = None
 
     @property
     def baseline_mypy_analyzer(self) -> MypyAnalyzer:
@@ -544,7 +545,7 @@ class ChangeMapper:
             raise ChangeMapperError("Mypy removals require an explicit --baseline-app snapshot")
         if self._baseline_registry is None:
             if self.secure_ast:
-                extractor: FastAPIExtractor | SecureASTExtractor = SecureASTExtractor(
+                secure_extractor = SecureASTExtractor(
                     app_path=self.baseline_app_path,
                     app_variable=self.app_variable,
                     app_entry=self.app_entry,
@@ -552,9 +553,10 @@ class ChangeMapper:
                     snapshot_side=SnapshotSide.BASELINE,
                 )
                 self._baseline_inventory = self._merge_surface_inventory(
-                    self.baseline_app_path, extractor.extract_inventory()
+                    self.baseline_app_path, secure_extractor.extract_inventory()
                 )
                 endpoints = self._baseline_inventory.endpoints
+                extractor: FastAPIExtractor | SecureASTExtractor = secure_extractor
             else:
                 extractor = FastAPIExtractor(
                     app_path=self.baseline_app_path,
@@ -617,7 +619,11 @@ class ChangeMapper:
         """Reconcile endpoint inventories by public route identity, failing closed."""
         if self.baseline_app_path is None:
             return []
-        baseline = self.baseline_mypy_registry.get_all()
+        try:
+            baseline = self.baseline_mypy_registry.get_all()
+        except Exception as exc:
+            self._baseline_failure = str(exc)
+            return []
         target = self.registry.get_all()
         identities = sorted({item.identifier for item in baseline + target})
         records: list[EndpointLifecycle] = []
@@ -1036,9 +1042,7 @@ class ChangeMapper:
             for side_registry, changed_path, side in (
                 (self.registry, diff_file.path, "target"),
                 (
-                    self.baseline_mypy_registry
-                    if self.baseline_app_path is not None
-                    else None,
+                    self.baseline_mypy_registry if self.baseline_app_path is not None else None,
                     diff_file.source_path or diff_file.path,
                     "baseline",
                 ),
@@ -1121,9 +1125,7 @@ class ChangeMapper:
 
         # Check for direct handler changes
         for endpoint in file_endpoints:
-            result = self._check_direct_handler_change(
-                endpoint, diff_file, added_lines, []
-            )
+            result = self._check_direct_handler_change(endpoint, diff_file, added_lines, [])
             if result:
                 _merge_affected(affected, result)
                 # Mark lines as processed
@@ -1739,9 +1741,17 @@ class ChangeMapper:
                 "baseline_app_path; removed lines are retained as unresolved orphan evidence."
             )
         elif has_mypy_removals and self.baseline_app_path is not None:
-            self._preanalyze_mypy_registry(
-                self.baseline_mypy_registry, self.baseline_mypy_analyzer, progress_callback
-            )
+            try:
+                self._preanalyze_mypy_registry(
+                    self.baseline_mypy_registry, self.baseline_mypy_analyzer, progress_callback
+                )
+            except Exception as exc:
+                self._baseline_failure = str(exc)
+                warnings.append(
+                    "Mypy baseline analysis is incomplete: "
+                    f"baseline snapshot could not be analyzed ({exc}); removed lines remain "
+                    "unresolved."
+                )
         self._effect_contract_audit = self._build_effect_contract_audit()
         if self.config.analysis.sql_transaction_diagnostics:
             if self._effect_contracts is None or self._effect_contract_audit is None:
@@ -1792,9 +1802,7 @@ class ChangeMapper:
                     _normalized_diff_path(diff_file.path),
                     _OrphanAccumulator(
                         file_path=str(diff_file.path),
-                        reason=(
-                            "Target-side code changes are unrelated or could not be resolved"
-                        ),
+                        reason=("Target-side code changes are unrelated or could not be resolved"),
                     ),
                 )
                 target_evidence.added.update(added_lines)
@@ -1854,6 +1862,14 @@ class ChangeMapper:
         duration_ms = (time.time() - start_time) * 1000
         report_progress(100, 100, "Complete!")
 
+        endpoint_lifecycle = self._endpoint_lifecycle()
+        if self._baseline_failure and not any(
+            "baseline analysis is incomplete" in warning.lower() for warning in warnings
+        ):
+            warnings.append(
+                "Mypy baseline analysis is incomplete: "
+                f"baseline endpoint lifecycle could not be reconciled ({self._baseline_failure})."
+            )
         report = AnalysisReport(
             app_path=str(self.app_path),
             diff_source=diff_source_str,
@@ -1864,7 +1880,7 @@ class ChangeMapper:
             ),
             affected_endpoints=filtered_affected,
             candidate_endpoints=materialized,
-            endpoint_lifecycle=self._endpoint_lifecycle(),
+            endpoint_lifecycle=endpoint_lifecycle,
             orphan_changes=orphan_changes,
             total_files_changed=len(diff_files),
             python_files_changed=len(python_files),
