@@ -585,6 +585,33 @@ def test_background_task_alias_branch_joins_remain_conditional(tmp_path: Path) -
     assert any("untrusted, dynamic, or rebound" in item.reason for item in inventory.limitations)
 
 
+def test_background_task_alias_match_join_remains_conditional(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import BackgroundTasks, FastAPI\n\n"
+        "async def send(): pass\n"
+        "app = FastAPI()\n"
+        "@app.post('/selected')\n"
+        "async def selected(tasks: BackgroundTasks, mode: str):\n"
+        "    match mode:\n"
+        "        case 'send':\n"
+        "            queue = tasks\n"
+        "        case _:\n"
+        "            queue = object()\n"
+        "    queue.add_task(send)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert not any(
+        endpoint.surface is not None
+        and endpoint.surface.surface_kind == "framework.background_task"
+        for endpoint in inventory.endpoints
+    )
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any("untrusted, dynamic, or rebound" in item.reason for item in inventory.limitations)
+
+
 def test_arbitrary_queue_add_task_is_not_inferred_from_its_name(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text(
         "from fastapi import FastAPI\n\n"

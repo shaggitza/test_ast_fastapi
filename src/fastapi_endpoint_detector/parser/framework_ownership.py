@@ -337,6 +337,60 @@ class _BackgroundTaskAliasAnalysis:
                         self._bind(item.optional_vars, None, True, aliases, suspect)
                 aliases, suspect = self._statements(statement.body, aliases, suspect, stack)
                 continue
+            if isinstance(statement, ast.Match):
+                self._expression(statement.subject, aliases, suspect, stack)
+                incoming_aliases = dict(aliases)
+                incoming_suspect = set(suspect)
+                branch_states: list[tuple[dict[str, str], set[str]]] = []
+                for case in statement.cases:
+                    case_aliases = dict(incoming_aliases)
+                    case_suspect = set(incoming_suspect)
+                    for name in _pattern_capture_names(case.pattern):
+                        self._bind(
+                            ast.Name(id=name, ctx=ast.Store()),
+                            None,
+                            True,
+                            case_aliases,
+                            case_suspect,
+                        )
+                    if case.guard is not None:
+                        self._expression(case.guard, case_aliases, case_suspect, stack)
+                    branch_states.append(
+                        self._statements(case.body, case_aliases, case_suspect, stack)
+                    )
+                if not statement.cases or not (
+                    statement.cases[-1].guard is None
+                    and _pattern_is_irrefutable(statement.cases[-1].pattern)
+                ):
+                    branch_states.append((incoming_aliases, incoming_suspect))
+                first_aliases = branch_states[0][0] if branch_states else incoming_aliases
+                aliases.clear()
+                aliases.update(
+                    {
+                        name: contract
+                        for name, contract in first_aliases.items()
+                        if all(state[0].get(name) == contract for state in branch_states[1:])
+                    }
+                )
+                suspect.clear()
+                for _, branch_suspect in branch_states:
+                    suspect.update(branch_suspect)
+                names = set(incoming_aliases) | incoming_suspect
+                for branch_aliases, branch_suspect in branch_states:
+                    names.update(branch_aliases)
+                    names.update(branch_suspect)
+                suspect.update(
+                    name
+                    for name in names
+                    if any(
+                        state[0].get(name) != first_aliases.get(name) for state in branch_states[1:]
+                    )
+                    and any(
+                        name in branch_aliases or name in branch_suspect
+                        for branch_aliases, branch_suspect in branch_states
+                    )
+                )
+                continue
             if isinstance(statement, ast.Try):
                 branches = [statement.body, *[handler.body for handler in statement.handlers]]
                 branch_states = [
@@ -460,6 +514,24 @@ class _BackgroundTaskAliasAnalysis:
 
 def _arguments(function: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[ast.arg, ...]:
     return (*function.args.posonlyargs, *function.args.args, *function.args.kwonlyargs)
+
+
+def _pattern_capture_names(pattern: ast.pattern) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(pattern):
+        if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name is not None:
+            names.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest is not None:
+            names.add(node.rest)
+    return names
+
+
+def _pattern_is_irrefutable(pattern: ast.pattern) -> bool:
+    if isinstance(pattern, ast.MatchAs):
+        return pattern.pattern is None or _pattern_is_irrefutable(pattern.pattern)
+    if isinstance(pattern, ast.MatchOr):
+        return any(_pattern_is_irrefutable(item) for item in pattern.patterns)
+    return False
 
 
 def _local_names(function: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
