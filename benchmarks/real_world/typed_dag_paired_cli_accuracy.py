@@ -489,6 +489,21 @@ def validate(document: dict[str, Any], analyzer_root: Path | None = None) -> Non
         raise ValueError("runner provenance is missing")
     if runner.get("revision_hash") != sha_text(str(runner.get("revision", ""))):
         raise ValueError("runner revision hash is invalid")
+    runner_root = Path(__file__).resolve().parents[2]
+    if Path(str(runner.get("root", ""))).resolve() != runner_root:
+        raise ValueError("runner root differs from this harness checkout")
+    runner_revision = str(runner.get("revision", ""))
+    for relative, field in (
+        ("benchmarks/real_world/typed_dag_paired_cli_accuracy.py", "harness_sha256"),
+        ("benchmarks/real_world/typed_dag_accuracy.py", "fixture_generator_sha256"),
+    ):
+        committed = subprocess.run(
+            ["git", "-C", str(runner_root), "show", f"{runner_revision}:{relative}"],
+            check=True,
+            capture_output=True,
+        ).stdout
+        if runner.get(field) != sha_bytes(committed):
+            raise ValueError(f"runner {relative} differs from pinned commit bytes")
     if runner.get("harness_sha256") != sha_bytes(Path(__file__).read_bytes()):
         raise ValueError("tampered harness source hash")
     if runner.get("fixture_generator_sha256") != sha_bytes(Path(v1.__file__).read_bytes()):
@@ -850,12 +865,12 @@ def _sum_tier(cases: list[dict[str, Any]], tiers: set[str]) -> dict[str, Any]:
 def run(
     output: Path, analyzer_root: Path, timeout_seconds: int = CLI_TIMEOUT_SECONDS
 ) -> dict[str, Any]:
+    started_at = datetime.now(timezone.utc).isoformat()
+    run_started = time.perf_counter()
     analyzer_root = analyzer_root.resolve()
     runner_root = Path(__file__).resolve().parents[2]
     analyzer_pin = analyzer_provenance(analyzer_root)
     runner_revision = _git(runner_root, "rev-parse", "HEAD")
-    started_at = datetime.now(timezone.utc).isoformat()
-    run_started = time.perf_counter()
     records = []
     with __import__("tempfile").TemporaryDirectory(prefix="typed-dag-paired-v2-") as tmp:
         fixture_root = Path(tmp)
@@ -941,6 +956,7 @@ def run(
         "run_started_at": started_at,
         "run_duration_ms": round((time.perf_counter() - run_started) * 1000, 3),
         "runner_provenance": {
+            "root": str(runner_root),
             "revision": runner_revision,
             "revision_hash": sha_text(runner_revision),
             "harness_sha256": sha_bytes(Path(__file__).read_bytes()),
