@@ -23,6 +23,17 @@ class SourceFile:
 
 @dataclass(frozen=True)
 class SourceInventory:
+    """Canonical file scope and its known import-closure limitations.
+
+    ``files`` and :attr:`paths` are the authoritative allowlist for downstream
+    analyzers. A consumer may not broaden that selection by walking ``root``
+    or following an in-root import on its own. ``unresolved_imports`` records
+    known local import edges whose target was not selected, and ``limitations``
+    explains why parts of the discovered source scope may be incomplete.
+    Consumers should preserve these limitations in analysis results when they
+    affect the result.
+    """
+
     root: Path
     files: tuple[SourceFile, ...]
     unresolved_imports: tuple[tuple[str, str], ...]
@@ -33,6 +44,7 @@ class SourceInventory:
 
     @property
     def paths(self) -> tuple[Path, ...]:
+        """Return exactly the files selected by this inventory."""
         return tuple(item.path for item in self.files)
 
 
