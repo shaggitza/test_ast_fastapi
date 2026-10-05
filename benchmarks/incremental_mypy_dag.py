@@ -24,6 +24,8 @@ from fastapi_endpoint_detector.analyzer.mypy_incremental import (
     TypedBuild,
 )
 
+MIN_DAG_MODULES = 4
+
 
 def make_dag(root: Path, modules: int) -> dict[str, Path]:
     for index in range(modules):
@@ -35,6 +37,24 @@ def make_dag(root: Path, modules: int) -> dict[str, Path]:
             f"{imported}\ndef f{index}(value: int) -> int:\n{called}", encoding="utf-8"
         )
     return {path.stem: path for path in root.glob("*.py")}
+
+
+def retarget_import_source(source: str, changed_index: int, modules: int) -> str:
+    """Retarget a generated DAG edge to a different in-inventory module."""
+    if modules < MIN_DAG_MODULES:
+        raise ValueError(f"retarget controls require at least {MIN_DAG_MODULES} modules")
+    original_target = changed_index + 1
+    retarget_index = (changed_index + 2) % modules
+    if retarget_index == original_target:
+        raise ValueError("retarget controls require two distinct outgoing targets")
+    original_import = f"from m{original_target} import f{original_target}"
+    retargeted_import = f"from m{retarget_index} import f{retarget_index}"
+    retargeted = source.replace(original_import, retargeted_import).replace(
+        f"f{original_target}(value)", f"f{retarget_index}(value)"
+    )
+    if retargeted == source:
+        raise ValueError("import-retarget fixture did not change source")
+    return retargeted
 
 
 def p95(samples: list[float]) -> float:
@@ -137,8 +157,10 @@ def main() -> None:  # noqa: PLR0915
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument("--python-version", default="3.11")
     args = parser.parse_args()
-    if args.modules < 3:
-        parser.error("--modules must be at least 3 for distinct DAG retarget controls")
+    if args.modules < MIN_DAG_MODULES:
+        parser.error(
+            f"--modules must be at least {MIN_DAG_MODULES} for distinct DAG retarget controls"
+        )
     if args.samples < 1:
         parser.error("--samples must be at least 1")
     cold: list[float] = []
@@ -232,18 +254,9 @@ def main() -> None:  # noqa: PLR0915
                 )
             )
             changed_index = args.modules // 2
-            original_target = changed_index + 1
-            # Pick a different in-inventory module so even small supported DAGs
-            # exercise a real topology change instead of a no-op text replace.
-            retarget_index = (changed_index + 2) % args.modules
-            if retarget_index == original_target:
-                raise RuntimeError("fixture could not choose a distinct import target")
-            retargeted_source = old_source.replace(
-                f"from m{original_target} import f{original_target}",
-                f"from m{retarget_index} import f{retarget_index}",
-            ).replace(f"f{original_target}(value)", f"f{retarget_index}(value)")
-            if retargeted_source == old_source:
-                raise RuntimeError("import-retarget fixture did not change source")
+            retargeted_source = retarget_import_source(
+                changed.read_text(encoding="utf-8"), changed_index, args.modules
+            )
             changed.write_text(retargeted_source, encoding="utf-8")
             rss_before = _rss_stats()
             started = time.perf_counter()

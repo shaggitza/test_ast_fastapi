@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+from benchmarks.incremental_mypy_dag import make_dag, retarget_import_source
 
 from fastapi_endpoint_detector.analyzer import mypy_incremental
 from fastapi_endpoint_detector.analyzer.mypy_incremental import (
@@ -131,6 +132,33 @@ def test_import_retarget_and_module_deletion_fall_back_cleanly(tmp_path: Path) -
     assert deleted.report.mode == "fallback_full_rebuild"
     assert "inventory identities" in (deleted.report.reason or "")
     assert deleted.typed_snapshot() == _fresh(tmp_path, inventory).typed_snapshot()
+
+
+@pytest.mark.parametrize("module_count", [4, 6])
+def test_generated_benchmark_retarget_is_real_and_matches_cold_build(
+    tmp_path: Path, module_count: int
+) -> None:
+    inventory = make_dag(tmp_path, module_count)
+    changed_index = module_count // 2
+    changed_path = inventory[f"m{changed_index}"]
+    original_source = changed_path.read_text(encoding="utf-8")
+    old_target = changed_index + 1
+    provider = MypyIncrementalProvider(BuildConfig(tmp_path))
+    provider.build(inventory)
+
+    retargeted_source = retarget_import_source(original_source, changed_index, module_count)
+    new_target = (changed_index + 2) % module_count
+    assert old_target != new_target
+    assert f"from m{old_target} import f{old_target}" in original_source
+    assert f"from m{new_target} import f{new_target}" in retargeted_source
+    assert retargeted_source != original_source
+    changed_path.write_text(retargeted_source, encoding="utf-8")
+
+    rebuilt = provider.build(inventory)
+    fresh = _fresh(tmp_path, inventory)
+    assert rebuilt.report.mode == "fallback_full_rebuild"
+    assert "import topology" in (rebuilt.report.reason or "")
+    assert rebuilt.typed_snapshot() == fresh.typed_snapshot()
 
 
 def test_unrelated_module_edit_does_not_disturb_unchanged_typed_modules(tmp_path: Path) -> None:
