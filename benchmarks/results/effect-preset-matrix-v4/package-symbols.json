@@ -1,0 +1,2168 @@
+{
+  "schema_version": 2,
+  "matrix_id": "effect-preset-package-matrix-v2",
+  "matrix_version": "2.0.0",
+  "source_inspection_method": "Pinned PyPI wheel or CPython source tarball; file hashes identify inspected source bytes. This is independent of analyzer observations.",
+  "packages": [
+    {
+      "distribution": "aiohttp",
+      "version": "3.11.11",
+      "artifact": "aiohttp-3.11.11-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "artifact_sha256": "249cc6912405917344192b9f9ea5cd5b139d49e0d2f5c7f70bdfaf6b4dbf3a2e",
+      "artifact_url": "https://files.pythonhosted.org/packages/c4/11/f478e071815a46ca0a5ae974651ff0c7a35898c55063305a896e58aa1247/aiohttp-3.11.11-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "inspected_sources": [
+        {
+          "path": "aiohttp/client.py",
+          "sha256": "10f68efd8e15a5374801b70e7ccc011abcd27c151c61a9a963064ddc63b6566e"
+        }
+      ],
+      "source_status": "inspected",
+      "declared_symbols": [
+        {
+          "symbol": "aiohttp.client.ClientSession.get",
+          "receiver": "ClientSession instance",
+          "parameters": [
+            "url",
+            "allow_redirects=True",
+            "**kwargs"
+          ],
+          "resource": "arg0/url",
+          "value": null,
+          "preset_contract": "aiohttp-session-get",
+          "source_signature": "(self, url: StrOrURL, *, allow_redirects: bool=True, **kwargs: Any)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "aiohttp.client.ClientSession.post",
+          "receiver": "ClientSession instance",
+          "parameters": [
+            "url",
+            "data=None",
+            "**kwargs"
+          ],
+          "resource": "arg0/url",
+          "value": null,
+          "preset_contract": "aiohttp-session-post",
+          "source_signature": "(self, url: StrOrURL, *, data: Any=None, **kwargs: Any)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "aiohttp.client.ClientSession.put",
+          "receiver": "ClientSession instance",
+          "parameters": [
+            "url",
+            "data=None",
+            "**kwargs"
+          ],
+          "resource": "arg0/url",
+          "value": null,
+          "preset_contract": "aiohttp-session-put",
+          "source_signature": "(self, url: StrOrURL, *, data: Any=None, **kwargs: Any)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "aiohttp.client.ClientSession.patch",
+          "receiver": "ClientSession instance",
+          "parameters": [
+            "url",
+            "data=None",
+            "**kwargs"
+          ],
+          "resource": "arg0/url",
+          "value": null,
+          "preset_contract": "aiohttp-session-patch",
+          "source_signature": "(self, url: StrOrURL, *, data: Any=None, **kwargs: Any)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "aiohttp.client.ClientSession.delete",
+          "receiver": "ClientSession instance",
+          "parameters": [
+            "url",
+            "**kwargs"
+          ],
+          "resource": "arg0/url",
+          "value": null,
+          "preset_contract": "aiohttp-session-delete",
+          "source_signature": "(self, url: StrOrURL, **kwargs: Any)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "aiohttp.client.ClientSession.head",
+          "receiver": "ClientSession instance",
+          "parameters": [
+            "url",
+            "allow_redirects=False",
+            "**kwargs"
+          ],
+          "resource": "arg0/url",
+          "value": null,
+          "preset_contract": "aiohttp-session-head",
+          "source_signature": "(self, url: StrOrURL, *, allow_redirects: bool=False, **kwargs: Any)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "aiohttp.client.ClientSession.options",
+          "receiver": "ClientSession instance",
+          "parameters": [
+            "url",
+            "allow_redirects=True",
+            "**kwargs"
+          ],
+          "resource": "arg0/url",
+          "value": null,
+          "preset_contract": "aiohttp-session-options",
+          "source_signature": "(self, url: StrOrURL, *, allow_redirects: bool=True, **kwargs: Any)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "aiohttp.client.ClientSession.request",
+          "receiver": "ClientSession instance",
+          "parameters": [
+            "method",
+            "url",
+            "**kwargs"
+          ],
+          "resource": "arg1/str_or_url",
+          "value": null,
+          "preset_contract": null,
+          "source_signature": "(self, method: str, url: StrOrURL, **kwargs: Any)",
+          "contract_resource_selector": null,
+          "contract_value_selector": null
+        }
+      ],
+      "release_source": "https://github.com/aio-libs/aiohttp/tree/v3.11.11",
+      "metadata_file": "aiohttp-3.11.11.dist-info/METADATA",
+      "metadata_sha256": "3bfd44644295797288e1cf032e3bc73c62b757b7a252ea74efae67597d3e4c9d",
+      "metadata_name": "aiohttp",
+      "metadata_version": "3.11.11"
+    },
+    {
+      "distribution": "boto3",
+      "version": "1.35.92",
+      "artifact": "boto3-1.35.92-py3-none-any.whl",
+      "artifact_sha256": "786930d5f1cd13d03db59ff2abbb2b7ffc173fd66646d5d8bee07f316a5f16ca",
+      "artifact_url": "https://files.pythonhosted.org/packages/4e/9d/0f7ecfea26ba0524617f7cfbd0b188d963bbc3b4cf2d9c3441dffe310c30/boto3-1.35.92-py3-none-any.whl",
+      "inspected_sources": [
+        {
+          "path": "boto3/session.py",
+          "sha256": "41c45a3d533051bf3f5ff1785c5e2bc45f304c73a03fa666148a8da97543f483"
+        }
+      ],
+      "source_status": "partially_inspected",
+      "declared_symbols": [
+        {
+          "symbol": "boto3.session.Session.client",
+          "receiver": "Session instance; service model factory",
+          "parameters": [
+            "service_name",
+            "region_name",
+            "api_version",
+            "use_ssl",
+            "verify",
+            "endpoint_url",
+            "aws_access_key_id",
+            "aws_secret_access_key",
+            "aws_session_token",
+            "config"
+          ],
+          "resource": "service_name selects generated client; generated operation API is botocore service-model driven",
+          "value": null,
+          "preset_contract": null,
+          "source_signature": "(self, service_name, region_name=None, api_version=None, use_ssl=True, verify=None, endpoint_url=None, aws_access_key_id=None, aws_secret_access_key=None, aws_session_token=None, config=None)",
+          "contract_resource_selector": null,
+          "contract_value_selector": null
+        }
+      ],
+      "release_source": "https://github.com/boto/boto3/tree/1.35.92",
+      "metadata_file": "boto3-1.35.92.dist-info/METADATA",
+      "metadata_sha256": "736311a60e8ddec3b05d139f6dda0f8be290821299b7b9029aba3790d7053d3c",
+      "metadata_name": "boto3",
+      "metadata_version": "1.35.92"
+    },
+    {
+      "distribution": "botocore",
+      "version": "1.35.92",
+      "artifact": "botocore-1.35.92-py3-none-any.whl",
+      "artifact_sha256": "f94ae1e056a675bd67c8af98a6858d06e3927d974d6c712ed6e27bb1d11bee1d",
+      "artifact_url": "https://files.pythonhosted.org/packages/a6/6f/015482b4bb28e9edcde97b67ec2d40f84956e1b8c7b22254f58a461d357d/botocore-1.35.92-py3-none-any.whl",
+      "metadata_file": "botocore-1.35.92.dist-info/METADATA",
+      "metadata_sha256": "ce24e69a318215777cdf361f5952b079ac38a38e97b3e8e15ee5e62853cb0179",
+      "metadata_name": "botocore",
+      "metadata_version": "1.35.92",
+      "inspected_sources": [
+        {
+          "path": "botocore/client.py",
+          "sha256": "e224e5accdba0e16813282bcb9e1dc943b57f0f4d8748cc0371d2cac4fdc924c"
+        },
+        {
+          "path": "botocore/data/s3/2006-03-01/service-2.json.gz",
+          "sha256": "e61b2810409f8741d3902e7903d26d821219d8fd3805a4b43382fdfc5920ad9a"
+        },
+        {
+          "path": "botocore/data/sqs/2012-11-05/service-2.json.gz",
+          "sha256": "95efb407c2ac3069ffa982020b62a4e2af84b54461e850176281ed2caaad5b21"
+        },
+        {
+          "path": "botocore/data/sns/2010-03-31/service-2.json.gz",
+          "sha256": "987d0a4ce6ccb89e066c95cd2de87e9c00a2db49002771eed7040c78378c5208"
+        }
+      ],
+      "source_status": "inspected",
+      "declared_symbols": [
+        {
+          "symbol": "botocore.client.BaseClient._make_api_call",
+          "receiver": "BaseClient instance",
+          "parameters": [
+            "operation_name",
+            "api_params"
+          ],
+          "resource": "arg0/operation_name selects a botocore service-model operation; not an exact per-operation callable",
+          "value": null,
+          "preset_contract": null,
+          "source_signature": "(self, operation_name, api_params)",
+          "contract_resource_selector": null,
+          "contract_value_selector": null
+        }
+      ],
+      "release_source": "https://github.com/boto/botocore/tree/1.35.92"
+    },
+    {
+      "distribution": "httpx",
+      "version": "0.28.1",
+      "artifact": "httpx-0.28.1-py3-none-any.whl",
+      "artifact_sha256": "d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad",
+      "artifact_url": "https://files.pythonhosted.org/packages/2a/39/e50c7c3a983047577ee07d2a9e53faf5a69493943ec3f6a384bdc792deb2/httpx-0.28.1-py3-none-any.whl",
+      "inspected_sources": [
+        {
+          "path": "httpx/_client.py",
+          "sha256": "c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d"
+        }
+      ],
+      "source_status": "inspected",
+      "declared_symbols": [
+        {
+          "symbol": "httpx._client.Client.get",
+          "receiver": "Client instance",
+          "parameters": [
+            "url",
+            "params",
+            "headers",
+            "cookies",
+            "auth",
+            "follow_redirects",
+            "timeout",
+            "extensions"
+          ],
+          "resource": "arg0/url",
+          "value": null,
+          "preset_contract": "httpx-client-get",
+          "source_signature": "(self, url: URL | str, *, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault | None=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "httpx._client.Client.post",
+          "receiver": "Client instance",
+          "parameters": [
+            "url",
+            "content",
+            "data",
+            "files",
+            "json",
+            "params",
+            "headers",
+            "cookies",
+            "auth",
+            "follow_redirects",
+            "timeout",
+            "extensions"
+          ],
+          "resource": "arg0/url",
+          "value": null,
+          "preset_contract": "httpx-client-post",
+          "source_signature": "(self, url: URL | str, *, content: RequestContent | None=None, data: RequestData | None=None, files: RequestFiles | None=None, json: typing.Any | None=None, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "httpx._client.Client.put",
+          "receiver": "Client instance",
+          "parameters": [
+            "url",
+            "content",
+            "data",
+            "files",
+            "json",
+            "params",
+            "headers",
+            "cookies",
+            "auth",
+            "follow_redirects",
+            "timeout",
+            "extensions"
+          ],
+          "resource": "arg0/url",
+          "value": null,
+          "preset_contract": "httpx-client-put",
+          "source_signature": "(self, url: URL | str, *, content: RequestContent | None=None, data: RequestData | None=None, files: RequestFiles | None=None, json: typing.Any | None=None, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "httpx._client.Client.patch",
+          "receiver": "Client instance",
+          "parameters": [
+            "url",
+            "content",
+            "data",
+            "files",
+            "json",
+            "params",
+            "headers",
+            "cookies",
+            "auth",
+            "follow_redirects",
+            "timeout",
+            "extensions"
+          ],
+          "resource": "arg0/url",
+          "value": null,
+          "preset_contract": "httpx-client-patch",
+          "source_signature": "(self, url: URL | str, *, content: RequestContent | None=None, data: RequestData | None=None, files: RequestFiles | None=None, json: typing.Any | None=None, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "httpx._client.Client.delete",
+          "receiver": "Client instance",
+          "parameters": [
+            "url",
+            "params",
+            "headers",
+            "cookies",
+            "auth",
+            "follow_redirects",
+            "timeout",
+            "extensions"
+          ],
+          "resource": "arg0/url",
+          "value": null,
+          "preset_contract": "httpx-client-delete",
+          "source_signature": "(self, url: URL | str, *, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "httpx._client.Client.head",
+          "receiver": "Client instance",
+          "parameters": [
+            "url",
+            "params",
+            "headers",
+            "cookies",
+            "auth",
+            "follow_redirects",
+            "timeout",
+            "extensions"
+          ],
+          "resource": "arg0/url",
+          "value": null,
+          "preset_contract": "httpx-client-head",
+          "source_signature": "(self, url: URL | str, *, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "httpx._client.Client.options",
+          "receiver": "Client instance",
+          "parameters": [
+            "url",
+            "params",
+            "headers",
+            "cookies",
+            "auth",
+            "follow_redirects",
+            "timeout",
+            "extensions"
+          ],
+          "resource": "arg0/url",
+          "value": null,
+          "preset_contract": "httpx-client-options",
+          "source_signature": "(self, url: URL | str, *, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "httpx._client.AsyncClient.get",
+          "receiver": "AsyncClient instance",
+          "parameters": [
+            "url",
+            "params",
+            "headers",
+            "cookies",
+            "auth",
+            "follow_redirects",
+            "timeout",
+            "extensions"
+          ],
+          "resource": "arg0/url",
+          "value": null,
+          "preset_contract": "httpx-async-client-get",
+          "source_signature": "async (self, url: URL | str, *, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault | None=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "httpx._client.AsyncClient.post",
+          "receiver": "AsyncClient instance",
+          "parameters": [
+            "url",
+            "content",
+            "data",
+            "files",
+            "json",
+            "params",
+            "headers",
+            "cookies",
+            "auth",
+            "follow_redirects",
+            "timeout",
+            "extensions"
+          ],
+          "resource": "arg0/url",
+          "value": null,
+          "preset_contract": "httpx-async-client-post",
+          "source_signature": "async (self, url: URL | str, *, content: RequestContent | None=None, data: RequestData | None=None, files: RequestFiles | None=None, json: typing.Any | None=None, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "httpx._client.AsyncClient.put",
+          "receiver": "AsyncClient instance",
+          "parameters": [
+            "url",
+            "content",
+            "data",
+            "files",
+            "json",
+            "params",
+            "headers",
+            "cookies",
+            "auth",
+            "follow_redirects",
+            "timeout",
+            "extensions"
+          ],
+          "resource": "arg0/url",
+          "value": null,
+          "preset_contract": "httpx-async-client-put",
+          "source_signature": "async (self, url: URL | str, *, content: RequestContent | None=None, data: RequestData | None=None, files: RequestFiles | None=None, json: typing.Any | None=None, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "httpx._client.AsyncClient.patch",
+          "receiver": "AsyncClient instance",
+          "parameters": [
+            "url",
+            "content",
+            "data",
+            "files",
+            "json",
+            "params",
+            "headers",
+            "cookies",
+            "auth",
+            "follow_redirects",
+            "timeout",
+            "extensions"
+          ],
+          "resource": "arg0/url",
+          "value": null,
+          "preset_contract": "httpx-async-client-patch",
+          "source_signature": "async (self, url: URL | str, *, content: RequestContent | None=None, data: RequestData | None=None, files: RequestFiles | None=None, json: typing.Any | None=None, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "httpx._client.AsyncClient.delete",
+          "receiver": "AsyncClient instance",
+          "parameters": [
+            "url",
+            "params",
+            "headers",
+            "cookies",
+            "auth",
+            "follow_redirects",
+            "timeout",
+            "extensions"
+          ],
+          "resource": "arg0/url",
+          "value": null,
+          "preset_contract": "httpx-async-client-delete",
+          "source_signature": "async (self, url: URL | str, *, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "httpx._client.AsyncClient.head",
+          "receiver": "AsyncClient instance",
+          "parameters": [
+            "url",
+            "params",
+            "headers",
+            "cookies",
+            "auth",
+            "follow_redirects",
+            "timeout",
+            "extensions"
+          ],
+          "resource": "arg0/url",
+          "value": null,
+          "preset_contract": "httpx-async-client-head",
+          "source_signature": "async (self, url: URL | str, *, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "httpx._client.AsyncClient.options",
+          "receiver": "AsyncClient instance",
+          "parameters": [
+            "url",
+            "params",
+            "headers",
+            "cookies",
+            "auth",
+            "follow_redirects",
+            "timeout",
+            "extensions"
+          ],
+          "resource": "arg0/url",
+          "value": null,
+          "preset_contract": "httpx-async-client-options",
+          "source_signature": "async (self, url: URL | str, *, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "httpx._client.Client.request",
+          "receiver": "Client instance",
+          "parameters": [
+            "method",
+            "url",
+            "content",
+            "data",
+            "files",
+            "json",
+            "params",
+            "headers",
+            "cookies",
+            "auth",
+            "follow_redirects",
+            "timeout",
+            "extensions"
+          ],
+          "resource": "arg1/url",
+          "value": null,
+          "preset_contract": null,
+          "source_signature": "(self, method: str, url: URL | str, *, content: RequestContent | None=None, data: RequestData | None=None, files: RequestFiles | None=None, json: typing.Any | None=None, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault | None=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+          "contract_resource_selector": null,
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "httpx._client.AsyncClient.request",
+          "receiver": "AsyncClient instance",
+          "parameters": [
+            "method",
+            "url",
+            "content",
+            "data",
+            "files",
+            "json",
+            "params",
+            "headers",
+            "cookies",
+            "auth",
+            "follow_redirects",
+            "timeout",
+            "extensions"
+          ],
+          "resource": "arg1/url",
+          "value": null,
+          "preset_contract": null,
+          "source_signature": "async (self, method: str, url: URL | str, *, content: RequestContent | None=None, data: RequestData | None=None, files: RequestFiles | None=None, json: typing.Any | None=None, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault | None=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+          "contract_resource_selector": null,
+          "contract_value_selector": null
+        }
+      ],
+      "release_source": "https://github.com/encode/httpx/tree/0.28.1",
+      "metadata_file": "httpx-0.28.1.dist-info/METADATA",
+      "metadata_sha256": "febb9b0f8f3e80d57c8199c304f35c4336e8581d1d18d7983c92766b82793b25",
+      "metadata_name": "httpx",
+      "metadata_version": "0.28.1"
+    },
+    {
+      "distribution": "motor",
+      "version": "3.6.0",
+      "artifact": "motor-3.6.0-py3-none-any.whl",
+      "artifact_sha256": "9f07ed96f1754963d4386944e1b52d403a5350c687edc60da487d66f98dbf894",
+      "artifact_url": "https://files.pythonhosted.org/packages/b4/c2/bba4dce0dc56e49d95c270c79c9330ed19e6b71a2a633aecf53e7e1f04c9/motor-3.6.0-py3-none-any.whl",
+      "inspected_sources": [
+        {
+          "path": "motor/core.py",
+          "sha256": "c5690d7e1c7b3f5ff9795ae4636463c92101ebba12f6a23bd2a357cbdb5a399a"
+        },
+        {
+          "path": "motor/motor_asyncio.py",
+          "sha256": "d6a374145b584868e6641adb91276132818b5a9699133806b5cae2c39dcbd262"
+        }
+      ],
+      "source_status": "partially_inspected",
+      "declared_symbols": [
+        {
+          "symbol": "motor.core.AgnosticCollection.find_one",
+          "receiver": "AgnosticCollection descriptor, AsyncRead over delegated pymongo.Collection.find_one",
+          "parameters": [
+            "delegated; descriptor supplies wrapper; resolved callable signature unavailable in source declaration"
+          ],
+          "resource": "receiver/collection",
+          "value": "filter value through delegated callable; analyzer binding not evaluated",
+          "preset_contract": null,
+          "source_signature": "descriptor = AsyncRead(PyMongoCollection.find_one); delegated signature",
+          "contract_resource_selector": null,
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "motor.core.AgnosticCollection.insert_one",
+          "receiver": "AgnosticCollection descriptor, AsyncCommand over delegated pymongo.Collection.insert_one",
+          "parameters": [
+            "delegated; descriptor supplies wrapper; resolved callable signature unavailable in source declaration"
+          ],
+          "resource": "receiver/collection",
+          "value": "document value through delegated callable; analyzer binding not evaluated",
+          "preset_contract": null,
+          "source_signature": "descriptor = AsyncCommand(PyMongoCollection.insert_one); delegated signature",
+          "contract_resource_selector": null,
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "motor.core.AgnosticCollection.update_one",
+          "receiver": "AgnosticCollection descriptor, AsyncCommand over delegated pymongo.Collection.update_one",
+          "parameters": [
+            "delegated; descriptor supplies wrapper; resolved callable signature unavailable in source declaration"
+          ],
+          "resource": "receiver/collection",
+          "value": "update value through delegated callable; analyzer binding not evaluated",
+          "preset_contract": null,
+          "source_signature": "descriptor = AsyncCommand(PyMongoCollection.update_one); delegated signature",
+          "contract_resource_selector": null,
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "motor.core.AgnosticCollection.delete_one",
+          "receiver": "AgnosticCollection descriptor, AsyncCommand over delegated pymongo.Collection.delete_one",
+          "parameters": [
+            "delegated; descriptor supplies wrapper; resolved callable signature unavailable in source declaration"
+          ],
+          "resource": "receiver/collection",
+          "value": "filter value through delegated callable; analyzer binding not evaluated",
+          "preset_contract": null,
+          "source_signature": "descriptor = AsyncCommand(PyMongoCollection.delete_one); delegated signature",
+          "contract_resource_selector": null,
+          "contract_value_selector": null
+        }
+      ],
+      "release_source": "https://github.com/mongodb/motor/tree/3.6.0",
+      "metadata_file": "motor-3.6.0.dist-info/METADATA",
+      "metadata_sha256": "dce8b401625d673eed6b2c0c66d9d196a13de0649c0788da8b3e2a72edb2965d",
+      "metadata_name": "motor",
+      "metadata_version": "3.6.0"
+    },
+    {
+      "distribution": "mypy-boto3-s3",
+      "version": "1.35.92",
+      "artifact": "mypy_boto3_s3-1.35.92-py3-none-any.whl",
+      "artifact_sha256": "ce302a635da78e1925d8ff4809184ba55618cd7e3707156bea405cde7fdcf67a",
+      "artifact_url": "https://files.pythonhosted.org/packages/f9/d0/f1553fb9684d0f43792efbe6238bf000dfdb514f35dbb8a488033796af41/mypy_boto3_s3-1.35.92-py3-none-any.whl",
+      "inspected_sources": [
+        {
+          "path": "mypy_boto3_s3/client.py",
+          "sha256": "e41cde1bc5682e1fc40449e36ea952ee2f953df336e805073219c3d5d6565432"
+        },
+        {
+          "path": "mypy_boto3_s3/type_defs.py",
+          "sha256": "acbc5700f9cfb70aea9cf39abc4ee4e3e84b90ad7d6130dbf5378a5edb2aa617"
+        }
+      ],
+      "source_status": "inspected",
+      "declared_symbols": [
+        {
+          "symbol": "mypy_boto3_s3.client.S3Client.get_object",
+          "receiver": "typed S3Client instance",
+          "parameters": [
+            "Bucket",
+            "Key",
+            "IfMatch",
+            "IfModifiedSince",
+            "IfNoneMatch",
+            "IfUnmodifiedSince",
+            "Range",
+            "ResponseCacheControl",
+            "ResponseContentDisposition",
+            "ResponseContentEncoding",
+            "ResponseContentLanguage",
+            "ResponseContentType",
+            "ResponseExpires",
+            "VersionId",
+            "SSECustomerAlgorithm",
+            "SSECustomerKey",
+            "RequestPayer",
+            "PartNumber",
+            "ExpectedBucketOwner",
+            "ChecksumMode"
+          ],
+          "resource": "keywords Bucket+Key; required parameter declarations inspected",
+          "value": null,
+          "preset_contract": "typed-s3-get-object",
+          "source_signature": "(self, **kwargs: Unpack[GetObjectRequestRequestTypeDef])",
+          "contract_resource_selector": {
+            "kind": "composite",
+            "components": [
+              {
+                "kind": "keyword",
+                "index": null,
+                "name": "Bucket",
+                "path": []
+              },
+              {
+                "kind": "keyword",
+                "index": null,
+                "name": "Key",
+                "path": []
+              }
+            ]
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "mypy_boto3_s3.client.S3Client.put_object",
+          "receiver": "typed S3Client instance",
+          "parameters": [
+            "Bucket",
+            "Key",
+            "ACL",
+            "Body",
+            "CacheControl",
+            "ContentDisposition",
+            "ContentEncoding",
+            "ContentLanguage",
+            "ContentLength",
+            "ContentMD5",
+            "ContentType",
+            "ChecksumAlgorithm",
+            "ChecksumCRC32",
+            "ChecksumCRC32C",
+            "ChecksumSHA1",
+            "ChecksumSHA256",
+            "Expires",
+            "IfMatch",
+            "IfNoneMatch",
+            "GrantFullControl",
+            "GrantRead",
+            "GrantReadACP",
+            "GrantWriteACP",
+            "WriteOffsetBytes",
+            "Metadata",
+            "ServerSideEncryption",
+            "StorageClass",
+            "WebsiteRedirectLocation",
+            "SSECustomerAlgorithm",
+            "SSECustomerKey",
+            "SSEKMSKeyId",
+            "SSEKMSEncryptionContext",
+            "BucketKeyEnabled",
+            "RequestPayer",
+            "Tagging",
+            "ObjectLockMode",
+            "ObjectLockRetainUntilDate",
+            "ObjectLockLegalHoldStatus",
+            "ExpectedBucketOwner"
+          ],
+          "resource": "keywords Bucket+Key; selector: Body",
+          "value": "keyword Body",
+          "preset_contract": "typed-s3-put-object",
+          "source_signature": "(self, **kwargs: Unpack[PutObjectRequestRequestTypeDef])",
+          "contract_resource_selector": {
+            "kind": "composite",
+            "components": [
+              {
+                "kind": "keyword",
+                "index": null,
+                "name": "Bucket",
+                "path": []
+              },
+              {
+                "kind": "keyword",
+                "index": null,
+                "name": "Key",
+                "path": []
+              }
+            ]
+          },
+          "contract_value_selector": {
+            "kind": "keyword",
+            "index": null,
+            "name": "Body",
+            "path": []
+          }
+        },
+        {
+          "symbol": "mypy_boto3_s3.client.S3Client.delete_object",
+          "receiver": "typed S3Client instance",
+          "parameters": [
+            "Bucket",
+            "Key",
+            "MFA",
+            "VersionId",
+            "RequestPayer",
+            "BypassGovernanceRetention",
+            "ExpectedBucketOwner",
+            "IfMatch",
+            "IfMatchLastModifiedTime",
+            "IfMatchSize"
+          ],
+          "resource": "keywords Bucket+Key",
+          "value": null,
+          "preset_contract": "typed-s3-delete-object",
+          "source_signature": "(self, **kwargs: Unpack[DeleteObjectRequestRequestTypeDef])",
+          "contract_resource_selector": {
+            "kind": "composite",
+            "components": [
+              {
+                "kind": "keyword",
+                "index": null,
+                "name": "Bucket",
+                "path": []
+              },
+              {
+                "kind": "keyword",
+                "index": null,
+                "name": "Key",
+                "path": []
+              }
+            ]
+          },
+          "contract_value_selector": null
+        }
+      ],
+      "release_source": "https://github.com/youtype/mypy_boto3_builder/tree/1.35.92",
+      "metadata_file": "mypy_boto3_s3-1.35.92.dist-info/METADATA",
+      "metadata_sha256": "bfed722c70de32e8451ec26799a8b413840e39fe57f8b479999b8823d2b6c884",
+      "metadata_name": "mypy-boto3-s3",
+      "metadata_version": "1.35.92"
+    },
+    {
+      "distribution": "mypy-boto3-sqs",
+      "version": "1.35.91",
+      "artifact": "mypy_boto3_sqs-1.35.91-py3-none-any.whl",
+      "artifact_sha256": "346a87bc0a447bb4c005b04d3efa0008bfa0ddd498cadd97e0e53a58752f84e9",
+      "artifact_url": "https://files.pythonhosted.org/packages/09/47/13b3df2b032fc029289ccb5aa9e6254cc4a425cb93677cf192e90c31f2a2/mypy_boto3_sqs-1.35.91-py3-none-any.whl",
+      "metadata_file": "mypy_boto3_sqs-1.35.91.dist-info/METADATA",
+      "metadata_sha256": "1592eec6fb80ee450bf0c68a9867b4cb638d3d23ea0d841089e5918c60206609",
+      "metadata_name": "mypy-boto3-sqs",
+      "metadata_version": "1.35.91",
+      "inspected_sources": [
+        {
+          "path": "mypy_boto3_sqs/client.py",
+          "sha256": "a79cac0f3445a6008f02b2def173dda53e868d9630d12ae4ae7806e41aefba3b"
+        },
+        {
+          "path": "mypy_boto3_sqs/type_defs.py",
+          "sha256": "76f2dfdc73b3fc623c8feb455d1fa079f22b4f4fd80b3f1f5df64fb7c8b5f013"
+        }
+      ],
+      "source_status": "inspected",
+      "declared_symbols": [
+        {
+          "symbol": "mypy_boto3_sqs.client.SQSClient.send_message",
+          "receiver": "typed SQSClient instance",
+          "parameters": [
+            "QueueUrl",
+            "MessageBody",
+            "DelaySeconds",
+            "MessageAttributes",
+            "MessageSystemAttributes",
+            "MessageDeduplicationId",
+            "MessageGroupId"
+          ],
+          "resource": "keywords QueueUrl,MessageBody; request parameters are keyword-only via **kwargs",
+          "value": null,
+          "preset_contract": null,
+          "source_signature": "(self, **kwargs: Unpack[SendMessageRequestRequestTypeDef])",
+          "contract_resource_selector": null,
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "mypy_boto3_sqs.client.SQSClient.send_message_batch",
+          "receiver": "typed SQSClient instance",
+          "parameters": [
+            "QueueUrl",
+            "Entries"
+          ],
+          "resource": "keywords QueueUrl,Entries; request parameters are keyword-only via **kwargs",
+          "value": null,
+          "preset_contract": null,
+          "source_signature": "(self, **kwargs: Unpack[SendMessageBatchRequestRequestTypeDef])",
+          "contract_resource_selector": null,
+          "contract_value_selector": null
+        }
+      ],
+      "release_source": "https://pypi.org/project/mypy-boto3-sqs/1.35.91/"
+    },
+    {
+      "distribution": "pymongo",
+      "version": "4.10.1",
+      "artifact": "pymongo-4.10.1-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "artifact_sha256": "cec237c305fcbeef75c0bcbe9d223d1e22a6e3ba1b53b2f0b79d3d29c742b45b",
+      "artifact_url": "https://files.pythonhosted.org/packages/9a/16/dbffca9d4ad66f2a325c280f1177912fa23235987f7b9033e283da889b7a/pymongo-4.10.1-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "inspected_sources": [
+        {
+          "path": "pymongo/synchronous/collection.py",
+          "sha256": "6615eeda9469b9c401d3441c3fd5a815fa46f16f748dab13e2aca9775fe4139d"
+        }
+      ],
+      "source_status": "inspected",
+      "declared_symbols": [
+        {
+          "symbol": "pymongo.synchronous.collection.Collection.find_one",
+          "receiver": "synchronous Collection instance",
+          "parameters": [
+            "filter=None",
+            "*args",
+            "**kwargs"
+          ],
+          "resource": "receiver/collection",
+          "value": "arg0/filter",
+          "preset_contract": "pymongo-find-one",
+          "source_signature": "(self, filter: Optional[Any]=None, *args: Any, **kwargs: Any)",
+          "contract_resource_selector": {
+            "kind": "receiver",
+            "index": null,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          }
+        },
+        {
+          "symbol": "pymongo.synchronous.collection.Collection.insert_one",
+          "receiver": "synchronous Collection instance",
+          "parameters": [
+            "document",
+            "bypass_document_validation",
+            "session",
+            "comment"
+          ],
+          "resource": "receiver/collection",
+          "value": "arg0/document",
+          "preset_contract": "pymongo-insert-one",
+          "source_signature": "(self, document: Union[_DocumentType, RawBSONDocument], bypass_document_validation: bool=False, session: Optional[ClientSession]=None, comment: Optional[Any]=None)",
+          "contract_resource_selector": {
+            "kind": "receiver",
+            "index": null,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          }
+        },
+        {
+          "symbol": "pymongo.synchronous.collection.Collection.update_one",
+          "receiver": "synchronous Collection instance",
+          "parameters": [
+            "filter",
+            "update",
+            "upsert",
+            "bypass_document_validation",
+            "collation",
+            "array_filters",
+            "hint",
+            "session",
+            "let",
+            "comment"
+          ],
+          "resource": "receiver/collection",
+          "value": "arg1/update",
+          "preset_contract": "pymongo-update-one",
+          "source_signature": "(self, filter: Mapping[str, Any], update: Union[Mapping[str, Any], _Pipeline], upsert: bool=False, bypass_document_validation: bool=False, collation: Optional[_CollationIn]=None, array_filters: Optional[Sequence[Mapping[str, Any]]]=None, hint: Optional[_IndexKeyHint]=None, session: Optional[ClientSession]=None, let: Optional[Mapping[str, Any]]=None, comment: Optional[Any]=None)",
+          "contract_resource_selector": {
+            "kind": "receiver",
+            "index": null,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": {
+            "kind": "argument",
+            "index": 1,
+            "name": null,
+            "path": []
+          }
+        },
+        {
+          "symbol": "pymongo.synchronous.collection.Collection.delete_one",
+          "receiver": "synchronous Collection instance",
+          "parameters": [
+            "filter",
+            "collation",
+            "hint",
+            "session",
+            "let",
+            "comment"
+          ],
+          "resource": "receiver/collection",
+          "value": "arg0/filter",
+          "preset_contract": "pymongo-delete-one",
+          "source_signature": "(self, filter: Mapping[str, Any], collation: Optional[_CollationIn]=None, hint: Optional[_IndexKeyHint]=None, session: Optional[ClientSession]=None, let: Optional[Mapping[str, Any]]=None, comment: Optional[Any]=None)",
+          "contract_resource_selector": {
+            "kind": "receiver",
+            "index": null,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          }
+        }
+      ],
+      "release_source": "https://github.com/mongodb/mongo-python-driver/tree/4.10.1",
+      "metadata_file": "pymongo-4.10.1.dist-info/METADATA",
+      "metadata_sha256": "8987a5ad4a49f4c30718e18b351deb204be66a238ebfc739c642836d946ac168",
+      "metadata_name": "pymongo",
+      "metadata_version": "4.10.1"
+    },
+    {
+      "distribution": "python-stdlib",
+      "version": "3.11.16",
+      "artifact": "Python-3.11.16.tgz",
+      "artifact_sha256": "6c0bd76ab0ec7d94ed400b1497f01ac6c7751c8822615ee0855a3eb2d893ea76",
+      "artifact_url": "https://www.python.org/ftp/python/3.11.16/Python-3.11.16.tgz",
+      "inspected_sources": [
+        {
+          "path": "Lib/pathlib.py",
+          "sha256": "3b21ac188fd9ac20bacc8ccd976fabd5d8ccf5000f8e157d3dfff005b228fb3d"
+        },
+        {
+          "path": "Modules/_io/iobase.c",
+          "sha256": "aff1055d983e6f999ce9260518583c8c7c3e7a455083b5b7e75d590b8ce8c35f"
+        },
+        {
+          "path": "Modules/_io/textio.c",
+          "sha256": "deeb2abda651f8840f1b0e1b20ccc3e0fd9fa7897c8410d9a2aaf6c37137ece7"
+        },
+        {
+          "path": "Modules/_io/bufferedio.c",
+          "sha256": "49f8a88a01f062d0b2e629526c0827d1f3d0a2aa525d22a059dc135479f720cb"
+        },
+        {
+          "path": "Modules/_io/_iomodule.c",
+          "sha256": "363b73175f26d739fa90c89684e5c4d2d78d9b4a5ce45023c194e924d476c522"
+        }
+      ],
+      "source_status": "partially_inspected",
+      "declared_symbols": [
+        {
+          "symbol": "pathlib.Path.read_text",
+          "receiver": "Path instance",
+          "parameters": [
+            "encoding=None",
+            "errors=None"
+          ],
+          "resource": "receiver/path",
+          "value": null,
+          "preset_contract": "pathlib-read-text",
+          "source_signature": "(self, encoding=None, errors=None)",
+          "contract_resource_selector": {
+            "kind": "receiver",
+            "index": null,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "pathlib.Path.read_bytes",
+          "receiver": "Path instance",
+          "parameters": [],
+          "resource": "receiver/path",
+          "value": null,
+          "preset_contract": "pathlib-read-bytes",
+          "source_signature": "(self)",
+          "contract_resource_selector": {
+            "kind": "receiver",
+            "index": null,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "pathlib.Path.write_text",
+          "receiver": "Path instance",
+          "parameters": [
+            "data",
+            "encoding=None",
+            "errors=None",
+            "newline=None"
+          ],
+          "resource": "receiver/path",
+          "value": "arg0/data",
+          "preset_contract": "pathlib-write-text",
+          "source_signature": "(self, data, encoding=None, errors=None, newline=None)",
+          "contract_resource_selector": {
+            "kind": "receiver",
+            "index": null,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          }
+        },
+        {
+          "symbol": "pathlib.Path.write_bytes",
+          "receiver": "Path instance",
+          "parameters": [
+            "data"
+          ],
+          "resource": "receiver/path",
+          "value": "arg0/data",
+          "preset_contract": "pathlib-write-bytes",
+          "source_signature": "(self, data)",
+          "contract_resource_selector": {
+            "kind": "receiver",
+            "index": null,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          }
+        },
+        {
+          "symbol": "pathlib.Path.open",
+          "receiver": "Path instance",
+          "parameters": [
+            "mode='r'",
+            "buffering=-1",
+            "encoding=None",
+            "errors=None",
+            "newline=None"
+          ],
+          "resource": "receiver/path",
+          "value": null,
+          "preset_contract": null,
+          "source_signature": "(self, mode='r', buffering=-1, encoding=None, errors=None, newline=None)",
+          "contract_resource_selector": null,
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "builtins.open",
+          "receiver": "function",
+          "parameters": [
+            "file",
+            "mode=\"r\"",
+            "buffering=-1",
+            "encoding=None",
+            "errors=None",
+            "newline=None",
+            "closefd=True",
+            "opener=None"
+          ],
+          "resource": "arg0/file; return type depends on mode",
+          "value": null,
+          "preset_contract": null,
+          "source_signature": "(file, mode='r', buffering=-1, encoding=None, errors=None, newline=None, closefd=True, opener=None)",
+          "contract_resource_selector": null,
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "_io.open",
+          "receiver": "function",
+          "parameters": [
+            "file",
+            "mode=\"r\"",
+            "buffering=-1",
+            "encoding=None",
+            "errors=None",
+            "newline=None",
+            "closefd=True",
+            "opener=None"
+          ],
+          "resource": "arg0/file; return type depends on mode",
+          "value": null,
+          "preset_contract": null,
+          "source_signature": "(file, mode='r', buffering=-1, encoding=None, errors=None, newline=None, closefd=True, opener=None)",
+          "contract_resource_selector": null,
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "_io._TextIOBase.read",
+          "receiver": "text IO handle instance",
+          "parameters": [
+            "size=-1"
+          ],
+          "resource": "receiver/origin required",
+          "value": null,
+          "preset_contract": null,
+          "source_signature": "(size=-1)",
+          "contract_resource_selector": null,
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "_io._TextIOBase.write",
+          "receiver": "text IO handle instance",
+          "parameters": [
+            "s"
+          ],
+          "resource": "receiver/origin required",
+          "value": "arg0/s",
+          "preset_contract": "io-text-write",
+          "source_signature": "(s)",
+          "contract_resource_selector": {
+            "kind": "receiver",
+            "index": null,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          }
+        },
+        {
+          "symbol": "_io._BufferedIOBase.read",
+          "receiver": "buffered IO handle instance",
+          "parameters": [
+            "size=-1"
+          ],
+          "resource": "receiver/origin required",
+          "value": null,
+          "preset_contract": null,
+          "source_signature": "(size=-1)",
+          "contract_resource_selector": null,
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "_io.BufferedWriter.write",
+          "receiver": "BufferedWriter instance",
+          "parameters": [
+            "b"
+          ],
+          "resource": "receiver/origin required",
+          "value": "arg0/b",
+          "preset_contract": "io-buffered-write",
+          "source_signature": "(b)",
+          "contract_resource_selector": {
+            "kind": "receiver",
+            "index": null,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          }
+        }
+      ],
+      "release_source": "https://github.com/python/cpython/tree/v3.11.16",
+      "metadata_file": null,
+      "metadata_sha256": null,
+      "metadata_name": null,
+      "metadata_version": null
+    },
+    {
+      "distribution": "redis",
+      "version": "5.2.1",
+      "artifact": "redis-5.2.1-py3-none-any.whl",
+      "artifact_sha256": "ee7e1056b9aea0f04c6c2ed59452947f34c4940ee025f5dd83e6a6418b6989e4",
+      "artifact_url": "https://files.pythonhosted.org/packages/3c/5f/fa26b9b2672cbe30e07d9a5bdf39cf16e3b80b42916757c5f92bca88e4ba/redis-5.2.1-py3-none-any.whl",
+      "inspected_sources": [
+        {
+          "path": "redis/commands/core.py",
+          "sha256": "6250b30f8e18267173744288143065a0f8758af80729c14c66cc4fcda984f493"
+        }
+      ],
+      "source_status": "inspected",
+      "declared_symbols": [
+        {
+          "symbol": "redis.commands.core.BasicKeyCommands.get",
+          "receiver": "BasicKeyCommands instance",
+          "parameters": [
+            "name"
+          ],
+          "resource": "arg0/name",
+          "value": null,
+          "preset_contract": "redis-get",
+          "source_signature": "(self, name: KeyT)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "redis.commands.core.BasicKeyCommands.set",
+          "receiver": "BasicKeyCommands instance",
+          "parameters": [
+            "name",
+            "value",
+            "ex",
+            "px",
+            "nx",
+            "xx",
+            "keepttl",
+            "get",
+            "exat",
+            "pxat"
+          ],
+          "resource": "arg0/name",
+          "value": "arg1/value",
+          "preset_contract": "redis-set",
+          "source_signature": "(self, name: KeyT, value: EncodableT, ex: Union[ExpiryT, None]=None, px: Union[ExpiryT, None]=None, nx: bool=False, xx: bool=False, keepttl: bool=False, get: bool=False, exat: Union[AbsExpiryT, None]=None, pxat: Union[AbsExpiryT, None]=None)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": {
+            "kind": "argument",
+            "index": 1,
+            "name": null,
+            "path": []
+          }
+        },
+        {
+          "symbol": "redis.commands.core.BasicKeyCommands.delete",
+          "receiver": "BasicKeyCommands instance",
+          "parameters": [
+            "*names"
+          ],
+          "resource": "arg0/first variadic name; multi-key resource semantics not evaluated",
+          "value": null,
+          "preset_contract": "redis-delete",
+          "source_signature": "(self, *names: KeyT)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "redis.commands.core.PubSubCommands.publish",
+          "receiver": "PubSubCommands instance",
+          "parameters": [
+            "channel",
+            "message"
+          ],
+          "resource": "arg0/channel",
+          "value": "arg1/message",
+          "preset_contract": "redis-publish",
+          "source_signature": "(self, channel: ChannelT, message: EncodableT, **kwargs)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": {
+            "kind": "argument",
+            "index": 1,
+            "name": null,
+            "path": []
+          }
+        }
+      ],
+      "release_source": "https://github.com/redis/redis-py/tree/v5.2.1",
+      "metadata_file": "redis-5.2.1.dist-info/METADATA",
+      "metadata_sha256": "04f889874b3113305e73dd752806406747db088e20178e8d06f61b315d1779ca",
+      "metadata_name": "redis",
+      "metadata_version": "5.2.1"
+    },
+    {
+      "distribution": "requests",
+      "version": "2.32.3",
+      "artifact": "requests-2.32.3-py3-none-any.whl",
+      "artifact_sha256": "70761cfe03c773ceb22aa2f671b4757976145175cdfca038c02654d061d6dcc6",
+      "artifact_url": "https://files.pythonhosted.org/packages/f9/9b/335f9764261e915ed497fcdeb11df5dfd6f7bf257d4a6a2a686d80da4d54/requests-2.32.3-py3-none-any.whl",
+      "inspected_sources": [
+        {
+          "path": "requests/sessions.py",
+          "sha256": "ca44c8f145864a5b4e7c7d3b1caa25947ee44c11b0e168620556901a67244f0e"
+        }
+      ],
+      "source_status": "inspected",
+      "declared_symbols": [
+        {
+          "symbol": "requests.sessions.Session.get",
+          "receiver": "Session instance",
+          "parameters": [
+            "url",
+            "**kwargs"
+          ],
+          "resource": "arg0/url; kwargs forwarded to request(method,url)",
+          "value": null,
+          "preset_contract": "requests-session-get",
+          "source_signature": "(self, url, **kwargs)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "requests.sessions.Session.post",
+          "receiver": "Session instance",
+          "parameters": [
+            "url",
+            "data=None",
+            "json=None",
+            "**kwargs"
+          ],
+          "resource": "arg0/url; kwargs forwarded",
+          "value": null,
+          "preset_contract": "requests-session-post",
+          "source_signature": "(self, url, data=None, json=None, **kwargs)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "requests.sessions.Session.put",
+          "receiver": "Session instance",
+          "parameters": [
+            "url",
+            "data=None",
+            "**kwargs"
+          ],
+          "resource": "arg0/url; kwargs forwarded",
+          "value": null,
+          "preset_contract": "requests-session-put",
+          "source_signature": "(self, url, data=None, **kwargs)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "requests.sessions.Session.patch",
+          "receiver": "Session instance",
+          "parameters": [
+            "url",
+            "data=None",
+            "**kwargs"
+          ],
+          "resource": "arg0/url; kwargs forwarded",
+          "value": null,
+          "preset_contract": "requests-session-patch",
+          "source_signature": "(self, url, data=None, **kwargs)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "requests.sessions.Session.delete",
+          "receiver": "Session instance",
+          "parameters": [
+            "url",
+            "**kwargs"
+          ],
+          "resource": "arg0/url; kwargs forwarded",
+          "value": null,
+          "preset_contract": "requests-session-delete",
+          "source_signature": "(self, url, **kwargs)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "requests.sessions.Session.head",
+          "receiver": "Session instance",
+          "parameters": [
+            "url",
+            "**kwargs"
+          ],
+          "resource": "arg0/url; kwargs forwarded",
+          "value": null,
+          "preset_contract": "requests-session-head",
+          "source_signature": "(self, url, **kwargs)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "requests.sessions.Session.options",
+          "receiver": "Session instance",
+          "parameters": [
+            "url",
+            "**kwargs"
+          ],
+          "resource": "arg0/url; kwargs forwarded",
+          "value": null,
+          "preset_contract": "requests-session-options",
+          "source_signature": "(self, url, **kwargs)",
+          "contract_resource_selector": {
+            "kind": "argument",
+            "index": 0,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "requests.sessions.Session.request",
+          "receiver": "Session instance",
+          "parameters": [
+            "method",
+            "url",
+            "params",
+            "data",
+            "headers",
+            "cookies",
+            "files",
+            "auth",
+            "timeout",
+            "allow_redirects",
+            "proxies",
+            "hooks",
+            "stream",
+            "verify",
+            "cert",
+            "json"
+          ],
+          "resource": "arg1/url",
+          "value": null,
+          "preset_contract": null,
+          "source_signature": "(self, method, url, params=None, data=None, headers=None, cookies=None, files=None, auth=None, timeout=None, allow_redirects=True, proxies=None, hooks=None, stream=None, verify=None, cert=None, json=None)",
+          "contract_resource_selector": null,
+          "contract_value_selector": null
+        }
+      ],
+      "release_source": "https://github.com/psf/requests/tree/v2.32.3",
+      "metadata_file": "requests-2.32.3.dist-info/METADATA",
+      "metadata_sha256": "658ee8454c1e2e76fb8c2127116f61156b3b22941b3559c00389dca70038581a",
+      "metadata_name": "requests",
+      "metadata_version": "2.32.3"
+    },
+    {
+      "distribution": "sqlalchemy",
+      "version": "2.0.36",
+      "artifact": "sqlalchemy-2.0.36.tar.gz",
+      "artifact_sha256": "7f2767680b6d2398aea7082e45a774b2b0767b5c8d8ffb9c8b683088ea9b29c5",
+      "artifact_url": "https://files.pythonhosted.org/packages/50/65/9cbc9c4c3287bed2499e05033e207473504dc4df999ce49385fb1f8b058a/sqlalchemy-2.0.36.tar.gz",
+      "metadata_file": null,
+      "metadata_sha256": null,
+      "metadata_name": null,
+      "metadata_version": null,
+      "inspected_sources": [
+        {
+          "path": "sqlalchemy/orm/session.py",
+          "sha256": "09925343ec0fc08cb473700c1718099c181a7ede9e11fe09cdc08b71a6824a38"
+        },
+        {
+          "path": "sqlalchemy/ext/asyncio/session.py",
+          "sha256": "4295e7aaca706274f6f339c3d447695086958d038ed418abb52d0125e0717999"
+        }
+      ],
+      "source_status": "inspected",
+      "declared_symbols": [
+        {
+          "symbol": "sqlalchemy.orm.session.Session.add",
+          "receiver": "Session instance",
+          "parameters": [
+            "instance",
+            "_warn"
+          ],
+          "resource": "{\"index\":null,\"kind\":\"none\",\"name\":null,\"path\":[]}",
+          "value": null,
+          "preset_contract": "sqlalchemy-session-add",
+          "source_signature": "(self, instance: object, _warn: bool=True)",
+          "contract_resource_selector": {
+            "kind": "none",
+            "index": null,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "sqlalchemy.orm.session.Session.add_all",
+          "receiver": "Session instance",
+          "parameters": [
+            "instances"
+          ],
+          "resource": "{\"index\":null,\"kind\":\"none\",\"name\":null,\"path\":[]}",
+          "value": null,
+          "preset_contract": "sqlalchemy-session-add-all",
+          "source_signature": "(self, instances: Iterable[object])",
+          "contract_resource_selector": {
+            "kind": "none",
+            "index": null,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "sqlalchemy.orm.session.Session.delete",
+          "receiver": "Session instance",
+          "parameters": [
+            "instance"
+          ],
+          "resource": "{\"index\":null,\"kind\":\"none\",\"name\":null,\"path\":[]}",
+          "value": null,
+          "preset_contract": "sqlalchemy-session-delete",
+          "source_signature": "(self, instance: object)",
+          "contract_resource_selector": {
+            "kind": "none",
+            "index": null,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "sqlalchemy.orm.session.Session.merge",
+          "receiver": "Session instance",
+          "parameters": [
+            "instance",
+            "load",
+            "options"
+          ],
+          "resource": "{\"index\":null,\"kind\":\"none\",\"name\":null,\"path\":[]}",
+          "value": null,
+          "preset_contract": "sqlalchemy-session-merge",
+          "source_signature": "(self, instance: _O, *, load: bool=True, options: Optional[Sequence[ORMOption]]=None)",
+          "contract_resource_selector": {
+            "kind": "none",
+            "index": null,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "sqlalchemy.orm.session.Session.flush",
+          "receiver": "Session instance",
+          "parameters": [
+            "objects"
+          ],
+          "resource": "{\"index\":null,\"kind\":\"none\",\"name\":null,\"path\":[]}",
+          "value": null,
+          "preset_contract": "sqlalchemy-session-flush",
+          "source_signature": "(self, objects: Optional[Sequence[Any]]=None)",
+          "contract_resource_selector": {
+            "kind": "none",
+            "index": null,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "sqlalchemy.orm.session.Session.begin",
+          "receiver": "Session instance",
+          "parameters": [
+            "nested"
+          ],
+          "resource": "{\"index\":null,\"kind\":\"none\",\"name\":null,\"path\":[]}",
+          "value": null,
+          "preset_contract": "sqlalchemy-session-begin",
+          "source_signature": "(self, nested: bool=False)",
+          "contract_resource_selector": {
+            "kind": "none",
+            "index": null,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "sqlalchemy.orm.session.Session.begin_nested",
+          "receiver": "Session instance",
+          "parameters": [],
+          "resource": "{\"index\":null,\"kind\":\"none\",\"name\":null,\"path\":[]}",
+          "value": null,
+          "preset_contract": "sqlalchemy-session-begin-nested",
+          "source_signature": "(self)",
+          "contract_resource_selector": {
+            "kind": "none",
+            "index": null,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "sqlalchemy.orm.session.Session.commit",
+          "receiver": "Session instance",
+          "parameters": [],
+          "resource": "{\"index\":null,\"kind\":\"none\",\"name\":null,\"path\":[]}",
+          "value": null,
+          "preset_contract": "sqlalchemy-session-commit",
+          "source_signature": "(self)",
+          "contract_resource_selector": {
+            "kind": "none",
+            "index": null,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "sqlalchemy.orm.session.Session.rollback",
+          "receiver": "Session instance",
+          "parameters": [],
+          "resource": "{\"index\":null,\"kind\":\"none\",\"name\":null,\"path\":[]}",
+          "value": null,
+          "preset_contract": "sqlalchemy-session-rollback",
+          "source_signature": "(self)",
+          "contract_resource_selector": {
+            "kind": "none",
+            "index": null,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "sqlalchemy.ext.asyncio.session.AsyncSession.add",
+          "receiver": "AsyncSession instance",
+          "parameters": [
+            "instance",
+            "_warn"
+          ],
+          "resource": "{\"index\":null,\"kind\":\"none\",\"name\":null,\"path\":[]}",
+          "value": null,
+          "preset_contract": "sqlalchemy-async-session-add",
+          "source_signature": "(self, instance: object, _warn: bool=True)",
+          "contract_resource_selector": {
+            "kind": "none",
+            "index": null,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "sqlalchemy.ext.asyncio.session.AsyncSession.add_all",
+          "receiver": "AsyncSession instance",
+          "parameters": [
+            "instances"
+          ],
+          "resource": "{\"index\":null,\"kind\":\"none\",\"name\":null,\"path\":[]}",
+          "value": null,
+          "preset_contract": "sqlalchemy-async-session-add-all",
+          "source_signature": "(self, instances: Iterable[object])",
+          "contract_resource_selector": {
+            "kind": "none",
+            "index": null,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "sqlalchemy.ext.asyncio.session.AsyncSession.delete",
+          "receiver": "AsyncSession instance",
+          "parameters": [
+            "instance"
+          ],
+          "resource": "{\"index\":null,\"kind\":\"none\",\"name\":null,\"path\":[]}",
+          "value": null,
+          "preset_contract": "sqlalchemy-async-session-delete",
+          "source_signature": "async (self, instance: object)",
+          "contract_resource_selector": {
+            "kind": "none",
+            "index": null,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "sqlalchemy.ext.asyncio.session.AsyncSession.merge",
+          "receiver": "AsyncSession instance",
+          "parameters": [
+            "instance",
+            "load",
+            "options"
+          ],
+          "resource": "{\"index\":null,\"kind\":\"none\",\"name\":null,\"path\":[]}",
+          "value": null,
+          "preset_contract": "sqlalchemy-async-session-merge",
+          "source_signature": "async (self, instance: _O, *, load: bool=True, options: Optional[Sequence[ORMOption]]=None)",
+          "contract_resource_selector": {
+            "kind": "none",
+            "index": null,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "sqlalchemy.ext.asyncio.session.AsyncSession.flush",
+          "receiver": "AsyncSession instance",
+          "parameters": [
+            "objects"
+          ],
+          "resource": "{\"index\":null,\"kind\":\"none\",\"name\":null,\"path\":[]}",
+          "value": null,
+          "preset_contract": "sqlalchemy-async-session-flush",
+          "source_signature": "async (self, objects: Optional[Sequence[Any]]=None)",
+          "contract_resource_selector": {
+            "kind": "none",
+            "index": null,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "sqlalchemy.ext.asyncio.session.AsyncSession.begin",
+          "receiver": "AsyncSession instance",
+          "parameters": [],
+          "resource": "{\"index\":null,\"kind\":\"none\",\"name\":null,\"path\":[]}",
+          "value": null,
+          "preset_contract": "sqlalchemy-async-session-begin",
+          "source_signature": "(self)",
+          "contract_resource_selector": {
+            "kind": "none",
+            "index": null,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "sqlalchemy.ext.asyncio.session.AsyncSession.begin_nested",
+          "receiver": "AsyncSession instance",
+          "parameters": [],
+          "resource": "{\"index\":null,\"kind\":\"none\",\"name\":null,\"path\":[]}",
+          "value": null,
+          "preset_contract": "sqlalchemy-async-session-begin-nested",
+          "source_signature": "(self)",
+          "contract_resource_selector": {
+            "kind": "none",
+            "index": null,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "sqlalchemy.ext.asyncio.session.AsyncSession.commit",
+          "receiver": "AsyncSession instance",
+          "parameters": [],
+          "resource": "{\"index\":null,\"kind\":\"none\",\"name\":null,\"path\":[]}",
+          "value": null,
+          "preset_contract": "sqlalchemy-async-session-commit",
+          "source_signature": "async (self)",
+          "contract_resource_selector": {
+            "kind": "none",
+            "index": null,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        },
+        {
+          "symbol": "sqlalchemy.ext.asyncio.session.AsyncSession.rollback",
+          "receiver": "AsyncSession instance",
+          "parameters": [],
+          "resource": "{\"index\":null,\"kind\":\"none\",\"name\":null,\"path\":[]}",
+          "value": null,
+          "preset_contract": "sqlalchemy-async-session-rollback",
+          "source_signature": "async (self)",
+          "contract_resource_selector": {
+            "kind": "none",
+            "index": null,
+            "name": null,
+            "path": []
+          },
+          "contract_value_selector": null
+        }
+      ],
+      "release_source": "https://github.com/sqlalchemy/sqlalchemy/tree/rel_2_0_36/lib/sqlalchemy"
+    }
+  ],
+  "controlled_evaluation": {
+    "status": "completed",
+    "analyzer_observations": 1,
+    "positive_matches": 4,
+    "negative_unrelated_same_name_calls": 5,
+    "negative_unmatched_open_constructors": 2,
+    "unresolved_calls": 0,
+    "ambiguous_calls": 0,
+    "receiver_origins": {
+      "builtins.open.read": "exact",
+      "pathlib.Path.open.read": "unavailable:receiver_origin_unsupported"
+    },
+    "real_package_execution": false,
+    "fixture_execution": false,
+    "note": "v2 stores raw physical-call observations and derives all counts from replayed analyzer output bound to the fixture, resolver, analyzer sources, exact interpreter source artifact, and parsed preset semantic contract."
+  },
+  "real_world_evaluation": {
+    "status": "not_evaluated",
+    "frozen_source_diffs": 0,
+    "note": "No source corpus is included in this release. Existing real-world benchmarks are not reclassified as effect-preset truth."
+  },
+  "range_compatibility": "not_evaluated; each release row is one exact artifact only",
+  "unsupported_cases": [
+    {
+      "distribution": "mypy-boto3-sqs",
+      "status": "not_available_at_audited_index",
+      "evidence": "An exact no-dependency download request returned no matching distribution; package release 1.35.91 is recorded and audited as a distinct exact version.",
+      "version": "1.35.92"
+    },
+    {
+      "distribution": "motor",
+      "version": "3.6.0",
+      "status": "source_partial_analyzer_symbol_unresolved",
+      "evidence": "Motor publishes methods as AsyncRead/AsyncCommand descriptors on AgnosticCollection and generates framework-specific collection types. This matrix does not claim that those descriptor identities match runtime or mypy-resolved public methods."
+    }
+  ],
+  "versioned_contract_sets": [
+    {
+      "preset_id": "pymongo-effects",
+      "version": "1.0.0",
+      "revision": "1",
+      "preset_path": "src/fastapi_endpoint_detector/presets/effects_mongodb_v1.yaml",
+      "preset_sha256": "df68200dc7df8e3176257815e1de2016bace4f9a049977fd31001d088f0f4d30",
+      "contract_count": 4,
+      "symbol_scope": "exact preset symbols and selectors covered by preset semantic hash",
+      "preset_semantic_sha256": "7e0f41e452ac61b7340f02215963e8aa765333988b67d441b7aece9dfa53191c",
+      "config_sha256": "40fc31d3da7d0b7f459923b7ef39cd62de26950039641d1ff5a21246fc524116",
+      "contract_inventory_sha256": "4a2b6f2acc548a85a5a7a1480a9494fdfa9895867e5ea43e64bb35c2c27b4bc6"
+    },
+    {
+      "preset_id": "python-http-client-effects",
+      "version": "2.0.0",
+      "revision": "2",
+      "preset_path": "src/fastapi_endpoint_detector/presets/effects_http_clients_v1.yaml",
+      "preset_sha256": "1999bca6c27a6b92cf448e21d56b213c8334273c1d92fe3da56ceba749cd9a7f",
+      "contract_count": 28,
+      "symbol_scope": "exact preset symbols and selectors covered by preset semantic hash",
+      "preset_semantic_sha256": "ab3d88b368db24f4c6c0879c8104105b09f23997997e63dd232856886bca6e2e",
+      "config_sha256": "2e09fa80796e9f4b3ad00e223d6d1c70c1b4b467e472291011708951596e3588",
+      "contract_inventory_sha256": "319001f492874914d378ca422191625df9d57b4bff2401d7f4b3d9626592ca3f"
+    },
+    {
+      "preset_id": "redis-py-effects",
+      "version": "1.0.0",
+      "revision": "1",
+      "preset_path": "src/fastapi_endpoint_detector/presets/effects_redis_v1.yaml",
+      "preset_sha256": "a7b6dd01808d6f9275ed9aa99c67c577c04aa2ce30a5301d3ef957fe6695fcf8",
+      "contract_count": 4,
+      "symbol_scope": "exact preset symbols and selectors covered by preset semantic hash",
+      "preset_semantic_sha256": "ce681490563300ce01dec68cd42af26c5fe8e06c7d5d45ae652dfce73c531ca2",
+      "config_sha256": "733270f1a03860adc9cae1c70d081317353f918f994b8a7112e37aa22bdb3438",
+      "contract_inventory_sha256": "abcb649ba8465582b8d359d9c0c91ef8ae3eb3790f30f4f506ad6ea9c7454dfd"
+    },
+    {
+      "preset_id": "sqlalchemy-transaction-effects",
+      "version": "3.0.0",
+      "revision": "3",
+      "preset_path": "src/fastapi_endpoint_detector/presets/effects_sqlalchemy_v1.yaml",
+      "preset_sha256": "907405ddeca13550c69e22245ab34162d50ee7e71e9fea50e42a3dc6e916718d",
+      "preset_semantic_sha256": "132982ba61f04626df531dc80c71ce5d21c12ec583a932d21c220486785c8d04",
+      "config_sha256": "2bf39dd60e0dfdfb381a3debb7663aba90a926323579cefdc29d6c5f4c4293e1",
+      "contract_inventory_sha256": "d385592523913096bc38522544e9069a23728b1fd5bcf2f008e8ff2a5f2fb404",
+      "contract_count": 18,
+      "symbol_scope": "exact preset symbols and selectors covered by preset semantic hash"
+    },
+    {
+      "preset_id": "stdlib-filesystem-effects",
+      "version": "2.0.0",
+      "revision": "2",
+      "preset_path": "src/fastapi_endpoint_detector/presets/effects_filesystem_v1.yaml",
+      "preset_sha256": "ece9515414a316b1fa6fec47e45699667e7d565b3c2537787dc91a203d0f88f3",
+      "contract_count": 8,
+      "symbol_scope": "exact preset symbols and selectors covered by preset semantic hash",
+      "preset_semantic_sha256": "5acc35da9d989ccafda0960090efefbbaa52ca5b70894882c24c4bf1355c2b96",
+      "config_sha256": "d168f95981e84b8e95dac49d0cc3072b51bbc18ec3a0c3a343f1ef02f9af0301",
+      "contract_inventory_sha256": "87ce0d3e9ab1fce41d81c6fa5164c54ca8341d299d2a2bcd907b01c34b7782f0"
+    },
+    {
+      "preset_id": "typed-s3-effects",
+      "version": "2.0.0",
+      "revision": "2",
+      "preset_path": "src/fastapi_endpoint_detector/presets/effects_object_storage_v1.yaml",
+      "preset_sha256": "7c5cf82835f371e3ec8e3d422f3f5c4f324622c7bfeb928690cb11921749b871",
+      "contract_count": 3,
+      "symbol_scope": "exact preset symbols and selectors covered by preset semantic hash",
+      "preset_semantic_sha256": "99707cccf212f530bd2437a3cb154d5ebea775857cc7d65c777771f9771cc6c4",
+      "config_sha256": "62e9eaec796e3ffd042e69758c6893d417ee0889fdf83145d56f544ae952f64a",
+      "contract_inventory_sha256": "f92be9fed84b9490660d85aba0e632fce3cac0118f341bedf6b0f627bde08511"
+    }
+  ]
+}
