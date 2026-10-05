@@ -1292,6 +1292,10 @@ def test_runtime_extractor_reports_worker_hard_exit(tmp_path: Path) -> None:
         ({"timeout_seconds": float("inf")}, "timeout_seconds must be a finite positive number"),
         ({"timeout_seconds": True}, "timeout_seconds must be a finite positive number"),
         ({"output_limit_bytes": 0}, "output_limit_bytes must be a positive integer"),
+        (
+            {"output_limit_bytes": 127},
+            "output_limit_bytes must be at least 128 for a structured worker response",
+        ),
         ({"output_limit_bytes": 1.5}, "output_limit_bytes must be a positive integer"),
         ({"output_limit_bytes": True}, "output_limit_bytes must be a positive integer"),
     ],

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import json
+import sys
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
@@ -131,6 +133,120 @@ def test_worker_stops_collecting_before_serialized_inventory_exceeds_limit(
     assert "exceeded the serialized output limit" in payload["message"]
     assert yielded == 1
     assert dumped == 0
+
+
+def test_v3_unicode_nested_error_response_respects_utf8_limit(tmp_path: Path, monkeypatch) -> None:
+    message = ('雪\nquote=" slash=\\ tab=\t ' * 1000) + "尾"
+
+    class RaisingExtractor:
+        def extract_endpoints(self):
+            raise RuntimeError(message)
+
+    monkeypatch.setattr(runtime_worker, "_extractor", lambda _request: RaisingExtractor())
+    monkeypatch.setattr(runtime_worker, "_container_process_rss_bytes", lambda: None)
+    request = json.loads(_request(tmp_path))
+    request["output_limit_bytes"] = runtime_worker.MIN_PROTOCOL_OUTPUT_BYTES
+
+    payload, status = runtime_worker.run_request(json.dumps(request))
+
+    encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    assert status == 1
+    assert payload["status"] == "error"
+    assert payload["message"].startswith('雪\nquote=" slash=\\ tab=\t ')
+    assert len(encoded) + 1 <= request["output_limit_bytes"]
+
+
+def test_too_small_v3_limit_is_rejected_before_work_and_serialization(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    request = json.loads(_request(tmp_path))
+    request["output_limit_bytes"] = runtime_worker.MIN_PROTOCOL_OUTPUT_BYTES - 1
+    raw_request = json.dumps(request)
+
+    def unexpected_extractor(_request):
+        raise AssertionError("application extraction must not start below protocol minimum")
+
+    monkeypatch.setattr(runtime_worker, "_extractor", unexpected_extractor)
+    monkeypatch.setattr(sys, "argv", ["runtime_worker", "--request-json", raw_request])
+
+    assert runtime_worker.main() == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert len(captured.out.encode("utf-8")) <= request["output_limit_bytes"]
+
+
+def _host_request(app: Path, *, output_limit: int) -> dict[str, object]:
+    return {
+        "schema_version": 2,
+        "app_path": str(app),
+        "app_variable": "app",
+        "app_entry": None,
+        "bootstrap_entry": None,
+        "dependency_max_depth": 10,
+        "dependency_max_nodes": 4096,
+        "dependency_max_work": 65536,
+        "output_limit_bytes": output_limit,
+    }
+
+
+def test_host_worker_unicode_error_file_respects_utf8_limit(tmp_path: Path, monkeypatch) -> None:
+    message = ('路\n\\nested=" \u00e9 ' * 1000) + "終"
+
+    class RaisingExtractor:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def _extract_endpoints_in_process(self):
+            raise RuntimeError(message)
+
+    monkeypatch.setattr(runtime_worker, "FastAPIExtractor", RaisingExtractor)
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(
+            json.dumps(
+                _host_request(
+                    tmp_path,
+                    output_limit=runtime_worker.MIN_PROTOCOL_OUTPUT_BYTES,
+                )
+            )
+        ),
+    )
+    result_path = tmp_path / "host-result.json"
+
+    assert runtime_worker._run_host_request(result_path) == 1
+
+    encoded = result_path.read_bytes()
+    payload = json.loads(encoded)
+    assert payload["status"] == "error"
+    assert payload["message"].startswith('路\n\\nested=" é ')
+    assert len(encoded) <= runtime_worker.MIN_PROTOCOL_OUTPUT_BYTES
+
+
+def test_too_small_host_limit_is_rejected_before_work_or_file_output(
+    tmp_path: Path, monkeypatch
+) -> None:
+    class UnexpectedExtractor:
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise AssertionError("application extraction must not start below protocol minimum")
+
+    monkeypatch.setattr(runtime_worker, "FastAPIExtractor", UnexpectedExtractor)
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(
+            json.dumps(
+                _host_request(
+                    tmp_path,
+                    output_limit=runtime_worker.MIN_PROTOCOL_OUTPUT_BYTES - 1,
+                )
+            )
+        ),
+    )
+    result_path = tmp_path / "host-result.json"
+
+    assert runtime_worker._run_host_request(result_path) == 2
+    assert not result_path.exists()
 
 
 def test_worker_analyze_uses_the_selected_runtime_inventory(tmp_path: Path, monkeypatch) -> None:

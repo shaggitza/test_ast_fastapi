@@ -10,6 +10,10 @@ from typing import Any
 
 from pydantic import BaseModel
 
+# Leaves 77 UTF-8 JSON string bytes for a useful diagnostic after the v3 error
+# envelope and newline framing; smaller requests are rejected before app execution.
+MIN_PROTOCOL_OUTPUT_BYTES = 128
+
 
 def bounded_json_bytes(value: Any, *, max_bytes: int, field: str) -> bytes:  # noqa: PLR0915
     """Encode supported response values incrementally, without dumping full models."""

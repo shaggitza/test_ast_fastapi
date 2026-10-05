@@ -40,7 +40,10 @@ from fastapi_endpoint_detector.models.endpoint import (
     EndpointMethod,
     HandlerInfo,
 )
-from fastapi_endpoint_detector.parser.bounded_output import bounded_json_bytes
+from fastapi_endpoint_detector.parser.bounded_output import (
+    MIN_PROTOCOL_OUTPUT_BYTES,
+    bounded_json_bytes,
+)
 from fastapi_endpoint_detector.parser.runtime_entry import select_runtime_app
 
 
@@ -104,6 +107,11 @@ class FastAPIExtractor:
             or output_limit_bytes > 64 * 1024 * 1024
         ):
             raise ValueError("output_limit_bytes must be a positive integer not exceeding 67108864")
+        if output_limit_bytes < MIN_PROTOCOL_OUTPUT_BYTES:
+            raise ValueError(
+                "output_limit_bytes must be at least "
+                f"{MIN_PROTOCOL_OUTPUT_BYTES} for a structured worker response"
+            )
         self.app_path = app_path.resolve()
         self.app_variable = app_variable
         self.module_name = module_name
