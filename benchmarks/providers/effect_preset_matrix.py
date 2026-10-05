@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import importlib.metadata
 import json
 import platform
 import re
@@ -28,15 +29,44 @@ from fastapi_endpoint_detector.models.endpoint import (
     HandlerInfo,
 )
 
-MATRIX_ROOT = Path(__file__).resolve().parents[1] / "results" / "effect-preset-matrix-v3"
+
+class MatrixEvidenceError(ValueError):
+    """Raised when frozen matrix provenance is incomplete or inconsistent."""
+
+
+MATRIX_ROOT = Path(__file__).resolve().parents[1] / "results" / "effect-preset-matrix-v4"
 MANIFEST_PATH = MATRIX_ROOT / "package-symbols.json"
-RESULTS_PATH = MATRIX_ROOT / "controlled-results.json"
 FIXTURE_PATH = MATRIX_ROOT / "fixtures" / "pathlib_open_handles.py"
 ANALYZER_SNAPSHOT_PATH = MATRIX_ROOT / "analyzer-source-snapshots.json"
 PACKAGE_CASES_PATH = MATRIX_ROOT / "package-analyzer-cases.json"
-PACKAGE_CASE_RESULTS_PATH = MATRIX_ROOT / "package-analyzer-results.json"
 SIGNATURE_REPORT_PATH = MATRIX_ROOT / "source-signature-observations.json"
 PROJECT_ROOT = MANIFEST_PATH.parents[3]
+_SUPPORTED_REPLAY_ENVS = {
+    ("3.10.21", "1.19.1"),
+    ("3.11.16", "1.19.1"),
+    ("3.12.14", "1.19.1"),
+    ("3.11.16", "2.4.0"),
+}
+
+
+def _replay_environment() -> tuple[str, str, Path]:
+    python_version = platform.python_version()
+    try:
+        resolver_version = importlib.metadata.version("mypy")
+    except importlib.metadata.PackageNotFoundError as exc:
+        raise MatrixEvidenceError("mypy distribution version is unavailable") from exc
+    if (python_version, resolver_version) not in _SUPPORTED_REPLAY_ENVS:
+        raise MatrixEvidenceError(
+            "no frozen replay result for exact environment "
+            f"Python {python_version} / mypy {resolver_version}"
+        )
+    run_dir = MATRIX_ROOT / "runs" / f"python-{python_version}-mypy-{resolver_version}"
+    return python_version, resolver_version, run_dir
+
+
+_PYTHON_VERSION, _RESOLVER_VERSION, _RUN_ROOT = _replay_environment()
+RESULTS_PATH = _RUN_ROOT / "controlled-results.json"
+PACKAGE_CASE_RESULTS_PATH = _RUN_ROOT / "package-analyzer-results.json"
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _OBSERVATION_STATES = {"matched", "unmatched", "ambiguous", "unresolved"}
 ANALYZER_SOURCE_PATHS = (
@@ -47,10 +77,6 @@ ANALYZER_SOURCE_PATHS = (
     "src/fastapi_endpoint_detector/models/endpoint.py",
     "src/fastapi_endpoint_detector/strict_data.py",
 )
-
-
-class MatrixEvidenceError(ValueError):
-    """Raised when frozen matrix provenance is incomplete or inconsistent."""
 
 
 def _sha256(data: bytes) -> str:
@@ -931,8 +957,7 @@ def _endpoint(path: Path, line_number: int = 10) -> Endpoint:
 def _replay_fixture() -> dict[str, Any]:
     """Statically analyze only the frozen synthetic fixture; never execute its source."""
     try:
-        if platform.python_version() != "3.11.16":
-            raise MatrixEvidenceError("controlled fixture requires exact Python 3.11.16")
+        python_version, expected_mypy, _ = _replay_environment()
         fixture = FIXTURE_PATH.read_bytes()
         with tempfile.TemporaryDirectory(prefix="gh97_matrix_replay_") as temp:
             root = Path(temp)
@@ -940,6 +965,8 @@ def _replay_fixture() -> dict[str, Any]:
             main.write_bytes(fixture)
             endpoint = _endpoint(main)
             analyzer = MypyAnalyzer(root, max_depth=1)
+            if analyzer.resolver_version.removeprefix("mypy ") != expected_mypy:
+                raise MatrixEvidenceError("mypy resolver differs from selected exact environment")
             dependencies = analyzer.analyze_endpoint(endpoint)
             call_sites = dependencies.get_resolved_call_sites()
             loaded = load_effect_preset("filesystem-v1")
@@ -957,7 +984,7 @@ def _replay_fixture() -> dict[str, Any]:
             return {
                 "observations": observations,
                 "resolver_version": analyzer.resolver_version,
-                "python_version": platform.python_version(),
+                "python_version": python_version,
                 "preset_raw_hash": loaded.raw_hash,
                 "preset_config_hash": loaded.config_hash,
                 "preset_semantic_hash": loaded.preset_hash,
@@ -1574,6 +1601,8 @@ def load_package_analyzer_results(
         "manifest_sha256",
         "case_fixture_sha256",
         "analyzer_snapshot_sha256",
+        "python_version",
+        "resolver_version",
         "source_execution",
         "upstream_package_code_imported_or_executed",
         "cases",
@@ -1584,8 +1613,8 @@ def load_package_analyzer_results(
         raise MatrixEvidenceError("package analyzer result has invalid fields")
     if (
         type(value["schema_version"]) is not int
-        or value["schema_version"] != 3
-        or value["result_id"] != "gh97-package-selector-binding-results-v3"
+        or value["schema_version"] != 4
+        or value["result_id"] != "gh97-package-selector-binding-results-v4"
         or value["status"] != "completed"
         or value["scope"]
         != (
@@ -1597,6 +1626,9 @@ def load_package_analyzer_results(
     ):
         raise MatrixEvidenceError("package analyzer result identity or scope is invalid")
     _, snapshot_sha = _load_analyzer_source_snapshots()
+    python_version, mypy_version, _ = _replay_environment()
+    if value["python_version"] != python_version or value["resolver_version"] != mypy_version:
+        raise MatrixEvidenceError("package analyzer result exact environment is invalid")
     expected_manifest_sha = f"sha256:{_sha256(MANIFEST_PATH.read_bytes())}"
     expected_fixture_sha = f"sha256:{_sha256(PACKAGE_CASES_PATH.read_bytes())}"
     if (
@@ -1940,7 +1972,7 @@ def load_controlled_results(path: Path = RESULTS_PATH) -> dict[str, Any]:  # noq
         evaluation["analyzer"] != "MypyAnalyzer plus audit_effect_contracts"
         or not isinstance(evaluation["resolver_version"], str)
         or not evaluation["resolver_version"]
-        or evaluation["python_version"] != "3.11.16"
+        or evaluation["python_version"] != _PYTHON_VERSION
         or evaluation["package_runtime"]
         != {
             "distribution": "python-stdlib",

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import importlib.metadata
 import json
+import platform
 from pathlib import Path
 
 import benchmarks.providers.effect_preset_matrix as matrix_provider
@@ -68,6 +70,14 @@ def test_frozen_matrix_is_explicit_and_does_not_expand_version_ranges() -> None:
         == "not_evaluated; each release row is one exact artifact only"
     )
     assert summary["real_world_evaluation"] == "not_evaluated"
+
+
+def test_unrecorded_python_mypy_environment_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(platform, "python_version", lambda: "3.13.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "1.19.1")
+
+    with pytest.raises(MatrixEvidenceError, match="no frozen replay result for exact environment"):
+        matrix_provider._replay_environment()
 
 
 def test_exact_package_signatures_and_selectors_are_explicit() -> None:
