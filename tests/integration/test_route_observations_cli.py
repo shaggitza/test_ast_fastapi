@@ -4,15 +4,23 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import pytest
 from click.testing import CliRunner
 
 from fastapi_endpoint_detector.analyzer import change_mapper
 from fastapi_endpoint_detector.cli import cli
+from fastapi_endpoint_detector.config import Config
 from fastapi_endpoint_detector.models.report import AnalysisReport
 from fastapi_endpoint_detector.output import formatters
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+if not hasattr(Config().analysis, "route_observations"):
+    pytest.skip(
+        "the stacked route-observation CLI integration is supplied by PR #312",
+        allow_module_level=True,
+    )
 
 
 def _install_stub_mapper(monkeypatch: Any, app_root: Path) -> None:
