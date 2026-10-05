@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 
 GraphConfidence = Literal["HIGH", "MEDIUM", "LOW"]
 _EVIDENCE_RELATIONS = frozenset({"calls", "imports", "imports_from", "inherits", "references"})
+_MAX_PATH_WITNESS_STATES = 100_000
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,7 @@ class GraphPathEvidence:
     extractor_strengths: tuple[GraphifyStrength, ...]
     confidence: GraphConfidence
     limitations: tuple[str, ...] = ()
+    edge_keys: tuple[int | str | None, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -135,8 +137,8 @@ def _endpoint_bindings(
     project_root: Path,
     *,
     graph_schema_version: int,
-) -> tuple[dict[str, _EndpointBinding], set[str]]:
-    bindings: dict[str, _EndpointBinding] = {}
+) -> tuple[dict[str, tuple[_EndpointBinding, ...]], set[str]]:
+    bindings: dict[str, list[_EndpointBinding]] = {}
     ambiguous: set[str] = set()
     for seed in seeds:
         path = _relative_path(seed.file_path, project_root)
@@ -169,10 +171,50 @@ def _endpoint_bindings(
             matches = exact_matches
             line_only = False
         if len(matches) == 1:
-            bindings[matches[0].node_id] = _EndpointBinding(seed, line_only)
+            bindings.setdefault(matches[0].node_id, []).append(_EndpointBinding(seed, line_only))
         elif len(matches) > 1:
             ambiguous.add(seed.endpoint_id)
-    return bindings, ambiguous
+    return {
+        node_id: tuple(
+            sorted(
+                node_bindings,
+                key=lambda item: (item.seed.endpoint_id, item.seed.discovery_status.value),
+            )
+        )
+        for node_id, node_bindings in bindings.items()
+    }, ambiguous
+
+
+def _edge_key(edge: GraphifyEdge) -> int | str | None:
+    value = getattr(edge, "edge_key", None)
+    if isinstance(value, bool) or not isinstance(value, (int, str, type(None))):
+        return None
+    return value
+
+
+def _edge_witness_key(
+    edge: GraphifyEdge,
+) -> tuple[str, str, str, str, int, int, str, str, str, str]:
+    span = edge.span
+    if span is None:
+        source_file, start_line, end_line, source_sha256 = "", -1, -1, ""
+    else:
+        source_file = span.file_path.as_posix()
+        start_line, end_line = span.start_line, span.end_line
+        source_sha256 = span.source_sha256
+    key = _edge_key(edge)
+    return (
+        edge.source_id,
+        edge.target_id,
+        edge.relation,
+        source_file,
+        start_line,
+        end_line,
+        source_sha256,
+        type(key).__name__,
+        "" if key is None else str(key),
+        edge.extractor_strength,
+    )
 
 
 def _relative_path(path_value: Path, project_root: Path) -> Path:
@@ -185,7 +227,7 @@ def _relative_path(path_value: Path, project_root: Path) -> Path:
     return path
 
 
-def traverse_graphify_snapshot(  # noqa: PLR0912
+def traverse_graphify_snapshot(  # noqa: PLR0912, PLR0915
     snapshot: GraphifySnapshot,
     *,
     project_root: Path,
@@ -230,7 +272,9 @@ def traverse_graphify_snapshot(  # noqa: PLR0912
     limitations: list[str] = []
     for endpoint in endpoints:
         if endpoint.endpoint_id not in ambiguous_endpoints and not any(
-            item.seed.endpoint_id == endpoint.endpoint_id for item in endpoint_by_node.values()
+            binding.seed.endpoint_id == endpoint.endpoint_id
+            for node_bindings in endpoint_by_node.values()
+            for binding in node_bindings
         ):
             limitations.append(
                 f"LOW; endpoint did not bind uniquely and was not traversed: {endpoint.endpoint_id}"
@@ -241,20 +285,43 @@ def traverse_graphify_snapshot(  # noqa: PLR0912
     queue = deque(_Walk(node_id, (node_id,), ()) for node_id in sorted(starts))
     nodes_by_id = {node.node_id: node for node in snapshot.nodes}
     visited_depth: dict[str, int] = {}
-    evidence: dict[tuple[str, str, tuple[str, ...]], GraphPathEvidence] = {}
-    capped = False
+    visited_witnesses: set[
+        tuple[
+            str,
+            tuple[str, ...],
+            tuple[tuple[str, str, str, str, int, int, str, str, str, str], ...],
+        ]
+    ] = set()
+    evidence: dict[
+        tuple[
+            str,
+            str,
+            tuple[str, ...],
+            tuple[tuple[str, str, str, str, int, int, str, str, str, str], ...],
+        ],
+        GraphPathEvidence,
+    ] = {}
+    node_capped = False
+    witness_capped = False
     while queue:
         walk = queue.popleft()
         depth = len(walk.edges)
-        previous_depth = visited_depth.get(walk.node_id)
-        if previous_depth is not None and previous_depth <= depth:
+        edge_witness = tuple(_edge_witness_key(edge) for edge in walk.edges)
+        witness_key = (walk.node_id, walk.node_path, edge_witness)
+        if witness_key in visited_witnesses:
             continue
-        if len(visited_depth) >= max_visited_nodes:
-            capped = True
+        if len(visited_witnesses) >= _MAX_PATH_WITNESS_STATES:
+            witness_capped = True
             break
-        visited_depth[walk.node_id] = depth
-        binding = endpoint_by_node.get(walk.node_id)
-        if binding is not None:
+        if walk.node_id not in visited_depth and len(visited_depth) >= max_visited_nodes:
+            node_capped = True
+            break
+        visited_witnesses.add(witness_key)
+        previous_depth = visited_depth.get(walk.node_id)
+        if previous_depth is None or depth < previous_depth:
+            visited_depth[walk.node_id] = depth
+        bindings = endpoint_by_node.get(walk.node_id, ())
+        for binding in bindings:
             endpoint_seed = binding.seed
             strengths = tuple(edge.extractor_strength for edge in walk.edges)
             node_spans = tuple(nodes_by_id[node_id].span for node_id in walk.node_path)
@@ -293,16 +360,25 @@ def traverse_graphify_snapshot(  # noqa: PLR0912
                     else _confidence(strengths, endpoint_seed.discovery_status)
                 ),
                 path_limitations,
+                tuple(_edge_key(edge) for edge in walk.edges),
             )
-            evidence[(endpoint_seed.endpoint_id, item.changed_node_id, item.node_path)] = item
+            evidence[
+                (endpoint_seed.endpoint_id, item.changed_node_id, item.node_path, edge_witness)
+            ] = item
             limitations.extend(path_limitations)
+        available_edges: list[GraphifyEdge] = []
+        for edge in reverse.get(walk.node_id, ()):
+            if edge.source_id in walk.node_path:
+                limitations.append(
+                    f"cycle edge skipped: {edge.source_id}->{edge.target_id} ({edge.relation})"
+                )
+            else:
+                available_edges.append(edge)
         if depth >= max_depth:
-            if reverse.get(walk.node_id):
+            if available_edges:
                 limitations.append(f"maximum traversal depth reached at {walk.node_id}")
             continue
-        for edge in sorted(
-            reverse.get(walk.node_id, ()), key=lambda item: (item.source_id, item.relation)
-        ):
+        for edge in sorted(available_edges, key=_edge_witness_key):
             queue.append(
                 _Walk(
                     edge.source_id,
@@ -310,8 +386,10 @@ def traverse_graphify_snapshot(  # noqa: PLR0912
                     (*walk.edges, edge),
                 )
             )
-    if capped:
+    if node_capped:
         limitations.append(f"maximum visited-node cap reached ({max_visited_nodes})")
+    if witness_capped:
+        limitations.append(f"maximum path-witness state cap reached ({_MAX_PATH_WITNESS_STATES})")
     return GraphTraversalResult(
         snapshot.side,
         tuple(evidence[key] for key in sorted(evidence)),
