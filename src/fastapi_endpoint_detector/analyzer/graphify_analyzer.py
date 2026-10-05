@@ -28,6 +28,8 @@ GraphConfidence = Literal["HIGH", "MEDIUM", "LOW"]
 _EVIDENCE_RELATIONS = frozenset({"calls", "imports", "imports_from", "inherits", "references"})
 _MAX_PATH_WITNESS_STATES = 100_000
 _DEFAULT_MAX_QUEUED_WITNESSES = 10_000
+_EdgeWitnessKey = tuple[str, str, str, str, int, int, str, str, str, str, str, str]
+_PathWitnessKey = tuple[str, tuple[str, ...], tuple[_EdgeWitnessKey, ...]]
 
 
 @dataclass(frozen=True)
@@ -85,6 +87,7 @@ class GraphPathEvidence:
     confidence: GraphConfidence
     limitations: tuple[str, ...] = ()
     edge_keys: tuple[int | str | None, ...] = ()
+    edge_context_identities: tuple[str | None, ...] = ()
     incomplete: bool = False
 
 
@@ -203,9 +206,14 @@ def _edge_key(edge: GraphifyEdge) -> int | str | None:
     return value
 
 
-def _edge_witness_key(
-    edge: GraphifyEdge,
-) -> tuple[str, str, str, str, int, int, str, str, str, str]:
+def _edge_context_identity(edge: GraphifyEdge) -> str | None:
+    value = getattr(edge, "context_identity", None)
+    if value is not None and not isinstance(value, str):
+        raise ValueError("Graphify edge context_identity must be a string or null")
+    return value
+
+
+def _edge_witness_key(edge: GraphifyEdge) -> _EdgeWitnessKey:
     span = edge.span
     if span is None:
         source_file, start_line, end_line, source_sha256 = "", -1, -1, ""
@@ -214,6 +222,7 @@ def _edge_witness_key(
         start_line, end_line = span.start_line, span.end_line
         source_sha256 = span.source_sha256
     key = _edge_key(edge)
+    context_identity = _edge_context_identity(edge)
     return (
         edge.source_id,
         edge.target_id,
@@ -225,6 +234,8 @@ def _edge_witness_key(
         type(key).__name__,
         "" if key is None else str(key),
         edge.extractor_strength,
+        type(context_identity).__name__,
+        "" if context_identity is None else context_identity,
     )
 
 
@@ -297,13 +308,7 @@ def traverse_graphify_snapshot(  # noqa: PLR0912, PLR0915
         limitations.append(f"ambiguous endpoint binding (LOW, not guessed): {endpoint_id}")
 
     queue: deque[_Walk] = deque()
-    scheduled_witnesses: set[
-        tuple[
-            str,
-            tuple[str, ...],
-            tuple[tuple[str, str, str, str, int, int, str, str, str, str], ...],
-        ]
-    ] = set()
+    scheduled_witnesses: set[_PathWitnessKey] = set()
 
     def enqueue(walk: _Walk) -> bool:
         key = (walk.node_id, walk.node_path, tuple(_edge_witness_key(edge) for edge in walk.edges))
@@ -322,21 +327,9 @@ def traverse_graphify_snapshot(  # noqa: PLR0912, PLR0915
             break
     nodes_by_id = {node.node_id: node for node in snapshot.nodes}
     visited_depth: dict[str, int] = {}
-    visited_witnesses: set[
-        tuple[
-            str,
-            tuple[str, ...],
-            tuple[tuple[str, str, str, str, int, int, str, str, str, str], ...],
-        ]
-    ] = set()
+    visited_witnesses: set[_PathWitnessKey] = set()
     evidence: dict[
-        tuple[
-            str,
-            str,
-            tuple[str, ...],
-            tuple[tuple[str, str, str, str, int, int, str, str, str, str], ...],
-        ],
-        GraphPathEvidence,
+        tuple[str, str, tuple[str, ...], tuple[_EdgeWitnessKey, ...]], GraphPathEvidence
     ] = {}
     node_capped = False
     witness_capped = False
@@ -399,6 +392,7 @@ def traverse_graphify_snapshot(  # noqa: PLR0912, PLR0915
                 ),
                 path_limitations,
                 tuple(_edge_key(edge) for edge in walk.edges),
+                tuple(_edge_context_identity(edge) for edge in walk.edges),
             )
             evidence[
                 (endpoint_seed.endpoint_id, item.changed_node_id, item.node_path, edge_witness)

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from inspect import signature
 from pathlib import Path
 
 import pytest
 
 from fastapi_endpoint_detector.analyzer.graphify_adapter import (
+    GraphifyAdapterError,
     GraphifyEdge,
     GraphifySourceSpan,
     GraphSide,
@@ -336,6 +338,105 @@ def test_parallel_edge_witnesses_are_preserved_and_order_independent(tmp_path: P
     preserved_edge_keys = {key for item in forward.evidence for key in item.edge_keys}
     if any(key is not None for key in preserved_edge_keys):
         assert {"parallel-call", "same-strength-parallel"}.issubset(preserved_edge_keys)
+
+
+@pytest.mark.integration
+def test_raw_context_identity_survives_adapter_and_analyzer(tmp_path: Path) -> None:
+    if (
+        "schema" not in signature(load_graphify_snapshot).parameters
+        or "context_identity" not in GraphifyEdge.__dataclass_fields__
+    ):
+        pytest.skip("requires PR #332 raw context-identity adapter interface")
+
+    root = _write_project(tmp_path / "target")
+    payload = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "hyperedges": [],
+        "nodes": [
+            {
+                "id": "endpoint",
+                "label": "endpoint",
+                "file_type": "code",
+                "source_file": "routes.py",
+                "source_location": "L1",
+            },
+            {
+                "id": "alias",
+                "label": "alias",
+                "file_type": "code",
+                "source_file": "legacy.py",
+                "source_location": "L1",
+            },
+            {
+                "id": "helper",
+                "label": "helper",
+                "file_type": "code",
+                "source_file": "service.py",
+                "source_location": "L1",
+            },
+        ],
+        "edges": [
+            {
+                "source": "endpoint",
+                "target": "alias",
+                "relation": "calls",
+                "confidence": "EXTRACTED",
+                "source_file": "routes.py",
+                "source_location": "L2",
+                "context": "route invocation",
+            },
+            {
+                "source": "endpoint",
+                "target": "alias",
+                "relation": "calls",
+                "confidence": "EXTRACTED",
+                "source_file": "routes.py",
+                "source_location": "L2",
+                "context": "dependency registration",
+            },
+            {
+                "source": "alias",
+                "target": "helper",
+                "relation": "calls",
+                "confidence": "EXTRACTED",
+                "source_file": "legacy.py",
+                "source_location": "L2",
+            },
+        ],
+    }
+    graph = tmp_path / "raw-context.json"
+    graph.write_text(json.dumps(payload), encoding="utf-8")
+    snapshot = load_graphify_snapshot(
+        graph,
+        project_root=root,
+        side="target",
+        schema="graphify-raw-0.9.30-v1",
+    )
+
+    result = traverse_graphify_snapshot(
+        snapshot,
+        project_root=root,
+        changed_ranges=(ChangedSourceRange(Path("service.py"), 1, 2),),
+        endpoints=(_seed(),),
+    )
+
+    assert len(result.evidence) == 2
+    assert len({item.edge_context_identities for item in result.evidence}) == 2
+    assert all(item.edge_context_identities[-1] is not None for item in result.evidence)
+    assert {item.node_path for item in result.evidence} == {("helper", "alias", "endpoint")}
+
+    duplicate_payload = dict(payload)
+    duplicate_payload["edges"] = [*payload["edges"], dict(payload["edges"][0])]
+    duplicate_graph = tmp_path / "raw-identical-context.json"
+    duplicate_graph.write_text(json.dumps(duplicate_payload), encoding="utf-8")
+    with pytest.raises(GraphifyAdapterError, match="duplicates an identical raw edge occurrence"):
+        load_graphify_snapshot(
+            duplicate_graph,
+            project_root=root,
+            side="target",
+            schema="graphify-raw-0.9.30-v1",
+        )
 
 
 def test_shared_handler_node_retains_each_secure_endpoint_seed(tmp_path: Path) -> None:
