@@ -21,6 +21,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 SCANNER_COMMIT = "84efc3d877c2d93a25bdd2c625120e6a6d918139"
+HISTORICAL_SCANNER_COMMIT = "1d9242d0d1d411b529c3227918aa2d05e98e8943"
+TRUSTED_SCANNER_COMMITS = frozenset({SCANNER_COMMIT, HISTORICAL_SCANNER_COMMIT})
 CLIENT_SCANNER_PATH = "src/fastapi_endpoint_detector/analyzer/client_observations.py"
 DEPLOYMENT_SCANNER_PATH = "src/fastapi_endpoint_detector/analyzer/deployment_observations.py"
 HERE = Path(__file__).resolve().parent
@@ -149,6 +151,14 @@ def _read_verified(base: Path, relative: Any, digest: Any, what: str) -> bytes:
     return payload
 
 
+def _require_trusted_scanner_commit(scanner_commit: str) -> str:
+    if not isinstance(scanner_commit, str) or not re.fullmatch(r"[0-9a-f]{40}", scanner_commit):
+        raise NonPythonFixtureError("scanner commit must be a full immutable Git SHA")
+    if scanner_commit not in TRUSTED_SCANNER_COMMITS:
+        raise NonPythonFixtureError("scanner commit is not in the approved immutable allowlist")
+    return scanner_commit
+
+
 def validate_fixture(  # noqa: PLR0912, PLR0915
     fixture: Path = FIXTURE, evidence_root: Path | None = None
 ) -> dict[str, Any]:
@@ -247,6 +257,14 @@ def validate_fixture(  # noqa: PLR0912, PLR0915
         license_record = record.get("license")
         if not isinstance(license_record, dict) or license_record.get("original_path") != "LICENSE":
             raise NonPythonFixtureError(f"license provenance missing: {case_id}")
+        expected_license_url = f"https://raw.githubusercontent.com/{repo}/{commit}/LICENSE"
+        if (
+            license_record.get("source_commit") != commit
+            or license_record.get("url") != expected_license_url
+        ):
+            raise NonPythonFixtureError(
+                f"license provenance is not bound to the pinned PR snapshot: {case_id}"
+            )
         license_bytes = _read_verified(
             fixture,
             license_record.get("storage_path"),
@@ -264,9 +282,6 @@ def validate_fixture(  # noqa: PLR0912, PLR0915
                 "sha256": license_record["sha256"],
             }
         )
-        for field in ("url", "source_commit"):
-            if not isinstance(license_record.get(field), str):
-                raise NonPythonFixtureError(f"license {field} provenance missing: {case_id}")
         diff_key = case_id
         diff = manifest["diffs"].get(diff_key)
         if not isinstance(diff, dict) or diff.get("commit") != commit:
@@ -371,8 +386,7 @@ def validate_fixture(  # noqa: PLR0912, PLR0915
 
 
 def _archive_scanner(repo_root: Path, scanner_commit: str, target: Path) -> tuple[str, str | None]:
-    if not re.fullmatch(r"[0-9a-f]{40}", scanner_commit):
-        raise NonPythonFixtureError("scanner commit must be a full immutable Git SHA")
+    _require_trusted_scanner_commit(scanner_commit)
     resolved = subprocess.run(
         ["git", "rev-parse", f"{scanner_commit}^{{commit}}"],
         cwd=repo_root,
@@ -449,6 +463,7 @@ def build_result(
     scanner_commit: str = SCANNER_COMMIT,
     repo_root: Path | None = None,
 ) -> dict[str, Any]:
+    _require_trusted_scanner_commit(scanner_commit)
     validated = validate_fixture(fixture)
     spec = validated["spec"]
     source_root = fixture / "source"

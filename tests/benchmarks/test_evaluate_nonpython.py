@@ -6,8 +6,10 @@ import json
 import shutil
 from pathlib import Path
 
+import benchmarks.real_world.evaluate_nonpython as evaluator
 import pytest
 from benchmarks.real_world.evaluate_nonpython import (
+    HISTORICAL_SCANNER_COMMIT,
     SCANNER_COMMIT,
     NonPythonFixtureError,
     scan_literal_case,
@@ -82,6 +84,61 @@ def test_rejects_source_byte_hash_mismatch(tmp_path: Path) -> None:
     source_path.write_bytes(source_path.read_bytes() + b"\n")
     with pytest.raises(NonPythonFixtureError, match="SHA-256 mismatch"):
         validate_fixture(fixture)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("source_commit", "0" * 40),
+        ("url", "https://example.invalid/LICENSE"),
+    ],
+)
+def test_rejects_license_provenance_not_bound_to_snapshot(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    fixture = copied_fixture(tmp_path)
+    manifest_path = fixture / "source_manifest.json"
+    manifest = read_json(manifest_path)
+    manifest["cases"]["khoj_1216"]["license"][field] = value
+    write_json(manifest_path, manifest)
+    with pytest.raises(NonPythonFixtureError, match=r"license provenance.*pinned PR snapshot"):
+        validate_fixture(fixture)
+
+
+def test_license_provenance_is_bound_to_each_pinned_snapshot() -> None:
+    validated = validate_fixture()
+    for case_id, case_key in validated["source_keys"].items():
+        case = next(row for row in validated["spec"]["cases"] if row["case_id"] == case_id)
+        license_record = validated["manifest"]["cases"][case_key]["license"]
+        expected_url = (
+            f"https://raw.githubusercontent.com/{case['repository']}/"
+            f"{case['merge_snapshot']}/LICENSE"
+        )
+        assert license_record["source_commit"] == case["merge_snapshot"]
+        assert license_record["url"] == expected_url
+
+
+def test_scanner_execution_is_limited_to_two_approved_commits() -> None:
+    assert evaluator._require_trusted_scanner_commit(SCANNER_COMMIT) == SCANNER_COMMIT
+    assert (
+        evaluator._require_trusted_scanner_commit(HISTORICAL_SCANNER_COMMIT)
+        == HISTORICAL_SCANNER_COMMIT
+    )
+
+
+def test_rejects_unapproved_full_scanner_sha_before_git_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[object] = []
+
+    def unexpected_git_call(*args: object, **kwargs: object) -> None:
+        calls.append((args, kwargs))
+        raise AssertionError("unapproved scanner SHA reached Git")
+
+    monkeypatch.setattr(evaluator.subprocess, "run", unexpected_git_call)
+    with pytest.raises(NonPythonFixtureError, match=r"not in the approved.*allowlist"):
+        evaluator._archive_scanner(ROOT, "682e6239eb7ab8e75b39bfd736b1bfe3a5fd2c7d", tmp_path)
+    assert calls == []
 
 
 def test_rejects_route_atom_count_tampering(tmp_path: Path) -> None:
