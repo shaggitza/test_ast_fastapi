@@ -18,6 +18,7 @@ from fastapi_endpoint_detector.models.endpoint import (
     DependencyCallableKind,
     DependencyDeclarationKind,
     DependencyGraphStatus,
+    EndpointDiscoveryStatus,
     HandlerInfo,
 )
 from fastapi_endpoint_detector.parser.fastapi_extractor import (
@@ -74,10 +75,21 @@ def test_runtime_extractor_filters_handlers_to_canonical_inventory(tmp_path: Pat
 
     extractor = FastAPIExtractor(app_file, source_inventory=inventory)
 
-    assert [endpoint.identifier for endpoint in extractor.extract_endpoints()] == ["GET /inside"]
+    endpoints = extractor.extract_endpoints()
+    assert [endpoint.identifier for endpoint in endpoints] == ["GET /inside"]
+    assert endpoints[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+    assert any(
+        "Runtime import is not constrained" in condition.reason
+        and "follow_imports is disabled" in condition.reason
+        for condition in endpoints[0].discovery_conditions
+    )
     assert (
         "does not sandbox or constrain import side effects"
         in (extractor.source_inventory_limitations[0])
+    )
+    assert any(
+        "follow_imports is disabled" in limitation
+        for limitation in extractor.source_inventory_limitations
     )
 
 

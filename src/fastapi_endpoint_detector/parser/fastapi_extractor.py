@@ -37,6 +37,8 @@ from fastapi_endpoint_detector.models.endpoint import (
     Endpoint,
     EndpointDependencyGraph,
     EndpointDependencyOccurrence,
+    EndpointDiscoveryCondition,
+    EndpointDiscoveryStatus,
     EndpointMethod,
     HandlerInfo,
 )
@@ -1044,7 +1046,34 @@ class FastAPIExtractor:
                     for endpoint in endpoints
                     if endpoint.handler.file_path.resolve() in allowed
                 ]
+                endpoints = [self._mark_inventory_scope(endpoint) for endpoint in endpoints]
             return endpoints
+
+    def _mark_inventory_scope(self, endpoint: Endpoint) -> Endpoint:
+        """Retain source-scope and runtime-import limits on each returned endpoint."""
+        if self.source_inventory is None:
+            return endpoint
+        reasons = [
+            "Runtime import is not constrained by the canonical source inventory; handlers "
+            "outside its selected paths are omitted, but their imports may still affect runtime "
+            "registrations."
+        ]
+        if self.source_inventory.limitations:
+            reasons.append(
+                "Canonical source inventory limitations: "
+                + "; ".join(self.source_inventory.limitations)
+            )
+        condition = EndpointDiscoveryCondition(
+            source_path=endpoint.handler.file_path,
+            source_line=endpoint.handler.line_number,
+            reason=" ".join(reasons),
+        )
+        return endpoint.model_copy(
+            update={
+                "discovery_status": EndpointDiscoveryStatus.CONDITIONAL,
+                "discovery_conditions": (*endpoint.discovery_conditions, condition),
+            }
+        )
 
     @property
     def source_inventory_limitations(self) -> tuple[str, ...]:
@@ -1055,6 +1084,7 @@ class FastAPIExtractor:
             "Runtime import still executes Python imports outside the inventory; the inventory "
             "filters returned endpoint handlers but does not sandbox or constrain import side "
             "effects.",
+            *self.source_inventory.limitations,
         )
 
     def get_endpoint_handler_files(self) -> dict[Path, list[Endpoint]]:
