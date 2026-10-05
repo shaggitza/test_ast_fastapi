@@ -1308,7 +1308,31 @@ class MypyAnalyzer:
         end_line = end_line_value if end_line_value >= line and end_column_value >= 0 else None
         end_column = end_column_value if end_line is not None else None
         canonical = str(Path(current_file).resolve())
-        if end_line is None:
+        if canonical not in self._source_bytes_cache:
+            try:
+                self._source_bytes_cache[canonical] = tuple(
+                    Path(canonical).read_bytes().splitlines(keepends=True)
+                )
+            except OSError:
+                self._source_bytes_cache[canonical] = None
+        lines = self._source_bytes_cache[canonical]
+        expected_name = (
+            getattr(callee, "name", None) if type(callee).__name__ == "NameExpr" else None
+        )
+        needs_ast_span = end_line is None
+        if (
+            not needs_ast_span
+            and isinstance(expected_name, str)
+            and lines is not None
+            and line <= len(lines)
+            and lines[line - 1][column:end_column].decode("utf-8", errors="replace")
+            != expected_name
+        ):
+            # Mypy may report NameExpr columns before a preceding multibyte character
+            # using its decoded character offset. Recover the exact physical occurrence
+            # from CPython's UTF-8 byte offsets, selecting the nearest same-line match.
+            needs_ast_span = True
+        if needs_ast_span:
             if canonical not in self._python_ast_cache:
                 try:
                     self._python_ast_cache[canonical] = ast.parse(
@@ -1332,19 +1356,24 @@ class MypyAnalyzer:
                                 function.end_col_offset,
                             )
                 self._python_call_span_cache[canonical] = spans
-            fallback_span = self._python_call_span_cache[canonical].get((line, column))
+            spans = self._python_call_span_cache[canonical]
+            fallback_span = spans.get((line, column))
+            if isinstance(expected_name, str) and lines is not None and line <= len(lines):
+                candidates = [
+                    (start_column, span)
+                    for (start_line, start_column), span in spans.items()
+                    if start_line == line
+                    and lines[line - 1][start_column : span[1]].decode("utf-8", errors="replace")
+                    == expected_name
+                ]
+                if candidates:
+                    column, fallback_span = min(
+                        candidates, key=lambda candidate: abs(candidate[0] - column)
+                    )
             if fallback_span is not None:
                 end_line, end_column = fallback_span
         if end_line is None or end_column is None:
             return None
-        if canonical not in self._source_bytes_cache:
-            try:
-                self._source_bytes_cache[canonical] = tuple(
-                    Path(canonical).read_bytes().splitlines(keepends=True)
-                )
-            except OSError:
-                self._source_bytes_cache[canonical] = None
-        lines = self._source_bytes_cache[canonical]
         spelling = ""
         if lines is not None and end_line is not None and end_line <= len(lines):
             if end_line == line:
