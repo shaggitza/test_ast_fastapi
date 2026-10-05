@@ -129,6 +129,54 @@ def _native_span(path: Path, node: ast.AST) -> NativeSourceSpan:
     )
 
 
+def _native_occurrence_order(span: NativeSourceSpan) -> int:
+    """Encode physical source order with enough precision for same-line calls."""
+    return span.start_line * _ORDER_SCALE + span.start_column
+
+
+def _lexical_assignment_binding(
+    module_name: str, tree: ast.Module, assignment: ast.Assign | ast.AnnAssign, variable: str
+) -> str:
+    """Return a qualified lexical owner for one exact app/router assignment."""
+
+    class ScopeFinder(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.scopes: list[str] = []
+            self.binding: str | None = None
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            self._visit_function(node)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            self._visit_function(node)
+
+        def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+            self.scopes.append(node.name)
+            self.generic_visit(node)
+            self.scopes.pop()
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            self.scopes.append(node.name)
+            self.generic_visit(node)
+            self.scopes.pop()
+
+        def visit_Assign(self, node: ast.Assign) -> None:
+            if node is assignment:
+                self.binding = ".".join((module_name, *self.scopes, variable))
+                return
+            self.generic_visit(node)
+
+        def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+            if node is assignment:
+                self.binding = ".".join((module_name, *self.scopes, variable))
+                return
+            self.generic_visit(node)
+
+    finder = ScopeFinder()
+    finder.visit(tree)
+    return finder.binding or f"{module_name}.{variable}"
+
+
 def _function_header_span(
     path: Path, node: ast.FunctionDef | ast.AsyncFunctionDef
 ) -> NativeSourceSpan:
@@ -1445,28 +1493,84 @@ class SecureASTExtractor:
                         object_module = modules.get(object_item.module)
                         if object_module is None or object_item.source_span is None:
                             continue
-                        variable = object_item.symbol.split("@", 1)[0]
-                        for statement in object_module.tree.body:
-                            if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                        assignments = [
+                            statement
+                            for statement in ast.walk(object_module.tree)
+                            if isinstance(statement, (ast.Assign, ast.AnnAssign))
+                            and statement.value is not None
+                            and _native_span(object_module.path, statement)
+                            == object_item.source_span
+                        ]
+                        if not assignments:
+                            marker = object_item.symbol.rfind(":snapshot:")
+                            if marker >= 0:
+                                snapshot_variable = object_item.symbol[
+                                    marker + len(":snapshot:") :
+                                ].split("@", 1)[0]
+                                factory_owner = next(
+                                    (
+                                        owner
+                                        for owner in source_owners
+                                        if owner.owner_kind == "factory_return"
+                                    ),
+                                    None,
+                                )
+                                if factory_owner is not None:
+                                    function_name = factory_owner.qualified_binding.rsplit(".", 1)[
+                                        -1
+                                    ]
+                                    factory_function = self._function_at(
+                                        object_module, function_name, 2**31 - 1
+                                    )
+                                    if factory_function is not None:
+                                        candidates = [
+                                            statement
+                                            for statement in ast.walk(factory_function)
+                                            if isinstance(statement, (ast.Assign, ast.AnnAssign))
+                                            and statement.value is not None
+                                            and _assignment_name(statement) == snapshot_variable
+                                            and statement.lineno
+                                            < object_item.source_span.start_line
+                                            and self._constructor_kind(
+                                                statement.value,
+                                                object_module,
+                                                statement.lineno,
+                                            )
+                                            == object_item.object_kind
+                                            and _lexical_assignment_binding(
+                                                object_module.name,
+                                                object_module.tree,
+                                                statement,
+                                                snapshot_variable,
+                                            )
+                                            == factory_owner.qualified_binding
+                                            + "."
+                                            + snapshot_variable
+                                        ]
+                                        if len(candidates) == 1:
+                                            assignments = candidates
+                        if len(assignments) == 1:
+                            statement = assignments[0]
+                            variable = _assignment_name(statement)
+                            if variable is None:
                                 continue
-                            if (
-                                statement.lineno != object_item.source_span.start_line
-                                or statement.value is None
-                            ):
-                                continue
-                            if _assignment_name(statement) != variable:
-                                continue
+                            assert statement.value is not None
+                            qualified_binding = _lexical_assignment_binding(
+                                object_module.name,
+                                object_module.tree,
+                                statement,
+                                variable,
+                            )
                             source_owners.append(
                                 NativeRouteSourceOwnerEvidence(
                                     side=self.snapshot_side,
                                     owner_kind="assignment_rhs",
-                                    qualified_binding=f"{object_module.name}.{variable}",
+                                    qualified_binding=qualified_binding,
                                     confidence="established",
                                     expression=ast.unparse(statement.value)[:4096],
                                     source_span=_native_span(object_module.path, statement.value),
                                 )
                             )
-                            break
                         factory_variable, separator, factory_token = object_item.symbol.partition(
                             "@"
                         )
@@ -1674,21 +1778,25 @@ class SecureASTExtractor:
                                                 ),
                                             )
                                         )
-                                for statement in exported_module.tree.body:
-                                    if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                                for export_statement in exported_module.tree.body:
+                                    if not isinstance(
+                                        export_statement, (ast.Assign, ast.AnnAssign)
+                                    ):
                                         continue
-                                    if not isinstance(statement.value, (ast.List, ast.Tuple)):
+                                    if not isinstance(
+                                        export_statement.value, (ast.List, ast.Tuple)
+                                    ):
                                         continue
                                     if any(
                                         isinstance(value, ast.Constant)
                                         and value.value == import_binding.symbol
-                                        for value in statement.value.elts
+                                        for value in export_statement.value.elts
                                     ) and any(
                                         "__all__" in _bound_names(target)
                                         for target in (
-                                            [statement.target]
-                                            if isinstance(statement, ast.AnnAssign)
-                                            else statement.targets
+                                            [export_statement.target]
+                                            if isinstance(export_statement, ast.AnnAssign)
+                                            else export_statement.targets
                                         )
                                     ):
                                         source_owners.append(
@@ -1698,9 +1806,12 @@ class SecureASTExtractor:
                                                 qualified_binding=f"{import_binding.module}.{import_binding.symbol}",
                                                 related_binding=f"{parent_module.name}.{child_argument.id}",
                                                 confidence="established",
-                                                expression=ast.unparse(statement.value)[:4096],
+                                                expression=ast.unparse(export_statement.value)[
+                                                    :4096
+                                                ],
                                                 source_span=_native_span(
-                                                    exported_module.path, statement.value
+                                                    exported_module.path,
+                                                    export_statement.value,
                                                 ),
                                             )
                                         )
@@ -1713,7 +1824,7 @@ class SecureASTExtractor:
                             operation=route.operation,
                             owner_module=route.owner[0],
                             owner_symbol=route.owner[1],
-                            occurrence_order=route.line,
+                            occurrence_order=_native_occurrence_order(route.source_span),
                             source_span=route.source_span,
                             dependency_expressions=(
                                 *route.dependency_expressions,
@@ -1785,7 +1896,7 @@ class SecureASTExtractor:
                             parent_symbol=edge.parent[1],
                             child_module=edge.child[0],
                             child_symbol=edge.child[1],
-                            occurrence_order=edge.line,
+                            occurrence_order=_native_occurrence_order(edge.source_span),
                             resolved_prefix=edge.prefix,
                             source_span=edge.source_span,
                             dependency_expressions=edge.dependency_expressions,

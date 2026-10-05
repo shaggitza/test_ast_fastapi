@@ -338,6 +338,7 @@ def test_same_line_keyword_include_calls_keep_exact_import_owners(tmp_path: Path
     second_edge = second_evidence.assembly_chain[0]
     assert first_edge.source_span != second_edge.source_span
     assert first_edge.source_span.start_line == second_edge.source_span.start_line == 4
+    assert first_edge.occurrence_order < second_edge.occurrence_order
 
 
 def test_annotated_and_security_handler_dependencies_are_route_scoped(tmp_path: Path) -> None:
@@ -400,6 +401,10 @@ def test_same_line_mount_keyword_apps_keep_distinct_import_owners(tmp_path: Path
         first_provenance.assembly_chain[0].source_span
         != second_provenance.assembly_chain[0].source_span
     )
+    assert (
+        first_provenance.assembly_chain[0].occurrence_order
+        < second_provenance.assembly_chain[0].occurrence_order
+    )
     first_bindings = [
         owner.qualified_binding
         for owner in first_provenance.source_owners
@@ -412,3 +417,59 @@ def test_same_line_mount_keyword_apps_keep_distinct_import_owners(tmp_path: Path
     ]
     assert first_bindings == ["main.first"]
     assert second_bindings == ["main.second"]
+
+
+def test_selected_factory_local_constructor_assignments_are_structural_owners(
+    tmp_path: Path,
+) -> None:
+    app_file = tmp_path / "main.py"
+    app_file.write_text(
+        "from fastapi import APIRouter, FastAPI\n"
+        "def create_app():\n"
+        "    router = APIRouter(prefix='/local')\n"
+        "    @router.get('/item')\n"
+        "    def item(): pass\n"
+        "    app = FastAPI()\n"
+        "    app.include_router(router)\n"
+        "    return app\n",
+        encoding="utf-8",
+    )
+    endpoint = SecureASTExtractor(app_file, app_entry="main:create_app").extract_endpoints()[0]
+    provenance = endpoint.native_provenance
+    assert provenance is not None
+    assignments = {
+        owner.qualified_binding: owner
+        for owner in provenance.source_owners
+        if owner.owner_kind == "assignment_rhs"
+    }
+    assert set(assignments) == {"main.create_app.router", "main.create_app.app"}
+    assert assignments["main.create_app.router"].source_span.start_line == 3
+    assert assignments["main.create_app.app"].source_span.start_line == 6
+    assert any(
+        owner.owner_kind == "assignment_rhs" and owner.qualified_binding == "main.create_app.router"
+        for owner in native_route_structural_owners(endpoint, app_file, {3})
+    )
+
+
+def test_same_line_route_registrations_have_distinct_physical_occurrence_order(
+    tmp_path: Path,
+) -> None:
+    app_file = tmp_path / "main.py"
+    app_file.write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "def handler(): pass\n"
+        "app.add_api_route('/first', handler); app.add_api_route('/second', handler)\n",
+        encoding="utf-8",
+    )
+    endpoints = SecureASTExtractor(app_file).extract_endpoints()
+    first = next(endpoint for endpoint in endpoints if endpoint.identifier == "GET /first")
+    second = next(endpoint for endpoint in endpoints if endpoint.identifier == "GET /second")
+    first_registration = first.native_provenance.registration if first.native_provenance else None
+    second_registration = (
+        second.native_provenance.registration if second.native_provenance else None
+    )
+    assert first_registration is not None and second_registration is not None
+    assert first_registration.source_span.start_line == second_registration.source_span.start_line
+    assert first_registration.source_span != second_registration.source_span
+    assert first_registration.occurrence_order < second_registration.occurrence_order
