@@ -13,6 +13,16 @@ The command exits nonzero unless every supported case has 100% precision and rec
 
 Addition, deletion, and rename fixtures include explicit paired source snapshots and diffs, but are currently marked `unsupported`: the shipped mypy `ChangeMapper` does not map these changes against paired baseline/target symbol graphs. They do not count toward a pass. Re-run this gate after dependency integration; an unsupported or failed case never becomes a guessed pass.
 
-Review note: an earlier generated result was withdrawn after inspection found that several dead-function controls were disconnected from endpoint call paths. Only results produced by the guarded fixtures described above are valid evidence.
+## Current run
+
+[`current-main.json`](./current-main.json) is a complete real CLI run from revision `ca1c5ab4939503b2d39207d04f44db8858afbbbc`, with harness SHA-256 `b6f41c4a5a5f4ab1756e93a7c76d5e349489e49b5fc704762b1f74d179bb31bb`. It used Python 3.11.16, mypy 2.4.0, FastAPI 0.142.2, and Pydantic 2.13.5. Ruff was unavailable at runtime and is recorded as such. All 18 declared cases were recorded: 15 supported and 3 unsupported.
+
+The result is **failed**: TP=11, FP=5, FN=0, precision=0.6875, recall=1.0. Each of the five reachable dead-body controls (`literal_false_control`, `post_return_control`, `deferred_closure_control`, `deferred_lambda_control`, and `unawaited_coroutine_control`) incorrectly produced a MEDIUM `GET /one` candidate. Their wrappers are invoked by the endpoint, but the changed inner expression is unreachable or deferred. The disconnected unrelated control correctly produced no candidate. This points to changed-statement/physical-callable ownership and execution-feasibility handling in the analyzer/mapper; the generated oracle and controls remain in force.
+
+Tier accounting is explicit. The HIGH/MEDIUM tier contains the 11 true positives and 5 false positives (precision 0.6875, recall 1.0). The LOW-only report tier contains TP=0, FP=0, FN=11 (precision undefined, recall 0.0); this does not erase the MEDIUM candidates or replace the all-candidate result.
+
+[`historical-29a5d41.json`](./historical-29a5d41.json) preserves the exact raw parent run at revision `29a5d41d1be7f00c20ec848fddca7bbd11ee962e`. It is separate from the current result and has the same measured metrics. The earlier result withdrawn for disconnected controls is not restored or represented as valid evidence.
+
+Addition, deletion, and rename fixtures include paired baseline and target source snapshots and diffs, but remain explicitly unsupported because the shipped mypy `ChangeMapper` does not provide paired baseline/target symbol mapping for those change kinds. They are excluded from supported-case precision/recall and cannot satisfy the gate.
 
 This generated subset is one GH283 milestone only. It does not close or satisfy GH283's normalized corpus milestones, the blind release corpus gate, bootstrap guard, or incremental performance gate. It changes no canonical truth, publication, or ledger data.
