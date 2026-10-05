@@ -46,7 +46,7 @@ def _project(root: Path) -> tuple[Path, Path]:
                 "contracts": [
                     {
                         "id": "emit",
-                        "symbol": f"{root.name}.helpers.emit",
+                        "symbol": "helpers.emit",
                         "invocation": "function",
                         "operation": "write",
                         "channel": "custom",
@@ -338,4 +338,4 @@ def test_contract_evidence_and_audit_render_in_all_formats(tmp_path: Path) -> No
     for output_format in ("text", "markdown", "html"):
         rendered = get_formatter(output_format).format(report)
         assert "Declared contract" in rendered or "declared contract" in rendered
-        assert "change-to-call flow not established" in rendered
+        assert "change-to-call flow not established" in " ".join(rendered.split())
