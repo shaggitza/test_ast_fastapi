@@ -3691,6 +3691,9 @@ class MypyAnalyzer:
     ) -> ResolvedCallSite | None:
         """Classify one mypy call expression without guessing symbol identity."""
         if string_environment or lexical_scope is not None:
+            # This same physical call can be reached under different endpoint
+            # actual-to-formal bindings; keep each trace's argument evidence
+            # separate instead of reusing the node-identity cache entry.
             site = self._resolved_call_site_uncached(
                 call,
                 current_file,

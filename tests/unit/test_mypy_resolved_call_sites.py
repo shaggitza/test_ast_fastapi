@@ -141,7 +141,7 @@ def test_forwards_endpoint_specific_literals_through_helper_chains(tmp_path: Pat
     main.write_text(
         "def writer(bucket: str, key: str) -> None: pass\n\n"
         "def middle(bucket: str, key: str) -> None:\n"
-        "    writer(bucket, key)\n\n"
+        "    writer(bucket, key=key)\n\n"
         "def outer(bucket: str, key: str) -> None:\n"
         "    middle(bucket, key)\n\n"
         "def endpoint_a() -> None:\n"
@@ -149,7 +149,23 @@ def test_forwards_endpoint_specific_literals_through_helper_chains(tmp_path: Pat
         "def endpoint_b() -> None:\n"
         "    outer('beta', 'second')\n\n"
         "def endpoint_dynamic(bucket: str) -> None:\n"
-        "    outer(bucket, 'third')\n",
+        "    outer(bucket, 'third')\n\n"
+        "def endpoint_reassigned(bucket: str) -> None:\n"
+        "    captured = 'safe'\n"
+        "    captured = bucket\n"
+        "    outer(captured, 'reassigned-key')\n\n"
+        "def endpoint_starred(values: tuple[str, str]) -> None:\n"
+        "    outer(*values)\n\n"
+        "def endpoint_kwargs(values: dict[str, str]) -> None:\n"
+        "    outer(**values)\n\n"
+        "def endpoint_over_cap(\n"
+        "    a: bool, b: bool, c: bool, d: bool, e: bool, f: bool, g: bool, h: bool\n"
+        ") -> None:\n"
+        "    bucket = (\n"
+        "        'a' if a else 'b' if b else 'c' if c else 'd' if d else\n"
+        "        'e' if e else 'f' if f else 'g' if g else 'h' if h else 'i'\n"
+        "    )\n"
+        "    outer(bucket, 'capped-key')\n",
         encoding="utf-8",
     )
     analyzer = MypyAnalyzer(tmp_path, max_depth=5)
@@ -161,14 +177,24 @@ def test_forwards_endpoint_specific_literals_through_helper_chains(tmp_path: Pat
         deps = analyzer.analyze_endpoint(endpoint)
         sites = _site_by_spelling(deps.resolved_call_sites, "writer")
         assert len(sites) == 1
+        assert [argument.positional_index for argument in sites[0].arguments] == [0, None]
+        assert [argument.keyword for argument in sites[0].arguments] == [None, "key"]
         return tuple(argument.value_hashes for argument in sites[0].arguments)  # type: ignore[return-value]
 
     args_a = writer_arguments(_endpoint(main, line=8, name="endpoint_a"))
     args_b = writer_arguments(_endpoint(main, line=11, name="endpoint_b"))
     args_dynamic = writer_arguments(_endpoint(main, line=14, name="endpoint_dynamic"))
+    args_reassigned = writer_arguments(_endpoint(main, line=17, name="endpoint_reassigned"))
+    args_starred = writer_arguments(_endpoint(main, line=22, name="endpoint_starred"))
+    args_kwargs = writer_arguments(_endpoint(main, line=25, name="endpoint_kwargs"))
+    args_over_cap = writer_arguments(_endpoint(main, line=28, name="endpoint_over_cap"))
     assert args_a == ((digest("alpha"),), (digest("first"),))
     assert args_b == ((digest("beta"),), (digest("second"),))
     assert args_dynamic == ((), (digest("third"),))
+    assert args_reassigned == ((), (digest("reassigned-key"),))
+    assert args_starred == ((), ())
+    assert args_kwargs == ((), ())
+    assert args_over_cap == ((), (digest("capped-key"),))
 
 
 def test_invoked_lambda_alias_traces_its_body(tmp_path: Path) -> None:
