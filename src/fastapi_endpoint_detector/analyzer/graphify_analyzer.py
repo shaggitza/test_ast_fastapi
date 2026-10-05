@@ -7,7 +7,7 @@ not participate in default endpoint analysis.
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 GraphConfidence = Literal["HIGH", "MEDIUM", "LOW"]
 _EVIDENCE_RELATIONS = frozenset({"calls", "imports", "imports_from", "inherits", "references"})
 _MAX_PATH_WITNESS_STATES = 100_000
+_DEFAULT_MAX_QUEUED_WITNESSES = 10_000
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,7 @@ class GraphPathEvidence:
     confidence: GraphConfidence
     limitations: tuple[str, ...] = ()
     edge_keys: tuple[int | str | None, ...] = ()
+    incomplete: bool = False
 
 
 @dataclass(frozen=True)
@@ -140,7 +142,16 @@ def _endpoint_bindings(
 ) -> tuple[dict[str, tuple[_EndpointBinding, ...]], set[str]]:
     bindings: dict[str, list[_EndpointBinding]] = {}
     ambiguous: set[str] = set()
+    seeds_by_id: dict[str, GraphEndpointSeed] = {}
     for seed in seeds:
+        prior_seed = seeds_by_id.get(seed.endpoint_id)
+        if prior_seed is not None:
+            if prior_seed != seed:
+                raise ValueError(
+                    f"conflicting endpoint seeds share endpoint_id: {seed.endpoint_id}"
+                )
+            continue
+        seeds_by_id[seed.endpoint_id] = seed
         path = _relative_path(seed.file_path, project_root)
         exact_matches = [
             node
@@ -235,6 +246,7 @@ def traverse_graphify_snapshot(  # noqa: PLR0912, PLR0915
     endpoints: tuple[GraphEndpointSeed, ...],
     max_depth: int = 64,
     max_visited_nodes: int = 50_000,
+    max_queued_witnesses: int = _DEFAULT_MAX_QUEUED_WITNESSES,
 ) -> GraphTraversalResult:
     """Find securely identified endpoints reachable by reverse evidence paths.
 
@@ -242,8 +254,10 @@ def traverse_graphify_snapshot(  # noqa: PLR0912, PLR0915
     source-backed calls/imports/inheritance/references. Community,
     similarity, containment, labels alone, and unlocated links never fan out.
     """
-    if max_depth < 0 or max_visited_nodes < 1:
-        raise ValueError("traversal bounds must be non-negative depth and positive node cap")
+    if max_depth < 0 or max_visited_nodes < 1 or max_queued_witnesses < 1:
+        raise ValueError(
+            "traversal bounds must be non-negative depth and positive node and queue caps"
+        )
     starts = {
         node.node_id
         for node in snapshot.nodes
@@ -282,7 +296,30 @@ def traverse_graphify_snapshot(  # noqa: PLR0912, PLR0915
     for endpoint_id in sorted(ambiguous_endpoints):
         limitations.append(f"ambiguous endpoint binding (LOW, not guessed): {endpoint_id}")
 
-    queue = deque(_Walk(node_id, (node_id,), ()) for node_id in sorted(starts))
+    queue: deque[_Walk] = deque()
+    scheduled_witnesses: set[
+        tuple[
+            str,
+            tuple[str, ...],
+            tuple[tuple[str, str, str, str, int, int, str, str, str, str], ...],
+        ]
+    ] = set()
+
+    def enqueue(walk: _Walk) -> bool:
+        key = (walk.node_id, walk.node_path, tuple(_edge_witness_key(edge) for edge in walk.edges))
+        if key in scheduled_witnesses:
+            return True
+        if len(queue) >= max_queued_witnesses:
+            return False
+        scheduled_witnesses.add(key)
+        queue.append(walk)
+        return True
+
+    frontier_capped = False
+    for node_id in sorted(starts):
+        if not enqueue(_Walk(node_id, (node_id,), ())):
+            frontier_capped = True
+            break
     nodes_by_id = {node.node_id: node for node in snapshot.nodes}
     visited_depth: dict[str, int] = {}
     visited_witnesses: set[
@@ -303,6 +340,7 @@ def traverse_graphify_snapshot(  # noqa: PLR0912, PLR0915
     ] = {}
     node_capped = False
     witness_capped = False
+    depth_truncated = False
     while queue:
         walk = queue.popleft()
         depth = len(walk.edges)
@@ -376,23 +414,45 @@ def traverse_graphify_snapshot(  # noqa: PLR0912, PLR0915
                 available_edges.append(edge)
         if depth >= max_depth:
             if available_edges:
+                depth_truncated = True
                 limitations.append(f"maximum traversal depth reached at {walk.node_id}")
             continue
         for edge in sorted(available_edges, key=_edge_witness_key):
-            queue.append(
+            if not enqueue(
                 _Walk(
                     edge.source_id,
                     (*walk.node_path, edge.source_id),
                     (*walk.edges, edge),
                 )
-            )
+            ):
+                frontier_capped = True
     if node_capped:
         limitations.append(f"maximum visited-node cap reached ({max_visited_nodes})")
     if witness_capped:
         limitations.append(f"maximum path-witness state cap reached ({_MAX_PATH_WITNESS_STATES})")
+    if frontier_capped:
+        limitations.append(
+            "maximum queued path-witness cap reached "
+            f"({max_queued_witnesses}); some witnesses were not scheduled"
+        )
+    incomplete = node_capped or witness_capped or frontier_capped or depth_truncated
+    evidence_items = tuple(evidence[key] for key in sorted(evidence))
+    if incomplete:
+        evidence_items = tuple(
+            replace(
+                item,
+                confidence="LOW",
+                incomplete=True,
+                limitations=(
+                    *item.limitations,
+                    "traversal incomplete; evidence confidence capped LOW",
+                ),
+            )
+            for item in evidence_items
+        )
     return GraphTraversalResult(
         snapshot.side,
-        tuple(evidence[key] for key in sorted(evidence)),
+        evidence_items,
         tuple(dict.fromkeys(limitations)),
         len(visited_depth),
     )
@@ -410,6 +470,7 @@ def traverse_graphify_sides(
     target_endpoints: tuple[GraphEndpointSeed, ...],
     max_depth: int = 64,
     max_visited_nodes: int = 50_000,
+    max_queued_witnesses: int = _DEFAULT_MAX_QUEUED_WITNESSES,
 ) -> GraphTraversalPair:
     """Traverse baseline and target snapshots with side-specific source inputs."""
     if baseline_snapshot.side != "baseline" or target_snapshot.side != "target":
@@ -422,6 +483,7 @@ def traverse_graphify_sides(
             endpoints=baseline_endpoints,
             max_depth=max_depth,
             max_visited_nodes=max_visited_nodes,
+            max_queued_witnesses=max_queued_witnesses,
         ),
         target=traverse_graphify_snapshot(
             target_snapshot,
@@ -430,5 +492,6 @@ def traverse_graphify_sides(
             endpoints=target_endpoints,
             max_depth=max_depth,
             max_visited_nodes=max_visited_nodes,
+            max_queued_witnesses=max_queued_witnesses,
         ),
     )

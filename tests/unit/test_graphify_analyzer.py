@@ -364,6 +364,23 @@ def test_shared_handler_node_retains_each_secure_endpoint_seed(tmp_path: Path) -
     assert [item.endpoint_id for item in result.evidence] == ["GET /items", "POST /items"]
 
 
+def test_conflicting_duplicate_endpoint_id_is_rejected(tmp_path: Path) -> None:
+    root = _write_project(tmp_path / "target")
+    graph = tmp_path / "graph.json"
+    _graph(graph)
+    conditional = GraphEndpointSeed(
+        "GET /items", "endpoint", Path("routes.py"), 1, 2, EndpointDiscoveryStatus.CONDITIONAL
+    )
+
+    with pytest.raises(ValueError, match="conflicting endpoint seeds share endpoint_id"):
+        traverse_graphify_snapshot(
+            _load(root, graph),
+            project_root=root,
+            changed_ranges=(ChangedSourceRange(Path("service.py"), 1, 2),),
+            endpoints=(_seed(), conditional),
+        )
+
+
 @pytest.mark.parametrize("relation", ["imports", "inherits", "references"])
 def test_reverse_traversal_accepts_source_backed_non_call_relations(
     tmp_path: Path, relation: str
@@ -400,6 +417,15 @@ def test_cycle_and_depth_limits_are_reported(tmp_path: Path) -> None:
     graph = tmp_path / "graph.json"
     _graph(graph)
     payload = json.loads(graph.read_text(encoding="utf-8"))
+    payload["nodes"].append(
+        {
+            "id": "upstream",
+            "label": "upstream",
+            "file_type": "code",
+            "source_file": "routes.py",
+            "source_location": "L2",
+        }
+    )
     payload["links"].append(
         {
             "source": "helper",
@@ -408,6 +434,16 @@ def test_cycle_and_depth_limits_are_reported(tmp_path: Path) -> None:
             "confidence": "EXTRACTED",
             "source_file": "service.py",
             "source_location": "L1",
+        }
+    )
+    payload["links"].append(
+        {
+            "source": "upstream",
+            "target": "endpoint",
+            "relation": "calls",
+            "confidence": "EXTRACTED",
+            "source_file": "routes.py",
+            "source_location": "L2",
         }
     )
     graph.write_text(json.dumps(payload), encoding="utf-8")
@@ -426,11 +462,57 @@ def test_cycle_and_depth_limits_are_reported(tmp_path: Path) -> None:
         endpoints=(_seed(),),
         max_depth=1,
     )
+    truncated_evidence_result = traverse_graphify_snapshot(
+        snapshot,
+        project_root=root,
+        changed_ranges=(ChangedSourceRange(Path("service.py"), 1, 2),),
+        endpoints=(_seed(),),
+        max_depth=2,
+    )
 
     assert len(cycle_result.evidence) == 1
     assert any("cycle edge skipped" in item for item in cycle_result.limitations)
     assert depth_result.evidence == ()
     assert any("maximum traversal depth reached" in item for item in depth_result.limitations)
+    assert len(truncated_evidence_result.evidence) == 1
+    assert truncated_evidence_result.evidence[0].confidence == "LOW"
+    assert truncated_evidence_result.evidence[0].incomplete is True
+    assert any(
+        "maximum traversal depth reached" in item for item in truncated_evidence_result.limitations
+    )
+
+
+def test_queue_cap_is_preallocation_bounded_and_marks_evidence_incomplete(tmp_path: Path) -> None:
+    root = _write_project(tmp_path / "target")
+    graph = tmp_path / "graph.json"
+    _graph(graph)
+    payload = json.loads(graph.read_text(encoding="utf-8"))
+    payload["links"].append(
+        {
+            "source": "endpoint",
+            "target": "helper",
+            "relation": "calls",
+            "confidence": "EXTRACTED",
+            "source_file": "routes.py",
+            "source_location": "L2",
+        }
+    )
+    graph.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = traverse_graphify_snapshot(
+        _load(root, graph),
+        project_root=root,
+        changed_ranges=(ChangedSourceRange(Path("service.py"), 1, 2),),
+        endpoints=(_seed(),),
+        max_queued_witnesses=1,
+    )
+
+    assert len(result.evidence) == 1
+    evidence = result.evidence[0]
+    assert evidence.confidence == "LOW"
+    assert evidence.incomplete is True
+    assert any("traversal incomplete" in item for item in evidence.limitations)
+    assert any("maximum queued path-witness cap reached (1)" in item for item in result.limitations)
 
 
 @pytest.mark.parametrize(
