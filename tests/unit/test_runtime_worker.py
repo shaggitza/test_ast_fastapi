@@ -95,6 +95,39 @@ def test_worker_requires_complete_exact_pins_and_bounded_config(tmp_path: Path) 
     assert package.is_dir()
 
 
+def test_worker_stops_collecting_before_serialized_inventory_exceeds_limit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    yielded = 0
+    dumped = 0
+
+    class OversizedEndpoint:
+        def model_dump(self, *, mode: str) -> dict[str, str]:
+            nonlocal dumped
+            assert mode == "json"
+            dumped += 1
+            return {"path": "/" + "x" * 2048}
+
+    class FakeExtractor:
+        def extract_endpoints(self):
+            nonlocal yielded
+            for _ in range(100):
+                yielded += 1
+                yield OversizedEndpoint()
+
+    monkeypatch.setattr(runtime_worker, "_extractor", lambda _request: FakeExtractor())
+    monkeypatch.setattr(runtime_worker, "_container_process_rss_bytes", lambda: None)
+    request = json.loads(_request(tmp_path))
+    request["output_limit_bytes"] = 512
+
+    payload, status = runtime_worker.run_request(json.dumps(request))
+
+    assert status == 1
+    assert payload["status"] == "error"
+    assert "exceeded the serialized output limit" in payload["message"]
+    assert yielded == dumped == 1
+
+
 def test_worker_analyze_uses_the_selected_runtime_inventory(tmp_path: Path, monkeypatch) -> None:
     _toy_project(tmp_path)
     diff = tmp_path / "change.diff"

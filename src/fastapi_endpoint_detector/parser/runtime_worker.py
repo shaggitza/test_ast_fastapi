@@ -29,6 +29,7 @@ _PIN_FIELDS = {
     "seccomp_sha256",
     "runtime_policy_sha256",
 }
+_COLLECTION_FIELDS = {"endpoints", "candidate_endpoints", "affected_endpoints"}
 _REQUEST_FIELDS = {
     "schema_version",
     "phase",
@@ -114,6 +115,24 @@ def _positive_integer(request: dict[str, Any], field: str, maximum: int) -> int:
     return value
 
 
+def _collect_bounded_models(
+    values: Any, *, field: str, remaining_bytes: int
+) -> tuple[list[Any], int]:
+    """Serialize models one at a time, stopping before an oversized output list forms."""
+    collected: list[Any] = []
+    used_bytes = 0
+    for value in values:
+        dump = getattr(value, "model_dump", None)
+        item = dump(mode="json") if callable(dump) else value
+        encoded = json.dumps(item, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        additional_bytes = len(encoded) + (1 if collected else 0)
+        if used_bytes + additional_bytes > remaining_bytes:
+            raise ValueError(f"runtime worker {field} exceeded the serialized output limit")
+        collected.append(item)
+        used_bytes += additional_bytes
+    return collected, used_bytes
+
+
 def _validate_request(value: Any) -> dict[str, Any]:
     if (
         not isinstance(value, dict)
@@ -163,7 +182,7 @@ def _extractor(request: dict[str, Any]) -> FastAPIExtractor:
     )
 
 
-def _analyze(request: dict[str, Any], endpoints: list[Any]) -> dict[str, Any]:
+def _analyze(request: dict[str, Any], endpoints: Any) -> dict[str, Any]:
     # ChangeMapper's public options intentionally reserve explicit entry selection
     # for secure-AST mode. Seed its registry from this worker's already selected
     # runtime inventory so mypy impact analysis cannot rediscover a different app.
@@ -180,12 +199,8 @@ def _analyze(request: dict[str, Any], endpoints: list[Any]) -> dict[str, Any]:
     mapper._registry = registry
     report = mapper.analyze_diff(Path(request["diff_path"]))
     return {
-        "candidate_endpoints": [
-            candidate.model_dump(mode="json") for candidate in report.candidate_endpoints
-        ],
-        "affected_endpoints": [
-            candidate.model_dump(mode="json") for candidate in report.affected_endpoints
-        ],
+        "candidate_endpoints": report.candidate_endpoints,
+        "affected_endpoints": report.affected_endpoints,
         "total_endpoints": report.total_endpoints,
         "total_files_changed": report.total_files_changed,
         "python_files_changed": report.python_files_changed,
@@ -202,22 +217,37 @@ def run_request(raw_request: str) -> tuple[dict[str, Any], int]:
             # monkeypatch this supervisor's pin validation or RSS telemetry.
             endpoints = extractor.extract_endpoints()
             result = (
-                {"endpoints": [endpoint.model_dump(mode="json") for endpoint in endpoints]}
+                {"endpoints": endpoints}
                 if request["phase"] == "list"
                 else _analyze(request, endpoints)
             )
         peak = rss_sampler.peak_bytes
-        payload = {
+        telemetry = {
+            "container_peak_rss_bytes": peak,
+            "container_peak_rss_status": "measured" if peak is not None else "unsupported",
+            "source": "sampled-/proc/[pid]/statm" if peak is not None else None,
+        }
+        payload: dict[str, Any] = {
             "schema_version": _PROTOCOL_VERSION,
             "status": "ok",
             "phase": request["phase"],
-            **result,
-            "telemetry": {
-                "container_peak_rss_bytes": peak,
-                "container_peak_rss_status": "measured" if peak is not None else "unsupported",
-                "source": "sampled-/proc/[pid]/statm" if peak is not None else None,
-            },
+            **{key: [] if key in _COLLECTION_FIELDS else value for key, value in result.items()},
+            "telemetry": telemetry,
         }
+        remaining_bytes = request["output_limit_bytes"] - len(
+            json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        )
+        if remaining_bytes < 0:
+            raise ValueError("runtime worker output envelope exceeded the byte limit")
+        for key, value in result.items():
+            if key in _COLLECTION_FIELDS:
+                payload[key], used_bytes = _collect_bounded_models(
+                    value, field=key, remaining_bytes=remaining_bytes
+                )
+                remaining_bytes -= used_bytes
+            else:
+                payload[key] = value
+        # The incremental row budget above includes the exact empty-array envelope.
         if (
             len(json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8"))
             > (request["output_limit_bytes"])
@@ -277,11 +307,19 @@ def _run_host_request(result_path: Path) -> int:
             redirect_stderr(sink),
         ):
             endpoints = extractor._extract_endpoints_in_process()
-        payload = {
+        payload: dict[str, Any] = {
             "schema_version": _HOST_PROTOCOL_VERSION,
             "status": "ok",
-            "endpoints": [endpoint.model_dump(mode="json") for endpoint in endpoints],
+            "endpoints": [],
         }
+        remaining_bytes = output_limit - len(
+            json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        )
+        if remaining_bytes < 0:
+            raise ValueError("runtime worker output envelope exceeded the byte limit")
+        payload["endpoints"], _ = _collect_bounded_models(
+            endpoints, field="endpoints", remaining_bytes=remaining_bytes
+        )
         exit_code = 0
     except Exception as exc:
         payload = {

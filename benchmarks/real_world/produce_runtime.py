@@ -217,24 +217,12 @@ class CommandRunner:
             args.extend(["--diff", str(request.snapshot.diff_path), "--no-cache"])
             if config.backend == "scip":
                 args.append("--scip")
-        if mode == "secure":
-            args.append("--secure-ast")
-            if config.app_entry:
-                args.extend(["--app-entry", config.app_entry])
-            if config.bootstrap_entry:
-                args.extend(["--bootstrap-entry", config.bootstrap_entry])
-        else:
-            args.append("--vm")
+        args.append("--secure-ast")
+        if config.app_entry:
+            args.extend(["--app-entry", config.app_entry])
+        if config.bootstrap_entry:
+            args.extend(["--bootstrap-entry", config.bootstrap_entry])
         environment = os.environ.copy()
-        if mode == "runtime":
-            environment.update(
-                FASTAPI_ENDPOINT_DETECTOR_VM_IMAGE=request.runtime_image,
-                FASTAPI_ENDPOINT_DETECTOR_VM_LOCK_SHA256=request.dependency_lock_sha256,
-                FASTAPI_ENDPOINT_DETECTOR_VM_SNAPSHOT_SHA256=request.snapshot_lock_sha256,
-                FASTAPI_ENDPOINT_DETECTOR_VM_SBOM_SHA256=request.sbom_sha256,
-                FASTAPI_ENDPOINT_DETECTOR_VM_SECCOMP_SHA256=request.seccomp_sha256,
-                FASTAPI_ENDPOINT_DETECTOR_VM_POLICY_SHA256=request.runtime_policy_sha256,
-            )
         started = time.monotonic()
         try:
             completed = subprocess.run(
@@ -614,7 +602,9 @@ def _record(  # noqa: PLR0911
             _validate_evidence(evidence, request)
         except ProducerError as error:
             record["failure"] = {"phase": "unavailable", "message": str(error)}
-            return record
+        # The configured verifier is NoReturn while no external trust authority
+        # exists. Runtime records therefore always abstain before either lane runs.
+        return record
     results: dict[str, InvocationResult] = {}
     for phase in ("list", "impact"):
         try:
@@ -658,11 +648,6 @@ def _record(  # noqa: PLR0911
         record["resources"]["peak_rss_bytes"] = {
             "status": "measured",
             "bytes": max(value for value in rss_values if value is not None),
-        }
-    elif mode == "runtime":
-        record["resources"]["peak_rss_bytes"] = {
-            "status": "not_measured",
-            "reason": "container_process_rss_unavailable",
         }
     record.update(status="success", failure=None, inventory=inventory, impact=impact)
     return record
