@@ -146,6 +146,8 @@ def test_node_link_multigraph_preserves_parallel_edge_key_provenance_and_span(
         original.relation,
     )
     assert parallel.edge_key == edge_key
+    assert original.context_identity is None
+    assert parallel.context_identity is None
     assert parallel.extractor_strength == "INFERRED"
     assert parallel.span is not None
     assert (parallel.span.start_line, parallel.span.end_line) == expected_span
@@ -186,11 +188,39 @@ def test_loads_explicit_raw_schema_without_promoting_line_markers_to_ranges(tmp_
     assert snapshot.edges[2].orientation == "subclass-to-base"
     assert snapshot.edges[3].orientation == "referencer-to-referenced"
     assert [edge.extractor_strength for edge in snapshot.edges] == [
-        "EXTRACTED", "INFERRED", "EXTRACTED", "AMBIGUOUS"
+        "EXTRACTED",
+        "INFERRED",
+        "EXTRACTED",
+        "AMBIGUOUS",
     ]
     assert snapshot.edges[0].span == GraphifySourceSpan(
         Path("app.py"), 4, 4, hashlib.sha256((project / "app.py").read_bytes()).hexdigest()
     )
+
+
+def test_raw_context_only_edge_occurrences_have_stable_distinct_identities(
+    tmp_path: Path,
+) -> None:
+    project = _project(tmp_path)
+    payload = json.loads(RAW_FIXTURE.read_text(encoding="utf-8"))
+    first = dict(payload["edges"][0], context="handler body")
+    second = dict(payload["edges"][0], context="decorator expansion")
+    payload["edges"] = [first, second]
+    graph = tmp_path / "raw-context-occurrences.json"
+    _write_payload(graph, payload)
+
+    snapshot = load_graphify_snapshot(
+        graph, project_root=project, side="target", schema=GRAPHIFY_RAW_SCHEMA
+    )
+
+    identities = [edge.context_identity for edge in snapshot.edges]
+    expected = [
+        hashlib.sha256(b"graphify-raw-edge-context-v1\0" + value.encode()).hexdigest()
+        for value in ("handler body", "decorator expansion")
+    ]
+    assert identities == expected
+    assert identities[0] != identities[1]
+    assert [edge.edge_key for edge in snapshot.edges] == [None, None]
 
 
 def test_raw_schema_requires_explicit_version_and_rejects_unknown_selectors(
@@ -211,6 +241,7 @@ def test_raw_schema_requires_explicit_version_and_rejects_unknown_selectors(
         (lambda value: value["hyperedges"].append({"nodes": []}), "hyperedges"),
         (lambda value: value["edges"][0].update({"source_location": "L3-L4"}), "line-only"),
         (lambda value: value["edges"][0].update({"confidence": "HIGH"}), "confidence"),
+        (lambda value: value["edges"][0].update({"context": ["invalid"]}), "context"),
         (lambda value: value["edges"][0].update({"source_file": "../app.py"}), "confined"),
         (lambda value: value["edges"][0].update({"target": "not-present"}), "unknown node"),
         (
@@ -224,6 +255,7 @@ def test_raw_schema_requires_explicit_version_and_rejects_unknown_selectors(
         "unsupported-hyperedge",
         "not-a-line-marker",
         "quality-is-not-provenance",
+        "malformed-context",
         "path-traversal",
         "missing-target",
         "duplicate-edge",

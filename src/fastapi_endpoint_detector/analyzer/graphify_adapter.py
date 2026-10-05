@@ -126,6 +126,7 @@ class GraphifyEdge:
     extractor_strength: GraphifyStrength
     span: GraphifySourceSpan | None
     edge_key: int | str | None = None
+    context_identity: str | None = None
 
     @property
     def traversable(self) -> bool:
@@ -480,7 +481,8 @@ def _raw_payload_collections(payload: dict[str, object]) -> tuple[list[object], 
 
 
 def _payload_collections(
-    payload: dict[str, object], schema: str,
+    payload: dict[str, object],
+    schema: str,
 ) -> tuple[list[object], list[object], str | None]:
     if schema == GRAPHIFY_RAW_SCHEMA:
         raw_nodes, raw_edges = _raw_payload_collections(payload)
@@ -544,9 +546,11 @@ def _adapt_nodes(
             node.get("source_location"),
             location,
         )
-        if raw_schema and node.get("source_location") is not None and re.fullmatch(
-            r"L[1-9][0-9]*", cast("str", node["source_location"])
-        ) is None:
+        if (
+            raw_schema
+            and node.get("source_location") is not None
+            and re.fullmatch(r"L[1-9][0-9]*", cast("str", node["source_location"])) is None
+        ):
             raise GraphifyAdapterError(
                 f"{location}.source_location must be a line-only Graphify marker"
             )
@@ -632,8 +636,23 @@ def _adapt_edges(
         edge_key = edge.get("key")
         if isinstance(edge_key, bool) or not isinstance(edge_key, (int, str, type(None))):
             raise GraphifyAdapterError(f"{location}.key must be an integer, string, or null")
+        context_identity = None
+        if raw_schema and "context" in edge:
+            context = cast("str", edge["context"])
+            context_identity = hashlib.sha256(
+                b"graphify-raw-edge-context-v1\0" + context.encode("utf-8")
+            ).hexdigest()
         edges.append(
-            GraphifyEdge(source_id, target_id, relation, orientation, strength, span, edge_key)
+            GraphifyEdge(
+                source_id,
+                target_id,
+                relation,
+                orientation,
+                strength,
+                span,
+                edge_key,
+                context_identity,
+            )
         )
     return tuple(edges)
 
