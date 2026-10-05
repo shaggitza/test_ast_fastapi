@@ -4,9 +4,9 @@
   "issue_comments_endpoint": "https://api.github.com/repos/shaggitza/test_ast_fastapi/issues/108/comments",
   "issue_comment_count": 0,
   "protocol_snapshot": {
-    "commit": "1d9242d0d1d411b529c3227918aa2d05e98e8943",
+    "commit": "84efc3d877c2d93a25bdd2c625120e6a6d918139",
     "path": "docs/client-observations.md",
-    "sha256": "d4d3151d3e6f9d3fba78227040be1f7ddcbeb4364114d5fa93c30f3b6af8ca2b"
+    "sha256": "a0353be69f785dfa21639040be8a2c86de389b11d674fd4e586a2745653f9a3a"
   },
   "audit_index": {
     "base_commit": "50f0c4dfa675c23f392d0f379cd44ddaa4248efa",
@@ -21,5 +21,5 @@
       "langflow-ai/langflow#13992"
     ]
   },
-  "conclusion": "The public issue body requires nine audited cases; issue comments are empty. The frozen client-observations protocol explicitly says its available corpus has no complete nine-case source-grounded set. The ranked audit index enumerates six non-Python cases. No other identities are inferred."
+  "conclusion": "GH108 says \u201cnine audited non-Python cases\u201d without defining the unit, and its issue comment thread is empty. The frozen ranked audit index identifies six PRs; their audited truth comprises eight client HTTP route atoms plus one conditional deployment route atom, which could be the intended nine. No other PR identities can be inferred from available evidence. This evaluation reports six PRs and nine atoms separately and makes no full-acceptance claim."
 }

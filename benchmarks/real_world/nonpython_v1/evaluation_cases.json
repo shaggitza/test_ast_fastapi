@@ -1,6 +1,6 @@
 {
   "schema": "nonpython-evaluation-cases-v1",
-  "scope": "Six source-backed audited PRs available in the checked-in audit corpus. Three expected slots remain identity-unknown and are not fabricated.",
+  "scope": "Six audited PRs, containing eight client HTTP route atoms and one conditional deployment route atom. GH108 does not define the unit of \u201cnine cases\u201d.",
   "truth_status": "reviewed_historical_atoms_provisional_not_canonical_truth",
   "cases": [
     {
@@ -170,23 +170,21 @@
           ]
         }
       ],
-      "audit_sha256": "ee9f8c423aeaf44c25a6d5e93234be2c62180db2db4f705cf1646971ba82e7e6"
-    },
-    {
-      "case_id": "unresolved-slot-7",
-      "status": "identity_and_immutable_inputs_not_located",
-      "atoms": []
-    },
-    {
-      "case_id": "unresolved-slot-8",
-      "status": "identity_and_immutable_inputs_not_located",
-      "atoms": []
-    },
-    {
-      "case_id": "unresolved-slot-9",
-      "status": "identity_and_immutable_inputs_not_located",
-      "atoms": []
+      "audit_sha256": "ee9f8c423aeaf44c25a6d5e93234be2c62180db2db4f705cf1646971ba82e7e6",
+      "deployment_files": [
+        "docker/build_and_push.Dockerfile",
+        "docker/build_and_push_base.Dockerfile",
+        "docker/build_and_push_with_extras.Dockerfile"
+      ],
+      "subprocess_file": "src/lfx/src/lfx/base/mcp/util.py"
     }
   ],
-  "origin_policy": "No client origin is inferred from dynamic base URLs. Explicit reviewed route surfaces have no origin attestation, so origin-gated joins intentionally abstain."
+  "origin_policy": "No client origin is inferred from dynamic base URLs. Explicit reviewed route surfaces have no origin attestation, so origin-gated joins intentionally abstain.",
+  "unit_interpretation": {
+    "audited_pr_count": 6,
+    "client_route_atom_count": 8,
+    "conditional_deployment_atom_count": 1,
+    "total_audited_nonpython_atom_count": 9,
+    "note": "The issue\u2019s nine-case wording could refer to these nine source-audited atoms. The six identified PRs are the full available ranked-audit set; this does not establish whether GH108 intended another unit or whether acceptance is complete."
+  }
 }
