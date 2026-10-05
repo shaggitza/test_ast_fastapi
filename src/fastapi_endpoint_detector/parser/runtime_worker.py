@@ -24,6 +24,7 @@ from fastapi_endpoint_detector.parser.fastapi_extractor import FastAPIExtractor
 _HOST_PROTOCOL_VERSION = 2
 _PROTOCOL_VERSION = 3
 _DEFAULT_OUTPUT_LIMIT_BYTES = 4 * 1024 * 1024
+_MAX_OUTPUT_LIMIT_BYTES = 64 * 1024 * 1024
 _PIN_FIELDS = {
     "runtime_image",
     "runtime_image_digest",
@@ -276,11 +277,10 @@ def run_request(raw_request: str) -> tuple[dict[str, Any], int]:
         raw_value = json.loads(raw_request)
         if isinstance(raw_value, dict):
             requested_limit = raw_value.get("output_limit_bytes")
-            if (
-                isinstance(requested_limit, int)
-                and not isinstance(requested_limit, bool)
-                and 0 < requested_limit <= _DEFAULT_OUTPUT_LIMIT_BYTES
-            ):
+            if isinstance(requested_limit, int) and not isinstance(requested_limit, bool):
+                if not MIN_PROTOCOL_OUTPUT_BYTES <= requested_limit <= _DEFAULT_OUTPUT_LIMIT_BYTES:
+                    # An explicit unsupported integer limit must never fall back to default.
+                    return {}, 2
                 output_limit = requested_limit
         if output_limit < MIN_PROTOCOL_OUTPUT_BYTES:
             # There is no JSON envelope that can fit such a limit. The CLI returns
@@ -364,20 +364,18 @@ def _run_host_request(result_path: Path) -> int:
     output_limit = _DEFAULT_OUTPUT_LIMIT_BYTES
     try:
         request = json.load(sys.stdin)
+        raw_limit = (
+            request.get("output_limit_bytes", output_limit) if isinstance(request, dict) else None
+        )
+        if isinstance(raw_limit, int) and not isinstance(raw_limit, bool):
+            if not MIN_PROTOCOL_OUTPUT_BYTES <= raw_limit <= _MAX_OUTPUT_LIMIT_BYTES:
+                # Reject without writing: a result path may already contain stale data.
+                return 2
+            output_limit = raw_limit
         if not isinstance(request, dict) or request.get("schema_version") != _HOST_PROTOCOL_VERSION:
             raise ValueError("unsupported runtime worker request")
-        raw_limit = request.get("output_limit_bytes", output_limit)
-        if (
-            not isinstance(raw_limit, int)
-            or isinstance(raw_limit, bool)
-            or raw_limit <= 0
-            or raw_limit > _DEFAULT_OUTPUT_LIMIT_BYTES
-        ):
+        if not isinstance(raw_limit, int) or isinstance(raw_limit, bool):
             raise ValueError("runtime worker output limit must be a positive integer")
-        output_limit = raw_limit
-        if output_limit < MIN_PROTOCOL_OUTPUT_BYTES:
-            # Reject unsupported limits before loading or invoking project code.
-            return 2
         for field in ("dependency_max_depth", "dependency_max_nodes", "dependency_max_work"):
             maximum = 64 if field.endswith("depth") else 4096 if field.endswith("nodes") else 65536
             _positive_integer(request, field, maximum)

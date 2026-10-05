@@ -7,9 +7,14 @@ import json
 import sys
 from typing import TYPE_CHECKING
 
+import pytest
 from pydantic import BaseModel
 
 from fastapi_endpoint_detector.parser import runtime_worker
+from fastapi_endpoint_detector.parser.fastapi_extractor import (
+    FastAPIExtractor,
+    FastAPIExtractorError,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -156,11 +161,20 @@ def test_v3_unicode_nested_error_response_respects_utf8_limit(tmp_path: Path, mo
     assert len(encoded) + 1 <= request["output_limit_bytes"]
 
 
-def test_too_small_v3_limit_is_rejected_before_work_and_serialization(
-    tmp_path: Path, monkeypatch, capsys
+@pytest.mark.parametrize(
+    "output_limit",
+    [
+        0,
+        -1,
+        runtime_worker.MIN_PROTOCOL_OUTPUT_BYTES - 1,
+        runtime_worker._DEFAULT_OUTPUT_LIMIT_BYTES + 1,
+    ],
+)
+def test_invalid_small_v3_limit_is_rejected_before_work_and_serialization(
+    tmp_path: Path, monkeypatch, capsys, output_limit: int
 ) -> None:
     request = json.loads(_request(tmp_path))
-    request["output_limit_bytes"] = runtime_worker.MIN_PROTOCOL_OUTPUT_BYTES - 1
+    request["output_limit_bytes"] = output_limit
     raw_request = json.dumps(request)
 
     def unexpected_extractor(_request):
@@ -172,7 +186,7 @@ def test_too_small_v3_limit_is_rejected_before_work_and_serialization(
     assert runtime_worker.main() == 2
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert len(captured.out.encode("utf-8")) <= request["output_limit_bytes"]
+    assert len(captured.out.encode("utf-8")) == 0
 
 
 def _host_request(app: Path, *, output_limit: int) -> dict[str, object]:
@@ -223,8 +237,17 @@ def test_host_worker_unicode_error_file_respects_utf8_limit(tmp_path: Path, monk
     assert len(encoded) <= runtime_worker.MIN_PROTOCOL_OUTPUT_BYTES
 
 
-def test_too_small_host_limit_is_rejected_before_work_or_file_output(
-    tmp_path: Path, monkeypatch
+@pytest.mark.parametrize(
+    "output_limit",
+    [
+        0,
+        -1,
+        runtime_worker.MIN_PROTOCOL_OUTPUT_BYTES - 1,
+        runtime_worker._MAX_OUTPUT_LIMIT_BYTES + 1,
+    ],
+)
+def test_invalid_small_host_limit_is_rejected_and_ignores_stale_output(
+    tmp_path: Path, monkeypatch, output_limit: int
 ) -> None:
     class UnexpectedExtractor:
         def __init__(self, *_args, **_kwargs) -> None:
@@ -238,15 +261,78 @@ def test_too_small_host_limit_is_rejected_before_work_or_file_output(
             json.dumps(
                 _host_request(
                     tmp_path,
-                    output_limit=runtime_worker.MIN_PROTOCOL_OUTPUT_BYTES - 1,
+                    output_limit=output_limit,
                 )
             )
         ),
     )
     result_path = tmp_path / "host-result.json"
+    stale_response = json.dumps(
+        {"schema_version": 2, "status": "ok", "endpoints": []}, separators=(",", ":")
+    )
+    result_path.write_text(stale_response, encoding="utf-8")
 
     assert runtime_worker._run_host_request(result_path) == 2
-    assert not result_path.exists()
+    assert result_path.read_text(encoding="utf-8") == stale_response
+    with pytest.raises(FastAPIExtractorError, match="status 2"):
+        FastAPIExtractor(tmp_path / "unused.py")._read_runtime_result(result_path, 2)
+
+
+def test_invalid_boolean_limit_keeps_structured_validation_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    request = json.loads(_request(tmp_path))
+    request["output_limit_bytes"] = False
+    monkeypatch.setattr(runtime_worker, "_extractor", lambda _request: pytest.fail("must not run"))
+
+    payload, status = runtime_worker.run_request(json.dumps(request))
+
+    encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    assert status == 1
+    assert payload["status"] == "error"
+    assert "output_limit_bytes" in payload["message"]
+    assert len(encoded) + 1 <= 4 * 1024 * 1024
+
+
+def test_v3_strict_schema_error_stays_structured_at_minimum_limit(tmp_path: Path) -> None:
+    request = json.loads(_request(tmp_path))
+    request["output_limit_bytes"] = runtime_worker.MIN_PROTOCOL_OUTPUT_BYTES
+    request["unexpected"] = "field"
+
+    payload, status = runtime_worker.run_request(json.dumps(request))
+
+    encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    assert status == 1
+    assert payload["message"] == "unsupported runtime worker request"
+    assert len(encoded) + 1 <= runtime_worker.MIN_PROTOCOL_OUTPUT_BYTES
+
+
+def test_host_boolean_limit_and_schema_errors_remain_structured(
+    tmp_path: Path, monkeypatch
+) -> None:
+    request = _host_request(tmp_path, output_limit=False)
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(json.dumps(request)),
+    )
+    result_path = tmp_path / "host-result.json"
+
+    assert runtime_worker._run_host_request(result_path) == 1
+
+    encoded = result_path.read_bytes()
+    payload = json.loads(encoded)
+    assert payload["status"] == "error"
+    assert "output limit" in payload["message"]
+    assert len(encoded) <= 4 * 1024 * 1024
+
+    request = _host_request(tmp_path, output_limit=runtime_worker.MIN_PROTOCOL_OUTPUT_BYTES)
+    request["schema_version"] = 3
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(request)))
+    assert runtime_worker._run_host_request(result_path) == 1
+    schema_error = result_path.read_bytes()
+    assert json.loads(schema_error)["message"] == "unsupported runtime worker request"
+    assert len(schema_error) <= runtime_worker.MIN_PROTOCOL_OUTPUT_BYTES
 
 
 def test_worker_analyze_uses_the_selected_runtime_inventory(tmp_path: Path, monkeypatch) -> None:

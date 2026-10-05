@@ -1023,6 +1023,9 @@ class FastAPIExtractor:
             process.wait()
 
     def _read_runtime_result(self, result_path: Path, returncode: int) -> list[Endpoint]:
+        if returncode == 2:
+            # Status 2 is a no-output protocol rejection; never consume a stale file.
+            raise FastAPIExtractorError("Runtime worker exited with status 2")
         if not result_path.is_file():
             raise FastAPIExtractorError(f"Runtime worker exited with status {returncode}")
         if result_path.stat().st_size > self.output_limit_bytes:
