@@ -115,3 +115,29 @@ fetch('/unrelated' + suffix);
         ("GET", "/nested-axios"),
         ("GET", "/nested-fetch"),
     ]
+
+
+def test_shadowed_client_globals_are_not_exact_or_joinable() -> None:
+    source = """
+function f(fetch) { fetch('https://api.test/admin'); }
+function g(axios) { axios.get('https://api.test/admin'); }
+function h(WebSocket) { new WebSocket('wss://api.test/admin'); }
+const before = fetch('https://api.test/items');
+let axios = client;
+axios.get('https://api.test/items');
+"""
+    observations = extract_client_observations(source)
+    trusted = EstablishedSurface("server:admin", "/admin", "GET", "https://api.test", True)
+    assert observations == ()
+    assert join_established_surfaces(observations, (trusted,)) == ()
+
+
+def test_unshadowed_browser_and_canonical_axios_imports_remain_supported() -> None:
+    observations = extract_client_observations(
+        "fetch('https://api.test/items'); "
+        "import http from 'axios'; http.get('https://api.test/items');"
+    )
+    assert [(item.method, item.route_path) for item in observations] == [
+        ("GET", "/items"),
+        ("GET", "/items"),
+    ]

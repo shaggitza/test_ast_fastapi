@@ -65,3 +65,31 @@ subprocess.run(command, shell=use_shell)
         ("run", None, "uncertain"),
     ]
     assert observations[2].uncertainty == "shell execution is excluded"
+
+
+def test_subprocess_requires_canonical_import_and_rejects_shadowing() -> None:
+    canonical_and_aliases = extract_subprocess_observations(
+        "import subprocess\n"
+        "import subprocess as sp\n"
+        "from subprocess import run as run_process\n"
+        "subprocess.run(['canonical'])\n"
+        "sp.Popen(['module-alias'])\n"
+        "run_process(['function-alias'])\n"
+    )
+    assert [(item.key, item.value, item.certainty) for item in canonical_and_aliases] == [
+        ("run", ("canonical",), "exact"),
+        ("Popen", ("module-alias",), "exact"),
+        ("run", ("function-alias",), "exact"),
+    ]
+
+    untrusted = extract_subprocess_observations(
+        "subprocess.run(['unimported'])\n"
+        "import subprocess\n"
+        "subprocess = fake\n"
+        "subprocess.run(['rebound'])\n"
+        "import subprocess as sp\n"
+        "def f(sp):\n"
+        "    sp.run(['parameter'])\n"
+        ""
+    )
+    assert untrusted == ()

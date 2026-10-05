@@ -241,24 +241,61 @@ def _literal_argv(node: ast.AST) -> tuple[str, ...] | None:
     return tuple(values)
 
 
-def extract_subprocess_observations(
+def extract_subprocess_observations(  # noqa: PLR0912
     source: str, source_path: Path | str = "<memory>"
 ) -> tuple[DeploymentObservation, ...]:
-    """Observe direct ``subprocess`` calls with literal argv, without execution."""
+    """Observe calls through a canonical subprocess import with literal argv.
+
+    Import aliases are supported. Any parameter or assignment that can rebind
+    an imported name invalidates that name file-wide, a conservative policy
+    that avoids resolving Python lexical scopes approximately.
+    """
     path = Path(source_path)
     try:
         tree = ast.parse(source, filename=str(path))
     except SyntaxError:
         return ()
+    module_names: set[str] = set()
+    function_names: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "subprocess":
+                    module_names.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.module == "subprocess":
+            for alias in node.names:
+                if alias.name in _SUBPROCESS_CALLS:
+                    function_names[alias.asname or alias.name] = alias.name
+
+    imported_names = module_names | set(function_names)
+    rebound_names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            if node.id in imported_names:
+                rebound_names.add(node.id)
+        elif isinstance(node, ast.arg) and node.arg in imported_names:
+            rebound_names.add(node.arg)
+        elif (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and node.name in imported_names
+        ):
+            rebound_names.add(node.name)
+
+    module_names -= rebound_names
+    function_names = {
+        name: function for name, function in function_names.items() if name not in rebound_names
+    }
     observations: list[DeploymentObservation] = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+        if not isinstance(node, ast.Call):
             continue
-        if (
-            node.func.attr not in _SUBPROCESS_CALLS
-            or not isinstance(node.func.value, ast.Name)
-            or node.func.value.id != "subprocess"
-        ):
+        call_name: str | None = None
+        if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+            if node.func.value.id in module_names and node.func.attr in _SUBPROCESS_CALLS:
+                call_name = node.func.attr
+        elif isinstance(node.func, ast.Name) and node.func.id in function_names:
+            call_name = function_names[node.func.id]
+        if call_name is None:
             continue
         shell = next(
             (keyword.value for keyword in node.keywords if keyword.arg == "shell"),
@@ -268,7 +305,7 @@ def extract_subprocess_observations(
         if isinstance(shell, ast.Constant) and shell.value is False and argv is not None:
             observations.append(
                 DeploymentObservation(
-                    path, node.lineno, "subprocess_argv", node.func.attr, argv, "exact"
+                    path, node.lineno, "subprocess_argv", call_name, argv, "exact"
                 )
             )
         else:
@@ -279,7 +316,7 @@ def extract_subprocess_observations(
             )
             observations.append(
                 DeploymentObservation(
-                    path, node.lineno, "subprocess_argv", node.func.attr, None, "uncertain", reason
+                    path, node.lineno, "subprocess_argv", call_name, None, "uncertain", reason
                 )
             )
     return tuple(sorted(observations, key=lambda item: (item.line, item.kind, item.key or "")))

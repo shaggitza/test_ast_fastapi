@@ -247,6 +247,167 @@ def _is_global_axios(tokens: list[_Token], index: int) -> bool:
     return previous.value not in {".", "["}
 
 
+def _shadowed_client_names(tokens: list[_Token]) -> tuple[set[str], set[str]]:  # noqa: PLR0912, PLR0915
+    """Fail closed file-wide when a client global has any local binding.
+
+    This deliberately sacrifices some observations: proving JavaScript lexical
+    scope correctly requires a full parser, so one declaration or assignment
+    anywhere suppresses that global name throughout the file.
+    """
+    names = {"fetch", "axios", "WebSocket"}
+    shadowed: set[str] = set()
+    axios_imports: set[str] = set()
+
+    def bind(token: _Token) -> None:
+        if token.kind == "id" and token.value in names:
+            shadowed.add(token.value)
+
+    def bind_parameters(start: int, end: int) -> None:
+        # Capture the first identifier in each top-level parameter, which is
+        # sufficient for simple names and conservative for destructuring.
+        begin = start
+        depth = 0
+        for pos in range(start, end + 1):
+            at_end = pos == end
+            value = tokens[pos].value if not at_end else ","
+            if value in {"(", "[", "{"}:
+                depth += 1
+            elif value in {")", "]", "}"}:
+                depth -= 1
+            elif value == "," and depth == 0:
+                for candidate in tokens[begin:pos]:
+                    if candidate.kind == "id":
+                        bind(candidate)
+                        break
+                begin = pos + 1
+
+    for index, token in enumerate(tokens):
+        if token.kind != "id":
+            continue
+        if token.value in {"const", "let", "var", "class", "function"} and index + 1 < len(tokens):
+            bind(tokens[index + 1])
+        if token.value in {"const", "let", "var"}:
+            # Destructured declarations: conservatively treat every matching
+            # identifier before the initializer as a local binding.
+            cursor = index + 1
+            while cursor < len(tokens) and tokens[cursor].value not in {"=", ";"}:
+                bind(tokens[cursor])
+                cursor += 1
+        if token.value == "function":
+            opening = index + 1
+            while opening < len(tokens) and tokens[opening].value not in {"(", "{", ";"}:
+                opening += 1
+            if opening < len(tokens) and tokens[opening].value == "(":
+                parsed = _split_args(tokens, opening)
+                if parsed is not None:
+                    _args, closing = parsed
+                    bind_parameters(opening + 1, closing)
+        if token.value == "catch" and index + 1 < len(tokens) and tokens[index + 1].value == "(":
+            parsed = _split_args(tokens, index + 1)
+            if parsed is not None:
+                _args, closing = parsed
+                bind_parameters(index + 2, closing)
+        # Parenthesized arrow parameters.
+        if (
+            token.value == ")"
+            and index + 2 < len(tokens)
+            and tokens[index + 1].value == "="
+            and tokens[index + 2].value == ">"
+        ):
+            opening = index - 1
+            depth = 1
+            while opening >= 0 and depth:
+                if tokens[opening].value == ")":
+                    depth += 1
+                elif tokens[opening].value == "(":
+                    depth -= 1
+                opening -= 1
+            if depth == 0:
+                bind_parameters(opening + 2, index)
+        # Single-identifier arrow parameter.
+        if (
+            index + 2 < len(tokens)
+            and tokens[index + 1].value == "="
+            and tokens[index + 2].value == ">"
+        ):
+            bind(token)
+        # Any direct assignment may rebind a global before or after a call.
+        if token.value in names and index + 1 < len(tokens) and tokens[index + 1].value == "=":
+            bind(token)
+        # Imported axios default/namespace bindings are accepted only from the
+        # canonical package. Other imported names shadow browser globals.
+        if token.value == "import":
+            cursor = index + 1
+            source_index = cursor
+            while source_index < len(tokens) and tokens[source_index].value not in {";"}:
+                if tokens[source_index].kind == "string":
+                    break
+                source_index += 1
+            if source_index >= len(tokens) or tokens[source_index].kind != "string":
+                continue
+            import_names = tokens[cursor:source_index]
+            module_name = tokens[source_index].value
+            if module_name == "axios":
+                local_names: list[_Token] = []
+                if (
+                    import_names
+                    and import_names[0].kind == "id"
+                    and import_names[0].value
+                    not in {
+                        "type",
+                        "{",
+                    }
+                ):
+                    local_names.append(import_names[0])
+                for offset, imported in enumerate(import_names[:-1]):
+                    if (
+                        imported.value == "*"
+                        and import_names[offset + 1].value == "as"
+                        and offset + 2 < len(import_names)
+                    ):
+                        local_names.append(import_names[offset + 2])
+                if "{" in [item.value for item in import_names]:
+                    in_named_imports = False
+                    named_specifier: list[_Token] = []
+                    for item in import_names:
+                        if item.value == "{":
+                            in_named_imports = True
+                            continue
+                        if item.value == "}":
+                            in_named_imports = False
+                            if named_specifier:
+                                local = named_specifier[-1]
+                                if local.kind == "id" and local.value in names:
+                                    shadowed.add(local.value)
+                                named_specifier.clear()
+                            continue
+                        if not in_named_imports:
+                            continue
+                        if item.value == ",":
+                            if named_specifier:
+                                local = named_specifier[-1]
+                                if local.kind == "id" and local.value in names:
+                                    shadowed.add(local.value)
+                            named_specifier.clear()
+                        else:
+                            named_specifier.append(item)
+                for local in local_names:
+                    if local.kind == "id":
+                        axios_imports.add(local.value)
+                        if local.value in {"fetch", "WebSocket"}:
+                            shadowed.add(local.value)
+            else:
+                # The local side of imports consists of identifiers before
+                # `from`; excluding syntax words leaves bindings and aliases.
+                for imported in import_names:
+                    if imported.value in {"type", "as", "from", "import"}:
+                        continue
+                    if imported.kind == "id":
+                        bind(imported)
+            cursor = source_index + 1
+    return shadowed, axios_imports
+
+
 def extract_client_observations(  # noqa: PLR0912, PLR0915
     source: str, source_path: Path | str = "<memory>"
 ) -> tuple[ClientObservation, ...]:
@@ -271,6 +432,7 @@ def extract_client_observations(  # noqa: PLR0912, PLR0915
                 mask[pos] = " "
         lexical_source = "".join(mask)
     ts = _tokens(lexical_source)
+    shadowed, axios_imports = _shadowed_client_names(ts)
     found: list[ClientObservation] = []
     i = 0
     while i < len(ts):
@@ -279,6 +441,7 @@ def extract_client_observations(  # noqa: PLR0912, PLR0915
         if (
             ts[i].kind == "id"
             and ts[i].value == "fetch"
+            and "fetch" not in shadowed
             and (i == 0 or ts[i - 1].value != ".")
             and i + 1 < len(ts)
             and ts[i + 1].value == "("
@@ -289,12 +452,14 @@ def extract_client_observations(  # noqa: PLR0912, PLR0915
             and ts[i].value == "new"
             and i + 3 < len(ts)
             and ts[i + 1].value == "WebSocket"
+            and "WebSocket" not in shadowed
             and ts[i + 2].value == "("
         ):
             name, opening, fixed, protocol = "websocket", i + 2, "WEBSOCKET", "websocket"
         elif (
             ts[i].kind == "id"
-            and ts[i].value == "axios"
+            and (ts[i].value == "axios" or ts[i].value in axios_imports)
+            and ts[i].value not in shadowed
             and _is_global_axios(ts, i)
             and i + 3 < len(ts)
             and ts[i + 1].value == "."
@@ -305,7 +470,8 @@ def extract_client_observations(  # noqa: PLR0912, PLR0915
             name, opening, fixed = "axios_method", i + 3, ts[i + 2].value.upper()
         elif (
             ts[i].kind == "id"
-            and ts[i].value == "axios"
+            and (ts[i].value == "axios" or ts[i].value in axios_imports)
+            and ts[i].value not in shadowed
             and _is_global_axios(ts, i)
             and i + 1 < len(ts)
             and ts[i + 1].value == "("
