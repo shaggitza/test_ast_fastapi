@@ -223,22 +223,43 @@ class _BackgroundTaskAliasAnalysis:
                 continue
             if isinstance(statement, ast.If):
                 self._expression(statement.test, aliases, suspect, stack)
+                incoming_aliases = dict(aliases)
+                incoming_suspect = set(suspect)
                 left_aliases, left_suspect = self._statements(
-                    statement.body, dict(aliases), set(suspect), stack
+                    statement.body, dict(incoming_aliases), set(incoming_suspect), stack
                 )
                 right_aliases, right_suspect = self._statements(
-                    statement.orelse, dict(aliases), set(suspect), stack
+                    statement.orelse, dict(incoming_aliases), set(incoming_suspect), stack
+                )
+                names = (
+                    set(incoming_aliases)
+                    | incoming_suspect
+                    | set(left_aliases)
+                    | left_suspect
+                    | set(right_aliases)
+                    | right_suspect
+                )
+                joined_aliases = {
+                    name: contract
+                    for name, contract in left_aliases.items()
+                    if right_aliases.get(name) == contract
+                }
+                joined_suspect = left_suspect | right_suspect
+                joined_suspect.update(
+                    name
+                    for name in names
+                    if left_aliases.get(name) != right_aliases.get(name)
+                    and (
+                        name in left_aliases
+                        or name in right_aliases
+                        or name in left_suspect
+                        or name in right_suspect
+                    )
                 )
                 aliases.clear()
-                aliases.update(
-                    {
-                        name: contract
-                        for name, contract in left_aliases.items()
-                        if right_aliases.get(name) == contract
-                    }
-                )
+                aliases.update(joined_aliases)
                 suspect.clear()
-                suspect.update(left_suspect | right_suspect)
+                suspect.update(joined_suspect)
                 continue
             if isinstance(statement, (ast.For, ast.AsyncFor)):
                 self._expression(statement.iter, aliases, suspect, stack)
