@@ -330,6 +330,7 @@ class MypyIncrementalProvider:
             raise IncrementalBuildError("configuration changed during full rebuild")
         if _capture_sources(canonical) != source_snapshot:
             raise IncrementalBuildError("source files changed during full rebuild")
+        _validate_local_graph_inventory(result.graph, canonical, self.config.source_root.resolve())
         fg = FineGrainedBuildManager(result)
         source_digests = _source_digests(source_snapshot)
         source_digests_before = getattr(self, "_source_digests", source_digests)
@@ -435,6 +436,23 @@ def _prime_source_snapshot(
         content = sources[module]
         fscache.read_cache[path] = content
         fscache.hash_cache[path] = hash_digest(content)
+
+
+def _validate_local_graph_inventory(
+    graph: Mapping[str, Any], inventory: Mapping[str, str], source_root: Path
+) -> None:
+    inventoried_paths = set(inventory.values())
+    for module, state in graph.items():
+        tree = getattr(state, "tree", None)
+        source_path = getattr(tree, "path", None)
+        if not source_path:
+            continue
+        resolved_path = Path(source_path).resolve()
+        is_local = resolved_path.is_relative_to(source_root)
+        if is_local and str(resolved_path) not in inventoried_paths:
+            raise IncrementalBuildError(
+                f"source inventory omits followed local module {module!r}: {resolved_path}"
+            )
 
 
 def _import_fingerprint_from_sources(

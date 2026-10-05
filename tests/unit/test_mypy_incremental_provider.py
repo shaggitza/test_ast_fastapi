@@ -134,6 +134,22 @@ def test_import_retarget_and_module_deletion_fall_back_cleanly(tmp_path: Path) -
     assert deleted.typed_snapshot() == _fresh(tmp_path, inventory).typed_snapshot()
 
 
+def test_cold_build_rejects_followed_local_modules_missing_from_inventory(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "m0.py").write_text(
+        "from m1 import f1\ndef f0(value: int) -> int:\n    return f1(value)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "m1.py").write_text(
+        "def f1(value: int) -> int:\n    return value\n", encoding="utf-8"
+    )
+    provider = MypyIncrementalProvider(BuildConfig(tmp_path))
+
+    with pytest.raises(IncrementalBuildError, match="omits followed local module 'm1'"):
+        provider.build({"m0": tmp_path / "m0.py"})
+
+
 @pytest.mark.parametrize("module_count", [4, 6])
 def test_generated_benchmark_retarget_is_real_and_matches_cold_build(
     tmp_path: Path, module_count: int

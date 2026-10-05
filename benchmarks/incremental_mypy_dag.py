@@ -110,10 +110,10 @@ def _source_hashes(report: object, field: str) -> list[dict[str, str]]:
 
 
 def _equivalence_check(
-    root: Path, inventory: dict[str, Path], state: TypedBuild
+    config: BuildConfig, inventory: dict[str, Path], state: TypedBuild
 ) -> dict[str, object]:
     started = time.perf_counter()
-    fresh = MypyIncrementalProvider(BuildConfig(root)).build(inventory)
+    fresh = MypyIncrementalProvider(config).build(inventory)
     elapsed = time.perf_counter() - started
     equivalent = state.typed_snapshot() == fresh.typed_snapshot()
     if not equivalent:
@@ -183,9 +183,8 @@ def main() -> None:  # noqa: PLR0915
         with tempfile.TemporaryDirectory(prefix="mypy-dag-") as directory:
             root = Path(directory)
             inventory = make_dag(root, args.modules)
-            provider = MypyIncrementalProvider(
-                BuildConfig(root, python_version=args.python_version)
-            )
+            build_config = BuildConfig(root, python_version=args.python_version)
+            provider = MypyIncrementalProvider(build_config)
             rss_before = _rss_stats()
             started = time.perf_counter()
             state = provider.build(inventory)
@@ -223,7 +222,7 @@ def main() -> None:  # noqa: PLR0915
                     elapsed,
                     rss_before,
                     _rss_stats(),
-                    _equivalence_check(root, inventory, update),
+                    _equivalence_check(build_config, inventory, update),
                 )
             )
             changed.write_text(
@@ -250,7 +249,7 @@ def main() -> None:  # noqa: PLR0915
                     elapsed,
                     rss_before,
                     _rss_stats(),
-                    _equivalence_check(root, inventory, signature),
+                    _equivalence_check(build_config, inventory, signature),
                 )
             )
             changed_index = args.modules // 2
@@ -271,7 +270,7 @@ def main() -> None:  # noqa: PLR0915
                     elapsed,
                     rss_before,
                     _rss_stats(),
-                    _equivalence_check(root, inventory, rebuilt),
+                    _equivalence_check(build_config, inventory, rebuilt),
                 )
             )
     result = {
