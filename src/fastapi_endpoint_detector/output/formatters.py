@@ -125,6 +125,13 @@ def get_formatter(
             key: getattr(output_config, key, default) for key, default in _OUTPUT_DEFAULTS.items()
         }
 
+    for option, value in options.items():
+        if type(value) is not bool:
+            raise ValueError(
+                f"Output option '{option}' for formatter '{name}' must be a bool; "
+                f"received {type(value).__name__}"
+            )
+
     unsupported = {
         "json": {key for key, value in options.items() if value != _OUTPUT_DEFAULTS[key]},
         "yaml": {key for key, value in options.items() if value != _OUTPUT_DEFAULTS[key]},

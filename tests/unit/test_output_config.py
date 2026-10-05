@@ -68,6 +68,21 @@ def test_text_colorize_false_emits_no_terminal_ansi() -> None:
     assert re.search(r"\x1b\[[0-?]*[ -/]*[@-~]", output) is None
 
 
+@pytest.mark.parametrize("name", ["text", "markdown", "html", "json", "yaml"])
+@pytest.mark.parametrize(
+    "option", ["show_confidence", "show_dependency_chain", "colorize", "verbose"]
+)
+@pytest.mark.parametrize("value", ["false", None, [], 42])
+def test_formatter_rejects_non_boolean_mapping_values(
+    name: str, option: str, value: object
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match=rf"Output option '{option}' for formatter '{name}' must be a bool",
+    ):
+        get_formatter(name, {option: value})
+
+
 @pytest.mark.parametrize("name", ["json", "yaml"])
 @pytest.mark.parametrize(
     ("option", "value"),
