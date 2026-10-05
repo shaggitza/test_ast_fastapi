@@ -207,6 +207,201 @@ def test_uninvoked_local_helper_mutation_does_not_qualify_copy(tmp_path: Path) -
     assert EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 2)]) is None
 
 
+def test_invoked_helper_maps_argument_to_formal_mutation_target(tmp_path: Path) -> None:
+    service = tmp_path / "service.py"
+    service.write_text(
+        "def dispatch(payload):\n"
+        "    payload = {**payload}\n"
+        "    def mutate(x):\n"
+        "        x.update({'x': 1})\n"
+        "    mutate(payload)\n"
+        "    return payload\n"
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def endpoint():\n    payload = {'x': 0}\n    dispatch(payload)\n    return payload\n"
+    )
+
+    result = EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 3)])
+
+    assert result is not None
+    assert result.confidence == ConfidenceLevel.HIGH
+
+
+def test_dead_and_post_terminal_mutations_do_not_qualify_copy(tmp_path: Path) -> None:
+    service = tmp_path / "service.py"
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def endpoint():\n    payload = {'x': 0}\n    dispatch(payload)\n    return payload\n"
+    )
+    dead_blocks = (
+        "if False:\n        payload.update({'x': 1})",
+        "if 0:\n        payload.update({'x': 1})",
+        "if None:\n        payload.update({'x': 1})",
+        "while False:\n        payload.update({'x': 1})",
+        "return {'ok': True}\n    payload.update({'x': 1})",
+        "raise RuntimeError()\n    payload.update({'x': 1})",
+    )
+    for block in dead_blocks:
+        service.write_text(
+            "def dispatch(payload):\n"
+            "    payload = {**payload}\n"
+            f"    {block.replace(chr(10), chr(10) + '    ')}\n"
+            "    return {'ok': True}\n"
+        )
+        assert (
+            EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 2)]) is None
+        )
+
+
+def test_reassigned_helper_binding_is_not_used_as_mutation_proof(tmp_path: Path) -> None:
+    service = tmp_path / "service.py"
+    service.write_text(
+        "def dispatch(payload):\n"
+        "    payload = {**payload}\n"
+        "    def mutate(x):\n"
+        "        x.update({'x': 1})\n"
+        "    mutate = replacement\n"
+        "    mutate(payload)\n"
+        "    return payload\n"
+    )
+    main = tmp_path / "main.py"
+    main.write_text("def endpoint():\n    return dispatch({'x': 0})\n")
+
+    assert EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 2)]) is None
+
+
+def test_helper_mutation_after_terminal_or_formal_rebinding_is_not_proof(tmp_path: Path) -> None:
+    service = tmp_path / "service.py"
+    main = tmp_path / "main.py"
+    main.write_text("def endpoint():\n    return dispatch({'x': 0})\n")
+    helpers = (
+        "def mutate(x):\n        return\n        x.update({'x': 1})",
+        "def mutate(x):\n        x = {}\n        x.update({'x': 1})",
+    )
+    for helper in helpers:
+        service.write_text(
+            "def dispatch(payload):\n"
+            "    payload = {**payload}\n"
+            f"    {helper.replace(chr(10), chr(10) + '    ')}\n"
+            "    mutate(payload)\n"
+        )
+        assert (
+            EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 2)]) is None
+        )
+
+
+def test_unawaited_async_helper_is_not_an_executed_mutation(tmp_path: Path) -> None:
+    service = tmp_path / "service.py"
+    service.write_text(
+        "async def dispatch(payload):\n"
+        "    payload = {**payload}\n"
+        "    async def mutate(x):\n"
+        "        x.update({'x': 1})\n"
+        "    mutate(payload)\n"
+        "    return payload\n"
+    )
+    main = tmp_path / "main.py"
+    main.write_text("def endpoint():\n    return dispatch({'x': 0})\n")
+
+    assert EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 2)]) is None
+
+
+def test_awaited_async_helper_argument_mutation_qualifies_copy(tmp_path: Path) -> None:
+    service = tmp_path / "service.py"
+    service.write_text(
+        "async def dispatch(payload):\n"
+        "    payload = {**payload}\n"
+        "    async def mutate(x):\n"
+        "        x.update({'x': 1})\n"
+        "    await mutate(payload)\n"
+        "    return payload\n"
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def endpoint():\n    payload = {'x': 0}\n    dispatch(payload)\n    return payload\n"
+    )
+
+    result = EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 3)])
+
+    assert result is not None
+    assert result.confidence == ConfidenceLevel.HIGH
+
+
+def test_conditional_mutation_proof_caps_observation_confidence(tmp_path: Path) -> None:
+    service = tmp_path / "service.py"
+    service.write_text(
+        "def dispatch(payload, enabled):\n"
+        "    payload = {**payload}\n"
+        "    if enabled:\n"
+        "        payload.update({'x': 1})\n"
+        "    return payload\n"
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def endpoint():\n    payload = {'x': 0}\n    dispatch(payload, True)\n    return payload\n"
+    )
+
+    result = EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 3)])
+
+    assert result is not None
+    assert result.confidence == ConfidenceLevel.MEDIUM
+    assert result.evidence[0].status.value == "conditional"
+    assert any("conditional path" in item for item in result.evidence[0].conditions)
+
+
+def test_mutation_after_conditional_return_is_reported_as_conditional(tmp_path: Path) -> None:
+    service = tmp_path / "service.py"
+    service.write_text(
+        "def dispatch(payload, stop):\n"
+        "    payload = {**payload}\n"
+        "    if stop:\n"
+        "        return payload\n"
+        "    payload.update({'x': 1})\n"
+        "    return payload\n"
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def endpoint():\n"
+        "    payload = {'x': 0}\n"
+        "    dispatch(payload, False)\n"
+        "    return payload\n"
+    )
+
+    result = EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 3)])
+
+    assert result is not None
+    assert result.confidence == ConfidenceLevel.MEDIUM
+    assert result.evidence[0].status.value == "conditional"
+
+
+def test_scope_scan_cap_fails_closed(tmp_path: Path) -> None:
+    service = tmp_path / "service.py"
+    service.write_text(
+        "def dispatch(payload):\n"
+        "    payload = {**payload}\n" + "    pass\n" * 2200 + "    payload.update({'x': 1})\n"
+    )
+    main = tmp_path / "main.py"
+    main.write_text("def endpoint():\n    return dispatch({'x': 0})\n")
+
+    assert EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 2)]) is None
+
+
+def test_copy_subject_reassignment_kills_mutation_proof(tmp_path: Path) -> None:
+    service = tmp_path / "service.py"
+    service.write_text(
+        "def dispatch(payload):\n"
+        "    payload = {**payload}\n"
+        "    payload = {}\n"
+        "    payload.update({'x': 1})\n"
+        "    return payload\n"
+    )
+    main = tmp_path / "main.py"
+    main.write_text("def endpoint():\n    return dispatch({'x': 0})\n")
+
+    assert EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 2)]) is None
+
+
 def test_defensive_copy_distinguishes_logging_from_public_response(tmp_path: Path) -> None:
     service = _service(tmp_path)
     main = tmp_path / "main.py"
