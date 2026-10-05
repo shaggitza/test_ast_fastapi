@@ -1,0 +1,136 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from fastapi_endpoint_detector.analyzer.mypy_incremental import (
+    BuildConfig,
+    MypyIncrementalProvider,
+    TypedBuild,
+)
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+def _source_inventory(root: Path) -> dict[str, Path]:
+    return {path.stem: path for path in root.glob("*.py")}
+
+
+def _dag(root: Path, size: int = 6) -> dict[str, Path]:
+    for index in range(size):
+        next_import = f"from m{index + 1} import f{index + 1}\n" if index + 1 < size else ""
+        next_call = (
+            f"    return f{index + 1}(value)\n"
+            if index + 1 < size else "    return value\n"
+        )
+        (root / f"m{index}.py").write_text(
+            f"{next_import}\ndef f{index}(value: int) -> int:\n{next_call}", encoding="utf-8"
+        )
+    return _source_inventory(root)
+
+
+def _fresh(root: Path, inventory: dict[str, Path]) -> TypedBuild:
+    return MypyIncrementalProvider(BuildConfig(root)).build(inventory)
+
+
+def test_no_change_reuses_exact_typed_build(tmp_path: Path) -> None:
+    inventory = _dag(tmp_path)
+    provider = MypyIncrementalProvider(BuildConfig(tmp_path))
+    cold = provider.build(inventory)
+    warm = provider.build(inventory)
+    assert cold.report.mode == "cold_build"
+    assert warm.report.mode == "no_change_reuse"
+    assert warm.manager is cold.manager
+    assert warm.typed_snapshot() == cold.typed_snapshot()
+
+
+def test_same_interface_edit_is_real_typed_incremental_update(tmp_path: Path) -> None:
+    inventory = _dag(tmp_path)
+    provider = MypyIncrementalProvider(BuildConfig(tmp_path))
+    provider.build(inventory)
+    (tmp_path / "m4.py").write_text(
+        "from m5 import f5\n"
+        "def f4(value: int) -> int:\n"
+        "    adjusted = value + 7\n"
+        "    return f5(adjusted)\n",
+        encoding="utf-8",
+    )
+    updated = provider.build(inventory)
+    fresh = _fresh(tmp_path, inventory)
+    assert updated.report.mode == "incremental_update"
+    assert updated.report.updated_modules == ("m4",)
+    assert updated.manager is not fresh.manager
+    assert updated.typed_snapshot() == fresh.typed_snapshot()
+    assert updated.type_maps
+
+
+def test_signature_change_invalidates_dependents_and_matches_fresh_snapshot(tmp_path: Path) -> None:
+    inventory = _dag(tmp_path)
+    provider = MypyIncrementalProvider(BuildConfig(tmp_path))
+    provider.build(inventory)
+    (tmp_path / "m4.py").write_text(
+        "from m5 import f5\ndef f4(value: str) -> str:\n    return f5(value)\n",
+        encoding="utf-8",
+    )
+    updated = provider.build(inventory)
+    fresh = _fresh(tmp_path, inventory)
+    assert updated.report.mode == "incremental_update"
+    assert any(target.startswith("m3.") for target in updated.manager.processed_targets)
+    assert updated.typed_snapshot() == fresh.typed_snapshot()
+
+
+def test_import_retarget_and_module_deletion_fall_back_cleanly(tmp_path: Path) -> None:
+    inventory = _dag(tmp_path)
+    (tmp_path / "alternate.py").write_text(
+        "def alternate(value: int) -> int:\n    return value\n", encoding="utf-8"
+    )
+    inventory["alternate"] = tmp_path / "alternate.py"
+    provider = MypyIncrementalProvider(BuildConfig(tmp_path))
+    provider.build(inventory)
+    (tmp_path / "m0.py").write_text(
+        "from alternate import alternate\n"
+        "def f0(value: int) -> int:\n"
+        "    return alternate(value)\n",
+        encoding="utf-8",
+    )
+    retargeted = provider.build(inventory)
+    assert retargeted.report.mode == "fallback_full_rebuild"
+    assert "import topology" in (retargeted.report.reason or "")
+    assert retargeted.typed_snapshot() == _fresh(tmp_path, inventory).typed_snapshot()
+
+    del inventory["m5"]
+    (tmp_path / "m5.py").unlink()
+    deleted = provider.build(inventory)
+    assert deleted.report.mode == "fallback_full_rebuild"
+    assert "inventory identities" in (deleted.report.reason or "")
+    assert deleted.typed_snapshot() == _fresh(tmp_path, inventory).typed_snapshot()
+
+
+def test_unrelated_module_edit_does_not_disturb_unchanged_typed_modules(tmp_path: Path) -> None:
+    inventory = _dag(tmp_path)
+    provider = MypyIncrementalProvider(BuildConfig(tmp_path))
+    before = provider.build(inventory).typed_snapshot()
+    (tmp_path / "m5.py").write_text(
+        "def f5(value: int) -> int:\n    return value + 19\n", encoding="utf-8"
+    )
+    after = provider.build(inventory)
+    fresh = _fresh(tmp_path, inventory)
+    assert after.report.mode == "incremental_update"
+    assert after.typed_snapshot() == fresh.typed_snapshot()
+    assert after.typed_snapshot()["m0"] == before["m0"]
+
+
+def test_config_content_change_invalidates_provider_state(tmp_path: Path) -> None:
+    inventory = _dag(tmp_path)
+    config = tmp_path / "mypy.ini"
+    config.write_text("[mypy]\npython_version = 3.11\n", encoding="utf-8")
+    provider = MypyIncrementalProvider(BuildConfig(tmp_path, config_file=config))
+    provider.build(inventory)
+    config.write_text(
+        "[mypy]\npython_version = 3.11\nstrict_optional = True\n", encoding="utf-8"
+    )
+    rebuilt = provider.build(inventory)
+    fresh = MypyIncrementalProvider(BuildConfig(tmp_path, config_file=config)).build(inventory)
+    assert rebuilt.report.mode == "fallback_full_rebuild"
+    assert "configuration/cache fingerprint" in (rebuilt.report.reason or "")
+    assert rebuilt.typed_snapshot() == fresh.typed_snapshot()

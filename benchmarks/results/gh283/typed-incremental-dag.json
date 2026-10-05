@@ -1,0 +1,79 @@
+{
+  "cache_fingerprint_unique_count": 5,
+  "fixture": {
+    "kind": "generated_import_dag",
+    "modules": 96,
+    "one_function_per_module": true,
+    "samples": 5
+  },
+  "incremental_valid": true,
+  "mypy_version": "1.19.1",
+  "platform": "Linux-6.17.2-1-pve-x86_64-with-glibc2.39",
+  "provider": "MypyIncrementalProvider",
+  "python_version": "3.11.16",
+  "scope": "trusted generated fixture only; not a host-project corpus score",
+  "seconds": {
+    "cold_build": {
+      "mean": 3.9414040555246173,
+      "p95": 4.355679868720472,
+      "samples": [
+        3.231264607049525,
+        4.355679868720472,
+        3.7404241897165775,
+        4.090262840967625,
+        4.289388771168888
+      ]
+    },
+    "fallback_full_rebuild": {
+      "mean": 4.654527784604579,
+      "p95": 5.534123511053622,
+      "samples": [
+        4.0417991927824914,
+        3.646073801908642,
+        5.431283745449036,
+        4.619358671829104,
+        5.534123511053622
+      ]
+    },
+    "incremental_update": {
+      "mean": 0.1326211841776967,
+      "p95": 0.31559971580281854,
+      "samples": [
+        0.09715747088193893,
+        0.08437882596626878,
+        0.31559971580281854,
+        0.10455367807298899,
+        0.06141623016446829
+      ]
+    },
+    "no_change_reuse": {
+      "mean": 0.09208556730300188,
+      "p95": 0.1524662529118359,
+      "samples": [
+        0.03875749418511987,
+        0.033578189089894295,
+        0.14692657114937901,
+        0.1524662529118359,
+        0.08869932917878032
+      ]
+    },
+    "signature_update_with_dependency_invalidation": {
+      "mean": 0.18354929350316523,
+      "p95": 0.3982347291894257,
+      "samples": [
+        0.2430460937321186,
+        0.06532896775752306,
+        0.3982347291894257,
+        0.1437364206649363,
+        0.06740025617182255
+      ]
+    }
+  },
+  "update_modes": [
+    "incremental_update",
+    "incremental_update",
+    "incremental_update",
+    "incremental_update",
+    "incremental_update"
+  ]
+}
