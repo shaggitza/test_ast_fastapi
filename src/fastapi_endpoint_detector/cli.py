@@ -157,6 +157,13 @@ def analyze(
 
     config: Config = ctx.obj["config"]
 
+    try:
+        # Validate structured-format presentation constraints before constructing
+        # analyzers or starting the isolated runtime.
+        formatter = get_formatter(output_format, output_config=config.output)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
     # Validate mutually exclusive options
     has_surface_contracts = any((config.analysis.surface_contracts, config.analysis.surface_preset))
     has_effect_contracts = any((config.analysis.effect_contracts, config.analysis.effect_preset))
@@ -299,7 +306,6 @@ def analyze(
             report = mapper.analyze_diff(diff, progress_callback=update_progress)
 
         # Format and output results
-        formatter = get_formatter(output_format)
         formatted_output = formatter.format(report)
 
         if output:
@@ -692,6 +698,12 @@ def list_endpoints(
 
     config: Config = ctx.obj["config"]
 
+    try:
+        # Validate presentation options before endpoint discovery or runtime execution.
+        formatter = get_formatter(output_format, output_config=config.output)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
     # Validate mutually exclusive options
     if config.analysis.surface_contracts is not None and not secure_ast:
         console.print("[red]Error:[/red] custom surface contracts require --secure-ast")
@@ -763,7 +775,6 @@ def list_endpoints(
             extractor = FastAPIExtractor(app_path=app, app_variable=app_var)
             endpoints = extractor.extract_endpoints()
 
-        formatter = get_formatter(output_format)
         formatted_output = (
             formatter.format_inventory(inventory)
             if secure_ast

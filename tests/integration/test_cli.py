@@ -8,7 +8,10 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
 from fastapi_endpoint_detector.cli import cli
+from fastapi_endpoint_detector.executor.vm_executor import VMExecutor
+from fastapi_endpoint_detector.parser.fastapi_extractor import FastAPIExtractor
 
 
 @pytest.fixture
@@ -286,6 +289,138 @@ contracts:
 
 class TestSecureASTMode:
     """Tests for --secure-ast option."""
+
+    def test_analyze_uses_configured_formatter_output(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "@app.get('/items')\n"
+            "def items():\n"
+            "    return helper()\n"
+            "def helper():\n"
+            "    return 1\n"
+            "for route in configured_routes:\n"
+            "    app.router.include_router(route)\n",
+            encoding="utf-8",
+        )
+        diff_file = tmp_path / "change.diff"
+        diff_file.write_text(
+            "diff --git a/app.py b/app.py\n"
+            "--- a/app.py\n"
+            "+++ b/app.py\n"
+            "@@ -7,1 +7,1 @@\n"
+            "-    return 1\n"
+            "+    return 2\n",
+            encoding="utf-8",
+        )
+        config = tmp_path / "config.yaml"
+        config.write_text(
+            "output:\n"
+            "  show_confidence: false\n"
+            "  show_dependency_chain: true\n"
+            "  colorize: false\n"
+            "  verbose: true\n",
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(
+            cli,
+            [
+                "--config",
+                str(config),
+                "analyze",
+                "--app",
+                str(tmp_path),
+                "--diff",
+                str(diff_file),
+                "--secure-ast",
+                "--no-cache",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Endpoints (1)" in result.output
+        assert "HIGH Confidence" not in result.output
+        assert "Changed files: app.py" in result.output
+        assert "Inventory Status: CONDITIONAL" in result.output
+        assert "Limitation:" in result.output
+        assert "\x1b[" not in result.output
+
+    def test_list_uses_configured_formatter_and_preserves_inventory_limitations(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "@app.get('/known')\n"
+            "def known():\n"
+            "    return None\n"
+            "for route in configured_routes:\n"
+            "    app.router.include_router(route)\n",
+            encoding="utf-8",
+        )
+        config = tmp_path / "config.yaml"
+        config.write_text("output:\n  colorize: false\n", encoding="utf-8")
+
+        result = runner.invoke(
+            cli,
+            ["--config", str(config), "list", "--app", str(app_file), "--secure-ast"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Inventory status: conditional" in result.output
+        assert "Limitation:" in result.output
+        assert "GET" in result.output and "/known" in result.output
+        assert "\x1b[" not in result.output
+
+    @pytest.mark.parametrize(
+        ("command", "use_vm"),
+        [("analyze", False), ("list", False), ("analyze", True), ("list", True)],
+    )
+    def test_rejects_unsupported_output_options_before_side_effects(
+        self,
+        runner: CliRunner,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        command: str,
+        use_vm: bool,
+    ) -> None:
+        config = tmp_path / "config.yaml"
+        config.write_text("output:\n  show_confidence: false\n", encoding="utf-8")
+        app_file = tmp_path / "app.py"
+        app_file.write_text("from fastapi import FastAPI\napp = FastAPI()\n", encoding="utf-8")
+        diff_file = tmp_path / "change.diff"
+        diff_file.write_text("diff --git a/app.py b/app.py\n", encoding="utf-8")
+
+        def unexpected_side_effect(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("output options must be validated before analysis or runtime")
+
+        monkeypatch.setattr(ChangeMapper, "__init__", unexpected_side_effect)
+        monkeypatch.setattr(FastAPIExtractor, "__init__", unexpected_side_effect)
+        monkeypatch.setattr(VMExecutor, "analyze_in_vm", unexpected_side_effect)
+
+        args = [
+            "--config",
+            str(config),
+            command,
+            "--app",
+            str(app_file),
+            "--format",
+            "json",
+        ]
+        if command == "analyze":
+            args.extend(["--diff", str(diff_file)])
+        if use_vm:
+            args.append("--vm")
+
+        result = runner.invoke(cli, args)
+
+        assert result.exit_code != 0
+        assert "Output option 'show_confidence' cannot be applied to 'json'" in result.output
 
     def test_secure_ast_list_basic(self, runner: CliRunner, tmp_path: Path) -> None:
         """Test listing endpoints with --secure-ast."""
