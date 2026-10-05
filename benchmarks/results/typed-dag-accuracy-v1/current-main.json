@@ -1,0 +1,551 @@
+{
+  "case_coverage": {
+    "declared": 14,
+    "recorded": 14,
+    "supported": 11,
+    "unsupported": 3
+  },
+  "cases": [
+    {
+      "actual": [
+        {
+          "confidence": "medium",
+          "endpoint": "GET /one"
+        },
+        {
+          "confidence": "medium",
+          "endpoint": "GET /two"
+        }
+      ],
+      "analyzer_errors": [],
+      "analyzer_warnings": [],
+      "case_id": "cross_file_alias_reconvergent_leaf",
+      "change_kind": "replacement",
+      "control": false,
+      "expected": [
+        "GET /one",
+        "GET /two"
+      ],
+      "fn": 0,
+      "fp": 0,
+      "input_hashes": {
+        "baseline": "sha256:9f51568b7327b22f3a40d9fc1b7163145c25446101b0f9a07eeb05652b051ba8",
+        "config": "sha256:5538b21974bac54edd9f84ea745db33cbd08424ff763edc72803112c0eb4f17c",
+        "diff": "sha256:071f5352e6bdad58d9df20e4ccb4eefe0b9cc8da2b4a43ea0380feb446578d66",
+        "target": "sha256:63a85b4db208a5db0c35822c41b215fb2265d2502f18946aa647694b46d146d9"
+      },
+      "input_material": {
+        "baseline": "{\"app/__init__.py\": \"\", \"app/helpers.py\": \"from __future__ import annotations\\ndef leaf_alias() -> int:\\n    return 1\\n\", \"app/routes.py\": \"from fastapi import FastAPI\\nfrom .service import direct_one, right_live, lambda_live, awaited_live, unawaited_coroutine_dead\\napp = FastAPI()\\n@app.get(\\\"/one\\\")\\nasync def route_one() -> int:\\n    unawaited_coroutine_dead()\\n    return direct_one() + lambda_live() + await awaited_live()\\n@app.get(\\\"/two\\\")\\ndef route_two() -> int:\\n    return right_live()\\n\", \"app/service.py\": \"from __future__ import annotations\\nfrom .helpers import leaf_alias as leaf_alias\\ndef direct_one() -> int:\\n    return shared_live()\\ndef right_live() -> int:\\n    return shared_live()\\ndef shared_live() -> int:\\n    return leaf_alias()\\ndef lambda_live() -> int:\\n    return (lambda: leaf_alias())()\\nasync def awaited_live() -> int:\\n    return await leaf_async()\\nasync def leaf_async() -> int:\\n    return leaf_alias()\\ndef literal_false_dead() -> int:\\n    if False:\\n        return leaf_alias()\\n    return 0\\ndef post_return_dead() -> int:\\n    return 0\\n    return leaf_alias()\\ndef deferred_closure_dead() -> int:\\n    def hidden() -> int:\\n        return leaf_alias()\\n    return 0\\ndef deferred_lambda_dead() -> int:\\n    hidden = lambda: leaf_alias()\\n    return 0\\nasync def unawaited_coroutine_dead() -> int:\\n    return leaf_alias()\\ndef unrelated_dead() -> int:\\n    return 30\\n\"}",
+        "config": "{\"backend\": \"mypy\", \"cache\": false, \"secure_ast\": true, \"transitive\": true}",
+        "diff": "--- a/app/helpers.py\n+++ b/app/helpers.py\n@@ -1,3 +1,3 @@\n from __future__ import annotations\n def leaf_alias() -> int:\n-    return 1\n+    return 2\n",
+        "target": "{\"app/__init__.py\": \"\", \"app/helpers.py\": \"from __future__ import annotations\\ndef leaf_alias() -> int:\\n    return 2\\n\", \"app/routes.py\": \"from fastapi import FastAPI\\nfrom .service import direct_one, right_live, lambda_live, awaited_live, unawaited_coroutine_dead\\napp = FastAPI()\\n@app.get(\\\"/one\\\")\\nasync def route_one() -> int:\\n    unawaited_coroutine_dead()\\n    return direct_one() + lambda_live() + await awaited_live()\\n@app.get(\\\"/two\\\")\\ndef route_two() -> int:\\n    return right_live()\\n\", \"app/service.py\": \"from __future__ import annotations\\nfrom .helpers import leaf_alias as leaf_alias\\ndef direct_one() -> int:\\n    return shared_live()\\ndef right_live() -> int:\\n    return shared_live()\\ndef shared_live() -> int:\\n    return leaf_alias()\\ndef lambda_live() -> int:\\n    return (lambda: leaf_alias())()\\nasync def awaited_live() -> int:\\n    return await leaf_async()\\nasync def leaf_async() -> int:\\n    return leaf_alias()\\ndef literal_false_dead() -> int:\\n    if False:\\n        return leaf_alias()\\n    return 0\\ndef post_return_dead() -> int:\\n    return 0\\n    return leaf_alias()\\ndef deferred_closure_dead() -> int:\\n    def hidden() -> int:\\n        return leaf_alias()\\n    return 0\\ndef deferred_lambda_dead() -> int:\\n    hidden = lambda: leaf_alias()\\n    return 0\\nasync def unawaited_coroutine_dead() -> int:\\n    return leaf_alias()\\ndef unrelated_dead() -> int:\\n    return 30\\n\"}"
+      },
+      "inventory_status": "established",
+      "precision": 1.0,
+      "recall": 1.0,
+      "source_discovery": "secure_ast",
+      "status": "passed",
+      "supported": true,
+      "symbol": "leaf_alias",
+      "total_endpoints": null,
+      "tp": 2
+    },
+    {
+      "actual": [
+        {
+          "confidence": "medium",
+          "endpoint": "GET /one"
+        }
+      ],
+      "analyzer_errors": [],
+      "analyzer_warnings": [],
+      "case_id": "cross_file_direct",
+      "change_kind": "replacement",
+      "control": false,
+      "expected": [
+        "GET /one"
+      ],
+      "fn": 0,
+      "fp": 0,
+      "input_hashes": {
+        "baseline": "sha256:1fd3f44865ece3afddb500fc9ff0db9144fb6047ba5d58a2fe175c975ece5320",
+        "config": "sha256:5538b21974bac54edd9f84ea745db33cbd08424ff763edc72803112c0eb4f17c",
+        "diff": "sha256:752cc7d87d9c93b8b8efd6069fb939461b6f77b2d240ef660bb19f1e2433b1d8",
+        "target": "sha256:bb750d02e43289641ed60b98991104098f7f61e157883b2f3acf6b00dbdc7ec2"
+      },
+      "input_material": {
+        "baseline": "{\"app/__init__.py\": \"\", \"app/helpers.py\": \"from __future__ import annotations\\ndef leaf_alias() -> int:\\n    return 1\\n\", \"app/routes.py\": \"from fastapi import FastAPI\\nfrom .service import direct_one, right_live, lambda_live, awaited_live, unawaited_coroutine_dead\\napp = FastAPI()\\n@app.get(\\\"/one\\\")\\nasync def route_one() -> int:\\n    unawaited_coroutine_dead()\\n    return direct_one() + lambda_live() + await awaited_live()\\n@app.get(\\\"/two\\\")\\ndef route_two() -> int:\\n    return right_live()\\n\", \"app/service.py\": \"from __future__ import annotations\\nfrom .helpers import leaf_alias as leaf_alias\\ndef direct_one() -> int:\\n    return 1\\ndef right_live() -> int:\\n    return shared_live()\\ndef shared_live() -> int:\\n    return leaf_alias()\\ndef lambda_live() -> int:\\n    return (lambda: leaf_alias())()\\nasync def awaited_live() -> int:\\n    return await leaf_async()\\nasync def leaf_async() -> int:\\n    return leaf_alias()\\ndef literal_false_dead() -> int:\\n    if False:\\n        return leaf_alias()\\n    return 0\\ndef post_return_dead() -> int:\\n    return 0\\n    return leaf_alias()\\ndef deferred_closure_dead() -> int:\\n    def hidden() -> int:\\n        return leaf_alias()\\n    return 0\\ndef deferred_lambda_dead() -> int:\\n    hidden = lambda: leaf_alias()\\n    return 0\\nasync def unawaited_coroutine_dead() -> int:\\n    return leaf_alias()\\ndef unrelated_dead() -> int:\\n    return 30\\n\"}",
+        "config": "{\"backend\": \"mypy\", \"cache\": false, \"secure_ast\": true, \"transitive\": true}",
+        "diff": "--- a/app/service.py\n+++ b/app/service.py\n@@ -1,7 +1,7 @@\n from __future__ import annotations\n from .helpers import leaf_alias as leaf_alias\n def direct_one() -> int:\n-    return 1\n+    return 2\n def right_live() -> int:\n     return shared_live()\n def shared_live() -> int:\n",
+        "target": "{\"app/__init__.py\": \"\", \"app/helpers.py\": \"from __future__ import annotations\\ndef leaf_alias() -> int:\\n    return 1\\n\", \"app/routes.py\": \"from fastapi import FastAPI\\nfrom .service import direct_one, right_live, lambda_live, awaited_live, unawaited_coroutine_dead\\napp = FastAPI()\\n@app.get(\\\"/one\\\")\\nasync def route_one() -> int:\\n    unawaited_coroutine_dead()\\n    return direct_one() + lambda_live() + await awaited_live()\\n@app.get(\\\"/two\\\")\\ndef route_two() -> int:\\n    return right_live()\\n\", \"app/service.py\": \"from __future__ import annotations\\nfrom .helpers import leaf_alias as leaf_alias\\ndef direct_one() -> int:\\n    return 2\\ndef right_live() -> int:\\n    return shared_live()\\ndef shared_live() -> int:\\n    return leaf_alias()\\ndef lambda_live() -> int:\\n    return (lambda: leaf_alias())()\\nasync def awaited_live() -> int:\\n    return await leaf_async()\\nasync def leaf_async() -> int:\\n    return leaf_alias()\\ndef literal_false_dead() -> int:\\n    if False:\\n        return leaf_alias()\\n    return 0\\ndef post_return_dead() -> int:\\n    return 0\\n    return leaf_alias()\\ndef deferred_closure_dead() -> int:\\n    def hidden() -> int:\\n        return leaf_alias()\\n    return 0\\ndef deferred_lambda_dead() -> int:\\n    hidden = lambda: leaf_alias()\\n    return 0\\nasync def unawaited_coroutine_dead() -> int:\\n    return leaf_alias()\\ndef unrelated_dead() -> int:\\n    return 30\\n\"}"
+      },
+      "inventory_status": "established",
+      "precision": 1.0,
+      "recall": 1.0,
+      "source_discovery": "secure_ast",
+      "status": "passed",
+      "supported": true,
+      "symbol": "direct_one",
+      "total_endpoints": null,
+      "tp": 1
+    },
+    {
+      "actual": [
+        {
+          "confidence": "medium",
+          "endpoint": "GET /one"
+        },
+        {
+          "confidence": "medium",
+          "endpoint": "GET /two"
+        }
+      ],
+      "analyzer_errors": [],
+      "analyzer_warnings": [],
+      "case_id": "shared_helper",
+      "change_kind": "replacement",
+      "control": false,
+      "expected": [
+        "GET /one",
+        "GET /two"
+      ],
+      "fn": 0,
+      "fp": 0,
+      "input_hashes": {
+        "baseline": "sha256:09065e7de110efdb9496739c0d548e20596514b3fd3114ff60c3e5b18e3b6193",
+        "config": "sha256:5538b21974bac54edd9f84ea745db33cbd08424ff763edc72803112c0eb4f17c",
+        "diff": "sha256:9e2414e8c388e30393eca825a5c2925fa939bb91b3445d2e2374be14ab5cc60e",
+        "target": "sha256:306226b547a09d8e319b5607c233adf47cbfa6c2f56b42c208f0bb55333e077b"
+      },
+      "input_material": {
+        "baseline": "{\"app/__init__.py\": \"\", \"app/helpers.py\": \"from __future__ import annotations\\ndef leaf_alias() -> int:\\n    return 1\\n\", \"app/routes.py\": \"from fastapi import FastAPI\\nfrom .service import direct_one, right_live, lambda_live, awaited_live, unawaited_coroutine_dead\\napp = FastAPI()\\n@app.get(\\\"/one\\\")\\nasync def route_one() -> int:\\n    unawaited_coroutine_dead()\\n    return direct_one() + lambda_live() + await awaited_live()\\n@app.get(\\\"/two\\\")\\ndef route_two() -> int:\\n    return right_live()\\n\", \"app/service.py\": \"from __future__ import annotations\\nfrom .helpers import leaf_alias as leaf_alias\\ndef direct_one() -> int:\\n    return shared_live()\\ndef right_live() -> int:\\n    return shared_live()\\ndef shared_live() -> int:\\n    return 1\\ndef lambda_live() -> int:\\n    return (lambda: leaf_alias())()\\nasync def awaited_live() -> int:\\n    return await leaf_async()\\nasync def leaf_async() -> int:\\n    return leaf_alias()\\ndef literal_false_dead() -> int:\\n    if False:\\n        return leaf_alias()\\n    return 0\\ndef post_return_dead() -> int:\\n    return 0\\n    return leaf_alias()\\ndef deferred_closure_dead() -> int:\\n    def hidden() -> int:\\n        return leaf_alias()\\n    return 0\\ndef deferred_lambda_dead() -> int:\\n    hidden = lambda: leaf_alias()\\n    return 0\\nasync def unawaited_coroutine_dead() -> int:\\n    return leaf_alias()\\ndef unrelated_dead() -> int:\\n    return 30\\n\"}",
+        "config": "{\"backend\": \"mypy\", \"cache\": false, \"secure_ast\": true, \"transitive\": true}",
+        "diff": "--- a/app/service.py\n+++ b/app/service.py\n@@ -5,7 +5,7 @@\n def right_live() -> int:\n     return shared_live()\n def shared_live() -> int:\n-    return 1\n+    return 2\n def lambda_live() -> int:\n     return (lambda: leaf_alias())()\n async def awaited_live() -> int:\n",
+        "target": "{\"app/__init__.py\": \"\", \"app/helpers.py\": \"from __future__ import annotations\\ndef leaf_alias() -> int:\\n    return 1\\n\", \"app/routes.py\": \"from fastapi import FastAPI\\nfrom .service import direct_one, right_live, lambda_live, awaited_live, unawaited_coroutine_dead\\napp = FastAPI()\\n@app.get(\\\"/one\\\")\\nasync def route_one() -> int:\\n    unawaited_coroutine_dead()\\n    return direct_one() + lambda_live() + await awaited_live()\\n@app.get(\\\"/two\\\")\\ndef route_two() -> int:\\n    return right_live()\\n\", \"app/service.py\": \"from __future__ import annotations\\nfrom .helpers import leaf_alias as leaf_alias\\ndef direct_one() -> int:\\n    return shared_live()\\ndef right_live() -> int:\\n    return shared_live()\\ndef shared_live() -> int:\\n    return 2\\ndef lambda_live() -> int:\\n    return (lambda: leaf_alias())()\\nasync def awaited_live() -> int:\\n    return await leaf_async()\\nasync def leaf_async() -> int:\\n    return leaf_alias()\\ndef literal_false_dead() -> int:\\n    if False:\\n        return leaf_alias()\\n    return 0\\ndef post_return_dead() -> int:\\n    return 0\\n    return leaf_alias()\\ndef deferred_closure_dead() -> int:\\n    def hidden() -> int:\\n        return leaf_alias()\\n    return 0\\ndef deferred_lambda_dead() -> int:\\n    hidden = lambda: leaf_alias()\\n    return 0\\nasync def unawaited_coroutine_dead() -> int:\\n    return leaf_alias()\\ndef unrelated_dead() -> int:\\n    return 30\\n\"}"
+      },
+      "inventory_status": "established",
+      "precision": 1.0,
+      "recall": 1.0,
+      "source_discovery": "secure_ast",
+      "status": "passed",
+      "supported": true,
+      "symbol": "shared_live",
+      "total_endpoints": null,
+      "tp": 2
+    },
+    {
+      "actual": [
+        {
+          "confidence": "medium",
+          "endpoint": "GET /one"
+        }
+      ],
+      "analyzer_errors": [],
+      "analyzer_warnings": [],
+      "case_id": "live_lambda",
+      "change_kind": "replacement",
+      "control": false,
+      "expected": [
+        "GET /one"
+      ],
+      "fn": 0,
+      "fp": 0,
+      "input_hashes": {
+        "baseline": "sha256:73dee26f52ee5c1b68df44695e1e967b3b82c4866db49793e6080533eeb23211",
+        "config": "sha256:5538b21974bac54edd9f84ea745db33cbd08424ff763edc72803112c0eb4f17c",
+        "diff": "sha256:41b85f6342e8f58ce8898262ca073f407b7a2c2bd2d49cff2530331908fb123b",
+        "target": "sha256:68fa4723881e1849d336d9adc67b3af5fcc835f693b2bfa3412ea6ef37c68099"
+      },
+      "input_material": {
+        "baseline": "{\"app/__init__.py\": \"\", \"app/helpers.py\": \"from __future__ import annotations\\ndef leaf_alias() -> int:\\n    return 1\\n\", \"app/routes.py\": \"from fastapi import FastAPI\\nfrom .service import direct_one, right_live, lambda_live, awaited_live, unawaited_coroutine_dead\\napp = FastAPI()\\n@app.get(\\\"/one\\\")\\nasync def route_one() -> int:\\n    unawaited_coroutine_dead()\\n    return direct_one() + lambda_live() + await awaited_live()\\n@app.get(\\\"/two\\\")\\ndef route_two() -> int:\\n    return right_live()\\n\", \"app/service.py\": \"from __future__ import annotations\\nfrom .helpers import leaf_alias as leaf_alias\\ndef direct_one() -> int:\\n    return shared_live()\\ndef right_live() -> int:\\n    return shared_live()\\ndef shared_live() -> int:\\n    return leaf_alias()\\ndef lambda_live() -> int:\\n    return 1\\nasync def awaited_live() -> int:\\n    return await leaf_async()\\nasync def leaf_async() -> int:\\n    return leaf_alias()\\ndef literal_false_dead() -> int:\\n    if False:\\n        return leaf_alias()\\n    return 0\\ndef post_return_dead() -> int:\\n    return 0\\n    return leaf_alias()\\ndef deferred_closure_dead() -> int:\\n    def hidden() -> int:\\n        return leaf_alias()\\n    return 0\\ndef deferred_lambda_dead() -> int:\\n    hidden = lambda: leaf_alias()\\n    return 0\\nasync def unawaited_coroutine_dead() -> int:\\n    return leaf_alias()\\ndef unrelated_dead() -> int:\\n    return 30\\n\"}",
+        "config": "{\"backend\": \"mypy\", \"cache\": false, \"secure_ast\": true, \"transitive\": true}",
+        "diff": "--- a/app/service.py\n+++ b/app/service.py\n@@ -7,7 +7,7 @@\n def shared_live() -> int:\n     return leaf_alias()\n def lambda_live() -> int:\n-    return 1\n+    return 2\n async def awaited_live() -> int:\n     return await leaf_async()\n async def leaf_async() -> int:\n",
+        "target": "{\"app/__init__.py\": \"\", \"app/helpers.py\": \"from __future__ import annotations\\ndef leaf_alias() -> int:\\n    return 1\\n\", \"app/routes.py\": \"from fastapi import FastAPI\\nfrom .service import direct_one, right_live, lambda_live, awaited_live, unawaited_coroutine_dead\\napp = FastAPI()\\n@app.get(\\\"/one\\\")\\nasync def route_one() -> int:\\n    unawaited_coroutine_dead()\\n    return direct_one() + lambda_live() + await awaited_live()\\n@app.get(\\\"/two\\\")\\ndef route_two() -> int:\\n    return right_live()\\n\", \"app/service.py\": \"from __future__ import annotations\\nfrom .helpers import leaf_alias as leaf_alias\\ndef direct_one() -> int:\\n    return shared_live()\\ndef right_live() -> int:\\n    return shared_live()\\ndef shared_live() -> int:\\n    return leaf_alias()\\ndef lambda_live() -> int:\\n    return 2\\nasync def awaited_live() -> int:\\n    return await leaf_async()\\nasync def leaf_async() -> int:\\n    return leaf_alias()\\ndef literal_false_dead() -> int:\\n    if False:\\n        return leaf_alias()\\n    return 0\\ndef post_return_dead() -> int:\\n    return 0\\n    return leaf_alias()\\ndef deferred_closure_dead() -> int:\\n    def hidden() -> int:\\n        return leaf_alias()\\n    return 0\\ndef deferred_lambda_dead() -> int:\\n    hidden = lambda: leaf_alias()\\n    return 0\\nasync def unawaited_coroutine_dead() -> int:\\n    return leaf_alias()\\ndef unrelated_dead() -> int:\\n    return 30\\n\"}"
+      },
+      "inventory_status": "established",
+      "precision": 1.0,
+      "recall": 1.0,
+      "source_discovery": "secure_ast",
+      "status": "passed",
+      "supported": true,
+      "symbol": "lambda_live",
+      "total_endpoints": null,
+      "tp": 1
+    },
+    {
+      "actual": [
+        {
+          "confidence": "medium",
+          "endpoint": "GET /one"
+        }
+      ],
+      "analyzer_errors": [],
+      "analyzer_warnings": [],
+      "case_id": "live_awaited_coroutine",
+      "change_kind": "replacement",
+      "control": false,
+      "expected": [
+        "GET /one"
+      ],
+      "fn": 0,
+      "fp": 0,
+      "input_hashes": {
+        "baseline": "sha256:ae90e82dbe21fb7045a6556281d510a29349dfe19cc57d922f3814f10f5869c5",
+        "config": "sha256:5538b21974bac54edd9f84ea745db33cbd08424ff763edc72803112c0eb4f17c",
+        "diff": "sha256:95931cce8a6be4670bbfc89a77a5ebd665c4eb4108fd1266ae0181a7955ce37b",
+        "target": "sha256:a59e19078802ef27013ed1d5f4a31cb7683e4c316216b599b54097b5e8451f77"
+      },
+      "input_material": {
+        "baseline": "{\"app/__init__.py\": \"\", \"app/helpers.py\": \"from __future__ import annotations\\ndef leaf_alias() -> int:\\n    return 1\\n\", \"app/routes.py\": \"from fastapi import FastAPI\\nfrom .service import direct_one, right_live, lambda_live, awaited_live, unawaited_coroutine_dead\\napp = FastAPI()\\n@app.get(\\\"/one\\\")\\nasync def route_one() -> int:\\n    unawaited_coroutine_dead()\\n    return direct_one() + lambda_live() + await awaited_live()\\n@app.get(\\\"/two\\\")\\ndef route_two() -> int:\\n    return right_live()\\n\", \"app/service.py\": \"from __future__ import annotations\\nfrom .helpers import leaf_alias as leaf_alias\\ndef direct_one() -> int:\\n    return shared_live()\\ndef right_live() -> int:\\n    return shared_live()\\ndef shared_live() -> int:\\n    return leaf_alias()\\ndef lambda_live() -> int:\\n    return (lambda: leaf_alias())()\\nasync def awaited_live() -> int:\\n    return 1\\nasync def leaf_async() -> int:\\n    return leaf_alias()\\ndef literal_false_dead() -> int:\\n    if False:\\n        return leaf_alias()\\n    return 0\\ndef post_return_dead() -> int:\\n    return 0\\n    return leaf_alias()\\ndef deferred_closure_dead() -> int:\\n    def hidden() -> int:\\n        return leaf_alias()\\n    return 0\\ndef deferred_lambda_dead() -> int:\\n    hidden = lambda: leaf_alias()\\n    return 0\\nasync def unawaited_coroutine_dead() -> int:\\n    return leaf_alias()\\ndef unrelated_dead() -> int:\\n    return 30\\n\"}",
+        "config": "{\"backend\": \"mypy\", \"cache\": false, \"secure_ast\": true, \"transitive\": true}",
+        "diff": "--- a/app/service.py\n+++ b/app/service.py\n@@ -9,7 +9,7 @@\n def lambda_live() -> int:\n     return (lambda: leaf_alias())()\n async def awaited_live() -> int:\n-    return 1\n+    return 2\n async def leaf_async() -> int:\n     return leaf_alias()\n def literal_false_dead() -> int:\n",
+        "target": "{\"app/__init__.py\": \"\", \"app/helpers.py\": \"from __future__ import annotations\\ndef leaf_alias() -> int:\\n    return 1\\n\", \"app/routes.py\": \"from fastapi import FastAPI\\nfrom .service import direct_one, right_live, lambda_live, awaited_live, unawaited_coroutine_dead\\napp = FastAPI()\\n@app.get(\\\"/one\\\")\\nasync def route_one() -> int:\\n    unawaited_coroutine_dead()\\n    return direct_one() + lambda_live() + await awaited_live()\\n@app.get(\\\"/two\\\")\\ndef route_two() -> int:\\n    return right_live()\\n\", \"app/service.py\": \"from __future__ import annotations\\nfrom .helpers import leaf_alias as leaf_alias\\ndef direct_one() -> int:\\n    return shared_live()\\ndef right_live() -> int:\\n    return shared_live()\\ndef shared_live() -> int:\\n    return leaf_alias()\\ndef lambda_live() -> int:\\n    return (lambda: leaf_alias())()\\nasync def awaited_live() -> int:\\n    return 2\\nasync def leaf_async() -> int:\\n    return leaf_alias()\\ndef literal_false_dead() -> int:\\n    if False:\\n        return leaf_alias()\\n    return 0\\ndef post_return_dead() -> int:\\n    return 0\\n    return leaf_alias()\\ndef deferred_closure_dead() -> int:\\n    def hidden() -> int:\\n        return leaf_alias()\\n    return 0\\ndef deferred_lambda_dead() -> int:\\n    hidden = lambda: leaf_alias()\\n    return 0\\nasync def unawaited_coroutine_dead() -> int:\\n    return leaf_alias()\\ndef unrelated_dead() -> int:\\n    return 30\\n\"}"
+      },
+      "inventory_status": "established",
+      "precision": 1.0,
+      "recall": 1.0,
+      "source_discovery": "secure_ast",
+      "status": "passed",
+      "supported": true,
+      "symbol": "awaited_live",
+      "total_endpoints": null,
+      "tp": 1
+    },
+    {
+      "actual": [],
+      "analyzer_errors": [],
+      "analyzer_warnings": [],
+      "case_id": "literal_false_control",
+      "change_kind": "replacement",
+      "control": true,
+      "expected": [],
+      "fn": 0,
+      "fp": 0,
+      "input_hashes": {
+        "baseline": "sha256:ccdcab093dfcf94b764ccb5d7cf58a598eabdbd120e2fe1d55fe5e1215487dd3",
+        "config": "sha256:5538b21974bac54edd9f84ea745db33cbd08424ff763edc72803112c0eb4f17c",
+        "diff": "sha256:c6e44ef68ebaf641892330e26ac2a085286e9defffc5c11132330884425fd9b9",
+        "target": "sha256:35918d4bfc05979316a7c915a567d42cfac8887fe3ea3ffc4786216dec6c6425"
+      },
+      "input_material": {
+        "baseline": "{\"app/__init__.py\": \"\", \"app/helpers.py\": \"from __future__ import annotations\\ndef leaf_alias() -> int:\\n    return 1\\n\", \"app/routes.py\": \"from fastapi import FastAPI\\nfrom .service import direct_one, right_live, lambda_live, awaited_live, unawaited_coroutine_dead\\napp = FastAPI()\\n@app.get(\\\"/one\\\")\\nasync def route_one() -> int:\\n    unawaited_coroutine_dead()\\n    return direct_one() + lambda_live() + await awaited_live()\\n@app.get(\\\"/two\\\")\\ndef route_two() -> int:\\n    return right_live()\\n\", \"app/service.py\": \"from __future__ import annotations\\nfrom .helpers import leaf_alias as leaf_alias\\ndef direct_one() -> int:\\n    return shared_live()\\ndef right_live() -> int:\\n    return shared_live()\\ndef shared_live() -> int:\\n    return leaf_alias()\\ndef lambda_live() -> int:\\n    return (lambda: leaf_alias())()\\nasync def awaited_live() -> int:\\n    return await leaf_async()\\nasync def leaf_async() -> int:\\n    return leaf_alias()\\ndef literal_false_dead() -> int:\\n    if False:\\n        return 1\\n    return 0\\ndef post_return_dead() -> int:\\n    return 0\\n    return leaf_alias()\\ndef deferred_closure_dead() -> int:\\n    def hidden() -> int:\\n        return leaf_alias()\\n    return 0\\ndef deferred_lambda_dead() -> int:\\n    hidden = lambda: leaf_alias()\\n    return 0\\nasync def unawaited_coroutine_dead() -> int:\\n    return leaf_alias()\\ndef unrelated_dead() -> int:\\n    return 30\\n\"}",
+        "config": "{\"backend\": \"mypy\", \"cache\": false, \"secure_ast\": true, \"transitive\": true}",
+        "diff": "--- a/app/service.py\n+++ b/app/service.py\n@@ -14,7 +14,7 @@\n     return leaf_alias()\n def literal_false_dead() -> int:\n     if False:\n-        return 1\n+        return 2\n     return 0\n def post_return_dead() -> int:\n     return 0\n",
+        "target": "{\"app/__init__.py\": \"\", \"app/helpers.py\": \"from __future__ import annotations\\ndef leaf_alias() -> int:\\n    return 1\\n\", \"app/routes.py\": \"from fastapi import FastAPI\\nfrom .service import direct_one, right_live, lambda_live, awaited_live, unawaited_coroutine_dead\\napp = FastAPI()\\n@app.get(\\\"/one\\\")\\nasync def route_one() -> int:\\n    unawaited_coroutine_dead()\\n    return direct_one() + lambda_live() + await awaited_live()\\n@app.get(\\\"/two\\\")\\ndef route_two() -> int:\\n    return right_live()\\n\", \"app/service.py\": \"from __future__ import annotations\\nfrom .helpers import leaf_alias as leaf_alias\\ndef direct_one() -> int:\\n    return shared_live()\\ndef right_live() -> int:\\n    return shared_live()\\ndef shared_live() -> int:\\n    return leaf_alias()\\ndef lambda_live() -> int:\\n    return (lambda: leaf_alias())()\\nasync def awaited_live() -> int:\\n    return await leaf_async()\\nasync def leaf_async() -> int:\\n    return leaf_alias()\\ndef literal_false_dead() -> int:\\n    if False:\\n        return 2\\n    return 0\\ndef post_return_dead() -> int:\\n    return 0\\n    return leaf_alias()\\ndef deferred_closure_dead() -> int:\\n    def hidden() -> int:\\n        return leaf_alias()\\n    return 0\\ndef deferred_lambda_dead() -> int:\\n    hidden = lambda: leaf_alias()\\n    return 0\\nasync def unawaited_coroutine_dead() -> int:\\n    return leaf_alias()\\ndef unrelated_dead() -> int:\\n    return 30\\n\"}"
+      },
+      "inventory_status": "established",
+      "precision": 1.0,
+      "recall": 1.0,
+      "source_discovery": "secure_ast",
+      "status": "passed",
+      "supported": true,
+      "symbol": "literal_false_dead",
+      "total_endpoints": null,
+      "tp": 0
+    },
+    {
+      "actual": [],
+      "analyzer_errors": [],
+      "analyzer_warnings": [],
+      "case_id": "post_return_control",
+      "change_kind": "replacement",
+      "control": true,
+      "expected": [],
+      "fn": 0,
+      "fp": 0,
+      "input_hashes": {
+        "baseline": "sha256:5f2d87e09083a3fb3e7915127769b78852dca4768b36d00f06ddb4867dffa385",
+        "config": "sha256:5538b21974bac54edd9f84ea745db33cbd08424ff763edc72803112c0eb4f17c",
+        "diff": "sha256:9ad7e65790e6ccff98eae7e9b6603cb02b3aa1815fb0e22b4f15f1a272df67c9",
+        "target": "sha256:b6969d3605bd642149d62356d707338b75d9ed94d4144e65b774c9b9fca24c93"
+      },
+      "input_material": {
+        "baseline": "{\"app/__init__.py\": \"\", \"app/helpers.py\": \"from __future__ import annotations\\ndef leaf_alias() -> int:\\n    return 1\\n\", \"app/routes.py\": \"from fastapi import FastAPI\\nfrom .service import direct_one, right_live, lambda_live, awaited_live, unawaited_coroutine_dead\\napp = FastAPI()\\n@app.get(\\\"/one\\\")\\nasync def route_one() -> int:\\n    unawaited_coroutine_dead()\\n    return direct_one() + lambda_live() + await awaited_live()\\n@app.get(\\\"/two\\\")\\ndef route_two() -> int:\\n    return right_live()\\n\", \"app/service.py\": \"from __future__ import annotations\\nfrom .helpers import leaf_alias as leaf_alias\\ndef direct_one() -> int:\\n    return shared_live()\\ndef right_live() -> int:\\n    return shared_live()\\ndef shared_live() -> int:\\n    return leaf_alias()\\ndef lambda_live() -> int:\\n    return (lambda: leaf_alias())()\\nasync def awaited_live() -> int:\\n    return await leaf_async()\\nasync def leaf_async() -> int:\\n    return leaf_alias()\\ndef literal_false_dead() -> int:\\n    if False:\\n        return leaf_alias()\\n    return 0\\ndef post_return_dead() -> int:\\n    return 0\\n    return 1\\ndef deferred_closure_dead() -> int:\\n    def hidden() -> int:\\n        return leaf_alias()\\n    return 0\\ndef deferred_lambda_dead() -> int:\\n    hidden = lambda: leaf_alias()\\n    return 0\\nasync def unawaited_coroutine_dead() -> int:\\n    return leaf_alias()\\ndef unrelated_dead() -> int:\\n    return 30\\n\"}",
+        "config": "{\"backend\": \"mypy\", \"cache\": false, \"secure_ast\": true, \"transitive\": true}",
+        "diff": "--- a/app/service.py\n+++ b/app/service.py\n@@ -18,7 +18,7 @@\n     return 0\n def post_return_dead() -> int:\n     return 0\n-    return 1\n+    return 2\n def deferred_closure_dead() -> int:\n     def hidden() -> int:\n         return leaf_alias()\n",
+        "target": "{\"app/__init__.py\": \"\", \"app/helpers.py\": \"from __future__ import annotations\\ndef leaf_alias() -> int:\\n    return 1\\n\", \"app/routes.py\": \"from fastapi import FastAPI\\nfrom .service import direct_one, right_live, lambda_live, awaited_live, unawaited_coroutine_dead\\napp = FastAPI()\\n@app.get(\\\"/one\\\")\\nasync def route_one() -> int:\\n    unawaited_coroutine_dead()\\n    return direct_one() + lambda_live() + await awaited_live()\\n@app.get(\\\"/two\\\")\\ndef route_two() -> int:\\n    return right_live()\\n\", \"app/service.py\": \"from __future__ import annotations\\nfrom .helpers import leaf_alias as leaf_alias\\ndef direct_one() -> int:\\n    return shared_live()\\ndef right_live() -> int:\\n    return shared_live()\\ndef shared_live() -> int:\\n    return leaf_alias()\\ndef lambda_live() -> int:\\n    return (lambda: leaf_alias())()\\nasync def awaited_live() -> int:\\n    return await leaf_async()\\nasync def leaf_async() -> int:\\n    return leaf_alias()\\ndef literal_false_dead() -> int:\\n    if False:\\n        return leaf_alias()\\n    return 0\\ndef post_return_dead() -> int:\\n    return 0\\n    return 2\\ndef deferred_closure_dead() -> int:\\n    def hidden() -> int:\\n        return leaf_alias()\\n    return 0\\ndef deferred_lambda_dead() -> int:\\n    hidden = lambda: leaf_alias()\\n    return 0\\nasync def unawaited_coroutine_dead() -> int:\\n    return leaf_alias()\\ndef unrelated_dead() -> int:\\n    return 30\\n\"}"
+      },
+      "inventory_status": "established",
+      "precision": 1.0,
+      "recall": 1.0,
+      "source_discovery": "secure_ast",
+      "status": "passed",
+      "supported": true,
+      "symbol": "post_return_dead",
+      "total_endpoints": null,
+      "tp": 0
+    },
+    {
+      "actual": [],
+      "analyzer_errors": [],
+      "analyzer_warnings": [],
+      "case_id": "deferred_closure_control",
+      "change_kind": "replacement",
+      "control": true,
+      "expected": [],
+      "fn": 0,
+      "fp": 0,
+      "input_hashes": {
+        "baseline": "sha256:2def1ef77f05dcafb4f17165ba999f2dc8943f62ca3e7163d4fa8991d4c667fd",
+        "config": "sha256:5538b21974bac54edd9f84ea745db33cbd08424ff763edc72803112c0eb4f17c",
+        "diff": "sha256:40d3239e8b1b72e5c8dae213ca3e29af07b0573c4993401707376d5b08009c5e",
+        "target": "sha256:3d03b9f50f85ae6b60742c33a94f35dfda9aad5fb1f7a128f1fe04200b766300"
+      },
+      "input_material": {
+        "baseline": "{\"app/__init__.py\": \"\", \"app/helpers.py\": \"from __future__ import annotations\\ndef leaf_alias() -> int:\\n    return 1\\n\", \"app/routes.py\": \"from fastapi import FastAPI\\nfrom .service import direct_one, right_live, lambda_live, awaited_live, unawaited_coroutine_dead\\napp = FastAPI()\\n@app.get(\\\"/one\\\")\\nasync def route_one() -> int:\\n    unawaited_coroutine_dead()\\n    return direct_one() + lambda_live() + await awaited_live()\\n@app.get(\\\"/two\\\")\\ndef route_two() -> int:\\n    return right_live()\\n\", \"app/service.py\": \"from __future__ import annotations\\nfrom .helpers import leaf_alias as leaf_alias\\ndef direct_one() -> int:\\n    return shared_live()\\ndef right_live() -> int:\\n    return shared_live()\\ndef shared_live() -> int:\\n    return leaf_alias()\\ndef lambda_live() -> int:\\n    return (lambda: leaf_alias())()\\nasync def awaited_live() -> int:\\n    return await leaf_async()\\nasync def leaf_async() -> int:\\n    return leaf_alias()\\ndef literal_false_dead() -> int:\\n    if False:\\n        return leaf_alias()\\n    return 0\\ndef post_return_dead() -> int:\\n    return 0\\n    return leaf_alias()\\ndef deferred_closure_dead() -> int:\\n    def hidden() -> int:\\n        return 1\\n    return 0\\ndef deferred_lambda_dead() -> int:\\n    hidden = lambda: leaf_alias()\\n    return 0\\nasync def unawaited_coroutine_dead() -> int:\\n    return leaf_alias()\\ndef unrelated_dead() -> int:\\n    return 30\\n\"}",
+        "config": "{\"backend\": \"mypy\", \"cache\": false, \"secure_ast\": true, \"transitive\": true}",
+        "diff": "--- a/app/service.py\n+++ b/app/service.py\n@@ -21,7 +21,7 @@\n     return leaf_alias()\n def deferred_closure_dead() -> int:\n     def hidden() -> int:\n-        return 1\n+        return 2\n     return 0\n def deferred_lambda_dead() -> int:\n     hidden = lambda: leaf_alias()\n",
+        "target": "{\"app/__init__.py\": \"\", \"app/helpers.py\": \"from __future__ import annotations\\ndef leaf_alias() -> int:\\n    return 1\\n\", \"app/routes.py\": \"from fastapi import FastAPI\\nfrom .service import direct_one, right_live, lambda_live, awaited_live, unawaited_coroutine_dead\\napp = FastAPI()\\n@app.get(\\\"/one\\\")\\nasync def route_one() -> int:\\n    unawaited_coroutine_dead()\\n    return direct_one() + lambda_live() + await awaited_live()\\n@app.get(\\\"/two\\\")\\ndef route_two() -> int:\\n    return right_live()\\n\", \"app/service.py\": \"from __future__ import annotations\\nfrom .helpers import leaf_alias as leaf_alias\\ndef direct_one() -> int:\\n    return shared_live()\\ndef right_live() -> int:\\n    return shared_live()\\ndef shared_live() -> int:\\n    return leaf_alias()\\ndef lambda_live() -> int:\\n    return (lambda: leaf_alias())()\\nasync def awaited_live() -> int:\\n    return await leaf_async()\\nasync def leaf_async() -> int:\\n    return leaf_alias()\\ndef literal_false_dead() -> int:\\n    if False:\\n        return leaf_alias()\\n    return 0\\ndef post_return_dead() -> int:\\n    return 0\\n    return leaf_alias()\\ndef deferred_closure_dead() -> int:\\n    def hidden() -> int:\\n        return 2\\n    return 0\\ndef deferred_lambda_dead() -> int:\\n    hidden = lambda: leaf_alias()\\n    return 0\\nasync def unawaited_coroutine_dead() -> int:\\n    return leaf_alias()\\ndef unrelated_dead() -> int:\\n    return 30\\n\"}"
+      },
+      "inventory_status": "established",
+      "precision": 1.0,
+      "recall": 1.0,
+      "source_discovery": "secure_ast",
+      "status": "passed",
+      "supported": true,
+      "symbol": "deferred_closure_dead",
+      "total_endpoints": null,
+      "tp": 0
+    },
+    {
+      "actual": [],
+      "analyzer_errors": [],
+      "analyzer_warnings": [],
+      "case_id": "deferred_lambda_control",
+      "change_kind": "replacement",
+      "control": true,
+      "expected": [],
+      "fn": 0,
+      "fp": 0,
+      "input_hashes": {
+        "baseline": "sha256:e0d6eb498adccd35ed773a6d8ebc004f0ecbbf97bec11a1f9c977a79e9d8b4f1",
+        "config": "sha256:5538b21974bac54edd9f84ea745db33cbd08424ff763edc72803112c0eb4f17c",
+        "diff": "sha256:03f5996ff37e05982865b615700ddfc6e6c81aa90e86935861831bc5f9bfe26e",
+        "target": "sha256:d26eea455f066591905e39a14aae1782a415460a3eded59bda79b04588ca5997"
+      },
+      "input_material": {
+        "baseline": "{\"app/__init__.py\": \"\", \"app/helpers.py\": \"from __future__ import annotations\\ndef leaf_alias() -> int:\\n    return 1\\n\", \"app/routes.py\": \"from fastapi import FastAPI\\nfrom .service import direct_one, right_live, lambda_live, awaited_live, unawaited_coroutine_dead\\napp = FastAPI()\\n@app.get(\\\"/one\\\")\\nasync def route_one() -> int:\\n    unawaited_coroutine_dead()\\n    return direct_one() + lambda_live() + await awaited_live()\\n@app.get(\\\"/two\\\")\\ndef route_two() -> int:\\n    return right_live()\\n\", \"app/service.py\": \"from __future__ import annotations\\nfrom .helpers import leaf_alias as leaf_alias\\ndef direct_one() -> int:\\n    return shared_live()\\ndef right_live() -> int:\\n    return shared_live()\\ndef shared_live() -> int:\\n    return leaf_alias()\\ndef lambda_live() -> int:\\n    return (lambda: leaf_alias())()\\nasync def awaited_live() -> int:\\n    return await leaf_async()\\nasync def leaf_async() -> int:\\n    return leaf_alias()\\ndef literal_false_dead() -> int:\\n    if False:\\n        return leaf_alias()\\n    return 0\\ndef post_return_dead() -> int:\\n    return 0\\n    return leaf_alias()\\ndef deferred_closure_dead() -> int:\\n    def hidden() -> int:\\n        return leaf_alias()\\n    return 0\\ndef deferred_lambda_dead() -> int:\\n    hidden = lambda: return 1\\n    return 0\\nasync def unawaited_coroutine_dead() -> int:\\n    return leaf_alias()\\ndef unrelated_dead() -> int:\\n    return 30\\n\"}",
+        "config": "{\"backend\": \"mypy\", \"cache\": false, \"secure_ast\": true, \"transitive\": true}",
+        "diff": "--- a/app/service.py\n+++ b/app/service.py\n@@ -24,7 +24,7 @@\n         return leaf_alias()\n     return 0\n def deferred_lambda_dead() -> int:\n-    hidden = lambda: return 1\n+    hidden = lambda: leaf_alias() + 1\n     return 0\n async def unawaited_coroutine_dead() -> int:\n     return leaf_alias()\n",
+        "target": "{\"app/__init__.py\": \"\", \"app/helpers.py\": \"from __future__ import annotations\\ndef leaf_alias() -> int:\\n    return 1\\n\", \"app/routes.py\": \"from fastapi import FastAPI\\nfrom .service import direct_one, right_live, lambda_live, awaited_live, unawaited_coroutine_dead\\napp = FastAPI()\\n@app.get(\\\"/one\\\")\\nasync def route_one() -> int:\\n    unawaited_coroutine_dead()\\n    return direct_one() + lambda_live() + await awaited_live()\\n@app.get(\\\"/two\\\")\\ndef route_two() -> int:\\n    return right_live()\\n\", \"app/service.py\": \"from __future__ import annotations\\nfrom .helpers import leaf_alias as leaf_alias\\ndef direct_one() -> int:\\n    return shared_live()\\ndef right_live() -> int:\\n    return shared_live()\\ndef shared_live() -> int:\\n    return leaf_alias()\\ndef lambda_live() -> int:\\n    return (lambda: leaf_alias())()\\nasync def awaited_live() -> int:\\n    return await leaf_async()\\nasync def leaf_async() -> int:\\n    return leaf_alias()\\ndef literal_false_dead() -> int:\\n    if False:\\n        return leaf_alias()\\n    return 0\\ndef post_return_dead() -> int:\\n    return 0\\n    return leaf_alias()\\ndef deferred_closure_dead() -> int:\\n    def hidden() -> int:\\n        return leaf_alias()\\n    return 0\\ndef deferred_lambda_dead() -> int:\\n    hidden = lambda: leaf_alias() + 1\\n    return 0\\nasync def unawaited_coroutine_dead() -> int:\\n    return leaf_alias()\\ndef unrelated_dead() -> int:\\n    return 30\\n\"}"
+      },
+      "inventory_status": "established",
+      "precision": 1.0,
+      "recall": 1.0,
+      "source_discovery": "secure_ast",
+      "status": "passed",
+      "supported": true,
+      "symbol": "deferred_lambda_dead",
+      "total_endpoints": null,
+      "tp": 0
+    },
+    {
+      "actual": [
+        {
+          "confidence": "medium",
+          "endpoint": "GET /one"
+        }
+      ],
+      "analyzer_errors": [],
+      "analyzer_warnings": [],
+      "case_id": "unawaited_coroutine_control",
+      "change_kind": "replacement",
+      "control": true,
+      "expected": [],
+      "fn": 0,
+      "fp": 1,
+      "input_hashes": {
+        "baseline": "sha256:5d5c7b95b1b3a2324ed271b81251ff284ca5069115babb9380e07a07afeeadfb",
+        "config": "sha256:5538b21974bac54edd9f84ea745db33cbd08424ff763edc72803112c0eb4f17c",
+        "diff": "sha256:0007a4b63951570bb807e5310debfffe95bb8fb3cd1d2488915e8b768962add1",
+        "target": "sha256:b1b11dab6cfbb4d2bbb0432df98693b55a9a11566ab43229ad95eb16c1b3fd4c"
+      },
+      "input_material": {
+        "baseline": "{\"app/__init__.py\": \"\", \"app/helpers.py\": \"from __future__ import annotations\\ndef leaf_alias() -> int:\\n    return 1\\n\", \"app/routes.py\": \"from fastapi import FastAPI\\nfrom .service import direct_one, right_live, lambda_live, awaited_live, unawaited_coroutine_dead\\napp = FastAPI()\\n@app.get(\\\"/one\\\")\\nasync def route_one() -> int:\\n    unawaited_coroutine_dead()\\n    return direct_one() + lambda_live() + await awaited_live()\\n@app.get(\\\"/two\\\")\\ndef route_two() -> int:\\n    return right_live()\\n\", \"app/service.py\": \"from __future__ import annotations\\nfrom .helpers import leaf_alias as leaf_alias\\ndef direct_one() -> int:\\n    return shared_live()\\ndef right_live() -> int:\\n    return shared_live()\\ndef shared_live() -> int:\\n    return leaf_alias()\\ndef lambda_live() -> int:\\n    return (lambda: leaf_alias())()\\nasync def awaited_live() -> int:\\n    return await leaf_async()\\nasync def leaf_async() -> int:\\n    return leaf_alias()\\ndef literal_false_dead() -> int:\\n    if False:\\n        return leaf_alias()\\n    return 0\\ndef post_return_dead() -> int:\\n    return 0\\n    return leaf_alias()\\ndef deferred_closure_dead() -> int:\\n    def hidden() -> int:\\n        return leaf_alias()\\n    return 0\\ndef deferred_lambda_dead() -> int:\\n    hidden = lambda: leaf_alias()\\n    return 0\\nasync def unawaited_coroutine_dead() -> int:\\n    return 1\\ndef unrelated_dead() -> int:\\n    return 30\\n\"}",
+        "config": "{\"backend\": \"mypy\", \"cache\": false, \"secure_ast\": true, \"transitive\": true}",
+        "diff": "--- a/app/service.py\n+++ b/app/service.py\n@@ -27,6 +27,6 @@\n     hidden = lambda: leaf_alias()\n     return 0\n async def unawaited_coroutine_dead() -> int:\n-    return 1\n+    return 2\n def unrelated_dead() -> int:\n     return 30\n",
+        "target": "{\"app/__init__.py\": \"\", \"app/helpers.py\": \"from __future__ import annotations\\ndef leaf_alias() -> int:\\n    return 1\\n\", \"app/routes.py\": \"from fastapi import FastAPI\\nfrom .service import direct_one, right_live, lambda_live, awaited_live, unawaited_coroutine_dead\\napp = FastAPI()\\n@app.get(\\\"/one\\\")\\nasync def route_one() -> int:\\n    unawaited_coroutine_dead()\\n    return direct_one() + lambda_live() + await awaited_live()\\n@app.get(\\\"/two\\\")\\ndef route_two() -> int:\\n    return right_live()\\n\", \"app/service.py\": \"from __future__ import annotations\\nfrom .helpers import leaf_alias as leaf_alias\\ndef direct_one() -> int:\\n    return shared_live()\\ndef right_live() -> int:\\n    return shared_live()\\ndef shared_live() -> int:\\n    return leaf_alias()\\ndef lambda_live() -> int:\\n    return (lambda: leaf_alias())()\\nasync def awaited_live() -> int:\\n    return await leaf_async()\\nasync def leaf_async() -> int:\\n    return leaf_alias()\\ndef literal_false_dead() -> int:\\n    if False:\\n        return leaf_alias()\\n    return 0\\ndef post_return_dead() -> int:\\n    return 0\\n    return leaf_alias()\\ndef deferred_closure_dead() -> int:\\n    def hidden() -> int:\\n        return leaf_alias()\\n    return 0\\ndef deferred_lambda_dead() -> int:\\n    hidden = lambda: leaf_alias()\\n    return 0\\nasync def unawaited_coroutine_dead() -> int:\\n    return 2\\ndef unrelated_dead() -> int:\\n    return 30\\n\"}"
+      },
+      "inventory_status": "established",
+      "precision": 0.0,
+      "recall": 1.0,
+      "source_discovery": "secure_ast",
+      "status": "failed",
+      "supported": true,
+      "symbol": "unawaited_coroutine_dead",
+      "total_endpoints": null,
+      "tp": 0
+    },
+    {
+      "actual": [],
+      "analyzer_errors": [],
+      "analyzer_warnings": [],
+      "case_id": "unrelated_disconnected_control",
+      "change_kind": "replacement",
+      "control": true,
+      "expected": [],
+      "fn": 0,
+      "fp": 0,
+      "input_hashes": {
+        "baseline": "sha256:8b844a1869ad79e7854c1457cf572390c7c563c9d467c705daefbb682a5354a3",
+        "config": "sha256:5538b21974bac54edd9f84ea745db33cbd08424ff763edc72803112c0eb4f17c",
+        "diff": "sha256:e08324018a1facfbc19b99dddfed8cd6a0e4055df768f198cf81a871ad51daff",
+        "target": "sha256:c76f04512b212b033955aa7c8c77db16c4cb747046aa9219c336c447c151cb09"
+      },
+      "input_material": {
+        "baseline": "{\"app/__init__.py\": \"\", \"app/helpers.py\": \"from __future__ import annotations\\ndef leaf_alias() -> int:\\n    return 1\\n\", \"app/routes.py\": \"from fastapi import FastAPI\\nfrom .service import direct_one, right_live, lambda_live, awaited_live, unawaited_coroutine_dead\\napp = FastAPI()\\n@app.get(\\\"/one\\\")\\nasync def route_one() -> int:\\n    unawaited_coroutine_dead()\\n    return direct_one() + lambda_live() + await awaited_live()\\n@app.get(\\\"/two\\\")\\ndef route_two() -> int:\\n    return right_live()\\n\", \"app/service.py\": \"from __future__ import annotations\\nfrom .helpers import leaf_alias as leaf_alias\\ndef direct_one() -> int:\\n    return shared_live()\\ndef right_live() -> int:\\n    return shared_live()\\ndef shared_live() -> int:\\n    return leaf_alias()\\ndef lambda_live() -> int:\\n    return (lambda: leaf_alias())()\\nasync def awaited_live() -> int:\\n    return await leaf_async()\\nasync def leaf_async() -> int:\\n    return leaf_alias()\\ndef literal_false_dead() -> int:\\n    if False:\\n        return leaf_alias()\\n    return 0\\ndef post_return_dead() -> int:\\n    return 0\\n    return leaf_alias()\\ndef deferred_closure_dead() -> int:\\n    def hidden() -> int:\\n        return leaf_alias()\\n    return 0\\ndef deferred_lambda_dead() -> int:\\n    hidden = lambda: leaf_alias()\\n    return 0\\nasync def unawaited_coroutine_dead() -> int:\\n    return leaf_alias()\\ndef unrelated_dead() -> int:\\n    return 1\\n\"}",
+        "config": "{\"backend\": \"mypy\", \"cache\": false, \"secure_ast\": true, \"transitive\": true}",
+        "diff": "--- a/app/service.py\n+++ b/app/service.py\n@@ -29,4 +29,4 @@\n async def unawaited_coroutine_dead() -> int:\n     return leaf_alias()\n def unrelated_dead() -> int:\n-    return 1\n+    return 2\n",
+        "target": "{\"app/__init__.py\": \"\", \"app/helpers.py\": \"from __future__ import annotations\\ndef leaf_alias() -> int:\\n    return 1\\n\", \"app/routes.py\": \"from fastapi import FastAPI\\nfrom .service import direct_one, right_live, lambda_live, awaited_live, unawaited_coroutine_dead\\napp = FastAPI()\\n@app.get(\\\"/one\\\")\\nasync def route_one() -> int:\\n    unawaited_coroutine_dead()\\n    return direct_one() + lambda_live() + await awaited_live()\\n@app.get(\\\"/two\\\")\\ndef route_two() -> int:\\n    return right_live()\\n\", \"app/service.py\": \"from __future__ import annotations\\nfrom .helpers import leaf_alias as leaf_alias\\ndef direct_one() -> int:\\n    return shared_live()\\ndef right_live() -> int:\\n    return shared_live()\\ndef shared_live() -> int:\\n    return leaf_alias()\\ndef lambda_live() -> int:\\n    return (lambda: leaf_alias())()\\nasync def awaited_live() -> int:\\n    return await leaf_async()\\nasync def leaf_async() -> int:\\n    return leaf_alias()\\ndef literal_false_dead() -> int:\\n    if False:\\n        return leaf_alias()\\n    return 0\\ndef post_return_dead() -> int:\\n    return 0\\n    return leaf_alias()\\ndef deferred_closure_dead() -> int:\\n    def hidden() -> int:\\n        return leaf_alias()\\n    return 0\\ndef deferred_lambda_dead() -> int:\\n    hidden = lambda: leaf_alias()\\n    return 0\\nasync def unawaited_coroutine_dead() -> int:\\n    return leaf_alias()\\ndef unrelated_dead() -> int:\\n    return 2\\n\"}"
+      },
+      "inventory_status": "established",
+      "precision": 1.0,
+      "recall": 1.0,
+      "source_discovery": "secure_ast",
+      "status": "passed",
+      "supported": true,
+      "symbol": "unrelated_dead",
+      "total_endpoints": null,
+      "tp": 0
+    },
+    {
+      "actual": [],
+      "case_id": "addition_unsupported",
+      "change_kind": "addition",
+      "control": false,
+      "expected": [],
+      "fn": 0,
+      "fp": 0,
+      "input_hashes": {
+        "baseline": "sha256:9f51568b7327b22f3a40d9fc1b7163145c25446101b0f9a07eeb05652b051ba8",
+        "config": "sha256:5538b21974bac54edd9f84ea745db33cbd08424ff763edc72803112c0eb4f17c",
+        "diff": "sha256:8826c09011a36aee56bd7974f1927a0ef02866bb877e05622e5d8c279d1f7b64",
+        "target": "sha256:44df20248cfa34470294ce6b918c7334250172787d56a6af5d797a4a3cbb400b"
+      },
+      "input_material": {
+        "baseline": "{\"app/__init__.py\": \"\", \"app/helpers.py\": \"from __future__ import annotations\\ndef leaf_alias() -> int:\\n    return 1\\n\", \"app/routes.py\": \"from fastapi import FastAPI\\nfrom .service import direct_one, right_live, lambda_live, awaited_live, unawaited_coroutine_dead\\napp = FastAPI()\\n@app.get(\\\"/one\\\")\\nasync def route_one() -> int:\\n    unawaited_coroutine_dead()\\n    return direct_one() + lambda_live() + await awaited_live()\\n@app.get(\\\"/two\\\")\\ndef route_two() -> int:\\n    return right_live()\\n\", \"app/service.py\": \"from __future__ import annotations\\nfrom .helpers import leaf_alias as leaf_alias\\ndef direct_one() -> int:\\n    return shared_live()\\ndef right_live() -> int:\\n    return shared_live()\\ndef shared_live() -> int:\\n    return leaf_alias()\\ndef lambda_live() -> int:\\n    return (lambda: leaf_alias())()\\nasync def awaited_live() -> int:\\n    return await leaf_async()\\nasync def leaf_async() -> int:\\n    return leaf_alias()\\ndef literal_false_dead() -> int:\\n    if False:\\n        return leaf_alias()\\n    return 0\\ndef post_return_dead() -> int:\\n    return 0\\n    return leaf_alias()\\ndef deferred_closure_dead() -> int:\\n    def hidden() -> int:\\n        return leaf_alias()\\n    return 0\\ndef deferred_lambda_dead() -> int:\\n    hidden = lambda: leaf_alias()\\n    return 0\\nasync def unawaited_coroutine_dead() -> int:\\n    return leaf_alias()\\ndef unrelated_dead() -> int:\\n    return 30\\n\"}",
+        "config": "{\"backend\": \"mypy\", \"cache\": false, \"secure_ast\": true, \"transitive\": true}",
+        "diff": "--- /dev/null\n+++ b/app/added.py\n@@ -0,0 +1,2 @@\n+def added() -> int:\n+    return 1\n",
+        "target": "{\"app/__init__.py\": \"\", \"app/added.py\": \"def added() -> int:\\n    return 1\\n\", \"app/helpers.py\": \"from __future__ import annotations\\ndef leaf_alias() -> int:\\n    return 1\\n\", \"app/routes.py\": \"from fastapi import FastAPI\\nfrom .service import direct_one, right_live, lambda_live, awaited_live, unawaited_coroutine_dead\\napp = FastAPI()\\n@app.get(\\\"/one\\\")\\nasync def route_one() -> int:\\n    unawaited_coroutine_dead()\\n    return direct_one() + lambda_live() + await awaited_live()\\n@app.get(\\\"/two\\\")\\ndef route_two() -> int:\\n    return right_live()\\n\", \"app/service.py\": \"from __future__ import annotations\\nfrom .helpers import leaf_alias as leaf_alias\\ndef direct_one() -> int:\\n    return shared_live()\\ndef right_live() -> int:\\n    return shared_live()\\ndef shared_live() -> int:\\n    return leaf_alias()\\ndef lambda_live() -> int:\\n    return (lambda: leaf_alias())()\\nasync def awaited_live() -> int:\\n    return await leaf_async()\\nasync def leaf_async() -> int:\\n    return leaf_alias()\\ndef literal_false_dead() -> int:\\n    if False:\\n        return leaf_alias()\\n    return 0\\ndef post_return_dead() -> int:\\n    return 0\\n    return leaf_alias()\\ndef deferred_closure_dead() -> int:\\n    def hidden() -> int:\\n        return leaf_alias()\\n    return 0\\ndef deferred_lambda_dead() -> int:\\n    hidden = lambda: leaf_alias()\\n    return 0\\nasync def unawaited_coroutine_dead() -> int:\\n    return leaf_alias()\\ndef unrelated_dead() -> int:\\n    return 30\\n\"}"
+      },
+      "limitation": "the shipped mypy mapper has no paired baseline/target symbol mapping for this change kind",
+      "precision": null,
+      "recall": null,
+      "status": "unsupported",
+      "supported": false,
+      "symbol": "added",
+      "tp": 0
+    },
+    {
+      "actual": [],
+      "case_id": "deletion_unsupported",
+      "change_kind": "deletion",
+      "control": false,
+      "expected": [],
+      "fn": 0,
+      "fp": 0,
+      "input_hashes": {
+        "baseline": "sha256:13fa1473c2efe503a32fac346cf7796f167e4d01fb9b1a7c532fc837ad46ff8c",
+        "config": "sha256:5538b21974bac54edd9f84ea745db33cbd08424ff763edc72803112c0eb4f17c",
+        "diff": "sha256:219ec0505b765fab47dff79f5335977bd3cd76570502076f4999ad188d930687",
+        "target": "sha256:9f51568b7327b22f3a40d9fc1b7163145c25446101b0f9a07eeb05652b051ba8"
+      },
+      "input_material": {
+        "baseline": "{\"app/__init__.py\": \"\", \"app/deleted.py\": \"def deleted() -> int:\\n    return 1\\n\", \"app/helpers.py\": \"from __future__ import annotations\\ndef leaf_alias() -> int:\\n    return 1\\n\", \"app/routes.py\": \"from fastapi import FastAPI\\nfrom .service import direct_one, right_live, lambda_live, awaited_live, unawaited_coroutine_dead\\napp = FastAPI()\\n@app.get(\\\"/one\\\")\\nasync def route_one() -> int:\\n    unawaited_coroutine_dead()\\n    return direct_one() + lambda_live() + await awaited_live()\\n@app.get(\\\"/two\\\")\\ndef route_two() -> int:\\n    return right_live()\\n\", \"app/service.py\": \"from __future__ import annotations\\nfrom .helpers import leaf_alias as leaf_alias\\ndef direct_one() -> int:\\n    return shared_live()\\ndef right_live() -> int:\\n    return shared_live()\\ndef shared_live() -> int:\\n    return leaf_alias()\\ndef lambda_live() -> int:\\n    return (lambda: leaf_alias())()\\nasync def awaited_live() -> int:\\n    return await leaf_async()\\nasync def leaf_async() -> int:\\n    return leaf_alias()\\ndef literal_false_dead() -> int:\\n    if False:\\n        return leaf_alias()\\n    return 0\\ndef post_return_dead() -> int:\\n    return 0\\n    return leaf_alias()\\ndef deferred_closure_dead() -> int:\\n    def hidden() -> int:\\n        return leaf_alias()\\n    return 0\\ndef deferred_lambda_dead() -> int:\\n    hidden = lambda: leaf_alias()\\n    return 0\\nasync def unawaited_coroutine_dead() -> int:\\n    return leaf_alias()\\ndef unrelated_dead() -> int:\\n    return 30\\n\"}",
+        "config": "{\"backend\": \"mypy\", \"cache\": false, \"secure_ast\": true, \"transitive\": true}",
+        "diff": "--- a/app/deleted.py\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-def deleted() -> int:\n-    return 1\n",
+        "target": "{\"app/__init__.py\": \"\", \"app/helpers.py\": \"from __future__ import annotations\\ndef leaf_alias() -> int:\\n    return 1\\n\", \"app/routes.py\": \"from fastapi import FastAPI\\nfrom .service import direct_one, right_live, lambda_live, awaited_live, unawaited_coroutine_dead\\napp = FastAPI()\\n@app.get(\\\"/one\\\")\\nasync def route_one() -> int:\\n    unawaited_coroutine_dead()\\n    return direct_one() + lambda_live() + await awaited_live()\\n@app.get(\\\"/two\\\")\\ndef route_two() -> int:\\n    return right_live()\\n\", \"app/service.py\": \"from __future__ import annotations\\nfrom .helpers import leaf_alias as leaf_alias\\ndef direct_one() -> int:\\n    return shared_live()\\ndef right_live() -> int:\\n    return shared_live()\\ndef shared_live() -> int:\\n    return leaf_alias()\\ndef lambda_live() -> int:\\n    return (lambda: leaf_alias())()\\nasync def awaited_live() -> int:\\n    return await leaf_async()\\nasync def leaf_async() -> int:\\n    return leaf_alias()\\ndef literal_false_dead() -> int:\\n    if False:\\n        return leaf_alias()\\n    return 0\\ndef post_return_dead() -> int:\\n    return 0\\n    return leaf_alias()\\ndef deferred_closure_dead() -> int:\\n    def hidden() -> int:\\n        return leaf_alias()\\n    return 0\\ndef deferred_lambda_dead() -> int:\\n    hidden = lambda: leaf_alias()\\n    return 0\\nasync def unawaited_coroutine_dead() -> int:\\n    return leaf_alias()\\ndef unrelated_dead() -> int:\\n    return 30\\n\"}"
+      },
+      "limitation": "the shipped mypy mapper has no paired baseline/target symbol mapping for this change kind",
+      "precision": null,
+      "recall": null,
+      "status": "unsupported",
+      "supported": false,
+      "symbol": "deleted",
+      "tp": 0
+    },
+    {
+      "actual": [],
+      "case_id": "rename_unsupported",
+      "change_kind": "rename",
+      "control": false,
+      "expected": [],
+      "fn": 0,
+      "fp": 0,
+      "input_hashes": {
+        "baseline": "sha256:3f773c9d10c670383de320289f338932f802872b392a46b2f815d27cbae4d51f",
+        "config": "sha256:5538b21974bac54edd9f84ea745db33cbd08424ff763edc72803112c0eb4f17c",
+        "diff": "sha256:22e5d8c2e7d4b141ef43b027e2c8a32df624a5e6ed110a86a462b12085350e38",
+        "target": "sha256:46f28419b24f0fd5a45ff6f4937fd6687a589069eba971f8dd8062481df72fe9"
+      },
+      "input_material": {
+        "baseline": "{\"app/__init__.py\": \"\", \"app/helpers.py\": \"from __future__ import annotations\\ndef leaf_alias() -> int:\\n    return 1\\n\", \"app/renamed.py\": \"def old_name() -> int:\\n    return 1\\n\", \"app/routes.py\": \"from fastapi import FastAPI\\nfrom .service import direct_one, right_live, lambda_live, awaited_live, unawaited_coroutine_dead\\napp = FastAPI()\\n@app.get(\\\"/one\\\")\\nasync def route_one() -> int:\\n    unawaited_coroutine_dead()\\n    return direct_one() + lambda_live() + await awaited_live()\\n@app.get(\\\"/two\\\")\\ndef route_two() -> int:\\n    return right_live()\\n\", \"app/service.py\": \"from __future__ import annotations\\nfrom .helpers import leaf_alias as leaf_alias\\ndef direct_one() -> int:\\n    return shared_live()\\ndef right_live() -> int:\\n    return shared_live()\\ndef shared_live() -> int:\\n    return leaf_alias()\\ndef lambda_live() -> int:\\n    return (lambda: leaf_alias())()\\nasync def awaited_live() -> int:\\n    return await leaf_async()\\nasync def leaf_async() -> int:\\n    return leaf_alias()\\ndef literal_false_dead() -> int:\\n    if False:\\n        return leaf_alias()\\n    return 0\\ndef post_return_dead() -> int:\\n    return 0\\n    return leaf_alias()\\ndef deferred_closure_dead() -> int:\\n    def hidden() -> int:\\n        return leaf_alias()\\n    return 0\\ndef deferred_lambda_dead() -> int:\\n    hidden = lambda: leaf_alias()\\n    return 0\\nasync def unawaited_coroutine_dead() -> int:\\n    return leaf_alias()\\ndef unrelated_dead() -> int:\\n    return 30\\n\"}",
+        "config": "{\"backend\": \"mypy\", \"cache\": false, \"secure_ast\": true, \"transitive\": true}",
+        "diff": "--- a/app/renamed.py\n+++ b/app/renamed.py\n@@ -1,2 +1,2 @@\n-def old_name() -> int:\n+def new_name() -> int:\n     return 1\n",
+        "target": "{\"app/__init__.py\": \"\", \"app/helpers.py\": \"from __future__ import annotations\\ndef leaf_alias() -> int:\\n    return 1\\n\", \"app/renamed.py\": \"def new_name() -> int:\\n    return 1\\n\", \"app/routes.py\": \"from fastapi import FastAPI\\nfrom .service import direct_one, right_live, lambda_live, awaited_live, unawaited_coroutine_dead\\napp = FastAPI()\\n@app.get(\\\"/one\\\")\\nasync def route_one() -> int:\\n    unawaited_coroutine_dead()\\n    return direct_one() + lambda_live() + await awaited_live()\\n@app.get(\\\"/two\\\")\\ndef route_two() -> int:\\n    return right_live()\\n\", \"app/service.py\": \"from __future__ import annotations\\nfrom .helpers import leaf_alias as leaf_alias\\ndef direct_one() -> int:\\n    return shared_live()\\ndef right_live() -> int:\\n    return shared_live()\\ndef shared_live() -> int:\\n    return leaf_alias()\\ndef lambda_live() -> int:\\n    return (lambda: leaf_alias())()\\nasync def awaited_live() -> int:\\n    return await leaf_async()\\nasync def leaf_async() -> int:\\n    return leaf_alias()\\ndef literal_false_dead() -> int:\\n    if False:\\n        return leaf_alias()\\n    return 0\\ndef post_return_dead() -> int:\\n    return 0\\n    return leaf_alias()\\ndef deferred_closure_dead() -> int:\\n    def hidden() -> int:\\n        return leaf_alias()\\n    return 0\\ndef deferred_lambda_dead() -> int:\\n    hidden = lambda: leaf_alias()\\n    return 0\\nasync def unawaited_coroutine_dead() -> int:\\n    return leaf_alias()\\ndef unrelated_dead() -> int:\\n    return 30\\n\"}"
+      },
+      "limitation": "the shipped mypy mapper has no paired baseline/target symbol mapping for this change kind",
+      "precision": null,
+      "recall": null,
+      "status": "unsupported",
+      "supported": false,
+      "symbol": "renamed",
+      "tp": 0
+    }
+  ],
+  "configuration": {
+    "backend": "mypy",
+    "cache": false,
+    "secure_ast": true,
+    "transitive": true
+  },
+  "configuration_hash": "sha256:5538b21974bac54edd9f84ea745db33cbd08424ff763edc72803112c0eb4f17c",
+  "dependency_version_hash": "sha256:af8ee8824e423690b939dcdfcccc382538d57e937a1005cb4733fce9add4b9db",
+  "dependency_versions": {
+    "fastapi": "0.139.0",
+    "mypy": "1.19.1",
+    "pydantic": "2.12.5",
+    "python": "3.11.16",
+    "ruff": "0.15.0"
+  },
+  "gate_status": "failed",
+  "harness_sha256": "sha256:4dad57f28fe8c354e635d88a8eeadb19ac1949e89c97ae7d41677a3924e012c9",
+  "limitations": [
+    "additions, deletions, and renames are unsupported by the target-only mypy mapper",
+    "this gate does not satisfy GH283 corpus, blind-release, or performance milestones"
+  ],
+  "metrics": {
+    "fn": 0,
+    "fp": 1,
+    "high_medium": {
+      "fn": 0,
+      "fp": 1,
+      "precision": 0.875,
+      "recall": 1.0,
+      "tp": 7
+    },
+    "high_medium_control_candidates": 1,
+    "low_report_only": {
+      "fn": 7,
+      "fp": 0,
+      "precision": null,
+      "recall": 0.0,
+      "tp": 0
+    },
+    "precision": 0.875,
+    "recall": 1.0,
+    "tp": 7
+  },
+  "pass_criteria": "100% precision/recall; zero HIGH/MEDIUM dead/unrelated candidates",
+  "revision": "2cb0c015dab810f699a353633fb50543c34c4ead",
+  "runtime": {
+    "fastapi": "0.139.0",
+    "mypy": "1.19.1",
+    "pydantic": "2.12.5",
+    "python": "3.11.16",
+    "ruff": "0.15.0"
+  },
+  "schema": "typed-dag-accuracy-v1",
+  "tool_revision_hash": "sha256:5fc887f7b9ee37f28f6dadc1e63911dbe2b8e2f2cd736f4d4dde180b1ad59505",
+  "unresolved_status": "open: original GH283 corpus and release milestones remain unmeasured"
+}

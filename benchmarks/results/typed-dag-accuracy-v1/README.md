@@ -14,3 +14,7 @@ The command exits nonzero unless every supported case has 100% precision and rec
 Addition, deletion, and rename fixtures include explicit paired source snapshots and diffs, but are currently marked `unsupported`: the shipped mypy `ChangeMapper` does not map these changes against paired baseline/target symbol graphs. They do not count toward a pass. Re-run this gate after dependency integration; an unsupported or failed case never becomes a guessed pass.
 
 This generated subset is one GH283 milestone only. It does not close or satisfy GH283's normalized corpus milestones, the blind release corpus gate, bootstrap guard, or incremental performance gate. It changes no canonical truth, publication, or ledger data.
+
+## Initial analyzer result
+
+The checked-in `current-main.json` run used harness revision `2cb0c015dab810f699a353633fb50543c34c4ead`. It recorded all 14 cases (11 supported, 3 unsupported) and failed the gate: `TP=7, FP=1, FN=0`, precision `87.5%`, recall `100%`, and one HIGH/MEDIUM negative-control candidate. The false positive is `unawaited_coroutine_control`, where `GET /one` was returned at MEDIUM confidence. The full output identifies all candidates, confidence tiers, inputs, and hashes. This is the pre-dependency-integration baseline for reruns after callable-semantics changes land.

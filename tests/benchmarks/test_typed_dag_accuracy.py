@@ -125,6 +125,15 @@ def test_validator_rejects_false_pass_with_failed_supported_case() -> None:
         gate.validate(document)
 
 
+def test_checked_in_analyzer_result_is_a_valid_failed_baseline() -> None:
+    evidence = gate.RESULTS / "current-main.json"
+    document = json.loads(evidence.read_text(encoding="utf-8"))
+    gate.validate(document)
+    assert document["gate_status"] == "failed"
+    assert document["metrics"]["fp"] == 1
+    assert document["metrics"]["high_medium_control_candidates"] == 1
+
+
 def test_real_cli_change_mapper_on_secure_generated_project(tmp_path: Path) -> None:
     """One real analyzer path protects against a generator-only false green."""
     case = gate.CASES[0]
