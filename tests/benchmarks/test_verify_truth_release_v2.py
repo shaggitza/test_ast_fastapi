@@ -88,6 +88,80 @@ def _release_with_superseding_adjudication(tmp_path: Path) -> Path:
     return tmp_path / "published" / "release-1"
 
 
+def _release_with_two_prs(tmp_path: Path) -> Path:
+    original_corpus = corpus()
+    repository = original_corpus.repositories[0]
+    second_pr = repository.pull_requests[0].model_copy(update={"number": 2, "rank": 2})
+    two_pr_corpus = original_corpus.model_copy(
+        update={
+            "repositories": (
+                repository.model_copy(
+                    update={"pull_requests": (*repository.pull_requests, second_pr)}
+                ),
+            )
+        }
+    )
+    db = tmp_path / "truth.sqlite"
+    initialize_database(db, two_pr_corpus, allow_synthetic=True)
+    review_artifacts = []
+    adjudication_artifacts = []
+    for number in (1, 2):
+        current_reviews = []
+        for lane in ("A", "B"):
+            payload = json.loads(review(lane))
+            payload["pr"] = number
+            current_reviews.append(canonical_json(payload))
+        review_artifacts.extend(current_reviews)
+        payload = json.loads(adjudication(*(artifact_sha256(raw) for raw in current_reviews)))
+        payload["pr"] = number
+        adjudication_artifacts.append(canonical_json(payload))
+    import_reviews(db, review_artifacts, validator_factory=validator_factory)
+    import_adjudications(db, adjudication_artifacts, imported_at="2025-01-02T01:00:00Z")
+    release(
+        db,
+        tmp_path / "published",
+        _publication(),
+        release_id="release-1",
+        created_at="2025-01-03T00:00:00Z",
+    )
+    return tmp_path / "published" / "release-1"
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
+    path.write_bytes(b"".join(canonical_json(row) for row in rows))
+
+
+def _remove_review_rows(root: Path, *, pr_id: str | None = None, digest: str | None = None) -> None:
+    runs_path = root / "tables/reviewer_run.jsonl"
+    runs = [json.loads(line) for line in runs_path.read_text().splitlines()]
+    removed_digests = {
+        row["artifact_sha256"]
+        for row in runs
+        if (pr_id is not None and row["pr_id"] == pr_id)
+        or (digest is not None and row["artifact_sha256"] == digest)
+    }
+    _write_jsonl(
+        runs_path,
+        [row for row in runs if row["artifact_sha256"] not in removed_digests],
+    )
+    reviews_path = root / "reviews.jsonl"
+    reviews = [json.loads(line) for line in reviews_path.read_text().splitlines()]
+    _write_jsonl(
+        reviews_path,
+        [row for row in reviews if row["artifact_sha256"] not in removed_digests],
+    )
+    index_path = root / "artifact-index.jsonl"
+    index = [json.loads(line) for line in index_path.read_text().splitlines()]
+    _write_jsonl(
+        index_path,
+        [
+            row
+            for row in index
+            if not (row["artifact_type"] == "review" and row["sha256"] in removed_digests)
+        ],
+    )
+
+
 def _reseal(root: Path, manifest: dict[str, object]) -> None:
     files = manifest["files"]
     assert isinstance(files, dict)
@@ -495,6 +569,70 @@ def test_manifest_provenance_matches_canonical_release_row(tmp_path: Path) -> No
     manifest = json.loads((root / "manifest.json").read_text())
     _reseal(root, manifest)
     with pytest.raises(GroundTruthError, match="manifest provenance"):
+        verify_release(root)
+
+
+def test_resealed_release_rejects_missing_reviewer_lane_and_projection_rows(
+    tmp_path: Path,
+) -> None:
+    root = _release(tmp_path)
+    run_rows = [
+        json.loads(line) for line in (root / "tables/reviewer_run.jsonl").read_text().splitlines()
+    ]
+    _remove_review_rows(root, digest=run_rows[0]["artifact_sha256"])
+    manifest = json.loads((root / "manifest.json").read_text())
+    _reseal(root, manifest)
+    with pytest.raises(GroundTruthError, match="lanes A and B for every selected PR"):
+        verify_release(root)
+
+
+def test_resealed_release_rejects_duplicate_reviewer_lane(tmp_path: Path) -> None:
+    root = _release(tmp_path)
+    run_path = root / "tables/reviewer_run.jsonl"
+    run_rows = [json.loads(line) for line in run_path.read_text().splitlines()]
+    duplicate = next(row for row in run_rows if row["lane"] == "B")
+    duplicate["lane"] = "A"
+    _write_jsonl(run_path, run_rows)
+    review_path = root / "reviews.jsonl"
+    review_rows = [json.loads(line) for line in review_path.read_text().splitlines()]
+    next(row for row in review_rows if row["artifact_sha256"] == duplicate["artifact_sha256"])[
+        "lane"
+    ] = "A"
+    _write_jsonl(review_path, review_rows)
+    manifest = json.loads((root / "manifest.json").read_text())
+    _reseal(root, manifest)
+    with pytest.raises(GroundTruthError, match="duplicate lane"):
+        verify_release(root)
+
+
+def test_resealed_release_rejects_missing_selected_pr_review_pair(tmp_path: Path) -> None:
+    root = _release_with_two_prs(tmp_path)
+    pull_requests = [
+        json.loads(line) for line in (root / "tables/pull_request.jsonl").read_text().splitlines()
+    ]
+    second_pr_id = next(row["pr_id"] for row in pull_requests if row["number"] == 2)
+    _remove_review_rows(root, pr_id=second_pr_id)
+    manifest = json.loads((root / "manifest.json").read_text())
+    _reseal(root, manifest)
+    with pytest.raises(GroundTruthError, match="lanes A and B for every selected PR"):
+        verify_release(root)
+
+
+@pytest.mark.parametrize(
+    "member,expected",
+    [("reviews.jsonl", "review projection"), ("artifact-index.jsonl", "artifact index")],
+)
+def test_resealed_release_rejects_undeclared_projection_keys(
+    tmp_path: Path, member: str, expected: str
+) -> None:
+    root = _release(tmp_path)
+    path = root / member
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    rows[0]["undeclared_extension"] = True
+    _write_jsonl(path, rows)
+    manifest = json.loads((root / "manifest.json").read_text())
+    _reseal(root, manifest)
+    with pytest.raises(GroundTruthError, match=expected):
         verify_release(root)
 
 

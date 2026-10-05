@@ -630,19 +630,30 @@ def _validate_review_and_artifact_projections(  # noqa: PLR0912, PLR0915
     pull_request_by_id = {row["pr_id"]: row for row in pull_request_rows}
     review_rows = []
     runs = _jsonl_rows(contents["tables/reviewer_run.jsonl"], "tables/reviewer_run.jsonl")
+    lanes_by_pr: dict[str, set[str]] = {}
     for row in runs:
         pr_id = row.get("pr_id")
         pr = pull_request_by_id.get(pr_id) if isinstance(pr_id, str) else None
         repository_id = pr.get("repository_id") if pr is not None else None
-        if pr is None or not isinstance(repository_id, str) or repository_id not in repositories:
+        if (
+            not isinstance(pr_id, str)
+            or pr is None
+            or not isinstance(repository_id, str)
+            or repository_id not in repositories
+        ):
             _fail("reviewer run references a missing canonical pull request")
         lane, digest = row.get("lane"), row.get("artifact_sha256")
         if (
-            lane not in {"A", "B"}
+            not isinstance(lane, str)
+            or lane not in {"A", "B"}
             or not isinstance(digest, str)
             or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
         ):
             _fail("reviewer run has malformed review projection fields")
+        lanes = lanes_by_pr.setdefault(pr_id, set())
+        if lane in lanes:
+            _fail("canonical reviewer runs contain a duplicate lane for a selected PR")
+        lanes.add(lane)
         review_rows.append(
             (
                 repositories[repository_id][1],
@@ -657,6 +668,8 @@ def _validate_review_and_artifact_projections(  # noqa: PLR0912, PLR0915
                 },
             )
         )
+    if any(lanes_by_pr.get(pr_id) != {"A", "B"} for pr_id in pull_request_by_id):
+        _fail("canonical reviewer runs do not contain lanes A and B for every selected PR")
     expected_reviews = [row for *_sort, row in sorted(review_rows, key=lambda item: item[:3])]
     if _jsonl_rows(contents["reviews.jsonl"], "reviews.jsonl") != expected_reviews:
         _fail("review projection does not match canonical reviewer runs")
