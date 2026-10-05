@@ -349,6 +349,78 @@ contracts:
         else:
             assert candidates == []
 
+    def test_cli_mypy_module_identity_ignores_checkout_root_name(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        checkout = tmp_path / "repo.with-hyphen and spaces"
+        baseline_root = checkout / "baseline"
+        target_root = checkout / "target"
+        baseline_app = baseline_root / "app"
+        target_app = target_root / "app"
+        baseline_app.mkdir(parents=True)
+        target_app.mkdir(parents=True)
+
+        for app_root, return_value in ((baseline_app, 1), (target_app, 2)):
+            (app_root / "__init__.py").write_text(
+                "from fastapi import FastAPI\n"
+                "from .service import helper\n"
+                "app = FastAPI()\n"
+                "@app.get('/one')\n"
+                "def route_one() -> int:\n    return helper()\n",
+                encoding="utf-8",
+            )
+            (app_root / "service.py").write_text(
+                f"def helper() -> int:\n    return {return_value}\n",
+                encoding="utf-8",
+            )
+
+        # The target and baseline snapshots deliberately have different parent
+        # directories under a checkout whose own name is not a Python module.
+        # The mapper's inventory adapter must hand mypy the same app.* module
+        # identities on both sides and a side-specific import root.
+        mapper = ChangeMapper(target_app, baseline_app_path=baseline_app)
+        target_analyzer = mapper.mypy_analyzer
+        baseline_analyzer = mapper.baseline_mypy_analyzer
+        assert target_analyzer.source_inventory is not None
+        assert baseline_analyzer.source_inventory is not None
+        target_modules = [record.module for record in target_analyzer.source_inventory.files]
+        baseline_modules = [record.module for record in baseline_analyzer.source_inventory.files]
+        assert target_modules == baseline_modules == ["app", "app.service"]
+        assert target_analyzer.module_root == target_root.resolve()
+        assert baseline_analyzer.module_root == baseline_root.resolve()
+        assert all("repo.with-hyphen" not in module for module in target_modules)
+
+        diff_file = tmp_path / "module-root.diff"
+        diff_file.write_text(
+            "diff --git a/service.py b/service.py\n"
+            "--- a/service.py\n"
+            "+++ b/service.py\n"
+            "@@ -1,2 +1,2 @@\n"
+            " def helper() -> int:\n"
+            "-    return 1\n"
+            "+    return 2\n",
+            encoding="utf-8",
+        )
+        result = runner.invoke(
+            cli,
+            [
+                "analyze",
+                "--app",
+                str(target_app),
+                "--baseline-app",
+                str(baseline_app),
+                "--diff",
+                str(diff_file),
+                "--format",
+                "json",
+                "--no-cache",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        candidates = json.loads(result.output)["candidate_endpoints"]
+        assert [item["endpoint"]["path"] for item in candidates] == ["/one"]
+
     def test_baseline_app_rejected_by_runtime_mode(self, runner: CliRunner, tmp_path: Path) -> None:
         app = tmp_path / "app"
         baseline = tmp_path / "baseline"
