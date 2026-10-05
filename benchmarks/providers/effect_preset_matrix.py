@@ -32,9 +32,20 @@ MATRIX_ROOT = Path(__file__).resolve().parents[1] / "results" / "effect-preset-m
 MANIFEST_PATH = MATRIX_ROOT / "package-symbols.json"
 RESULTS_PATH = MATRIX_ROOT / "controlled-results.json"
 FIXTURE_PATH = MATRIX_ROOT / "fixtures" / "pathlib_open_handles.py"
+ANALYZER_SNAPSHOT_PATH = MATRIX_ROOT / "analyzer-source-snapshots.json"
+PACKAGE_CASES_PATH = MATRIX_ROOT / "package-analyzer-cases.json"
+PACKAGE_CASE_RESULTS_PATH = MATRIX_ROOT / "package-analyzer-results.json"
 PROJECT_ROOT = MANIFEST_PATH.parents[3]
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _OBSERVATION_STATES = {"matched", "unmatched", "ambiguous", "unresolved"}
+ANALYZER_SOURCE_PATHS = (
+    "benchmarks/providers/effect_preset_matrix.py",
+    "src/fastapi_endpoint_detector/analyzer/effect_contract_auditor.py",
+    "src/fastapi_endpoint_detector/analyzer/mypy_analyzer.py",
+    "src/fastapi_endpoint_detector/models/effect_contract.py",
+    "src/fastapi_endpoint_detector/models/endpoint.py",
+    "src/fastapi_endpoint_detector/strict_data.py",
+)
 
 
 class MatrixEvidenceError(ValueError):
@@ -61,6 +72,46 @@ def _strict_json(raw: bytes, label: str) -> Any:
         return json.loads(raw, object_pairs_hook=unique_pairs, parse_constant=reject_constant)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise MatrixEvidenceError(f"cannot parse strict JSON for {label}") from exc
+
+
+def _load_analyzer_source_snapshots() -> tuple[dict[str, str], str]:
+    """Require the committed analyzer source snapshot to cover the authoritative path set."""
+    try:
+        raw = ANALYZER_SNAPSHOT_PATH.read_bytes()
+    except OSError as exc:
+        raise MatrixEvidenceError("missing committed analyzer source snapshot") from exc
+    value = _strict_json(raw, "analyzer source snapshots")
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema_version", "snapshot_id", "source_files"}
+        or type(value["schema_version"]) is not int
+        or value["schema_version"] != 1
+        or value["snapshot_id"] != "gh97-analyzer-source-snapshot-v1"
+        or not isinstance(value["source_files"], list)
+    ):
+        raise MatrixEvidenceError("committed analyzer source snapshot has invalid schema")
+    rows = value["source_files"]
+    expected = list(ANALYZER_SOURCE_PATHS)
+    if (
+        any(
+            not isinstance(row, dict)
+            or set(row) != {"path", "sha256"}
+            or not _safe_relative(row["path"])
+            or not _is_sha(row["sha256"])
+            for row in rows
+        )
+        or [row["path"] for row in rows] != expected
+    ):
+        raise MatrixEvidenceError("committed analyzer source snapshot path set is invalid")
+    hashes = {row["path"]: f"sha256:{row['sha256']}" for row in rows}
+    for relpath, expected_hash in hashes.items():
+        try:
+            actual = f"sha256:{_sha256((PROJECT_ROOT / relpath).read_bytes())}"
+        except OSError as exc:
+            raise MatrixEvidenceError(f"missing analyzer snapshot source: {relpath}") from exc
+        if actual != expected_hash:
+            raise MatrixEvidenceError(f"analyzer source differs from committed snapshot: {relpath}")
+    return hashes, f"sha256:{_sha256(raw)}"
 
 
 def _is_sha(value: object) -> bool:
@@ -187,7 +238,11 @@ def _validate_manifest(value: Any) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
             or (name, version) in releases
             or not isinstance(package["artifact"], str)
             or Path(package["artifact"]).name != package["artifact"]
-            or Path(package["artifact"]).suffix not in {".whl", ".tgz"}
+            or not (
+                package["artifact"].endswith(".whl")
+                or package["artifact"].endswith(".tgz")
+                or package["artifact"].endswith(".tar.gz")
+            )
             or not isinstance(package["artifact_url"], str)
             or not package["artifact_url"].startswith("https://")
             or not isinstance(package["release_source"], str)
@@ -408,8 +463,12 @@ def verify_artifacts(artifact_dir: Path, manifest: dict[str, Any] | None = None)
             else:
                 with tarfile.open(path, "r:gz") as archive:
                     for source in package["inspected_sources"]:
-                        member = f"Python-{package['version']}/{source['path']}"
-                        stream = archive.extractfile(member)
+                        matches = [
+                            member
+                            for member in archive.getmembers()
+                            if member.isfile() and member.name.endswith("/" + source["path"])
+                        ]
+                        stream = archive.extractfile(matches[0]) if len(matches) == 1 else None
                         if stream is None or _sha256(stream.read()) != source["sha256"]:
                             raise MatrixEvidenceError(
                                 f"inspected source hash mismatch: {package['distribution']}"
@@ -485,9 +544,12 @@ def verify_declared_python_signatures(  # noqa: PLR0912, PLR0915
                         raw = archive.read(source["path"])
                 else:
                     with tarfile.open(artifact, "r:gz") as archive:
-                        member = archive.extractfile(
-                            f"Python-{package['version']}/{source['path']}"
-                        )
+                        matches = [
+                            candidate
+                            for candidate in archive.getmembers()
+                            if candidate.isfile() and candidate.name.endswith("/" + source["path"])
+                        ]
+                        member = archive.extractfile(matches[0]) if len(matches) == 1 else None
                         if member is None:
                             raise KeyError(source["path"])
                         raw = member.read()
@@ -783,6 +845,8 @@ def _control_class(source_spelling: str) -> str:
         "foreign.send",
     }:
         return "unrelated_same_name_negative"
+    if source_spelling.startswith("foreign."):
+        return "unrelated_same_name_negative"
     if source_spelling in {"open", "path.open"}:
         return "unmatched_open_constructor"
     return "positive_or_neutral"
@@ -812,7 +876,7 @@ def _build_observations(audit: Any, call_sites: list[Any]) -> list[dict[str, Any
     return rows
 
 
-def _endpoint(path: Path) -> Endpoint:
+def _endpoint(path: Path, line_number: int = 10) -> Endpoint:
     return Endpoint(
         path="/matrix",
         methods=[EndpointMethod.GET],
@@ -820,7 +884,7 @@ def _endpoint(path: Path) -> Endpoint:
             name="handler",
             module="main",
             file_path=path,
-            line_number=10,
+            line_number=line_number,
         ),
     )
 
@@ -861,6 +925,337 @@ def _replay_fixture() -> dict[str, Any]:
             }
     except (OSError, ValueError, RuntimeError) as exc:
         raise MatrixEvidenceError("cannot replay static controlled fixture") from exc
+
+
+def _render_case_arguments(arguments: Any) -> str:
+    if not isinstance(arguments, list) or not arguments:
+        raise MatrixEvidenceError("package analyzer case requires call arguments")
+    positional: list[str] = []
+    keywords: list[str] = []
+    for argument in arguments:
+        if not isinstance(argument, dict) or set(argument) not in (
+            {"kind", "value"},
+            {"kind", "name", "value"},
+        ):
+            raise MatrixEvidenceError("package analyzer call argument has invalid fields")
+        if not isinstance(argument["value"], str):
+            raise MatrixEvidenceError("package analyzer fixture values must be strings")
+        if argument["kind"] == "positional" and set(argument) == {"kind", "value"}:
+            positional.append(repr(argument["value"]))
+        elif (
+            argument["kind"] == "keyword"
+            and set(argument) == {"kind", "name", "value"}
+            and isinstance(argument["name"], str)
+            and argument["name"].isidentifier()
+        ):
+            keywords.append(f"{argument['name']}={argument['value']!r}")
+        else:
+            raise MatrixEvidenceError("package analyzer call argument kind is invalid")
+    return ", ".join((*positional, *keywords))
+
+
+def _replay_package_case(case: dict[str, Any]) -> dict[str, Any]:
+    """Resolve a synthetic canonical receiver against one audited exact contract."""
+    module, class_name, method = case["symbol"].rsplit(".", 2)
+    module_parts = module.split(".")
+    arguments = _render_case_arguments(case["arguments"])
+    app_call = f"client.{method}({arguments})"
+    negative_call = f"foreign.{method}({arguments})"
+    fixture = (
+        f"from {module} import {class_name} as Client\n\n"
+        "class Foreign:\n"
+        f"    def {method}(self, *args: object, **kwargs: object) -> object: ...\n\n"
+        "def handler(client: Client, foreign: Foreign) -> None:\n"
+        f"    {app_call}\n"
+        f"    {negative_call}\n"
+    )
+    try:
+        with tempfile.TemporaryDirectory(prefix="gh97_package_case_") as temp:
+            top = Path(temp)
+            app = top / "app"
+            app.mkdir()
+            main = app / "main.py"
+            main.write_text(fixture, encoding="utf-8")
+            current = top
+            for part in module_parts[:-1]:
+                current = current / part
+                current.mkdir(exist_ok=True)
+                (current / "__init__.py").write_text("", encoding="utf-8")
+            (current / f"{module_parts[-1]}.py").write_text(
+                f"class {class_name}:\n"
+                f"    def {method}(self, *args: object, **kwargs: object) -> object: ...\n",
+                encoding="utf-8",
+            )
+            endpoint = _endpoint(main, line_number=6)
+            analyzer = MypyAnalyzer(app, max_depth=1)
+            dependencies = analyzer.analyze_endpoint(endpoint)
+            call_sites = dependencies.get_resolved_call_sites()
+            preset = load_effect_preset(case["preset_selector"])
+            audit = audit_effect_contracts(
+                preset,
+                source_root=app,
+                inventory=EndpointInventory(endpoints=[endpoint]),
+                endpoint_call_sites=[(endpoint, call_sites)],
+                track_transitive=False,
+                max_depth=1,
+                cache_enabled=False,
+                resolver_versions=(f"mypy@{analyzer.resolver_version}",),
+            )
+            rows = _build_observations(audit, call_sites)
+            return {
+                "fixture_sha256": f"sha256:{_sha256(fixture.encode())}",
+                "resolver_version": analyzer.resolver_version,
+                "observations": rows,
+            }
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise MatrixEvidenceError(
+            f"cannot replay controlled package case: {case['case_id']}"
+        ) from exc
+
+
+def replay_package_analyzer_cases() -> list[dict[str, Any]]:
+    """Run source-only synthetic symbol-resolution cases tied to pinned release rows."""
+    try:
+        case_data = _strict_json(PACKAGE_CASES_PATH.read_bytes(), "package analyzer cases")
+    except OSError as exc:
+        raise MatrixEvidenceError("cannot read package analyzer case fixture") from exc
+    if (
+        not isinstance(case_data, dict)
+        or set(case_data) != {"schema_version", "fixture_id", "cases", "unsupported_cases"}
+        or type(case_data["schema_version"]) is not int
+        or case_data["schema_version"] != 1
+        or case_data["fixture_id"] != "gh97-package-analyzer-cases-v1"
+        or not isinstance(case_data["cases"], list)
+    ):
+        raise MatrixEvidenceError("package analyzer case fixture has invalid schema")
+    manifest = load_manifest()
+    verify_preset_contracts(manifest)
+    releases = {(row["distribution"], row["version"]): row for row in manifest["packages"]}
+    presets = {row["preset_id"]: row for row in manifest["versioned_contract_sets"]}
+    seen: set[str] = set()
+    results: list[dict[str, Any]] = []
+    for case in case_data["cases"]:
+        fields = {"case_id", "distribution", "version", "symbol", "preset_selector", "arguments"}
+        if not isinstance(case, dict) or set(case) != fields:
+            raise MatrixEvidenceError("package analyzer case has invalid fields")
+        if (
+            not isinstance(case["case_id"], str)
+            or not case["case_id"]
+            or case["case_id"] in seen
+            or not isinstance(case["distribution"], str)
+            or not isinstance(case["version"], str)
+            or not isinstance(case["symbol"], str)
+            or not isinstance(case["preset_selector"], str)
+        ):
+            raise MatrixEvidenceError("package analyzer case identity is invalid")
+        seen.add(case["case_id"])
+        package = releases.get((case["distribution"], case["version"]))
+        if package is None:
+            raise MatrixEvidenceError("package analyzer case references an unaudited release")
+        declaration = next(
+            (row for row in package["declared_symbols"] if row["symbol"] == case["symbol"]), None
+        )
+        if declaration is None or declaration["preset_contract"] is None:
+            raise MatrixEvidenceError("package analyzer case lacks a pinned preset symbol")
+        contract_set_id = next(
+            (
+                contract_set["preset_id"]
+                for contract_set in manifest["versioned_contract_sets"]
+                if contract_set["preset_path"].endswith(
+                    {
+                        "http-clients-v1": "effects_http_clients_v1.yaml",
+                        "redis-v1": "effects_redis_v1.yaml",
+                        "mongodb-v1": "effects_mongodb_v1.yaml",
+                        "sqlalchemy-v1": "effects_sqlalchemy_v1.yaml",
+                        "object-storage-v1": "effects_object_storage_v1.yaml",
+                    }.get(case["preset_selector"], "<unsupported>")
+                )
+            ),
+            None,
+        )
+        if contract_set_id is None or contract_set_id not in presets:
+            raise MatrixEvidenceError("package analyzer case preset is not pinned")
+        result = _replay_package_case(case)
+        result.update(
+            {
+                "case_id": case["case_id"],
+                "distribution": package["distribution"],
+                "version": package["version"],
+                "artifact_sha256": f"sha256:{package['artifact_sha256']}",
+                "symbol": case["symbol"],
+                "contract_id": declaration["preset_contract"],
+                "preset_id": contract_set_id,
+                "preset_version": presets[contract_set_id]["version"],
+                "preset_revision": presets[contract_set_id]["revision"],
+                "preset_sha256": f"sha256:{presets[contract_set_id]['preset_sha256']}",
+                "preset_semantic_sha256": (
+                    f"sha256:{presets[contract_set_id]['preset_semantic_sha256']}"
+                ),
+                "config_sha256": f"sha256:{presets[contract_set_id]['config_sha256']}",
+            }
+        )
+        rows = result["observations"]
+        if (
+            len(rows) != 2
+            or rows[0]["canonical_symbol"] != case["symbol"]
+            or rows[0]["audit_status"] != "matched"
+            or rows[0]["contract_id"] != declaration["preset_contract"]
+            or rows[1]["audit_status"] != "unmatched"
+            or rows[1]["control_class"] != "unrelated_same_name_negative"
+        ):
+            raise MatrixEvidenceError(
+                f"controlled package case failed its exact control: {case['case_id']}"
+            )
+        results.append(result)
+    return results
+
+
+def _package_unsupported_cases(case_data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Validate explicit unsupported package symbols without synthesizing runtime authority."""
+    if not isinstance(case_data["unsupported_cases"], list):
+        raise MatrixEvidenceError("unsupported package analyzer cases must be a list")
+    packages = {(row["distribution"], row["version"]): row for row in load_manifest()["packages"]}
+    results: list[dict[str, Any]] = []
+    case_ids: set[str] = set()
+    for case in case_data["unsupported_cases"]:
+        if not isinstance(case, dict) or set(case) != {
+            "case_id",
+            "distribution",
+            "version",
+            "symbol",
+            "reason_code",
+        }:
+            raise MatrixEvidenceError("unsupported package case has invalid fields")
+        if (
+            not all(isinstance(case[key], str) and case[key] for key in case)
+            or case["case_id"] in case_ids
+            or case["reason_code"]
+            not in {"descriptor_signature_unavailable", "no_exact_preset_contract"}
+        ):
+            raise MatrixEvidenceError("unsupported package case identity is invalid")
+        expected_case = {
+            "motor-async-descriptor-not-evaluated": (
+                "motor",
+                "3.6.0",
+                "motor.core.AgnosticCollection.insert_one",
+                "descriptor_signature_unavailable",
+            ),
+            "sqs-send-message-no-exact-contract": (
+                "mypy-boto3-sqs",
+                "1.35.91",
+                "mypy_boto3_sqs.client.SQSClient.send_message",
+                "no_exact_preset_contract",
+            ),
+        }.get(case["case_id"])
+        observed_case = (
+            case["distribution"],
+            case["version"],
+            case["symbol"],
+            case["reason_code"],
+        )
+        if expected_case != observed_case:
+            raise MatrixEvidenceError("unsupported package case does not match a bounded known gap")
+        case_ids.add(case["case_id"])
+        package = packages.get((case["distribution"], case["version"]))
+        declaration = (
+            next(
+                (row for row in package["declared_symbols"] if row["symbol"] == case["symbol"]),
+                None,
+            )
+            if package
+            else None
+        )
+        if package is None or declaration is None or declaration["preset_contract"] is not None:
+            raise MatrixEvidenceError(
+                "unsupported package case is not backed by a no-contract symbol"
+            )
+        if case["reason_code"] == "descriptor_signature_unavailable" and not declaration[
+            "source_signature"
+        ].startswith("descriptor = Async"):
+            raise MatrixEvidenceError("descriptor limitation is not backed by inspected source")
+        results.append(
+            {
+                **case,
+                "artifact_sha256": f"sha256:{package['artifact_sha256']}",
+                "source_signature": declaration["source_signature"],
+                "status": "not_evaluated",
+            }
+        )
+    if case_ids != {
+        "motor-async-descriptor-not-evaluated",
+        "sqs-send-message-no-exact-contract",
+    }:
+        raise MatrixEvidenceError("unsupported package case inventory is incomplete")
+    return results
+
+
+def load_package_analyzer_results(
+    path: Path = PACKAGE_CASE_RESULTS_PATH,
+) -> dict[str, Any]:
+    """Verify raw package-symbol controls by replaying each synthetic analyzer case."""
+    try:
+        value = _strict_json(path.read_bytes(), "package analyzer results")
+    except OSError as exc:
+        raise MatrixEvidenceError("cannot read package analyzer results") from exc
+    fields = {
+        "schema_version",
+        "result_id",
+        "status",
+        "scope",
+        "manifest_sha256",
+        "case_fixture_sha256",
+        "analyzer_snapshot_sha256",
+        "source_execution",
+        "upstream_package_code_imported_or_executed",
+        "cases",
+        "unsupported_cases",
+        "observed",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise MatrixEvidenceError("package analyzer result has invalid fields")
+    if (
+        type(value["schema_version"]) is not int
+        or value["schema_version"] != 1
+        or value["result_id"] != "gh97-package-symbol-analyzer-results-v1"
+        or value["status"] != "completed"
+        or value["scope"] != "synthetic canonical-symbol and same-name negative controls only"
+        or value["source_execution"] is not False
+        or value["upstream_package_code_imported_or_executed"] is not False
+    ):
+        raise MatrixEvidenceError("package analyzer result identity or scope is invalid")
+    _, snapshot_sha = _load_analyzer_source_snapshots()
+    expected_manifest_sha = f"sha256:{_sha256(MANIFEST_PATH.read_bytes())}"
+    expected_fixture_sha = f"sha256:{_sha256(PACKAGE_CASES_PATH.read_bytes())}"
+    if (
+        value["manifest_sha256"] != expected_manifest_sha
+        or value["case_fixture_sha256"] != expected_fixture_sha
+        or value["analyzer_snapshot_sha256"] != snapshot_sha
+    ):
+        raise MatrixEvidenceError("package analyzer result provenance does not match snapshots")
+    replayed = replay_package_analyzer_cases()
+    if value["cases"] != replayed:
+        raise MatrixEvidenceError("package analyzer observations differ from static replay")
+    case_data = _strict_json(PACKAGE_CASES_PATH.read_bytes(), "package analyzer cases")
+    unsupported = _package_unsupported_cases(case_data)
+    if value["unsupported_cases"] != unsupported:
+        raise MatrixEvidenceError("unsupported package cases differ from exact source evidence")
+    rows = [row for case in replayed for row in case["observations"]]
+    expected_observed = {
+        "physical_calls": len(rows),
+        "matched_calls": sum(row["audit_status"] == "matched" for row in rows),
+        "unmatched_calls": sum(row["audit_status"] == "unmatched" for row in rows),
+        "ambiguous_calls": sum(row["audit_status"] == "ambiguous" for row in rows),
+        "unresolved_calls": sum(row["audit_status"] == "unresolved" for row in rows),
+        "unrelated_same_name_negative_calls": sum(
+            row["control_class"] == "unrelated_same_name_negative" for row in rows
+        ),
+        "matched_exact_symbols": sorted(
+            {row["canonical_symbol"] for row in rows if row["audit_status"] == "matched"}
+        ),
+    }
+    if value["observed"] != expected_observed:
+        raise MatrixEvidenceError("package analyzer aggregate does not match raw observations")
+    return value
 
 
 def _derive_observed(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1124,6 +1519,7 @@ def load_controlled_results(path: Path = RESULTS_PATH) -> dict[str, Any]:  # noq
         "fixture_path",
         "fixture_sha256",
         "analyzer",
+        "analyzer_snapshot_sha256",
         "analyzer_source_hashes",
         "resolver_version",
         "python_version",
@@ -1152,25 +1548,18 @@ def load_controlled_results(path: Path = RESULTS_PATH) -> dict[str, Any]:  # noq
             raise MatrixEvidenceError(f"missing controlled input source: {field}") from exc
         if source_hash != evaluation[sha_key]:
             raise MatrixEvidenceError(f"controlled input hash mismatch: {field}")
-    hashes = evaluation["analyzer_source_hashes"]
-    if not isinstance(hashes, dict) or not hashes:
-        raise MatrixEvidenceError("controlled analyzer source hashes are missing")
-    for relpath, digest in hashes.items():
-        if (
-            not _safe_relative(relpath)
-            or not (
-                relpath.startswith("src/fastapi_endpoint_detector/")
-                or relpath.startswith("benchmarks/providers/")
-            )
-            or not _is_sha(digest.removeprefix("sha256:") if isinstance(digest, str) else None)
-        ):
-            raise MatrixEvidenceError("invalid analyzer source hash identity")
-        try:
-            actual = f"sha256:{_sha256((PROJECT_ROOT / relpath).read_bytes())}"
-        except OSError as exc:
-            raise MatrixEvidenceError(f"missing analyzer source: {relpath}") from exc
-        if actual != digest:
-            raise MatrixEvidenceError(f"analyzer source hash mismatch: {relpath}")
+    hashes, snapshot_hash = _load_analyzer_source_snapshots()
+    if evaluation["analyzer_snapshot_sha256"] != snapshot_hash:
+        raise MatrixEvidenceError("controlled results do not bind the committed analyzer snapshot")
+    recorded_hashes = evaluation["analyzer_source_hashes"]
+    if not isinstance(recorded_hashes, dict) or set(recorded_hashes) != set(ANALYZER_SOURCE_PATHS):
+        raise MatrixEvidenceError(
+            "controlled analyzer source hash path set is incomplete or excessive"
+        )
+    if recorded_hashes != hashes:
+        raise MatrixEvidenceError(
+            "controlled analyzer source hashes differ from committed snapshots"
+        )
     if (
         evaluation["analyzer"] != "MypyAnalyzer plus audit_effect_contracts"
         or not isinstance(evaluation["resolver_version"], str)

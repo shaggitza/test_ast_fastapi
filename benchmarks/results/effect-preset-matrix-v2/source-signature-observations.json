@@ -2,7 +2,7 @@
   "schema_version": 1,
   "report_id": "effect-preset-source-signature-observations-v1",
   "status": "partial",
-  "manifest_sha256": "sha256:2fd9d9c7b9878c8c23c5b81d2de68dde338dbb2e348f12007015421a7b7b87b5",
+  "manifest_sha256": "sha256:f90c11bb5eeb2e5a4d60607438f24d4070be4c84506787e73c1b06903833df1d",
   "release_artifacts": [
     {
       "distribution": "aiohttp",
@@ -69,12 +69,18 @@
       "version": "2.32.3",
       "artifact": "requests-2.32.3-py3-none-any.whl",
       "artifact_sha256": "sha256:70761cfe03c773ceb22aa2f671b4757976145175cdfca038c02654d061d6dcc6"
+    },
+    {
+      "distribution": "sqlalchemy",
+      "version": "2.0.36",
+      "artifact": "sqlalchemy-2.0.36.tar.gz",
+      "artifact_sha256": "sha256:7f2767680b6d2398aea7082e45a774b2b0767b5c8d8ffb9c8b683088ea9b29c5"
     }
   ],
   "artifact_directory_verified": true,
   "source_execution": false,
   "counts": {
-    "verified_callable_signatures": 52,
+    "verified_callable_signatures": 70,
     "partial_declarations": 10
   },
   "verified_callable_signatures": [
@@ -1145,6 +1151,268 @@
         "cert",
         "json"
       ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "sqlalchemy",
+      "version": "2.0.36",
+      "symbol": "sqlalchemy.orm.session.Session.add",
+      "source_path": "sqlalchemy/orm/session.py",
+      "source_sha256": "sha256:09925343ec0fc08cb473700c1718099c181a7ede9e11fe09cdc08b71a6824a38",
+      "signature": "(self, instance: object, _warn: bool=True)",
+      "selector_source_path": "sqlalchemy/orm/session.py",
+      "selector_source_sha256": "sha256:09925343ec0fc08cb473700c1718099c181a7ede9e11fe09cdc08b71a6824a38",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "instance",
+        "_warn"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "sqlalchemy",
+      "version": "2.0.36",
+      "symbol": "sqlalchemy.orm.session.Session.add_all",
+      "source_path": "sqlalchemy/orm/session.py",
+      "source_sha256": "sha256:09925343ec0fc08cb473700c1718099c181a7ede9e11fe09cdc08b71a6824a38",
+      "signature": "(self, instances: Iterable[object])",
+      "selector_source_path": "sqlalchemy/orm/session.py",
+      "selector_source_sha256": "sha256:09925343ec0fc08cb473700c1718099c181a7ede9e11fe09cdc08b71a6824a38",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "instances"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "sqlalchemy",
+      "version": "2.0.36",
+      "symbol": "sqlalchemy.orm.session.Session.delete",
+      "source_path": "sqlalchemy/orm/session.py",
+      "source_sha256": "sha256:09925343ec0fc08cb473700c1718099c181a7ede9e11fe09cdc08b71a6824a38",
+      "signature": "(self, instance: object)",
+      "selector_source_path": "sqlalchemy/orm/session.py",
+      "selector_source_sha256": "sha256:09925343ec0fc08cb473700c1718099c181a7ede9e11fe09cdc08b71a6824a38",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "instance"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "sqlalchemy",
+      "version": "2.0.36",
+      "symbol": "sqlalchemy.orm.session.Session.merge",
+      "source_path": "sqlalchemy/orm/session.py",
+      "source_sha256": "sha256:09925343ec0fc08cb473700c1718099c181a7ede9e11fe09cdc08b71a6824a38",
+      "signature": "(self, instance: _O, *, load: bool=True, options: Optional[Sequence[ORMOption]]=None)",
+      "selector_source_path": "sqlalchemy/orm/session.py",
+      "selector_source_sha256": "sha256:09925343ec0fc08cb473700c1718099c181a7ede9e11fe09cdc08b71a6824a38",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "instance",
+        "load",
+        "options"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "sqlalchemy",
+      "version": "2.0.36",
+      "symbol": "sqlalchemy.orm.session.Session.flush",
+      "source_path": "sqlalchemy/orm/session.py",
+      "source_sha256": "sha256:09925343ec0fc08cb473700c1718099c181a7ede9e11fe09cdc08b71a6824a38",
+      "signature": "(self, objects: Optional[Sequence[Any]]=None)",
+      "selector_source_path": "sqlalchemy/orm/session.py",
+      "selector_source_sha256": "sha256:09925343ec0fc08cb473700c1718099c181a7ede9e11fe09cdc08b71a6824a38",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "objects"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "sqlalchemy",
+      "version": "2.0.36",
+      "symbol": "sqlalchemy.orm.session.Session.begin",
+      "source_path": "sqlalchemy/orm/session.py",
+      "source_sha256": "sha256:09925343ec0fc08cb473700c1718099c181a7ede9e11fe09cdc08b71a6824a38",
+      "signature": "(self, nested: bool=False)",
+      "selector_source_path": "sqlalchemy/orm/session.py",
+      "selector_source_sha256": "sha256:09925343ec0fc08cb473700c1718099c181a7ede9e11fe09cdc08b71a6824a38",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "nested"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "sqlalchemy",
+      "version": "2.0.36",
+      "symbol": "sqlalchemy.orm.session.Session.begin_nested",
+      "source_path": "sqlalchemy/orm/session.py",
+      "source_sha256": "sha256:09925343ec0fc08cb473700c1718099c181a7ede9e11fe09cdc08b71a6824a38",
+      "signature": "(self)",
+      "selector_source_path": "sqlalchemy/orm/session.py",
+      "selector_source_sha256": "sha256:09925343ec0fc08cb473700c1718099c181a7ede9e11fe09cdc08b71a6824a38",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "sqlalchemy",
+      "version": "2.0.36",
+      "symbol": "sqlalchemy.orm.session.Session.commit",
+      "source_path": "sqlalchemy/orm/session.py",
+      "source_sha256": "sha256:09925343ec0fc08cb473700c1718099c181a7ede9e11fe09cdc08b71a6824a38",
+      "signature": "(self)",
+      "selector_source_path": "sqlalchemy/orm/session.py",
+      "selector_source_sha256": "sha256:09925343ec0fc08cb473700c1718099c181a7ede9e11fe09cdc08b71a6824a38",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "sqlalchemy",
+      "version": "2.0.36",
+      "symbol": "sqlalchemy.orm.session.Session.rollback",
+      "source_path": "sqlalchemy/orm/session.py",
+      "source_sha256": "sha256:09925343ec0fc08cb473700c1718099c181a7ede9e11fe09cdc08b71a6824a38",
+      "signature": "(self)",
+      "selector_source_path": "sqlalchemy/orm/session.py",
+      "selector_source_sha256": "sha256:09925343ec0fc08cb473700c1718099c181a7ede9e11fe09cdc08b71a6824a38",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "sqlalchemy",
+      "version": "2.0.36",
+      "symbol": "sqlalchemy.ext.asyncio.session.AsyncSession.add",
+      "source_path": "sqlalchemy/ext/asyncio/session.py",
+      "source_sha256": "sha256:4295e7aaca706274f6f339c3d447695086958d038ed418abb52d0125e0717999",
+      "signature": "(self, instance: object, _warn: bool=True)",
+      "selector_source_path": "sqlalchemy/ext/asyncio/session.py",
+      "selector_source_sha256": "sha256:4295e7aaca706274f6f339c3d447695086958d038ed418abb52d0125e0717999",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "instance",
+        "_warn"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "sqlalchemy",
+      "version": "2.0.36",
+      "symbol": "sqlalchemy.ext.asyncio.session.AsyncSession.add_all",
+      "source_path": "sqlalchemy/ext/asyncio/session.py",
+      "source_sha256": "sha256:4295e7aaca706274f6f339c3d447695086958d038ed418abb52d0125e0717999",
+      "signature": "(self, instances: Iterable[object])",
+      "selector_source_path": "sqlalchemy/ext/asyncio/session.py",
+      "selector_source_sha256": "sha256:4295e7aaca706274f6f339c3d447695086958d038ed418abb52d0125e0717999",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "instances"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "sqlalchemy",
+      "version": "2.0.36",
+      "symbol": "sqlalchemy.ext.asyncio.session.AsyncSession.delete",
+      "source_path": "sqlalchemy/ext/asyncio/session.py",
+      "source_sha256": "sha256:4295e7aaca706274f6f339c3d447695086958d038ed418abb52d0125e0717999",
+      "signature": "async (self, instance: object)",
+      "selector_source_path": "sqlalchemy/ext/asyncio/session.py",
+      "selector_source_sha256": "sha256:4295e7aaca706274f6f339c3d447695086958d038ed418abb52d0125e0717999",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "instance"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "sqlalchemy",
+      "version": "2.0.36",
+      "symbol": "sqlalchemy.ext.asyncio.session.AsyncSession.merge",
+      "source_path": "sqlalchemy/ext/asyncio/session.py",
+      "source_sha256": "sha256:4295e7aaca706274f6f339c3d447695086958d038ed418abb52d0125e0717999",
+      "signature": "async (self, instance: _O, *, load: bool=True, options: Optional[Sequence[ORMOption]]=None)",
+      "selector_source_path": "sqlalchemy/ext/asyncio/session.py",
+      "selector_source_sha256": "sha256:4295e7aaca706274f6f339c3d447695086958d038ed418abb52d0125e0717999",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "instance",
+        "load",
+        "options"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "sqlalchemy",
+      "version": "2.0.36",
+      "symbol": "sqlalchemy.ext.asyncio.session.AsyncSession.flush",
+      "source_path": "sqlalchemy/ext/asyncio/session.py",
+      "source_sha256": "sha256:4295e7aaca706274f6f339c3d447695086958d038ed418abb52d0125e0717999",
+      "signature": "async (self, objects: Optional[Sequence[Any]]=None)",
+      "selector_source_path": "sqlalchemy/ext/asyncio/session.py",
+      "selector_source_sha256": "sha256:4295e7aaca706274f6f339c3d447695086958d038ed418abb52d0125e0717999",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "objects"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "sqlalchemy",
+      "version": "2.0.36",
+      "symbol": "sqlalchemy.ext.asyncio.session.AsyncSession.begin",
+      "source_path": "sqlalchemy/ext/asyncio/session.py",
+      "source_sha256": "sha256:4295e7aaca706274f6f339c3d447695086958d038ed418abb52d0125e0717999",
+      "signature": "(self)",
+      "selector_source_path": "sqlalchemy/ext/asyncio/session.py",
+      "selector_source_sha256": "sha256:4295e7aaca706274f6f339c3d447695086958d038ed418abb52d0125e0717999",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "sqlalchemy",
+      "version": "2.0.36",
+      "symbol": "sqlalchemy.ext.asyncio.session.AsyncSession.begin_nested",
+      "source_path": "sqlalchemy/ext/asyncio/session.py",
+      "source_sha256": "sha256:4295e7aaca706274f6f339c3d447695086958d038ed418abb52d0125e0717999",
+      "signature": "(self)",
+      "selector_source_path": "sqlalchemy/ext/asyncio/session.py",
+      "selector_source_sha256": "sha256:4295e7aaca706274f6f339c3d447695086958d038ed418abb52d0125e0717999",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "sqlalchemy",
+      "version": "2.0.36",
+      "symbol": "sqlalchemy.ext.asyncio.session.AsyncSession.commit",
+      "source_path": "sqlalchemy/ext/asyncio/session.py",
+      "source_sha256": "sha256:4295e7aaca706274f6f339c3d447695086958d038ed418abb52d0125e0717999",
+      "signature": "async (self)",
+      "selector_source_path": "sqlalchemy/ext/asyncio/session.py",
+      "selector_source_sha256": "sha256:4295e7aaca706274f6f339c3d447695086958d038ed418abb52d0125e0717999",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "sqlalchemy",
+      "version": "2.0.36",
+      "symbol": "sqlalchemy.ext.asyncio.session.AsyncSession.rollback",
+      "source_path": "sqlalchemy/ext/asyncio/session.py",
+      "source_sha256": "sha256:4295e7aaca706274f6f339c3d447695086958d038ed418abb52d0125e0717999",
+      "signature": "async (self)",
+      "selector_source_path": "sqlalchemy/ext/asyncio/session.py",
+      "selector_source_sha256": "sha256:4295e7aaca706274f6f339c3d447695086958d038ed418abb52d0125e0717999",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [],
       "status": "exact_source_signature_and_selector_match"
     }
   ],

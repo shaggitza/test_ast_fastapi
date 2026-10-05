@@ -3,14 +3,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import benchmarks.providers.effect_preset_matrix as matrix_provider
 import pytest
 from benchmarks.providers.effect_preset_matrix import (
+    ANALYZER_SNAPSHOT_PATH,
     MANIFEST_PATH,
     RESULTS_PATH,
     MatrixEvidenceError,
     exact_release_status,
     load_controlled_results,
     load_manifest,
+    load_package_analyzer_results,
     load_source_signature_observations,
     summarize_matrix,
     verify_artifacts,
@@ -49,12 +52,14 @@ def test_frozen_matrix_is_explicit_and_does_not_expand_version_ranges() -> None:
     assert exact_release_status("redis", "6.0.0", manifest) == "not_audited"
     assert exact_release_status("motor", "3.6.0", manifest) == "audited_exact_release"
     assert exact_release_status("motor", "3.7.0", manifest) == "not_audited"
+    assert exact_release_status("sqlalchemy", "2.0.36", manifest) == "audited_exact_release"
+    assert exact_release_status("sqlalchemy", "2.0.37", manifest) == "not_audited"
     assert exact_release_status("mypy-boto3-sqs", "1.35.91", manifest) == "audited_exact_release"
     assert exact_release_status("mypy-boto3-sqs", "1.35.92", manifest) == "not_audited"
     summary = summarize_matrix(manifest)
-    assert summary["package_releases"] == 11
-    assert len(verify_preset_contracts(manifest)) == 5
-    assert summary["source_inspected"] == 8
+    assert summary["package_releases"] == 12
+    assert len(verify_preset_contracts(manifest)) == 6
+    assert summary["source_inspected"] == 9
     assert summary["source_partially_inspected"] == 3
     assert summary["analyzer_observations"] == 1
     assert summary["unsupported_cases"] == 2
@@ -256,6 +261,73 @@ def test_controlled_results_reject_forged_aggregates(tmp_path: Path) -> None:
 
     with pytest.raises(MatrixEvidenceError, match="aggregate does not match raw"):
         load_controlled_results(altered)
+
+
+def test_pinned_package_symbol_cases_replay_with_same_name_negatives() -> None:
+    result = load_package_analyzer_results()
+    assert len(result["cases"]) == 6
+    assert {(row["distribution"], row["version"]) for row in result["cases"]} == {
+        ("requests", "2.32.3"),
+        ("aiohttp", "3.11.11"),
+        ("redis", "5.2.1"),
+        ("pymongo", "4.10.1"),
+        ("sqlalchemy", "2.0.36"),
+        ("mypy-boto3-s3", "1.35.92"),
+    }
+    assert result["observed"]["matched_calls"] == 6
+    assert result["observed"]["unrelated_same_name_negative_calls"] == 6
+    assert result["observed"]["unmatched_calls"] == 6
+    assert result["source_execution"] is False
+    assert result["upstream_package_code_imported_or_executed"] is False
+    assert {row["reason_code"] for row in result["unsupported_cases"]} == {
+        "descriptor_signature_unavailable",
+        "no_exact_preset_contract",
+    }
+
+
+def test_package_symbol_results_reject_forged_aggregates(tmp_path: Path) -> None:
+    source = matrix_provider.PACKAGE_CASE_RESULTS_PATH
+    result = json.loads(source.read_text(encoding="utf-8"))
+    result["observed"]["matched_calls"] = 12
+    altered = tmp_path / "altered-package-results.json"
+    altered.write_text(json.dumps(result), encoding="utf-8")
+
+    with pytest.raises(MatrixEvidenceError, match="aggregate does not match raw"):
+        load_package_analyzer_results(altered)
+
+
+def test_controlled_results_require_exact_analyzer_source_hash_path_set(tmp_path: Path) -> None:
+    result = json.loads(RESULTS_PATH.read_text(encoding="utf-8"))
+    hashes = result["controlled_evaluation"]["analyzer_source_hashes"]
+    hashes.pop("src/fastapi_endpoint_detector/analyzer/mypy_analyzer.py")
+    altered = tmp_path / "missing-mypy-analyzer-hash.json"
+    altered.write_text(json.dumps(result), encoding="utf-8")
+
+    with pytest.raises(MatrixEvidenceError, match="path set is incomplete or excessive"):
+        load_controlled_results(altered)
+
+
+def test_controlled_results_reject_extra_analyzer_source_hash(tmp_path: Path) -> None:
+    result = json.loads(RESULTS_PATH.read_text(encoding="utf-8"))
+    result["controlled_evaluation"]["analyzer_source_hashes"]["src/extra.py"] = "sha256:" + "0" * 64
+    altered = tmp_path / "extra-analyzer-hash.json"
+    altered.write_text(json.dumps(result), encoding="utf-8")
+
+    with pytest.raises(MatrixEvidenceError, match="path set is incomplete or excessive"):
+        load_controlled_results(altered)
+
+
+def test_committed_analyzer_source_snapshot_requires_exact_unique_path_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot = json.loads(ANALYZER_SNAPSHOT_PATH.read_text(encoding="utf-8"))
+    snapshot["source_files"].append(snapshot["source_files"][-1])
+    altered = tmp_path / "duplicate-source-path.json"
+    altered.write_text(json.dumps(snapshot), encoding="utf-8")
+
+    monkeypatch.setattr(matrix_provider, "ANALYZER_SNAPSHOT_PATH", altered)
+    with pytest.raises(MatrixEvidenceError, match="snapshot path set is invalid"):
+        load_controlled_results()
 
 
 def test_controlled_results_reject_raw_rows_that_disagree_with_replay(

@@ -4,7 +4,7 @@
   "status": "completed",
   "package_source_audit": {
     "manifest_path": "benchmarks/results/effect-preset-matrix-v2/package-symbols.json",
-    "manifest_sha256": "sha256:2fd9d9c7b9878c8c23c5b81d2de68dde338dbb2e348f12007015421a7b7b87b5",
+    "manifest_sha256": "sha256:f90c11bb5eeb2e5a4d60607438f24d4070be4c84506787e73c1b06903833df1d",
     "release_artifacts": [
       {
         "distribution": "aiohttp",
@@ -82,17 +82,16 @@
         "artifact": "requests-2.32.3-py3-none-any.whl",
         "artifact_sha256": "sha256:70761cfe03c773ceb22aa2f671b4757976145175cdfca038c02654d061d6dcc6",
         "metadata_sha256": "sha256:658ee8454c1e2e76fb8c2127116f61156b3b22941b3559c00389dca70038581a"
+      },
+      {
+        "distribution": "sqlalchemy",
+        "version": "2.0.36",
+        "artifact": "sqlalchemy-2.0.36.tar.gz",
+        "artifact_sha256": "sha256:7f2767680b6d2398aea7082e45a774b2b0767b5c8d8ffb9c8b683088ea9b29c5",
+        "metadata_sha256": null
       }
     ],
     "versioned_contract_sets": [
-      {
-        "preset_id": "redis-py-effects",
-        "version": "1.0.0",
-        "revision": "1",
-        "preset_sha256": "sha256:a7b6dd01808d6f9275ed9aa99c67c577c04aa2ce30a5301d3ef957fe6695fcf8",
-        "preset_semantic_sha256": "sha256:ce681490563300ce01dec68cd42af26c5fe8e06c7d5d45ae652dfce73c531ca2",
-        "config_sha256": "sha256:733270f1a03860adc9cae1c70d081317353f918f994b8a7112e37aa22bdb3438"
-      },
       {
         "preset_id": "pymongo-effects",
         "version": "1.0.0",
@@ -102,20 +101,36 @@
         "config_sha256": "sha256:40fc31d3da7d0b7f459923b7ef39cd62de26950039641d1ff5a21246fc524116"
       },
       {
-        "preset_id": "stdlib-filesystem-effects",
-        "version": "2.0.0",
-        "revision": "2",
-        "preset_sha256": "sha256:ece9515414a316b1fa6fec47e45699667e7d565b3c2537787dc91a203d0f88f3",
-        "preset_semantic_sha256": "sha256:5acc35da9d989ccafda0960090efefbbaa52ca5b70894882c24c4bf1355c2b96",
-        "config_sha256": "sha256:d168f95981e84b8e95dac49d0cc3072b51bbc18ec3a0c3a343f1ef02f9af0301"
-      },
-      {
         "preset_id": "python-http-client-effects",
         "version": "2.0.0",
         "revision": "2",
         "preset_sha256": "sha256:1999bca6c27a6b92cf448e21d56b213c8334273c1d92fe3da56ceba749cd9a7f",
         "preset_semantic_sha256": "sha256:ab3d88b368db24f4c6c0879c8104105b09f23997997e63dd232856886bca6e2e",
         "config_sha256": "sha256:2e09fa80796e9f4b3ad00e223d6d1c70c1b4b467e472291011708951596e3588"
+      },
+      {
+        "preset_id": "redis-py-effects",
+        "version": "1.0.0",
+        "revision": "1",
+        "preset_sha256": "sha256:a7b6dd01808d6f9275ed9aa99c67c577c04aa2ce30a5301d3ef957fe6695fcf8",
+        "preset_semantic_sha256": "sha256:ce681490563300ce01dec68cd42af26c5fe8e06c7d5d45ae652dfce73c531ca2",
+        "config_sha256": "sha256:733270f1a03860adc9cae1c70d081317353f918f994b8a7112e37aa22bdb3438"
+      },
+      {
+        "preset_id": "sqlalchemy-transaction-effects",
+        "version": "3.0.0",
+        "revision": "3",
+        "preset_sha256": "sha256:907405ddeca13550c69e22245ab34162d50ee7e71e9fea50e42a3dc6e916718d",
+        "preset_semantic_sha256": "sha256:132982ba61f04626df531dc80c71ce5d21c12ec583a932d21c220486785c8d04",
+        "config_sha256": "sha256:2bf39dd60e0dfdfb381a3debb7663aba90a926323579cefdc29d6c5f4c4293e1"
+      },
+      {
+        "preset_id": "stdlib-filesystem-effects",
+        "version": "2.0.0",
+        "revision": "2",
+        "preset_sha256": "sha256:ece9515414a316b1fa6fec47e45699667e7d565b3c2537787dc91a203d0f88f3",
+        "preset_semantic_sha256": "sha256:5acc35da9d989ccafda0960090efefbbaa52ca5b70894882c24c4bf1355c2b96",
+        "config_sha256": "sha256:d168f95981e84b8e95dac49d0cc3072b51bbc18ec3a0c3a343f1ef02f9af0301"
       },
       {
         "preset_id": "typed-s3-effects",
@@ -132,17 +147,17 @@
   "controlled_evaluation": {
     "case_id": "stdlib-pathlib-and-open-handles-v2",
     "test_path": "tests/benchmarks/test_effect_preset_matrix.py",
-    "test_file_sha256": "sha256:eaddf8bf4fceb873e6d9efbb0a67bba83531b623c5979b3d2161a9e0ed2ac5a7",
+    "test_file_sha256": "sha256:8c24e449cdc320ba1b96e2f3df0b759924635c40a0c7c6c9c4a0611ae80cb747",
     "fixture_path": "benchmarks/results/effect-preset-matrix-v2/fixtures/pathlib_open_handles.py",
     "fixture_sha256": "sha256:daf0971e1851bbcc8ad6437794ef9a6bc0c37ddbb2fc45f0efa7714cab833155",
     "analyzer": "MypyAnalyzer plus audit_effect_contracts",
     "analyzer_source_hashes": {
-      "src/fastapi_endpoint_detector/analyzer/mypy_analyzer.py": "sha256:2725b79f15a2d91bd95d3700b33696dff2c2888718ba78d57189cbd2a8af33be",
+      "benchmarks/providers/effect_preset_matrix.py": "sha256:39f099c9e80120be1cf6a4cccea4090a6ceceecbbe1854110715283a30cc2f91",
       "src/fastapi_endpoint_detector/analyzer/effect_contract_auditor.py": "sha256:c6ecd7210e7c4fc054010c80e9df0961b1510fd9cb9599faa49a27e751258d57",
+      "src/fastapi_endpoint_detector/analyzer/mypy_analyzer.py": "sha256:2725b79f15a2d91bd95d3700b33696dff2c2888718ba78d57189cbd2a8af33be",
       "src/fastapi_endpoint_detector/models/effect_contract.py": "sha256:392c7024633ea0d309447c1991f96d0f2293d52732371797538ca2f0637f92d8",
       "src/fastapi_endpoint_detector/models/endpoint.py": "sha256:d5a01763444a26da525f3320d7adab34df281407073b80a5b1a755c737c1ffa7",
-      "src/fastapi_endpoint_detector/strict_data.py": "sha256:ba4b87f249f2e54a5ce4b507a3cbd4871d00ee03f6ea2fc44ca5e1a60236ea81",
-      "benchmarks/providers/effect_preset_matrix.py": "sha256:4ad88395afc0b8e61ab1d60563eb08d1b8d73819e649ad32124686a27b979a9e"
+      "src/fastapi_endpoint_detector/strict_data.py": "sha256:ba4b87f249f2e54a5ce4b507a3cbd4871d00ee03f6ea2fc44ca5e1a60236ea81"
     },
     "resolver_version": "2.4.0",
     "python_version": "3.11.16",
@@ -681,7 +696,8 @@
         "builtins.open.read": "exact"
       }
     },
-    "analysis_policy": "static analyzer replay only; fixture source never executed"
+    "analysis_policy": "static analyzer replay only; fixture source never executed",
+    "analyzer_snapshot_sha256": "sha256:a0690e1975c038cb800d23f2b614cfd5018be6c759cb79022da4ed026739e842"
   },
   "environment": {
     "python": "3.11.16",
