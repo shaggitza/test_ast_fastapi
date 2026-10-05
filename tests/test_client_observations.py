@@ -2,6 +2,7 @@ from pathlib import Path
 
 from fastapi_endpoint_detector.analyzer.client_observations import (
     EstablishedSurface,
+    extract_client_observation_inventory,
     extract_client_observations,
     join_established_surfaces,
 )
@@ -75,6 +76,29 @@ def test_fetch_requires_exact_literal_method_options_and_join_needs_origin_trust
     calls = extract_client_observations("fetch('https://api.test/items?q=1');")
     matches = join_established_surfaces(calls, surfaces)
     assert [item.surface_id for item in matches] == ["trusted"]
+
+
+def test_dynamic_urls_and_unknown_request_options_are_uncertainties_only() -> None:
+    source = (
+        "fetch(`${base}/items`); "
+        "fetch('/items', options); "
+        "axios.get('/items', options); "
+        "axios.post('/items', body); "
+        "axios({method: 'GET', url: '/reversed'}); "
+        "axios({url: '/extra', method: 'GET', headers});"
+    )
+    exact, uncertain = extract_client_observation_inventory(source, Path("client.ts"))
+    assert [(item.method, item.route_path) for item in exact] == [
+        ("POST", "/items"),
+        ("GET", "/reversed"),
+    ]
+    assert [item.reason for item in uncertain] == [
+        "dynamic_or_nonliteral_url",
+        "dynamic_or_unsupported_request_options",
+        "unsupported_or_dynamic_request_options",
+        "unsupported_or_dynamic_axios_options",
+    ]
+    assert all(item.start_offset < item.end_offset for item in uncertain)
 
 
 def test_svelte_scans_script_blocks_only() -> None:

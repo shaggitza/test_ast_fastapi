@@ -10,9 +10,11 @@ This package contains modules for:
 from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
 from fastapi_endpoint_detector.analyzer.client_observations import (
     ClientObservation,
+    ClientObservationIssue,
     ClientSurfaceMatch,
     EstablishedSurface,
     established_surfaces,
+    extract_client_observation_inventory,
     extract_client_observations,
     join_established_surfaces,
 )
@@ -33,6 +35,7 @@ from fastapi_endpoint_detector.analyzer.project_observations import (
 __all__ = [
     "ChangeMapper",
     "ClientObservation",
+    "ClientObservationIssue",
     "ClientSurfaceMatch",
     "DeploymentObservation",
     "EndpointRegistry",
@@ -41,6 +44,7 @@ __all__ = [
     "ProjectObservationSnapshot",
     "SourceObservationIssue",
     "established_surfaces",
+    "extract_client_observation_inventory",
     "extract_client_observations",
     "extract_dockerfile_observations",
     "extract_env_observations",

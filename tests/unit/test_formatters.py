@@ -118,10 +118,14 @@ def test_source_observations_are_optional_structured_json_and_yaml() -> None:
     yaml_default = yaml.safe_load(YamlFormatter().format(report))
     assert "source_observations" not in json_default
     assert "source_observations" not in yaml_default
+    assert "Source Observations" not in TextFormatter().format(report)
+    assert "Source Observations" not in MarkdownFormatter().format(report)
+    assert "Source Observations" not in HtmlFormatter().format(report)
 
     source_observations = {
         "scope": "bounded_source_observations_only",
         "client_observations": [{"route_path": "/items", "query": "q=1"}],
+        "client_uncertainties": [{"reason": "dynamic_or_nonliteral_url", "certainty": "uncertain"}],
         "deployment_observations": [{"certainty": "uncertain"}],
     }
     report.source_observations = source_observations
@@ -129,6 +133,10 @@ def test_source_observations_are_optional_structured_json_and_yaml() -> None:
     yaml_result = yaml.safe_load(YamlFormatter().format(report))
     assert json_result["source_observations"] == source_observations
     assert yaml_result["source_observations"] == source_observations
+    summary = "1 exact client observations, 1 uncertain client calls"
+    assert summary in re.sub(r"\s+", " ", TextFormatter().format(report))
+    assert summary in MarkdownFormatter().format(report)
+    assert summary in HtmlFormatter().format(report)
 
 
 def test_json_and_yaml_preserve_optional_dependency_graph() -> None:

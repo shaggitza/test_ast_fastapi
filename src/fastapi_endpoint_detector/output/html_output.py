@@ -2623,6 +2623,13 @@ class HtmlFormatter(BaseFormatter):
                 f"{paths.summary.unresolved_pairs} unresolved pairs; "
                 "lexical and conditional only, persistence not established</div>"
             )
+        if report.source_observations is not None:
+            summary = self.summarize_source_observations(report.source_observations)
+            content_lines.append(
+                '<div class="summary-item"><span class="summary-label">'
+                "Source Observations:</span> "
+                f"{html.escape(summary)}</div>"
+            )
         content_lines.append("</div>")
 
         # Affected endpoints

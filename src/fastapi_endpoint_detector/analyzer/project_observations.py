@@ -17,10 +17,11 @@ from urllib.parse import urlsplit
 
 from fastapi_endpoint_detector.analyzer.client_observations import (
     ClientObservation,
+    ClientObservationIssue,
     ClientSurfaceMatch,
     EstablishedSurface,
     established_surfaces,
-    extract_client_observations,
+    extract_client_observation_inventory,
     join_established_surfaces,
 )
 from fastapi_endpoint_detector.analyzer.deployment_observations import (
@@ -61,6 +62,7 @@ _DEFAULT_DEPLOYMENT_PATTERNS = (
     "**/.env",
     "**/.env.*",
     "**/Dockerfile*",
+    "**/*.Dockerfile",
     "**/*.py",
 )
 
@@ -79,6 +81,7 @@ class ProjectObservationSnapshot:
 
     root: Path
     client_observations: tuple[ClientObservation, ...]
+    client_uncertainties: tuple[ClientObservationIssue, ...]
     deployment_observations: tuple[DeploymentObservation, ...]
     surface_matches: tuple[ClientSurfaceMatch, ...]
     scanned_files: int
@@ -122,6 +125,18 @@ class ProjectObservationSnapshot:
                 }
                 for item in self.client_observations
             ],
+            "client_uncertainties": [
+                {
+                    "source_path": item.source_path.as_posix(),
+                    "line": item.line,
+                    "method": item.method,
+                    "reason": item.reason,
+                    "start_offset": item.start_offset,
+                    "end_offset": item.end_offset,
+                    "certainty": "uncertain",
+                }
+                for item in self.client_uncertainties
+            ],
             "deployment_observations": [
                 {
                     "source_path": item.source_path.as_posix(),
@@ -147,7 +162,8 @@ class ProjectObservationSnapshot:
                 {"source_path": item.source_path, "reason": item.reason} for item in self.issues
             ],
             "limitations": [
-                "Only exact bounded client call forms are reported; unsupported syntax is omitted.",
+                "Unsupported or dynamic recognized call shapes are listed as client uncertainties.",
+                "Only exact client observations are eligible for explicit-origin route joins.",
                 "A route match requires an explicitly supplied trusted surface "
                 "and explicit origin.",
                 "Observations do not change endpoint candidates, confidence, or route inventory.",
@@ -162,7 +178,11 @@ def _is_candidate(path: Path) -> tuple[bool, str | None]:
         return True, "client"
     if name == ".env" or name.startswith(".env."):
         return True, "env"
-    if lowered == "dockerfile" or lowered.startswith("dockerfile."):
+    if (
+        lowered == "dockerfile"
+        or lowered.startswith("dockerfile.")
+        or lowered.endswith(".dockerfile")
+    ):
         return True, "dockerfile"
     if path.suffix.lower() == ".py":
         return True, "python"
@@ -291,6 +311,7 @@ def scan_project_observations(  # noqa: PLR0912, PLR0915
     )
 
     client_observations: list[ClientObservation] = []
+    client_uncertainties: list[ClientObservationIssue] = []
     deployment_observations: list[DeploymentObservation] = []
     issues: list[SourceObservationIssue] = []
     scanned_files = 0
@@ -342,7 +363,9 @@ def scan_project_observations(  # noqa: PLR0912, PLR0915
                 continue
 
             if kind == "client":
-                client_observations.extend(extract_client_observations(source, Path(relative)))
+                exact, uncertain = extract_client_observation_inventory(source, Path(relative))
+                client_observations.extend(exact)
+                client_uncertainties.extend(uncertain)
             elif kind == "env":
                 deployment_observations.extend(extract_env_observations(source, Path(relative)))
             elif kind == "dockerfile":
@@ -368,10 +391,21 @@ def scan_project_observations(  # noqa: PLR0912, PLR0915
             key=lambda item: (item.source_path.as_posix(), item.line, item.kind, item.key or ""),
         )
     )
+    client_issues = tuple(
+        sorted(
+            client_uncertainties,
+            key=lambda item: (
+                item.source_path.as_posix(),
+                item.start_offset,
+                item.end_offset,
+            ),
+        )
+    )
     matches = join_established_surfaces(clients, trusted_surfaces)
     return ProjectObservationSnapshot(
         base,
         clients,
+        client_issues,
         deployments,
         matches,
         scanned_files,

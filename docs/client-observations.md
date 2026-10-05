@@ -8,10 +8,12 @@ and complete supported call forms. It handles `fetch`, common `axios` methods,
 the literal `{url, method}` axios config form, and `new WebSocket(...)`.
 
 Dynamic templates, concatenations, receiver calls such as `client.fetch`,
-unknown fetch options, malformed calls, and unsupported config fields produce
-no exact observation. Svelte markup is masked; only script block contents are
-scanned. Each result retains the exact source offsets, line, literal URL, and
-query. Repeated identical calls remain separate observations.
+unknown request options, malformed calls, and unsupported config fields produce
+no exact observation. Recognized calls with dynamic URLs or unsupported options
+are kept in a separate uncertainty list with source spans and cannot be joined.
+Svelte markup is masked; only script block contents are scanned. Each exact
+result retains the exact source offsets, line, literal URL, and query. Repeated
+identical calls remain separate observations.
 
 Relative URLs have no origin and cannot be correlated. Absolute URLs retain a
 normalized origin. A join requires the caller to provide an established server
@@ -20,9 +22,10 @@ origin, method, and path matches are returned. Endpoint projection alone does
 not imply trust or origin. No global URL fanout or inferred server candidate
 is produced.
 
-This module is an extraction primitive, not yet a repository-wide client
-inventory. CLI/configuration and analyzer integration must preserve the same
-origin and trust gates. `analyzer.deployment_observations` separately records
+`analyzer.project_observations` applies client and deployment glob selection,
+file-count and per-file byte budgets, records skipped-file issues, and emits
+source evidence only. CLI/configuration wiring is being integrated in PR #310.
+`analyzer.deployment_observations` separately records
 simple `.env` and Dockerfile route settings, exposed ports, exec-form startup
 argv, and direct Python `subprocess` calls with literal argv. Only allowlisted
 route environment keys retain their values; unknown keys are redacted. URL
@@ -33,6 +36,24 @@ they do not execute commands, resolve environment expansion, or create route
 joins. The isolated runtime comparator remains separate, with its Docker,
 environment, and subprocess policy contracts.
 
-The current checked-in benchmark corpus has no nine-case source-grounded,
-audited TypeScript/Svelte evaluation set. Evaluation is therefore pending; no
-precision/recall result is claimed from the general PR corpus.
+## Exploratory source comparison
+
+The source archive and evaluation atoms from PR #324 were checked against their
+25 SHA-256/byte-count entries before scanning. That fixture contains six audited
+PRs, eight client-route atoms, and one conditional deployment atom. Its stated
+truth status is `reviewed_historical_atoms_provisional_not_canonical_truth`;
+the available “nine” units are atoms across six PRs, not nine independent PR
+cases.
+
+The bounded project adapter scanned the selected TypeScript/Svelte and Docker
+sources with no file-budget or read issues. It found one exact client call and
+76 uncertain client calls. The exact call did not match any of the eight
+provisional client-route atoms, and no origin-gated route join was possible
+because the fixture supplies no explicit origin attestations. In the Langflow
+case it found three exact Docker startup argv records and 33 uncertain
+deployment records. Those static records do not establish the conditional
+runtime-impact atom; no runtime behavior was executed or observed.
+
+This is an exploratory extraction comparison against provisional reviewed
+atoms, not canonical independent truth, and it does not support a precision or
+recall claim.

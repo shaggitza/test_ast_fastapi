@@ -29,6 +29,10 @@ def test_project_adapter_preserves_occurrences_queries_and_explicit_origin_join(
         'EXPOSE 8000\nCMD ["uvicorn", "app:app"]\n',
         encoding="utf-8",
     )
+    (tmp_path / "docker").mkdir()
+    (tmp_path / "docker" / "build_and_push_base.Dockerfile").write_text(
+        'ENTRYPOINT ["python", "-m", "app"]\n', encoding="utf-8"
+    )
     (tmp_path / "launch.py").write_text(
         "import subprocess as sp\nsp.run(['echo', 'ok'])\n", encoding="utf-8"
     )
@@ -75,17 +79,26 @@ def test_project_adapter_preserves_occurrences_queries_and_explicit_origin_join(
     )
     assert any(item.kind == "container_argv" for item in snapshot.deployment_observations)
     assert any(
+        item.source_path.as_posix() == "docker/build_and_push_base.Dockerfile"
+        and item.kind == "container_argv"
+        for item in snapshot.deployment_observations
+    )
+    assert any(
         item.kind == "subprocess_argv" and item.certainty == "exact"
         for item in snapshot.deployment_observations
     )
 
 
 def test_project_adapter_never_infers_origin_or_trust(tmp_path: Path) -> None:
-    (tmp_path / "client.ts").write_text("fetch('https://api.example.test/items')", encoding="utf-8")
+    (tmp_path / "client.ts").write_text(
+        "fetch('https://api.example.test/items'); fetch(`${origin}/dynamic`);",
+        encoding="utf-8",
+    )
     (tmp_path / ".env").write_text("API_BASE_URL=${API_ORIGIN}\n", encoding="utf-8")
     snapshot = scan_project_observations(tmp_path)
 
     assert not snapshot.surface_matches
+    assert [item.reason for item in snapshot.client_uncertainties] == ["dynamic_or_nonliteral_url"]
     assert snapshot.deployment_observations[0].certainty == "uncertain"
     assert snapshot.to_dict()["scope"] == "bounded_source_observations_only"
     with pytest.raises(ValueError, match="not established"):

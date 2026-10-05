@@ -33,6 +33,18 @@ class ClientObservation:
 
 
 @dataclass(frozen=True)
+class ClientObservationIssue:
+    """Recognized HTTP call syntax that cannot yield an exact route observation."""
+
+    source_path: Path
+    line: int
+    method: str | None
+    reason: str
+    start_offset: int
+    end_offset: int
+
+
+@dataclass(frozen=True)
 class EstablishedSurface:
     surface_id: str
     path: str
@@ -237,6 +249,34 @@ def _method_option(arg: list[_Token]) -> str | None:
     return None
 
 
+def _axios_config(arg: list[_Token]) -> tuple[str, str] | None:
+    """Accept only the fully consumed literal url/method object."""
+    if len(arg) != 9 or arg[0].value != "{" or arg[-1].value != "}":
+        return None
+    props = arg[1:-1]
+    if props[3].value != ",":
+        return None
+    if (
+        props[0].value == "url"
+        and props[1].value == ":"
+        and props[2].kind == "string"
+        and props[4].value == "method"
+        and props[5].value == ":"
+        and props[6].kind == "string"
+    ):
+        return props[2].value, props[6].value
+    if (
+        props[0].value == "method"
+        and props[1].value == ":"
+        and props[2].kind == "string"
+        and props[4].value == "url"
+        and props[5].value == ":"
+        and props[6].kind == "string"
+    ):
+        return props[6].value, props[2].value
+    return None
+
+
 def _is_global_axios(tokens: list[_Token], index: int) -> bool:
     """Reject axios references selected through an object/property receiver."""
     if index == 0:
@@ -436,10 +476,10 @@ def _shadowed_client_names(tokens: list[_Token]) -> tuple[set[str], set[str]]:  
     return shadowed, axios_imports
 
 
-def extract_client_observations(  # noqa: PLR0912, PLR0915
+def extract_client_observation_inventory(  # noqa: PLR0912, PLR0915
     source: str, source_path: Path | str = "<memory>"
-) -> tuple[ClientObservation, ...]:
-    """Extract exactly supported call forms; unsupported expressions are omitted."""
+) -> tuple[tuple[ClientObservation, ...], tuple[ClientObservationIssue, ...]]:
+    """Return exact observations and separate uncertainties for supported call names."""
     path = Path(source_path)
     lexical_source = source
     if path.suffix.lower() == ".svelte":
@@ -462,6 +502,7 @@ def extract_client_observations(  # noqa: PLR0912, PLR0915
     ts = _tokens(lexical_source)
     shadowed, axios_imports = _shadowed_client_names(ts)
     found: list[ClientObservation] = []
+    uncertain: list[ClientObservationIssue] = []
     i = 0
     while i < len(ts):
         start_i = i
@@ -513,35 +554,49 @@ def extract_client_observations(  # noqa: PLR0912, PLR0915
             i += 1
             continue
         args, close_i = parsed_args
-        url = None
+        url: str | None = None
         method = fixed or "GET"
+        uncertainty: str | None = None
         if name in {"fetch", "websocket"}:
             if 1 <= len(args) <= 2:
                 url = _literal(args[0])
+                if url is None:
+                    uncertainty = "dynamic_or_nonliteral_url"
                 if len(args) == 2:
-                    method = _method_option(args[1]) or ""
+                    parsed_method = _method_option(args[1])
+                    if parsed_method is None:
+                        method = ""
+                        uncertainty = "dynamic_or_unsupported_request_options"
+                    else:
+                        method = parsed_method
+            else:
+                uncertainty = "unsupported_argument_shape"
         elif name == "axios_method":
-            if 1 <= len(args) <= 2:
+            method_name = ts[start_i + 2].value.lower()
+            config_method = method_name in {"get", "delete", "head", "options"}
+            max_args = 1 if config_method else 2
+            if 1 <= len(args) <= max_args:
                 url = _literal(args[0])
+                if url is None:
+                    uncertainty = "dynamic_or_nonliteral_url"
+            elif config_method and len(args) == 2:
+                url = _literal(args[0])
+                uncertainty = "unsupported_or_dynamic_request_options"
+            else:
+                uncertainty = "unsupported_argument_shape"
         elif name == "axios_config" and len(args) == 1:
-            a = args[0]
-            # Only {url: literal, method: literal} in either order.
-            if a and a[0].value == "{" and a[-1].value == "}":
-                props = a[1:-1]
-                if (
-                    len(props) == 7
-                    and props[0].value == "url"
-                    and props[1].value == ":"
-                    and props[2].kind == "string"
-                    and props[3].value == ","
-                    and props[4].value == "method"
-                    and props[5].value == ":"
-                    and props[6].kind == "string"
-                ):
-                    url = props[2].value
-                    method = props[6].value.upper()
+            parsed_config = _axios_config(args[0])
+            if parsed_config is not None:
+                url, method_value = parsed_config
+                method = method_value.upper()
+            else:
+                uncertainty = "unsupported_or_dynamic_axios_options"
+        else:
+            uncertainty = "unsupported_argument_shape"
         parsed_url = _parse_url(url) if url is not None else None
-        if parsed_url and method:
+        if parsed_url is None and uncertainty is None:
+            uncertainty = "unsupported_url"
+        if parsed_url and method and uncertainty is None:
             pr, default, route, query, origin = parsed_url
             if pr == protocol and (
                 method in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "WEBSOCKET"}
@@ -562,11 +617,34 @@ def extract_client_observations(  # noqa: PLR0912, PLR0915
                         origin,
                     )
                 )
+            else:
+                uncertainty = "unsupported_protocol_or_method"
+        if uncertainty is not None:
+            first = ts[start_i]
+            last = ts[close_i]
+            uncertain.append(
+                ClientObservationIssue(
+                    path,
+                    source.count("\n", 0, first.start) + 1,
+                    method or None,
+                    uncertainty,
+                    first.start,
+                    last.end,
+                )
+            )
         # Continue inside the argument list. An unsupported outer call may
         # contain an independently supported nested call that remains useful
         # evidence (for example, fetch(makeRequest(axios.get('/inner')))).
         i += 1
-    return tuple(found)
+    return tuple(found), tuple(uncertain)
+
+
+def extract_client_observations(
+    source: str, source_path: Path | str = "<memory>"
+) -> tuple[ClientObservation, ...]:
+    """Extract exact supported calls; dynamic and unsupported shapes stay uncertain."""
+    observations, _uncertain = extract_client_observation_inventory(source, source_path)
+    return observations
 
 
 def join_established_surfaces(
