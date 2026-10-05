@@ -12,7 +12,6 @@ from benchmarks.real_world.evaluate_nonpython import (
     HISTORICAL_SCANNER_COMMIT,
     SCANNER_COMMIT,
     NonPythonFixtureError,
-    scan_literal_case,
     strict_json,
     validate_fixture,
 )
@@ -33,6 +32,66 @@ def read_json(path: Path) -> dict:
 
 def write_json(path: Path, value: dict) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+
+
+def install_self_contained_scanner_double(monkeypatch: pytest.MonkeyPatch, worker) -> None:
+    scanner_metadata = read_json(FIXTURE / "results/evaluation.json")["scanner"]
+
+    def approved_archive(repo_root: Path, scanner_commit: str, target: Path) -> tuple[str, str]:
+        assert repo_root == ROOT
+        assert scanner_commit == SCANNER_COMMIT
+        assert target.is_dir()
+        return (
+            scanner_metadata["client_source_sha256"],
+            scanner_metadata["deployment_source_sha256"],
+        )
+
+    monkeypatch.setattr(evaluator, "_archive_scanner", approved_archive)
+    monkeypatch.setattr(evaluator, "_run_worker", worker)
+
+
+def literal_probe_worker(_scanner_source: Path, payload: dict) -> dict:
+    result = {}
+    for case in payload["cases"]:
+        observations = []
+        for source in case.get("client_sources", []):
+            source_text = source["text"]
+            offset = source_text.find("/race-probe")
+            if offset >= 0:
+                observations.append(
+                    {
+                        "source_path": source["path"],
+                        "line": source_text.count("\n", 0, offset) + 1,
+                        "protocol": "http",
+                        "method": "GET",
+                        "literal_url": "/race-probe",
+                        "origin": None,
+                        "raw_route_path": "/race-probe",
+                        "query_evidence": None,
+                        "normalized_route_identity": "GET /race-probe",
+                        "start_offset": offset,
+                        "end_offset": offset + len("/race-probe"),
+                    }
+                )
+        result[case["case_id"]] = {
+            "client_observations": observations,
+            "joined_surface_ids": [],
+            "deployment_observations": [],
+            "subprocess_observations": [],
+        }
+    return result
+
+
+def empty_scanner_worker(_scanner_source: Path, payload: dict) -> dict:
+    return {
+        case["case_id"]: {
+            "client_observations": [],
+            "joined_surface_ids": [],
+            "deployment_observations": [],
+            "subprocess_observations": [],
+        }
+        for case in payload["cases"]
+    }
 
 
 def test_fixture_reports_six_prs_and_nine_separately_audited_atoms() -> None:
@@ -216,6 +275,7 @@ def test_build_result_scans_the_exact_bytes_validated_before_a_race(
         return validated
 
     monkeypatch.setattr(evaluator, "validate_fixture", validate_then_mutate)
+    install_self_contained_scanner_double(monkeypatch, literal_probe_worker)
     result = evaluator.build_result(fixture, repo_root=ROOT)
     output_case = next(row for row in result["cases"] if row["case_id"] == case["case_id"])
     assert all(
@@ -230,16 +290,20 @@ def test_build_result_scans_the_exact_bytes_validated_before_a_race(
     assert verified_source["sha256"] == source_record["sha256"]
 
     raced_text = source_path.read_text(encoding="utf-8")
-    scanner_control = scan_literal_case(
-        repo_root=ROOT,
-        scanner_commit=SCANNER_COMMIT,
-        source_path=source_record["path"],
-        source_text=raced_text,
-        surfaces=[],
+    scanner_control = literal_probe_worker(
+        Path("self-contained-test-double"),
+        {
+            "cases": [
+                {
+                    "case_id": "mutated-source-control",
+                    "client_sources": [{"path": source_record["path"], "text": raced_text}],
+                }
+            ]
+        },
     )
     assert any(
         observation["raw_route_path"] == "/race-probe"
-        for observation in scanner_control["client_observations"]
+        for observation in scanner_control["mutated-source-control"]["client_observations"]
     )
 
 
@@ -252,43 +316,24 @@ def test_vendored_python_sources_are_data_only() -> None:
                 assert source["storage_path"].endswith(".py.txt")
 
 
-def test_join_requires_exact_method_path_and_trusted_origin() -> None:
-    result = scan_literal_case(
-        repo_root=ROOT,
-        scanner_commit=SCANNER_COMMIT,
-        source_path="client.ts",
-        source_text=('fetch("https://service.example/items?q=1"); fetch("/items");'),
-        surfaces=[
-            {
-                "surface_id": "exact",
-                "path": "/items",
-                "method": "GET",
-                "origin": "https://service.example",
-                "trusted": True,
-            },
-            {
-                "surface_id": "wrong-origin",
-                "path": "/items",
-                "method": "GET",
-                "origin": "https://other.example",
-                "trusted": True,
-            },
-            {
-                "surface_id": "wrong-method",
-                "path": "/items",
-                "method": "POST",
-                "origin": "https://service.example",
-                "trusted": True,
-            },
-            {
-                "surface_id": "untrusted",
-                "path": "/items",
-                "method": "GET",
-                "origin": "https://service.example",
-                "trusted": False,
-            },
-        ],
-    )
-    assert result["joined_surface_ids"] == ["exact"]
-    assert len(result["client_observations"]) == 2
-    assert result["client_observations"][0]["query_evidence"] == "q=1"
+def test_build_result_keeps_queries_and_unattested_origins_separate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, dict] = {}
+
+    def record_worker(_scanner_source: Path, payload: dict) -> dict:
+        captured.update({case["case_id"]: case for case in payload["cases"]})
+        return empty_scanner_worker(_scanner_source, payload)
+
+    install_self_contained_scanner_double(monkeypatch, record_worker)
+    result = evaluator.build_result(repo_root=ROOT)
+
+    client_case = captured["khoj-ai/khoj#1221"]
+    assert client_case["surfaces"]
+    assert all(surface["origin"] is None for surface in client_case["surfaces"])
+    assert all(surface["trusted"] is True for surface in client_case["surfaces"])
+    output_case = next(row for row in result["cases"] if row["case_id"] == "khoj-ai/khoj#1221")
+    patch_atom = next(atom for atom in output_case["atoms"] if atom["method"] == "PATCH")
+    assert patch_atom["query_evidence"] == "client=obsidian"
+    assert patch_atom["status"] == "abstained"
+    assert output_case["explicit_established_surface_joins"] == []
