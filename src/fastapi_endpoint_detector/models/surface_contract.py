@@ -98,6 +98,7 @@ class SurfaceExecutionMode(str, Enum):
 class ContractMultiplicity(str, Enum):
     """Registration behavior declared by a versioned framework preset."""
 
+    UNKNOWN = "unknown"
     ALL_EXECUTE = "all_execute"
     LAST_WINS = "last_wins"
 
@@ -281,7 +282,7 @@ class SurfaceContract(_StrictModel):
     callback_mode: CallbackMode = CallbackMode.EITHER
     callback_range: CallbackRangeMode = CallbackRangeMode.FULL
     execution_mode: SurfaceExecutionMode = SurfaceExecutionMode.DIRECT
-    multiplicity: ContractMultiplicity | None = None
+    multiplicity: ContractMultiplicity | None = ContractMultiplicity.UNKNOWN
     activates_routes: bool = False
     conditions: tuple[str, ...] = ()
     provenance: ContractProvenance | None = None

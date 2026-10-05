@@ -32,6 +32,26 @@ def _extract(tmp_path: Path, *, app_entry: str | None = None) -> EndpointInvento
     ).extract_inventory()
 
 
+def test_framework_preset_versions_explicit_registration_multiplicity() -> None:
+    loaded = load_surface_preset("framework-v1")
+    assert loaded.document.preset.version == "8"
+    assert all(
+        contract.multiplicity is not None and contract.multiplicity.value != "unknown"
+        for contract in loaded.document.contracts
+        if contract.surface.kind.startswith("framework.")
+    )
+    assert {
+        contract.surface.kind: contract.multiplicity.value
+        for contract in loaded.document.contracts
+        if contract.surface.kind in {"framework.lifecycle", "framework.middleware"}
+    } == {"framework.lifecycle": "all_execute", "framework.middleware": "all_execute"}
+    assert all(
+        contract.multiplicity.value == "last_wins"
+        for contract in loaded.document.contracts
+        if contract.surface.kind == "framework.exception_handler"
+    )
+
+
 def _expected_late_nested_calls(callback: str) -> list[str]:
     installed_version = version("fastapi")
     release = re.match(r"^(\d+)\.(\d+)", installed_version)
@@ -183,6 +203,51 @@ def test_exception_handler_contract_uses_last_wins_multiplicity(tmp_path: Path) 
     assert [(item.identifier, item.handler.name) for item in inventory.endpoints] == [
         ("FRAMEWORK.EXCEPTION_HANDLER exception:builtins.ValueError", "effective")
     ]
+
+
+def test_unknown_exception_override_does_not_leave_stale_handler_established(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "@app.exception_handler(ValueError)\n"
+        "async def stale(request, exc): return None\n"
+        "async def unresolved(request, exc): return None\n"
+        "app.add_exception_handler(dynamic_exception_type, unresolved)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert not any(
+        item.surface and item.surface.surface_kind == "framework.exception_handler"
+        for item in inventory.endpoints
+    )
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any("may override an earlier key" in item.reason for item in inventory.limitations)
+
+
+def test_unknown_exception_override_in_unused_app_does_not_taint_selected_app(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "unused = FastAPI()\n"
+        "async def unused_handler(request, exc): return None\n"
+        "unused.add_exception_handler(dynamic_exception_type, unused_handler)\n"
+        "app = FastAPI()\n"
+        "@app.exception_handler(ValueError)\n"
+        "async def selected_handler(request, exc): return None\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert [(item.identifier, item.handler.name) for item in inventory.endpoints] == [
+        ("FRAMEWORK.EXCEPTION_HANDLER exception:builtins.ValueError", "selected_handler")
+    ]
+    assert inventory.status == InventoryStatus.ESTABLISHED
 
 
 def test_pure_asgi_middleware_resolves_local_call_protocol(tmp_path: Path) -> None:

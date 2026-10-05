@@ -1,11 +1,11 @@
 schema_version: 5
 preset:
   id: framework-callbacks
-  version: "7"
+  version: "8"
   provenance:
     kind: preset
     source: fastapi-endpoint-detector
-    revision: "7"
+    revision: "8"
 contracts:
   - id: fastapi-constructor-on-startup-list
     multiplicity: all_execute

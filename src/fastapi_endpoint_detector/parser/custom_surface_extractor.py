@@ -89,6 +89,13 @@ class _FrameworkRegistrationEvent:
 
 
 @dataclass(frozen=True)
+class _FrameworkUnknownOverrideEvent:
+    token: _FrameworkToken
+    surface_kind: str
+    condition: EndpointDiscoveryCondition
+
+
+@dataclass(frozen=True)
 class _FrameworkIncludeEvent:
     parent: _FrameworkToken
     child: _FrameworkToken | None
@@ -103,7 +110,12 @@ class _FrameworkRouteEvent:
     condition: EndpointDiscoveryCondition | None
 
 
-_FrameworkEvent = _FrameworkRegistrationEvent | _FrameworkIncludeEvent | _FrameworkRouteEvent
+_FrameworkEvent = (
+    _FrameworkRegistrationEvent
+    | _FrameworkUnknownOverrideEvent
+    | _FrameworkIncludeEvent
+    | _FrameworkRouteEvent
+)
 
 
 @dataclass(frozen=True)
@@ -1164,6 +1176,20 @@ class CustomSurfaceExtractor:
                     for ancestor in self._framework_include_ancestors(event.token, included_by):
                         conditions.setdefault(ancestor, []).append(condition)
                 continue
+            if isinstance(event, _FrameworkUnknownOverrideEvent):
+                live[event.token] = [
+                    endpoint
+                    for endpoint in live.get(event.token, ())
+                    if endpoint.surface is None
+                    or endpoint.surface.surface_kind != event.surface_kind
+                    or not self._contract_has_multiplicity(
+                        endpoint.surface.contract_id, ContractMultiplicity.LAST_WINS
+                    )
+                ]
+                conditions.setdefault(event.token, []).append(event.condition)
+                for ancestor in self._framework_include_ancestors(event.token, included_by):
+                    conditions.setdefault(ancestor, []).append(event.condition)
+                continue
             if isinstance(event, _FrameworkRouteEvent):
                 if event.callback is not None:
                     routes.setdefault(event.token, []).append(event.callback)
@@ -1258,6 +1284,14 @@ class CustomSurfaceExtractor:
             ancestors.append(parent)
             pending.extend(mounted_by.get(parent, ()))
         return tuple(ancestors)
+
+    def _contract_has_multiplicity(
+        self, contract_id: str, multiplicity: ContractMultiplicity
+    ) -> bool:
+        return any(
+            item.id == contract_id and item.multiplicity == multiplicity
+            for item in self.contracts.document.contracts
+        )
 
     def _emit_background_task_surfaces(self) -> None:  # noqa: PLR0912
         """Attribute annotated BackgroundTasks.add_task calls to selected route handlers."""
@@ -2880,6 +2914,41 @@ class CustomSurfaceExtractor:
         if token is not None:
             self._framework_events.append(_FrameworkRegistrationEvent(token, endpoint))
 
+    def _record_unknown_framework_override(
+        self,
+        module: _Module,
+        call: ast.Call,
+        state: dict[str, _Binding | None],
+        evaluation: _CallEvaluation | None,
+        contract: SurfaceContract,
+        reason: str,
+    ) -> bool:
+        if (
+            not self._scope_framework_surfaces
+            or contract.surface.kind != "framework.exception_handler"
+            or contract.multiplicity != ContractMultiplicity.LAST_WINS
+        ):
+            return False
+        token = (
+            self._framework_call_token(call, evaluation, state)
+            if isinstance(call.func, ast.Attribute)
+            else None
+        )
+        if token is None:
+            return False
+        condition = EndpointDiscoveryCondition(
+            source_path=module.path,
+            source_line=call.lineno,
+            reason=(
+                "selected app exception handler may override an earlier key, but its "
+                f"registration is unresolved: {reason}"
+            ),
+        )
+        self._framework_events.append(
+            _FrameworkUnknownOverrideEvent(token, contract.surface.kind, condition)
+        )
+        return True
+
     def _inspect_registration(  # noqa: PLR0912, PLR0915
         self,
         module: _Module,
@@ -3065,16 +3134,25 @@ class CustomSurfaceExtractor:
             if handler_result is None or not self._callback_matches(
                 contract.callback_mode, handler_result[1]
             ):
-                self._limitations.append(
-                    EndpointDiscoveryCondition(
-                        source_path=module.path,
-                        source_line=call.lineno,
-                        reason=(
-                            f"custom surface contract {contract.id!r} matched but "
-                            "handler was unresolved"
-                        ),
-                    )
+                scoped_override = self._record_unknown_framework_override(
+                    module,
+                    call,
+                    state,
+                    evaluation,
+                    contract,
+                    "handler callback identity was unresolved",
                 )
+                if not scoped_override:
+                    self._limitations.append(
+                        EndpointDiscoveryCondition(
+                            source_path=module.path,
+                            source_line=call.lineno,
+                            reason=(
+                                f"custom surface contract {contract.id!r} matched but "
+                                "handler was unresolved"
+                            ),
+                        )
+                    )
                 continue
             handler_module, function = handler_result
             if contract.callback_range != CallbackRangeMode.FULL and not self._trusted_lifespan(
@@ -3129,16 +3207,25 @@ class CustomSurfaceExtractor:
             )
             resources = resource_result.values
             if resources is None:
-                self._limitations.append(
-                    EndpointDiscoveryCondition(
-                        source_path=module.path,
-                        source_line=call.lineno,
-                        reason=(
-                            f"custom surface contract {contract.id!r} matched but "
-                            f"{resource_result.reason}"
-                        ),
-                    )
+                scoped_override = self._record_unknown_framework_override(
+                    module,
+                    call,
+                    state,
+                    evaluation,
+                    contract,
+                    resource_result.reason,
                 )
+                if not scoped_override:
+                    self._limitations.append(
+                        EndpointDiscoveryCondition(
+                            source_path=module.path,
+                            source_line=call.lineno,
+                            reason=(
+                                f"custom surface contract {contract.id!r} matched but "
+                                f"{resource_result.reason}"
+                            ),
+                        )
+                    )
                 continue
             conditions = list(inherited_conditions)
             for declared in contract.conditions:
