@@ -190,6 +190,16 @@ def test_reverse_reference_requires_its_own_index_provenance() -> None:
         validate_response(value, request=req)
 
 
+@pytest.mark.parametrize("kind", ["reverse_reference", "cross_repo_consumer"])
+def test_duplicate_reference_identity_fails_even_with_resealed_result_hash(kind: str) -> None:
+    req = request(kind)
+    value = response(kind, req)
+    value["evidence"].append(dict(value["evidence"][0]))  # type: ignore[index]
+    _seal(value, req)
+    with pytest.raises(EvidenceError, match="duplicate reference identity"):
+        validate_response(value, request=req)
+
+
 def test_cross_repository_revision_must_be_declared_in_request() -> None:
     req = request("cross_repo_consumer")
     value = response("cross_repo_consumer", req)

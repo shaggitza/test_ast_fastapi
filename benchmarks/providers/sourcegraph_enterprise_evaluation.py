@@ -207,12 +207,13 @@ def _validate_changed_symbol(value: object, requested_symbol: str) -> None:
         raise EvidenceError("changed-symbol evidence must distinguish before and after identities")
 
 
-def _validate_references(
+def _validate_references(  # noqa: PLR0912
     value: object, *, kind: str, request: dict[str, Any], binding: dict[str, Any]
 ) -> None:
     if not isinstance(value, list) or not value:
         raise EvidenceError("reference evidence must be a non-empty list")
     consumer_indexes = request["consumer_indexes"]
+    seen_identities: set[tuple[str, str, str, int, int, str]] = set()
     for item in value:
         if not isinstance(item, dict) or set(item) != _REFERENCE_FIELDS:
             raise EvidenceError("reference lacks exact source identity, range, or fingerprints")
@@ -224,6 +225,17 @@ def _validate_references(
         _validate_range(item, "reference")
         if item["symbol"] != request["symbol"]:
             raise EvidenceError("reference symbol does not match requested symbol")
+        identity = (
+            item["repository"],
+            item["revision"],
+            item["path"],
+            item["start_line"],
+            item["end_line"],
+            item["symbol"],
+        )
+        if identity in seen_identities:
+            raise EvidenceError("duplicate reference identity")
+        seen_identities.add(identity)
         if kind == "reverse_reference":
             if item["repository"] != request["repository"]:
                 raise EvidenceError("reverse reference must be in the queried repository")
