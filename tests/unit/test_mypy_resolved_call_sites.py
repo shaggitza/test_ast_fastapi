@@ -293,6 +293,28 @@ def test_bounded_callable_returns_parameters_and_partials_are_traced(tmp_path: P
     assert not any(symbol.endswith(".parameter_effect") for symbol in other_symbols)
 
 
+def test_bound_method_alias_on_open_base_parameter_stays_unresolved(tmp_path: Path) -> None:
+    main = tmp_path / "main.py"
+    main.write_text(
+        "class Base:\n"
+        "    def changed(self) -> None:\n"
+        "        return None\n\n"
+        "def handler(value: Base) -> None:\n"
+        "    callback = value.changed\n"
+        "    callback()\n",
+        encoding="utf-8",
+    )
+
+    deps = MypyAnalyzer(tmp_path).analyze_endpoint(_endpoint(main, line=5))
+
+    assert not any(
+        reference.symbol_name.endswith("Base.changed") for reference in deps.referenced_symbols
+    )
+    callback_sites = _site_by_spelling(deps.resolved_call_sites, "callback")
+    assert callback_sites
+    assert all(site.status != CallResolutionStatus.EXACT for site in callback_sites)
+
+
 def test_unused_nested_function_body_is_deferred_without_a_bundle(tmp_path: Path) -> None:
     main = tmp_path / "main.py"
     main.write_text(

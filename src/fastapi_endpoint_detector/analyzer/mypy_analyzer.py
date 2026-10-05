@@ -2396,7 +2396,8 @@ class MypyAnalyzer:
                         stack,
                         budget,
                     )
-                    value = (declaration, receiver)
+                    if declaration[1] != InvocationKind.INSTANCE_METHOD or receiver is not None:
+                        value = (declaration, receiver)
             if value is not None:
                 environment[parameter] = value
         required = {
@@ -4683,7 +4684,9 @@ class MypyAnalyzer:
                         (),
                         finite_budget,
                     )
-                    if declaration is not None:
+                    if declaration is not None and (
+                        declaration[1] != InvocationKind.INSTANCE_METHOD or receiver is not None
+                    ):
                         callable_value = (declaration, receiver)
                 elif isinstance(n.rvalue, CallExpr):
                     returned_call = self._resolved_call_site(
