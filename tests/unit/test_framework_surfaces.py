@@ -187,6 +187,23 @@ def test_exception_handlers_are_keyed_and_selected_app_scoped(tmp_path: Path) ->
     assert inventory.status == InventoryStatus.ESTABLISHED
 
 
+def test_exception_handler_decorator_accepts_fastapi_keyword_selector(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "@app.exception_handler(exc_class_or_status_code=ValueError)\n"
+        "async def value_error(request, exc): return None\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert [(item.identifier, item.handler.name) for item in inventory.endpoints] == [
+        ("FRAMEWORK.EXCEPTION_HANDLER exception:builtins.ValueError", "value_error")
+    ]
+    assert inventory.status == InventoryStatus.ESTABLISHED
+
+
 def test_exception_handler_contract_uses_last_wins_multiplicity(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text(
         "from fastapi import FastAPI\n\n"

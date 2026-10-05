@@ -5110,7 +5110,13 @@ class CustomSurfaceExtractor:
                     (
                         item.value
                         for item in call.keywords
-                        if item.arg in {"exc_class", "exc", "exception_class"}
+                        if item.arg
+                        in {
+                            "exc_class_or_status_code",
+                            "exc_class",
+                            "exc",
+                            "exception_class",
+                        }
                     ),
                     None,
                 )
