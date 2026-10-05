@@ -194,6 +194,9 @@ def analyze(
     if baseline_app is not None and vm:
         console.print("[red]Error:[/red] --baseline-app is unavailable with --vm")
         raise click.Abort()
+    if vm and config.analysis.route_observations.enabled:
+        console.print("[red]Error:[/red] analysis.route_observations is unavailable with --vm")
+        raise click.Abort()
 
     if verbose:
         console.print(f"[blue]Analyzing FastAPI application at:[/blue] {app}")
@@ -304,6 +307,23 @@ def analyze(
                 mapper.mypy_analyzer.set_line_progress_callback(line_progress)
 
             report = mapper.analyze_diff(diff, progress_callback=update_progress)
+
+        route_observations = config.analysis.route_observations
+        if route_observations.enabled:
+            from fastapi_endpoint_detector.analyzer.project_observations import (
+                scan_project_observations,
+            )
+
+            snapshot = scan_project_observations(
+                mapper.target_project_root,
+                endpoints=mapper.get_endpoints(),
+                client_include_patterns=route_observations.client_include_patterns,
+                deployment_include_patterns=route_observations.deployment_include_patterns,
+                max_files=route_observations.max_files,
+                max_file_bytes=route_observations.max_file_bytes,
+                trusted_server_origins=route_observations.trusted_server_origins,
+            )
+            report.source_observations = snapshot.to_dict()
 
         # Format and output results
         formatted_output = formatter.format(report)
