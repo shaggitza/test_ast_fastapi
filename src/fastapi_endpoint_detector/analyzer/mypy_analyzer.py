@@ -121,7 +121,7 @@ class SymbolReference:
 
 @dataclass(frozen=True)
 class SourceEvidenceSpan:
-    """Exact CPython source span for a deferred or invoked lambda body."""
+    """Exact CPython source span; columns use UTF-8 byte offsets."""
 
     file_path: str
     start_line: int

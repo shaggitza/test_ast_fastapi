@@ -579,9 +579,12 @@ def handler(flag: bool):
         service = tmp_path / "service.py"
         service.write_text(
             "from effects import leaf_alias\n\n"
-            "def deferred_lambda_dead() -> int: hidden = lambda: leaf_alias(); return 0\n"
-            "def invoked_lambda_live() -> int: hidden = lambda: leaf_alias(); return hidden()\n"
-            "def ambiguous_lambda_dead() -> int: first = lambda: leaf_alias(); "
+            "def deferred_lambda_dead() -> int: label = 'é😀'; "
+            "hidden = lambda: leaf_alias(); return 0\n"
+            "def invoked_lambda_live() -> int: label = 'é😀'; "
+            "hidden = lambda: leaf_alias(); return hidden()\n"
+            "def ambiguous_lambda_dead() -> int: label = 'é😀'; "
+            "first = lambda: leaf_alias(); "
             "second = lambda: leaf_alias(); return 0\n",
             encoding="utf-8",
         )
@@ -611,7 +614,8 @@ def handler(flag: bool):
             assert len(spans) == 1
             assert spans[0].execution_state == expected_state
             lambda_line = service.read_text(encoding="utf-8").splitlines()[spans[0].start_line - 1]
-            assert lambda_line[spans[0].start_column : spans[0].end_column] == "leaf_alias()"
+            lambda_bytes = lambda_line.encode("utf-8")
+            assert lambda_bytes[spans[0].start_column : spans[0].end_column] == b"leaf_alias()"
         assert deps.references_file(str(effects)) is executes_effect
 
         cache = tmp_path / "analysis-cache.json"
