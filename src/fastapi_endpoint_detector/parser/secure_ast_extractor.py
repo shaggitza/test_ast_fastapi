@@ -29,6 +29,7 @@ from fastapi_endpoint_detector.models.endpoint import (
     NativeRouteProvenance,
     NativeRouteRegistrationEvidence,
     NativeRouteRootEvidence,
+    NativeRouteSourceOwnerEvidence,
     NativeRouteStructuralOwnerEvidence,
     NativeSourceSpan,
     SnapshotSide,
@@ -64,6 +65,26 @@ def native_route_structural_owners(
             role=role,  # type: ignore[arg-type]
             source_span=span,
             side=provenance.side,
+        )
+        if record not in matches:
+            matches.append(record)
+
+    for owner in provenance.source_owners:
+        if owner.source_span.file_path != source_path or not owner.source_span.overlaps_lines(
+            changed_lines
+        ):
+            continue
+        record = NativeRouteStructuralOwnerEvidence(
+            endpoint_identifier=endpoint.identifier,
+            role="root"
+            if owner.owner_kind in {"factory_return", "bootstrap_registration"}
+            else "object",
+            source_span=owner.source_span,
+            side=provenance.side,
+            owner_kind=owner.owner_kind,
+            qualified_binding=owner.qualified_binding,
+            related_binding=owner.related_binding,
+            confidence=owner.confidence,
         )
         if record not in matches:
             matches.append(record)
@@ -108,21 +129,55 @@ def _native_span(path: Path, node: ast.AST) -> NativeSourceSpan:
     )
 
 
+def _function_header_span(
+    path: Path, node: ast.FunctionDef | ast.AsyncFunctionDef
+) -> NativeSourceSpan:
+    """Span decorators and the complete function header, excluding the body."""
+    start = min((item.lineno for item in node.decorator_list), default=node.lineno)
+    try:
+        with tokenize.open(path) as source_file:
+            tokens = tokenize.generate_tokens(iter(source_file.readlines()).__next__)
+            depth = 0
+            saw_def = False
+            end_line = node.lineno
+            end_column = 0
+            for token in tokens:
+                if token.start[0] < node.lineno:
+                    continue
+                if token.type == tokenize.NAME and token.string in {"def", "async"}:
+                    saw_def = True
+                if not saw_def:
+                    continue
+                if token.type == tokenize.OP and token.string in "([{}":
+                    depth += 1
+                elif token.type == tokenize.OP and token.string in ")]}":
+                    depth = max(depth - 1, 0)
+                elif token.type == tokenize.OP and token.string == ":" and depth == 0:
+                    end_line, end_column = token.end
+                    break
+    except (OSError, UnicodeError, tokenize.TokenError):
+        return _native_span(path, node)
+    if end_column == 0:
+        return _native_span(path, node)
+    return NativeSourceSpan(
+        file_path=path,
+        start_line=start,
+        start_column=0,
+        end_line=end_line,
+        end_column=end_column,
+    )
+
+
 def _native_dependency_expressions(
-    path: Path, side: SnapshotSide, scope: str, expression: ast.expr | None
+    extractor: SecureASTExtractor,
+    module: _Module,
+    scope: str,
+    expression: ast.expr | None,
 ) -> tuple[NativeRouteDependencyExpressionEvidence, ...]:
-    """Keep dependency declarations as source evidence without evaluating them."""
+    """Keep dependency declarations and resolve only canonical FastAPI bindings."""
     if expression is None:
         return ()
     values = expression.elts if isinstance(expression, (ast.List, ast.Tuple)) else (expression,)
-
-    def dotted_name(node: ast.expr) -> str | None:
-        if isinstance(node, ast.Name):
-            return node.id
-        if isinstance(node, ast.Attribute):
-            prefix = dotted_name(node.value)
-            return f"{prefix}.{node.attr}" if prefix else None
-        return None
 
     result: list[NativeRouteDependencyExpressionEvidence] = []
     for value in values:
@@ -133,27 +188,103 @@ def _native_dependency_expressions(
         callable_expressions: tuple[str, ...] = ()
         confidence = "conditional"
         if isinstance(value, ast.Call):
-            function = dotted_name(value.func)
-            constructor = function.rsplit(".", 1)[-1] if function else None
-            if constructor in {"Depends", "Security"}:
+            constructor = _canonical_dependency_constructor(
+                extractor, module, value.func, value.lineno
+            )
+            if constructor is not None:
                 kind = "security" if constructor == "Security" else "depends"
-                if value.args:
-                    callable_name = dotted_name(value.args[0])
-                    if callable_name is not None:
-                        callable_expressions = (callable_name,)
-                        confidence = "established" if len(value.args) == 1 else "conditional"
+                dependency_keywords = [
+                    item.value for item in value.keywords if item.arg == "dependency"
+                ]
+                target: ast.expr | None
+                if len(value.args) == 1 and not dependency_keywords:
+                    target = value.args[0]
+                elif not value.args and len(dependency_keywords) == 1:
+                    target = dependency_keywords[0]
+                else:
+                    target = None
+                allowed = {"use_cache", "scope", "scopes", "dependency"}
+                known_shape = (
+                    target is not None
+                    and all(item.arg is not None and item.arg in allowed for item in value.keywords)
+                    and len([item.arg for item in value.keywords if item.arg == "dependency"]) <= 1
+                    and not any(isinstance(item, ast.Starred) for item in value.args)
+                )
+                resolved = (
+                    _qualified_dependency_callable(extractor, module, target, value.lineno)
+                    if target is not None
+                    else None
+                )
+                if resolved is not None:
+                    callable_expressions = (resolved,)
+                if known_shape and resolved is not None:
+                    confidence = "established"
         result.append(
             NativeRouteDependencyExpressionEvidence(
-                side=side,
+                side=extractor.snapshot_side,
                 scope=scope,  # type: ignore[arg-type]
                 expression=rendered,
                 callable_expressions=callable_expressions,
                 kind=kind,  # type: ignore[arg-type]
                 confidence=confidence,  # type: ignore[arg-type]
-                source_span=_native_span(path, value),
+                source_span=_native_span(module.path, value),
             )
         )
     return tuple(result)
+
+
+def _canonical_dependency_constructor(
+    extractor: SecureASTExtractor, module: _Module, function: ast.expr, line: int
+) -> str | None:
+    """Resolve only an unshadowed canonical fastapi Depends/Security binding."""
+    if isinstance(function, ast.Name):
+        if _lexically_bound_name(module, function.id, line):
+            return None
+        binding = extractor._import_binding_at(module, function.id, line)
+        if binding is not None and binding.module in {"fastapi", "fastapi.params"}:
+            return binding.symbol if binding.symbol in {"Depends", "Security"} else None
+        # A module-level local binding, including def Depends(...), shadows imports.
+        return None
+    if isinstance(function, ast.Attribute) and isinstance(function.value, ast.Name):
+        binding = extractor._import_binding_at(module, function.value.id, line)
+        if binding is not None and binding.symbol is None and binding.module == "fastapi":
+            return function.attr if function.attr in {"Depends", "Security"} else None
+    return None
+
+
+def _qualified_dependency_callable(
+    extractor: SecureASTExtractor, module: _Module, target: ast.expr, line: int
+) -> str | None:
+    """Return an exact binding identity; leave dynamic or colliding names conditional."""
+    if isinstance(target, ast.Name):
+        if _lexically_bound_name(module, target.id, line):
+            return None
+        function = extractor._function_at(module, target.id, line)
+        if function is not None:
+            return f"{module.name}.{target.id}"
+        binding = extractor._import_binding_at(module, target.id, line)
+        if binding is not None and binding.symbol is not None:
+            return f"{binding.module}.{binding.symbol}"
+        return None
+    if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
+        binding = extractor._import_binding_at(module, target.value.id, line)
+        if binding is not None and binding.symbol is None:
+            return f"{binding.module}.{target.attr}"
+    return None
+
+
+def _lexically_bound_name(module: _Module, name: str, line: int) -> bool:
+    """Whether a containing function scope binds a spelling locally anywhere."""
+    containing = [
+        node
+        for node in ast.walk(module.tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.lineno <= line <= (node.end_lineno or node.lineno)
+    ]
+    if not containing:
+        return False
+    scope = min(containing, key=lambda node: (node.end_lineno or node.lineno) - node.lineno)
+    return name in _scope_bound_names(scope, evaluate_annotations=False)
 
 
 _HTTP_ROUTE_METADATA_KEYWORDS = frozenset(
@@ -1096,7 +1227,7 @@ class SecureASTExtractor:
                 dependency_expressions=item.dependency_expressions,
             )
 
-        def visit(
+        def visit(  # noqa: PLR0912, PLR0915 - route traversal assembles immutable evidence
             owner: ObjectKey,
             inherited: str,
             cutoff: int | None,
@@ -1193,6 +1324,272 @@ class SecureASTExtractor:
                     and route.operation is not None
                     and route.source_span is not None
                 ):
+                    source_owners: list[NativeRouteSourceOwnerEvidence] = []
+                    handler_module = modules.get(route.handler.module)
+                    if handler_module is not None:
+                        handler_node = next(
+                            (
+                                candidate
+                                for candidate in ast.walk(handler_module.tree)
+                                if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef))
+                                and candidate.name == route.handler.name
+                                and candidate.lineno == route.handler.line_number
+                            ),
+                            None,
+                        )
+                        if handler_node is not None:
+                            source_owners.append(
+                                NativeRouteSourceOwnerEvidence(
+                                    side=self.snapshot_side,
+                                    owner_kind="decorator_signature",
+                                    qualified_binding=f"{handler_module.name}.{handler_node.name}",
+                                    confidence="established",
+                                    expression=f"def {handler_node.name}",
+                                    source_span=_function_header_span(
+                                        handler_module.path, handler_node
+                                    ),
+                                )
+                            )
+                            for candidate in ast.walk(handler_module.tree):
+                                if not isinstance(candidate, ast.ClassDef) or not any(
+                                    isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                                    and child.name == handler_node.name
+                                    and child.lineno == handler_node.lineno
+                                    for child in candidate.body
+                                ):
+                                    continue
+                                binding = f"{handler_module.name}.{candidate.name}"
+                                source_owners.extend(
+                                    NativeRouteSourceOwnerEvidence(
+                                        side=self.snapshot_side,
+                                        owner_kind="class_base",
+                                        qualified_binding=binding,
+                                        related_binding=f"{handler_module.name}.{handler_node.name}",
+                                        confidence="established",
+                                        expression=ast.unparse(base)[:4096],
+                                        source_span=_native_span(handler_module.path, base),
+                                    )
+                                    for base in candidate.bases
+                                )
+                                source_owners.extend(
+                                    NativeRouteSourceOwnerEvidence(
+                                        side=self.snapshot_side,
+                                        owner_kind="class_decorator",
+                                        qualified_binding=binding,
+                                        related_binding=f"{handler_module.name}.{handler_node.name}",
+                                        confidence="established",
+                                        expression=ast.unparse(decorator)[:4096],
+                                        source_span=_native_span(handler_module.path, decorator),
+                                    )
+                                    for decorator in candidate.decorator_list
+                                )
+                    for object_item in current_object_chain:
+                        object_module = modules.get(object_item.module)
+                        if object_module is None or object_item.source_span is None:
+                            continue
+                        variable = object_item.symbol.split("@", 1)[0]
+                        for statement in object_module.tree.body:
+                            if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                                continue
+                            if (
+                                statement.lineno != object_item.source_span.start_line
+                                or statement.value is None
+                            ):
+                                continue
+                            if _assignment_name(statement) != variable:
+                                continue
+                            source_owners.append(
+                                NativeRouteSourceOwnerEvidence(
+                                    side=self.snapshot_side,
+                                    owner_kind="assignment_rhs",
+                                    qualified_binding=f"{object_module.name}.{variable}",
+                                    confidence="established",
+                                    expression=ast.unparse(statement.value)[:4096],
+                                    source_span=_native_span(object_module.path, statement.value),
+                                )
+                            )
+                            break
+                        factory_variable, separator, factory_token = object_item.symbol.partition(
+                            "@"
+                        )
+                        if not separator:
+                            continue
+                        factory_call = next(
+                            (
+                                candidate
+                                for candidate in object_module.factory_calls
+                                if candidate.variable == factory_variable
+                                and _node_token(candidate.call) == factory_token
+                            ),
+                            None,
+                        )
+                        if factory_call is None:
+                            continue
+                        factory_target = self._factory_target(
+                            factory_call.call, object_module, aliases, modules, factory_call.line
+                        )
+                        if factory_target is None:
+                            continue
+                        factory_function = factory_target[1]
+                        return_nodes = _returns_outside_nested_functions(factory_function.body)
+                        if len(return_nodes) != 1 or return_nodes[0].value is None:
+                            continue
+                        return_node = return_nodes[0]
+                        return_value = return_node.value
+                        assert return_value is not None
+                        source_owners.append(
+                            NativeRouteSourceOwnerEvidence(
+                                side=self.snapshot_side,
+                                owner_kind="factory_return",
+                                qualified_binding=(
+                                    f"{factory_target[0].name}.{factory_function.name}"
+                                ),
+                                related_binding=f"{object_module.name}.{factory_variable}",
+                                confidence="established",
+                                expression=ast.unparse(return_value)[:4096],
+                                source_span=_native_span(object_module.path, return_value),
+                            )
+                        )
+                    if (
+                        root_evidence.bootstrap_span is not None
+                        and root_evidence.bootstrap_span.file_path == route.source_span.file_path
+                        and root_evidence.bootstrap_span.start_line
+                        <= route.source_span.start_line
+                        <= root_evidence.bootstrap_span.end_line
+                    ):
+                        source_owners.append(
+                            NativeRouteSourceOwnerEvidence(
+                                side=self.snapshot_side,
+                                owner_kind="bootstrap_registration",
+                                qualified_binding=(
+                                    f"{root_evidence.module}.{root_evidence.symbol}"
+                                ),
+                                related_binding=route.handler.module + "." + route.handler.name,
+                                confidence="established",
+                                expression=f"{route.operation}({route.handler.name})",
+                                source_span=route.source_span,
+                            )
+                        )
+                    for structural_edge in assembly_chain:
+                        parent_module = modules.get(structural_edge.parent_module)
+                        if parent_module is None:
+                            continue
+                        edge_calls = [
+                            candidate
+                            for candidate in ast.walk(parent_module.tree)
+                            if isinstance(candidate, ast.Call)
+                            and candidate.lineno == structural_edge.source_span.start_line
+                        ]
+                        for edge_call in edge_calls:
+                            arguments = edge_call.args
+                            child_argument = (
+                                arguments[0]
+                                if structural_edge.operation == "include_router" and arguments
+                                else arguments[1]
+                                if structural_edge.operation == "mount" and len(arguments) > 1
+                                else None
+                            )
+                            if isinstance(child_argument, ast.Call) and isinstance(
+                                child_argument.func, ast.Name
+                            ):
+                                child_argument = child_argument.func
+                            if not isinstance(child_argument, ast.Name):
+                                continue
+                            import_binding = self._import_binding_at(
+                                parent_module, child_argument.id, edge_call.lineno
+                            )
+                            if import_binding is None:
+                                continue
+                            import_node = next(
+                                (
+                                    statement
+                                    for statement in parent_module.tree.body
+                                    if isinstance(statement, (ast.Import, ast.ImportFrom))
+                                    and statement.lineno == import_binding.line
+                                ),
+                                None,
+                            )
+                            if import_node is not None:
+                                source_owners.append(
+                                    NativeRouteSourceOwnerEvidence(
+                                        side=self.snapshot_side,
+                                        owner_kind="import_binding",
+                                        qualified_binding=f"{parent_module.name}.{child_argument.id}",
+                                        related_binding=(
+                                            f"{import_binding.module}.{import_binding.symbol}"
+                                            if import_binding.symbol is not None
+                                            else import_binding.module
+                                        ),
+                                        confidence="established",
+                                        expression=ast.unparse(import_node)[:4096],
+                                        source_span=_native_span(parent_module.path, import_node),
+                                    )
+                                )
+                            exported_module = modules.get(import_binding.module)
+                            if exported_module is not None and import_binding.symbol is not None:
+                                forward_binding = self._import_binding_at(
+                                    exported_module, import_binding.symbol, 2**31 - 1
+                                )
+                                if forward_binding is not None:
+                                    forward_node = next(
+                                        (
+                                            statement
+                                            for statement in exported_module.tree.body
+                                            if isinstance(statement, (ast.Import, ast.ImportFrom))
+                                            and statement.lineno == forward_binding.line
+                                        ),
+                                        None,
+                                    )
+                                    if forward_node is not None:
+                                        source_owners.append(
+                                            NativeRouteSourceOwnerEvidence(
+                                                side=self.snapshot_side,
+                                                owner_kind="reexport",
+                                                qualified_binding=(
+                                                    f"{exported_module.name}.{import_binding.symbol}"
+                                                ),
+                                                related_binding=(
+                                                    f"{forward_binding.module}.{forward_binding.symbol}"
+                                                    if forward_binding.symbol is not None
+                                                    else forward_binding.module
+                                                ),
+                                                confidence="established",
+                                                expression=ast.unparse(forward_node)[:4096],
+                                                source_span=_native_span(
+                                                    exported_module.path, forward_node
+                                                ),
+                                            )
+                                        )
+                                for statement in exported_module.tree.body:
+                                    if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                                        continue
+                                    if not isinstance(statement.value, (ast.List, ast.Tuple)):
+                                        continue
+                                    if any(
+                                        isinstance(value, ast.Constant)
+                                        and value.value == import_binding.symbol
+                                        for value in statement.value.elts
+                                    ) and any(
+                                        "__all__" in _bound_names(target)
+                                        for target in (
+                                            [statement.target]
+                                            if isinstance(statement, ast.AnnAssign)
+                                            else statement.targets
+                                        )
+                                    ):
+                                        source_owners.append(
+                                            NativeRouteSourceOwnerEvidence(
+                                                side=self.snapshot_side,
+                                                owner_kind="all_export",
+                                                qualified_binding=f"{import_binding.module}.{import_binding.symbol}",
+                                                related_binding=f"{parent_module.name}.{child_argument.id}",
+                                                confidence="established",
+                                                expression=ast.unparse(statement.value)[:4096],
+                                                source_span=_native_span(
+                                                    exported_module.path, statement.value
+                                                ),
+                                            )
+                                        )
                     native_provenance = NativeRouteProvenance(
                         side=self.snapshot_side,
                         root=root_evidence,
@@ -1208,6 +1605,7 @@ class SecureASTExtractor:
                         ),
                         object_chain=current_object_chain,
                         assembly_chain=assembly_chain,
+                        source_owners=tuple(source_owners),
                     )
                 found.append(
                     Endpoint(
@@ -1559,8 +1957,8 @@ class SecureASTExtractor:
                         line=node.lineno,
                         source_span=_native_span(module.path, node),
                         dependency_expressions=_native_dependency_expressions(
-                            module.path,
-                            self.snapshot_side,
+                            self,
+                            module,
                             constructor,
                             _keyword_expr(value, "dependencies"),
                         ),
@@ -2242,8 +2640,8 @@ class SecureASTExtractor:
                         call_line,
                         source_span=_native_span(module.path, statement),
                         dependency_expressions=_native_dependency_expressions(
-                            module.path,
-                            self.snapshot_side,
+                            self,
+                            module,
                             constructor,
                             _keyword_expr(value, "dependencies"),
                         ),
@@ -4082,8 +4480,8 @@ class SecureASTExtractor:
                         operation=operation,
                         source_span=_native_span(module.path, call),
                         dependency_expressions=_native_dependency_expressions(
-                            module.path,
-                            self.snapshot_side,
+                            self,
+                            module,
                             "route",
                             _keyword_expr(call, "dependencies"),
                         ),
@@ -4133,8 +4531,8 @@ class SecureASTExtractor:
                         operation=operation,
                         source_span=_native_span(module.path, call),
                         dependency_expressions=_native_dependency_expressions(
-                            module.path,
-                            self.snapshot_side,
+                            self,
+                            module,
                             "route",
                             _keyword_expr(call, "dependencies"),
                         ),
@@ -4183,8 +4581,8 @@ class SecureASTExtractor:
                         "include_router",
                         _native_span(module.path, call),
                         _native_dependency_expressions(
-                            module.path,
-                            self.snapshot_side,
+                            self,
+                            module,
                             "include",
                             _keyword_expr(call, "dependencies"),
                         ),
@@ -4217,8 +4615,8 @@ class SecureASTExtractor:
                     "mount",
                     _native_span(module.path, call),
                     _native_dependency_expressions(
-                        module.path,
-                        self.snapshot_side,
+                        self,
+                        module,
                         "include",
                         _keyword_expr(call, "dependencies"),
                     ),

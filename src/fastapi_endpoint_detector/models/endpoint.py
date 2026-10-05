@@ -416,6 +416,53 @@ class NativeRouteStructuralOwnerEvidence(BaseModel):
     role: Literal["registration", "assembly", "object", "root", "dependency"]
     source_span: NativeSourceSpan
     side: SnapshotSide
+    owner_kind: (
+        Literal[
+            "registration",
+            "assembly",
+            "object",
+            "root",
+            "dependency",
+            "decorator_signature",
+            "assignment_rhs",
+            "import_binding",
+            "reexport",
+            "all_export",
+            "class_base",
+            "class_decorator",
+            "factory_return",
+            "bootstrap_registration",
+        ]
+        | None
+    ) = None
+    qualified_binding: str | None = Field(default=None, min_length=1, max_length=2048)
+    related_binding: str | None = Field(default=None, min_length=1, max_length=2048)
+    confidence: Literal["established", "conditional"] = "established"
+
+    class Config:
+        frozen = True
+
+
+class NativeRouteSourceOwnerEvidence(BaseModel):
+    """Immutable source occurrence owned by one qualified native route binding."""
+
+    side: SnapshotSide
+    owner_kind: Literal[
+        "decorator_signature",
+        "assignment_rhs",
+        "import_binding",
+        "reexport",
+        "all_export",
+        "class_base",
+        "class_decorator",
+        "factory_return",
+        "bootstrap_registration",
+    ]
+    qualified_binding: str = Field(min_length=1, max_length=2048)
+    related_binding: str | None = Field(default=None, min_length=1, max_length=2048)
+    confidence: Literal["established", "conditional"]
+    expression: str | None = Field(default=None, max_length=4096)
+    source_span: NativeSourceSpan
 
     class Config:
         frozen = True
@@ -430,6 +477,7 @@ class NativeRouteProvenance(BaseModel):
     registration: NativeRouteRegistrationEvidence
     object_chain: tuple[NativeRouteObjectEvidence, ...] = Field(min_length=1, max_length=256)
     assembly_chain: tuple[NativeRouteAssemblyEdgeEvidence, ...] = Field(default=(), max_length=256)
+    source_owners: tuple[NativeRouteSourceOwnerEvidence, ...] = Field(default=(), max_length=2048)
 
     @model_validator(mode="after")
     def validate_chain(self) -> "NativeRouteProvenance":
@@ -438,6 +486,7 @@ class NativeRouteProvenance(BaseModel):
             self.registration.side,
             *(item.side for item in self.object_chain),
             *(item.side for item in self.assembly_chain),
+            *(item.side for item in self.source_owners),
         ]
         if any(side != self.side for side in evidence):
             raise ValueError("native route provenance cannot mix snapshot sides")
