@@ -40,7 +40,7 @@ def _project(root: Path) -> tuple[Path, Path]:
                 "contracts": [
                     {
                         "id": "emit",
-                        "symbol": f"{root.name}.helpers.emit",
+                        "symbol": "helpers.emit",
                         "invocation": "function",
                         "operation": "publish",
                         "channel": "message_bus",
