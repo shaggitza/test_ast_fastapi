@@ -10,6 +10,8 @@
     "missing_provenance"
   ],
   "measured": false,
+  "provider_authenticated": false,
+  "scoreable": false,
   "claims": [],
-  "note": "No enterprise calls were made. Fixture evidence is synthetic parser test data, not product output."
+  "note": "No enterprise calls were made. Fixture evidence is synthetic, schema validation cannot authenticate a provider, and readiness is not runtime authorization."
 }
