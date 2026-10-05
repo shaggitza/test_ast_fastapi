@@ -55,7 +55,7 @@ def _project(
                 "contracts": [
                     {
                         "id": "read-state",
-                        "symbol": f"{root.name}.main.read_state",
+                        "symbol": "main.read_state",
                         "invocation": "function",
                         "operation": "read",
                         "channel": "custom",
@@ -63,7 +63,7 @@ def _project(
                     },
                     {
                         "id": "write-state",
-                        "symbol": f"{root.name}.main.write_state",
+                        "symbol": "main.write_state",
                         "invocation": "function",
                         "operation": "write",
                         "channel": "custom",
@@ -147,7 +147,7 @@ def _composite_project(root: Path, reader_bucket: str) -> tuple[Path, Path, Path
                 "contracts": [
                     {
                         "id": "read-state",
-                        "symbol": f"{root.name}.main.read_state",
+                        "symbol": "main.read_state",
                         "invocation": "function",
                         "operation": "read",
                         "channel": "custom",
@@ -155,7 +155,7 @@ def _composite_project(root: Path, reader_bucket: str) -> tuple[Path, Path, Path
                     },
                     {
                         "id": "write-state",
-                        "symbol": f"{root.name}.main.write_state",
+                        "symbol": "main.write_state",
                         "invocation": "function",
                         "operation": "write",
                         "channel": "custom",
@@ -655,7 +655,7 @@ def _message_project(root: Path) -> tuple[Path, Path, Path]:
                 "contracts": [
                     {
                         "id": "consume-topic",
-                        "symbol": f"{root.name}.main.consume",
+                        "symbol": "main.consume",
                         "invocation": "function",
                         "operation": "consume",
                         "channel": "message_bus",
@@ -663,7 +663,7 @@ def _message_project(root: Path) -> tuple[Path, Path, Path]:
                     },
                     {
                         "id": "publish-topic",
-                        "symbol": f"{root.name}.main.publish",
+                        "symbol": "main.publish",
                         "invocation": "function",
                         "operation": "publish",
                         "channel": "message_bus",
