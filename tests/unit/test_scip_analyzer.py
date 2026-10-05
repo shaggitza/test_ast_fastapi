@@ -23,6 +23,7 @@ def completed(
 
 
 def test_outline_converts_zero_based_ranges_and_selects_narrowest(tmp_path: Path) -> None:
+    (tmp_path / "module.py").write_text("")
     analyzer = SCIPAnalyzer(tmp_path)
     payload = {
         "result": [
@@ -235,6 +236,7 @@ def test_command_failure_is_explicit(tmp_path: Path) -> None:
 def test_reverse_call_edges_proves_calls_deduplicates_sorts_and_caches(tmp_path: Path) -> None:
     (tmp_path / "callee.py").write_text("def target():\n    return None\n")
     (tmp_path / "z.py").write_text(
+        "from callee import target\n"
         "def z_caller():\n"
         "    target()\n"
         "    value = target\n"
@@ -245,11 +247,13 @@ def test_reverse_call_edges_proves_calls_deduplicates_sorts_and_caches(tmp_path:
         "    def nested():\n"
         "        target()\n"
     )
-    (tmp_path / "a.py").write_text("async def a_caller():\n    await target()\n")
+    (tmp_path / "a.py").write_text(
+        "from callee import target\nasync def a_caller():\n    await target()\n"
+    )
     analyzer = SCIPAnalyzer(tmp_path)
     callee = SCIPDefinition("full target symbol", "callee:target()", Path("callee.py"), 1, 2)
-    z_caller = SCIPDefinition("z symbol", "z:z_caller()", Path("z.py"), 1, 3)
-    a_caller = SCIPDefinition("a symbol", "a:a_caller()", Path("a.py"), 1, 2)
+    z_caller = SCIPDefinition("z symbol", "z:z_caller()", Path("z.py"), 2, 4)
+    a_caller = SCIPDefinition("a symbol", "a:a_caller()", Path("a.py"), 2, 3)
     payload = {
         "matched": True,
         "resolved": {
@@ -264,9 +268,9 @@ def test_reverse_call_edges_proves_calls_deduplicates_sorts_and_caches(tmp_path:
             {"relativePath": "z.py", "line": 2},
             {"relativePath": "z.py", "line": 3},
             {"relativePath": "z.py", "line": 5},
-            {"relativePath": "z.py", "line": 8},
+            {"relativePath": "z.py", "line": 9},
             {"relativePath": "z.py", "line": 1},
-            {"relativePath": "a.py", "line": 1},
+            {"relativePath": "a.py", "line": 2},
         ],
     }
 
@@ -283,8 +287,8 @@ def test_reverse_call_edges_proves_calls_deduplicates_sorts_and_caches(tmp_path:
         second = analyzer.reverse_call_edges(callee)
 
     assert first == (
-        SCIPReverseCallEdge(a_caller, callee, SCIPOccurrence(Path("a.py"), 2)),
-        SCIPReverseCallEdge(z_caller, callee, SCIPOccurrence(Path("z.py"), 2)),
+        SCIPReverseCallEdge(a_caller, callee, SCIPOccurrence(Path("a.py"), 3)),
+        SCIPReverseCallEdge(z_caller, callee, SCIPOccurrence(Path("z.py"), 3)),
     )
     assert second is first
     run.assert_called_once_with(["scip-query", "refs", callee.symbol, "--json"], json_output=True)
@@ -324,6 +328,9 @@ def test_reverse_call_edges_rejects_reference_lines_without_callee_call(
         patch.object(analyzer, "outline", return_value=(caller,)),
     ):
         assert analyzer.reverse_call_edges(callee) == ()
+    assert analyzer.reverse_call_edge_limitations(callee) == (
+        "SCIP reference was unsupported or ambiguous as a source-bound direct call",
+    )
 
 
 @pytest.mark.parametrize(
@@ -456,6 +463,7 @@ def test_reverse_call_edges_uses_sanitized_pinned_schema_and_argv(tmp_path: Path
     payload = fixture.read_text(encoding="utf-8")
     (tmp_path / "services.py").write_text("def calculate():\n    return 1\n")
     (tmp_path / "routers.py").write_text(
+        "from services import calculate\n"
         "def quote():\n    value = 1\n    value += 1\n    return calculate()\n"
     )
     analyzer = SCIPAnalyzer(tmp_path)
@@ -470,8 +478,8 @@ def test_reverse_call_edges_uses_sanitized_pinned_schema_and_argv(tmp_path: Path
         "scip-python python fixture 0.0.0 `routers`/quote().",
         "routers:quote()",
         Path("routers.py"),
-        1,
-        4,
+        2,
+        5,
     )
     with (
         patch.object(analyzer, "_executable", return_value="/tools/scip-query"),
@@ -480,7 +488,7 @@ def test_reverse_call_edges_uses_sanitized_pinned_schema_and_argv(tmp_path: Path
     ):
         edges = analyzer.reverse_call_edges(callee)
 
-    assert edges == (SCIPReverseCallEdge(caller, callee, SCIPOccurrence(Path("routers.py"), 4)),)
+    assert edges == (SCIPReverseCallEdge(caller, callee, SCIPOccurrence(Path("routers.py"), 5)),)
     argv = run.call_args.args[0]
     assert argv == ["/tools/scip-query", "refs", callee.symbol, "--json"]
     assert "shell" not in run.call_args.kwargs
