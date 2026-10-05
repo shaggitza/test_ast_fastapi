@@ -38,9 +38,10 @@ def _rows(report: dict[str, Any]) -> dict[tuple[str, int], dict[str, Any]]:
     for row in rows:
         if not isinstance(row, dict):
             raise ValueError("malformed per_pr evidence row")
-        key = (row.get("repository"), row.get("pr"))
-        if not isinstance(key[0], str) or type(key[1]) is not int:
+        repository, pr = row.get("repository"), row.get("pr")
+        if not isinstance(repository, str) or type(pr) is not int:
             raise ValueError("malformed PR identity")
+        key = (repository, pr)
         if key in mapped:
             raise ValueError(f"duplicate PR evidence row: {key}")
         mapped[key] = row
