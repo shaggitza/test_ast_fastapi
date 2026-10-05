@@ -527,6 +527,12 @@ def test_product_scope_memberships_cover_every_selected_entrypoint(tmp_path: Pat
         ("adjudications.jsonl", "version", 77, "adjudication projection"),
         ("adjudications.jsonl", "artifact_sha256", "sha256:" + "0" * 64, "adjudication projection"),
         ("reviews.jsonl", "lane", "A-forged", "review projection"),
+        ("reviews.jsonl", "repository", "forged/repository", "review projection"),
+        ("reviews.jsonl", "pr", 999, "review projection"),
+        ("reviews.jsonl", "artifact_sha256", "sha256:" + "0" * 64, "review projection"),
+        ("reviews.jsonl", "terminal_recommendation", "negative_control", "review projection"),
+        ("artifact-index.jsonl", "artifact_type", "forged", "artifact index"),
+        ("artifact-index.jsonl", "sha256", "sha256:" + "0" * 64, "artifact index"),
         ("artifact-index.jsonl", "bytes", 1, "artifact index"),
     ],
 )
@@ -633,6 +639,20 @@ def test_resealed_release_rejects_undeclared_projection_keys(
     manifest = json.loads((root / "manifest.json").read_text())
     _reseal(root, manifest)
     with pytest.raises(GroundTruthError, match=expected):
+        verify_release(root)
+
+
+def test_resealed_release_rejects_artifact_index_row_inventory_change(
+    tmp_path: Path,
+) -> None:
+    root = _release(tmp_path)
+    path = root / "artifact-index.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    rows.pop()
+    _write_jsonl(path, rows)
+    manifest = json.loads((root / "manifest.json").read_text())
+    _reseal(root, manifest)
+    with pytest.raises(GroundTruthError, match="artifact index"):
         verify_release(root)
 
 
