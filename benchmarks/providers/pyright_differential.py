@@ -6,10 +6,13 @@ This tool does not infer execution, endpoint reachability, or canonical truth.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
 import re
+import selectors
+import signal
 import stat
 import subprocess
 import sys
@@ -23,12 +26,14 @@ ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "benchmarks/providers/fixtures/pyright_differential"
 RESULTS = ROOT / "benchmarks/results/pyright-differential-v1"
 RESULTS_V2 = ROOT / "benchmarks/results/pyright-differential-v2"
+RESULTS_V3 = ROOT / "benchmarks/results/pyright-differential-v3"
 PYRIGHT_VERSION = "1.1.411"
 MYPY_VERSION = "2.4.0"
 FIXTURE_NAMES = ("callable", "overloads", "package_layout", "receiver", "shadowing", "utf8")
 MAX_FILES = 32
 MAX_BYTES = 256_000
 TIMEOUT_SECONDS = 25
+MAX_OUTPUT_BYTES = 2_000_000
 _RANGE = re.compile(r"^(.*?):(\d+):(\d+): (error|warning|note): (.*?)(?:\s+\[([^]]+)\])?$")
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _MYPY_CONFIG = b"[mypy]\npython_version = 3.10\nshow_column_numbers = True\n"
@@ -56,6 +61,7 @@ _PROVENANCE_FIELDS = {
     "consumed_config_sha256",
     "working_directory",
 }
+_V3_PROVENANCE_FIELDS = _PROVENANCE_FIELDS | {"provider_artifacts", "max_output_bytes"}
 
 
 class EvaluationError(RuntimeError):
@@ -101,21 +107,79 @@ def _loads(raw: str | bytes, label: str) -> Any:
         raise EvaluationError(f"invalid {label} JSON: {exc}") from exc
 
 
-def _run(
-    command: list[str], cwd: Path, timeout: int = TIMEOUT_SECONDS
+def _run(  # noqa: PLR0912
+    command: list[str], cwd: Path, timeout: float = TIMEOUT_SECONDS
 ) -> subprocess.CompletedProcess[str]:
+    """Run one provider with a wall clock, output and process-group bound."""
+    if os.name != "posix":
+        raise EvaluationError("bounded provider process groups require POSIX")
+    process: subprocess.Popen[bytes] | None = None
+    output = {"stdout": bytearray(), "stderr": bytearray()}
+    deadline = time.monotonic() + timeout
+    selector: selectors.BaseSelector | None = None
+
+    def stop_group() -> None:
+        if process is None:
+            return
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+
     try:
-        return subprocess.run(
+        process = subprocess.Popen(
             command,
             cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
             env={**os.environ, "NO_COLOR": "1", "PYTHONDONTWRITEBYTECODE": "1"},
         )
-    except subprocess.TimeoutExpired as exc:
-        raise EvaluationError(f"provider timed out after {timeout}s: {command[0]}") from exc
+        assert process.stdout is not None and process.stderr is not None
+        selector = selectors.DefaultSelector()
+        for stream, label in ((process.stdout, "stdout"), (process.stderr, "stderr")):
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ, label)
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                stop_group()
+                process.wait()
+                raise EvaluationError(f"provider timed out after {timeout}s: {command[0]}")
+            for key, _ in selector.select(min(remaining, 0.1)):
+                chunk = os.read(key.fd, 65536)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                buffer = output[key.data]
+                if sum(len(part) for part in output.values()) + len(chunk) > MAX_OUTPUT_BYTES:
+                    stop_group()
+                    process.wait()
+                    raise EvaluationError(
+                        f"provider output exceeded {MAX_OUTPUT_BYTES} bytes: {command[0]}"
+                    )
+                buffer.extend(chunk)
+        returncode = process.wait(timeout=max(0.01, deadline - time.monotonic()))
+        return subprocess.CompletedProcess(
+            command,
+            returncode,
+            output["stdout"].decode("utf-8", errors="strict"),
+            output["stderr"].decode("utf-8", errors="strict"),
+        )
+    except (OSError, UnicodeDecodeError, subprocess.TimeoutExpired) as exc:
+        stop_group()
+        if process is not None:
+            process.wait()
+        raise EvaluationError(f"provider invocation failed: {command[0]}: {exc}") from exc
+    finally:
+        if process is not None:
+            if process.poll() is not None:
+                stop_group()
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+        if selector is not None:
+            selector.close()
 
 
 def _read_pyright(
@@ -253,9 +317,62 @@ def _version(command: list[str], expected: str, provider: str) -> str:
     if not lines:
         raise EvaluationError(f"{provider} returned an empty version string")
     actual = lines[0]
-    if expected not in actual:
+    pattern = (
+        rf"^pyright {re.escape(expected)}$"
+        if provider == "Pyright"
+        else rf"^mypy {re.escape(expected)}(?: \(compiled: (?:yes|no)\))?$"
+    )
+    if re.fullmatch(pattern, actual) is None:
         raise EvaluationError(f"expected {provider} {expected}, got {actual!r}")
     return actual
+
+
+def _artifact_identity(provider: str, executable: str) -> tuple[str, dict[str, str]]:
+    """Bind invocation to resolved CLI and official package metadata bytes."""
+    path = Path(executable).resolve(strict=True)
+    if not path.is_file():
+        raise EvaluationError(f"{provider} executable is not a regular file")
+    if provider == "pyright":
+        package_file = path.parent / "package.json"
+        if path.name != "index.js" or not package_file.is_file():
+            raise EvaluationError("Pyright CLI must resolve to the official npm package entrypoint")
+        package = _loads(package_file.read_bytes(), "Pyright package metadata")
+        package_bin = package.get("bin") if isinstance(package, dict) else None
+        if (
+            not isinstance(package, dict)
+            or package.get("name") != "pyright"
+            or package.get("version") != PYRIGHT_VERSION
+            or not isinstance(package_bin, dict)
+            or package_bin.get("pyright") != "index.js"
+        ):
+            raise EvaluationError("Pyright executable is not bound to the pinned npm package")
+        alias = "<pyright-package>/index.js"
+        package_hash = sha256(package_file)
+    else:
+        if path.name != "mypy" or path.parent.name != "bin":
+            raise EvaluationError("mypy CLI must resolve to an installed package bin/mypy")
+        metadata = next(
+            (
+                found
+                for candidate in path.parents
+                for found in candidate.glob(
+                    f"lib/python*/site-packages/mypy-{MYPY_VERSION}.dist-info/METADATA"
+                )
+                if found.is_file()
+            ),
+            None,
+        )
+        if metadata is None:
+            raise EvaluationError("mypy executable has no pinned distribution metadata")
+        metadata_raw = metadata.read_bytes()
+        if f"Name: mypy\nVersion: {MYPY_VERSION}\n".encode() not in metadata_raw:
+            raise EvaluationError("mypy distribution metadata does not match pinned package")
+        alias = "<mypy-package>/bin/mypy"
+        package_hash = sha256(metadata)
+    return alias, {
+        "executable_sha256": sha256(path),
+        "package_metadata_sha256": package_hash,
+    }
 
 
 def _fixture_inputs(fixture: Path) -> list[Path]:
@@ -318,7 +435,7 @@ def _snapshot(fixture: Path, files: list[Path], destination: Path) -> tuple[Path
     return snapshot, mypy_config
 
 
-def evaluate(
+def evaluate(  # noqa: PLR0915
     name: str,
     pyright_bin: str,
     mypy_bin: str,
@@ -335,6 +452,8 @@ def evaluate(
     source_hashes, pyright_config_hashes = _input_hashes(fixture, files)
     pyright_version = _version([pyright_bin, "--version"], PYRIGHT_VERSION, "Pyright")
     mypy_version = _version([mypy_bin, "--version"], MYPY_VERSION, "mypy")
+    pyright_alias, pyright_artifact = _artifact_identity("pyright", pyright_bin)
+    mypy_alias, mypy_artifact = _artifact_identity("mypy", mypy_bin)
     start = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="pyright-differential-") as temporary:
         snapshot, mypy_config = _snapshot(fixture, files, Path(temporary))
@@ -385,15 +504,15 @@ def evaluate(
         "mypy.ini": hashlib.sha256(_MYPY_CONFIG).hexdigest(),
     }
     record: dict[str, Any] = {
-        "schema": "pyright-mypy-differential-v2",
+        "schema": "pyright-mypy-differential-v3",
         "fixture": name,
         "source_sha256": source_hashes,
         "config_sha256": config_hashes,
         "engines": {"pyright": pyright_version, "mypy": mypy_version},
         "provenance": {
-            "pyright_command": [pyright_bin, "--project", "<snapshot>/fixture", "--outputjson"],
+            "pyright_command": [pyright_alias, "--project", "<snapshot>/fixture", "--outputjson"],
             "mypy_command": [
-                mypy_bin,
+                mypy_alias,
                 "--config-file",
                 "<snapshot>/mypy.ini",
                 "--no-incremental",
@@ -412,6 +531,8 @@ def evaluate(
             "consumed_source_sha256": source_hashes,
             "consumed_config_sha256": config_hashes,
             "working_directory": "<repository-root>",
+            "provider_artifacts": {"pyright": pyright_artifact, "mypy": mypy_artifact},
+            "max_output_bytes": MAX_OUTPUT_BYTES,
         },
         "observations": [asdict(item) for item in p_obs + m_obs],
         "comparison": _compare(p_obs, m_obs),
@@ -439,7 +560,7 @@ def evaluate(
         "scope": "synthetic fixtures only; no corpus application execution or canonical truth",
     }
     if write:
-        output_dir = results_dir or RESULTS_V2
+        output_dir = results_dir or RESULTS_V3
         if output_dir.is_symlink():
             raise EvaluationError("results directory must not be a symlink")
         destination = output_dir / f"{name}.json"
@@ -490,7 +611,7 @@ def _validate_observations(value: Any, source_names: set[str], label: str, schem
         "rule",
         "comparable",
     }
-    if schema.endswith("v2"):
+    if schema.endswith(("v2", "v3")):
         fields |= {"end_line", "end_column"}
     if not isinstance(value, list):
         raise EvaluationError(f"{label} observations must be a list")
@@ -515,7 +636,7 @@ def _validate_observations(value: Any, source_names: set[str], label: str, schem
             or (item["rule"] is not None and not isinstance(item["rule"], str))
             or type(item["comparable"]) is not bool
             or (
-                schema.endswith("v2")
+                schema.endswith(("v2", "v3"))
                 and item["provider"] == "pyright"
                 and (
                     type(item["end_line"]) is not int
@@ -525,7 +646,7 @@ def _validate_observations(value: Any, source_names: set[str], label: str, schem
                 )
             )
             or (
-                schema.endswith("v2")
+                schema.endswith(("v2", "v3"))
                 and item["provider"] == "mypy"
                 and (item["end_line"] is not None or item["end_column"] is not None)
             )
@@ -536,7 +657,7 @@ def _validate_observations(value: Any, source_names: set[str], label: str, schem
 def _validate_record(record: Any, schema: str, fixture_name: str) -> None:  # noqa: PLR0912, PLR0915
     fields = (
         _V2_FIELDS
-        if schema.endswith("v2")
+        if schema.endswith(("v2", "v3"))
         else {
             "schema",
             "fixture",
@@ -563,7 +684,7 @@ def _validate_record(record: Any, schema: str, fixture_name: str) -> None:  # no
     inputs = _fixture_inputs(fixture)
     source_hashes, configs = _input_hashes(fixture, inputs)
     expected_configs = dict(configs)
-    if schema.endswith("v2"):
+    if schema.endswith(("v2", "v3")):
         expected_configs["mypy.ini"] = hashlib.sha256(_MYPY_CONFIG).hexdigest()
     if record["source_sha256"] != source_hashes:
         raise EvaluationError(f"stale or incomplete source hashes: {fixture_name}")
@@ -585,13 +706,17 @@ def _validate_record(record: Any, schema: str, fixture_name: str) -> None:  # no
     if (
         engines["pyright"] != f"pyright {PYRIGHT_VERSION}"
         or not isinstance(engines["mypy"], str)
-        or MYPY_VERSION not in engines["mypy"]
+        or re.fullmatch(
+            rf"mypy {re.escape(MYPY_VERSION)}(?: \(compiled: (?:yes|no)\))?",
+            engines["mypy"],
+        )
+        is None
     ):
         raise EvaluationError(f"unexpected engine version: {fixture_name}")
     provenance = record["provenance"]
     expected_provenance_fields = (
-        _PROVENANCE_FIELDS
-        if schema.endswith("v2")
+        (_V3_PROVENANCE_FIELDS if schema.endswith("v3") else _PROVENANCE_FIELDS)
+        if schema.endswith(("v2", "v3"))
         else {
             "pyright_command",
             "mypy_command",
@@ -613,7 +738,7 @@ def _validate_record(record: Any, schema: str, fixture_name: str) -> None:  # no
         or not (0 < provenance["elapsed_seconds"] <= TIMEOUT_SECONDS * 2 + 1)
     ):
         raise EvaluationError(f"invalid provider limits or duration: {fixture_name}")
-    if schema.endswith("v2") and (
+    if schema.endswith(("v2", "v3")) and (
         provenance["consumed_source_sha256"] != source_hashes
         or provenance["consumed_config_sha256"] != expected_configs
         or provenance["working_directory"] != "<repository-root>"
@@ -636,10 +761,31 @@ def _validate_record(record: Any, schema: str, fixture_name: str) -> None:  # no
         ]
     ):
         raise EvaluationError(f"provider provenance does not bind consumed inputs: {fixture_name}")
+    if schema.endswith("v3"):
+        artifacts = provenance.get("provider_artifacts")
+        if (
+            not isinstance(artifacts, dict)
+            or set(artifacts) != {"pyright", "mypy"}
+            or any(
+                not isinstance(item, dict)
+                or set(item) != {"executable_sha256", "package_metadata_sha256"}
+                or any(
+                    not isinstance(digest, str) or _SHA256.fullmatch(f"sha256:{digest}") is None
+                    for digest in item.values()
+                )
+                for item in artifacts.values()
+            )
+            or provenance.get("max_output_bytes") != MAX_OUTPUT_BYTES
+            or provenance["pyright_command"][0] != "<pyright-package>/index.js"
+            or provenance["mypy_command"][0] != "<mypy-package>/bin/mypy"
+        ):
+            raise EvaluationError(
+                f"provider executable/package provenance is invalid: {fixture_name}"
+            )
     _validate_observations(record["observations"], set(source_hashes), fixture_name, schema)
     unsupported = record["unsupported"]
     expected_queries = {"definition_target", "execution_or_reachability"}
-    if schema.endswith("v2"):
+    if schema.endswith(("v2", "v3")):
         expected_queries.add("cross_engine_diagnostic_semantics")
     if (
         not isinstance(unsupported, list)
@@ -656,7 +802,7 @@ def _validate_record(record: Any, schema: str, fixture_name: str) -> None:  # no
     ):
         raise EvaluationError(f"unsupported query declarations are incomplete: {fixture_name}")
     comparison = record["comparison"]
-    if schema.endswith("v2"):
+    if schema.endswith(("v2", "v3")):
         comp_fields = {
             "policy",
             "overlapping_error_locations",
@@ -747,23 +893,26 @@ def _verify_result_directory(directory: Path, schema: str, *, allow_readme: bool
         raise EvaluationError(f"results do not cover all fixtures: {directory}")
 
 
-def verify_records(results_v2: Path = RESULTS_V2) -> None:
+def verify_records(results_v3: Path = RESULTS_V3) -> None:
     _verify_result_directory(RESULTS, "pyright-mypy-differential-v1", allow_readme=True)
-    _verify_result_directory(results_v2, "pyright-mypy-differential-v2", allow_readme=False)
+    _verify_result_directory(RESULTS_V2, "pyright-mypy-differential-v2", allow_readme=False)
+    _verify_result_directory(results_v3, "pyright-mypy-differential-v3", allow_readme=False)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("fixture", nargs="?", help="one controlled fixture directory")
-    parser.add_argument("--pyright", default="/tmp/pyright-differential/node_modules/.bin/pyright")
-    parser.add_argument("--mypy", default="mypy")
+    parser.add_argument("--pyright", help="absolute path to pinned Pyright CLI")
+    parser.add_argument("--mypy", help="absolute path to pinned mypy CLI")
     parser.add_argument("--results-dir", type=Path, default=None)
     parser.add_argument("--verify-records", action="store_true")
     args = parser.parse_args()
     try:
         if args.verify_records:
-            verify_records(args.results_dir or RESULTS_V2)
+            verify_records(args.results_dir or RESULTS_V3)
         elif args.fixture:
+            if not args.pyright or not args.mypy:
+                parser.error("fixture runs require explicit --pyright and --mypy paths")
             evaluate(args.fixture, args.pyright, args.mypy, results_dir=args.results_dir)
         else:
             parser.error("fixture or --verify-records is required")

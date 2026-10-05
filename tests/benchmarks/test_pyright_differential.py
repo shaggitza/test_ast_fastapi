@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -92,6 +95,26 @@ def _write_complete_v2(directory: Path) -> None:
         (directory / f"{name}.json").write_text(payload, encoding="utf-8")
 
 
+def _validation_record_v3(name: str) -> dict[str, Any]:
+    row = _validation_record(name)
+    row["schema"] = "pyright-mypy-differential-v3"
+    row["provenance"]["pyright_command"][0] = "<pyright-package>/index.js"
+    row["provenance"]["mypy_command"][0] = "<mypy-package>/bin/mypy"
+    row["provenance"]["provider_artifacts"] = {
+        key: {"executable_sha256": "a" * 64, "package_metadata_sha256": "b" * 64}
+        for key in ("pyright", "mypy")
+    }
+    row["provenance"]["max_output_bytes"] = harness.MAX_OUTPUT_BYTES
+    return row
+
+
+def _write_complete_v3(directory: Path) -> None:
+    directory.mkdir()
+    for name in harness.FIXTURE_NAMES:
+        payload = json.dumps(_validation_record_v3(name), allow_nan=False, sort_keys=True)
+        (directory / f"{name}.json").write_text(payload, encoding="utf-8")
+
+
 def test_strict_json_rejects_duplicate_keys_and_non_finite_values() -> None:
     with pytest.raises(harness.EvaluationError, match="duplicate JSON key"):
         harness._loads('{"version":"x","version":"y"}', "test")
@@ -104,13 +127,50 @@ def test_pyright_parser_rejects_malformed_output() -> None:
         harness._read_pyright("not-json", Path("/tmp/fixture"))
 
 
-def test_timeout_is_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
-    def timeout(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        raise subprocess.TimeoutExpired("pyright", 1)
-
-    monkeypatch.setattr(harness.subprocess, "run", timeout)
+@pytest.mark.skipif(os.name != "posix", reason="provider process groups require POSIX")
+def test_timeout_is_explicit(tmp_path: Path) -> None:
     with pytest.raises(harness.EvaluationError, match="timed out"):
-        harness._run(["pyright"], Path(), timeout=1)
+        harness._run([sys.executable, "-c", "import time; time.sleep(10)"], tmp_path, timeout=0.1)
+
+
+def test_version_match_is_exact(monkeypatch: pytest.MonkeyPatch) -> None:
+    def reported(
+        command: list[str], _cwd: Path, _timeout: int = 25
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            command, 0, "mypy 1.12.0, compatibility string 2.4.0\n", ""
+        )
+
+    monkeypatch.setattr(harness, "_run", reported)
+    with pytest.raises(harness.EvaluationError, match=r"expected mypy 2\.4\.0"):
+        harness._version(["mypy", "--version"], "2.4.0", "mypy")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="provider process groups require POSIX")
+def test_output_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(harness, "MAX_OUTPUT_BYTES", 1024)
+    script = "import sys; sys.stdout.write('x' * 4096); sys.stdout.flush()"
+    with pytest.raises(harness.EvaluationError, match="output exceeded"):
+        harness._run([sys.executable, "-c", script], tmp_path, timeout=3)
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux", reason="process-group cleanup control is Linux-specific"
+)
+def test_timeout_kills_descendant_process_group(tmp_path: Path) -> None:
+    pid_file = tmp_path / "descendant.pid"
+    child = "import time; time.sleep(30)"
+    parent = (
+        "import subprocess,sys,time,pathlib; "
+        f"p=subprocess.Popen([sys.executable,'-c',{child!r}]); "
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(p.pid)); time.sleep(30)"
+    )
+    with pytest.raises(harness.EvaluationError, match="timed out"):
+        harness._run([sys.executable, "-c", parent], tmp_path, timeout=0.3)
+    descendant = int(pid_file.read_text())
+    time.sleep(0.05)
+    status = Path(f"/proc/{descendant}/status")
+    assert not status.exists() or "State:\tZ" in status.read_text()
 
 
 def test_fixture_rejects_out_of_root_symlink(
@@ -153,6 +213,25 @@ def test_record_verifier_rejects_unbound_or_malformed_records(
         )
 
 
+@pytest.mark.parametrize(
+    ("provider", "substitute"),
+    [("pyright", "/tmp/attacker/pyright"), ("mypy", "/tmp/attacker/mypy")],
+)
+def test_v3_record_rejects_substituted_executable(
+    tmp_path: Path, provider: str, substitute: str
+) -> None:
+    results = tmp_path / "results-v3"
+    _write_complete_v3(results)
+    record_path = results / "callable.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["provenance"][f"{provider}_command"][0] = substitute
+    record_path.write_text(json.dumps(record, allow_nan=False), encoding="utf-8")
+    with pytest.raises(harness.EvaluationError, match="executable/package provenance"):
+        harness._verify_result_directory(
+            results, "pyright-mypy-differential-v3", allow_readme=False
+        )
+
+
 def test_result_verifier_rejects_empty_or_incomplete_directory(tmp_path: Path) -> None:
     empty = tmp_path / "empty"
     empty.mkdir()
@@ -181,17 +260,27 @@ def test_comparison_reports_location_overlap_without_semantic_equivalence() -> N
 
 
 def test_real_provider_invocation_uses_snapshot_and_explicit_mypy_config() -> None:
-    pyright = shutil.which("pyright") or "/tmp/pyright-differential/node_modules/.bin/pyright"
-    mypy = shutil.which("mypy") or "/root/.local/bin/mypy"
+    if os.name != "posix":
+        pytest.skip("provider process groups require POSIX")
+    pyright = os.environ.get("PYRIGHT_DIFFERENTIAL_PYRIGHT", "")
+    mypy = os.environ.get("PYRIGHT_DIFFERENTIAL_MYPY", "")
     if not Path(pyright).is_file() or not Path(mypy).is_file():
-        pytest.skip("pinned real provider executables are not available")
+        pytest.skip(
+            "set explicit pinned PYRIGHT_DIFFERENTIAL_PYRIGHT and PYRIGHT_DIFFERENTIAL_MYPY paths"
+        )
+    try:
+        harness._version([pyright, "--version"], harness.PYRIGHT_VERSION, "Pyright")
+        harness._version([mypy, "--version"], harness.MYPY_VERSION, "mypy")
+    except harness.EvaluationError as exc:
+        pytest.skip(f"explicit provider paths are not pinned: {exc}")
     record = harness.evaluate(
         "callable",
         pyright,
         mypy,
         write=False,
     )
-    assert record["schema"] == "pyright-mypy-differential-v2"
+    assert record["schema"] == "pyright-mypy-differential-v3"
+    assert record["provenance"]["provider_artifacts"]["mypy"]["executable_sha256"]
     assert record["provenance"]["consumed_source_sha256"] == record["source_sha256"]
     assert "--config-file" in record["provenance"]["mypy_command"]
     assert {item["query"] for item in record["unsupported"]} >= {
@@ -213,6 +302,14 @@ def test_provider_run_fails_if_live_fixture_changes(
         harness,
         "_version",
         lambda _command, expected, provider: f"{provider.lower()} {expected}",
+    )
+    monkeypatch.setattr(
+        harness,
+        "_artifact_identity",
+        lambda provider, _path: (
+            f"<{provider}-package>/cli",
+            {"executable_sha256": "a" * 64, "package_metadata_sha256": "b" * 64},
+        ),
     )
 
     def invoke(
