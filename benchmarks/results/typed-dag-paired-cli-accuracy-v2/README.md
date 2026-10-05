@@ -5,7 +5,7 @@ This version runs every declared case through the installed public CLI with both
 Run against a clean integration worktree that contains the actual analyzer and CLI revision under evaluation:
 
 ```sh
-uv run python benchmarks/real_world/typed_dag_paired_cli_accuracy.py \
+uv run python -m benchmarks.real_world.typed_dag_paired_cli_accuracy \
   --analyzer-project-root /path/to/clean/analyzer-worktree \
   --output benchmarks/results/typed-dag-paired-cli-accuracy-v2/current.json
 ```
