@@ -32,6 +32,11 @@ def __getattr__(name: str) -> Any:
     return value
 
 
+def __dir__() -> list[str]:
+    """Expose public exports without eagerly importing their implementations."""
+    return sorted(set(globals()) | set(_EXPORT_MODULES))
+
+
 __all__ = [
     "ChangeMapper",
     "EndpointRegistry",
