@@ -1,17 +1,17 @@
-"""Typed, fail-closed bridge for exact framework callback phase evidence.
-
-This module deliberately consumes evidence from a typed frontend; it does not
-discover callbacks by spelling or inspect framework implementation code.
-"""
+"""Canonical framework-v1 contract to execution-phase mapping."""
 
 from __future__ import annotations
 
 from enum import Enum
-from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from fastapi_endpoint_detector.models.surface_contract import CallbackRangeMode
+from fastapi_endpoint_detector.models.surface_contract import (
+    CallbackRangeMode,
+    LoadedSurfaceContracts,
+    SurfaceContract,
+    load_surface_preset,
+)
 
 
 class FrameworkPhase(str, Enum):
@@ -23,14 +23,8 @@ class FrameworkPhase(str, Enum):
     DEPENDENCY = "dependency"
 
 
-class EvidenceStrength(str, Enum):
-    ESTABLISHED = "established"
-    CONDITIONAL = "conditional"
-    UNAVAILABLE = "unavailable"
-
-
 class SourceIdentity(BaseModel):
-    """Canonical source identity bound to the exact typed callable target."""
+    """Physical source identity emitted by a typed integration adapter."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     module: str = Field(min_length=1)
@@ -38,84 +32,82 @@ class SourceIdentity(BaseModel):
     file: str = Field(min_length=1)
     line: int = Field(ge=1)
     column: int = Field(ge=0)
+    end_line: int | None = Field(default=None, ge=1)
+    end_column: int | None = Field(default=None, ge=0)
     source_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-
-
-class TypedFrameworkCallback(BaseModel):
-    """One registration occurrence resolved by an authoritative typed frontend.
-
-    ``trusted_framework_symbol`` must be supplied from the type resolver's
-    resolved callable symbol, never inferred from source text. The source
-    callback and registration occurrence are separate identities on purpose.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-    callback: SourceIdentity
-    registration: SourceIdentity
-    trusted_framework_symbol: str | None = Field(default=None, min_length=3)
-    contract_id: str | None = None
-    phase: FrameworkPhase | None = None
-    callback_range: CallbackRangeMode = CallbackRangeMode.FULL
-    execution_condition: str | None = Field(default=None, min_length=1)
-    lifecycle_conditional: bool = False
-    exact_typed_identity: bool = False
-    selected_surface: bool = False
-    reachable_registration: bool = False
-    backend: Literal["mypy", "scip", "unknown"] = "unknown"
-    backend_capability: str | None = None
-    source_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    inventory_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    engine_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    config_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
     @model_validator(mode="after")
-    def enforce_proof_gates(self) -> TypedFrameworkCallback:
-        proven = (
-            self.exact_typed_identity
-            and self.selected_surface
-            and self.reachable_registration
-            and self.trusted_framework_symbol is not None
-            and self.contract_id is not None
-            and self.phase is not None
-        )
-        if not proven and self.phase is not None:
-            raise ValueError(
-                "a phase requires exact typed identity, selected contract, and reachability"
-            )
-        if self.backend == "scip" and self.exact_typed_identity and not self.backend_capability:
-            raise ValueError("SCIP exact identity requires an explicit backend capability record")
-        if self.phase == FrameworkPhase.STARTUP and self.lifecycle_conditional:
-            raise ValueError(
-                "startup execution is phase evidence; lifecycle conditionality belongs to surfaces"
-            )
-        if self.phase == FrameworkPhase.STARTUP and self.callback_range not in {
-            CallbackRangeMode.FULL,
-            CallbackRangeMode.BEFORE_YIELD,
-        }:
-            raise ValueError("startup evidence must use the pre-yield callback range")
-        if self.phase == FrameworkPhase.SHUTDOWN and self.callback_range not in {
-            CallbackRangeMode.FULL,
-            CallbackRangeMode.AFTER_YIELD,
-        }:
-            raise ValueError("shutdown evidence must use the post-yield callback range")
+    def validate_span(self) -> SourceIdentity:
+        if (self.end_line is None) != (self.end_column is None):
+            raise ValueError("source identity end line and column must be provided together")
         return self
 
-    @property
-    def strength(self) -> EvidenceStrength:
-        if not (
-            self.exact_typed_identity
-            and self.selected_surface
-            and self.reachable_registration
-            and self.trusted_framework_symbol
-            and self.contract_id
-            and self.phase
-        ):
-            return EvidenceStrength.UNAVAILABLE
-        if self.execution_condition or self.lifecycle_conditional:
-            return EvidenceStrength.CONDITIONAL
-        return EvidenceStrength.ESTABLISHED
+
+_CANONICAL_PHASES: dict[str, tuple[str, CallbackRangeMode, FrameworkPhase]] = {
+    "fastapi-lifespan-startup": ("startup", CallbackRangeMode.BEFORE_YIELD, FrameworkPhase.STARTUP),
+    "fastapi-lifespan-shutdown": (
+        "shutdown",
+        CallbackRangeMode.AFTER_YIELD,
+        FrameworkPhase.SHUTDOWN,
+    ),
+    "fastapi-on-event": ("startup-or-shutdown", CallbackRangeMode.FULL, FrameworkPhase.STARTUP),
+    "fastapi-add-event-handler": (
+        "startup-or-shutdown",
+        CallbackRangeMode.FULL,
+        FrameworkPhase.STARTUP,
+    ),
+    "starlette-on-event": (
+        "startup-or-shutdown",
+        CallbackRangeMode.FULL,
+        FrameworkPhase.STARTUP,
+    ),
+    "starlette-add-event-handler": (
+        "startup-or-shutdown",
+        CallbackRangeMode.FULL,
+        FrameworkPhase.STARTUP,
+    ),
+    "fastapi-http-middleware": ("http", CallbackRangeMode.FULL, FrameworkPhase.MIDDLEWARE),
+    "fastapi-base-http-middleware": ("http", CallbackRangeMode.FULL, FrameworkPhase.MIDDLEWARE),
+    "starlette-base-http-middleware": (
+        "http",
+        CallbackRangeMode.FULL,
+        FrameworkPhase.MIDDLEWARE,
+    ),
+}
 
 
-def bind_framework_callback(evidence: TypedFrameworkCallback) -> TypedFrameworkCallback:
-    """Narrow public bridge seam for extractor/reverse-graph integration."""
-    return evidence
+def canonical_framework_phase(  # noqa: PLR0911
+    contract: SurfaceContract,
+    resource: str,
+    callback_range: CallbackRangeMode,
+    selected: LoadedSurfaceContracts,
+) -> FrameworkPhase | None:
+    """Resolve only an unchanged contract from the bundled framework-v1 catalog.
+
+    The selected document must contain the exact canonical contract payload.
+    Arbitrary IDs, symbols, phases, and ranges never establish a phase.
+    """
+    catalog = load_surface_preset("framework-v1")
+    canonical = next((item for item in catalog.document.contracts if item.id == contract.id), None)
+    selected_copy = next(
+        (item for item in selected.document.contracts if item.id == contract.id), None
+    )
+    if canonical is None or selected_copy is None:
+        return None
+    if catalog.document.contract_hashes[contract.id] != selected.document.contract_hashes.get(
+        contract.id
+    ):
+        return None
+    if contract.model_dump(mode="json") != canonical.model_dump(mode="json"):
+        return None
+    allowed = _CANONICAL_PHASES.get(contract.id)
+    if allowed is None or callback_range != allowed[1]:
+        return None
+    resource_contract, _range, phase = allowed
+    if resource_contract == "startup-or-shutdown":
+        if resource not in {"startup", "shutdown"}:
+            return None
+        return FrameworkPhase(resource)
+    if resource != resource_contract:
+        return None
+    return phase

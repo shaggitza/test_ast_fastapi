@@ -1,115 +1,131 @@
-"""Synthetic contract tests for the GH104 typed framework bridge."""
+"""Canonical phase catalog and fail-closed runtime receipt checks."""
 
-import pytest
-from pydantic import ValidationError
+import json
+from pathlib import Path
 
 from fastapi_endpoint_detector.analyzer.framework_phase_bridge import (
-    EvidenceStrength,
     FrameworkPhase,
-    TypedFrameworkCallback,
+    canonical_framework_phase,
 )
 from fastapi_endpoint_detector.analyzer.framework_phase_comparison import (
-    PhaseObservation,
-    compare_phase_observations,
+    compare_phase_artifacts,
 )
-from fastapi_endpoint_detector.models.surface_contract import CallbackRangeMode
-
-H = "sha256:" + "a" * 64
-
-
-def callback(**changes: object) -> TypedFrameworkCallback:
-    base: dict[str, object] = {
-        "callback": {
-            "module": "app",
-            "symbol": "startup",
-            "file": "app.py",
-            "line": 4,
-            "column": 0,
-            "source_sha256": H,
-        },
-        "registration": {
-            "module": "app",
-            "symbol": "build",
-            "file": "app.py",
-            "line": 8,
-            "column": 4,
-            "source_sha256": H,
-        },
-        "trusted_framework_symbol": "fastapi.FastAPI.on_event",
-        "contract_id": "fastapi-lifecycle-startup-v1",
-        "phase": "startup",
-        "callback_range": CallbackRangeMode.BEFORE_YIELD,
-        "exact_typed_identity": True,
-        "selected_surface": True,
-        "reachable_registration": True,
-        "backend": "mypy",
-        "source_sha256": H,
-        "inventory_sha256": H,
-        "engine_sha256": H,
-        "config_sha256": H,
-    }
-    base.update(changes)
-    return TypedFrameworkCallback.model_validate(base)
-
-
-def test_exact_typed_registration_is_established_and_occurrence_bound() -> None:
-    evidence = callback()
-    assert evidence.strength == EvidenceStrength.ESTABLISHED
-    assert evidence.registration.line == 8
-
-
-@pytest.mark.parametrize(
-    "changes",
-    [
-        {"exact_typed_identity": False},
-        {"selected_surface": False},
-        {"reachable_registration": False},
-        {"trusted_framework_symbol": None},
-    ],
+from fastapi_endpoint_detector.models.surface_contract import (
+    CallbackRangeMode,
+    load_surface_preset,
 )
-def test_unproven_callback_cannot_claim_phase(changes: dict[str, object]) -> None:
-    with pytest.raises(ValidationError):
-        callback(**changes)
 
 
-def test_shutdown_requires_post_yield_range() -> None:
-    with pytest.raises(ValidationError, match="post-yield"):
-        callback(phase=FrameworkPhase.SHUTDOWN, callback_range=CallbackRangeMode.BEFORE_YIELD)
-
-
-def test_scip_capability_is_explicit() -> None:
-    with pytest.raises(ValidationError, match="capability"):
-        callback(backend="scip")
-
-
-def test_phase_comparison_preserves_registration_multiplicity_and_is_observational() -> None:
-    secure = PhaseObservation(
-        phase="startup",
-        callbacks=("app.startup@8", "app.startup@8"),
-        source_sha256=H,
-        inventory_sha256=H,
-        engine_sha256=H,
-        config_sha256=H,
-        validated=True,
+def test_canonical_lifespan_contract_reconciles_phase_and_range() -> None:
+    selected = load_surface_preset("framework-v1")
+    startup = next(
+        item for item in selected.document.contracts if item.id == "fastapi-lifespan-startup"
     )
-    runtime = secure.model_copy(update={"callbacks": ("app.startup@8",)})
-    result = compare_phase_observations(secure, runtime)
-    assert result.status == "compared"
-    assert result.secure_only == ("app.startup@8",)
-    assert result.shared == ("app.startup@8",)
-    assert result.role == "runtime_observation_only"
-
-
-def test_missing_runtime_phase_is_explicitly_unavailable() -> None:
-    secure = PhaseObservation(
-        phase="shutdown",
-        callbacks=(),
-        source_sha256=H,
-        inventory_sha256=H,
-        engine_sha256=H,
-        config_sha256=H,
-        validated=True,
+    shutdown = next(
+        item for item in selected.document.contracts if item.id == "fastapi-lifespan-shutdown"
     )
-    result = compare_phase_observations(secure, None)
+
+    assert (
+        canonical_framework_phase(startup, "startup", CallbackRangeMode.BEFORE_YIELD, selected)
+        == FrameworkPhase.STARTUP
+    )
+    assert (
+        canonical_framework_phase(shutdown, "shutdown", CallbackRangeMode.AFTER_YIELD, selected)
+        == FrameworkPhase.SHUTDOWN
+    )
+    assert canonical_framework_phase(startup, "startup", CallbackRangeMode.FULL, selected) is None
+    assert (
+        canonical_framework_phase(shutdown, "shutdown", CallbackRangeMode.BEFORE_YIELD, selected)
+        is None
+    )
+
+
+def test_arbitrary_contract_payload_cannot_enter_canonical_catalog() -> None:
+    selected = load_surface_preset("framework-v1")
+    event = next(item for item in selected.document.contracts if item.id == "fastapi-on-event")
+    altered = event.model_copy(update={"callback_range": CallbackRangeMode.BEFORE_YIELD})
+
+    assert canonical_framework_phase(altered, "startup", altered.callback_range, selected) is None
+
+
+def test_runtime_phase_receipt_is_unavailable_without_validated_artifacts(tmp_path: Path) -> None:
+    result = compare_phase_artifacts(
+        tmp_path / "invented-secure.json",
+        tmp_path / "invented-runtime.json",
+        phase=FrameworkPhase.STARTUP,
+    )
+
     assert result.status == "unavailable"
-    assert result.reason == "actual isolated runtime phase observation absent"
+    assert "receipt validation failed" in result.reason
+
+
+def test_valid_aggregate_pair_still_cannot_claim_phase_comparison(tmp_path: Path) -> None:
+    def digest(char: str) -> str:
+        return "sha256:" + char * 64
+
+    common = {
+        "schema_version": 1,
+        "snapshot": "target",
+        "status": "success",
+        "configuration": {
+            "app_entry": None,
+            "bootstrap_entry": None,
+            "app_variable": "app",
+            "backend": "mypy",
+            "dependency_lock_sha256": digest("a"),
+        },
+        "timing": {
+            "list": {"status": "measured", "seconds": 1.0},
+            "impact": {"status": "measured", "seconds": 1.0},
+        },
+        "resources": {"peak_rss_bytes": {"status": "measured", "bytes": 1}},
+        "failure": None,
+        "inventory": {
+            "inventory_status": "established",
+            "endpoints": [{"methods": ["GET"], "path": "/", "surface": None}],
+        },
+        "impact": {
+            "candidate_endpoints": [
+                {"endpoint": {"methods": ["GET"], "path": "/", "surface": None}}
+            ]
+        },
+    }
+    secure = dict(
+        common,
+        mode="secure",
+        provenance={
+            "source_sha256": digest("b"),
+            "tool_sha256": digest("c"),
+            "effective_invocation_sha256": digest("7"),
+            "dependency_lock_sha256": digest("a"),
+            "runtime_image_digest": f"registry.example/test@{digest('e')}",
+            "runtime_sbom_sha256": digest("f"),
+        },
+    )
+    runtime = dict(
+        common,
+        mode="runtime",
+        inventory={
+            "inventory_status": "runtime_observed",
+            "endpoints": common["inventory"]["endpoints"],
+        },
+        provenance={
+            "source_sha256": digest("b"),
+            "tool_sha256": digest("c"),
+            "effective_invocation_sha256": digest("8"),
+            "dependency_lock_sha256": digest("a"),
+            "runtime_image_digest": f"registry.example/test@{digest('e')}",
+            "runtime_sbom_sha256": digest("f"),
+            "runtime_seccomp_sha256": digest("1"),
+            "runtime_policy_sha256": digest("0"),
+        },
+    )
+    secure_path, runtime_path = tmp_path / "secure.json", tmp_path / "runtime.json"
+    secure_path.write_text(json.dumps(secure), encoding="utf-8")
+    runtime_path.write_text(json.dumps(runtime), encoding="utf-8")
+
+    result = compare_phase_artifacts(secure_path, runtime_path, phase=FrameworkPhase.STARTUP)
+
+    assert result.status == "unavailable"
+    assert result.paired_comparison_status == "validated_aggregate_only"
+    assert "no phase callback receipts" in result.reason

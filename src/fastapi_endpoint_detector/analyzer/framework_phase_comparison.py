@@ -1,82 +1,55 @@
-"""Compare validated phase observations without promoting runtime to truth."""
+"""Fail-closed phase comparison over the existing secure/runtime trust chain."""
 
 from __future__ import annotations
 
-from collections import Counter
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from benchmarks.real_world.compare_runtime import ComparisonError, compare
+from pydantic import BaseModel, ConfigDict
 
-Phase = Literal["startup", "shutdown", "request", "background", "middleware", "dependency"]
+from fastapi_endpoint_detector.analyzer.framework_phase_bridge import FrameworkPhase  # noqa: TC001
 
-
-class PhaseObservation(BaseModel):
-    """A validated secure observation or externally attested runtime observation."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-    phase: Phase
-    callbacks: tuple[str, ...]
-    source_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    inventory_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    engine_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    config_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    validated: bool = False
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class PhaseComparison(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    status: Literal["compared", "unavailable"]
+    status: Literal["unavailable"] = "unavailable"
     role: Literal["runtime_observation_only"] = "runtime_observation_only"
-    phase: Phase
-    secure_only: tuple[str, ...] = ()
-    runtime_only: tuple[str, ...] = ()
-    shared: tuple[str, ...] = ()
-    reason: str | None = None
+    phase: FrameworkPhase | None = None
+    reason: str
+    paired_comparison_status: str | None = None
 
 
-def compare_phase_observations(
-    secure: PhaseObservation,
-    runtime: PhaseObservation | None,
+def compare_phase_artifacts(
+    secure_artifact: Path,
+    runtime_artifact: Path,
+    *,
+    phase: FrameworkPhase | None = None,
 ) -> PhaseComparison:
-    """Compare only same-phase, snapshot- and configuration-matched evidence.
+    """Validate artifacts with comparator #307, then require phase receipts.
 
-    A missing actual isolated runtime phase observation remains unavailable.
-    This function does not execute workloads, attest runtime provenance, or
-    modify canonical secure classifications.
+    Comparator #307 validates secure/runtime artifact shape, pair equivalence,
+    and provenance. Its current artifact schema has no phase callback receipts,
+    so a valid aggregate pair still cannot establish a phase comparison. This
+    API deliberately returns unavailable until that receipt chain exists.
     """
-    if runtime is None:
+    try:
+        aggregate = compare(secure_artifact, runtime_artifact)
+    except (ComparisonError, OSError) as error:
         return PhaseComparison(
-            status="unavailable",
-            phase=secure.phase,
-            reason="actual isolated runtime phase observation absent",
+            phase=phase,
+            reason=f"secure/runtime receipt validation failed: {error}",
         )
-    if not secure.validated or not runtime.validated:
+    if not aggregate.get("paired_success"):
         return PhaseComparison(
-            status="unavailable", phase=secure.phase, reason="phase observation failed validation"
+            phase=phase,
+            reason="validated secure/runtime artifacts are not a successful pair",
+            paired_comparison_status="paired_failure_or_ineligible",
         )
-    if secure.phase != runtime.phase:
-        reason = "phase mismatch"
-    elif (
-        secure.source_sha256,
-        secure.inventory_sha256,
-        secure.engine_sha256,
-        secure.config_sha256,
-    ) != (
-        runtime.source_sha256,
-        runtime.inventory_sha256,
-        runtime.engine_sha256,
-        runtime.config_sha256,
-    ):
-        reason = "source, inventory, engine, or configuration identity mismatch"
-    else:
-        reason = None
-    if reason:
-        return PhaseComparison(status="unavailable", phase=secure.phase, reason=reason)
-    left, right = Counter(secure.callbacks), Counter(runtime.callbacks)
     return PhaseComparison(
-        status="compared",
-        phase=secure.phase,
-        secure_only=tuple(sorted((left - right).elements())),
-        runtime_only=tuple(sorted((right - left).elements())),
-        shared=tuple(sorted((left & right).elements())),
+        phase=phase,
+        reason="validated aggregate artifacts contain no phase callback receipts",
+        paired_comparison_status="validated_aggregate_only",
     )
