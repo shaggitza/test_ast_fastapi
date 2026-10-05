@@ -10,10 +10,12 @@ side-qualified changed symbols and follows caller edges in reverse, preserving
 all route occurrence bindings and reconvergent physical paths.
 
 The graph records exact mypy-resolved call targets and explicit-import aliases.
-It does not invent targets for unresolved names or match module names by suffix.
-Calls carry source coordinates, confidence, execution/reference state, formal
-argument bindings, receiver identity, and an argument environment. Constructors
-target the typed `__init__`; global reads and writes are represented separately.
+It does not invent targets for unresolved names, guess instance dispatch from a
+local variable spelling, or match module names by suffix. Calls carry full-call
+and callee-token source spans, direct confidence, invocation kind,
+execution/reference state, formal argument bindings, receiver identity, and an
+argument environment. Constructors target the typed `__init__`; global reads
+and writes are represented separately.
 Directly invoked lambda bodies are distinguished from deferred lambda bodies.
 Per-evidence uncertainty witnesses record unknown/external call bindings,
 member dispatch, deferred lambda capture, dependency parameter transfer, and
@@ -43,7 +45,7 @@ against the graph. It rejects mismatched roots, changed bytes, symlinks, paths
 outside the root, schema changes, engine changes, and a different retained
 provider build.
 
-Mypy AST edge and symbol spans, plus endpoint registration spans, are validated
+Mypy AST edge, callee-token and symbol spans, plus endpoint registration spans, are validated
 against the exact source bytes, including end-line/end-column boundaries. Call
 arguments retain both the actual expression type and formal parameter type
 from the retained provider's `type_maps` when mypy has a finding; absent type
@@ -122,35 +124,41 @@ Run the trusted generated fixture with:
 uv run python benchmarks/typed_reverse_graph_parity.py --modules 24 --samples 5
 ```
 
-It compares positive and negative candidate sets, plus a one-file edited
-snapshot, to terminal-reaching physical call paths from the current full-depth
-`MypyAnalyzer.analyze_endpoint` call stacks and exact `ResolvedCallSite`
-coordinates. The report includes physical occurrence IDs, per-edge witness
-identities, source locations, confidence, execution and reference state,
-argument bindings, receiver/environment, cap state, and resolved-call-site
-totals. A candidate or physical path mismatch stops the run.
+It compares positive and negative candidates, plus a one-file edited snapshot,
+against current full-depth `MypyAnalyzer.analyze_endpoint` evidence. For each
+terminal-reaching call-stack path, it matches exact canonical target symbols,
+callee-token byte ranges, resolved-call-site status, invocation kind, and
+available positional/keyword argument bindings. The generated fixture's
+package root is part of both analyzers' canonical module IDs; comparison does
+not normalize by basename. It reports endpoint referenced files and symbol
+ranges beside each physical occurrence, graph witness, confidence, execution
+and reference state, argument/environment bindings, cap, and uncertainty. A
+candidate, occurrence, terminal, coordinate, target, invocation, or binding
+mismatch stops the run. Direct exact-call confidence and call-stack execution
+state are checked.
 It prints raw sample timings and empirical p95 values for retained provider
 cold typing, independent full-depth oracle typing, cold graph construction,
 warm query, actual one-file provider update, graph reconstruction from the
 updated retained snapshot, fresh typed rebuild after the edit, and cold graph
-construction from that fresh typed build. The endpoint output has no
-corresponding graph-wide cap or effect summary, so those semantics cannot be
-compared here. The generated DAG does not establish production-corpus parity
+construction from that fresh typed build. Endpoint dependencies have no
+matching route-level cap or effect-summary fields, so those semantics cannot
+be compared here. The generated DAG does not establish production-corpus parity
 or cover DI transfer, multi-target dispatch, effect-helper closures,
 conditional routes, baseline deletions, or every analyzer evidence type. Its
 exact physical call paths therefore do not establish no-quality-regression for
 GH107.
 
 The latest recorded run on Python 3.11.16 / mypy 1.19.1 (24 modules, five
-samples, 25 paired physical-path checks) reported p95s of 5.621 s for retained
-provider cold typing, 2.510 s for independent full-depth analyzer typing,
-0.069 s for cold graph construction, 0.209 ms for a warm query, 0.014 s for the
-actual one-file provider update, 0.055 s for graph reconstruction from that
-updated snapshot, 1.507 s for a fresh provider rebuild after the edit, 1.994 s
-for an independent cold analyzer rebuild, and 0.055 s for graph construction
-from that fresh typed build. Provider reports confirmed `incremental_update`
-and updated only `m23` on each sample. Positive graph evidence was LOW because
-effect summaries are unmodeled; the full-depth callstack oracle does not expose
-confidence/effect fields, so those dimensions remain non-comparable. These are
+samples, 30 full-evidence checks) reported p95s of 5.403 s for retained provider
+cold typing, 1.694 s for independent full-depth analyzer typing, 0.056 s for
+cold graph construction, 0.196 ms for a warm query, 0.014 s for the actual
+one-file provider update, 0.047 s for graph reconstruction from that updated
+snapshot, 1.481 s for a fresh provider rebuild after the edit, 1.561 s for an
+independent cold analyzer rebuild, and 0.046 s for graph construction from that
+fresh typed build. Provider reports confirmed `incremental_update` and exactly
+one updated module (the fixture's final `m23`) per sample. Positive graph route
+evidence was LOW because effect transfer remains unmodeled; the endpoint oracle
+does not encode route-level confidence, effect summaries, or graph caps. Those
+dimensions remain non-comparable and GH107 acceptance remains open. These are
 generated-fixture measurements, not latency targets or corpus performance
 claims.

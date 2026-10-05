@@ -260,11 +260,52 @@ def test_constructor_seed_uses_typed_constructor_target(tmp_path: Path) -> None:
     graph = build_typed_reverse_graph(inventory, snapshot, [binding], config_fingerprint="cfg")
 
     constructor = next(edge for edge in graph.edges if edge.relation == "typed_constructor")
+    assert constructor.invocation == "constructor"
     assert constructor.arguments[0].formal_name == "self"
     assert constructor.arguments[1].formal_name == "key"
     assert constructor.arguments[1].formal_type == "builtins.int"
     result = graph.query([ChangedSeed("target", constructor.callee)], side="target")
     assert result.evidence and result.evidence[0].occurrence.occurrence_id == "route"
+
+
+def test_typed_receiver_formals_and_method_invocation_kinds(tmp_path: Path) -> None:
+    inventory, snapshot, _ = _snapshot(
+        tmp_path,
+        {
+            "app": (
+                "from service import Service\n"
+                "def handler(value: int):\n"
+                "    service = Service()\n"
+                "    service.run(value)\n"
+                "    Service.build(value)\n"
+                "    Service.ping(value)\n"
+            ),
+            "service": (
+                "class Service:\n"
+                "    def __init__(self): pass\n"
+                "    def run(self, value: int): pass\n"
+                "    @classmethod\n"
+                "    def build(cls, value: int): pass\n"
+                "    @staticmethod\n"
+                "    def ping(value: int): pass\n"
+            ),
+        },
+    )
+    graph = build_typed_reverse_graph(inventory, snapshot, [], config_fingerprint="cfg")
+    run_edges = [edge for edge in graph.edges if edge.callee.endswith("Service.run")]
+    build = next(edge for edge in graph.edges if edge.callee.endswith("Service.build"))
+    ping = next(edge for edge in graph.edges if edge.callee.endswith("Service.ping"))
+
+    assert run_edges == []
+    assert any(
+        item.owner == "app.handler" and item.category == "virtual_dispatch"
+        for item in graph.uncertainties
+    )
+    assert build.invocation == "class_method"
+    assert build.arguments[0].formal_name == "cls"
+    assert build.arguments[1].formal_name == "value"
+    assert ping.invocation == "function"
+    assert ping.arguments[0].formal_name == "value"
 
 
 def test_typed_arguments_and_utf8_end_columns_use_provider_findings(tmp_path: Path) -> None:
@@ -283,10 +324,15 @@ def test_typed_arguments_and_utf8_end_columns_use_provider_findings(tmp_path: Pa
         inventory, snapshot, [], config_fingerprint="cfg"
     ).edges if item.callee.endswith("service.changed"))
     raw_line = (tmp_path / "app.py").read_bytes().splitlines()[edge.span.start_line - 1]
+    target_span = edge.target_span
+    assert target_span is not None
+    target_line = (tmp_path / "app.py").read_bytes().splitlines()[target_span.start_line - 1]
 
     assert edge.arguments[0].actual_type is not None
     assert "café" in edge.arguments[0].actual_type
     assert edge.arguments[0].formal_type == "builtins.str"
+    assert edge.invocation == "function"
+    assert target_line[target_span.start_column : target_span.end_column] == b"changed"
     source_slice = raw_line[edge.span.start_column : edge.span.end_column].decode("utf-8")
     assert source_slice == 'changed("café")'
 
@@ -663,8 +709,12 @@ def test_exact_changed_coordinate_seeds_and_conditional_low_cap(tmp_path: Path) 
     )
     graph = build_typed_reverse_graph(inventory, snapshot, [binding], config_fingerprint="cfg")
     seeds = seeds_for_changed_coordinates("baseline", [(str(changed_path), 1, 4)], graph)
+    outside_symbol = seeds_for_changed_coordinates(
+        "baseline", [(str(changed_path), 2, 99)], graph
+    )
     result = graph.query(seeds, side="baseline")
 
     assert [seed.symbol for seed in seeds] == [changed]
+    assert outside_symbol == ()
     assert result.evidence
     assert all(item.confidence == "LOW" for item in result.evidence)

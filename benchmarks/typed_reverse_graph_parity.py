@@ -1,7 +1,8 @@
 """Generated evidence parity and phase benchmark for the opt-in reverse graph.
 
-The oracle is current full-depth MypyAnalyzer call stacks and resolved call sites.
-Candidate, physical path, and edge-coordinate mismatches fail without filtering.
+The oracle is current full-depth MypyAnalyzer call stacks, resolved call sites,
+argument evidence, and referenced symbol/file evidence. Candidate, occurrence,
+terminal, exact callee-coordinate, target, and invocation mismatches fail.
 """
 
 from __future__ import annotations
@@ -16,10 +17,14 @@ from dataclasses import dataclass
 from importlib.metadata import version
 from itertools import pairwise
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
-from fastapi_endpoint_detector.analyzer.mypy_incremental import BuildConfig, MypyIncrementalProvider
+from fastapi_endpoint_detector.analyzer.mypy_incremental import (
+    BuildConfig,
+    MypyIncrementalProvider,
+    TypedBuild,
+)
 from fastapi_endpoint_detector.analyzer.typed_reverse_graph import (
     ChangedSeed,
     EndpointOccurrenceBinding,
@@ -48,7 +53,7 @@ def _write_fixture(root: Path, modules: int, leaf_increment: int = 0) -> dict[st
     for index in range(modules):
         following = index + 1
         if following < modules:
-            imported = f"from m{following} import f{following}\n"
+            imported = f"from {root.name}.m{following} import f{following}\n"
             increment = leaf_increment if following == modules - 1 else 0
             body = f"    return f{following}(value) + {increment}\n"
         else:
@@ -59,14 +64,27 @@ def _write_fixture(root: Path, modules: int, leaf_increment: int = 0) -> dict[st
             + f"def f{index}(value: int) -> int:\n{body}"
             + "\ndef unused(value: int) -> int:\n    return value\n"
         )
-    sources["app"] = "from m0 import f0\ndef handler(value: int) -> int:\n    return f0(value)\n"
+    sources["app"] = (
+        f"from {root.name}.m0 import f0\n"
+        "def handler(value: int) -> int:\n    return f0(value)\n"
+    )
     for module, source in sources.items():
         (root / f"{module}.py").write_text(source, encoding="utf-8")
     return sources
 
 
-def _retained_snapshot(root: Path, *, max_depth: int):
-    module_paths = {path.stem: path for path in sorted(root.glob("*.py"))}
+def _retained_snapshot(
+    root: Path, *, max_depth: int
+) -> tuple[
+    Inventory,
+    TypedBuild,
+    MypyAnalyzer,
+    MypyIncrementalProvider,
+    dict[str, Path],
+    float,
+    float,
+]:
+    module_paths = {f"{root.name}.{path.stem}": path for path in sorted(root.glob("*.py"))}
     provider = MypyIncrementalProvider(BuildConfig(source_root=root))
     typed = provider.build(module_paths)
     records = tuple(
@@ -95,28 +113,48 @@ def _retained_snapshot(root: Path, *, max_depth: int):
 
 
 def _physical_oracle_paths(
-    analyzer: MypyAnalyzer, endpoint: Endpoint, terminal_name: str, root: Path
-) -> list[tuple[tuple[str, int], ...]]:
+    analyzer: MypyAnalyzer, endpoint: Endpoint, terminal_symbol: str, root: Path
+) -> list[tuple[tuple[str, int, int, int, int, str], ...]]:
     dependencies = analyzer.analyze_endpoint(endpoint)
-    paths: list[tuple[tuple[str, int], ...]] = []
+    sites = dependencies.get_resolved_call_sites()
+    paths: list[tuple[tuple[str, int, int, int, int, str], ...]] = []
     for stacks in dependencies.call_stacks.values():
         for stack in stacks:
             terminal_indexes = [
-                index
-                for index, frame in enumerate(stack)
-                if frame.function_name.rsplit(".", maxsplit=1)[-1] == terminal_name
+                index for index, frame in enumerate(stack) if frame.function_name == terminal_symbol
             ]
             if not terminal_indexes:
                 continue
             terminal = terminal_indexes[-1]
-            physical = []
+            physical: list[tuple[str, int, int, int, int, str]] = []
             for caller, callee in pairwise(stack[: terminal + 1]):
                 if callee.caller_line_number is None:
                     raise AssertionError("full-depth oracle path lacks caller line coordinate")
+                caller_path = Path(caller.file_path).resolve()
+                matching = [
+                    site
+                    for site in sites
+                    if Path(site.file_path).resolve() == caller_path
+                    and site.line == callee.caller_line_number
+                    and site.canonical_symbol == callee.function_name
+                    and site.status.value == "exact"
+                ]
+                if len(matching) != 1:
+                    raise AssertionError(
+                        "oracle physical path does not map to one exact full-name site: "
+                        f"{caller!r} -> {callee!r}, matches={matching!r}"
+                    )
+                site = matching[0]
+                if site.end_line is None or site.end_column is None:
+                    raise AssertionError(f"oracle call site lacks end coordinates: {site!r}")
                 physical.append(
                     (
-                        Path(caller.file_path).resolve().relative_to(root.resolve()).as_posix(),
+                        caller_path.relative_to(root.resolve()).as_posix(),
                         callee.caller_line_number,
+                        site.column,
+                        site.end_line,
+                        site.end_column,
+                        callee.function_name,
                     )
                 )
             paths.append(tuple(physical))
@@ -124,8 +162,8 @@ def _physical_oracle_paths(
 
 
 def _graph_physical_paths(
-    graph: Any, seed: str, *, side: str = "target"
-) -> list[tuple[tuple[str, int], ...]]:
+    graph: Any, seed: str, *, side: Literal["baseline", "target"] = "target"
+) -> list[tuple[tuple[str, int, int, int, int, str], ...]]:
     result = graph.query([ChangedSeed(side, seed)], side=side)
     return sorted(
         {
@@ -133,6 +171,10 @@ def _graph_physical_paths(
                 (
                     Path(edge.span.path).resolve().relative_to(Path(graph.root)).as_posix(),
                     edge.span.start_line,
+                    edge.target_span.start_column if edge.target_span else -1,
+                    edge.target_span.end_line if edge.target_span else -1,
+                    edge.target_span.end_column if edge.target_span else -1,
+                    edge.callee,
                 )
                 for edge in evidence.witnesses
                 if edge.kind in {"call", "constructor"}
@@ -142,20 +184,22 @@ def _graph_physical_paths(
     )
 
 
-def _inventory_module(snapshot: Any, short: str) -> str:
-    return next(
-        module
-        for module, state in snapshot.modules.items()
-        if module.rsplit(".", maxsplit=1)[-1] == short and getattr(state, "tree", None) is not None
-    )
+def _inventory_module(snapshot: Any, module: str) -> str:
+    state = snapshot.modules.get(module)
+    if state is None or getattr(state, "tree", None) is None:
+        raise AssertionError(f"snapshot does not contain exact fixture module {module!r}")
+    return module
 
 
 def _fullname(snapshot: Any, module: str, name: str) -> str:
-    return snapshot.modules[module].tree.names[name].node.fullname
+    fullname = snapshot.modules[module].tree.names[name].node.fullname
+    if not isinstance(fullname, str):
+        raise AssertionError(f"fixture symbol has no canonical fullname: {module}.{name}")
+    return fullname
 
 
 def _endpoint(root: Path, snapshot: Any) -> tuple[Endpoint, EndpointOccurrenceBinding]:
-    module = _inventory_module(snapshot, "app")
+    module = _inventory_module(snapshot, f"{root.name}.app")
     path = root / "app.py"
     fullname = _fullname(snapshot, module, "handler")
     endpoint = Endpoint(
@@ -193,41 +237,25 @@ def _oracle_endpoint(root: Path, analyzer: MypyAnalyzer) -> Endpoint:
 
 def _seed_path(root: Path, seed: str) -> Path:
     module = seed.rsplit(".", maxsplit=1)[0]
+    package = f"{root.name}."
+    if module.startswith(package):
+        module = module.removeprefix(package)
     return root.joinpath(*module.split(".")).with_suffix(".py").resolve()
 
 
-def _oracle_set(
-    analyzer: MypyAnalyzer, endpoint: Endpoint, changed_symbol: str, root: Path
-) -> set[str]:
-    dependencies = analyzer.analyze_endpoint(endpoint)
-    expected_path = _seed_path(root, changed_symbol)
-    expected_name = changed_symbol.rsplit(".", maxsplit=1)[-1]
-    found = any(
-        Path(frame.file_path).resolve() == expected_path
-        and frame.function_name.rsplit(".", maxsplit=1)[-1] == expected_name
-        for call_stacks in dependencies.call_stacks.values()
-        for stack in call_stacks
-        for frame in stack
-    )
-    return {endpoint.identifier} if found else set()
-
-
-def _compare_full_depth_evidence(
+def _compare_full_depth_evidence(  # noqa: PLR0912, PLR0915
     analyzer: MypyAnalyzer,
     endpoint: Endpoint,
     graph: Any,
     seed: str,
     *,
-    side: str,
+    side: Literal["baseline", "target"],
     root: Path,
 ) -> dict[str, Any]:
     """Compare route terminals and each physical call edge to full-depth stacks."""
     dependencies = analyzer.analyze_endpoint(endpoint)
-    oracle_paths: list[tuple[tuple[str, int, str], ...]] = []
-    oracle_sites = {
-        (Path(site.file_path).resolve(), site.line, site.canonical_symbol, site.status.value)
-        for site in dependencies.get_resolved_call_sites()
-    }
+    oracle_paths: list[tuple[tuple[Any, ...], ...]] = []
+    oracle_sites = dependencies.get_resolved_call_sites()
     for stacks in dependencies.call_stacks.values():
         for stack in stacks:
             if not any(
@@ -244,7 +272,7 @@ def _compare_full_depth_evidence(
                 and frame.function_name.rsplit(".", maxsplit=1)[-1]
                 == seed.rsplit(".", maxsplit=1)[-1]
             )
-            rows: list[tuple[str, int, str]] = []
+            rows: list[tuple[Any, ...]] = []
             for caller, callee in pairwise(stack[: terminal + 1]):
                 # CallFrame stores the physical call line on the callee frame.
                 line = callee.caller_line_number
@@ -253,74 +281,231 @@ def _compare_full_depth_evidence(
                         f"oracle path lacks call coordinate: {caller!r} -> {callee!r}"
                     )
                 caller_path = Path(caller.file_path).resolve()
-                target_site = next(
-                    (
+                matching_sites = [
                         site
-                        for site in dependencies.get_resolved_call_sites()
+                        for site in oracle_sites
                         if Path(site.file_path).resolve() == caller_path
                         and site.line == line
                         and site.status.value == "exact"
-                        and site.canonical_symbol is not None
-                        and site.canonical_symbol.rsplit(".", maxsplit=1)[-1]
-                        == callee.function_name.rsplit(".", maxsplit=1)[-1]
-                    ),
-                    None,
-                )
-                if target_site is None:
+                        and site.canonical_symbol == callee.function_name
+                    ]
+                if len(matching_sites) != 1:
                     raise AssertionError(
-                        "full-depth stack edge lacks exact ResolvedCallSite: "
-                        f"{caller!r} -> {callee!r}"
+                        "full-depth stack edge does not map to one exact ResolvedCallSite: "
+                        f"{caller!r} -> {callee!r}, matches={matching_sites!r}"
+                    )
+                target_site = matching_sites[0]
+                if target_site.end_line is None or target_site.end_column is None:
+                    raise AssertionError(f"exact call site lacks end coordinates: {target_site!r}")
+                source_line = caller_path.read_bytes().splitlines()[line - 1]
+                source_spelling = source_line[target_site.column : target_site.end_column].decode(
+                    "utf-8"
+                )
+                if source_spelling != target_site.source_spelling:
+                    raise AssertionError(
+                        "oracle call-site spelling does not match its byte coordinates: "
+                        f"site={target_site!r}, source={source_spelling!r}"
                     )
                 rows.append(
                     (
                         caller_path.relative_to(root.resolve()).as_posix(),
                         line,
-                        (
-                            Path(callee.file_path)
-                            .resolve()
-                            .relative_to(root.resolve())
-                            .with_suffix("")
-                            .as_posix()
-                            .replace("/", ".")
-                            + "."
-                            + callee.function_name.rsplit(".", maxsplit=1)[-1]
-                        ),
+                        target_site.column,
+                        target_site.end_line,
+                        target_site.end_column,
+                        target_site.canonical_symbol,
+                        target_site.status.value,
+                        target_site.invocation.value if target_site.invocation else None,
                     )
                 )
             oracle_paths.append(tuple(rows))
 
     query = graph.query([ChangedSeed(side, seed)], side=side)
-    graph_paths: list[tuple[tuple[str, int, str], ...]] = []
+    graph_paths: list[tuple[tuple[Any, ...], ...]] = []
+    expected_candidates = {endpoint.identifier} if oracle_paths else set()
     for item in query.evidence:
-        rows = tuple(
-            (
+        rows_list: list[tuple[Any, ...]] = []
+        for edge in item.witnesses:
+            if edge.kind not in {"call", "constructor"}:
+                continue
+            target_span = edge.target_span
+            if target_span is None:
+                raise AssertionError(f"graph call edge has no exact target span: {edge!r}")
+            matching_sites = [
+                site
+                for site in oracle_sites
+                if Path(site.file_path).resolve() == Path(edge.span.path).resolve()
+                and site.line == target_span.start_line
+                and site.column == target_span.start_column
+                and site.end_line == target_span.end_line
+                and site.end_column == target_span.end_column
+                and site.canonical_symbol == edge.callee
+            ]
+            if len(matching_sites) != 1:
+                raise AssertionError(
+                    "graph physical target does not map to one oracle call site: "
+                    f"{edge!r}, matches={matching_sites!r}"
+                )
+            site = matching_sites[0]
+            if edge.confidence != "HIGH":
+                raise AssertionError(
+                    f"exact oracle call site has lowered direct graph confidence: {edge!r}"
+                )
+            if edge.execution_state != "executed" or edge.reference_state != "invocation":
+                raise AssertionError(
+                    "call-stack oracle edge is not represented as an executed invocation: "
+                    f"{edge!r}"
+                )
+            graph_argument_bindings = {
+                (argument.source_index, argument.positional_index, argument.keyword)
+                for argument in edge.arguments
+                if argument.source_index >= 0
+            }
+            for argument in site.arguments:
+                if (
+                    argument.source_index,
+                    argument.positional_index,
+                    argument.keyword,
+                ) not in graph_argument_bindings:
+                    raise AssertionError(
+                        "oracle finite argument binding is missing from graph edge: "
+                        f"site={site!r}, argument={argument!r}, edge={edge!r}"
+                    )
+            rows_list.append(
+                (
                 Path(edge.span.path).resolve().relative_to(root.resolve()).as_posix(),
-                edge.span.start_line,
+                target_span.start_line,
+                target_span.start_column,
+                target_span.end_line,
+                target_span.end_column,
                 edge.callee,
+                "exact",
+                edge.invocation,
             )
-            for edge in item.witnesses
-            if edge.kind in {"call", "constructor"}
-        )
-        graph_paths.append(rows)
+            )
+        graph_rows = tuple(rows_list)
+        if not graph_rows or graph_rows[-1][5] != seed:
+            raise AssertionError(f"graph evidence does not terminate at changed symbol {seed!r}")
+        graph_paths.append(graph_rows)
     # Full-depth forward stacks may include an intermediate prefix ending at
     # each helper. Compare the terminal-reaching complete physical paths only.
     oracle_terminal_paths = [path for path in oracle_paths if path]
     oracle_norm = sorted(oracle_terminal_paths)
     graph_norm = sorted(graph_paths)
-    exact_sites = sum(1 for site in oracle_sites if site[3] == "exact")
+    exact_sites = sum(1 for site in oracle_sites if site.status.value == "exact")
+    graph_route_symbols = {
+        fullname
+        for item in query.evidence
+        for fullname in (
+            item.occurrence.symbol,
+            item.seed.symbol,
+            *(edge.caller for edge in item.witnesses),
+        )
+    }
+    graph_symbol_ranges = {
+        (
+            Path(symbol.span.path).resolve().relative_to(root.resolve()).as_posix(),
+            symbol.span.start_line,
+            symbol.span.end_line,
+        )
+        for symbol in graph.symbols
+        if symbol.fullname in graph_route_symbols and symbol.span is not None
+    }
+    oracle_symbol_ranges = {
+        (
+            Path(reference.file_path).resolve().relative_to(root.resolve()).as_posix(),
+            reference.start_line,
+            reference.end_line,
+        )
+        for reference in dependencies.referenced_symbols
+        if Path(reference.file_path).resolve().is_relative_to(root.resolve())
+    }
     result = {
         "candidate_ids": sorted({item.occurrence.endpoint_id for item in query.evidence}),
+        "oracle_candidate_ids": sorted(expected_candidates),
         "physical_route_occurrences": sorted(
             item.occurrence.occurrence_id for item in query.evidence
         ),
         "terminal_count": len(query.evidence),
+        "terminal_symbols": sorted({path[-1][5] for path in graph_paths if path}),
         "oracle_terminal_paths": [list(path) for path in oracle_norm],
         "graph_terminal_paths": [list(path) for path in graph_norm],
         "resolved_call_site_count": len(oracle_sites),
         "resolved_exact_call_site_count": exact_sites,
+        "oracle_call_site_evidence": [
+            {
+                "path": Path(site.file_path).resolve().relative_to(root.resolve()).as_posix(),
+                "line": site.line,
+                "column": site.column,
+                "end_line": site.end_line,
+                "end_column": site.end_column,
+                "canonical_symbol": site.canonical_symbol,
+                "status": site.status.value,
+                "invocation": site.invocation.value if site.invocation else None,
+                "arguments": [
+                    {
+                        "source_index": argument.source_index,
+                        "positional_index": argument.positional_index,
+                        "keyword": argument.keyword,
+                        "status": argument.status.value,
+                        "value_hashes": list(argument.value_hashes),
+                        "reason_code": argument.reason_code,
+                    }
+                    for argument in site.arguments
+                ],
+            }
+            for site in oracle_sites
+        ],
+        "oracle_reference_evidence": {
+            "referenced_files": {
+                Path(path).resolve().relative_to(root.resolve()).as_posix(): sorted(lines)
+                for path, lines in sorted(dependencies.referenced_files.items())
+                if Path(path).resolve().is_relative_to(root.resolve())
+            },
+            "referenced_symbols": [
+                {
+                    "path": Path(reference.file_path)
+                    .resolve()
+                    .relative_to(root.resolve())
+                    .as_posix(),
+                    "symbol": reference.symbol_name,
+                    "start_line": reference.start_line,
+                    "end_line": reference.end_line,
+                    "low_confidence": reference.low_confidence,
+                }
+                for reference in dependencies.referenced_symbols
+                if Path(reference.file_path).resolve().is_relative_to(root.resolve())
+            ],
+        },
+        "graph_route_symbol_ranges": sorted(graph_symbol_ranges),
+        "oracle_referenced_symbol_ranges": sorted(oracle_symbol_ranges),
+        "reference_range_comparability": bool(oracle_paths),
+        "graph_route_evidence": [
+            {
+                "occurrence_id": item.occurrence.occurrence_id,
+                "terminal_symbol": item.seed.symbol,
+                "confidence": item.confidence,
+                "execution_state": item.execution_state,
+                "reference_state": item.reference_state,
+                "witness_ids": [edge.witness_id for edge in item.witnesses],
+                "incomplete": {
+                    "capped": item.incomplete.capped,
+                    "reasons": list(item.incomplete.reasons),
+                    "affected_seeds": list(item.incomplete.affected_seeds),
+                },
+                "uncertainties": [
+                    {
+                        "category": uncertainty.category,
+                        "reason_code": uncertainty.reason_code,
+                    }
+                    for uncertainty in item.uncertainties
+                ],
+            }
+            for item in query.evidence
+        ],
         "confidence_comparability": (
-            "not represented by the current full-depth endpoint oracle; graph confidence "
-            "is shown with uncertainty witnesses and is not inferred from exact call resolution"
+            "direct exact-call confidence is asserted HIGH; endpoint route-level confidence "
+            "and graph effect/cap semantics have no one-to-one EndpointDependencies fields"
         ),
         "graph_confidences": sorted({item.confidence for item in query.evidence}),
         "graph_witnesses": [
@@ -402,13 +587,22 @@ def _compare_full_depth_evidence(
             "reasons": list(query.incomplete.reasons),
             "affected_seeds": list(query.incomplete.affected_seeds),
         },
-        "limitation": (
-            "existing endpoint output has no graph-level cap/effect-summary field; effect, DI, "
-            "and conditional-route parity remain explicitly unproven"
-        ),
+        "limitations": [
+            "endpoint oracle call stacks and exact call sites do not encode graph cap state",
+            "endpoint oracle does not expose the reverse graph effect-summary transfer",
+            "DI transfer, unknown target, deferred callable, and route-conditional parity "
+            "need paired fixtures and current change-mapper output comparison",
+            "confidence is compared at exact direct call edges; oracle route-level confidence "
+            "does not have a one-to-one field on EndpointDependencies",
+        ],
     }
+    actual_candidate_ids = sorted({item.occurrence.endpoint_id for item in query.evidence})
+    if actual_candidate_ids != sorted(expected_candidates):
+        raise AssertionError(f"full-depth candidate parity mismatch: {result!r}")
     if graph_norm != oracle_norm:
         raise AssertionError(f"full-depth physical witness parity mismatch: {result!r}")
+    if oracle_paths and graph_symbol_ranges != oracle_symbol_ranges:
+        raise AssertionError(f"full-depth referenced-symbol range parity mismatch: {result!r}")
     if query.incomplete.capped:
         raise AssertionError(f"uncapped generated parity fixture unexpectedly capped: {result!r}")
     return result
@@ -454,7 +648,7 @@ def _measure(modules: int, samples: int) -> dict[str, Any]:  # noqa: PLR0915
             phases["oracle_full_depth_cold_build_seconds"].append(oracle_elapsed)
             _endpoint_value, binding = _endpoint(root, snapshot)
             oracle_endpoint = _oracle_endpoint(root, analyzer)
-            changed_module = _inventory_module(snapshot, f"m{modules - 1}")
+            changed_module = _inventory_module(snapshot, f"{root.name}.m{modules - 1}")
             positive_seed = _fullname(snapshot, changed_module, f"f{modules - 1}")
             start = time.perf_counter()
             graph = build_typed_reverse_graph(
@@ -462,7 +656,7 @@ def _measure(modules: int, samples: int) -> dict[str, Any]:  # noqa: PLR0915
             )
             phases["graph_cold_build_seconds"].append(time.perf_counter() - start)
             initial_oracle_paths = _physical_oracle_paths(
-                analyzer, oracle_endpoint, f"f{modules - 1}", root
+                analyzer, oracle_endpoint, positive_seed, root
             )
             initial_provider_paths = _graph_physical_paths(graph, positive_seed, side="baseline")
             if initial_provider_paths != initial_oracle_paths:
@@ -476,47 +670,20 @@ def _measure(modules: int, samples: int) -> dict[str, Any]:  # noqa: PLR0915
                     "phase": "provider_cold",
                     "oracle_terminal_paths": initial_oracle_paths,
                     "provider_terminal_paths": initial_provider_paths,
-                    "provider_report_mode": provider._typed.report.mode,
-                    "provider_cache_fingerprint": provider._typed.report.cache_fingerprint,
+                    "provider_report_mode": snapshot.report.mode,
+                    "provider_cache_fingerprint": snapshot.report.cache_fingerprint,
                 }
             )
             positive_evidence = _compare_full_depth_evidence(
                 analyzer, oracle_endpoint, graph, positive_seed, side="baseline", root=root
             )
-            expected = _oracle_set(analyzer, oracle_endpoint, positive_seed, root)
-            actual = set(positive_evidence["candidate_ids"])
-            if actual != expected:
-                dependencies = analyzer.analyze_endpoint(oracle_endpoint)
-                frame_names = [
-                    frame.function_name
-                    for stacks in dependencies.call_stacks.values()
-                    for stack in stacks
-                    for frame in stack
-                ]
-                raise AssertionError(
-                    f"positive parity mismatch: graph={actual!r}, oracle={expected!r}, "
-                    f"seed={positive_seed!r}, frames={frame_names!r}"
-                )
             oracle_checks += 1
             evidence_comparisons.append(positive_evidence)
-            negative_module = _inventory_module(snapshot, "m0")
+            negative_module = _inventory_module(snapshot, f"{root.name}.m0")
             negative_seed = _fullname(snapshot, negative_module, "unused")
-            expected_negative = _oracle_set(analyzer, oracle_endpoint, negative_seed, root)
-            actual_negative = {
-                item.occurrence.endpoint_id
-                for item in graph.query(
-                    [ChangedSeed("baseline", negative_seed)], side="baseline"
-                ).evidence
-            }
             negative_evidence = _compare_full_depth_evidence(
                 analyzer, oracle_endpoint, graph, negative_seed, side="baseline", root=root
             )
-            actual_negative = set(negative_evidence["candidate_ids"])
-            if actual_negative != expected_negative:
-                raise AssertionError(
-                    "negative parity mismatch: "
-                    f"graph={actual_negative!r}, oracle={expected_negative!r}"
-                )
             oracle_checks += 1
             evidence_comparisons.append(negative_evidence)
             start = time.perf_counter()
@@ -585,8 +752,30 @@ def _measure(modules: int, samples: int) -> dict[str, Any]:  # noqa: PLR0915
             updated_oracle_endpoint = _oracle_endpoint(root, updated_analyzer)
             updated_seed = _fullname(
                 updated_snapshot,
-                _inventory_module(updated_snapshot, f"m{modules - 1}"),
+                _inventory_module(updated_snapshot, f"{root.name}.m{modules - 1}"),
                 f"f{modules - 1}",
+            )
+            provider_seed = _fullname(
+                provider_typed,
+                _inventory_module(provider_typed, f"{root.name}.m{modules - 1}"),
+                f"f{modules - 1}",
+            )
+            provider_update_evidence = _compare_full_depth_evidence(
+                updated_analyzer,
+                updated_oracle_endpoint,
+                provider_graph,
+                provider_seed,
+                side="target",
+                root=root,
+            )
+            oracle_checks += 1
+            evidence_comparisons.append(
+                {
+                    **provider_update_evidence,
+                    "phase": "provider_incremental_update_full_evidence",
+                    "provider_report_mode": provider_typed.report.mode,
+                    "provider_updated_modules": list(provider_typed.report.updated_modules),
+                }
             )
             updated_evidence = _compare_full_depth_evidence(
                 updated_analyzer,
@@ -596,23 +785,18 @@ def _measure(modules: int, samples: int) -> dict[str, Any]:  # noqa: PLR0915
                 side="target",
                 root=root,
             )
-            updated_actual = set(updated_evidence["candidate_ids"])
-            updated_expected = _oracle_set(
-                updated_analyzer, updated_oracle_endpoint, updated_seed, root
-            )
-            if updated_actual != updated_expected:
-                raise AssertionError(
-                    "one-file parity mismatch: "
-                    f"graph={updated_actual!r}, oracle={updated_expected!r}"
-                )
             oracle_checks += 1
             evidence_comparisons.append(updated_evidence)
             updated_oracle_paths = _physical_oracle_paths(
-                updated_analyzer, updated_oracle_endpoint, f"f{modules - 1}", root
+                updated_analyzer, updated_oracle_endpoint, updated_seed, root
             )
             updated_provider_paths = _graph_physical_paths(
                 provider_graph,
-                f"m{modules - 1}.f{modules - 1}",
+                _fullname(
+                    provider_typed,
+                    _inventory_module(provider_typed, f"{root.name}.m{modules - 1}"),
+                    f"f{modules - 1}",
+                ),
             )
             if updated_provider_paths != updated_oracle_paths:
                 raise AssertionError(
@@ -623,6 +807,13 @@ def _measure(modules: int, samples: int) -> dict[str, Any]:  # noqa: PLR0915
                 raise AssertionError(
                     "one-file provider phase fell back instead of testing retained update: "
                     f"{provider_typed.report.mode!r}"
+                )
+            expected_updated_module = f"{root.name}.m{modules - 1}"
+            if provider_typed.report.updated_modules != (expected_updated_module,):
+                raise AssertionError(
+                    "retained provider updated an unexpected module set: "
+                    f"expected={(expected_updated_module,)!r}, "
+                    f"actual={provider_typed.report.updated_modules!r}"
                 )
             oracle_checks += 1
             evidence_comparisons.append(
@@ -637,7 +828,7 @@ def _measure(modules: int, samples: int) -> dict[str, Any]:  # noqa: PLR0915
             )
 
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "fixture": (
             "generated typed call DAG with one endpoint, a positive path, "
             "and an uncalled negative function"
@@ -645,8 +836,9 @@ def _measure(modules: int, samples: int) -> dict[str, Any]:  # noqa: PLR0915
         "modules": modules,
         "samples": samples,
         "oracle": (
-            "full-depth call_stacks plus resolved_call_sites physical edge paths "
-            "and terminal occurrence evidence"
+            "full-depth call_stacks plus exact ResolvedCallSite byte coordinates, "
+            "canonical targets, invocation/resolution status, argument bindings, "
+            "referenced symbols/files, and terminal occurrence evidence"
         ),
         "oracle_checks": oracle_checks,
         "evidence_comparisons": evidence_comparisons,
@@ -658,8 +850,9 @@ def _measure(modules: int, samples: int) -> dict[str, Any]:  # noqa: PLR0915
             "baseline and target graphs use separate retained provider snapshots",
             "one-file phases separate PR #326 incremental update from fresh typed rebuild",
             "fixture parity does not establish corpus, DI, dispatch, or effect parity",
-            "oracle does not expose effect summaries or route confidence caps; "
-            "those remain unproven",
+            "direct exact-call confidence and execution/invocation state are checked",
+            "endpoint oracle has no matching route confidence, effect-summary, "
+            "graph-cap, or deferred-callable output; those dimensions remain unproven",
         ],
     }
 

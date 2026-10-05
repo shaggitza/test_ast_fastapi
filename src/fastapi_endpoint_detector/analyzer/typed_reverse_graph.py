@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import deque
+from collections.abc import Iterable  # noqa: TC003
 from dataclasses import dataclass
 from importlib.metadata import version
 from pathlib import Path
@@ -38,15 +39,24 @@ from mypy.nodes import (
 
 GraphSide = Literal["baseline", "target"]
 EdgeKind = Literal["call", "constructor", "global_read", "global_write", "dependency"]
+Confidence = Literal["HIGH", "MEDIUM", "LOW"]
+Invocation = Literal["function", "instance_method", "class_method", "constructor", "unknown"]
 
 
 class TypedSnapshot(Protocol):
     """Structural boundary shared by the retained provider and analyzer snapshots."""
 
-    modules: Any
-    module_paths: Any
-    report: Any
-    type_maps: Any
+    @property
+    def modules(self) -> Any: ...
+
+    @property
+    def module_paths(self) -> Any: ...
+
+    @property
+    def report(self) -> Any: ...
+
+    @property
+    def type_maps(self) -> Any: ...
 
 
 @dataclass(frozen=True, order=True)
@@ -86,7 +96,9 @@ class EdgeWitness:
     callee: str
     kind: EdgeKind
     span: SourceSpan
+    target_span: SourceSpan | None
     confidence: Literal["HIGH", "MEDIUM", "LOW"]
+    invocation: Invocation
     execution_state: Literal["executed", "deferred", "unknown"]
     reference_state: Literal["reference", "invocation", "unknown"]
     relation: str
@@ -355,7 +367,7 @@ class TypedReverseGraph:
                         break
                     for occurrence in sorted(by_symbol.get(current, ()), key=_binding_key):
                         path_id = "/".join(edge.witness_id for edge in path)
-                        record = PotentialImpactEvidence(
+                        potential_record = PotentialImpactEvidence(
                             side,
                             occurrence,
                             seed,
@@ -374,7 +386,7 @@ class TypedReverseGraph:
                                 uncertainty.uncertainty_id,
                                 path_id,
                             )
-                        ] = record
+                        ] = potential_record
                     if len(path) >= budgets.depth:
                         if index.get(current):
                             reasons.add("depth_budget")
@@ -597,29 +609,70 @@ class _ModuleWalker:
         for child in _mypy_children(node):
             self._walk(child)
 
-    def _record_call(self, node: CallExpr) -> None:
+    def _record_call(self, node: CallExpr) -> None:  # noqa: PLR0912, PLR0915
         target_node = getattr(node.callee, "node", None)
         target = _fullname(target_node)
+        resolved_target_node: Any = target_node
         if isinstance(node.callee, NameExpr):
             target = self.import_aliases.get(node.callee.name, target)
         elif isinstance(node.callee, MemberExpr):
-            imported_base = _expression_fullname(node.callee.expr, self.import_aliases)
-            target = f"{imported_base}.{node.callee.name}" if imported_base else target
+            base_expression = node.callee.expr
+            base_node = getattr(base_expression, "node", None)
+            imported_base = _expression_fullname(
+                base_expression, self.import_aliases, self.owner
+            )
+            if isinstance(base_node, TypeInfo):
+                member_symbol = base_node.get(node.callee.name)
+                resolved_target_node = getattr(member_symbol, "node", None)
+                if isinstance(resolved_target_node, Decorator):
+                    resolved_target_node = resolved_target_node.func
+                target = _fullname(resolved_target_node)
+            elif imported_base in self.module_ids:
+                target = f"{imported_base}.{node.callee.name}"
+                resolved_target_node = self.definitions.get(target)
+                if not isinstance(resolved_target_node, (FuncDef, Decorator)):
+                    target = None
+            else:
+                # An instance receiver's declared class is not a proven finite
+                # runtime target. Leave the call unbound until the analyzer
+                # exports its owned finite dispatch result.
+                target = None
+                resolved_target_node = None
         kind: EdgeKind = "call"
         relation = "typed_call"
         confidence: Literal["HIGH", "MEDIUM", "LOW"] = "HIGH"
+        invocation: Invocation = "function"
         if isinstance(node.callee, LambdaExpr):
             target = f"{self.owner}.<lambda>@{node.callee.line}:{node.callee.column}"
             self._invoked_lambdas.add(id(node.callee))
             relation = "direct_lambda_invocation"
-        resolved_target_node = self.definitions.get(target, target_node)
+        if target:
+            resolved_target_node = self.definitions.get(target, resolved_target_node)
         if isinstance(resolved_target_node, TypeInfo):
             init = resolved_target_node.get("__init__")
             resolved_target_node = init.node if init is not None else None
             target = _fullname(resolved_target_node)
             kind, relation = "constructor", "typed_constructor"
+            invocation = "constructor"
             if target is None:
                 confidence = "LOW"
+        elif isinstance(node.callee, MemberExpr):
+            function_node = (
+                resolved_target_node.func
+                if isinstance(resolved_target_node, Decorator)
+                else resolved_target_node
+            )
+            if isinstance(function_node, FuncDef):
+                invocation = (
+                    "class_method"
+                    if function_node.is_class
+                    else "function"
+                    if function_node.is_static
+                    else "instance_method"
+                )
+                resolved_target_node = function_node
+            else:
+                invocation = "unknown"
         if target and _is_project_symbol(target, self.module_ids):
             span = self._span(node)
             receiver = (
@@ -634,7 +687,10 @@ class _ModuleWalker:
                 import_aliases=self.import_aliases,
                 owner=self.owner,
                 skip_receiver=kind == "constructor"
-                or (receiver is not None and bool(getattr(resolved_target_node, "info", None))),
+                or (
+                    receiver is not None
+                    and invocation in {"instance_method", "class_method"}
+                ),
             )
             edge = self._edge(
                 self.owner,
@@ -647,10 +703,16 @@ class _ModuleWalker:
                 relation,
                 arguments,
                 receiver,
+                invocation=invocation,
+                target_span=self._span(node.callee),
             )
             self.edges.append(edge)
             self.symbols.setdefault(self.owner, self._symbol(self.owner, "function", node))
-            if isinstance(node.callee, MemberExpr):
+            if isinstance(node.callee, MemberExpr) and invocation in {
+                "instance_method",
+                "class_method",
+                "function",
+            }:
                 self._record_uncertainty(
                     self.owner,
                     node,
@@ -767,7 +829,7 @@ class _ModuleWalker:
         )
 
     def _symbol(self, fullname: str, kind: str, node: Any) -> Symbol:
-        span = self._span(node) if node is not None and getattr(node, "line", 0) else None
+        span = self._span(node) if node is not None and getattr(node, "line", None) else None
         return Symbol(self.module, fullname, kind, span)
 
     def _edge(
@@ -782,13 +844,27 @@ class _ModuleWalker:
         relation: str,
         arguments: tuple[ArgumentBinding, ...],
         receiver_fullname: str | None = None,
+        *,
+        invocation: Invocation = "unknown",
+        target_span: SourceSpan | None = None,
     ) -> EdgeWitness:
         environment = tuple(
             (argument.formal_name, argument.expression_fullname)
             for argument in arguments
             if argument.formal_name and argument.expression_fullname
         )
-        material = (caller, callee, kind, span, relation, arguments, receiver_fullname, environment)
+        material = (
+            caller,
+            callee,
+            kind,
+            span,
+            target_span,
+            relation,
+            arguments,
+            invocation,
+            receiver_fullname,
+            environment,
+        )
         witness_id = hashlib.sha256(repr(material).encode()).hexdigest()
         return EdgeWitness(
             witness_id,
@@ -796,7 +872,9 @@ class _ModuleWalker:
             callee,
             kind,
             span,
+            target_span,
             confidence,
+            invocation,
             state,
             reference,
             relation,
@@ -890,7 +968,7 @@ def build_typed_reverse_graph(  # noqa: PLR0912, PLR0915
     module_by_path = {path: module for module, path in module_paths.items()}
     built_spans = (
         *(symbol.span for symbol in symbols.values() if symbol.span is not None),
-        *(edge.span for edge in edges.values()),
+        *(span for edge in edges.values() for span in (edge.span, edge.target_span) if span),
         *(item.span for item in uncertainties.values()),
     )
     for span in built_spans:
@@ -931,7 +1009,9 @@ def build_typed_reverse_graph(  # noqa: PLR0912, PLR0915
                 dependency,
                 "dependency",
                 binding.span,
+                None,
                 "LOW",
+                "unknown",
                 "executed",
                 "invocation",
                 "framework_dependency_binding",
@@ -960,7 +1040,7 @@ def build_typed_reverse_graph(  # noqa: PLR0912, PLR0915
     if reported_sources != tuple(sorted(source_hashes)):
         raise ValueError("typed provider source digests do not match canonical inventory bytes")
     return TypedReverseGraph(
-        3,
+        4,
         str(root),
         inventory_fingerprint,
         tuple(source_hashes),
@@ -1090,7 +1170,9 @@ def _argument_bindings(
     skip_receiver: bool = False,
 ) -> tuple[ArgumentBinding, ...]:
     args: list[ArgumentBinding] = []
-    callable_node = getattr(target, "node", target)
+    callable_node = (
+        target.func if isinstance(target, Decorator) else getattr(target, "node", target)
+    )
     arg_names = tuple(getattr(callable_node, "arg_names", ()) or ())
     callable_type = getattr(callable_node, "type", None)
     formal_types = tuple(getattr(callable_type, "arg_types", ()) or ())
@@ -1127,10 +1209,10 @@ def _argument_bindings(
             else None
         )
         actual_type = _render_type(type_maps.get(expr)) if hasattr(type_maps, "get") else None
-        formal_index = arg_names.index(formal) if formal in arg_names else None
+        bound_formal_index = arg_names.index(formal) if formal in arg_names else None
         formal_type = (
-            _render_type(formal_types[formal_index])
-            if formal_index is not None and formal_index < len(formal_types)
+            _render_type(formal_types[bound_formal_index])
+            if bound_formal_index is not None and bound_formal_index < len(formal_types)
             else None
         )
         value = (
@@ -1175,8 +1257,9 @@ def _binding_key(binding: EndpointOccurrenceBinding) -> tuple[str, str, str, int
     )
 
 
-def _confidence(values: Any) -> Literal["HIGH", "MEDIUM", "LOW"]:
-    return max(values, key={"HIGH": 0, "MEDIUM": 1, "LOW": 2}.get, default="LOW")
+def _confidence(values: Iterable[Confidence]) -> Confidence:
+    rank: dict[Confidence, int] = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+    return max(values, key=rank.__getitem__, default="LOW")
 
 
 def _join_execution(values: Any) -> Literal["executed", "deferred", "unknown"]:
@@ -1300,7 +1383,7 @@ class TypedGraphCache:
             return False
         return (
             tuple(current) == graph.source_hashes
-            and graph.schema_version == 3
+            and graph.schema_version == 4
             and graph.inventory_fingerprint == inventory_fingerprint
             and inventoried_paths.issubset(snapshot_paths)
             and bool(snapshot_provenance)
@@ -1327,6 +1410,7 @@ def seeds_for_changed_coordinates(
                 and span.path == canonical
                 and span.start_line <= line <= span.end_line
                 and (line != span.start_line or column >= span.start_column)
+                and (line != span.end_line or column <= span.end_column)
             ):
                 seeds.add(ChangedSeed(side, symbol.fullname, span))
     return tuple(sorted(seeds, key=_seed_key))
