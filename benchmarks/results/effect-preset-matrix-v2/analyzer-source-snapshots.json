@@ -4,7 +4,7 @@
   "source_files": [
     {
       "path": "benchmarks/providers/effect_preset_matrix.py",
-      "sha256": "39f099c9e80120be1cf6a4cccea4090a6ceceecbbe1854110715283a30cc2f91"
+      "sha256": "ec2a899b30c722199307e681336337e7832b37028c5dd26cdac25d87f37c4de2"
     },
     {
       "path": "src/fastapi_endpoint_detector/analyzer/effect_contract_auditor.py",

@@ -35,6 +35,7 @@ FIXTURE_PATH = MATRIX_ROOT / "fixtures" / "pathlib_open_handles.py"
 ANALYZER_SNAPSHOT_PATH = MATRIX_ROOT / "analyzer-source-snapshots.json"
 PACKAGE_CASES_PATH = MATRIX_ROOT / "package-analyzer-cases.json"
 PACKAGE_CASE_RESULTS_PATH = MATRIX_ROOT / "package-analyzer-results.json"
+SIGNATURE_REPORT_PATH = MATRIX_ROOT / "source-signature-observations.json"
 PROJECT_ROOT = MANIFEST_PATH.parents[3]
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _OBSERVATION_STATES = {"matched", "unmatched", "ambiguous", "unresolved"}
@@ -544,12 +545,14 @@ def verify_declared_python_signatures(  # noqa: PLR0912, PLR0915
                         raw = archive.read(source["path"])
                 else:
                     with tarfile.open(artifact, "r:gz") as archive:
-                        matches = [
+                        tar_members = [
                             candidate
                             for candidate in archive.getmembers()
                             if candidate.isfile() and candidate.name.endswith("/" + source["path"])
                         ]
-                        member = archive.extractfile(matches[0]) if len(matches) == 1 else None
+                        member = (
+                            archive.extractfile(tar_members[0]) if len(tar_members) == 1 else None
+                        )
                         if member is None:
                             raise KeyError(source["path"])
                         raw = member.read()
@@ -593,8 +596,10 @@ def verify_declared_python_signatures(  # noqa: PLR0912, PLR0915
                 continue
             module, (source_path, source_hash, tree) = module_entry
             parts = tuple(symbol[len(module) + 1 :].split("."))
-            matches = [node for owners, node in _function_nodes(tree.body) if owners == parts]
-            if not matches:
+            callable_matches = [
+                node for owners, node in _function_nodes(tree.body) if owners == parts
+            ]
+            if not callable_matches:
                 partial.append(
                     {
                         "distribution": package["distribution"],
@@ -605,7 +610,7 @@ def verify_declared_python_signatures(  # noqa: PLR0912, PLR0915
                     }
                 )
                 continue
-            node = matches[-1]
+            node = callable_matches[-1]
             actual_signature = ("async " if isinstance(node, ast.AsyncFunctionDef) else "") + (
                 "(" + ast.unparse(node.args) + ")"
             )
@@ -781,14 +786,16 @@ def verify_preset_contracts(manifest: dict[str, Any] | None = None) -> dict[str,
                 if resource_selector is not None or value_selector is not None:
                     raise MatrixEvidenceError("unmapped symbol cannot claim preset selectors")
                 continue
-            contract = contract_lookup.get(contract_id)
-            if contract is None or contract.symbol != declaration["symbol"]:
+            selected_contract = contract_lookup.get(contract_id)
+            if selected_contract is None or selected_contract.symbol != declaration["symbol"]:
                 raise MatrixEvidenceError(
                     f"package symbol does not map to exact preset contract: {declaration['symbol']}"
                 )
-            actual_resource = contract.resource.model_dump(mode="json")
+            actual_resource = selected_contract.resource.model_dump(mode="json")
             actual_value = (
-                contract.value.model_dump(mode="json") if contract.value is not None else None
+                selected_contract.value.model_dump(mode="json")
+                if selected_contract.value is not None
+                else None
             )
             if resource_selector != actual_resource or value_selector != actual_value:
                 raise MatrixEvidenceError(
@@ -954,11 +961,163 @@ def _render_case_arguments(arguments: Any) -> str:
     return ", ".join((*positional, *keywords))
 
 
-def _replay_package_case(case: dict[str, Any]) -> dict[str, Any]:
-    """Resolve a synthetic canonical receiver against one audited exact contract."""
+def _package_signature_evidence(
+    package: dict[str, Any], declaration: dict[str, Any]
+) -> dict[str, Any]:
+    """Bind a generated analyzer surface to the exact artifact source audit row."""
+    try:
+        report = _strict_json(SIGNATURE_REPORT_PATH.read_bytes(), "source signature observations")
+    except OSError as exc:
+        raise MatrixEvidenceError("missing exact-artifact signature observations") from exc
+    if (
+        not isinstance(report, dict)
+        or type(report.get("schema_version")) is not int
+        or report.get("schema_version") != 1
+        or report.get("report_id") != "effect-preset-source-signature-observations-v1"
+        or report.get("manifest_sha256") != f"sha256:{_sha256(MANIFEST_PATH.read_bytes())}"
+        or report.get("status") != "partial"
+        or report.get("artifact_directory_verified") is not True
+        or report.get("source_execution") is not False
+    ):
+        raise MatrixEvidenceError("source signature report is not bound to the pinned manifest")
+    expected_artifacts = [
+        {
+            "distribution": row["distribution"],
+            "version": row["version"],
+            "artifact": row["artifact"],
+            "artifact_sha256": f"sha256:{row['artifact_sha256']}",
+        }
+        for row in load_manifest()["packages"]
+    ]
+    if report.get("release_artifacts") != expected_artifacts:
+        raise MatrixEvidenceError("source signature report artifact list differs from manifest")
+    rows = report.get("verified_callable_signatures")
+    if not isinstance(rows, list):
+        raise MatrixEvidenceError("source signature report has no verified signature rows")
+    matches = [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and row.get("distribution") == package["distribution"]
+        and row.get("version") == package["version"]
+        and row.get("symbol") == declaration["symbol"]
+    ]
+    if len(matches) != 1:
+        raise MatrixEvidenceError(f"no unique pinned source signature for {declaration['symbol']}")
+    row = matches[0]
+    inspected = {item["path"]: f"sha256:{item['sha256']}" for item in package["inspected_sources"]}
+    if row.get("selector_kind") == "TypedDict_fields":
+        expected_selectors = _selector_parameter_names(declaration)
+    else:
+        source_signature = declaration["source_signature"].removeprefix("async ")
+        try:
+            parsed = ast.parse(f"def _pinned{source_signature}: ...").body[0]
+        except SyntaxError as exc:
+            raise MatrixEvidenceError(
+                "pinned signature cannot be parsed for selector check"
+            ) from exc
+        if not isinstance(parsed, ast.FunctionDef):
+            raise MatrixEvidenceError("pinned signature selector source is not a function")
+        expected_selectors = _formal_parameter_names(parsed)
+    if (
+        row.get("status") != "exact_source_signature_and_selector_match"
+        or row.get("signature") != declaration["source_signature"]
+        or row.get("source_sha256") != inspected.get(row.get("source_path"))
+        or row.get("selector_source_sha256") != inspected.get(row.get("selector_source_path"))
+        or row.get("selector_parameters") != expected_selectors
+    ):
+        raise MatrixEvidenceError(
+            f"pinned source signature or selector evidence mismatch: {declaration['symbol']}"
+        )
+    return {
+        "source_report_sha256": f"sha256:{_sha256(SIGNATURE_REPORT_PATH.read_bytes())}",
+        "source_path": row["source_path"],
+        "source_sha256": row["source_sha256"],
+        "source_signature": row["signature"],
+        "selector_source_path": row["selector_source_path"],
+        "selector_source_sha256": row["selector_source_sha256"],
+        "selector_kind": row["selector_kind"],
+        "selector_parameters": row["selector_parameters"],
+    }
+
+
+def _stub_method_signature(  # noqa: PLR0912
+    evidence: dict[str, Any],
+) -> tuple[str, set[str] | None]:
+    """Render a static stub with pinned parameter names/kinds and typed-dict keys."""
+    signature = evidence["source_signature"]
+    async_prefix = "async " if signature.startswith("async ") else ""
+    signature = signature.removeprefix("async ")
+    try:
+        function = ast.parse(f"def _pinned{signature}: ...").body[0]
+    except SyntaxError as exc:
+        raise MatrixEvidenceError("pinned source signature cannot be parsed") from exc
+    if not isinstance(function, ast.FunctionDef):
+        raise MatrixEvidenceError("pinned source signature is not callable")
+    args = function.args
+    unpacked = any(
+        arg.annotation is not None and "Unpack[" in ast.unparse(arg.annotation)
+        for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs]
+    ) or (
+        args.kwarg is not None
+        and args.kwarg.annotation is not None
+        and "Unpack[" in ast.unparse(args.kwarg.annotation)
+    )
+    typed_dict_keys: set[str] | None = set(evidence["selector_parameters"]) if unpacked else None
+    positional = [*args.posonlyargs, *args.args]
+    defaults = [None] * (len(positional) - len(args.defaults)) + list(args.defaults)
+    rendered: list[str] = []
+    for arg, default in zip(positional, defaults, strict=True):
+        if arg.arg == "self":
+            continue
+        text = arg.arg
+        if default is not None:
+            text += " = ..."
+        rendered.append(text)
+    if args.vararg is not None:
+        rendered.append(f"*{args.vararg.arg}")
+    elif args.kwonlyargs:
+        rendered.append("*")
+    for arg, default in zip(args.kwonlyargs, args.kw_defaults, strict=True):
+        text = arg.arg
+        if default is not None:
+            text += " = ..."
+        rendered.append(text)
+    if unpacked:
+        if typed_dict_keys is None:
+            raise MatrixEvidenceError("typed dictionary selector keys are unavailable")
+        for key in evidence["selector_parameters"]:
+            if key not in typed_dict_keys:
+                raise MatrixEvidenceError("typed dictionary selector key is invalid")
+            rendered.append(f"{key} = ...")
+    elif args.kwarg is not None:
+        rendered.append(f"**{args.kwarg.arg}")
+    return (
+        f"{async_prefix}def method(self{', ' if rendered else ''}"
+        f"{', '.join(rendered)}) -> object: ...",
+        typed_dict_keys,
+    )
+
+
+def _validate_case_binding(case: dict[str, Any], typed_dict_keys: set[str] | None) -> None:
+    if typed_dict_keys is None:
+        return
+    for argument in case["arguments"]:
+        if argument["kind"] == "keyword" and argument["name"] not in typed_dict_keys:
+            raise MatrixEvidenceError(
+                f"fixture keyword is absent from pinned TypedDict selector: {argument['name']}"
+            )
+
+
+def _replay_package_case(
+    case: dict[str, Any], signature_evidence: dict[str, Any]
+) -> dict[str, Any]:
+    """Resolve a source-derived canonical receiver against one exact contract."""
     module, class_name, method = case["symbol"].rsplit(".", 2)
     module_parts = module.split(".")
     arguments = _render_case_arguments(case["arguments"])
+    method_signature, typed_dict_keys = _stub_method_signature(signature_evidence)
+    _validate_case_binding(case, typed_dict_keys)
     app_call = f"client.{method}({arguments})"
     negative_call = f"foreign.{method}({arguments})"
     fixture = (
@@ -982,8 +1141,7 @@ def _replay_package_case(case: dict[str, Any]) -> dict[str, Any]:
                 current.mkdir(exist_ok=True)
                 (current / "__init__.py").write_text("", encoding="utf-8")
             (current / f"{module_parts[-1]}.py").write_text(
-                f"class {class_name}:\n"
-                f"    def {method}(self, *args: object, **kwargs: object) -> object: ...\n",
+                f"class {class_name}:\n    {method_signature.replace('method', method, 1)}\n",
                 encoding="utf-8",
             )
             endpoint = _endpoint(main, line_number=6)
@@ -1005,6 +1163,8 @@ def _replay_package_case(case: dict[str, Any]) -> dict[str, Any]:
             return {
                 "fixture_sha256": f"sha256:{_sha256(fixture.encode())}",
                 "resolver_version": analyzer.resolver_version,
+                "signature_evidence": signature_evidence,
+                "generated_signature": method_signature,
                 "observations": rows,
             }
     except (OSError, ValueError, RuntimeError) as exc:
@@ -1014,7 +1174,7 @@ def _replay_package_case(case: dict[str, Any]) -> dict[str, Any]:
 
 
 def replay_package_analyzer_cases() -> list[dict[str, Any]]:
-    """Run source-only synthetic symbol-resolution cases tied to pinned release rows."""
+    """Run analyzer cases with source-derived parameter and selector surfaces."""
     try:
         case_data = _strict_json(PACKAGE_CASES_PATH.read_bytes(), "package analyzer cases")
     except OSError as exc:
@@ -1075,7 +1235,8 @@ def replay_package_analyzer_cases() -> list[dict[str, Any]]:
         )
         if contract_set_id is None or contract_set_id not in presets:
             raise MatrixEvidenceError("package analyzer case preset is not pinned")
-        result = _replay_package_case(case)
+        signature_evidence = _package_signature_evidence(package, declaration)
+        result = _replay_package_case(case, signature_evidence)
         result.update(
             {
                 "case_id": case["case_id"],
@@ -1215,10 +1376,14 @@ def load_package_analyzer_results(
         raise MatrixEvidenceError("package analyzer result has invalid fields")
     if (
         type(value["schema_version"]) is not int
-        or value["schema_version"] != 1
-        or value["result_id"] != "gh97-package-symbol-analyzer-results-v1"
+        or value["schema_version"] != 2
+        or value["result_id"] != "gh97-package-signature-analyzer-results-v2"
         or value["status"] != "completed"
-        or value["scope"] != "synthetic canonical-symbol and same-name negative controls only"
+        or value["scope"]
+        != (
+            "source-derived parameter and selector surfaces with same-name negatives; "
+            "installed package compatibility not evaluated"
+        )
         or value["source_execution"] is not False
         or value["upstream_package_code_imported_or_executed"] is not False
     ):

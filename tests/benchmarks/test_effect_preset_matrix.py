@@ -279,10 +279,33 @@ def test_pinned_package_symbol_cases_replay_with_same_name_negatives() -> None:
     assert result["observed"]["unmatched_calls"] == 6
     assert result["source_execution"] is False
     assert result["upstream_package_code_imported_or_executed"] is False
+    s3_case = next(row for row in result["cases"] if row["case_id"].startswith("typed-s3-"))
+    assert s3_case["signature_evidence"]["source_signature"] == (
+        "(self, **kwargs: Unpack[PutObjectRequestRequestTypeDef])"
+    )
+    assert "Bucket" in s3_case["signature_evidence"]["selector_parameters"]
+    assert "BogusField" not in s3_case["generated_signature"]
     assert {row["reason_code"] for row in result["unsupported_cases"]} == {
         "descriptor_signature_unavailable",
         "no_exact_preset_contract",
     }
+
+
+def test_pinned_typed_dict_signature_rejects_unknown_case_keyword() -> None:
+    manifest = load_manifest()
+    package = next(row for row in manifest["packages"] if row["distribution"] == "mypy-boto3-s3")
+    declaration = next(
+        row
+        for row in package["declared_symbols"]
+        if row["symbol"] == "mypy_boto3_s3.client.S3Client.put_object"
+    )
+    evidence = matrix_provider._package_signature_evidence(package, declaration)
+    case = json.loads(matrix_provider.PACKAGE_CASES_PATH.read_text(encoding="utf-8"))["cases"][-1]
+    altered = json.loads(json.dumps(case))
+    altered["arguments"][0]["name"] = "BogusField"
+
+    with pytest.raises(MatrixEvidenceError, match="absent from pinned TypedDict selector"):
+        matrix_provider._replay_package_case(altered, evidence)
 
 
 def test_package_symbol_results_reject_forged_aggregates(tmp_path: Path) -> None:
@@ -444,7 +467,9 @@ def test_exact_pathlib_calls_match_and_unrelated_same_name_methods_do_not(
         for item in dependencies.get_resolved_call_sites()
         if item.source_spelling == "handle.read"
     )
-    assert by_line[path_open_line].receiver_origin is not None
-    assert by_line[path_open_line].receiver_origin.status.value == "unavailable"
-    assert by_line[builtin_open_line].receiver_origin is not None
-    assert by_line[builtin_open_line].receiver_origin.status.value == "exact"
+    path_origin = by_line[path_open_line].receiver_origin
+    builtin_origin = by_line[builtin_open_line].receiver_origin
+    assert path_origin is not None
+    assert path_origin.status.value == "unavailable"
+    assert builtin_origin is not None
+    assert builtin_origin.status.value == "exact"

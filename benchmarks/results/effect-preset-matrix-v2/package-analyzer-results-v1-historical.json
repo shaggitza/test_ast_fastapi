@@ -1,11 +1,11 @@
 {
-  "schema_version": 2,
-  "result_id": "gh97-package-signature-analyzer-results-v2",
+  "schema_version": 1,
+  "result_id": "gh97-package-symbol-analyzer-results-v1",
   "status": "completed",
-  "scope": "source-derived parameter and selector surfaces with same-name negatives; installed package compatibility not evaluated",
+  "scope": "synthetic canonical-symbol and same-name negative controls only",
   "manifest_sha256": "sha256:f90c11bb5eeb2e5a4d60607438f24d4070be4c84506787e73c1b06903833df1d",
   "case_fixture_sha256": "sha256:32aa9f56d699e65f9d81baedba81372544cadae780dab27a527795c86d098ec3",
-  "analyzer_snapshot_sha256": "sha256:4170fbf9187134eff2d06e606f6b2b4eb631f9f2e8e3fc7be2e97a35cf8ebea6",
+  "analyzer_snapshot_sha256": "sha256:c34160ff3d4164c292951cba06ce1a70c76593e996cf6a258a23f7d293ebb357",
   "source_execution": false,
   "upstream_package_code_imported_or_executed": false,
   "cases": [

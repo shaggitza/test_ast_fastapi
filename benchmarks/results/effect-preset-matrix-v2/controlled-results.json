@@ -147,12 +147,12 @@
   "controlled_evaluation": {
     "case_id": "stdlib-pathlib-and-open-handles-v2",
     "test_path": "tests/benchmarks/test_effect_preset_matrix.py",
-    "test_file_sha256": "sha256:8c24e449cdc320ba1b96e2f3df0b759924635c40a0c7c6c9c4a0611ae80cb747",
+    "test_file_sha256": "sha256:3ed753a5e1b9f83b50f578b61fe90771ece231b48e2f27c630b476084d4053cc",
     "fixture_path": "benchmarks/results/effect-preset-matrix-v2/fixtures/pathlib_open_handles.py",
     "fixture_sha256": "sha256:daf0971e1851bbcc8ad6437794ef9a6bc0c37ddbb2fc45f0efa7714cab833155",
     "analyzer": "MypyAnalyzer plus audit_effect_contracts",
     "analyzer_source_hashes": {
-      "benchmarks/providers/effect_preset_matrix.py": "sha256:39f099c9e80120be1cf6a4cccea4090a6ceceecbbe1854110715283a30cc2f91",
+      "benchmarks/providers/effect_preset_matrix.py": "sha256:ec2a899b30c722199307e681336337e7832b37028c5dd26cdac25d87f37c4de2",
       "src/fastapi_endpoint_detector/analyzer/effect_contract_auditor.py": "sha256:c6ecd7210e7c4fc054010c80e9df0961b1510fd9cb9599faa49a27e751258d57",
       "src/fastapi_endpoint_detector/analyzer/mypy_analyzer.py": "sha256:2725b79f15a2d91bd95d3700b33696dff2c2888718ba78d57189cbd2a8af33be",
       "src/fastapi_endpoint_detector/models/effect_contract.py": "sha256:392c7024633ea0d309447c1991f96d0f2293d52732371797538ca2f0637f92d8",
@@ -697,7 +697,7 @@
       }
     },
     "analysis_policy": "static analyzer replay only; fixture source never executed",
-    "analyzer_snapshot_sha256": "sha256:a0690e1975c038cb800d23f2b614cfd5018be6c759cb79022da4ed026739e842"
+    "analyzer_snapshot_sha256": "sha256:4170fbf9187134eff2d06e606f6b2b4eb631f9f2e8e3fc7be2e97a35cf8ebea6"
   },
   "environment": {
     "python": "3.11.16",
