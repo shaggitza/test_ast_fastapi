@@ -428,9 +428,6 @@ class MypyAnalyzer:
         self._python_dependency_cache: dict[tuple[str, int, str], set[str]] = {}
         self._python_ast_cache: dict[str, ast.Module | None] = {}
         self._python_call_span_cache: dict[str, dict[tuple[int, int], tuple[int, int]]] = {}
-        self._python_call_span_assignments: dict[
-            tuple[str, int, str], set[tuple[int, int, int, int]]
-        ] = {}
         self._source_bytes_cache: dict[str, tuple[bytes, ...] | None] = {}
         self._resolved_call_site_cache: dict[int, ResolvedCallSite | None] = {}
         self._finite_global_value_cache: dict[str, _FinitePointsTo | None] = {}
@@ -571,7 +568,6 @@ class MypyAnalyzer:
         self._python_dependency_cache.clear()
         self._python_ast_cache.clear()
         self._python_call_span_cache.clear()
-        self._python_call_span_assignments.clear()
         self._source_bytes_cache.clear()
         self._resolved_call_site_cache.clear()
         self._finite_global_value_cache.clear()
@@ -1365,86 +1361,6 @@ class MypyAnalyzer:
                 spelling = raw.decode("utf-8")
             except UnicodeDecodeError:
                 spelling = ""
-        expected_name = getattr(callee, "name", None)
-        if (
-            isinstance(expected_name, str)
-            and lines is not None
-            and line <= len(lines)
-            and any(value >= 0x80 for value in lines[line - 1][:column])
-        ):
-            if canonical not in self._python_ast_cache:
-                try:
-                    self._python_ast_cache[canonical] = ast.parse(
-                        Path(canonical).read_text(encoding="utf-8"), filename=canonical
-                    )
-                except (OSError, SyntaxError, UnicodeError):
-                    self._python_ast_cache[canonical] = None
-            tree = self._python_ast_cache[canonical]
-            assignment_key = (canonical, line, expected_name)
-            assigned_spans = self._python_call_span_assignments.setdefault(assignment_key, set())
-            candidates: list[tuple[int, int, int, int, str]] = []
-            if tree is not None:
-                for candidate in ast.walk(tree):
-                    function = candidate.func if isinstance(candidate, ast.Call) else None
-                    function_name = (
-                        function.id
-                        if isinstance(function, ast.Name)
-                        else function.attr
-                        if isinstance(function, ast.Attribute)
-                        else None
-                    )
-                    if (
-                        function is None
-                        or function_name != expected_name
-                        or function.lineno != line
-                        or function.end_lineno is None
-                        or function.end_col_offset is None
-                    ):
-                        continue
-                    span_key = (
-                        function.lineno,
-                        function.col_offset,
-                        function.end_lineno,
-                        function.end_col_offset,
-                    )
-                    if span_key in assigned_spans:
-                        continue
-                    if function.end_lineno == function.lineno:
-                        candidate_raw = lines[function.lineno - 1][
-                            function.col_offset : function.end_col_offset
-                        ]
-                    else:
-                        candidate_raw = b"".join(
-                            (
-                                lines[function.lineno - 1][function.col_offset :],
-                                *lines[function.lineno : function.end_lineno - 1],
-                                lines[function.end_lineno - 1][: function.end_col_offset],
-                            )
-                        )
-                    candidate_spelling = candidate_raw.decode("utf-8", errors="replace")
-                    if not candidate_spelling.strip().endswith(expected_name):
-                        continue
-                    try:
-                        character_column = len(
-                            lines[line - 1][: function.col_offset].decode("utf-8")
-                        )
-                    except UnicodeDecodeError:
-                        continue
-                    distance = min(
-                        abs(function.col_offset - column), abs(character_column - column)
-                    )
-                    candidates.append(
-                        (
-                            distance,
-                            function.col_offset,
-                            function.end_lineno,
-                            function.end_col_offset,
-                            candidate_spelling,
-                        )
-                    )
-            if candidates:
-                _, column, end_line, end_column, spelling = min(candidates)
-                assigned_spans.add((line, column, end_line, end_column))
         if not spelling.strip():
             return None
         return line, column, end_line, end_column, spelling

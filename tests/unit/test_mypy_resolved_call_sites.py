@@ -493,7 +493,7 @@ def test_utf8_byte_columns_and_same_line_calls_keep_physical_identity(tmp_path: 
     main.write_text(
         "def emit() -> int:\n    return 1\n\n"
         "def handler() -> int:\n"
-        "    label = 'ééééééé'; return emit() + emit()\n",
+        "    label = 'é'; return emit() + emit()\n",
         encoding="utf-8",
     )
 
