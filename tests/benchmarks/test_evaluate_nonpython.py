@@ -192,6 +192,57 @@ def test_same_route_and_surface_in_different_prs_remain_valid() -> None:
     assert second["query_evidence"] == "client=obsidian"
 
 
+def test_build_result_scans_the_exact_bytes_validated_before_a_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = copied_fixture(tmp_path)
+    spec = read_json(fixture / "evaluation_cases.json")
+    manifest = read_json(fixture / "source_manifest.json")
+    case = next(row for row in spec["cases"] if row["case_id"] == "khoj-ai/khoj#1216")
+    case_manifest = manifest["cases"]["khoj_1216"]
+    source_record = next(
+        row for row in case_manifest["files"] if row["path"] in case["client_files"]
+    )
+    source_path = fixture / "source/khoj_1216" / source_record["storage_path"]
+    validated_bytes = source_path.read_bytes()
+    race_payload = b'\nfetch("/race-probe", {method: "GET"});\n'
+    real_validate = evaluator.validate_fixture
+
+    def validate_then_mutate(
+        candidate: Path = evaluator.FIXTURE, evidence_root: Path | None = None
+    ) -> dict:
+        validated = real_validate(candidate, evidence_root)
+        source_path.write_bytes(validated_bytes + race_payload)
+        return validated
+
+    monkeypatch.setattr(evaluator, "validate_fixture", validate_then_mutate)
+    result = evaluator.build_result(fixture, repo_root=ROOT)
+    output_case = next(row for row in result["cases"] if row["case_id"] == case["case_id"])
+    assert all(
+        observation["raw_route_path"] != "/race-probe"
+        for observation in output_case["raw_client_observations"]
+    )
+    verified_source = next(
+        row
+        for row in result["verified_source_files"]
+        if row["case_id"] == case["case_id"] and row["original_path"] == source_record["path"]
+    )
+    assert verified_source["sha256"] == source_record["sha256"]
+
+    raced_text = source_path.read_text(encoding="utf-8")
+    scanner_control = scan_literal_case(
+        repo_root=ROOT,
+        scanner_commit=SCANNER_COMMIT,
+        source_path=source_record["path"],
+        source_text=raced_text,
+        surfaces=[],
+    )
+    assert any(
+        observation["raw_route_path"] == "/race-probe"
+        for observation in scanner_control["client_observations"]
+    )
+
+
 def test_vendored_python_sources_are_data_only() -> None:
     assert not list((FIXTURE / "source").rglob("*.py"))
     manifest = read_json(FIXTURE / "source_manifest.json")

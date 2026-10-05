@@ -182,6 +182,7 @@ def validate_fixture(  # noqa: PLR0912, PLR0915
     case_keys: dict[str, str] = {}
     audit_hashes: list[dict[str, str]] = []
     verified_sources: list[dict[str, Any]] = []
+    source_snapshots: dict[str, dict[str, bytes]] = {}
     verified_licenses: list[dict[str, Any]] = []
     verified_diffs: list[dict[str, Any]] = []
     fixture.resolve(strict=True)
@@ -218,6 +219,7 @@ def validate_fixture(  # noqa: PLR0912, PLR0915
         if not isinstance(files, list) or not files:
             raise NonPythonFixtureError(f"missing source file inventory: {case_id}")
         original_paths: set[str] = set()
+        case_source_snapshots: dict[str, bytes] = {}
         for source in files:
             if not isinstance(source, dict):
                 raise NonPythonFixtureError(f"malformed source metadata: {case_id}")
@@ -225,6 +227,10 @@ def validate_fixture(  # noqa: PLR0912, PLR0915
             stored = source.get("storage_path")
             if not isinstance(original, str) or not isinstance(stored, str):
                 raise NonPythonFixtureError(f"source path provenance is incomplete: {case_id}")
+            if original in case_source_snapshots:
+                raise NonPythonFixtureError(
+                    f"duplicate original source path in manifest: {case_id}:{original}"
+                )
             safe_relative(original, "original source path")
             safe_relative(stored, "stored source path")
             if original.endswith(".py") and not stored.endswith(".py.txt"):
@@ -245,6 +251,7 @@ def validate_fixture(  # noqa: PLR0912, PLR0915
             if len(source_bytes) != source.get("bytes"):
                 raise NonPythonFixtureError(f"source byte count mismatch: {case_id}:{original}")
             actual = sha256(source_bytes)
+            case_source_snapshots[original] = source_bytes
             verified_sources.append(
                 {
                     "case_id": case_id,
@@ -254,6 +261,7 @@ def validate_fixture(  # noqa: PLR0912, PLR0915
                     "bytes": len(source_bytes),
                 }
             )
+        source_snapshots[case_id] = case_source_snapshots
         license_record = record.get("license")
         if not isinstance(license_record, dict) or license_record.get("original_path") != "LICENSE":
             raise NonPythonFixtureError(f"license provenance missing: {case_id}")
@@ -376,6 +384,7 @@ def validate_fixture(  # noqa: PLR0912, PLR0915
         "manifest": manifest,
         "spec": spec,
         "source_keys": case_keys,
+        "source_snapshots": source_snapshots,
         "verified_source_files": verified_sources,
         "verified_licenses": verified_licenses,
         "verified_diffs": verified_diffs,
@@ -458,6 +467,14 @@ def scan_literal_case(
         )["direct-test"]
 
 
+def _decode_source_snapshot(source_bytes: bytes, source_path: str) -> str:
+    """Decode the already-verified byte snapshot like Path.read_text(encoding=utf-8)."""
+    try:
+        return io.TextIOWrapper(io.BytesIO(source_bytes), encoding="utf-8").read()
+    except UnicodeDecodeError as exc:
+        raise NonPythonFixtureError(f"verified source is not UTF-8 text: {source_path}") from exc
+
+
 def build_result(
     fixture: Path = FIXTURE,
     scanner_commit: str = SCANNER_COMMIT,
@@ -466,15 +483,12 @@ def build_result(
     _require_trusted_scanner_commit(scanner_commit)
     validated = validate_fixture(fixture)
     spec = validated["spec"]
-    source_root = fixture / "source"
     repo = repo_root or Path(__file__).resolve().parents[2]
     result_cases_input: list[dict[str, Any]] = []
     for case in spec["cases"]:
-        case_key = validated["source_keys"][case["case_id"]]
-        case_manifest = validated["manifest"]["cases"][case_key]
         source_by_original = {
-            row["path"]: (source_root / case_key / row["storage_path"]).read_text(encoding="utf-8")
-            for row in case_manifest["files"]
+            path: _decode_source_snapshot(source_bytes, path)
+            for path, source_bytes in validated["source_snapshots"][case["case_id"]].items()
         }
         atoms = case["atoms"]
         result_cases_input.append(
