@@ -2641,7 +2641,7 @@ class HtmlFormatter(BaseFormatter):
             content_lines.append("<h2>Affected Endpoints</h2>")
 
             # Group by confidence
-            groups = (
+            groups: list[tuple[ConfidenceLevel | None, list[AffectedEndpoint]]] = (
                 [
                     (confidence, report.get_endpoints_by_confidence(confidence))
                     for confidence in [
