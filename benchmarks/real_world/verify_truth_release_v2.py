@@ -905,6 +905,7 @@ def _verify_product_scopes(  # noqa: PLR0912, PLR0915
             or not isinstance(scope_id, str)
             or type(version) is not int
             or (scope_id, version) not in definitions
+            or not isinstance(status, str)
             or status not in {"in_scope", "out_of_scope"}
         ):
             _fail("product scope membership table contains a malformed selected row")

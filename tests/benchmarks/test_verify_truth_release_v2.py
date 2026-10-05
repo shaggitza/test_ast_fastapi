@@ -544,6 +544,24 @@ def test_product_scope_memberships_cover_every_selected_entrypoint(tmp_path: Pat
         verify_release(root)
 
 
+@pytest.mark.parametrize("status", [[], {}, 1, None, True])
+def test_resealed_release_rejects_non_string_scope_membership_status(
+    tmp_path: Path, status: object
+) -> None:
+    root = _release(tmp_path)
+    membership_path = root / "tables/scope_membership.jsonl"
+    memberships = [json.loads(line) for line in membership_path.read_text().splitlines()]
+    memberships[0]["status"] = status
+    _write_jsonl(membership_path, memberships)
+    manifest = json.loads((root / "manifest.json").read_text())
+    _reseal(root, manifest)
+
+    with pytest.raises(
+        GroundTruthError, match="product scope membership table contains a malformed"
+    ):
+        verify_release(root)
+
+
 @pytest.mark.parametrize(
     "member,field,value,expected",
     [
