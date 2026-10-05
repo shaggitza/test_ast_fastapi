@@ -16,7 +16,11 @@ from typing import Any, Literal, Protocol
 
 from mypy.nodes import (
     ARG_NAMED,
+    ARG_NAMED_OPT,
+    ARG_OPT,
     ARG_POS,
+    ARG_STAR,
+    ARG_STAR2,
     AssignmentStmt,
     CallExpr,
     Decorator,
@@ -619,7 +623,7 @@ class _ModuleWalker:
         if target and _is_project_symbol(target, self.module_ids):
             span = self._span(node)
             receiver = (
-                _expression_fullname(node.callee.expr, self.import_aliases)
+                _expression_fullname(node.callee.expr, self.import_aliases, self.owner)
                 if isinstance(node.callee, MemberExpr)
                 else None
             )
@@ -627,6 +631,8 @@ class _ModuleWalker:
                 node,
                 resolved_target_node,
                 type_maps=self.type_maps,
+                import_aliases=self.import_aliases,
+                owner=self.owner,
                 skip_receiver=kind == "constructor"
                 or (receiver is not None and bool(getattr(resolved_target_node, "info", None))),
             )
@@ -659,6 +665,14 @@ class _ModuleWalker:
                 "effect_transfer_not_imported",
                 target,
             )
+            if any(kind in {ARG_STAR, ARG_STAR2} for kind in node.arg_kinds):
+                self._record_uncertainty(
+                    self.owner,
+                    node,
+                    "unknown_binding",
+                    "starred_actual_formal_binding_unresolved",
+                    _call_spelling(node.callee),
+                )
         elif not isinstance(node.callee, LambdaExpr):
             spelling = _call_spelling(node.callee)
             self._record_uncertainty(
@@ -1015,11 +1029,16 @@ def _module_import_aliases(tree: Any, module: str, module_ids: frozenset[str]) -
     return aliases
 
 
-def _expression_fullname(expression: Any, aliases: dict[str, str]) -> str | None:
+def _expression_fullname(
+    expression: Any, aliases: dict[str, str], owner: str | None = None
+) -> str | None:
     if isinstance(expression, NameExpr):
-        return aliases.get(expression.name, _fullname(getattr(expression, "node", None)))
+        value = aliases.get(expression.name, _fullname(getattr(expression, "node", None)))
+        if value and "." not in value and owner:
+            return f"{owner}.{value}"
+        return value
     if isinstance(expression, MemberExpr):
-        base = _expression_fullname(expression.expr, aliases)
+        base = _expression_fullname(expression.expr, aliases, owner)
         return f"{base}.{expression.name}" if base else None
     return None
 
@@ -1066,6 +1085,8 @@ def _argument_bindings(
     target: Any,
     *,
     type_maps: Any,
+    import_aliases: dict[str, str],
+    owner: str,
     skip_receiver: bool = False,
 ) -> tuple[ArgumentBinding, ...]:
     args: list[ArgumentBinding] = []
@@ -1081,7 +1102,7 @@ def _argument_bindings(
                 arg_names[0],
                 None,
                 None,
-                _expression_fullname(call.callee.expr, {})
+                _expression_fullname(call.callee.expr, import_aliases, owner)
                 if isinstance(call.callee, MemberExpr)
                 else None,
                 None,
@@ -1089,15 +1110,18 @@ def _argument_bindings(
             )
         )
     pos = 0
+    positional_uncertain = False
+    positional_kinds = {ARG_POS, ARG_OPT}
+    keyword_kinds = {ARG_NAMED, ARG_NAMED_OPT}
     for index, (expr, kind, name) in enumerate(
         zip(call.args, call.arg_kinds, call.arg_names, strict=True)
     ):
-        positional = pos if kind == ARG_POS else None
-        keyword = name if kind == ARG_NAMED else None
+        positional = pos if kind in positional_kinds and not positional_uncertain else None
+        keyword = name if kind in keyword_kinds else None
         formal_index = pos + offset
         formal = (
-            name
-            if keyword
+            name if keyword in arg_names else None
+            if keyword is not None
             else arg_names[formal_index]
             if positional is not None and formal_index < len(arg_names)
             else None
@@ -1110,15 +1134,17 @@ def _argument_bindings(
             else None
         )
         value = (
-            _fullname(getattr(expr, "node", None))
+            _expression_fullname(expr, import_aliases, owner)
             if isinstance(expr, (NameExpr, MemberExpr))
             else None
         )
         args.append(
             ArgumentBinding(index, formal, positional, keyword, value, actual_type, formal_type)
         )
-        if kind == ARG_POS:
+        if kind in positional_kinds and not positional_uncertain:
             pos += 1
+        elif kind == ARG_STAR:
+            positional_uncertain = True
     return tuple(args)
 
 

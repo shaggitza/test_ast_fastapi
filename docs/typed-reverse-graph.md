@@ -47,7 +47,9 @@ Mypy AST edge and symbol spans, plus endpoint registration spans, are validated
 against the exact source bytes, including end-line/end-column boundaries. Call
 arguments retain both the actual expression type and formal parameter type
 from the retained provider's `type_maps` when mypy has a finding; absent type
-entries remain `None` rather than being guessed.
+entries remain `None` rather than being guessed. Exact keyword formals are
+resolved by formal name; after a starred positional actual, later positional
+formals remain unresolved and are exposed as an `unknown_binding` uncertainty.
 
 ## Minimal integration plan
 

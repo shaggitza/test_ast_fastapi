@@ -291,6 +291,44 @@ def test_typed_arguments_and_utf8_end_columns_use_provider_findings(tmp_path: Pa
     assert source_slice == 'changed("café")'
 
 
+def test_keyword_formals_resolve_exactly_and_starred_formals_abstain(tmp_path: Path) -> None:
+    inventory, snapshot, _ = _snapshot(
+        tmp_path,
+        {
+            "app": (
+                "from service import combine as join\n"
+                "def handler(first: str, second: str, values: tuple[str, ...]):\n"
+                "    join(second=second, first=first)\n"
+                "    join(*values)\n"
+            ),
+            "service": (
+                "def combine(first: str, second: str) -> None:\n"
+                "    return None\n"
+            ),
+        },
+    )
+    graph = build_typed_reverse_graph(inventory, snapshot, [], config_fingerprint="cfg")
+    calls = [edge for edge in graph.edges if edge.callee.endswith("service.combine")]
+    keyword_call = next(edge for edge in calls if len(edge.arguments) == 2)
+    starred_call = next(edge for edge in calls if len(edge.arguments) == 1)
+
+    assert [argument.formal_name for argument in keyword_call.arguments] == [
+        "second",
+        "first",
+    ]
+    assert all(argument.formal_type == "builtins.str" for argument in keyword_call.arguments)
+    assert [argument.expression_fullname for argument in keyword_call.arguments] == [
+        "app.handler.second",
+        "app.handler.first",
+    ]
+    assert starred_call.arguments[0].formal_name is None
+    assert any(
+        item.owner == starred_call.caller
+        and item.reason_code == "starred_actual_formal_binding_unresolved"
+        for item in graph.uncertainties
+    )
+
+
 def test_unmodeled_binding_effect_and_virtual_dispatch_are_per_evidence(
     tmp_path: Path,
 ) -> None:
