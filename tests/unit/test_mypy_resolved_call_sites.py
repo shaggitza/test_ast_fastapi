@@ -753,6 +753,55 @@ def test_missing_end_coordinates_and_malformed_source_abstain(tmp_path: Path) ->
     assert analyzer._call_source_identity(str(main), malformed) is None
 
 
+def test_growth_after_stale_size_check_is_rejected_before_ast_parse(
+    tmp_path: Path, monkeypatch
+) -> None:
+    main = tmp_path / "main.py"
+    main.write_bytes(b"x = 1\n" * 5)
+    canonical = str(main.resolve())
+    stale_stat = main.stat()
+    max_bytes = 100
+    grown_source = b"emit()\n" + (b"x = 1\n" * 40)
+    assert stale_stat.st_size < max_bytes < len(grown_source)
+    main.write_bytes(grown_source)
+
+    parsed_byte_lengths: list[int] = []
+    real_parse = ast.parse
+
+    def parse_spy(source, *args, **kwargs):
+        parsed_byte_lengths.append(len(source.encode("utf-8")))
+        return real_parse(source, *args, **kwargs)
+
+    monkeypatch.setattr(ast, "parse", parse_spy)
+    analyzer = MypyAnalyzer(tmp_path)
+    analyzer.MAX_CALL_SPAN_SOURCE_BYTES = max_bytes
+    callee = SimpleNamespace(line=1, column=0, end_line=1, end_column=4)
+
+    assert analyzer._call_source_identity(str(main), callee) is None
+    assert parsed_byte_lengths == []
+    assert analyzer._call_source_snapshot_cache[canonical] == grown_source[: max_bytes + 1]
+    assert canonical in analyzer._python_call_span_abstained
+
+
+def test_span_and_spelling_use_the_same_cached_source_snapshot(tmp_path: Path, monkeypatch) -> None:
+    main = tmp_path / "main.py"
+    main.write_bytes(b"emit()\n")
+    analyzer = MypyAnalyzer(tmp_path)
+    real_parse = ast.parse
+
+    def parse_then_mutate(source, *args, **kwargs):
+        tree = real_parse(source, *args, **kwargs)
+        main.write_bytes(b"ping()\n")
+        return tree
+
+    monkeypatch.setattr(ast, "parse", parse_then_mutate)
+    callee = SimpleNamespace(line=1, column=0, end_line=1, end_column=4)
+    identity = analyzer._call_source_identity(str(main), callee)
+
+    assert identity == (1, 0, 1, 4, "emit")
+    assert main.read_bytes() == b"ping()\n"
+
+
 def test_span_matching_abstains_when_any_traversal_budget_is_exhausted(
     tmp_path: Path,
 ) -> None:

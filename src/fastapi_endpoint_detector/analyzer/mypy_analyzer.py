@@ -437,6 +437,7 @@ class MypyAnalyzer:
         self._python_ast_nodes_cache: dict[str, list[ast.AST] | None] = {}
         self._python_verified_call_spans: dict[str, dict[int, tuple[int, int, int, int]]] = {}
         self._python_call_span_abstained: set[str] = set()
+        self._call_source_snapshot_cache: dict[str, bytes | None] = {}
         self._source_bytes_cache: dict[str, tuple[bytes, ...] | None] = {}
         self._resolved_call_site_cache: dict[int, ResolvedCallSite | None] = {}
         self._finite_global_value_cache: dict[str, _FinitePointsTo | None] = {}
@@ -579,6 +580,7 @@ class MypyAnalyzer:
         self._python_ast_nodes_cache.clear()
         self._python_verified_call_spans.clear()
         self._python_call_span_abstained.clear()
+        self._call_source_snapshot_cache.clear()
         self._source_bytes_cache.clear()
         self._resolved_call_site_cache.clear()
         self._finite_global_value_cache.clear()
@@ -1320,14 +1322,11 @@ class MypyAnalyzer:
             span = self._exact_coordinate_source_span(canonical, callee)
         if span is None:
             return None
+        source_snapshot = self._bounded_call_source_snapshot(canonical)
+        if source_snapshot is None:
+            return None
         line, column, end_line, end_column = span
-        if canonical not in self._source_bytes_cache:
-            try:
-                self._source_bytes_cache[canonical] = tuple(
-                    Path(canonical).read_bytes().splitlines(keepends=True)
-                )
-            except OSError:
-                self._source_bytes_cache[canonical] = None
+        self._source_bytes_cache[canonical] = tuple(source_snapshot.splitlines(keepends=True))
         lines = self._source_bytes_cache[canonical]
         spelling = ""
         if lines is not None and end_line is not None and end_line <= len(lines):
@@ -1349,6 +1348,22 @@ class MypyAnalyzer:
             return None
         return line, column, end_line, end_column, spelling
 
+    def _bounded_call_source_snapshot(self, canonical: str) -> bytes | None:
+        """Cache at most the configured source byte limit plus one probe byte."""
+        if canonical not in self._call_source_snapshot_cache:
+            try:
+                with Path(canonical).open("rb") as source_file:
+                    snapshot = source_file.read(self.MAX_CALL_SPAN_SOURCE_BYTES + 1)
+            except OSError:
+                snapshot = None
+            self._call_source_snapshot_cache[canonical] = snapshot
+
+        snapshot = self._call_source_snapshot_cache[canonical]
+        if snapshot is not None and len(snapshot) > self.MAX_CALL_SPAN_SOURCE_BYTES:
+            self._python_call_span_abstained.add(canonical)
+            return None
+        return snapshot
+
     def _exact_coordinate_source_span(
         self,
         canonical: str,
@@ -1363,13 +1378,13 @@ class MypyAnalyzer:
             return None
         if line < 1 or column < 0 or end_line < line or end_column < 0:
             return None
+        source_snapshot = self._bounded_call_source_snapshot(canonical)
+        if source_snapshot is None:
+            return None
         if canonical not in self._python_ast_cache:
             try:
-                if Path(canonical).stat().st_size > self.MAX_CALL_SPAN_SOURCE_BYTES:
-                    self._python_call_span_abstained.add(canonical)
-                    return None
                 self._python_ast_cache[canonical] = ast.parse(
-                    Path(canonical).read_text(encoding="utf-8"), filename=canonical
+                    source_snapshot.decode("utf-8"), filename=canonical
                 )
             except (OSError, SyntaxError, UnicodeError, RecursionError):
                 self._python_ast_cache[canonical] = None
@@ -1380,7 +1395,7 @@ class MypyAnalyzer:
         if nodes is None:
             return None
         try:
-            source_lines = Path(canonical).read_text(encoding="utf-8").splitlines()
+            source_lines = source_snapshot.decode("utf-8").splitlines()
 
             def forms(source_line: int, byte_column: int) -> set[int]:
                 raw = source_lines[source_line - 1].encode("utf-8")
@@ -1445,11 +1460,11 @@ class MypyAnalyzer:
         """Pair calls only when both complete per-line source sequences agree."""
         from mypy.nodes import CallExpr, FuncDef, LambdaExpr, MemberExpr, NameExpr, Node
 
+        source_snapshot = self._bounded_call_source_snapshot(canonical)
+        if source_snapshot is None:
+            return {}
         try:
-            if Path(canonical).stat().st_size > self.MAX_CALL_SPAN_SOURCE_BYTES:
-                self._python_call_span_abstained.add(canonical)
-                return {}
-            source = Path(canonical).read_text(encoding="utf-8")
+            source = source_snapshot.decode("utf-8")
             python_tree = ast.parse(source, filename=canonical)
         except (OSError, SyntaxError, UnicodeError, RecursionError):
             return {}
