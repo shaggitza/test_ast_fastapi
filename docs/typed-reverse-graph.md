@@ -8,6 +8,9 @@ source hashes, records engine/config/provider provenance, and emits one witness
 for every physical call or supported global reference. Querying starts from
 side-qualified changed symbols and follows caller edges in reverse, preserving
 all route occurrence bindings and reconvergent physical paths.
+`ChangedSeed.occurrence_id` optionally scopes exact and uncertain evidence to
+one route occurrence; it is part of deterministic evidence identity, so two
+changed occurrences of the same canonical symbol are not merged.
 
 The graph records exact mypy-resolved call targets and explicit-import aliases.
 It does not invent targets for unresolved names, guess instance dispatch from a
@@ -69,7 +72,8 @@ branch:
    `conditional=True` for conditional registrations so the binding enforces
    the LOW cap.
 3. Build one graph per snapshot, map added target and removed baseline hunks to
-   exact symbol seeds, and query the matching side.
+   exact symbol seeds, optionally carrying an occurrence ID when the change
+   belongs to one route occurrence, and query the matching side.
 4. Convert `ImpactEvidence` back to existing mapper evidence while retaining
    physical call coordinates and the existing effect/conditional-route caps.
 5. Keep the new path behind an explicit opt-in switch until full-depth parity,

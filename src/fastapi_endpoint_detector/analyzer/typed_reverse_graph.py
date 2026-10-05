@@ -246,8 +246,8 @@ class TypedReverseGraph:
         by_symbol: dict[str, list[EndpointOccurrenceBinding]] = {}
         for binding in bindings:
             by_symbol.setdefault(binding.symbol, []).append(binding)
-        evidence: dict[tuple[str, str, str], ImpactEvidence] = {}
-        uncertain_evidence: dict[tuple[str, str, str, str], PotentialImpactEvidence] = {}
+        evidence: dict[tuple[str, str, str, str], ImpactEvidence] = {}
+        uncertain_evidence: dict[tuple[str, str, str, str, str], PotentialImpactEvidence] = {}
         uncertainties_by_owner: dict[str, tuple[UncertaintyWitness, ...]] = {}
         for item in self.uncertainties:
             uncertainties_by_owner.setdefault(item.owner, ())
@@ -281,6 +281,8 @@ class TypedReverseGraph:
                     affected.add(seed.symbol)
                     break
                 for occurrence in sorted(by_symbol.get(current, ()), key=_binding_key):
+                    if seed.occurrence_id and seed.occurrence_id != occurrence.occurrence_id:
+                        continue
                     confidence = _confidence((occurrence.confidence, *(e.confidence for e in path)))
                     exec_state = _join_execution(edge.execution_state for edge in path)
                     ref_state = _join_reference(edge.reference_state for edge in path)
@@ -315,7 +317,9 @@ class TypedReverseGraph:
                         path_uncertainties,
                     )
                     path_id = "/".join(edge.witness_id for edge in record.witnesses)
-                    evidence[(occurrence.occurrence_id, seed.symbol, path_id)] = record
+                    evidence[
+                        (occurrence.occurrence_id, seed.symbol, seed.occurrence_id or "", path_id)
+                    ] = record
                 if len(path) >= budgets.depth:
                     if index.get(current):
                         reasons.add("depth_budget")
@@ -366,6 +370,8 @@ class TypedReverseGraph:
                         uncertain_capped = True
                         break
                     for occurrence in sorted(by_symbol.get(current, ()), key=_binding_key):
+                        if seed.occurrence_id and seed.occurrence_id != occurrence.occurrence_id:
+                            continue
                         path_id = "/".join(edge.witness_id for edge in path)
                         potential_record = PotentialImpactEvidence(
                             side,
@@ -383,6 +389,7 @@ class TypedReverseGraph:
                             (
                                 occurrence.occurrence_id,
                                 seed.symbol,
+                                seed.occurrence_id or "",
                                 uncertainty.uncertainty_id,
                                 path_id,
                             )
@@ -460,6 +467,7 @@ class TypedReverseGraph:
                     item.occurrence.occurrence_id,
                     item.side,
                     item.seed.symbol,
+                    item.seed.occurrence_id or "",
                     item.uncertainty.uncertainty_id,
                     tuple(edge.witness_id for edge in item.supporting_witnesses),
                 ),
@@ -673,6 +681,12 @@ class _ModuleWalker:
                 resolved_target_node = function_node
             else:
                 invocation = "unknown"
+            if isinstance(base_node, TypeInfo) and invocation == "instance_method":
+                # A class object does not supply the actual instance receiver;
+                # unbound method calls need an explicit receiver binding API.
+                target = None
+                resolved_target_node = None
+                invocation = "unknown"
         if target and _is_project_symbol(target, self.module_ids):
             span = self._span(node)
             receiver = (
@@ -708,11 +722,7 @@ class _ModuleWalker:
             )
             self.edges.append(edge)
             self.symbols.setdefault(self.owner, self._symbol(self.owner, "function", node))
-            if isinstance(node.callee, MemberExpr) and invocation in {
-                "instance_method",
-                "class_method",
-                "function",
-            }:
+            if isinstance(node.callee, MemberExpr) and invocation == "instance_method":
                 self._record_uncertainty(
                     self.owner,
                     node,
@@ -1284,11 +1294,12 @@ def _join_reference(values: Any) -> Literal["reference", "invocation", "unknown"
     )
 
 
-def _evidence_key(item: ImpactEvidence) -> tuple[str, str, str, str]:
+def _evidence_key(item: ImpactEvidence) -> tuple[str, str, str, str, str]:
     return (
         item.occurrence.occurrence_id,
         item.side,
         item.seed.symbol,
+        item.seed.occurrence_id or "",
         "/".join(e.witness_id for e in item.witnesses),
     )
 
@@ -1398,6 +1409,8 @@ def seeds_for_changed_coordinates(
     side: GraphSide,
     changed: tuple[tuple[str, int, int], ...] | list[tuple[str, int, int]],
     graph: TypedReverseGraph,
+    *,
+    occurrence_id: str | None = None,
 ) -> tuple[ChangedSeed, ...]:
     """Map exact path/line/column changes to graph symbols; no basename matching."""
     seeds: set[ChangedSeed] = set()
@@ -1412,5 +1425,5 @@ def seeds_for_changed_coordinates(
                 and (line != span.start_line or column >= span.start_column)
                 and (line != span.end_line or column <= span.end_column)
             ):
-                seeds.add(ChangedSeed(side, symbol.fullname, span))
+                seeds.add(ChangedSeed(side, symbol.fullname, span, occurrence_id))
     return tuple(sorted(seeds, key=_seed_key))

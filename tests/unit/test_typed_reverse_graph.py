@@ -103,9 +103,21 @@ def test_snapshot_graph_preserves_reconvergent_physical_paths_and_occurrences(
     result = graph.query(
         [ChangedSeed("target", _fullname(snapshot, leaf_module, "changed"))], side="target"
     )
+    occurrence_result = graph.query(
+        [
+            ChangedSeed(
+                "target",
+                _fullname(snapshot, leaf_module, "changed"),
+                occurrence_id="route-a",
+            )
+        ],
+        side="target",
+    )
 
     assert len(result.evidence) == 4  # two paths x two physical route occurrences
     assert {item.occurrence.occurrence_id for item in result.evidence} == {"route-a", "route-b"}
+    assert len(occurrence_result.evidence) == 2
+    assert {item.occurrence.occurrence_id for item in occurrence_result.evidence} == {"route-a"}
     assert {len(item.witnesses) for item in result.evidence} == {2}
     assert not result.incomplete.capped
 
@@ -155,7 +167,11 @@ def test_caps_are_explicit_and_fail_closed_even_when_evidence_was_found(tmp_path
     inventory, snapshot, _ = _snapshot(
         tmp_path,
         {
-            "app": "def handler():\n    return None\ndef dispatcher():\n    handler()\n",
+            "app": (
+                "def handler():\n    return None\n"
+                "def dispatcher():\n    handler()\n"
+                "def outer():\n    dispatcher()\n"
+            ),
         },
     )
     app_module = _module(snapshot, "app")
@@ -172,6 +188,21 @@ def test_caps_are_explicit_and_fail_closed_even_when_evidence_was_found(tmp_path
     assert result.evidence
     assert all(item.confidence == "LOW" for item in result.evidence)
     assert all(item.incomplete.capped for item in result.evidence)
+
+    expected_reasons = {
+        "depth_budget": TraversalBudgets(depth=1),
+        "enqueue_budget": TraversalBudgets(enqueues=0),
+        "frontier_budget": TraversalBudgets(frontier=0),
+        "witness_budget": TraversalBudgets(witnesses=0),
+    }
+    for expected_reason, budgets in expected_reasons.items():
+        capped = graph.query(
+            [ChangedSeed("target", _fullname(snapshot, app_module, "handler"))],
+            side="target",
+            budgets=budgets,
+        )
+        assert capped.incomplete.capped
+        assert expected_reason in capped.incomplete.reasons
 
 
 def test_cache_rejects_changed_bytes_symlinks_and_root_mismatch(tmp_path: Path) -> None:
