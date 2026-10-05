@@ -476,12 +476,12 @@ def test_exact_pathlib_calls_match_and_unrelated_same_name_methods_do_not(
         cache_enabled=False,
         resolver_versions=(f"mypy@{MypyAnalyzer(tmp_path).resolver_version}",),
     )
-
     assert audit.summary.matched_calls == 4, [
         (item.source_spelling, item.canonical_symbol, item.reason_code)
         for item in audit.occurrences
     ]
-    assert audit.summary.unmatched_calls == 7
+    assert audit.summary.unmatched_calls == 2
+    assert audit.summary.ambiguous_calls == 5
     assert {item.contract_id for item in audit.occurrences if item.contract_id} == {
         "pathlib-read-text",
         "pathlib-write-text",
@@ -492,13 +492,16 @@ def test_exact_pathlib_calls_match_and_unrelated_same_name_methods_do_not(
         for item in audit.occurrences
         if item.canonical_symbol is not None and item.audit_status.value == "unmatched"
     }
-    assert unmatched_symbols == {
-        "read_text",
-        "open",
-        "get",
-        "set",
-        "write",
-        "send",
+    assert unmatched_symbols == {"open"}
+    ambiguous_spellings = {
+        item.source_spelling for item in audit.occurrences if item.audit_status.value == "ambiguous"
+    }
+    assert ambiguous_spellings == {
+        "foreign.read_text",
+        "foreign.get",
+        "foreign.set",
+        "foreign.write",
+        "foreign.send",
     }
     write_site = next(
         item
