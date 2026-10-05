@@ -119,6 +119,29 @@ class SymbolReference:
         return self.start_line <= line <= self.end_line
 
 
+@dataclass(frozen=True)
+class SourceEvidenceSpan:
+    """Exact CPython source span for a deferred or invoked lambda body."""
+
+    file_path: str
+    start_line: int
+    start_column: int
+    end_line: int
+    end_column: int
+    execution_state: str
+    evidence_kind: str = "lambda_body"
+
+    def __post_init__(self) -> None:
+        if self.execution_state not in {"executed", "deferred"}:
+            raise ValueError("unsupported source evidence execution state")
+        if self.evidence_kind != "lambda_body":
+            raise ValueError("unsupported source evidence kind")
+        if self.start_line < 1 or self.end_line < self.start_line:
+            raise ValueError("source evidence span lines are invalid")
+        if self.start_column < 0 or self.end_column < 0:
+            raise ValueError("source evidence span columns are invalid")
+
+
 @dataclass
 class _ProjectPathIndex:
     """Shared canonical project inventory with fail-closed query resolution."""
@@ -184,6 +207,8 @@ class EndpointDependencies:
     """Mapping of file path -> list of call stacks showing all paths from handler to that file."""
     resolved_call_sites: list[ResolvedCallSite] = field(default_factory=list)
     """Source-backed call occurrences reached from this endpoint."""
+    source_evidence_spans: list[SourceEvidenceSpan] = field(default_factory=list)
+    """Column-precise execution state for callable bodies sharing physical lines."""
     source_root: str = ""
     project_files: set[str] | frozenset[str] = field(default_factory=set)
     analysis_incomplete: bool = False
@@ -248,6 +273,75 @@ class EndpointDependencies:
         self.resolved_call_sites.append(call_site)
         self._canonical_key_indexes.pop("resolved_call_sites", None)
 
+    def add_source_evidence_span(self, span: SourceEvidenceSpan) -> None:
+        """Record one precise source-body state, preferring invocation over deferral."""
+        if span.execution_state == "executed":
+            self.source_evidence_spans = [
+                existing
+                for existing in self.source_evidence_spans
+                if not (
+                    existing.file_path == span.file_path
+                    and existing.start_line == span.start_line
+                    and existing.start_column == span.start_column
+                    and existing.end_line == span.end_line
+                    and existing.end_column == span.end_column
+                    and existing.evidence_kind == span.evidence_kind
+                )
+            ]
+        elif any(
+            existing.file_path == span.file_path
+            and existing.start_line == span.start_line
+            and existing.start_column == span.start_column
+            and existing.end_line == span.end_line
+            and existing.end_column == span.end_column
+            and existing.evidence_kind == span.evidence_kind
+            and existing.execution_state == "executed"
+            for existing in self.source_evidence_spans
+        ):
+            return
+        if span not in self.source_evidence_spans:
+            self.source_evidence_spans.append(span)
+            self.source_evidence_spans.sort(
+                key=lambda item: (
+                    item.file_path,
+                    item.start_line,
+                    item.start_column,
+                    item.end_line,
+                    item.end_column,
+                    item.evidence_kind,
+                    item.execution_state,
+                )
+            )
+
+    def get_source_evidence_spans(
+        self,
+        file_path: str | None = None,
+        *,
+        execution_state: str | None = None,
+    ) -> list[SourceEvidenceSpan]:
+        """Return deterministic precise callable-body evidence."""
+        selected = self.source_evidence_spans
+        if file_path is not None:
+            matches = self._matching_paths(
+                file_path,
+                (item.file_path for item in selected),
+                "source_evidence_spans",
+            )
+            selected = [item for item in selected if item.file_path in matches]
+        if execution_state is not None:
+            selected = [item for item in selected if item.execution_state == execution_state]
+        return sorted(
+            selected,
+            key=lambda item: (
+                item.file_path,
+                item.start_line,
+                item.start_column,
+                item.end_line,
+                item.end_column,
+                item.execution_state,
+            ),
+        )
+
     def _matching_paths(
         self,
         file_path: str,
@@ -269,6 +363,7 @@ class EndpointDependencies:
                         *(ref.file_path for ref in self.referenced_symbols),
                         *self.call_stacks,
                         *(site.file_path for site in self.resolved_call_sites),
+                        *(span.file_path for span in self.source_evidence_spans),
                     }
                 )
                 index = _ProjectPathIndex(self.source_root, inventory)
@@ -419,7 +514,7 @@ class MypyAnalyzer:
     and extract precise file/line information for all references.
     """
 
-    CACHE_SCHEMA_VERSION = 20
+    CACHE_SCHEMA_VERSION = 21
     MAX_POINTS_TO_TARGETS = 8
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
@@ -915,6 +1010,53 @@ class MypyAnalyzer:
         # conservatively indivisible.
         end = definition.body[0].lineno - 1 if definition.body else definition.lineno
         return start, max(start, end)
+
+    def _lambda_body_source_span(
+        self,
+        func_node: Any,
+        lambda_node: Any,
+        file_path: str,
+        execution_state: str,
+    ) -> SourceEvidenceSpan | None:
+        """Map a mypy lambda to one unique CPython body span or abstain."""
+        import ast
+
+        actual = self._actual_function(func_node)
+        function_name = getattr(actual, "name", None)
+        function_line = int(getattr(actual, "line", 0) or 0)
+        lambda_line = int(getattr(lambda_node, "line", 0) or 0)
+        if not isinstance(function_name, str) or function_line < 1 or lambda_line < 1:
+            return None
+        try:
+            source = Path(file_path).read_text(encoding="utf-8")
+            module = ast.parse(source)
+        except (OSError, SyntaxError, UnicodeDecodeError):
+            return None
+        definitions = [
+            item
+            for item in ast.walk(module)
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and item.name == function_name
+            and item.lineno == function_line
+        ]
+        if len(definitions) != 1:
+            return None
+        lambdas = [
+            item
+            for item in ast.walk(definitions[0])
+            if isinstance(item, ast.Lambda) and item.lineno == lambda_line
+        ]
+        if len(lambdas) != 1:
+            return None
+        body = lambdas[0].body
+        return SourceEvidenceSpan(
+            file_path=file_path,
+            start_line=body.lineno,
+            start_column=body.col_offset,
+            end_line=body.end_lineno or body.lineno,
+            end_column=body.end_col_offset or body.col_offset,
+            execution_state=execution_state,
+        )
 
     def _resolve_fullname_to_file(self, fullname: str) -> tuple[str, str] | None:
         """Resolve one fullname with snapshot-local memoization."""
@@ -3891,6 +4033,21 @@ class MypyAnalyzer:
             str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]
         ] = dict(initial_callable_environment or {})
         lambda_environment: dict[str, Any] = {}
+        lambda_execution_states: dict[int, str] = {}
+
+        def record_lambda_execution(expression: Any, state: str) -> None:
+            """Attach exact source-body state when its AST identity is unique."""
+            if not isinstance(expression, LambdaExpr):
+                return
+            lambda_execution_states[id(expression)] = state
+            span = self._lambda_body_source_span(
+                function_node,
+                expression,
+                current_file,
+                state,
+            )
+            if span is not None:
+                deps.add_source_evidence_span(span)
 
         def resolve_and_trace(
             fullname: str,
@@ -4181,6 +4338,7 @@ class MypyAnalyzer:
                                 finite_edge_budget=finite_edge_budget,
                             )
                     else:
+                        record_lambda_execution(lambda_expression, "executed")
                         walk_node(assigned_lambda.body)
                     string_environment = original_strings
                     traced = True
@@ -4510,6 +4668,7 @@ class MypyAnalyzer:
 
             # Walk nested calls before invalidating mutable local object state.
             if isinstance(callee, LambdaExpr):
+                record_lambda_execution(callee, "executed")
                 walk_node(callee.body)
             walk_node(callee)
             for arg in call.args:
@@ -5063,6 +5222,10 @@ class MypyAnalyzer:
                     walk_node(n.sequences[0])
 
             elif isinstance(n, LambdaExpr):
+                record_lambda_execution(
+                    n,
+                    lambda_execution_states.get(id(n), "deferred"),
+                )
                 # Walk lambda arguments (for default values)
                 if hasattr(n, "arguments"):
                     for arg in n.arguments:
@@ -5310,6 +5473,18 @@ class MypyAnalyzer:
                     site.model_dump(mode="json", exclude_none=True)
                     for site in deps.get_resolved_call_sites()
                 ],
+                "source_evidence_spans": [
+                    {
+                        "file_path": span.file_path,
+                        "start_line": span.start_line,
+                        "start_column": span.start_column,
+                        "end_line": span.end_line,
+                        "end_column": span.end_column,
+                        "execution_state": span.execution_state,
+                        "evidence_kind": span.evidence_kind,
+                    }
+                    for span in deps.get_source_evidence_spans()
+                ],
                 "call_stacks": {
                     f: [
                         [
@@ -5407,6 +5582,26 @@ class MypyAnalyzer:
                 resolved_call_sites = [
                     ResolvedCallSite.model_validate(item) for item in call_sites_data
                 ]
+                source_span_data = deps_data.get("source_evidence_spans", [])
+                if not isinstance(source_span_data, list):
+                    self._endpoint_deps.clear()
+                    return False
+                source_evidence_spans = [
+                    SourceEvidenceSpan(
+                        file_path=item["file_path"],
+                        start_line=item["start_line"],
+                        start_column=item["start_column"],
+                        end_line=item["end_line"],
+                        end_column=item["end_column"],
+                        execution_state=item["execution_state"],
+                        evidence_kind=item.get("evidence_kind", "lambda_body"),
+                    )
+                    for item in source_span_data
+                    if isinstance(item, dict)
+                ]
+                if len(source_evidence_spans) != len(source_span_data):
+                    self._endpoint_deps.clear()
+                    return False
 
                 symbol_refs: list[SymbolReference] = []
                 for ref_data in deps_data.get("referenced_symbols", []):
@@ -5435,6 +5630,7 @@ class MypyAnalyzer:
                     referenced_symbols=symbol_refs,
                     call_stacks=call_stacks,
                     resolved_call_sites=resolved_call_sites,
+                    source_evidence_spans=source_evidence_spans,
                     source_root=str(self.source_root),
                     project_files=path_index.project_files,
                     _path_index=path_index,
