@@ -197,10 +197,13 @@ class _CallIndexer(ast.NodeVisitor):
             and begin_receiver[: len(captured_receiver)] == captured_receiver
         )
         receiver_yield_is_authorized = begin_key in self.captured_context_receivers
-        if receiver_is_shadowed:
-            if not receiver_yield_is_authorized:
-                return
+        if receiver_yield_is_authorized and captured_receiver is not None:
+            # The exact contract says stages use the value yielded by this
+            # context manager. Prefer that receiver even when the factory
+            # expression itself has a receiver (for example factory.begin()).
             begin_receiver = captured_receiver
+        elif receiver_is_shadowed:
+            return
         # `as name` captures __enter__/__aenter__'s yielded value. It can stand
         # in for the receiver only when the exact begin contract explicitly
         # declares that the context yields the receiver used by its scoped stage.

@@ -439,6 +439,7 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
         "    def add(self, value: str) -> None: pass\n\n"
         "class UnitOfWorkFactory:\n"
         "    def begin(self) -> YieldedUnitOfWork: return YieldedUnitOfWork()\n\n"
+        "    def untrusted_begin(self) -> YieldedUnitOfWork: return YieldedUnitOfWork()\n\n"
         "class ReceiverlessContext:\n"
         "    def __enter__(self) -> Session: return Session()\n"
         "    def __exit__(self, exc_type, exc, tb): return False\n\n"
@@ -498,6 +499,16 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
         "    work = UnitOfWorkFactory()\n"
         "    with work.begin() as work:\n"
         "        work.add('shadowed')\n\n"
+        "@app.post('/trusted-method-yield-context')\n"
+        "def trusted_method_yield_context() -> None:\n"
+        "    factory = UnitOfWorkFactory()\n"
+        "    with factory.begin() as transaction:\n"
+        "        transaction.add('yielded')\n\n"
+        "@app.post('/untrusted-method-yield-context')\n"
+        "def untrusted_method_yield_context() -> None:\n"
+        "    factory = UnitOfWorkFactory()\n"
+        "    with factory.untrusted_begin() as transaction:\n"
+        "        transaction.add('unproven-yielded')\n\n"
         "@app.post('/attribute')\n"
         "def attribute_receiver() -> None:\n"
         "    holder = Holder()\n"
@@ -636,6 +647,19 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
                             "timing": "context_enter",
                             "transaction_scope": "transaction",
                             "context_exit": "transaction_commit_rollback",
+                            "stage_receiver_from_yield": True,
+                        },
+                    },
+                    {
+                        "id": "uow-factory-untrusted-begin",
+                        "symbol": f"{root.name}.main.UnitOfWorkFactory.untrusted_begin",
+                        "invocation": "instance_method",
+                        "operation": "begin",
+                        "channel": "sql",
+                        "behavior": {
+                            "timing": "context_enter",
+                            "transaction_scope": "transaction",
+                            "context_exit": "transaction_commit_rollback",
                         },
                     },
                     {
@@ -739,8 +763,8 @@ def test_ordered_paths_require_same_scope_receiver_and_straight_line(tmp_path: P
         "ordered_flushes": 1,
         "ordered_commits": 3,
         "ordered_rollbacks": 0,
-        "context_manager_paths": 6,
-        "context_transactions": 5,
+        "context_manager_paths": 7,
+        "context_transactions": 6,
         "context_savepoints": 1,
         "unresolved_pairs": 8,
     }
@@ -770,9 +794,15 @@ def test_ordered_paths_require_same_scope_receiver_and_straight_line(tmp_path: P
         "wrapper_context",
         "captured_context",
         "trusted_receiverless_captured_context",
+        "trusted_method_yield_context",
     }
     assert all(
-        item.function_name not in {"receiverless_captured_context", "receiver_shadow_context"}
+        item.function_name
+        not in {
+            "receiverless_captured_context",
+            "receiver_shadow_context",
+            "untrusted_method_yield_context",
+        }
         for item in paths.context_paths
     )
     managed = next(item for item in paths.context_paths if item.function_name == "managed_context")

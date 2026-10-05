@@ -365,7 +365,10 @@ class EffectContractDocument(_StrictModel):
     def normalized_payload(self) -> dict[str, Any]:
         """Return canonical semantic content, independent of YAML ordering."""
         payload = self.model_dump(mode="json", exclude_none=True)
-        payload["contracts"] = sorted(payload["contracts"], key=lambda item: item["id"])
+        payload["contracts"] = sorted(
+            (_contract_document_payload(contract) for contract in self.contracts),
+            key=lambda item: item["id"],
+        )
         return payload
 
     @property
@@ -609,3 +612,12 @@ def _semantic_hash(payload: object) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return f"sha256:{hashlib.sha256(canonical).hexdigest()}"
+
+
+def _contract_document_payload(contract: EffectContract) -> dict[str, Any]:
+    """Serialize a document contract without adding default-false hash fields."""
+    payload = contract.model_dump(mode="json", exclude_none=True)
+    behavior = payload.get("behavior")
+    if isinstance(behavior, dict) and behavior.get("stage_receiver_from_yield") is False:
+        behavior.pop("stage_receiver_from_yield")
+    return payload
