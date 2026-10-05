@@ -50,6 +50,7 @@ class SQLTransactionBeginScopeEvidence(_StrictModel):
     scope: TransactionScope
     timing: EffectTiming
     context_exit: ContextExitSemantics | None = None
+    stage_receiver_from_yield: bool = False
 
     @model_validator(mode="after")
     def validate_context_exit(self) -> SQLTransactionBeginScopeEvidence:

@@ -79,6 +79,7 @@ class ResourceSelectorKind(str, Enum):
     KEYWORD = "keyword"
     KEYWORD_OR_HANDLER_NAME = "keyword_or_handler_name"
     HANDLER_NAME = "handler_name"
+    HANDLER_IDENTITY = "handler_identity"
     LITERAL = "literal"
 
 
@@ -92,6 +93,14 @@ class SurfaceExecutionMode(str, Enum):
     SCHEDULER = "scheduler"
     CLI_DISPATCH = "cli_dispatch"
     FRAMEWORK = "framework"
+
+
+class ContractMultiplicity(str, Enum):
+    """Registration behavior declared by a versioned framework preset."""
+
+    UNKNOWN = "unknown"
+    ALL_EXECUTE = "all_execute"
+    LAST_WINS = "last_wins"
 
 
 class CallbackMode(str, Enum):
@@ -273,6 +282,7 @@ class SurfaceContract(_StrictModel):
     callback_mode: CallbackMode = CallbackMode.EITHER
     callback_range: CallbackRangeMode = CallbackRangeMode.FULL
     execution_mode: SurfaceExecutionMode = SurfaceExecutionMode.DIRECT
+    multiplicity: ContractMultiplicity | None = ContractMultiplicity.UNKNOWN
     activates_routes: bool = False
     conditions: tuple[str, ...] = ()
     provenance: ContractProvenance | None = None

@@ -1,0 +1,241 @@
+From f413ce7354c3981f1e22c9d784f4197ac253a41a Mon Sep 17 00:00:00 2001
+From: Boris Smus <borismus@users.noreply.github.com>
+Date: Mon, 29 Dec 2025 01:39:19 -0800
+Subject: [PATCH] Enable excluding folders to sync from obsidian plugin
+ settings (#1235)
+
+- Add excludeFolders field to KhojSetting interface
+- Rename 'Sync Folders' to 'Include Folders' for clarity
+- Add 'Exclude Folders' UI section with folder picker
+- Filter out excluded folders during content sync
+- Show file counts when syncing (X of Y files)
+- Prevent excluding root folder
+
+This allows users to exclude specific directories (e.g., Inbox,
+Highlights) from being indexed, while the existing Include Folders acts
+as a whitelist.
+
+---------
+
+Co-authored-by: Debanjum <debanjum@gmail.com>
+---
+ src/interface/obsidian/src/settings.ts | 96 +++++++++++++++++++++-----
+ src/interface/obsidian/src/utils.ts    | 30 +++++++-
+ 2 files changed, 104 insertions(+), 22 deletions(-)
+
+diff --git a/src/interface/obsidian/src/settings.ts b/src/interface/obsidian/src/settings.ts
+index 4a07ca0c7..e7e443215 100644
+--- a/src/interface/obsidian/src/settings.ts
++++ b/src/interface/obsidian/src/settings.ts
+@@ -36,6 +36,7 @@ export interface KhojSetting {
+     syncFileType: SyncFileTypes;
+     userInfo: UserInfo | null;
+     syncFolders: string[];
++    excludeFolders: string[];
+     syncInterval: number;
+     autoVoiceResponse: boolean;
+     fileAccessMode: 'none' | 'read' | 'write';
+@@ -57,6 +58,7 @@ export const DEFAULT_SETTINGS: KhojSetting = {
+     },
+     userInfo: null,
+     syncFolders: [],
++    excludeFolders: [],
+     syncInterval: 60,
+     autoVoiceResponse: true,
+     fileAccessMode: 'read',
+@@ -273,11 +275,11 @@ export class KhojSettingTab extends PluginSettingTab {
+                     this.plugin.restartSyncTimer();
+                 }));
+ 
+-        // Add setting to manage sync folders
+-        const syncFoldersContainer = containerEl.createDiv('sync-folders-container');
+-        new Setting(syncFoldersContainer)
+-            .setName('Sync Folders')
+-            .setDesc('Specify folders to sync (leave empty to sync entire vault)')
++        // Add setting to manage include folders
++        const includeFoldersContainer = containerEl.createDiv('include-folders-container');
++        new Setting(includeFoldersContainer)
++            .setName('Include Folders')
++            .setDesc('Folders to sync (leave empty to sync entire vault)')
+             .addButton(button => button
+                 .setButtonText('Add Folder')
+                 .onClick(() => {
+@@ -285,15 +287,42 @@ export class KhojSettingTab extends PluginSettingTab {
+                         if (!this.plugin.settings.syncFolders.includes(folder)) {
+                             this.plugin.settings.syncFolders.push(folder);
+                             this.plugin.saveSettings();
+-                            this.updateFolderList(folderListEl);
++                            this.updateIncludeFolderList(includeFolderListEl);
+                         }
+                     });
+                     modal.open();
+                 }));
+ 
+-        // Create a list to display selected folders
+-        const folderListEl = syncFoldersContainer.createDiv('folder-list');
+-        this.updateFolderList(folderListEl);
++        // Create a list to display selected include folders
++        const includeFolderListEl = includeFoldersContainer.createDiv('folder-list');
++        this.updateIncludeFolderList(includeFolderListEl);
++
++        // Add setting to manage exclude folders
++        const excludeFoldersContainer = containerEl.createDiv('exclude-folders-container');
++        new Setting(excludeFoldersContainer)
++            .setName('Exclude Folders')
++            .setDesc('Folders to exclude from sync (takes precedence over includes)')
++            .addButton(button => button
++                .setButtonText('Add Folder')
++                .onClick(() => {
++                    const modal = new FolderSuggestModal(this.app, (folder: string) => {
++                        // Don't allow excluding root folder
++                        if (folder === '') {
++                            new Notice('Cannot exclude the root folder');
++                            return;
++                        }
++                        if (!this.plugin.settings.excludeFolders.includes(folder)) {
++                            this.plugin.settings.excludeFolders.push(folder);
++                            this.plugin.saveSettings();
++                            this.updateExcludeFolderList(excludeFolderListEl);
++                        }
++                    });
++                    modal.open();
++                }));
++
++        // Create a list to display selected exclude folders
++        const excludeFolderListEl = excludeFoldersContainer.createDiv('folder-list');
++        this.updateExcludeFolderList(excludeFolderListEl);
+ 
+         let indexVaultSetting = new Setting(containerEl);
+         indexVaultSetting
+@@ -441,19 +470,52 @@ export class KhojSettingTab extends PluginSettingTab {
+         });
+     }
+ 
+-    // Helper method to update the folder list display
+-    private updateFolderList(containerEl: HTMLElement) {
++    // Helper method to update the include folder list display
++    private updateIncludeFolderList(containerEl: HTMLElement) {
++        this.updateFolderList(
++            containerEl,
++            this.plugin.settings.syncFolders,
++            'Including entire vault',
++            async (folder) => {
++                this.plugin.settings.syncFolders = this.plugin.settings.syncFolders.filter(f => f !== folder);
++                await this.plugin.saveSettings();
++                this.updateIncludeFolderList(containerEl);
++            }
++        );
++    }
++
++    // Helper method to update the exclude folder list display
++    private updateExcludeFolderList(containerEl: HTMLElement) {
++        this.updateFolderList(
++            containerEl,
++            this.plugin.settings.excludeFolders,
++            'No folders excluded',
++            async (folder) => {
++                this.plugin.settings.excludeFolders = this.plugin.settings.excludeFolders.filter(f => f !== folder);
++                await this.plugin.saveSettings();
++                this.updateExcludeFolderList(containerEl);
++            }
++        );
++    }
++
++    // Shared helper to render a folder list with remove buttons
++    private updateFolderList(
++        containerEl: HTMLElement,
++        folders: string[],
++        emptyText: string,
++        onRemove: (folder: string) => void
++    ) {
+         containerEl.empty();
+-        if (this.plugin.settings.syncFolders.length === 0) {
++        if (folders.length === 0) {
+             containerEl.createEl('div', {
+-                text: 'Syncing entire vault',
++                text: emptyText,
+                 cls: 'folder-list-empty'
+             });
+             return;
+         }
+ 
+         const list = containerEl.createEl('ul', { cls: 'folder-list' });
+-        this.plugin.settings.syncFolders.forEach(folder => {
++        folders.forEach(folder => {
+             const item = list.createEl('li', { cls: 'folder-list-item' });
+             item.createSpan({ text: folder });
+ 
+@@ -461,11 +523,7 @@ export class KhojSettingTab extends PluginSettingTab {
+                 cls: 'folder-list-remove',
+                 text: '×'
+             });
+-            removeButton.addEventListener('click', async () => {
+-                this.plugin.settings.syncFolders = this.plugin.settings.syncFolders.filter(f => f !== folder);
+-                await this.plugin.saveSettings();
+-                this.updateFolderList(containerEl);
+-            });
++            removeButton.addEventListener('click', () => onRemove(folder));
+         });
+     }
+ }
+diff --git a/src/interface/obsidian/src/utils.ts b/src/interface/obsidian/src/utils.ts
+index 4a4faae4d..29c81bc4e 100644
+--- a/src/interface/obsidian/src/utils.ts
++++ b/src/interface/obsidian/src/utils.ts
+@@ -73,7 +73,7 @@ export async function updateContentIndex(vault: Vault, setting: KhojSetting, las
+             if (fileTypeToExtension.image.includes(file.extension)) return setting.syncFileType.images;
+             return false;
+         })
+-        // Filter files based on specified folders
++        // Filter files based on specified folders (include)
+         .filter(file => {
+             // If no folders are specified, sync all files
+             if (setting.syncFolders.length === 0) return true;
+@@ -81,12 +81,35 @@ export async function updateContentIndex(vault: Vault, setting: KhojSetting, las
+             return setting.syncFolders.some(folder =>
+                 file.path.startsWith(folder + '/') || file.path === folder
+             );
++        })
++        // Filter out excluded folders
++        .filter(file => {
++            // If no folders are excluded, include all files
++            if (setting.excludeFolders.length === 0) return true;
++            // Exclude files in any of the excluded folders
++            return !setting.excludeFolders.some(folder =>
++                file.path.startsWith(folder + '/') || file.path === folder
++            );
+         });
+ 
++    // Log total eligible files
++    console.log(`Khoj: Found ${files.length} eligible files in vault`);
++
+     let countOfFilesToIndex = 0;
+     let countOfFilesToDelete = 0;
+     lastSync = lastSync.size > 0 ? lastSync : new Map<TFile, number>();
+ 
++    // Count files that need indexing (modified since last sync or regenerating)
++    const filesToSync = regenerate
++        ? files
++        : files.filter(file => file.stat.mtime >= (lastSync.get(file) ?? 0));
++
++    // Show notice with file counts when user triggers sync
++    if (userTriggered) {
++        new Notice(`🔄 Syncing ${filesToSync.length} of ${files.length} files to Khoj...`);
++    }
++    console.log(`Khoj: ${filesToSync.length} files to sync (${files.length} total eligible)`);
++
+     // Add all files to index as multipart form data
+     let fileData = [];
+     let currentBatchSize = 0;
+@@ -233,8 +256,9 @@ export async function updateContentIndex(vault: Vault, setting: KhojSetting, las
+     if (error_message) {
+         new Notice(error_message);
+     } else {
+-        if (userTriggered) new Notice('✅ Updated Khoj index.');
+-        console.log(`✅ Refreshed Khoj content index. Updated: ${countOfFilesToIndex} files, Deleted: ${countOfFilesToDelete} files.`);
++        const summary = `Updated ${countOfFilesToIndex}, deleted ${countOfFilesToDelete} files`;
++        if (userTriggered) new Notice(`✅ ${summary}`);
++        console.log(`✅ Refreshed Khoj content index. ${summary}.`);
+     }
+ 
+     return lastSync;
