@@ -6,22 +6,31 @@ import ast
 import hashlib
 import json
 from pathlib import Path
-from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import yaml
 from pydantic import ValidationError
 
 from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
+from fastapi_endpoint_detector.analyzer.effect_contract_auditor import audit_effect_contracts
+from fastapi_endpoint_detector.analyzer.sql_transaction import build_sql_transaction_diagnostics
 from fastapi_endpoint_detector.analyzer.sql_transaction_paths import (
     build_sql_transaction_path_diagnostics,
 )
 from fastapi_endpoint_detector.config import AnalysisConfig, Config
 from fastapi_endpoint_detector.models.effect_contract import (
-    ContextExitSemantics,
-    EffectTiming,
-    TransactionScope,
+    CallResolutionStatus,
+    InvocationKind,
+    ResolvedCallSite,
     load_effect_contracts,
+)
+from fastapi_endpoint_detector.models.endpoint import (
+    Endpoint,
+    EndpointInventory,
+    EndpointMethod,
+    HandlerInfo,
+    InventoryStatus,
 )
 from fastapi_endpoint_detector.models.report import AnalysisReport
 from fastapi_endpoint_detector.models.sql_transaction import (
@@ -109,97 +118,212 @@ def _candidate_projection(report: AnalysisReport) -> list[dict[str, object]]:
     return [item.model_dump(mode="json") for item in report.candidate_endpoints]
 
 
-def _fixture_occurrence(
-    fixture: Path,
-    relative_path: str,
-    spelling: str,
-    ordinal: int = 0,
-) -> SimpleNamespace:
-    tree = ast.parse((fixture / relative_path).read_bytes(), filename=relative_path)
-    matches = [
-        node.func
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and ast.unparse(node.func) == spelling
-        and node.func.end_lineno is not None
-        and node.func.end_col_offset is not None
-    ]
-    node = matches[ordinal]
-    path = Path(relative_path).as_posix()
-    identity = hashlib.sha256(
-        f"{path}:{node.lineno}:{node.col_offset}:{node.end_lineno}:{node.end_col_offset}".encode()
-    ).hexdigest()
-    return SimpleNamespace(
-        id=f"sha256:{identity}",
-        file_path=path,
-        line=node.lineno,
-        column=node.col_offset,
-        end_line=node.end_lineno,
-        end_column=node.end_col_offset,
+def _fixture_endpoint_calls(fixture: Path) -> tuple[Endpoint, tuple[ResolvedCallSite, ...]]:
+    """Build resolver inputs from the pinned handler AST and its explicit imports."""
+    relative = Path("source/langflow/api/v1/traces.py.txt")
+    file_path = fixture / relative
+    source = file_path.read_bytes()
+    tree = ast.parse(source, filename=str(file_path))
+    handler = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "delete_traces_by_flow"
     )
+    prefix = next(
+        keyword.value.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "router" for target in node.targets)
+        and isinstance(node.value, ast.Call)
+        and ast.unparse(node.value.func) == "APIRouter"
+        for keyword in node.value.keywords
+        if keyword.arg == "prefix" and isinstance(keyword.value, ast.Constant)
+    )
+    route = next(
+        decorator
+        for decorator in handler.decorator_list
+        if isinstance(decorator, ast.Call)
+        and isinstance(decorator.func, ast.Attribute)
+        and decorator.func.attr == "delete"
+    )
+    suffix = route.args[0].value
+    endpoint_path = prefix.rstrip("/") + (suffix if suffix.startswith("/") else f"/{suffix}")
+    endpoint = Endpoint(
+        path=endpoint_path,
+        methods=[EndpointMethod.DELETE],
+        handler=HandlerInfo(
+            name=handler.name,
+            module="langflow.api.v1.traces",
+            file_path=file_path,
+            line_number=handler.lineno,
+        ),
+    )
+    sites = []
+    for node in ast.walk(handler):
+        if not isinstance(node, ast.Call):
+            continue
+        source_spelling = ast.unparse(node.func)
+        common = {
+            "file_path": str(file_path),
+            "line": node.func.lineno,
+            "column": node.func.col_offset,
+            "end_line": node.func.end_lineno,
+            "end_column": node.func.end_col_offset,
+            "source_spelling": source_spelling,
+            "resolver": "pinned_fixture_ast",
+            "resolver_version": "1",
+        }
+        exact = {
+            "session.execute": (
+                "sqlalchemy.ext.asyncio.session.AsyncSession.execute",
+                InvocationKind.INSTANCE_METHOD,
+            ),
+            "session_scope": (
+                "langflow.services.deps.session_scope",
+                InvocationKind.FUNCTION,
+            ),
+        }.get(source_spelling)
+        if exact is None:
+            sites.append(
+                ResolvedCallSite(
+                    **common,
+                    status=CallResolutionStatus.UNRESOLVED,
+                    reason_code="not_resolved_by_fixture_call_map",
+                )
+            )
+        else:
+            symbol, invocation = exact
+            sites.append(
+                ResolvedCallSite(
+                    **common,
+                    canonical_symbol=symbol,
+                    invocation=invocation,
+                    status=CallResolutionStatus.EXACT,
+                )
+            )
+    return endpoint, tuple(sites)
 
 
-def _assert_langflow_fixture_path_analysis(fixture: Path) -> None:
-    """Exercise transaction path analysis against source positions in pinned files."""
-    stage = _fixture_occurrence(fixture, "source/langflow/api/v1/traces.py.txt", "session.execute")
-    begin = _fixture_occurrence(
-        fixture,
-        "source/langflow/api/v1/traces.py.txt",
-        "session_scope",
-        ordinal=1,
+def _langflow_fixture_transaction_reports(fixture: Path):
+    """Run configured audit, transaction aggregation, and bounded path analysis."""
+    effects = load_effect_contracts(fixture / "effects.yaml")
+    endpoint, sites = _fixture_endpoint_calls(fixture)
+    inventory = EndpointInventory(endpoints=[endpoint], status=InventoryStatus.ESTABLISHED)
+    audit = audit_effect_contracts(
+        effects,
+        source_root=fixture,
+        inventory=inventory,
+        endpoint_call_sites=((endpoint, sites),),
+        track_transitive=False,
+        max_depth=1,
+        cache_enabled=False,
+        resolver_versions=("pinned_fixture_ast@1",),
     )
-    flush = _fixture_occurrence(fixture, "source/langflow/api/v1/flows.py.txt", "db.flush")
-    commit = _fixture_occurrence(fixture, "source/lfx/services/deps.py.txt", "session.commit")
-    rollbacks = [
-        _fixture_occurrence(
-            fixture,
-            "source/lfx/services/deps.py.txt",
-            "session.rollback",
-            ordinal,
-        )
-        for ordinal in range(2)
-    ]
-    boundaries = (flush, commit, *rollbacks)
-    endpoint_id = f"sha256:{hashlib.sha256(b'langflow-13960-delete-traces').hexdigest()}"
-    begin_scope = SimpleNamespace(
-        occurrence_id=begin.id,
-        scope=TransactionScope.TRANSACTION,
-        timing=EffectTiming.CONTEXT_ENTER,
-        context_exit=ContextExitSemantics.TRANSACTION_COMMIT_ROLLBACK,
-    )
-    evidence = SimpleNamespace(
-        endpoint_id=endpoint_id,
-        stage_occurrence_ids=(stage.id,),
-        flush_occurrence_ids=(flush.id,),
-        begin_occurrence_ids=(begin.id,),
-        begin_scopes=(begin_scope,),
-        commit_occurrence_ids=(commit.id,),
-        rollback_occurrence_ids=tuple(item.id for item in rollbacks),
-    )
-    transaction_report = SimpleNamespace(
-        endpoint_evidence=(evidence,),
-        report_hash=f"sha256:{'1' * 64}",
-    )
-    audit = SimpleNamespace(
-        provenance=SimpleNamespace(audit_hash=f"sha256:{'2' * 64}"),
-        occurrences=(stage, begin, *boundaries),
-    )
+    transaction = build_sql_transaction_diagnostics(effects, audit)
     paths = build_sql_transaction_path_diagnostics(
         fixture,
         audit,
-        transaction_report,
+        transaction,
         max_pairs=8,
     )
+    return audit, transaction, paths
+
+
+def _assert_langflow_pinned_snapshots(fixture: Path, provenance: dict[str, Any]) -> None:
+    assert provenance["repository"] == "langflow-ai/langflow"
+    assert provenance["pull_request"] == 13960
+    assert provenance["base_sha"] == "b40e4aa02661dcc9d630e1e97a0af45d45e88ae4"
+    assert provenance["target_merge_sha"] == "a69a47ff1b5c99ce9c50edc4df45de4397151f17"
+    assert provenance["license"]["spdx"] == "MIT"
+    assert "Copyright (c) 2024 Langflow" in (fixture / "LICENSE.langflow.txt").read_text()
+    snapshots = provenance["source_snapshots"]
+    snapshot_sources = tuple((fixture / "source").rglob("*.py.txt"))
+    assert snapshot_sources
+    assert not tuple((fixture / "source").rglob("*.py"))
+    snapshot_paths = set()
+    for upstream_path, snapshot in snapshots.items():
+        relative_path = snapshot["snapshot_path"]
+        snapshot_paths.add(relative_path)
+        content = (fixture / relative_path).read_bytes()
+        start, end = snapshot["byte_start"], snapshot["byte_end"]
+        assert start == 0 and end == len(content)
+        assert content[start:end] == content
+        assert hashlib.sha256(content).hexdigest() == snapshot["sha256"]
+        assert snapshot["sha256"] == provenance["upstream_sources"][upstream_path]["sha256"]
+        assert snapshot["line_start"] == 1
+        assert snapshot["line_end"] == len(content.splitlines())
+        ast.parse(content, filename=upstream_path)
+    assert snapshot_paths == {path.relative_to(fixture).as_posix() for path in snapshot_sources}
+
+
+def _assert_langflow_context_yield_identity(fixture: Path) -> None:
+    langflow_wrapper = (fixture / "source/langflow/services/deps.py.txt").read_text(
+        encoding="utf-8"
+    )
+    wrapper = (fixture / "source/lfx/services/deps.py.txt").read_text(encoding="utf-8")
+    assert "async with lfx_session_scope() as session" in langflow_wrapper
+    assert "yield session" in langflow_wrapper
+    assert "yield session" in wrapper
+
+
+def _assert_langflow_source_transaction_evidence(
+    fixture: Path,
+    provenance: dict[str, Any],
+) -> None:
+    route = (fixture / "source/langflow/api/v1/traces.py.txt").read_text(encoding="utf-8")
+    wrapper = (fixture / "source/lfx/services/deps.py.txt").read_text(encoding="utf-8")
+    flow_source = (fixture / "source/langflow/api/v1/flows.py.txt").read_text(encoding="utf-8")
+    regression = (fixture / "source/langflow/tests/test_span_cascade_delete.py.txt").read_text(
+        encoding="utf-8"
+    )
+    assert "async with session_scope() as session" in route
+    assert "await session.execute(delete_stmt)" in route
+    _assert_langflow_context_yield_identity(fixture)
+    assert "await db.flush()" in flow_source
+    assert "await session.commit()" in wrapper
+    assert "await session.rollback()" in wrapper
+    assert "except HTTPException" in wrapper and "except Exception" in wrapper
+    assert "await session.commit()" in regression
+    assert "begin_nested" not in route and "begin_nested" not in wrapper
+    assert provenance["transaction_semantics"]["durability"].startswith("commit reachable")
+
+    contract_info = provenance["configured_wrapper_contract"]
+    contract_bytes = (fixture / contract_info["path"]).read_bytes()
+    assert hashlib.sha256(contract_bytes).hexdigest() == contract_info["sha256"]
+    contract = load_effect_contracts(fixture / contract_info["path"]).document.contracts[0]
+    assert contract.id == contract_info["contract_id"]
+    assert contract.symbol == "langflow.services.deps.session_scope"
+    assert contract.operation.value == "begin"
+    assert contract.behavior.context_exit.value == "transaction_commit_rollback"
+
+    audit, transaction, paths = _langflow_fixture_transaction_reports(fixture)
+    assert audit.summary.matched_calls == 2
+    assert audit.summary.unresolved_calls > 0
+    assert transaction.summary.endpoints_with_staging == 1
+    assert transaction.summary.pending_persistence == 1
+    assert transaction.summary.commit_reachable == 0
+    assert transaction.summary.rollback_reachable == 0
+    evidence = transaction.endpoint_evidence[0]
+    assert len(evidence.stage_occurrence_ids) == 1
+    assert len(evidence.begin_occurrence_ids) == 1
+    assert evidence.flush_occurrence_ids == ()
+    assert evidence.commit_occurrence_ids == ()
+    assert evidence.rollback_occurrence_ids == ()
+    assert evidence.begin_scopes[0].context_exit.value == "transaction_commit_rollback"
+    assert evidence.begin_scopes[0].stage_receiver_from_yield is True
+    assert evidence.persistence_status == "not_established"
+    assert any("transaction identity" in item for item in evidence.limitations)
+    assert any("durable write" in item for item in evidence.limitations)
+    assert paths.effect_audit_hash == audit.provenance.audit_hash
+    assert paths.transaction_report_hash == transaction.report_hash
     assert paths.ordered_paths == ()
     assert len(paths.context_paths) == 1
-    context_path = paths.context_paths[0]
-    assert context_path.normal_exit == "commit_reachable"
-    assert context_path.exceptional_exit == "rollback_reachable"
-    assert context_path.status == "conditional_on_context_exit"
-    assert context_path.persistence_status == "not_established"
-    assert any("runtime transaction identity" in item for item in context_path.limitations)
-    assert len(paths.diagnostics) == 4
-    assert {item.reason_code for item in paths.diagnostics} == {"different_source_scope"}
+    langflow_context = paths.context_paths[0]
+    assert langflow_context.normal_exit == "commit_reachable"
+    assert langflow_context.exceptional_exit == "rollback_reachable"
+    assert langflow_context.status == "conditional_on_context_exit"
+    assert langflow_context.persistence_status == "not_established"
+    assert any("runtime transaction identity" in item for item in langflow_context.limitations)
 
 
 def test_sql_diagnostics_separate_pending_and_reachable_boundaries(tmp_path: Path) -> None:
@@ -326,6 +450,10 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
         "    def __enter__(self): return self\n"
         "    def __exit__(self, exc_type, exc, tb): return False\n"
         "    def add(self, value: str) -> None: pass\n\n"
+        "class ReceiverlessContext:\n"
+        "    def __enter__(self) -> Session: return Session()\n"
+        "    def __exit__(self, exc_type, exc, tb): return False\n\n"
+        "def begin_context() -> ReceiverlessContext: return ReceiverlessContext()\n\n"
         "def stage_helper(session: Session) -> None:\n"
         "    session.add('helper')\n\n"
         "@app.post('/ordered')\n"
@@ -367,6 +495,10 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
         "    session = Session()\n"
         "    with session.begin() as transaction:\n"
         "        session.add('captured')\n\n"
+        "@app.post('/receiverless-captured-context')\n"
+        "def receiverless_captured_context() -> None:\n"
+        "    with begin_context() as transaction:\n"
+        "        transaction.add('unproven')\n\n"
         "@app.post('/attribute')\n"
         "def attribute_receiver() -> None:\n"
         "    holder = Holder()\n"
@@ -488,6 +620,18 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
                         "operation": "stage",
                         "channel": "sql",
                     },
+                    {
+                        "id": "receiverless-begin",
+                        "symbol": f"{root.name}.main.begin_context",
+                        "invocation": "function",
+                        "operation": "begin",
+                        "channel": "sql",
+                        "behavior": {
+                            "timing": "context_enter",
+                            "transaction_scope": "transaction",
+                            "context_exit": "transaction_commit_rollback",
+                        },
+                    },
                 ]
                 + [
                     {
@@ -595,6 +739,9 @@ def test_ordered_paths_require_same_scope_receiver_and_straight_line(tmp_path: P
         "wrapper_context",
         "captured_context",
     }
+    assert all(
+        item.function_name != "receiverless_captured_context" for item in paths.context_paths
+    )
     managed = next(item for item in paths.context_paths if item.function_name == "managed_context")
     assert managed.normal_exit == "commit_reachable"
     assert managed.exceptional_exit == "rollback_reachable"
@@ -665,57 +812,9 @@ def test_ordered_paths_are_explicit_and_atomically_bounded(tmp_path: Path) -> No
         ).analyze_diff(diff)
 
 
-def test_langflow_13960_real_source_transaction_fixture_is_pinned_and_bounded(
-    tmp_path: Path,
-) -> None:
+def test_langflow_13960_real_source_transaction_fixture_is_pinned_and_bounded() -> None:
     """Parse complete pinned upstream snapshots as data; never import or execute them."""
     fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
     provenance = json.loads((fixture / "provenance.json").read_text(encoding="utf-8"))
-    assert provenance["repository"] == "langflow-ai/langflow"
-    assert provenance["pull_request"] == 13960
-    assert provenance["base_sha"] == "b40e4aa02661dcc9d630e1e97a0af45d45e88ae4"
-    assert provenance["target_merge_sha"] == "a69a47ff1b5c99ce9c50edc4df45de4397151f17"
-    assert provenance["license"]["spdx"] == "MIT"
-    assert "Copyright (c) 2024 Langflow" in (fixture / "LICENSE.langflow.txt").read_text()
-    snapshot_sources = tuple((fixture / "source").rglob("*.py.txt"))
-    assert snapshot_sources
-    assert not tuple((fixture / "source").rglob("*.py"))
-    snapshot_paths = set()
-    for upstream_path, snapshot in provenance["source_snapshots"].items():
-        relative_path = snapshot["snapshot_path"]
-        snapshot_paths.add(relative_path)
-        content = (fixture / relative_path).read_bytes()
-        start, end = snapshot["byte_start"], snapshot["byte_end"]
-        assert start == 0 and end == len(content)
-        assert content[start:end] == content
-        assert hashlib.sha256(content).hexdigest() == snapshot["sha256"]
-        assert snapshot["sha256"] == provenance["upstream_sources"][upstream_path]["sha256"]
-        assert snapshot["line_start"] == 1
-        assert snapshot["line_end"] == len(content.splitlines())
-        ast.parse(content, filename=upstream_path)
-    assert snapshot_paths == {path.relative_to(fixture).as_posix() for path in snapshot_sources}
-
-    route = (fixture / "source/langflow/api/v1/traces.py.txt").read_text(encoding="utf-8")
-    wrapper = (fixture / "source/lfx/services/deps.py.txt").read_text(encoding="utf-8")
-    flow_flush = (fixture / "source/langflow/api/v1/flows.py.txt").read_text(encoding="utf-8")
-    regression = (fixture / "source/langflow/tests/test_span_cascade_delete.py.txt").read_text(
-        encoding="utf-8"
-    )
-    assert "async with session_scope() as session" in route
-    assert "await session.execute(delete_stmt)" in route
-    assert "await db.flush()" in flow_flush
-    assert "await session.commit()" in wrapper
-    assert "await session.rollback()" in wrapper
-    assert "except HTTPException" in wrapper and "except Exception" in wrapper
-    assert "await session.commit()" in regression
-    assert "begin_nested" not in route and "begin_nested" not in wrapper
-    assert provenance["transaction_semantics"]["durability"].startswith("commit reachable")
-    contract_info = provenance["configured_wrapper_contract"]
-    contract_bytes = (fixture / contract_info["path"]).read_bytes()
-    assert hashlib.sha256(contract_bytes).hexdigest() == contract_info["sha256"]
-    contract = load_effect_contracts(fixture / contract_info["path"]).document.contracts[0]
-    assert contract.id == contract_info["contract_id"]
-    assert contract.symbol == "langflow.services.deps.session_scope"
-    assert contract.operation.value == "begin"
-    assert contract.behavior.context_exit.value == "transaction_commit_rollback"
-    _assert_langflow_fixture_path_analysis(fixture)
+    _assert_langflow_pinned_snapshots(fixture, provenance)
+    _assert_langflow_source_transaction_evidence(fixture, provenance)

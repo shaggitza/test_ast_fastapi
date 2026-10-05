@@ -7,7 +7,7 @@
       "src/lfx/src/lfx/services/deps.py"
     ],
     "path": "effects.yaml",
-    "sha256": "73311c3224ae313433ccf14847c1c34f0670b0522958a3703f3ace80259809de",
+    "sha256": "36230dca9036152ba563eea906ec843c6b0bc66c6bdca4214b638fac661f23b4",
     "symbol": "langflow.services.deps.session_scope"
   },
   "fixture_schema": 1,
@@ -21,9 +21,67 @@
   "pull_request": 13960,
   "pull_request_url": "https://github.com/langflow-ai/langflow/pull/13960",
   "repository": "langflow-ai/langflow",
+  "source_snapshots": {
+    "src/backend/base/langflow/alembic/versions/e1705947c729_ensure_span_trace_id_foreign_key_has_.py": {
+      "byte_end": 2872,
+      "byte_start": 0,
+      "line_end": 87,
+      "line_start": 1,
+      "sha256": "7e7518febdf798c3b8a40ed5d46e6fddc83a8862db2b142821177fb5cdb09e10",
+      "snapshot_path": "source/langflow/alembic/e1705947c729_ensure_span_trace_id_foreign_key_has_.py.txt"
+    },
+    "src/backend/base/langflow/api/v1/flows.py": {
+      "byte_end": 35075,
+      "byte_start": 0,
+      "line_end": 856,
+      "line_start": 1,
+      "sha256": "177661e26da88df54a30c6a70cafcbf39578399564bb92d708f91fa17942aefd",
+      "snapshot_path": "source/langflow/api/v1/flows.py.txt"
+    },
+    "src/backend/base/langflow/api/v1/traces.py": {
+      "byte_end": 7118,
+      "byte_start": 0,
+      "line_end": 196,
+      "line_start": 1,
+      "sha256": "f4e056cf2f3174bdef687aa91c06985ffbe12771e4e3a93125e3aef017498ed2",
+      "snapshot_path": "source/langflow/api/v1/traces.py.txt"
+    },
+    "src/backend/base/langflow/services/database/models/traces/model.py": {
+      "byte_end": 12940,
+      "byte_start": 0,
+      "line_end": 402,
+      "line_start": 1,
+      "sha256": "27b1f279aa4563e56c3fd061463d19c9b1d4cc9e47005aaf2dbc924ca00f7122",
+      "snapshot_path": "source/langflow/services/database/models/traces/model.py.txt"
+    },
+    "src/backend/base/langflow/services/deps.py": {
+      "byte_end": 9774,
+      "byte_start": 0,
+      "line_end": 293,
+      "line_start": 1,
+      "sha256": "3e22d2f206868c0c50210ff61c3e01fd2ac783fc03346ece0c4c203fb15a7a54",
+      "snapshot_path": "source/langflow/services/deps.py.txt"
+    },
+    "src/backend/tests/unit/services/database/models/traces/test_span_cascade_delete.py": {
+      "byte_end": 4557,
+      "byte_start": 0,
+      "line_end": 110,
+      "line_start": 1,
+      "sha256": "6d83128c6ab01bf941d3ae763e573877651c8769b2b9edb0f5591d25c383afce",
+      "snapshot_path": "source/langflow/tests/test_span_cascade_delete.py.txt"
+    },
+    "src/lfx/src/lfx/services/deps.py": {
+      "byte_end": 10005,
+      "byte_start": 0,
+      "line_end": 282,
+      "line_start": 1,
+      "sha256": "87b3f6400bca39f560ca4efcd2035b07325f88c095aa64b82605f15168bc94b2",
+      "snapshot_path": "source/lfx/services/deps.py.txt"
+    }
+  },
   "target_merge_sha": "a69a47ff1b5c99ce9c50edc4df45de4397151f17",
   "transaction_semantics": {
-    "context": "Langflow services.deps.session_scope delegates through async with to LFX session_scope; contract applies to this exact wrapper symbol, grounded in both pinned wrapper files.",
+    "context": "Langflow services.deps.session_scope delegates through async with to LFX session_scope, and both pinned wrappers yield their bound session; the exact contract declares that captured context target to represent the context receiver.",
     "durability": "commit reachable from the wrapper contract only; no runtime database state or durability observation is made.",
     "exception_exit": "LFX session_scope handles HTTPException and Exception branches by rolling back active sessions and reraising.",
     "flush": "the changed PR regression test seeds rows with add() and commit(); its clear path does not explicitly flush. The separate flow bulk-delete source calls db.flush() before leaving its injected session context.",
@@ -60,64 +118,6 @@
     "src/lfx/src/lfx/services/deps.py": {
       "sha256": "87b3f6400bca39f560ca4efcd2035b07325f88c095aa64b82605f15168bc94b2",
       "url": "https://github.com/langflow-ai/langflow/blob/a69a47ff1b5c99ce9c50edc4df45de4397151f17/src/lfx/src/lfx/services/deps.py"
-    }
-  },
-  "source_snapshots": {
-    "src/backend/base/langflow/alembic/versions/e1705947c729_ensure_span_trace_id_foreign_key_has_.py": {
-      "snapshot_path": "source/langflow/alembic/e1705947c729_ensure_span_trace_id_foreign_key_has_.py.txt",
-      "sha256": "7e7518febdf798c3b8a40ed5d46e6fddc83a8862db2b142821177fb5cdb09e10",
-      "byte_start": 0,
-      "byte_end": 2872,
-      "line_start": 1,
-      "line_end": 87
-    },
-    "src/backend/base/langflow/api/v1/flows.py": {
-      "snapshot_path": "source/langflow/api/v1/flows.py.txt",
-      "sha256": "177661e26da88df54a30c6a70cafcbf39578399564bb92d708f91fa17942aefd",
-      "byte_start": 0,
-      "byte_end": 35075,
-      "line_start": 1,
-      "line_end": 856
-    },
-    "src/backend/base/langflow/api/v1/traces.py": {
-      "snapshot_path": "source/langflow/api/v1/traces.py.txt",
-      "sha256": "f4e056cf2f3174bdef687aa91c06985ffbe12771e4e3a93125e3aef017498ed2",
-      "byte_start": 0,
-      "byte_end": 7118,
-      "line_start": 1,
-      "line_end": 196
-    },
-    "src/backend/base/langflow/services/database/models/traces/model.py": {
-      "snapshot_path": "source/langflow/services/database/models/traces/model.py.txt",
-      "sha256": "27b1f279aa4563e56c3fd061463d19c9b1d4cc9e47005aaf2dbc924ca00f7122",
-      "byte_start": 0,
-      "byte_end": 12940,
-      "line_start": 1,
-      "line_end": 402
-    },
-    "src/backend/base/langflow/services/deps.py": {
-      "snapshot_path": "source/langflow/services/deps.py.txt",
-      "sha256": "3e22d2f206868c0c50210ff61c3e01fd2ac783fc03346ece0c4c203fb15a7a54",
-      "byte_start": 0,
-      "byte_end": 9774,
-      "line_start": 1,
-      "line_end": 293
-    },
-    "src/backend/tests/unit/services/database/models/traces/test_span_cascade_delete.py": {
-      "snapshot_path": "source/langflow/tests/test_span_cascade_delete.py.txt",
-      "sha256": "6d83128c6ab01bf941d3ae763e573877651c8769b2b9edb0f5591d25c383afce",
-      "byte_start": 0,
-      "byte_end": 4557,
-      "line_start": 1,
-      "line_end": 110
-    },
-    "src/lfx/src/lfx/services/deps.py": {
-      "snapshot_path": "source/lfx/services/deps.py.txt",
-      "sha256": "87b3f6400bca39f560ca4efcd2035b07325f88c095aa64b82605f15168bc94b2",
-      "byte_start": 0,
-      "byte_end": 10005,
-      "line_start": 1,
-      "line_end": 282
     }
   }
 }

@@ -62,8 +62,9 @@ class _SourceCall:
 class _CallIndexer(ast.NodeVisitor):
     """Index call callee spans without treating nested control flow as straight-line."""
 
-    def __init__(self, file_path: str) -> None:
+    def __init__(self, file_path: str, *, allow_captured_context_receiver: bool = False) -> None:
         self.file_path = file_path
+        self.allow_captured_context_receiver = allow_captured_context_receiver
         self.qualname: list[str] = []
         self.calls: dict[tuple[int, int, int, int], _SourceCall] = {}
         self._indexed_context_nodes: set[int] = set()
@@ -167,16 +168,20 @@ class _CallIndexer(ast.NodeVisitor):
         begin = _unwrap_call(item.context_expr)
         if begin is None:
             return
-        captured_receiver = (
-            _target_key(item.optional_vars) if item.optional_vars is not None else None
-        )
-        if item.optional_vars is not None and captured_receiver is None:
+        if item.optional_vars is not None and _target_key(item.optional_vars) is None:
             return
         begin_receiver = (
             _receiver_key(begin.func.value) if isinstance(begin.func, ast.Attribute) else None
         )
-        if begin_receiver is None and captured_receiver is None:
-            return
+        # `as name` captures __enter__/__aenter__'s yielded value. It can stand
+        # in for the receiver only when the exact begin contract explicitly
+        # declares that the context yields the receiver used by its scoped stage.
+        if begin_receiver is None:
+            if not self.allow_captured_context_receiver or item.optional_vars is None:
+                return
+            begin_receiver = _target_key(item.optional_vars)
+            if begin_receiver is None:
+                return
         context_id = _semantic_hash(
             {
                 "kind": "sql_context",
@@ -192,7 +197,7 @@ class _CallIndexer(ast.NodeVisitor):
             statement_index,
             function_body,
             context_id=context_id,
-            receiver_key_override=begin_receiver or captured_receiver,
+            receiver_key_override=begin_receiver,
         )
         context_body = tuple(statement.body)
         for body_index, body_statement in enumerate(context_body):
@@ -333,7 +338,12 @@ def _safe_source_path(root: Path, relative_path: str) -> Path | None:
     return candidate
 
 
-def _load_call_index(root: Path, file_path: str) -> dict[tuple[int, int, int, int], _SourceCall]:
+def _load_call_index(
+    root: Path,
+    file_path: str,
+    *,
+    allow_captured_context_receiver: bool = False,
+) -> dict[tuple[int, int, int, int], _SourceCall]:
     source = _safe_source_path(root, file_path)
     if source is None:
         return {}
@@ -347,7 +357,10 @@ def _load_call_index(root: Path, file_path: str) -> dict[tuple[int, int, int, in
         tree = ast.parse(raw, filename=str(source))
     except (SyntaxError, ValueError):
         return {}
-    indexer = _CallIndexer(file_path)
+    indexer = _CallIndexer(
+        file_path,
+        allow_captured_context_receiver=allow_captured_context_receiver,
+    )
     indexer.visit(tree)
     return indexer.calls
 
@@ -502,11 +515,37 @@ def build_sql_transaction_path_diagnostics(  # noqa: PLR0912, PLR0915
             *evidence.rollback_occurrence_ids,
         )
     }
-    indexes = {file_path: _load_call_index(root, file_path) for file_path in sorted(files)}
+    yield_receiver_files = {
+        occurrence_by_id[scope.occurrence_id].file_path
+        for evidence in transaction_report.endpoint_evidence
+        for scope in evidence.begin_scopes
+        if scope.stage_receiver_from_yield
+    }
+    indexes = {
+        (file_path, allow_yield_receiver): _load_call_index(
+            root,
+            file_path,
+            allow_captured_context_receiver=allow_yield_receiver,
+        )
+        for file_path in sorted(files)
+        for allow_yield_receiver in (False, True)
+    }
+    yield_receiver_occurrences = {
+        scope.occurrence_id
+        for evidence in transaction_report.endpoint_evidence
+        for scope in evidence.begin_scopes
+        if scope.stage_receiver_from_yield
+    }
     contexts: dict[str, _SourceCall | None] = {}
     for occurrence_id, occurrence in occurrence_by_id.items():
         key = _occurrence_key(occurrence)
-        contexts[occurrence_id] = indexes.get(occurrence.file_path, {}).get(key) if key else None
+        allow_yield_receiver = (
+            occurrence_id in yield_receiver_occurrences
+            or occurrence.file_path in yield_receiver_files
+        )
+        contexts[occurrence_id] = (
+            indexes.get((occurrence.file_path, allow_yield_receiver), {}).get(key) if key else None
+        )
 
     paths: list[SQLTransactionOrderedPath] = []
     context_paths: list[SQLTransactionContextPath] = []
