@@ -9,16 +9,19 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
-from fastapi_endpoint_detector.analyzer.graphify_adapter import (
-    GraphSide,
-    GraphifyEdge,
-    GraphifyNode,
-    GraphifySnapshot,
-    GraphifyStrength,
-)
-from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointDiscoveryStatus
+from fastapi_endpoint_detector.models.endpoint import EndpointDiscoveryStatus
+
+if TYPE_CHECKING:
+    from fastapi_endpoint_detector.analyzer.graphify_adapter import (
+        GraphifyEdge,
+        GraphifyNode,
+        GraphifySnapshot,
+        GraphifyStrength,
+        GraphSide,
+    )
+    from fastapi_endpoint_detector.models.endpoint import Endpoint
 
 GraphConfidence = Literal["HIGH", "MEDIUM", "LOW"]
 _EVIDENCE_RELATIONS = frozenset({"calls", "imports", "imports_from", "inherits", "references"})
@@ -152,7 +155,7 @@ def _relative_path(path_value: Path, project_root: Path) -> Path:
     return path
 
 
-def traverse_graphify_snapshot(
+def traverse_graphify_snapshot(  # noqa: PLR0912
     snapshot: GraphifySnapshot,
     *,
     project_root: Path,
@@ -169,7 +172,6 @@ def traverse_graphify_snapshot(
     """
     if max_depth < 0 or max_visited_nodes < 1:
         raise ValueError("traversal bounds must be non-negative depth and positive node cap")
-    nodes = {node.node_id: node for node in snapshot.nodes}
     starts = {
         node.node_id
         for node in snapshot.nodes
@@ -217,21 +219,21 @@ def traverse_graphify_snapshot(
             capped = True
             break
         visited_depth[walk.node_id] = depth
-        endpoint = endpoint_by_node.get(walk.node_id)
-        if endpoint is not None:
+        endpoint_seed = endpoint_by_node.get(walk.node_id)
+        if endpoint_seed is not None:
             strengths = tuple(edge.extractor_strength for edge in walk.edges)
             item = GraphPathEvidence(
                 snapshot.side,
-                endpoint.endpoint_id,
-                endpoint.discovery_status,
+                endpoint_seed.endpoint_id,
+                endpoint_seed.discovery_status,
                 walk.node_path[0],
                 walk.node_id,
                 walk.node_path,
                 tuple(edge.relation for edge in walk.edges),
                 strengths,
-                _confidence(strengths, endpoint.discovery_status),
+                _confidence(strengths, endpoint_seed.discovery_status),
             )
-            evidence[(endpoint.endpoint_id, item.changed_node_id, item.node_path)] = item
+            evidence[(endpoint_seed.endpoint_id, item.changed_node_id, item.node_path)] = item
         if depth >= max_depth:
             if reverse.get(walk.node_id):
                 limitations.append(f"maximum traversal depth reached at {walk.node_id}")

@@ -11,8 +11,8 @@ from fastapi_endpoint_detector.analyzer.graphify_adapter import GraphSide, load_
 from fastapi_endpoint_detector.analyzer.graphify_analyzer import (
     ChangedSourceRange,
     GraphEndpointSeed,
-    traverse_graphify_snapshot,
     traverse_graphify_sides,
+    traverse_graphify_snapshot,
 )
 from fastapi_endpoint_detector.models.endpoint import EndpointDiscoveryStatus
 
@@ -191,7 +191,9 @@ def test_ambiguous_binding_is_not_guessed_and_conditional_seed_is_low(tmp_path: 
         endpoints=(_seed(),),
     )
     assert result.evidence == ()
-    assert any("ambiguous endpoint binding (LOW, not guessed)" in item for item in result.limitations)
+    assert any(
+        "ambiguous endpoint binding (LOW, not guessed)" in item for item in result.limitations
+    )
 
     conditional = GraphEndpointSeed(
         "GET /items", "endpoint", Path("routes.py"), 1, 2, EndpointDiscoveryStatus.CONDITIONAL
