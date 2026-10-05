@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import ast
+import hashlib
 import json
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 import yaml
@@ -11,14 +13,12 @@ from pydantic import ValidationError
 
 from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
 from fastapi_endpoint_detector.config import AnalysisConfig, Config
+from fastapi_endpoint_detector.models.effect_contract import load_effect_contracts
 from fastapi_endpoint_detector.models.report import AnalysisReport
 from fastapi_endpoint_detector.models.sql_transaction import (
     build_sql_transaction_path_report,
 )
 from fastapi_endpoint_detector.output.formatters import get_formatter
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _project(root: Path) -> tuple[Path, Path]:
@@ -500,9 +500,9 @@ def test_ordered_paths_require_same_scope_receiver_and_straight_line(tmp_path: P
     assert wrapper.normal_exit == "commit_reachable"
     assert wrapper.exceptional_exit == "rollback_reachable"
     assert all(item.persistence_status == "not_established" for item in paths.context_paths)
-    assert sum(
-        item.reason_code == "control_flow_unavailable" for item in paths.diagnostics
-    ) >= 4  # Branch flow plus all three try/except boundaries stay unresolved.
+    assert (
+        sum(item.reason_code == "control_flow_unavailable" for item in paths.diagnostics) >= 4
+    )  # Branch flow plus all three try/except boundaries stay unresolved.
     savepoint = next(
         item for item in paths.context_paths if item.function_name == "managed_savepoint"
     )
@@ -560,3 +560,45 @@ def test_ordered_paths_are_explicit_and_atomically_bounded(tmp_path: Path) -> No
             secure_ast=True,
             use_cache=False,
         ).analyze_diff(diff)
+
+
+def test_langflow_13960_real_source_transaction_fixture_is_pinned_and_bounded(
+    tmp_path: Path,
+) -> None:
+    """Parse the pinned upstream excerpts as data; never import or execute them."""
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    provenance = json.loads((fixture / "provenance.json").read_text(encoding="utf-8"))
+    assert provenance["repository"] == "langflow-ai/langflow"
+    assert provenance["pull_request"] == 13960
+    assert provenance["base_sha"] == "b40e4aa02661dcc9d630e1e97a0af45d45e88ae4"
+    assert provenance["target_merge_sha"] == "a69a47ff1b5c99ce9c50edc4df45de4397151f17"
+    assert provenance["license"]["spdx"] == "MIT"
+    assert "Copyright (c) 2024 Langflow" in (fixture / "LICENSE.langflow.txt").read_text()
+    for relative_path, expected_hash in provenance["fixture_excerpt_sha256"].items():
+        content = (fixture / relative_path).read_bytes()
+        assert hashlib.sha256(content).hexdigest() == expected_hash
+        ast.parse(content, filename=relative_path)
+
+    route = (fixture / "source/langflow/api/v1/traces.py").read_text(encoding="utf-8")
+    wrapper = (fixture / "source/lfx/services/deps.py").read_text(encoding="utf-8")
+    flow_flush = (fixture / "source/langflow/api/v1/flows_flush.py").read_text(encoding="utf-8")
+    regression = (fixture / "source/langflow/tests/test_span_cascade_delete.py").read_text(
+        encoding="utf-8"
+    )
+    assert "async with session_scope() as session" in route
+    assert "await session.execute(delete_stmt)" in route
+    assert "await db.flush()" in flow_flush
+    assert "await session.commit()" in wrapper
+    assert "await session.rollback()" in wrapper
+    assert "except HTTPException" in wrapper and "except Exception" in wrapper
+    assert "await session.commit()" in regression
+    assert "begin_nested" not in route and "begin_nested" not in wrapper
+    assert provenance["transaction_semantics"]["durability"].startswith("commit reachable")
+    contract_info = provenance["configured_wrapper_contract"]
+    contract_bytes = (fixture / contract_info["path"]).read_bytes()
+    assert hashlib.sha256(contract_bytes).hexdigest() == contract_info["sha256"]
+    contract = load_effect_contracts(fixture / contract_info["path"]).document.contracts[0]
+    assert contract.id == contract_info["contract_id"]
+    assert contract.symbol == "langflow.services.deps.session_scope"
+    assert contract.operation.value == "begin"
+    assert contract.behavior.context_exit.value == "transaction_commit_rollback"

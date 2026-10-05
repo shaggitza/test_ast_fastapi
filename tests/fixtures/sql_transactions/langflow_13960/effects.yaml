@@ -1,0 +1,19 @@
+schema_version: 2
+preset:
+  id: langflow-13960-transaction-wrapper
+  version: "1"
+  provenance:
+    kind: user
+    source: https://github.com/langflow-ai/langflow/blob/a69a47ff1b5c99ce9c50edc4df45de4397151f17/src/backend/base/langflow/services/deps.py
+    revision: a69a47ff1b5c99ce9c50edc4df45de4397151f17
+contracts:
+  - id: langflow-session-scope
+    symbol: langflow.services.deps.session_scope
+    invocation: function
+    operation: begin
+    channel: sql
+    behavior:
+      async_mode: async
+      timing: context_enter
+      transaction_scope: transaction
+      context_exit: transaction_commit_rollback
