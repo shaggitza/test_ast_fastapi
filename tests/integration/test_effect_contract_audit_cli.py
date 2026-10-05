@@ -204,6 +204,93 @@ def test_audit_uses_config_relative_contracts_and_rejects_dual_sources(
     assert "conflicts" in conflict.output
 
 
+def test_audit_resolves_src_package_identity_without_checkout_fallback(tmp_path: Path) -> None:
+    project = tmp_path / "unrelated_checkout_name"
+    package = project / "src" / "orders_api"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "helpers.py").write_text(
+        "def emit(resource: str) -> int:\n    return 1\n",
+        encoding="utf-8",
+    )
+    (package / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "from orders_api.helpers import emit\n\n"
+        "app = FastAPI()\n\n"
+        "@app.get('/')\n"
+        "def handler() -> int:\n"
+        "    return emit('orders')\n",
+        encoding="utf-8",
+    )
+    contracts = project / "effects.yaml"
+    contracts.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "preset": {
+                    "id": "src-layout-audit",
+                    "version": "1.0.0",
+                    "provenance": {"kind": "user", "source": "effects.yaml"},
+                },
+                "contracts": [
+                    {
+                        "id": "exact-package",
+                        "symbol": "orders_api.helpers.emit",
+                        "invocation": "function",
+                        "operation": "publish",
+                        "channel": "message_bus",
+                        "resource": {"kind": "argument", "index": 0},
+                    },
+                    {
+                        "id": "checkout-prefixed-decoy",
+                        "symbol": "unrelated_checkout.orders_api.helpers.emit",
+                        "invocation": "function",
+                        "operation": "publish",
+                        "channel": "message_bus",
+                        "resource": {"kind": "argument", "index": 0},
+                    },
+                    {
+                        "id": "wrong-package-decoy",
+                        "symbol": "wrong_package.helpers.emit",
+                        "invocation": "function",
+                        "operation": "publish",
+                        "channel": "message_bus",
+                        "resource": {"kind": "argument", "index": 0},
+                    },
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    for app_path in (project, project / "src", package):
+        result = runner.invoke(
+            cli,
+            [
+                "audit-effect-contracts",
+                "--app",
+                str(app_path),
+                "--contracts",
+                str(contracts),
+                "--format",
+                "json",
+                "--no-cache",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["summary"]["matched_calls"] == 1
+        assert data["summary"]["matched_contracts"] == 1
+        assert data["summary"]["unmatched_contracts"] == 2
+        matched = [item for item in data["occurrences"] if item.get("contract_id")]
+        assert [(item["canonical_symbol"], item["contract_id"]) for item in matched] == [
+            ("orders_api.helpers.emit", "exact-package")
+        ]
+
+
 def test_audit_loads_configured_effect_preset(tmp_path: Path) -> None:
     _project(tmp_path)
     config = tmp_path / "detector.yaml"
