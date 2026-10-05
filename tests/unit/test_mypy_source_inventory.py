@@ -20,10 +20,10 @@ class _SourceFile:
 class _Inventory:
     root: Path
     files: tuple[_SourceFile, ...]
-    follow_imports: str = "normal"
+    follow_imports: bool = True
     max_depth: int = 10
     excluded_files: tuple[str, ...] = ()
-    unresolved_imports: tuple[str, ...] = ()
+    unresolved_imports: tuple[tuple[str, str], ...] = ()
 
 
 def test_module_ids_use_explicit_root_for_src_namespace_and_app_paths(tmp_path: Path) -> None:
@@ -77,8 +77,8 @@ def test_canonical_inventory_controls_discovery_and_cache_identity(tmp_path: Pat
         *,
         file_digest: str = digest,
         module: str = "pkg.main",
-        follow_imports: str = "normal",
-        unresolved_imports: tuple[str, ...] = (),
+        follow_imports: bool = True,
+        unresolved_imports: tuple[tuple[str, str], ...] = (),
         excluded: tuple[str, ...] = (),
     ) -> MypyAnalyzer:
         inventory = _Inventory(
@@ -112,12 +112,31 @@ def test_canonical_inventory_controls_discovery_and_cache_identity(tmp_path: Pat
 
     variants = [
         analyzer(module="other.main"),
-        analyzer(follow_imports="skip"),
-        analyzer(unresolved_imports=("pkg.helper",)),
+        analyzer(follow_imports=False),
+        analyzer(unresolved_imports=(("pkg/main.py", "pkg.helper"),)),
         analyzer(excluded=("pkg/generated.py",)),
     ]
     assert changed_fingerprint != fingerprint
     assert all(candidate._cache_fingerprint()[0] != fingerprint for candidate in variants)
+
+
+def test_inventory_follow_import_policy_maps_to_mypy_values(tmp_path: Path) -> None:
+    path = tmp_path / "main.py"
+    path.write_text("def handler():\n    return 1\n", encoding="utf-8")
+    digest = sha256(path.read_bytes()).hexdigest()
+
+    def with_policy(policy: bool) -> MypyAnalyzer:
+        return MypyAnalyzer(
+            path,
+            source_inventory=_Inventory(
+                root=tmp_path,
+                files=(_SourceFile(str(path), "main.py", "main", digest),),
+                follow_imports=policy,
+            ),
+        )
+
+    assert with_policy(True)._effective_follow_imports() == "normal"
+    assert with_policy(False)._effective_follow_imports() == "skip"
 
 
 def test_stale_inventory_hash_fails_closed(tmp_path: Path) -> None:
