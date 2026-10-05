@@ -215,6 +215,45 @@ def test_constructor_parameter_to_self_field_delegation_is_finite_and_low(
     assert deps.references_lines_low_only("services.py", {2})
 
 
+def test_callable_alias_invocation_resolves_its_function_body(tmp_path: Path) -> None:
+    service = _write_service(tmp_path)
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from services import Service\n\n"
+        "def changed() -> int:\n"
+        "    return Service().changed()\n\n"
+        "def handler() -> int:\n"
+        "    callback = changed\n"
+        "    return callback()\n",
+        encoding="utf-8",
+    )
+
+    deps = MypyAnalyzer(tmp_path, max_depth=5).analyze_endpoint(_endpoint(main, line=7))
+
+    assert deps.references_symbol_at_line(str(main), 4) is not None
+    assert deps.references_symbol_at_line(str(service), 2) is not None
+
+
+def test_unrelated_call_preserves_unexposed_finite_receiver_alias(tmp_path: Path) -> None:
+    service = _write_service(tmp_path)
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from services import Service\n\n"
+        "def harmless() -> None:\n"
+        "    return None\n\n"
+        "def handler() -> int:\n"
+        "    value = Service()\n"
+        "    harmless()\n"
+        "    return value.changed()\n",
+        encoding="utf-8",
+    )
+
+    deps = MypyAnalyzer(tmp_path, max_depth=5).analyze_endpoint(_endpoint(main, line=6))
+
+    assert deps.references_symbol_at_line(str(service), 2) is not None
+    assert deps.references_symbol_at_line(str(service), 5) is None
+
+
 def test_conflicting_finite_overrides_fail_closed_without_partial_fanout(
     tmp_path: Path,
 ) -> None:

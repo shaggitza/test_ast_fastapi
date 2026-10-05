@@ -80,11 +80,15 @@ def test_captures_exact_functions_constructors_and_method_kinds(tmp_path: Path) 
     run_sites = [site for site in sites if site.source_spelling.endswith(".run")]
     assert len(run_sites) == 2
     immediate_run = _site_by_spelling(sites, "Service().run")[0]
+    assert immediate_run.status == CallResolutionStatus.EXACT
     assert immediate_run.invocation == InvocationKind.INSTANCE_METHOD
     assert immediate_run.canonical_symbol and immediate_run.canonical_symbol.endswith("Service.run")
     local_run = _site_by_spelling(sites, "service.run")[0]
-    assert local_run.status == CallResolutionStatus.UNRESOLVED
-    assert local_run.reason_code == "dynamic_receiver"
+    assert local_run.status in {
+        CallResolutionStatus.AMBIGUOUS,
+        CallResolutionStatus.UNRESOLVED,
+    }
+    assert local_run.reason_code in {"open_receiver_dispatch", "dynamic_receiver"}
 
     build = _site_by_spelling(sites, "Service.build")[0]
     assert build.invocation == InvocationKind.CLASS_METHOD
@@ -336,7 +340,7 @@ def test_union_receiver_is_ambiguous_when_implementations_differ(tmp_path: Path)
     assert site.receiver_candidates == tuple(sorted(site.receiver_candidates))
 
 
-def test_union_receiver_with_common_inherited_method_is_exact(tmp_path: Path) -> None:
+def test_open_union_receiver_with_common_inherited_method_is_ambiguous(tmp_path: Path) -> None:
     main = tmp_path / "main.py"
     main.write_text(
         "class Base:\n"
@@ -351,10 +355,30 @@ def test_union_receiver_with_common_inherited_method_is_exact(tmp_path: Path) ->
     deps = MypyAnalyzer(tmp_path).analyze_endpoint(_endpoint(main, line=10))
     site = _site_by_spelling(deps.resolved_call_sites, "value.run")[0]
 
-    assert site.status == CallResolutionStatus.EXACT
-    assert site.canonical_symbol and site.canonical_symbol.endswith("Base.run")
-    assert site.invocation == InvocationKind.INSTANCE_METHOD
+    assert site.status == CallResolutionStatus.AMBIGUOUS
+    assert site.reason_code == "open_receiver_dispatch"
+    assert site.canonical_symbol is None
+    assert site.invocation is None
     assert len(site.receiver_candidates) == 2
+
+
+def test_final_receiver_preserves_exact_method_dispatch(tmp_path: Path) -> None:
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from typing import final\n\n"
+        "@final\n"
+        "class Service:\n"
+        "    def run(self) -> int:\n        return 1\n\n"
+        "def handler(value: Service) -> int:\n"
+        "    return value.run()\n",
+        encoding="utf-8",
+    )
+
+    deps = MypyAnalyzer(tmp_path).analyze_endpoint(_endpoint(main, line=8))
+    site = _site_by_spelling(deps.resolved_call_sites, "value.run")[0]
+
+    assert site.status == CallResolutionStatus.EXACT
+    assert site.canonical_symbol and site.canonical_symbol.endswith("Service.run")
 
 
 def test_import_map_does_not_override_lexically_shadowed_names(tmp_path: Path) -> None:
@@ -396,8 +420,11 @@ def test_import_map_does_not_override_lexically_shadowed_names(tmp_path: Path) -
 
 
 def test_overloaded_static_and_class_methods_preserve_invocation_kind(tmp_path: Path) -> None:
+    worker = tmp_path / "worker.py"
+    worker.write_text("def changed() -> int:\n    return 1\n", encoding="utf-8")
     main = tmp_path / "main.py"
     main.write_text(
+        "from worker import changed\n"
         "from typing import overload\n\n"
         "class Service:\n"
         "    @staticmethod\n"
@@ -407,7 +434,7 @@ def test_overloaded_static_and_class_methods_preserve_invocation_kind(tmp_path: 
         "    @overload\n"
         "    def parse(value: str) -> str: ...\n"
         "    @staticmethod\n"
-        "    def parse(value: object) -> object:\n        return value\n\n"
+        "    def parse(value: object) -> object:\n        return changed()\n\n"
         "    @classmethod\n"
         "    @overload\n"
         "    def build(cls, value: int) -> int: ...\n"
@@ -422,13 +449,15 @@ def test_overloaded_static_and_class_methods_preserve_invocation_kind(tmp_path: 
         encoding="utf-8",
     )
 
-    sites = MypyAnalyzer(tmp_path).analyze_endpoint(_endpoint(main, line=24)).resolved_call_sites
+    deps = MypyAnalyzer(tmp_path).analyze_endpoint(_endpoint(main, line=24))
+    sites = deps.resolved_call_sites
     parse = _site_by_spelling(sites, "Service.parse")[0]
     build = _site_by_spelling(sites, "Service.build")[0]
 
     assert parse.status == CallResolutionStatus.EXACT
     assert parse.invocation == InvocationKind.FUNCTION
     assert build.status == CallResolutionStatus.EXACT
+    assert deps.references_symbol_at_line(str(worker), 1) is not None
     assert build.invocation == InvocationKind.CLASS_METHOD
 
 

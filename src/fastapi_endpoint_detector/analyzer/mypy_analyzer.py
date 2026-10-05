@@ -24,7 +24,7 @@ from importlib.metadata import PackageNotFoundError, version
 from importlib.util import find_spec
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Protocol
 
 from fastapi_endpoint_detector.models.effect_contract import (
     CallArgumentEvidence,
@@ -43,6 +43,47 @@ from fastapi_endpoint_detector.models.surface_contract import CallbackRangeMode
 
 # Type alias for line-level progress callback (file_path, line_number, symbol_name)
 LineProgressCallback = Callable[[str, int, str], None]
+
+
+class SourceFileRecord(Protocol):
+    """Structural source record shared with offline snapshot producers."""
+
+    @property
+    def path(self) -> str | Path: ...
+
+    @property
+    def relative_path(self) -> str: ...
+
+    @property
+    def module(self) -> str: ...
+
+    @property
+    def sha256(self) -> str: ...
+
+    @property
+    def imports(self) -> Iterable[str]: ...
+
+
+class SourceInventory(Protocol):
+    """Optional canonical project snapshot; deliberately has no package import dependency."""
+
+    @property
+    def root(self) -> str | Path: ...
+
+    @property
+    def files(self) -> Iterable[SourceFileRecord]: ...
+
+    @property
+    def follow_imports(self) -> str: ...
+
+    @property
+    def max_depth(self) -> int: ...
+
+    @property
+    def excluded_files(self) -> Iterable[str]: ...
+
+    @property
+    def unresolved_imports(self) -> Iterable[str]: ...
 
 
 class MypyAnalyzerError(Exception):
@@ -376,7 +417,7 @@ class MypyAnalyzer:
     and extract precise file/line information for all references.
     """
 
-    CACHE_SCHEMA_VERSION = 18
+    CACHE_SCHEMA_VERSION = 19
     MAX_POINTS_TO_TARGETS = 8
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
@@ -400,13 +441,31 @@ class MypyAnalyzer:
         "starlette.concurrency.run_in_threadpool": _ExecutorSummary(0, True, True),
     }
 
-    def __init__(self, app_path: Path, *, max_depth: int = 10) -> None:
+    def __init__(
+        self,
+        app_path: Path,
+        *,
+        max_depth: int | None = None,
+        module_root: Path | None = None,
+        source_inventory: SourceInventory | None = None,
+    ) -> None:
         """Initialize the mypy analyzer."""
-        if max_depth < 1:
+        inventory_root = (
+            Path(source_inventory.root).resolve() if source_inventory is not None else None
+        )
+        inventory_depth = getattr(source_inventory, "max_depth", None)
+        effective_depth = int(
+            max_depth if max_depth is not None else inventory_depth if inventory_depth else 10
+        )
+        if effective_depth < 1:
             raise ValueError("max_depth must be at least 1")
         self.app_path = app_path.resolve()
-        self.source_root = self.app_path.parent if self.app_path.is_file() else self.app_path
-        self.max_depth = max_depth
+        self.source_root = inventory_root or (
+            self.app_path.parent if self.app_path.is_file() else self.app_path
+        )
+        self.module_root = (module_root or self._infer_module_root(self.source_root)).resolve()
+        self.source_inventory = source_inventory
+        self.max_depth = effective_depth
         self._endpoint_deps: dict[str, EndpointDependencies] = {}
         self._mypy_available = self._check_mypy_available()
         self._cache_file: Path | None = None
@@ -427,7 +486,9 @@ class MypyAnalyzer:
         self._global_value_cache: dict[str, SymbolReference | None] = {}
         self._python_dependency_cache: dict[tuple[str, int, str], set[str]] = {}
         self._python_ast_cache: dict[str, ast.Module | None] = {}
-        self._python_call_span_cache: dict[str, dict[tuple[int, int], tuple[int, int]]] = {}
+        self._python_call_span_cache: dict[
+            str, dict[tuple[int, int], list[tuple[int, int, int]]]
+        ] = {}
         self._source_bytes_cache: dict[str, tuple[bytes, ...] | None] = {}
         self._resolved_call_site_cache: dict[int, ResolvedCallSite | None] = {}
         self._finite_global_value_cache: dict[str, _FinitePointsTo | None] = {}
@@ -470,9 +531,65 @@ class MypyAnalyzer:
 
     def _get_source_root(self) -> Path:
         """Get the source root directory."""
-        if self.app_path.is_file():
-            return self.app_path.parent
-        return self.app_path
+        return self.source_root
+
+    @staticmethod
+    def _infer_module_root(source_root: Path) -> Path:
+        """Choose a stable import root without incorporating the checkout basename."""
+        if (source_root / "src").is_dir() and any((source_root / "src").rglob("*.py")):
+            return source_root / "src"
+        if (source_root / "__init__.py").is_file():
+            return source_root.parent
+        # Preserve the prior package base for ad-hoc app directories. In
+        # particular, flattening them can turn a local ``types.py`` into a
+        # top-level module that shadows Python's ``types`` library.
+        return source_root.parent
+
+    @staticmethod
+    def _module_name_from_path(path: Path, module_root: Path) -> str:
+        """Derive a module ID relative to an explicit import root."""
+        relative = path.relative_to(module_root)
+        parts = list(relative.with_suffix("").parts)
+        if parts and parts[-1] == "__init__":
+            parts.pop()
+        return ".".join(parts)
+
+    def _source_records(self) -> list[tuple[Path, str, str]]:
+        """Return canonical (path, module, digest) inputs from inventory or disk."""
+        inventory = self.source_inventory
+        if inventory is not None:
+            records = []
+            for record in inventory.files:
+                path = Path(record.path).resolve()
+                expected = (Path(inventory.root) / record.relative_path).resolve()
+                if path != expected:
+                    raise MypyAnalyzerError(
+                        f"source inventory path mismatch for {record.relative_path}"
+                    )
+                try:
+                    actual_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                except OSError as exc:
+                    raise MypyAnalyzerError(
+                        f"source inventory file is unavailable: {record.relative_path}"
+                    ) from exc
+                if actual_digest != record.sha256:
+                    raise MypyAnalyzerError(f"source inventory is stale for {record.relative_path}")
+                records.append((path, record.module, record.sha256))
+            return sorted(records, key=lambda record: (str(record[0]), record[1]))
+        records = []
+        for path in self.source_root.rglob("*.py"):
+            if any(part.startswith((".", "__pycache__")) for part in path.parts):
+                continue
+            try:
+                try:
+                    module = self._module_name_from_path(path, self.module_root)
+                except ValueError:
+                    module = self._module_name_from_path(path, self.source_root)
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            except (OSError, ValueError):
+                continue
+            records.append((path.resolve(), module, digest))
+        return sorted(records, key=lambda record: (str(record[0]), record[1]))
 
     def _ensure_mypy_built(self) -> None:
         """Ensure mypy has analyzed the project and we have the typed ASTs."""
@@ -487,31 +604,18 @@ class MypyAnalyzer:
         from mypy.modulefinder import BuildSource
         from mypy.options import Options
 
-        source_root = self._get_source_root()
-
-        # Collect all Python files
+        # Collect all Python files using a repository-independent import root.
         sources: list[BuildSource] = []
-        for py_file in source_root.rglob("*.py"):
-            if any(part.startswith((".", "__pycache__")) for part in py_file.parts):
-                continue
-
-            try:
-                rel_path = py_file.relative_to(source_root.parent)
-                if rel_path.name == "__init__.py":
-                    module_name = str(rel_path.parent).replace("/", ".").replace("\\", ".")
-                else:
-                    module_name = str(rel_path.with_suffix("")).replace("/", ".").replace("\\", ".")
-            except ValueError:
-                module_name = py_file.stem
-
+        for py_file, module_name, _digest in self._source_records():
             sources.append(BuildSource(path=str(py_file), module=module_name))
             self._module_to_path[module_name] = str(py_file)
 
         # Configure mypy for full analysis with AST retention
         options = Options()
         options.ignore_missing_imports = True
-        options.follow_imports = "normal"
-        options.mypy_path = [str(source_root.parent)]
+        follow_imports = getattr(self.source_inventory, "follow_imports", "normal")
+        options.follow_imports = follow_imports
+        options.mypy_path = [str(self.module_root)]
         options.namespace_packages = True
         options.explicit_package_bases = True
         options.preserve_asts = True
@@ -520,8 +624,8 @@ class MypyAnalyzer:
         options.export_types = True  # Critical for type information!
 
         original_path = sys.path.copy()
-        if str(source_root.parent) not in sys.path:
-            sys.path.insert(0, str(source_root.parent))
+        if str(self.module_root) not in sys.path:
+            sys.path.insert(0, str(self.module_root))
 
         try:
             fscache = FileSystemCache()
@@ -624,7 +728,10 @@ class MypyAnalyzer:
             elif isinstance(defn, Decorator) and defn.func.name == func_name:
                 candidates.append((defn, defn.func.name))
             elif isinstance(defn, OverloadedFuncDef) and defn.name == func_name:
-                if defn.items:
+                implementation = getattr(defn, "impl", None)
+                if implementation is not None:
+                    candidates.append((implementation, defn.name))
+                elif defn.items:
                     candidates.append((defn.items[0], defn.name))
             elif isinstance(defn, ClassDef):
                 for item in defn.defs.body:
@@ -632,6 +739,11 @@ class MypyAnalyzer:
                         candidates.append((item, f"{defn.name}.{item.name}"))
                     elif isinstance(item, Decorator) and item.func.name == func_name:
                         candidates.append((item, f"{defn.name}.{item.func.name}"))
+                    elif isinstance(item, OverloadedFuncDef) and item.name == func_name:
+                        implementation = getattr(item, "impl", None)
+                        selected = implementation or (item.items[0] if item.items else None)
+                        if selected is not None:
+                            candidates.append((selected, f"{defn.name}.{item.name}"))
 
         if qualified_name:
             exact = [candidate for candidate in candidates if candidate[1] == qualified_name]
@@ -1305,36 +1417,85 @@ class MypyAnalyzer:
         end_column_value = int(end_column_raw) if isinstance(end_column_raw, int) else -1
         if line < 1 or column < 0:
             return None
-        end_line = end_line_value if end_line_value >= line and end_column_value >= 0 else None
-        end_column = end_column_value if end_line is not None else None
         canonical = str(Path(current_file).resolve())
-        if end_line is None:
-            if canonical not in self._python_ast_cache:
-                try:
-                    self._python_ast_cache[canonical] = ast.parse(
-                        Path(canonical).read_text(encoding="utf-8"), filename=canonical
+        if canonical not in self._python_ast_cache:
+            try:
+                self._python_ast_cache[canonical] = ast.parse(
+                    Path(canonical).read_text(encoding="utf-8"), filename=canonical
+                )
+            except (OSError, SyntaxError, UnicodeError):
+                self._python_ast_cache[canonical] = None
+        tree = self._python_ast_cache[canonical]
+        if canonical not in self._python_call_span_cache:
+            spans: dict[tuple[int, int], list[tuple[int, int, int]]] = {}
+            if tree is not None:
+                source_lines = Path(canonical).read_text(encoding="utf-8").splitlines()
+                for candidate in ast.walk(tree):
+                    function = candidate.func if isinstance(candidate, ast.Call) else None
+                    if (
+                        function is None
+                        or function.end_lineno is None
+                        or function.end_col_offset is None
+                    ):
+                        continue
+                    span = (
+                        function.col_offset,
+                        function.end_lineno,
+                        function.end_col_offset,
                     )
-                except (OSError, SyntaxError, UnicodeError):
-                    self._python_ast_cache[canonical] = None
-            tree = self._python_ast_cache[canonical]
-            if canonical not in self._python_call_span_cache:
-                spans: dict[tuple[int, int], tuple[int, int]] = {}
-                if tree is not None:
-                    for candidate in ast.walk(tree):
-                        function = candidate.func if isinstance(candidate, ast.Call) else None
-                        if (
-                            function is not None
-                            and function.end_lineno is not None
-                            and function.end_col_offset is not None
-                        ):
-                            spans[(function.lineno, function.col_offset)] = (
-                                function.end_lineno,
-                                function.end_col_offset,
-                            )
-                self._python_call_span_cache[canonical] = spans
-            fallback_span = self._python_call_span_cache[canonical].get((line, column))
-            if fallback_span is not None:
-                end_line, end_column = fallback_span
+                    spans.setdefault((function.lineno, function.col_offset), []).append(span)
+                    # Mypy releases have reported columns as either UTF-8
+                    # bytes or Unicode code points. Index both coordinate
+                    # systems while retaining the AST's byte offsets.
+                    line_text = source_lines[function.lineno - 1]
+                    character_column = len(
+                        line_text.encode("utf-8")[: function.col_offset].decode("utf-8")
+                    )
+                    spans.setdefault((function.lineno, character_column), []).append(span)
+                    prefix = line_text.encode("utf-8")[: function.col_offset].decode("utf-8")
+                    # Older mypy wheels on Python 3.10 subtract the UTF-8
+                    # expansion twice when reporting AST columns. Keep this
+                    # third deterministic coordinate key for those releases.
+                    legacy_column = character_column - sum(
+                        not character.isascii() for character in prefix
+                    )
+                    spans.setdefault((function.lineno, legacy_column), []).append(span)
+            spans = {key: list(dict.fromkeys(candidates)) for key, candidates in spans.items()}
+            self._python_call_span_cache[canonical] = spans
+        source_spans = self._python_call_span_cache[canonical].get((line, column), [])
+        if not source_spans:
+            # Synthetic or version-incompatible coordinates have no proven
+            # source occurrence, even if mypy supplied a plausible end span.
+            return None
+        end_line: int | None
+        end_column: int | None
+        if len(source_spans) > 1 and end_line_value >= line and end_column_value >= 0:
+            source_lines = Path(canonical).read_text(encoding="utf-8").splitlines()
+
+            def column_forms(source_line: int, byte_column: int) -> set[int]:
+                text = source_lines[source_line - 1]
+                prefix = text.encode("utf-8")[:byte_column].decode("utf-8")
+                character_column = len(prefix)
+                return {
+                    byte_column,
+                    character_column,
+                    character_column - sum(not character.isascii() for character in prefix),
+                }
+
+            source_spans = [
+                span
+                for span in source_spans
+                if span[1] == end_line_value and end_column_value in column_forms(span[1], span[2])
+            ]
+            if not source_spans:
+                return None
+        if len(source_spans) == 1:
+            column, end_line, end_column = source_spans[0]
+        elif source_spans:
+            # Multiple nested calls can begin at one source position. If
+            # mypy's end coordinate does not select one AST span uniquely,
+            # omit the occurrence rather than borrowing a neighboring range.
+            return None
         if end_line is None or end_column is None:
             return None
         if canonical not in self._source_bytes_cache:
@@ -1913,6 +2074,32 @@ class MypyAnalyzer:
             declaration[0], expression, environment, import_map, stack, budget
         )
 
+    @staticmethod
+    def _literal_boolean(expression: Any) -> bool | None:
+        """Return the truth value of a source literal condition, when exact."""
+        from mypy.nodes import IntExpr, NameExpr, StrExpr, UnaryExpr
+
+        if isinstance(expression, NameExpr) and expression.name in {"True", "False"}:
+            return expression.name == "True"
+        if isinstance(expression, (IntExpr, StrExpr)):
+            return bool(expression.value)
+        if isinstance(expression, UnaryExpr) and expression.op == "not":
+            value = MypyAnalyzer._literal_boolean(expression.expr)
+            return None if value is None else not value
+        return None
+
+    @staticmethod
+    def _returned_nested_function(parent: Any, nested: Any) -> bool:
+        """Recognize closures returned by their defining callable as escaping."""
+        from mypy.nodes import NameExpr, ReturnStmt
+
+        body = getattr(parent, "body", None)
+        for statement in getattr(body, "body", ()):
+            if isinstance(statement, ReturnStmt) and isinstance(statement.expr, NameExpr):
+                if statement.expr.name == getattr(nested, "name", None):
+                    return True
+        return False
+
     def _finite_constructor_value(
         self,
         info: Any,
@@ -2158,11 +2345,25 @@ class MypyAnalyzer:
         return positional[positional_index] if positional_index < len(positional) else None
 
     @staticmethod
-    def _valid_builtin_generator_consumer(call: Any) -> bool:
-        """Accept only valid explicit `next`/`anext` positional call shapes."""
+    def _valid_builtin_generator_consumer(call: Any, fullname: str) -> bool:
+        """Accept only eager builtin iterator consumers with exact call shapes."""
         from mypy.nodes import ARG_POS
 
-        return 1 <= len(call.args) <= 2 and all(
+        counts = {
+            "builtins.all": {1},
+            "builtins.any": {1},
+            "builtins.list": {1},
+            "builtins.set": {1},
+            "builtins.frozenset": {1},
+            "builtins.tuple": {1},
+            "builtins.sum": {1, 2},
+            "builtins.min": {1},
+            "builtins.max": {1},
+            "builtins.sorted": {1},
+            "builtins.next": {1, 2},
+            "builtins.anext": {1, 2},
+        }
+        return len(call.args) in counts.get(fullname, set()) and all(
             kind == ARG_POS and name is None
             for kind, name in zip(call.arg_kinds, call.arg_names, strict=True)
         )
@@ -2399,7 +2600,7 @@ class MypyAnalyzer:
         str | None,
     ]:
         """Resolve one member call through finite nominal receiver evidence."""
-        from mypy.nodes import CallExpr, NameExpr, TypeInfo, Var
+        from mypy.nodes import CallExpr, Decorator, FuncDef, NameExpr, TypeInfo, Var
         from mypy.types import Instance, UnionType, get_proper_type
 
         if (
@@ -2422,6 +2623,7 @@ class MypyAnalyzer:
 
         receiver_infos: list[TypeInfo] = []
         incomplete = False
+        source_exact_receiver = False
         if isinstance(callee.expr, NameExpr):
             imported = (
                 import_map.get(callee.expr.name, "")
@@ -2451,6 +2653,7 @@ class MypyAnalyzer:
             constructed = self._project_type_info(imported)
             if constructed is not None:
                 receiver_infos.append(constructed)
+                source_exact_receiver = True
         if not receiver_infos:
             receiver_type = self._get_type_from_node(callee.expr)
             if (
@@ -2471,6 +2674,7 @@ class MypyAnalyzer:
         if receiver_infos:
             candidates = tuple(sorted({item.fullname for item in receiver_infos if item.fullname}))
             resolutions: set[tuple[str, InvocationKind]] = set()
+            dynamically_final = True
             for info in receiver_infos:
                 member = info.get(callee.name)
                 declaration = (
@@ -2480,14 +2684,43 @@ class MypyAnalyzer:
                     incomplete = True
                 else:
                     resolutions.add(declaration)
+                    method = member.node if member is not None else None
+                    method_final = (
+                        bool(getattr(method.var, "is_final", False))
+                        if isinstance(method, Decorator)
+                        else bool(getattr(method, "is_final", False))
+                        if isinstance(method, FuncDef)
+                        else False
+                    )
+                    dynamically_final = dynamically_final and (
+                        bool(getattr(info, "is_final", False)) or method_final
+                    )
             if len(resolutions) == 1 and not incomplete:
                 resolved_symbol, invocation = next(iter(resolutions))
+                # Project source is subject to subclass overrides. External
+                # library declarations remain exact here because this
+                # analyzer has no project implementation set to fan out to.
+                resolved_file = self._resolve_fullname_to_file(resolved_symbol)
+                if resolved_file is None or resolved_file[1] not in self._project_modules:
+                    dynamically_final = True
+                if source_exact_receiver:
+                    dynamically_final = True
+                if invocation != InvocationKind.INSTANCE_METHOD:
+                    dynamically_final = True
+                if dynamically_final:
+                    return (
+                        CallResolutionStatus.EXACT,
+                        resolved_symbol,
+                        invocation,
+                        candidates,
+                        None,
+                    )
                 return (
-                    CallResolutionStatus.EXACT,
-                    resolved_symbol,
-                    invocation,
-                    candidates,
+                    CallResolutionStatus.AMBIGUOUS,
                     None,
+                    None,
+                    candidates,
+                    "open_receiver_dispatch",
                 )
             if len(receiver_infos) > 1 or len(resolutions) > 1:
                 return (
@@ -2922,6 +3155,8 @@ class MypyAnalyzer:
             finite_edge_budget = [0]
 
         from mypy.nodes import (
+            ARG_STAR,
+            ARG_STAR2,
             AssertStmt,
             AssignmentStmt,
             AwaitExpr,
@@ -2968,7 +3203,15 @@ class MypyAnalyzer:
         finite_budget = [0]
         awaited_call_ids: set[int] = set()
         consumed_generator_call_kinds: dict[int, bool | None] = {}
+        consumed_generator_expression_ids: set[int] = set()
+        eager_generator_expression_depth = [0]
         deferred_environment: dict[str, _DeferredGenerator] = {}
+        # Callable aliases are kept separately from object points-to values.
+        # The tuple retains a bound receiver when the source assignment proves
+        # one; arbitrary callable expressions remain unresolved.
+        callable_environment: dict[
+            str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]
+        ] = {}
 
         def resolve_and_trace(
             fullname: str,
@@ -3163,6 +3406,9 @@ class MypyAnalyzer:
             """Mark a direct generator call or consume one protocol-matched alias."""
             if isinstance(expression, CallExpr):
                 consumed_generator_call_kinds[id(expression)] = require_async
+            elif isinstance(expression, GeneratorExpr):
+                if not require_async:
+                    consumed_generator_expression_ids.add(id(expression))
             elif isinstance(expression, NameExpr):
                 generator = deferred_environment.get(expression.name)
                 if generator is not None and (
@@ -3177,6 +3423,24 @@ class MypyAnalyzer:
                 deps.add_resolved_call_site(call_site)
             callee = call.callee
             traced = False
+
+            if isinstance(callee, NameExpr):
+                callable_alias = callable_environment.get(callee.name)
+                if callable_alias is not None:
+                    declaration, bound_receiver = callable_alias
+                    alias_fullname, alias_invocation = declaration
+                    deps.add_reference(current_file, call.line, alias_fullname)
+                    resolve_and_trace(
+                        alias_fullname,
+                        call.line,
+                        target_receiver=(
+                            bound_receiver
+                            if alias_invocation == InvocationKind.INSTANCE_METHOD
+                            else None
+                        ),
+                        edge_kind="callable_alias_invocation",
+                    )
+                    traced = True
 
             canonical_symbol = (call_site.canonical_symbol if call_site is not None else None) or ""
             generator_consumer = self.GENERATOR_CONSUMERS.get(canonical_symbol)
@@ -3197,8 +3461,21 @@ class MypyAnalyzer:
             builtin_consumer = {
                 "builtins.anext": True,
                 "builtins.next": False,
+                "builtins.all": False,
+                "builtins.any": False,
+                "builtins.list": False,
+                "builtins.set": False,
+                "builtins.frozenset": False,
+                "builtins.tuple": False,
+                "builtins.sum": False,
+                "builtins.min": False,
+                "builtins.max": False,
+                "builtins.sorted": False,
             }.get(canonical_symbol)
-            if builtin_consumer is not None and self._valid_builtin_generator_consumer(call):
+            if builtin_consumer is not None and self._valid_builtin_generator_consumer(
+                call,
+                canonical_symbol,
+            ):
                 consume_generator_expression(
                     call.args[0],
                     call.line,
@@ -3320,7 +3597,16 @@ class MypyAnalyzer:
                 and call_site.canonical_symbol is not None
             ):
                 deps.add_reference(current_file, call.line, call_site.canonical_symbol)
-                resolve_and_trace(call_site.canonical_symbol, call.line)
+                resolve_and_trace(
+                    call_site.canonical_symbol,
+                    call.line,
+                    low_confidence_edge=eager_generator_expression_depth[0] > 0,
+                    edge_kind=(
+                        "consumed_generator_expression"
+                        if eager_generator_expression_depth[0] > 0
+                        else None
+                    ),
+                )
 
             # FastAPI dependency injection passes callables as values rather
             # than invoking them in the handler body. Treat the callable given
@@ -3345,15 +3631,36 @@ class MypyAnalyzer:
                     )
 
             # Walk nested calls before invalidating mutable local object state.
+            if isinstance(callee, LambdaExpr):
+                walk_node(callee.body)
             walk_node(callee)
             for arg in call.args:
                 walk_node(arg)
-            flow_environment.clear()
-            deferred_environment.clear()
+            # A call with unrelated arguments cannot invalidate every local
+            # fact. Kill only values explicitly exposed to the call; unknown
+            # star expansion invalidates the bounded local state.
+            exposed_names: set[str] = set()
+            if isinstance(callee, MemberExpr) and isinstance(callee.expr, NameExpr):
+                exposed_names.add(callee.expr.name)
+            for argument, argument_kind in zip(
+                call.args,
+                call.arg_kinds,
+                strict=True,
+            ):
+                if isinstance(argument, NameExpr):
+                    exposed_names.add(argument.name)
+                if argument_kind in (ARG_STAR, ARG_STAR2):
+                    exposed_names.update(flow_environment)
+                    exposed_names.update(deferred_environment)
+                    exposed_names.update(callable_environment)
+            for name in exposed_names:
+                flow_environment.pop(name, None)
+                deferred_environment.pop(name, None)
+                callable_environment.pop(name, None)
 
         def walk_node(n: Any) -> None:
             """Recursively walk a mypy AST node with a bounded local environment."""
-            nonlocal deferred_environment, flow_environment
+            nonlocal callable_environment, deferred_environment, flow_environment
             if n is None:
                 return
 
@@ -3393,13 +3700,19 @@ class MypyAnalyzer:
                 if hasattr(n, "decorators"):
                     for decorator in n.decorators:
                         walk_node(decorator)
-                # Walk function body
-                if hasattr(n, "body"):
-                    walk_node(n.body)
+                # A nested function definition evaluates its signature and
+                # decorators here; its body executes only through a call edge.
+                if n is function_node or self._returned_nested_function(function_node, n):
+                    if hasattr(n, "body"):
+                        walk_node(n.body)
 
             elif isinstance(n, Block):
                 for stmt in n.body:
                     walk_node(stmt)
+                    # Statements following an unconditional terminal cannot
+                    # contribute executable references in this block.
+                    if isinstance(stmt, (ReturnStmt, RaiseStmt)):
+                        break
 
             elif isinstance(n, ExpressionStmt):
                 walk_node(n.expr)
@@ -3427,6 +3740,26 @@ class MypyAnalyzer:
                         else None
                     )
                 )
+                callable_value: tuple[tuple[str, InvocationKind], _FinitePointsTo | None] | None = (
+                    None
+                )
+                if isinstance(n.rvalue, NameExpr):
+                    callable_value = callable_environment.get(n.rvalue.name)
+                    if callable_value is None:
+                        declaration = self._callable_declaration(getattr(n.rvalue, "node", None))
+                        if declaration is not None:
+                            callable_value = (declaration, None)
+                elif isinstance(n.rvalue, MemberExpr):
+                    declaration = self._callable_declaration(getattr(n.rvalue, "node", None))
+                    receiver = self._finite_expression_value(
+                        n.rvalue.expr,
+                        flow_environment,
+                        import_map,
+                        (),
+                        finite_budget,
+                    )
+                    if declaration is not None:
+                        callable_value = (declaration, receiver)
                 walk_node(n.rvalue)
                 for lv in n.lvalues:
                     if isinstance(lv, NameExpr):
@@ -3438,11 +3771,16 @@ class MypyAnalyzer:
                             deferred_environment.pop(lv.name, None)
                         else:
                             deferred_environment[lv.name] = deferred_value
+                        if callable_value is None:
+                            callable_environment.pop(lv.name, None)
+                        else:
+                            callable_environment[lv.name] = callable_value
                     else:
                         # Arbitrary/reflection-driven member mutation invalidates all
                         # finite heap evidence outside constructor summarization.
                         flow_environment.clear()
                         deferred_environment.clear()
+                        callable_environment.clear()
                     walk_node(lv)
 
             elif isinstance(n, ReturnStmt):
@@ -3451,33 +3789,78 @@ class MypyAnalyzer:
             elif isinstance(n, IfStmt):
                 base_environment = dict(flow_environment)
                 base_deferred = dict(deferred_environment)
+                base_callables = dict(callable_environment)
                 branch_environments: list[dict[str, _FinitePointsTo]] = []
                 branch_deferred: list[dict[str, _DeferredGenerator]] = []
+                branch_callables: list[
+                    dict[str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]]
+                ] = []
+                selected: int | None = None
+                unknown_before_selection = False
                 for expr, body in zip(n.expr, n.body, strict=True):
+                    literal = self._literal_boolean(expr)
+                    if literal is False:
+                        # Evaluating the condition is harmless; the body is
+                        # statically unreachable.
+                        walk_node(expr)
+                        continue
+                    if selected is not None:
+                        continue
                     flow_environment = dict(base_environment)
                     deferred_environment = dict(base_deferred)
+                    callable_environment = dict(base_callables)
                     walk_node(expr)
                     walk_node(body)
                     branch_environments.append(dict(flow_environment))
                     branch_deferred.append(dict(deferred_environment))
+                    branch_callables.append(dict(callable_environment))
+                    if literal is True:
+                        selected = len(branch_environments) - 1
+                    else:
+                        unknown_before_selection = True
                 flow_environment = dict(base_environment)
                 deferred_environment = dict(base_deferred)
-                if n.else_body:
+                callable_environment = dict(base_callables)
+                if n.else_body and selected is None:
                     walk_node(n.else_body)
                     branch_environments.append(dict(flow_environment))
                     branch_deferred.append(dict(deferred_environment))
-                else:
+                    branch_callables.append(dict(callable_environment))
+                elif not n.else_body and selected is None:
                     branch_environments.append(base_environment)
                     branch_deferred.append(base_deferred)
-                flow_environment = self._join_finite_environments(branch_environments)
-                common_deferred = set.intersection(*(set(branch) for branch in branch_deferred))
-                deferred_environment = {
-                    name: branch_deferred[0][name]
-                    for name in common_deferred
-                    if all(
-                        branch[name] == branch_deferred[0][name] for branch in branch_deferred[1:]
+                    branch_callables.append(base_callables)
+                if selected is not None and not unknown_before_selection:
+                    flow_environment = branch_environments[selected]
+                    deferred_environment = branch_deferred[selected]
+                    callable_environment = branch_callables[selected]
+                else:
+                    flow_environment = self._join_finite_environments(branch_environments)
+                    if branch_deferred:
+                        common_deferred = set.intersection(
+                            *(set(branch) for branch in branch_deferred)
+                        )
+                        deferred_environment = {
+                            name: branch_deferred[0][name]
+                            for name in common_deferred
+                            if all(
+                                branch[name] == branch_deferred[0][name]
+                                for branch in branch_deferred[1:]
+                            )
+                        }
+                    common_callables = (
+                        set.intersection(*(set(branch) for branch in branch_callables))
+                        if branch_callables
+                        else set()
                     )
-                }
+                    callable_environment = {
+                        name: branch_callables[0][name]
+                        for name in common_callables
+                        if all(
+                            branch[name] == branch_callables[0][name]
+                            for branch in branch_callables[1:]
+                        )
+                    }
 
             elif isinstance(n, WhileStmt):
                 walk_node(n.expr)
@@ -3610,8 +3993,19 @@ class MypyAnalyzer:
                 walk_node(n.value)
 
             elif isinstance(n, GeneratorExpr):
-                # Creating a generator expression evaluates only its outer iterable.
-                if n.sequences:
+                if id(n) in consumed_generator_expression_ids:
+                    for sequence in n.sequences:
+                        walk_node(sequence)
+                    for conditions in n.condlists:
+                        for condition in conditions:
+                            walk_node(condition)
+                    eager_generator_expression_depth[0] += 1
+                    try:
+                        walk_node(n.left_expr)
+                    finally:
+                        eager_generator_expression_depth[0] -= 1
+                elif n.sequences:
+                    # Creating a generator expression evaluates only its outer iterable.
                     walk_node(n.sequences[0])
 
             elif isinstance(n, LambdaExpr):
@@ -3620,8 +4014,7 @@ class MypyAnalyzer:
                     for arg in n.arguments:
                         if hasattr(arg, "initializer") and arg.initializer:
                             walk_node(arg.initializer)
-                # Walk lambda body
-                walk_node(n.body)
+                # The body is deferred until the lambda is invoked.
 
             elif isinstance(n, YieldFromExpr):
                 consume_generator_expression(n.expr, n.line, require_async=False)
@@ -3721,19 +4114,71 @@ class MypyAnalyzer:
 
     def _cache_fingerprint(self) -> tuple[str, dict[str, str]]:
         """Fingerprint all Python inputs and analysis semantics."""
-        sources: dict[str, str] = {}
-        for discovered in sorted(self.source_root.rglob("*.py")):
-            try:
-                path = discovered.resolve()
-                relative = path.relative_to(self.source_root).as_posix()
-                sources[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
-            except (OSError, ValueError):
-                continue
+        if self.source_inventory is not None:
+            # Validate declared hashes immediately before they enter a
+            # persistent cache key, as well as when they enter mypy's build.
+            self._source_records()
+            inventory_files = sorted(
+                self.source_inventory.files,
+                key=lambda record: (record.relative_path, record.module, str(record.path)),
+            )
+            sources = {
+                Path(record.relative_path).as_posix(): record.sha256 for record in inventory_files
+            }
+            inventory_inputs = [
+                {
+                    "path": str(Path(record.path).resolve()),
+                    "relative_path": Path(record.relative_path).as_posix(),
+                    "module": record.module,
+                    "sha256": record.sha256,
+                    "imports": sorted(record.imports),
+                }
+                for record in inventory_files
+            ]
+        else:
+            source_records = self._source_records()
+            sources = {
+                path.relative_to(self.source_root).as_posix(): digest
+                for path, _module, digest in source_records
+            }
+            inventory_inputs = [
+                {
+                    "path": relative,
+                    "relative_path": relative,
+                    "module": module,
+                    "sha256": digest,
+                    "imports": [],
+                }
+                for path, module, digest in source_records
+                for relative in (path.relative_to(self.source_root).as_posix(),)
+            ]
         mypy_version = self._resolver_version
+        follow_imports = getattr(self.source_inventory, "follow_imports", "normal")
         payload = json.dumps(
             {
                 "schema": self.CACHE_SCHEMA_VERSION,
+                "engine": "fastapi-endpoint-detector:mypy-analyzer-v2",
+                "source_span_normalization": "source-ast-byte-spans-coordinate-aliases-v1",
                 "max_depth": self.max_depth,
+                "module_root": str(self.module_root.resolve()),
+                "effective_mypy_config": {
+                    "follow_imports": follow_imports,
+                    "ignore_missing_imports": True,
+                    "namespace_packages": True,
+                    "explicit_package_bases": True,
+                    "preserve_asts": True,
+                    "incremental": False,
+                    "check_untyped_defs": True,
+                    "export_types": True,
+                    "excluded_files": sorted(
+                        self.source_inventory.excluded_files if self.source_inventory else ()
+                    ),
+                    "unresolved_imports": sorted(
+                        self.source_inventory.unresolved_imports if self.source_inventory else ()
+                    ),
+                },
+                "inventory_root": str(self.source_root.resolve()),
+                "source_inventory": inventory_inputs,
                 "finite_points_to": {
                     "max_targets": self.MAX_POINTS_TO_TARGETS,
                     "max_factory_returns": self.MAX_FACTORY_RETURNS,
