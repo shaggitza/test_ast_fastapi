@@ -53,6 +53,7 @@ def build_sql_transaction_diagnostics(
                     scope=contract.behavior.transaction_scope or TransactionScope.NONE,
                     timing=contract.behavior.timing,
                     context_exit=contract.behavior.context_exit,
+                    stage_receiver_from_yield=contract.behavior.stage_receiver_from_yield,
                 )
 
     evidence = []

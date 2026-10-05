@@ -660,6 +660,8 @@ def audit_effect_contracts_command(
                 app,
                 loaded_surfaces,
                 bootstrap_entry=bootstrap_entry,
+                app_variable=app_var,
+                app_entry=app_entry,
             ).extract_inventory()
             inventory = merge_surface_inventory(inventory, custom)
         source_root = app.resolve().parent if app.is_file() else app.resolve()
@@ -873,6 +875,8 @@ def list_endpoints(
                     app,
                     loaded_surfaces,
                     bootstrap_entry=bootstrap_entry,
+                    app_variable=app_var,
+                    app_entry=app_entry,
                 ).extract_inventory()
                 inventory = merge_surface_inventory(inventory, custom)
             endpoints = inventory.endpoints
