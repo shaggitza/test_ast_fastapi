@@ -18,6 +18,7 @@ if TYPE_CHECKING:
         GraphifyEdge,
         GraphifyNode,
         GraphifySnapshot,
+        GraphifySourceSpan,
         GraphifyStrength,
         GraphSide,
     )
@@ -75,6 +76,8 @@ class GraphPathEvidence:
     changed_node_id: str
     endpoint_node_id: str
     node_path: tuple[str, ...]
+    node_source_spans: tuple[GraphifySourceSpan | None, ...]
+    edge_source_spans: tuple[GraphifySourceSpan | None, ...]
     relations: tuple[str, ...]
     extractor_strengths: tuple[GraphifyStrength, ...]
     confidence: GraphConfidence
@@ -106,6 +109,12 @@ class _Walk:
     edges: tuple[GraphifyEdge, ...]
 
 
+@dataclass(frozen=True)
+class _EndpointBinding:
+    seed: GraphEndpointSeed
+    line_only: bool
+
+
 def _overlaps(left_start: int, left_end: int, right_start: int, right_end: int) -> bool:
     return left_start <= right_end and right_start <= left_end
 
@@ -124,22 +133,43 @@ def _endpoint_bindings(
     nodes: tuple[GraphifyNode, ...],
     seeds: tuple[GraphEndpointSeed, ...],
     project_root: Path,
-) -> tuple[dict[str, GraphEndpointSeed], set[str]]:
-    bindings: dict[str, GraphEndpointSeed] = {}
+    *,
+    graph_schema_version: int,
+) -> tuple[dict[str, _EndpointBinding], set[str]]:
+    bindings: dict[str, _EndpointBinding] = {}
     ambiguous: set[str] = set()
     for seed in seeds:
         path = _relative_path(seed.file_path, project_root)
-        matches = [
+        exact_matches = [
             node
             for node in nodes
             if node.source_file == path
             and node.label == seed.handler_name
             and node.span is not None
+            and node.span.file_path == path
             and node.span.start_line == seed.start_line
             and node.span.end_line == seed.end_line
         ]
+        if graph_schema_version == 2:
+            # The explicit raw Graphify schema only carries line markers. Keep
+            # the marker intact and use containment solely to associate it
+            # with a secure range; never widen it into a function span.
+            matches = [
+                node
+                for node in nodes
+                if node.source_file == path
+                and node.label == seed.handler_name
+                and node.span is not None
+                and node.span.file_path == path
+                and node.span.start_line == node.span.end_line
+                and seed.start_line <= node.span.start_line <= seed.end_line
+            ]
+            line_only = True
+        else:
+            matches = exact_matches
+            line_only = False
         if len(matches) == 1:
-            bindings[matches[0].node_id] = seed
+            bindings[matches[0].node_id] = _EndpointBinding(seed, line_only)
         elif len(matches) > 1:
             ambiguous.add(seed.endpoint_id)
     return bindings, ambiguous
@@ -192,12 +222,15 @@ def traverse_graphify_snapshot(  # noqa: PLR0912
         if edge.traversable and edge.relation in _EVIDENCE_RELATIONS:
             reverse.setdefault(edge.target_id, []).append(edge)
     endpoint_by_node, ambiguous_endpoints = _endpoint_bindings(
-        snapshot.nodes, endpoints, project_root
+        snapshot.nodes,
+        endpoints,
+        project_root,
+        graph_schema_version=snapshot.graph_schema_version,
     )
     limitations: list[str] = []
     for endpoint in endpoints:
         if endpoint.endpoint_id not in ambiguous_endpoints and not any(
-            item.endpoint_id == endpoint.endpoint_id for item in endpoint_by_node.values()
+            item.seed.endpoint_id == endpoint.endpoint_id for item in endpoint_by_node.values()
         ):
             limitations.append(
                 f"LOW; endpoint did not bind uniquely and was not traversed: {endpoint.endpoint_id}"
@@ -206,6 +239,7 @@ def traverse_graphify_snapshot(  # noqa: PLR0912
         limitations.append(f"ambiguous endpoint binding (LOW, not guessed): {endpoint_id}")
 
     queue = deque(_Walk(node_id, (node_id,), ()) for node_id in sorted(starts))
+    nodes_by_id = {node.node_id: node for node in snapshot.nodes}
     visited_depth: dict[str, int] = {}
     evidence: dict[tuple[str, str, tuple[str, ...]], GraphPathEvidence] = {}
     capped = False
@@ -219,9 +253,29 @@ def traverse_graphify_snapshot(  # noqa: PLR0912
             capped = True
             break
         visited_depth[walk.node_id] = depth
-        endpoint_seed = endpoint_by_node.get(walk.node_id)
-        if endpoint_seed is not None:
+        binding = endpoint_by_node.get(walk.node_id)
+        if binding is not None:
+            endpoint_seed = binding.seed
             strengths = tuple(edge.extractor_strength for edge in walk.edges)
+            node_spans = tuple(nodes_by_id[node_id].span for node_id in walk.node_path)
+            edge_spans = tuple(edge.span for edge in walk.edges)
+            line_only_spans = (
+                tuple(
+                    span
+                    for span in (*node_spans, *edge_spans)
+                    if span is not None and span.start_line == span.end_line
+                )
+                if snapshot.graph_schema_version == 2
+                else ()
+            )
+            path_limitations = tuple(
+                dict.fromkeys(
+                    "line-only Graphify location retained without widening or confidence "
+                    "promotion: "
+                    f"{span.file_path}:L{span.start_line}"
+                    for span in line_only_spans
+                )
+            )
             item = GraphPathEvidence(
                 snapshot.side,
                 endpoint_seed.endpoint_id,
@@ -229,11 +283,19 @@ def traverse_graphify_snapshot(  # noqa: PLR0912
                 walk.node_path[0],
                 walk.node_id,
                 walk.node_path,
+                node_spans,
+                edge_spans,
                 tuple(edge.relation for edge in walk.edges),
                 strengths,
-                _confidence(strengths, endpoint_seed.discovery_status),
+                (
+                    "LOW"
+                    if binding.line_only or line_only_spans
+                    else _confidence(strengths, endpoint_seed.discovery_status)
+                ),
+                path_limitations,
             )
             evidence[(endpoint_seed.endpoint_id, item.changed_node_id, item.node_path)] = item
+            limitations.extend(path_limitations)
         if depth >= max_depth:
             if reverse.get(walk.node_id):
                 limitations.append(f"maximum traversal depth reached at {walk.node_id}")

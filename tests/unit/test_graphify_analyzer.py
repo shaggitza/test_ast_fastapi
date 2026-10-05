@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from fastapi_endpoint_detector.analyzer.graphify_adapter import GraphSide, load_graphify_snapshot
+from fastapi_endpoint_detector.analyzer.graphify_adapter import (
+    GraphifySourceSpan,
+    GraphSide,
+    load_graphify_snapshot,
+)
 from fastapi_endpoint_detector.analyzer.graphify_analyzer import (
     ChangedSourceRange,
     GraphEndpointSeed,
@@ -119,6 +124,20 @@ def _load(root: Path, graph: Path, side: GraphSide = "target"):
     return load_graphify_snapshot(graph, project_root=root, side=side)
 
 
+def _line_only_snapshot(snapshot):
+    def line_span(span: GraphifySourceSpan | None) -> GraphifySourceSpan | None:
+        if span is None:
+            return None
+        return replace(span, end_line=span.start_line)
+
+    return replace(
+        snapshot,
+        graph_schema_version=2,
+        nodes=tuple(replace(node, span=line_span(node.span)) for node in snapshot.nodes),
+        edges=tuple(replace(edge, span=line_span(edge.span)) for edge in snapshot.edges),
+    )
+
+
 def _seed() -> GraphEndpointSeed:
     return GraphEndpointSeed(
         "GET /items", "endpoint", Path("routes.py"), 1, 2, EndpointDiscoveryStatus.ESTABLISHED
@@ -209,6 +228,57 @@ def test_ambiguous_binding_is_not_guessed_and_conditional_seed_is_low(tmp_path: 
     assert len(conditional_result.evidence) == 1
     assert conditional_result.evidence[0].confidence == "LOW"
     assert conditional_result.evidence[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+
+
+def test_raw_line_only_binding_preserves_location_and_stays_low(tmp_path: Path) -> None:
+    root = _write_project(tmp_path / "target")
+    graph = tmp_path / "graph.json"
+    _graph(graph)
+    snapshot = _line_only_snapshot(_load(root, graph))
+
+    result = traverse_graphify_snapshot(
+        snapshot,
+        project_root=root,
+        changed_ranges=(ChangedSourceRange(Path("service.py"), 1, 2),),
+        endpoints=(_seed(),),
+    )
+
+    assert len(result.evidence) == 1
+    evidence = result.evidence[0]
+    assert evidence.node_path == ("helper", "alias", "endpoint")
+    assert [
+        (span.file_path, span.start_line, span.end_line)
+        for span in evidence.node_source_spans
+        if span is not None
+    ] == [
+        (Path("service.py"), 1, 1),
+        (Path("legacy.py"), 1, 1),
+        (Path("routes.py"), 1, 1),
+    ]
+    assert all(
+        span is not None and span.start_line == span.end_line for span in evidence.edge_source_spans
+    )
+    assert evidence.confidence == "LOW"
+    assert evidence.limitations
+    assert all("without widening or confidence promotion" in item for item in evidence.limitations)
+    assert set(evidence.limitations).issubset(result.limitations)
+
+
+def test_ambiguous_raw_line_only_binding_is_not_guessed(tmp_path: Path) -> None:
+    root = _write_project(tmp_path / "target")
+    graph = tmp_path / "graph.json"
+    _graph(graph, duplicate_endpoint=True)
+    snapshot = _line_only_snapshot(_load(root, graph))
+
+    result = traverse_graphify_snapshot(
+        snapshot,
+        project_root=root,
+        changed_ranges=(ChangedSourceRange(Path("service.py"), 1, 2),),
+        endpoints=(_seed(),),
+    )
+
+    assert result.evidence == ()
+    assert any("ambiguous endpoint binding" in item for item in result.limitations)
 
 
 @pytest.mark.parametrize(
