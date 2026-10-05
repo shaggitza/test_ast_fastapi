@@ -6,11 +6,8 @@ import ast
 import hashlib
 import importlib.metadata
 import json
-import os
 import platform
 import re
-import subprocess
-import sys
 import tarfile
 import tempfile
 import zipfile
@@ -21,6 +18,8 @@ from typing import Any
 from fastapi_endpoint_detector.analyzer.effect_contract_auditor import audit_effect_contracts
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.models.effect_contract import (
+    EffectContractError,
+    load_effect_contracts,
     load_effect_preset,
 )
 from fastapi_endpoint_detector.models.endpoint import (
@@ -36,11 +35,6 @@ class MatrixEvidenceError(ValueError):
 
 
 MATRIX_ROOT = Path(__file__).resolve().parents[1] / "results" / "effect-preset-matrix-v4"
-FROZEN_RUNTIME_ROOT = Path(__file__).resolve().parents[1] / "results" / "effect-preset-matrix-v5"
-FROZEN_PROJECT_ROOT = FROZEN_RUNTIME_ROOT / "frozen-project"
-FROZEN_RUNTIME_MANIFEST_PATH = FROZEN_RUNTIME_ROOT / "frozen-runtime.json"
-FROZEN_RUNNER_PATH = Path(__file__).with_name("effect_preset_frozen_runner.py")
-FROZEN_RUNTIME_MANIFEST_SHA256 = "0fbac4c6357c7189500097986815d8f868c37c845f8a61a05d846cbf209e7cf8"
 MANIFEST_PATH = MATRIX_ROOT / "package-symbols.json"
 FIXTURE_PATH = MATRIX_ROOT / "fixtures" / "pathlib_open_handles.py"
 ANALYZER_SNAPSHOT_PATH = MATRIX_ROOT / "analyzer-source-snapshots.json"
@@ -107,8 +101,8 @@ def _strict_json(raw: bytes, label: str) -> Any:
         raise MatrixEvidenceError(f"cannot parse strict JSON for {label}") from exc
 
 
-def _load_analyzer_source_snapshots() -> tuple[dict[str, str], str]:  # noqa: PLR0912, PLR0915
-    """Authenticate v4 source identities against the committed executable source bundle."""
+def _load_analyzer_source_snapshots() -> tuple[dict[str, str], str]:
+    """Require the committed analyzer source snapshot to cover the authoritative path set."""
     try:
         raw = ANALYZER_SNAPSHOT_PATH.read_bytes()
     except OSError as exc:
@@ -137,180 +131,14 @@ def _load_analyzer_source_snapshots() -> tuple[dict[str, str], str]:  # noqa: PL
     ):
         raise MatrixEvidenceError("committed analyzer source snapshot path set is invalid")
     hashes = {row["path"]: f"sha256:{row['sha256']}" for row in rows}
-    runtime_raw = _read_evidence_file(
-        FROZEN_RUNTIME_MANIFEST_PATH, "frozen analyzer runtime manifest"
-    )
-    if _sha256(runtime_raw) != FROZEN_RUNTIME_MANIFEST_SHA256:
-        raise MatrixEvidenceError("frozen analyzer runtime manifest hash mismatch")
-    runner_raw = _read_evidence_file(FROZEN_RUNNER_PATH, "frozen analyzer replay runner")
-    runtime = _strict_json(runtime_raw, "frozen analyzer runtime manifest")
-    if (
-        not isinstance(runtime, dict)
-        or set(runtime)
-        != {
-            "schema_version",
-            "runtime_id",
-            "source_commit",
-            "v4_snapshot_sha256",
-            "v4_artifact_files",
-            "runner_sha256",
-            "runtime_distributions",
-            "files",
-        }
-        or type(runtime["schema_version"]) is not int
-        or runtime["schema_version"] != 1
-        or runtime["runtime_id"] != "gh97-effect-analyzer-frozen-runtime-v1"
-        or runtime["source_commit"] != "88ec7c33b45ec45435aaf7ffb72494c02f2328e4"
-        or runtime["v4_snapshot_sha256"] != _sha256(raw)
-        or runtime["runner_sha256"] != _sha256(runner_raw)
-        or runtime["runtime_distributions"]
-        != {
-            "librt": "0.16.0",
-            "mypy-extensions": "1.1.0",
-            "pathspec": "1.1.1",
-            "pydantic": "2.13.5",
-            "pydantic-core": "2.46.5",
-            "PyYAML": "6.0.3",
-            "typing-extensions": "4.16.0",
-        }
-        or not isinstance(runtime["files"], list)
-        or not isinstance(runtime["v4_artifact_files"], list)
-    ):
-        raise MatrixEvidenceError("frozen analyzer runtime identity is invalid")
-    runtime_rows = runtime["files"]
-    runtime_paths: list[str] = []
-    for row in runtime_rows:
-        if (
-            not isinstance(row, dict)
-            or set(row) != {"path", "sha256"}
-            or not _safe_relative(row["path"])
-            or not _is_sha(row["sha256"])
-        ):
-            raise MatrixEvidenceError("frozen analyzer runtime source row is invalid")
-        runtime_paths.append(row["path"])
-    if (
-        not runtime_paths
-        or runtime_paths != sorted(runtime_paths)
-        or len(runtime_paths) != len(set(runtime_paths))
-    ):
-        raise MatrixEvidenceError("frozen analyzer runtime source set is not unique and sorted")
-    actual_paths = {
-        path.relative_to(FROZEN_PROJECT_ROOT).as_posix()
-        for path in FROZEN_PROJECT_ROOT.rglob("*")
-        if path.is_file()
-    }
-    if actual_paths != set(runtime_paths):
-        raise MatrixEvidenceError("frozen analyzer runtime tree has missing or extra files")
-    runtime_hashes: dict[str, str] = {}
-    for row in runtime_rows:
-        relpath = row["path"]
-        source_path = FROZEN_PROJECT_ROOT / relpath
-        if source_path.is_symlink():
-            raise MatrixEvidenceError(f"frozen analyzer runtime contains a symlink: {relpath}")
-        actual = f"sha256:{_sha256(source_path.read_bytes())}"
-        expected_hash = f"sha256:{row['sha256']}"
+    for relpath, expected_hash in hashes.items():
+        try:
+            actual = f"sha256:{_sha256((PROJECT_ROOT / relpath).read_bytes())}"
+        except OSError as exc:
+            raise MatrixEvidenceError(f"missing analyzer snapshot source: {relpath}") from exc
         if actual != expected_hash:
-            raise MatrixEvidenceError(f"frozen analyzer runtime source hash mismatch: {relpath}")
-        runtime_hashes[relpath] = expected_hash
-    if any(runtime_hashes.get(path) != digest for path, digest in hashes.items()):
-        raise MatrixEvidenceError("frozen runtime does not bind the exact v4 analyzer source set")
-    if "tests/benchmarks/test_effect_preset_matrix.py" not in runtime_hashes:
-        raise MatrixEvidenceError("frozen runtime omits the controlled test source")
-    artifact_rows = runtime["v4_artifact_files"]
-    artifact_paths: list[str] = []
-    for row in artifact_rows:
-        if (
-            not isinstance(row, dict)
-            or set(row) != {"path", "sha256"}
-            or not _safe_relative(row["path"])
-            or not _is_sha(row["sha256"])
-        ):
-            raise MatrixEvidenceError("frozen v4 artifact row is invalid")
-        artifact_paths.append(row["path"])
-    if (
-        not artifact_paths
-        or artifact_paths != sorted(artifact_paths)
-        or len(artifact_paths) != len(set(artifact_paths))
-    ):
-        raise MatrixEvidenceError("frozen v4 artifact set is not unique and sorted")
-    for row in artifact_rows:
-        snapshot_path = f"benchmarks/results/effect-preset-matrix-v4/{row['path']}"
-        if runtime_hashes.get(snapshot_path) != f"sha256:{row['sha256']}":
-            raise MatrixEvidenceError(
-                f"frozen source bundle does not preserve v4 artifact: {row['path']}"
-            )
-    actual_artifact_paths = {
-        path.relative_to(MATRIX_ROOT).as_posix()
-        for path in MATRIX_ROOT.rglob("*")
-        if path.is_file()
-    }
-    if actual_artifact_paths != set(artifact_paths):
-        raise MatrixEvidenceError("historical v4 artifact tree has missing or extra files")
-    for row in artifact_rows:
-        path = MATRIX_ROOT / row["path"]
-        if path.is_symlink() or f"sha256:{_sha256(path.read_bytes())}" != f"sha256:{row['sha256']}":
-            raise MatrixEvidenceError(f"historical v4 artifact changed: {row['path']}")
+            raise MatrixEvidenceError(f"analyzer source differs from committed snapshot: {relpath}")
     return hashes, f"sha256:{_sha256(raw)}"
-
-
-def _read_evidence_file(path: Path, label: str) -> bytes:
-    try:
-        return path.read_bytes()
-    except OSError as exc:
-        raise MatrixEvidenceError(f"cannot read {label}: {path}") from exc
-
-
-def _run_frozen_analyzer(operation: str) -> Any:
-    """Replay historical observations using only the verified v5 source bundle."""
-    if operation not in {"fixture", "package-cases", "presets"}:
-        raise MatrixEvidenceError("unsupported frozen analyzer operation")
-    _load_analyzer_source_snapshots()
-    python_version, mypy_version, _ = _replay_environment()
-    command = [
-        sys.executable,
-        "-B",
-        "-I",
-        str(FROZEN_RUNNER_PATH),
-        operation,
-        str(MATRIX_ROOT.resolve()),
-        python_version,
-        mypy_version,
-    ]
-    try:
-        completed = subprocess.run(
-            command,
-            check=False,
-            cwd=FROZEN_RUNTIME_ROOT,
-            env={"PATH": os.defpath, "HOME": str(FROZEN_RUNTIME_ROOT)},
-            capture_output=True,
-            timeout=180,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise MatrixEvidenceError("frozen analyzer subprocess could not complete") from exc
-    if len(completed.stdout) > 4_000_000 or len(completed.stderr) > 16_000:
-        raise MatrixEvidenceError("frozen analyzer subprocess exceeded bounded output limits")
-    if completed.returncode != 0:
-        detail = completed.stderr.decode("utf-8", errors="replace").strip()[:1000]
-        raise MatrixEvidenceError(
-            f"frozen analyzer subprocess failed with status {completed.returncode}: {detail}"
-        )
-    return _strict_json(completed.stdout, f"frozen analyzer {operation} output")
-
-
-def _verify_historical_preset_contracts(manifest: dict[str, Any]) -> dict[str, str]:
-    """Verify v4 preset bytes and semantics with their frozen first-party loaders."""
-    del manifest  # The frozen provider loads the committed v4 manifest itself.
-    result = _run_frozen_analyzer("presets")
-    if not isinstance(result, dict) or set(result) != {
-        "redis-py-effects",
-        "pymongo-effects",
-        "stdlib-filesystem-effects",
-        "python-http-client-effects",
-        "typed-s3-effects",
-        "sqlalchemy-transaction-effects",
-    }:
-        raise MatrixEvidenceError("frozen preset verification returned an invalid identity set")
-    return result
 
 
 def _is_sha(value: object) -> bool:
@@ -971,22 +799,67 @@ def load_source_signature_observations(
 
 
 def verify_preset_contracts(manifest: dict[str, Any] | None = None) -> dict[str, str]:
-    """Verify historical v4 preset identities with their frozen loader and YAML bytes."""
+    """Parse each pinned preset and verify its identity, count, selectors and raw bytes."""
     frozen = _validated_manifest(manifest)
-    _load_analyzer_source_snapshots()
-    trusted_manifest_path = FROZEN_PROJECT_ROOT / (
-        "benchmarks/results/effect-preset-matrix-v4/package-symbols.json"
-    )
-    trusted = _validated_manifest(load_manifest(trusted_manifest_path))
-    if frozen != trusted:
-        raise MatrixEvidenceError("supplied package manifest differs from frozen v4 manifest")
-    result = _verify_historical_preset_contracts(trusted)
-    expected_ids = {row["preset_id"] for row in trusted["versioned_contract_sets"]}
-    if set(result) != expected_ids:
-        raise MatrixEvidenceError("frozen preset verification returned unexpected identities")
-    if not all(_is_sha(value.removeprefix("sha256:")) for value in result.values()):
-        raise MatrixEvidenceError("frozen preset verification returned invalid hashes")
-    return result
+    observed: dict[str, str] = {}
+    contract_lookup: dict[str, Any] = {}
+    for row in frozen["versioned_contract_sets"]:
+        path = (PROJECT_ROOT / row["preset_path"]).resolve()
+        try:
+            path.relative_to(PROJECT_ROOT.resolve())
+            loaded = load_effect_contracts(path)
+        except (OSError, ValueError, EffectContractError) as exc:
+            raise MatrixEvidenceError(f"cannot parse frozen preset: {row['preset_id']}") from exc
+        preset = loaded.document.preset
+        actual = {
+            "preset_id": preset.id,
+            "version": preset.version,
+            "revision": preset.provenance.revision,
+            "contract_count": len(loaded.document.contracts),
+            "preset_sha256": loaded.raw_hash.removeprefix("sha256:"),
+            "preset_semantic_sha256": loaded.preset_hash.removeprefix("sha256:"),
+            "config_sha256": loaded.config_hash.removeprefix("sha256:"),
+            "contract_inventory_sha256": _sha256(
+                json.dumps(loaded.contract_hashes, sort_keys=True, separators=(",", ":")).encode()
+            ),
+        }
+        expected = {key: row[key] for key in actual}
+        if actual != expected:
+            raise MatrixEvidenceError(
+                f"preset identity, count, selectors or hashes mismatch: {row['preset_id']}"
+            )
+        observed[row["preset_id"]] = loaded.raw_hash
+        for contract in loaded.document.contracts:
+            if contract.id in contract_lookup:
+                raise MatrixEvidenceError(
+                    f"duplicate preset contract ID across sets: {contract.id}"
+                )
+            contract_lookup[contract.id] = contract
+    for package in frozen["packages"]:
+        for declaration in package["declared_symbols"]:
+            contract_id = declaration["preset_contract"]
+            resource_selector = declaration["contract_resource_selector"]
+            value_selector = declaration["contract_value_selector"]
+            if contract_id is None:
+                if resource_selector is not None or value_selector is not None:
+                    raise MatrixEvidenceError("unmapped symbol cannot claim preset selectors")
+                continue
+            selected_contract = contract_lookup.get(contract_id)
+            if selected_contract is None or selected_contract.symbol != declaration["symbol"]:
+                raise MatrixEvidenceError(
+                    f"package symbol does not map to exact preset contract: {declaration['symbol']}"
+                )
+            actual_resource = selected_contract.resource.model_dump(mode="json")
+            actual_value = (
+                selected_contract.value.model_dump(mode="json")
+                if selected_contract.value is not None
+                else None
+            )
+            if resource_selector != actual_resource or value_selector != actual_value:
+                raise MatrixEvidenceError(
+                    f"preset selector semantics mismatch: {declaration['symbol']}"
+                )
+    return observed
 
 
 def summarize_matrix(manifest: dict[str, Any] | None = None) -> dict[str, object]:
@@ -1082,23 +955,7 @@ def _endpoint(path: Path, line_number: int = 10) -> Endpoint:
 
 
 def _replay_fixture() -> dict[str, Any]:
-    """Replay the historical fixture through the verified v4 analyzer source snapshot."""
-    result = _run_frozen_analyzer("fixture")
-    fields = {
-        "observations",
-        "resolver_version",
-        "python_version",
-        "preset_raw_hash",
-        "preset_config_hash",
-        "preset_semantic_hash",
-    }
-    if not isinstance(result, dict) or set(result) != fields:
-        raise MatrixEvidenceError("frozen fixture replay returned an invalid result schema")
-    return result
-
-
-def _replay_live_fixture() -> dict[str, Any]:
-    """Analyze the fixture with current checkout sources for live controls only."""
+    """Statically analyze only the frozen synthetic fixture; never execute its source."""
     try:
         python_version, expected_mypy, _ = _replay_environment()
         fixture = FIXTURE_PATH.read_bytes()
@@ -1496,8 +1353,8 @@ def _replay_package_case(
         ) from exc
 
 
-def _replay_live_package_analyzer_cases() -> list[dict[str, Any]]:
-    """Run package cases with current checkout analyzer, separate from historical v4 replay."""
+def replay_package_analyzer_cases() -> list[dict[str, Any]]:
+    """Run analyzer cases with source-derived parameter and selector surfaces."""
     try:
         case_data = _strict_json(PACKAGE_CASES_PATH.read_bytes(), "package analyzer cases")
     except OSError as exc:
@@ -1647,14 +1504,6 @@ def _replay_live_package_analyzer_cases() -> list[dict[str, Any]]:
             ]
         results.append(result)
     return results
-
-
-def replay_package_analyzer_cases() -> list[dict[str, Any]]:
-    """Replay historical package cases through the verified v4 analyzer source snapshot."""
-    result = _run_frozen_analyzer("package-cases")
-    if not isinstance(result, list) or any(not isinstance(row, dict) for row in result):
-        raise MatrixEvidenceError("frozen package replay returned an invalid result schema")
-    return result
 
 
 def _package_unsupported_cases(case_data: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2022,7 +1871,7 @@ def load_controlled_results(path: Path = RESULTS_PATH) -> dict[str, Any]:  # noq
         raise MatrixEvidenceError("unsupported controlled result identity or status")
 
     manifest = load_manifest()
-    _verify_historical_preset_contracts(manifest)
+    verify_preset_contracts(manifest)
     audit = value["package_source_audit"]
     audit_fields = {
         "manifest_path",
@@ -2100,8 +1949,7 @@ def load_controlled_results(path: Path = RESULTS_PATH) -> dict[str, Any]:  # noq
             raise MatrixEvidenceError(
                 "controlled input path is not a safe repository-relative path"
             )
-        source_root = FROZEN_PROJECT_ROOT if field == evaluation["test_path"] else PROJECT_ROOT
-        source_path = source_root / field
+        source_path = PROJECT_ROOT / field
         try:
             source_hash = f"sha256:{_sha256(source_path.read_bytes())}"
         except OSError as exc:
