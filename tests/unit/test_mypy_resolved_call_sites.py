@@ -3,7 +3,9 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 from pathlib import Path
+from types import SimpleNamespace
 
 from mypy.nodes import CallExpr, FuncDef, OpExpr
 
@@ -688,3 +690,152 @@ def test_utf8_live_call_identity_is_stable_with_dead_same_line_peer(tmp_path: Pa
 
     assert first == second == source_calls[1]
     assert dead == source_calls[0]
+
+
+def test_nested_lambda_calls_keep_identity_when_scope_signatures_collide(
+    tmp_path: Path,
+) -> None:
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def emit() -> int: return 1\n"
+        "def handler() -> int:\n"
+        f"    prefix = {'é' * 8!r}; return (lambda: emit())() + (lambda: emit())() + emit()\n",
+        encoding="utf-8",
+    )
+    analyzer = MypyAnalyzer(tmp_path)
+    deps = analyzer.analyze_endpoint(_endpoint(main, line=2))
+    handler = next(
+        node
+        for tree in analyzer._trees.values()
+        for node in tree.defs
+        if isinstance(node, FuncDef) and node.name == "handler"
+    )
+    source_calls = sorted(
+        (node.func.col_offset, node.func.end_col_offset)
+        for node in ast.walk(ast.parse(main.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "emit"
+    )
+    assert len(source_calls) == 3
+    assert len(handler.body.body) == 2
+    expression = handler.body.body[1].expr
+    assert isinstance(expression, OpExpr)
+    assert isinstance(expression.left, OpExpr)
+    first_call, second_call = expression.left.left, expression.left.right
+    final_call = expression.right
+    assert isinstance(first_call, CallExpr) and isinstance(second_call, CallExpr)
+    assert isinstance(final_call, CallExpr)
+    first_lambda_call = first_call.callee.body.body[0].expr
+    second_lambda_call = second_call.callee.body.body[0].expr
+    assert isinstance(first_lambda_call, CallExpr) and isinstance(second_lambda_call, CallExpr)
+    # Query the same-line lambda peers in reverse physical order.
+    for callee, span in zip(
+        (final_call.callee, second_lambda_call.callee, first_lambda_call.callee),
+        reversed(source_calls),
+        strict=True,
+    ):
+        identity = analyzer._call_source_identity(str(main), callee)
+        assert identity is not None
+        assert (identity[1], identity[3]) == span
+
+    sites = _site_by_spelling(deps.get_resolved_call_sites(str(main)), "emit")
+    assert [(site.column, site.end_column) for site in sites] == source_calls
+
+
+def test_missing_end_coordinates_and_malformed_source_abstain(tmp_path: Path) -> None:
+    main = tmp_path / "main.py"
+    main.write_text("def handler(): return emit()\n", encoding="utf-8")
+    analyzer = MypyAnalyzer(tmp_path)
+    missing_end = SimpleNamespace(line=1, column=22, end_line=None, end_column=None)
+    assert analyzer._call_source_identity(str(main), missing_end) is None
+
+    main.write_text("def handler(:\n", encoding="utf-8")
+    malformed = SimpleNamespace(line=1, column=18, end_line=1, end_column=22)
+    assert analyzer._call_source_identity(str(main), malformed) is None
+
+
+def test_span_matching_abstains_when_any_traversal_budget_is_exhausted(
+    tmp_path: Path,
+) -> None:
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def emit() -> int: return 1\ndef handler() -> int:\n    return emit()\n",
+        encoding="utf-8",
+    )
+    analyzer = MypyAnalyzer(tmp_path)
+    analyzer.analyze_endpoint(_endpoint(main, line=2))
+    handler = next(
+        node
+        for tree in analyzer._trees.values()
+        for node in tree.defs
+        if isinstance(node, FuncDef) and node.name == "handler"
+    )
+    call = handler.body.body[0].expr
+    assert isinstance(call, CallExpr)
+    canonical = str(main.resolve())
+    budgets = (
+        ("MAX_CALL_SPAN_SOURCE_BYTES", 1),
+        ("MAX_CALL_SPAN_SOURCE_NODES", 1),
+        ("MAX_CALL_SPAN_SOURCE_ITEMS", 0),
+        ("MAX_CALL_SPAN_SOURCE_DEPTH", 0),
+        ("MAX_CALL_SPAN_MYPY_NODES", 0),
+        ("MAX_CALL_SPAN_MYPY_ITEMS", 0),
+        ("MAX_CALL_SPAN_MYPY_DEPTH", 0),
+    )
+    for name, exhausted_value in budgets:
+        original_value = getattr(analyzer, name)
+        setattr(analyzer, name, exhausted_value)
+        analyzer._python_ast_cache.pop(canonical, None)
+        analyzer._python_ast_nodes_cache.pop(canonical, None)
+        analyzer._python_verified_call_spans.pop(canonical, None)
+        analyzer._python_call_span_abstained.discard(canonical)
+        try:
+            assert analyzer._call_source_identity(str(main), call.callee) is None, name
+            assert canonical in analyzer._python_call_span_abstained, name
+        finally:
+            setattr(analyzer, name, original_value)
+
+
+def test_span_cache_invalidation_detects_same_size_same_mtime_edit(tmp_path: Path) -> None:
+    main = tmp_path / "main.py"
+    original = "def emit() -> int: return 1\ndef handler() -> int:\n    return emit()\n"
+    updated = "def ping() -> int: return 1\ndef handler() -> int:\n    return ping()\n"
+    assert len(original.encode()) == len(updated.encode())
+    main.write_text(original, encoding="utf-8")
+    analyzer = MypyAnalyzer(tmp_path)
+    endpoint = _endpoint(main, line=2)
+    before = _site_by_spelling(
+        analyzer.analyze_endpoints([endpoint], use_cache=False)[
+            analyzer._endpoint_key(endpoint)
+        ].get_resolved_call_sites(str(main)),
+        "emit",
+    )
+    assert len(before) == 1
+    handler = next(
+        node
+        for tree in analyzer._trees.values()
+        for node in tree.defs
+        if isinstance(node, FuncDef) and node.name == "handler"
+    )
+    old_callee = next(
+        statement.expr.callee
+        for statement in handler.body.body
+        if isinstance(statement.expr, CallExpr)
+        and getattr(statement.expr.callee, "name", None) == "emit"
+    )
+    old_callee_id = id(old_callee)
+    old_stat = main.stat()
+
+    main.write_text(updated, encoding="utf-8")
+    os.utime(main, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+    after_stat = main.stat()
+    assert after_stat.st_size == old_stat.st_size
+    assert after_stat.st_mtime_ns == old_stat.st_mtime_ns
+
+    after = _site_by_spelling(
+        analyzer.analyze_endpoints([endpoint], use_cache=False)[
+            analyzer._endpoint_key(endpoint)
+        ].get_resolved_call_sites(str(main)),
+        "ping",
+    )
+    assert len(after) == 1
+    assert old_callee_id not in analyzer._python_verified_call_spans[str(main.resolve())]
