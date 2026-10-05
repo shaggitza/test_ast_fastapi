@@ -1,4 +1,4 @@
-# GH103 frozen source metadata evidence v1
+# GH103 frozen source metadata attempt v1 (historical)
 
 This is a separate evidence layer for the exact 50 repositories and survey
 commits frozen in v1 and v2. It never edits their manifests, checksum profiles,
@@ -27,18 +27,10 @@ only a declaration. Review of license and dependency evidence also remains a
 human/legal and environment-specific decision. PR types remain unclassified;
 no semantics, labels, impact, or truth were inferred.
 
-## Reproduce
-
-```bash
-.venv/bin/python benchmarks/real_world/source_metadata_v1.py --collect
-.venv/bin/python benchmarks/real_world/source_metadata_v1.py --validate benchmarks/results/gh103-source-metadata-v1/source-metadata-v1.json
-.venv/bin/python scripts/run_tests_bounded.py tests/benchmarks/test_source_metadata_v1.py --pytest-arg=-x
-```
-
-Run collection only as a dedicated bounded operation, not as a test. The
-committed collector implements exact frozen population checks and deterministic
-no-clobber publication. The JSON result is a collection-time observation, not a
-claim about mutable default branches.
+This directory preserves the original v1 attempt and its exact failed retrieval
+record. Its v1 status strings and hashes are historical observations, not
+authenticated source evidence; use the strict v2 collector and validator in
+`benchmarks/real_world/source_metadata_v2.py` for current evidence.
 
 ## Observed bounded run
 
