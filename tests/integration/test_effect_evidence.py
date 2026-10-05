@@ -102,4 +102,4 @@ def test_conditional_copy_mutation_caps_candidate_confidence(tmp_path: Path) -> 
     assert candidate.confidence == ConfidenceLevel.MEDIUM
     evidence = candidate.effect_evidence[-1]
     assert evidence.status.value == "conditional"
-    assert "A reachable mutation occurs only on a conditional path." in evidence.conditions
+    assert "The copy/mutation proof depends on a conditional path." in evidence.conditions

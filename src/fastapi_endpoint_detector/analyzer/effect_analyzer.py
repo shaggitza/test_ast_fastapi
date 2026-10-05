@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass, replace
+from itertools import product
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -40,6 +41,13 @@ class _Observation:
     conditional: bool = False
 
 
+@dataclass(frozen=True)
+class _ExecutionNode:
+    node: ast.AST
+    conditional: bool
+    path: tuple[tuple[ast.AST, int], ...]
+
+
 _CONFIDENCE_RANK = {
     ConfidenceLevel.LOW: 0,
     ConfidenceLevel.MEDIUM: 1,
@@ -52,6 +60,7 @@ class EffectAnalyzer:
 
     _MAX_SCOPE_NODES = 2000
     _MAX_LOCAL_HELPERS = 8
+    _MAX_BRANCH_WORLDS = 256
 
     def __init__(self, project_root: Path) -> None:
         self.project_root = project_root.resolve()
@@ -73,7 +82,30 @@ class EffectAnalyzer:
         changed = self._defensive_copy_change(path, tree, changed_lines)
         if changed is None:
             return None
-        function, subject, copy_line, conditional_mutation = changed
+        function, subject, copy_line, conditional_mutation, unresolved_reason = changed
+        if unresolved_reason is not None:
+            return EffectAnalysis(
+                (
+                    EffectEvidence(
+                        producer=EvidenceProducer.DATA_FLOW,
+                        status=EvidenceStatus.UNRESOLVED,
+                        effect=ChangeEffectKind.DEFENSIVE_COPY_ADDED,
+                        observations=[DataObservationKind.UNKNOWN],
+                        channel=ImpactChannel.DYNAMIC_EXTENSION,
+                        disposition=EffectDisposition.DYNAMIC_OR_UNRESOLVED,
+                        summary=unresolved_reason,
+                        subject=subject,
+                        changed_location=CodeReference(
+                            file_path=str(path), line_number=copy_line, symbol=function.name
+                        ),
+                        limitations=[
+                            "Effect qualification stops at its explicit AST and helper scan caps.",
+                            "Caller argument identity could not be mapped conservatively.",
+                        ],
+                    ),
+                ),
+                ConfidenceLevel.MEDIUM,
+            )
         evidence: list[EffectEvidence] = []
         confidence = ConfidenceLevel.LOW
         for stack in call_stacks:
@@ -81,9 +113,13 @@ class EffectAnalyzer:
             if result is None:
                 continue
             observation, summary, limitations = result
-            if conditional_mutation:
-                observation = replace(observation, conditional=True)
             candidate_confidence = self._confidence_for(observation)
+            if conditional_mutation:
+                candidate_confidence = min(
+                    (candidate_confidence, ConfidenceLevel.MEDIUM),
+                    key=lambda value: _CONFIDENCE_RANK[value],
+                )
+                observation = replace(observation, conditional=True)
             if _CONFIDENCE_RANK[candidate_confidence] > _CONFIDENCE_RANK[confidence]:
                 confidence = candidate_confidence
             status = (
@@ -115,7 +151,7 @@ class EffectAnalyzer:
                     conditions=[
                         "The path must select the changed callable at runtime.",
                         *(
-                            ["A reachable mutation occurs only on a conditional path."]
+                            ["The copy/mutation proof depends on a conditional path."]
                             if conditional_mutation
                             else []
                         ),
@@ -124,9 +160,9 @@ class EffectAnalyzer:
                         "The copy is shallow; nested mutable values remain aliased.",
                         (
                             "Copy mutation qualification scans at most 2,000 scope nodes and "
-                            "eight directly invoked local helpers, one level deep; dynamic "
-                            "dispatch, recursive helper effects, and helper aliases are "
-                            "unresolved."
+                            "eight local helper definitions, eight branch tokens, and 256 "
+                            "branch-state combinations; dynamic dispatch, recursive helper "
+                            "effects, and helper aliases are unresolved."
                         ),
                         (
                             "Literal constant if conditions and while conditions are pruned; "
@@ -192,10 +228,13 @@ class EffectAnalyzer:
 
     def _defensive_copy_change(
         self, path: Path, tree: ast.Module, changed_lines: set[int]
-    ) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, str, int, bool] | None:
+    ) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, str, int, bool, str | None] | None:
         del path
-        matches: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str, int, bool]] = []
+        matches: list[
+            tuple[ast.FunctionDef | ast.AsyncFunctionDef, str, int, bool, str | None]
+        ] = []
         for function in self._function_nodes(tree):
+            execution = self._execution_nodes(function)
             parameters = {
                 argument.arg
                 for argument in [
@@ -208,7 +247,8 @@ class EffectAnalyzer:
                 parameters.add(function.args.vararg.arg)
             if function.args.kwarg:
                 parameters.add(function.args.kwarg.arg)
-            for node in self._same_scope_nodes(function):
+            for copy_index, item in enumerate(execution):
+                node = item.node
                 if not isinstance(node, ast.Assign) or node.lineno not in changed_lines:
                     continue
                 if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
@@ -223,11 +263,38 @@ class EffectAnalyzer:
                     and not self._dict_is_unshadowed(tree)
                 ):
                     continue
+                local_helpers = sum(
+                    isinstance(candidate.node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and candidate.node is not function
+                    for candidate in execution[copy_index + 1 :]
+                )
+                if len(execution) > self._MAX_SCOPE_NODES:
+                    reason = (
+                        "A candidate defensive copy is present, but the enclosing effect scan "
+                        "exceeded the 2,000 node cap."
+                    )
+                    matches.append((function, subject, node.lineno, True, reason))
+                    continue
+                if local_helpers > self._MAX_LOCAL_HELPERS:
+                    reason = (
+                        "A candidate defensive copy is present, but the invoked local helper "
+                        "scan exceeded the eight helper cap."
+                    )
+                    matches.append((function, subject, node.lineno, True, reason))
+                    continue
                 mutation_conditional = self._has_later_top_level_mutation(
-                    function, subject, node.lineno
+                    function, subject, execution, copy_index
                 )
                 if mutation_conditional is not None:
-                    matches.append((function, subject, node.lineno, mutation_conditional))
+                    matches.append(
+                        (
+                            function,
+                            subject,
+                            node.lineno,
+                            mutation_conditional or item.conditional,
+                            None,
+                        )
+                    )
         return matches[0] if len(matches) == 1 else None
 
     @staticmethod
@@ -249,7 +316,7 @@ class EffectAnalyzer:
         )
 
     @staticmethod
-    def _dict_is_unshadowed(tree: ast.Module) -> bool:
+    def _dict_is_unshadowed(tree: ast.Module) -> bool:  # noqa: PLR0911 - explicit binding kinds
         # Any module binding may shadow builtins for a nested function too.
         for node in ast.walk(tree):
             if isinstance(node, ast.Name) and node.id == "dict" and isinstance(node.ctx, ast.Store):
@@ -262,6 +329,16 @@ class EffectAnalyzer:
             ):
                 return False
             if isinstance(node, ast.alias) and (node.asname or node.name.split(".")[0]) == "dict":
+                return False
+            if isinstance(node, ast.ExceptHandler) and node.name == "dict":
+                return False
+            if isinstance(node, ast.MatchAs) and node.name == "dict":
+                return False
+            if isinstance(node, ast.MatchStar) and node.name == "dict":
+                return False
+            if isinstance(node, ast.MatchMapping) and node.rest == "dict":
+                return False
+            if isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names):
                 return False
         return True
 
@@ -282,26 +359,65 @@ class EffectAnalyzer:
 
     def _execution_nodes(  # noqa: PLR0915 - bounded AST interpreter
         self, function: ast.FunctionDef | ast.AsyncFunctionDef
-    ) -> list[tuple[ast.AST, bool]]:
+    ) -> list[_ExecutionNode]:
         """Return scope nodes on possible execution paths with uncertainty attached."""
-        result: list[tuple[ast.AST, bool]] = []
+        result: list[_ExecutionNode] = []
         overflow = False
 
-        def add_tree(node: ast.AST, conditional: bool) -> None:
+        def add_tree(  # noqa: PLR0911, PLR0912 - explicit AST execution cases
+            node: ast.AST,
+            conditional: bool,
+            path: tuple[tuple[ast.AST, int], ...],
+        ) -> None:
             nonlocal overflow
             if overflow:
                 return
-            result.append((node, conditional))
+            result.append(_ExecutionNode(node, conditional, path))
             if len(result) > self._MAX_SCOPE_NODES:
                 overflow = True
                 return
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
                 return
+            if isinstance(node, ast.GeneratorExp):
+                return
+            if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp)):
+                for generator in node.generators:
+                    add_tree(generator.iter, conditional, path)
+                    for condition in generator.ifs:
+                        add_tree(condition, True, path)
+                if isinstance(node, ast.DictComp):
+                    add_tree(node.key, True, path)
+                    add_tree(node.value, True, path)
+                else:
+                    add_tree(node.elt, True, path)
+                return
+            if isinstance(node, ast.BoolOp):
+                for index, value in enumerate(node.values):
+                    add_tree(value, conditional or index > 0, path)
+                    truth = self._literal_truth(value)
+                    if isinstance(node.op, ast.And) and truth is False:
+                        break
+                    if isinstance(node.op, ast.Or) and truth is True:
+                        break
+                return
+            if isinstance(node, ast.IfExp):
+                add_tree(node.test, conditional, path)
+                truth = self._literal_truth(node.test)
+                if truth is True:
+                    add_tree(node.body, conditional, path)
+                elif truth is False:
+                    add_tree(node.orelse, conditional, path)
+                else:
+                    add_tree(node.body, True, (*path, (node, 0)))
+                    add_tree(node.orelse, True, (*path, (node, 1)))
+                return
             for child in ast.iter_child_nodes(node):
-                add_tree(child, conditional)
+                add_tree(child, conditional, path)
 
         def visit_block(  # noqa: PLR0912, PLR0915 - explicit control-flow cases
-            statements: list[ast.stmt], conditional: bool
+            statements: list[ast.stmt],
+            conditional: bool,
+            path: tuple[tuple[ast.AST, int], ...],
         ) -> bool:
             nonlocal overflow
             terminal = False
@@ -310,32 +426,41 @@ class EffectAnalyzer:
                 if terminal or overflow:
                     break
                 if isinstance(statement, ast.If):
-                    add_tree(statement.test, path_conditional)
+                    add_tree(statement.test, path_conditional, path)
                     truth = self._literal_truth(statement.test)
                     if truth is True:
-                        terminal = visit_block(statement.body, path_conditional)
+                        terminal = visit_block(statement.body, path_conditional, path)
                     elif truth is False:
-                        terminal = visit_block(statement.orelse, path_conditional)
+                        terminal = visit_block(statement.orelse, path_conditional, path)
                     else:
-                        body_terminal = visit_block(statement.body, True)
+                        body_path = (*path, (statement, 0))
+                        else_path = (*path, (statement, 1))
+                        body_terminal = visit_block(statement.body, True, body_path)
                         else_terminal = (
-                            visit_block(statement.orelse, True) if statement.orelse else False
+                            visit_block(statement.orelse, True, else_path)
+                            if statement.orelse
+                            else False
                         )
                         terminal = bool(statement.orelse) and body_terminal and else_terminal
                         if body_terminal != else_terminal:
                             path_conditional = True
                     continue
                 if isinstance(statement, ast.While):
-                    add_tree(statement.test, path_conditional)
+                    add_tree(statement.test, path_conditional, path)
                     truth = self._literal_truth(statement.test)
                     if truth is False:
-                        terminal = visit_block(statement.orelse, path_conditional)
+                        terminal = visit_block(statement.orelse, path_conditional, path)
                     else:
-                        visit_block(statement.body, True)
-                        visit_block(statement.orelse, True)
+                        visit_block(
+                            statement.body,
+                            path_conditional if truth is True else True,
+                            (*path, (statement, 0)),
+                        )
+                        visit_block(statement.orelse, True, (*path, (statement, 1)))
+                        terminal = truth is True and not self._loop_has_break(statement)
                     continue
                 if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    result.append((statement, path_conditional))
+                    result.append(_ExecutionNode(statement, path_conditional, path))
                     overflow = len(result) > self._MAX_SCOPE_NODES
                     # Decorators/defaults execute when the definition is reached.
                     for expr in [
@@ -344,42 +469,237 @@ class EffectAnalyzer:
                         *statement.args.kw_defaults,
                     ]:
                         if expr is not None:
-                            add_tree(expr, path_conditional)
+                            add_tree(expr, path_conditional, path)
                 elif isinstance(statement, (ast.For, ast.AsyncFor)):
-                    result.append((statement, path_conditional))
+                    result.append(_ExecutionNode(statement, path_conditional, path))
                     overflow = len(result) > self._MAX_SCOPE_NODES
-                    add_tree(statement.iter, path_conditional)
-                    add_tree(statement.target, True)
-                    visit_block(statement.body, True)
-                    visit_block(statement.orelse, True)
+                    add_tree(statement.iter, path_conditional, path)
+                    body_path = (*path, (statement, 0))
+                    add_tree(statement.target, True, body_path)
+                    visit_block(statement.body, True, body_path)
+                    visit_block(statement.orelse, True, (*path, (statement, 1)))
+                elif isinstance(statement, (ast.With, ast.AsyncWith)):
+                    for item in statement.items:
+                        add_tree(item.context_expr, path_conditional, path)
+                        if item.optional_vars is not None:
+                            add_tree(item.optional_vars, path_conditional, path)
+                    terminal = visit_block(statement.body, path_conditional, path)
                 elif isinstance(statement, ast.Try):
-                    visit_block(statement.body, True)
-                    for handler in statement.handlers:
-                        result.append((handler, True))
+                    body_terminal = visit_block(statement.body, path_conditional, path)
+                    handler_terminals: list[bool] = []
+                    for index, handler in enumerate(statement.handlers, start=1):
+                        handler_path = (*path, (statement, index))
+                        result.append(_ExecutionNode(handler, True, handler_path))
                         overflow = len(result) > self._MAX_SCOPE_NODES
                         if overflow:
                             break
-                        add_tree(handler.type, True) if handler.type is not None else None
-                        visit_block(handler.body, True)
-                    visit_block(statement.orelse, True)
-                    visit_block(statement.finalbody, path_conditional)
+                        if handler.type is not None:
+                            add_tree(handler.type, True, handler_path)
+                        handler_terminals.append(visit_block(handler.body, True, handler_path))
+                    else_terminal = False
+                    if statement.orelse and not body_terminal:
+                        else_terminal = visit_block(statement.orelse, True, path)
+                    finally_terminal = visit_block(statement.finalbody, path_conditional, path)
+                    terminal = finally_terminal or (
+                        body_terminal
+                        and (not statement.handlers or all(handler_terminals))
+                        and (not statement.orelse or else_terminal)
+                    )
+                elif isinstance(statement, ast.Match):
+                    add_tree(statement.subject, path_conditional, path)
+                    for index, case in enumerate(statement.cases):
+                        case_path = (*path, (statement, index))
+                        add_tree(case.pattern, True, case_path)
+                        if case.guard is not None:
+                            add_tree(case.guard, True, case_path)
+                        visit_block(case.body, True, case_path)
+                    terminal = False
                 else:
-                    add_tree(statement, path_conditional)
-                terminal = isinstance(statement, (ast.Return, ast.Raise))
+                    add_tree(statement, path_conditional, path)
+                    terminal = isinstance(statement, (ast.Return, ast.Raise))
             return terminal
 
-        visit_block(function.body, False)
-        return [] if overflow else result
+        visit_block(function.body, False, ())
+        return result
+
+    @staticmethod
+    def _loop_has_break(loop: ast.While) -> bool:
+        pending: list[ast.AST] = list(loop.body)
+        while pending:
+            node = pending.pop()
+            if isinstance(node, ast.Break):
+                return True
+            if isinstance(
+                node,
+                (
+                    ast.For,
+                    ast.AsyncFor,
+                    ast.While,
+                    ast.FunctionDef,
+                    ast.AsyncFunctionDef,
+                    ast.Lambda,
+                ),
+            ):
+                continue
+            pending.extend(ast.iter_child_nodes(node))
+        return False
 
     @staticmethod
     def _is_awaited(call: ast.Call, parents: dict[ast.AST, ast.AST]) -> bool:
         return isinstance(parents.get(call), ast.Await)
 
-    def _has_later_top_level_mutation(  # noqa: PLR0912, PLR0915 - explicit bounded proof
+    @staticmethod
+    def _paths_compatible(
+        left: tuple[tuple[ast.AST, int], ...], right: tuple[tuple[ast.AST, int], ...]
+    ) -> bool:
+        left_values = dict(left)
+        return all(
+            token not in left_values or left_values[token] == value for token, value in right
+        )
+
+    @staticmethod
+    def _path_contains(
+        path: tuple[tuple[ast.AST, int], ...], required: tuple[tuple[ast.AST, int], ...]
+    ) -> bool:
+        values = dict(path)
+        return all(values.get(token) == value for token, value in required)
+
+    def _alias_status(
+        self,
+        name: str,
+        path: tuple[tuple[ast.AST, int], ...],
+        before: int,
+        facts: dict[str, list[tuple[int, tuple[tuple[ast.AST, int], ...], bool | None]]],
+    ) -> tuple[bool, bool]:
+        records = [
+            record
+            for record in facts.get(name, [])
+            if record[0] < before and self._paths_compatible(record[1], path)
+        ]
+        tokens = {token for token, _ in path}
+        for _, record_path, _ in records:
+            tokens.update(token for token, _ in record_path)
+        if len(tokens) > 8:
+            return any(state is not False for _, _, state in records), False
+        ordered_tokens = sorted(tokens, key=id)
+        domains = [
+            tuple(range(len(token.cases) + 1)) if isinstance(token, ast.Match) else (0, 1)
+            for token in ordered_tokens
+        ]
+        world_count = 1
+        for domain in domains:
+            world_count *= len(domain)
+            if world_count > self._MAX_BRANCH_WORLDS:
+                return any(state is not False for _, _, state in records), False
+        outcomes: set[bool] = set()
+        for values in product(*domains):
+            world = dict(zip(ordered_tokens, values, strict=True))
+            if any(world.get(token) != value for token, value in path):
+                continue
+            applicable = [
+                record
+                for record in records
+                if all(world.get(token) == value for token, value in record[1])
+            ]
+            state = max(applicable, key=lambda record: record[0])[2] if applicable else False
+            if state is None:
+                outcomes.update((True, False))
+            else:
+                outcomes.add(state)
+        if not outcomes:
+            return False, False
+        return True in outcomes, outcomes == {True}
+
+    @staticmethod
+    def _binding_names(node: ast.AST) -> set[str]:  # noqa: PLR0911 - explicit binding kinds
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            return {node.id}
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return {node.name}
+        if isinstance(node, ast.ExceptHandler) and node.name:
+            return {node.name}
+        if isinstance(node, ast.alias):
+            return {node.asname or node.name.split(".")[0]}
+        if isinstance(node, ast.MatchAs) and node.name:
+            return {node.name}
+        if isinstance(node, ast.MatchStar) and node.name:
+            return {node.name}
+        if isinstance(node, ast.MatchMapping) and node.rest:
+            return {node.rest}
+        return set()
+
+    @staticmethod
+    def _helper_call_is_valid(  # noqa: PLR0911 - explicit signature validation exits
+        call: ast.Call, helper: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> bool:
+        if any(isinstance(argument, ast.Starred) for argument in call.args) or any(
+            keyword.arg is None for keyword in call.keywords
+        ):
+            return False
+        positional = [*helper.args.posonlyargs, *helper.args.args]
+        keyword_only = helper.args.kwonlyargs
+        if len(call.args) > len(positional) and helper.args.vararg is None:
+            return False
+        supplied = {argument.arg for argument in positional[: len(call.args)]}
+        seen_keywords: set[str] = set()
+        positional_only = {argument.arg for argument in helper.args.posonlyargs}
+        accepted = {argument.arg for argument in [*positional, *keyword_only]}
+        for keyword in call.keywords:
+            assert keyword.arg is not None
+            if keyword.arg in seen_keywords or keyword.arg in positional_only:
+                return False
+            if keyword.arg not in accepted and helper.args.kwarg is None:
+                return False
+            if keyword.arg in supplied:
+                return False
+            seen_keywords.add(keyword.arg)
+        supplied.update(seen_keywords)
+        default_start = len(positional) - len(helper.args.defaults)
+        for index, argument in enumerate(positional):
+            if (
+                index not in range(len(call.args))
+                and argument.arg not in supplied
+                and index < default_start
+            ):
+                return False
+        kw_defaults = dict(
+            zip((arg.arg for arg in keyword_only), helper.args.kw_defaults, strict=True)
+        )
+        return all(
+            argument.arg in supplied or kw_defaults[argument.arg] is not None
+            for argument in keyword_only
+        )
+
+    @classmethod
+    def _direct_mutation_names(cls, node: ast.AST, mutators: set[str]) -> set[str]:
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in mutators
+            and isinstance(node.func.value, ast.Name)
+        ):
+            return {node.func.value.id}
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.Delete)):
+            targets = node.targets if isinstance(node, (ast.Assign, ast.Delete)) else [node.target]
+            return {
+                target.value.id
+                for target in targets
+                if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)
+            }
+        if (
+            isinstance(node, ast.AugAssign)
+            and isinstance(node.op, ast.BitOr)
+            and isinstance(node.target, ast.Name)
+        ):
+            return {node.target.id}
+        return set()
+
+    def _has_later_top_level_mutation(  # noqa: PLR0915 - explicit bounded proof
         self,
         function: ast.FunctionDef | ast.AsyncFunctionDef,
         subject: str,
-        copy_line: int,
+        execution: list[_ExecutionNode],
+        copy_index: int,
     ) -> bool | None:
         mutators = {
             "add",
@@ -395,199 +715,173 @@ class EffectAnalyzer:
             "sort",
             "update",
         }
-        execution = self._execution_nodes(function)
-        if not execution:
+        if copy_index >= len(execution):
             return None
-        parent_nodes = self._same_scope_nodes(function)
-        parent_set = set(parent_nodes)
+        initial_path = execution[copy_index].path
+        facts: dict[str, list[tuple[int, tuple[tuple[ast.AST, int], ...], bool | None]]] = {
+            subject: [(-1, (), False), (copy_index, initial_path, True)]
+        }
+        scope_nodes = self._same_scope_nodes(function)
+        scope_set = set(scope_nodes)
         parents = {
             child: parent
-            for parent in parent_nodes
+            for parent in scope_nodes
             for child in ast.iter_child_nodes(parent)
-            if child in parent_set
+            if child in scope_set
         }
+        helpers = [
+            (index, item.node, item)
+            for index, item in enumerate(execution)
+            if isinstance(item.node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and item.node is not function
+        ]
+        if len(helpers) > self._MAX_LOCAL_HELPERS:
+            return None
         candidates: list[bool] = []
-        live = [(node, cond) for node, cond in execution if getattr(node, "lineno", 0) > copy_line]
-        aliases = {subject}
-        aliases_at: dict[ast.AST, set[str]] = {}
-        for node, _ in live:
-            aliases_at[node] = set(aliases)
-            value: ast.expr | None
-            if isinstance(node, ast.Assign):
-                targets = node.targets
-                value = node.value
-            elif isinstance(node, ast.AnnAssign):
-                targets = [node.target]
-                value = node.value
-            elif isinstance(node, (ast.AugAssign, ast.Delete)):
-                targets = [node.target] if isinstance(node, ast.AugAssign) else node.targets
-                value = None
-            elif isinstance(node, (ast.For, ast.AsyncFor)):
-                targets = [node.target]
-                value = None
-            elif isinstance(node, ast.With):
-                targets = [item.optional_vars for item in node.items if item.optional_vars]
-                value = None
-            elif isinstance(node, ast.NamedExpr):
-                targets = [node.target]
-                value = node.value
-            elif isinstance(node, ast.ExceptHandler):
-                targets = [ast.Name(id=node.name, ctx=ast.Store())] if node.name else []
-                value = None
-            else:
-                targets = []
-                value = None
-            source_alias = isinstance(value, ast.Name) and value.id in aliases
-            for target in targets:
-                if not isinstance(target, ast.Name):
-                    continue
-                aliases.discard(target.id)
-                if source_alias:
-                    aliases.add(target.id)
-        for node, conditional in live:
-            current_aliases = aliases_at[node]
-            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Delete)):
-                targets = (
-                    node.targets if isinstance(node, (ast.Assign, ast.Delete)) else [node.target]
-                )
-                # Rebinding the local name kills its identity; it is not an object mutation.
-                if any(
-                    not isinstance(t, ast.Name) and self._root_name(t) in current_aliases
-                    for t in targets
-                ):
-                    candidates.append(conditional)
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr in mutators
-                and self._root_name(node.func.value) in current_aliases
-            ):
-                candidates.append(conditional)
 
-        helper_defs = [
-            (node, conditional)
-            for node, conditional in execution
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node is not function
-            and node.lineno > copy_line
-        ][: self._MAX_LOCAL_HELPERS]
-        for helper, definition_conditional in helper_defs:
-            same_named_defs = [
-                node
-                for node, _ in execution
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and node.name == helper.name
-            ]
-            if len(same_named_defs) != 1:
-                continue
+        def binding_state(
+            value: ast.expr | None,
+            path: tuple[tuple[ast.AST, int], ...],
+            index: int,
+            aliases: dict[str, list[tuple[int, tuple[tuple[ast.AST, int], ...], bool | None]]],
+        ) -> bool | None:
+            if not isinstance(value, ast.Name):
+                return False
+            may_alias, definite_alias = self._alias_status(value.id, path, index, aliases)
+            return True if definite_alias else None if may_alias else False
+
+        def update_bindings(  # noqa: PLR0912 - explicit binding forms
+            node: ast.AST,
+            path: tuple[tuple[ast.AST, int], ...],
+            index: int,
+            aliases: dict[str, list[tuple[int, tuple[tuple[ast.AST, int], ...], bool | None]]],
+            binding_parents: dict[ast.AST, ast.AST],
+        ) -> None:
+            targets: list[ast.expr] = []
+            value: ast.expr | None = None
+            if isinstance(node, ast.Assign):
+                targets, value = node.targets, node.value
+            elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
+                targets, value = [node.target], node.value
+            elif isinstance(node, ast.AugAssign):
+                targets = [node.target]
+                if isinstance(node.op, ast.BitOr) and isinstance(node.target, ast.Name):
+                    return
+            elif isinstance(node, ast.Delete):
+                targets = node.targets
+            elif isinstance(node, (ast.For, ast.AsyncFor)):
+                return  # The target store is visited on the loop-body path.
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                targets = [ast.Name(id=node.name, ctx=ast.Store())]
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                parent = binding_parents.get(node)
+                if isinstance(parent, (ast.For, ast.AsyncFor, ast.withitem)):
+                    targets = [node]
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                targets = [ast.Name(id=node.name, ctx=ast.Store())]
+            elif isinstance(node, ast.alias):
+                targets = [ast.Name(id=node.asname or node.name.split(".")[0], ctx=ast.Store())]
+            elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+                targets = [ast.Name(id=node.name, ctx=ast.Store())]
+            elif isinstance(node, ast.MatchMapping) and node.rest:
+                targets = [ast.Name(id=node.rest, ctx=ast.Store())]
+            state = binding_state(value, path, index, aliases)
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    aliases.setdefault(target.id, []).append((index, path, state))
+
+        def helper_effect(  # noqa: PLR0911, PLR0912 - fail-closed helper proof
+            call: ast.Call, call_index: int, call_item: _ExecutionNode
+        ) -> bool | None:
+            if not isinstance(call.func, ast.Name):
+                return None
+            matches = [(idx, fn, item) for idx, fn, item in helpers if fn.name == call.func.id]
+            if len(matches) != 1:
+                return None
+            helper_index, helper, helper_item = matches[0]
+            if helper_index >= call_index or not self._path_contains(
+                call_item.path, helper_item.path
+            ):
+                return None
+            if helper.decorator_list or not self._helper_call_is_valid(call, helper):
+                return None
+            if isinstance(helper, ast.AsyncFunctionDef) and not self._is_awaited(call, parents):
+                return None
             helper_nodes = self._execution_nodes(helper)
-            if not helper_nodes:
+            helper_scope = self._same_scope_nodes(helper)
+            helper_scope_set = set(helper_scope)
+            helper_parents = {
+                child: parent
+                for parent in helper_scope
+                for child in ast.iter_child_nodes(parent)
+                if child in helper_scope_set
+            }
+            if not helper_nodes or any(
+                isinstance(node, (ast.Yield, ast.YieldFrom, ast.Global, ast.Nonlocal))
+                for node in ast.walk(helper)
+            ):
+                return None
+            for item in execution[helper_index + 1 : call_index]:
+                if call.func.id in self._binding_names(item.node) and self._paths_compatible(
+                    item.path, call_item.path
+                ):
+                    return None
+                if isinstance(item.node, ast.ImportFrom) and any(
+                    alias.name == "*" for alias in item.node.names
+                ):
+                    return None
+            arguments = [*helper.args.posonlyargs, *helper.args.args, *helper.args.kwonlyargs]
+            formal_names = {argument.arg for argument in arguments}
+            helper_facts: dict[
+                str, list[tuple[int, tuple[tuple[ast.AST, int], ...], bool | None]]
+            ] = {}
+            outer_names = set(facts) - formal_names
+            for name in outer_names:
+                may_alias, definite_alias = self._alias_status(
+                    name, call_item.path, call_index, facts
+                )
+                if may_alias:
+                    helper_facts[name] = [(-1, (), True if definite_alias else None)]
+            for argument in arguments:
+                actual = self._actual_for_parameter(call, helper, argument.arg)
+                if isinstance(actual, ast.Name):
+                    may_alias, definite_alias = self._alias_status(
+                        actual.id, call_item.path, call_index, facts
+                    )
+                    helper_facts[argument.arg] = (
+                        [(-1, (), True if definite_alias else None)]
+                        if may_alias
+                        else [(-1, (), False)]
+                    )
+                else:
+                    helper_facts[argument.arg] = [(-1, (), False)]
+            helper_candidates: list[bool] = []
+            for body_index, body_item in enumerate(helper_nodes):
+                node = body_item.node
+                for root in self._direct_mutation_names(node, mutators):
+                    may_alias, definite_alias = self._alias_status(
+                        root, body_item.path, body_index, helper_facts
+                    )
+                    if may_alias:
+                        helper_candidates.append(
+                            call_item.conditional or body_item.conditional or not definite_alias
+                        )
+                update_bindings(node, body_item.path, body_index, helper_facts, helper_parents)
+            return min(helper_candidates) if helper_candidates else None
+
+        for index, item in enumerate(execution):
+            if index <= copy_index:
                 continue
-            helper_args = [*helper.args.posonlyargs, *helper.args.args, *helper.args.kwonlyargs]
-            formal_names = {arg.arg for arg in helper_args}
-            for call, call_conditional in live:
-                if not (
-                    isinstance(call, ast.Call)
-                    and isinstance(call.func, ast.Name)
-                    and call.func.id == helper.name
-                    and call.lineno > helper.lineno
-                ):
-                    continue
-                if isinstance(helper, ast.AsyncFunctionDef) and not self._is_awaited(call, parents):
-                    continue
-                if any(
-                    argument.arg == helper.name
-                    for argument in [
-                        *function.args.posonlyargs,
-                        *function.args.args,
-                        *function.args.kwonlyargs,
-                    ]
-                ):
-                    continue
-                if any(
-                    (
-                        (
-                            isinstance(stmt, ast.Name)
-                            and stmt.id == helper.name
-                            and isinstance(stmt.ctx, ast.Store)
-                        )
-                        or (isinstance(stmt, ast.ExceptHandler) and stmt.name == helper.name)
-                    )
-                    and helper.lineno < getattr(stmt, "lineno", 0) < call.lineno
-                    for stmt, _ in execution
-                    if stmt is not helper
-                ):
-                    continue
-                actual_formals: set[str] = set()
-                for formal in formal_names:
-                    actual = self._actual_for_parameter(call, helper, formal)
-                    if isinstance(actual, ast.Name) and actual.id in aliases_at.get(call, set()):
-                        actual_formals.add(formal)
-                for mutation, helper_conditional in helper_nodes:
-                    if getattr(mutation, "lineno", 0) <= 0:
-                        continue
-                    root: str | None = None
-                    if (
-                        isinstance(mutation, ast.Call)
-                        and isinstance(mutation.func, ast.Attribute)
-                        and mutation.func.attr in mutators
-                    ):
-                        root = self._root_name(mutation.func.value)
-                    elif isinstance(
-                        mutation, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Delete)
-                    ):
-                        targets = (
-                            mutation.targets
-                            if isinstance(mutation, (ast.Assign, ast.Delete))
-                            else [mutation.target]
-                        )
-                        if any(
-                            not isinstance(t, ast.Name)
-                            and self._root_name(t) in aliases_at.get(call, set()) | actual_formals
-                            for t in targets
-                        ):
-                            root = subject
-                    call_aliases = aliases_at.get(call, set())
-                    if root not in call_aliases | actual_formals:
-                        continue
-                    # Rebinding a formal or capture loses caller-object identity.
-                    if root in formal_names and any(
-                        (
-                            isinstance(stmt, ast.Name)
-                            and stmt.id == root
-                            and isinstance(stmt.ctx, ast.Store)
-                            and getattr(stmt, "lineno", 0) < getattr(mutation, "lineno", 0)
-                        )
-                        or (
-                            isinstance(stmt, ast.ExceptHandler)
-                            and stmt.name == root
-                            and getattr(stmt, "lineno", 0) < getattr(mutation, "lineno", 0)
-                        )
-                        for stmt, _ in helper_nodes
-                    ):
-                        continue
-                    if (
-                        root in call_aliases
-                        and root != subject
-                        and any(
-                            (
-                                isinstance(stmt, ast.Name)
-                                and stmt.id == root
-                                and isinstance(stmt.ctx, ast.Store)
-                                and stmt.lineno < getattr(mutation, "lineno", 0)
-                            )
-                            or (
-                                isinstance(stmt, ast.ExceptHandler)
-                                and stmt.name == root
-                                and getattr(stmt, "lineno", 0) < getattr(mutation, "lineno", 0)
-                            )
-                            for stmt, _ in helper_nodes
-                        )
-                    ):
-                        continue
-                    candidates.append(
-                        definition_conditional or call_conditional or helper_conditional
-                    )
+            node = item.node
+            for root in self._direct_mutation_names(node, mutators):
+                may_alias, definite_alias = self._alias_status(root, item.path, index, facts)
+                if may_alias:
+                    candidates.append(item.conditional or not definite_alias)
+            if isinstance(node, ast.Call):
+                result = helper_effect(node, index, item)
+                if result is not None:
+                    candidates.append(item.conditional or result)
+            update_bindings(node, item.path, index, facts, parents)
         return min(candidates) if candidates else None
 
     @staticmethod
