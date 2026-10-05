@@ -16,6 +16,7 @@ import gc
 import hashlib
 import json
 import os
+import stat
 import sys
 import tempfile
 from collections.abc import Callable, Iterable
@@ -653,6 +654,40 @@ class MypyAnalyzer:
             parts.pop()
         return ".".join(parts)
 
+    def _read_discovered_source(self, path: Path) -> bytes | None:
+        """Read one in-root regular source file without following a symlink."""
+        try:
+            relative = path.relative_to(self.source_root)
+        except ValueError:
+            return None
+        if not relative.parts:
+            return None
+        current = self.source_root
+        try:
+            for part in relative.parts:
+                current = current / part
+                if current.is_symlink():
+                    return None
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(self.source_root)
+            descriptor = os.open(
+                path,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+            )
+        except (OSError, ValueError):
+            return None
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                return None
+            with os.fdopen(descriptor, "rb") as source:
+                descriptor = -1
+                return source.read()
+        except OSError:
+            return None
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
     def _source_records(self) -> list[tuple[Path, str, str]]:
         """Return canonical (path, module, digest) inputs from inventory or disk."""
         inventory = self.source_inventory
@@ -679,15 +714,18 @@ class MypyAnalyzer:
         for path in self.source_root.rglob("*.py"):
             if any(part.startswith((".", "__pycache__")) for part in path.parts):
                 continue
+            source_bytes = self._read_discovered_source(path)
+            if source_bytes is None:
+                continue
             try:
                 try:
                     module = self._module_name_from_path(path, self.module_root)
                 except ValueError:
                     module = self._module_name_from_path(path, self.source_root)
-                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                digest = hashlib.sha256(source_bytes).hexdigest()
             except (OSError, ValueError):
                 continue
-            records.append((path.resolve(), module, digest))
+            records.append((path, module, digest))
         return sorted(records, key=lambda record: (str(record[0]), record[1]))
 
     def _ensure_mypy_built(self) -> None:
