@@ -28,7 +28,7 @@ from fastapi_endpoint_detector.models.endpoint import (
     HandlerInfo,
 )
 
-MATRIX_ROOT = Path(__file__).resolve().parents[1] / "results" / "effect-preset-matrix-v2"
+MATRIX_ROOT = Path(__file__).resolve().parents[1] / "results" / "effect-preset-matrix-v3"
 MANIFEST_PATH = MATRIX_ROOT / "package-symbols.json"
 RESULTS_PATH = MATRIX_ROOT / "controlled-results.json"
 FIXTURE_PATH = MATRIX_ROOT / "fixtures" / "pathlib_open_handles.py"
@@ -528,7 +528,7 @@ def _selector_parameter_names(declaration: dict[str, Any]) -> list[str]:
 def verify_declared_python_signatures(  # noqa: PLR0912, PLR0915
     artifact_dir: Path, manifest: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    """Reconcile Python-declared callable signatures with exact hashed wheel/sdist source."""
+    """Reconcile callable signatures, selectors and required fields with hashed source."""
     frozen = _validated_manifest(manifest)
     verify_artifacts(artifact_dir, frozen)
     rows: list[dict[str, Any]] = []
@@ -650,10 +650,41 @@ def verify_declared_python_signatures(  # noqa: PLR0912, PLR0915
                     for item in typed_dict.body
                     if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name)
                 ]
+                typed_dict_total = next(
+                    (
+                        keyword.value.value is True
+                        for keyword in typed_dict.keywords
+                        if keyword.arg == "total" and isinstance(keyword.value, ast.Constant)
+                    ),
+                    True,
+                )
+                selector_required_names = []
+                for item in typed_dict.body:
+                    if not isinstance(item, ast.AnnAssign) or not isinstance(item.target, ast.Name):
+                        continue
+                    annotation_text = ast.unparse(item.annotation)
+                    explicitly_required = annotation_text.startswith("Required[")
+                    explicitly_optional = annotation_text.startswith("NotRequired[")
+                    if explicitly_required or (typed_dict_total and not explicitly_optional):
+                        selector_required_names.append(item.target.id)
                 selector_kind = "TypedDict_fields"
             else:
                 type_path, type_hash = source_path, source_hash
                 selector_names = _formal_parameter_names(node)
+                positional_parameters = [*node.args.posonlyargs, *node.args.args]
+                required_positional_count = len(positional_parameters) - len(node.args.defaults)
+                selector_required_names = [
+                    item.arg
+                    for item in positional_parameters[:required_positional_count]
+                    if item.arg != "self"
+                ]
+                selector_required_names.extend(
+                    item.arg
+                    for item, default in zip(
+                        node.args.kwonlyargs, node.args.kw_defaults, strict=True
+                    )
+                    if default is None
+                )
                 selector_kind = "callable_parameters"
             if selector_names != _selector_parameter_names(declaration):
                 raise MatrixEvidenceError(
@@ -671,6 +702,7 @@ def verify_declared_python_signatures(  # noqa: PLR0912, PLR0915
                     "selector_source_sha256": f"sha256:{type_hash}",
                     "selector_kind": selector_kind,
                     "selector_parameters": selector_names,
+                    "selector_required_parameters": selector_required_names,
                     "status": "exact_source_signature_and_selector_match",
                 }
             )
@@ -703,8 +735,8 @@ def load_source_signature_observations(
     manifest = load_manifest()
     if (
         type(value["schema_version"]) is not int
-        or value["schema_version"] != 1
-        or value["report_id"] != "effect-preset-source-signature-observations-v1"
+        or value["schema_version"] != 2
+        or value["report_id"] != "effect-preset-source-signature-observations-v2"
         or value["status"] != "partial"
         or value["manifest_sha256"] != f"sha256:{_sha256(MANIFEST_PATH.read_bytes())}"
         or value["artifact_directory_verified"] is not True
@@ -939,6 +971,7 @@ def _render_case_arguments(arguments: Any) -> str:
         raise MatrixEvidenceError("package analyzer case requires call arguments")
     positional: list[str] = []
     keywords: list[str] = []
+    keyword_names: set[str] = set()
     for argument in arguments:
         if not isinstance(argument, dict) or set(argument) not in (
             {"kind", "value"},
@@ -955,6 +988,9 @@ def _render_case_arguments(arguments: Any) -> str:
             and isinstance(argument["name"], str)
             and argument["name"].isidentifier()
         ):
+            if argument["name"] in keyword_names:
+                raise MatrixEvidenceError("package analyzer call repeats a keyword binding")
+            keyword_names.add(argument["name"])
             keywords.append(f"{argument['name']}={argument['value']!r}")
         else:
             raise MatrixEvidenceError("package analyzer call argument kind is invalid")
@@ -972,8 +1008,8 @@ def _package_signature_evidence(
     if (
         not isinstance(report, dict)
         or type(report.get("schema_version")) is not int
-        or report.get("schema_version") != 1
-        or report.get("report_id") != "effect-preset-source-signature-observations-v1"
+        or report.get("schema_version") != 2
+        or report.get("report_id") != "effect-preset-source-signature-observations-v2"
         or report.get("manifest_sha256") != f"sha256:{_sha256(MANIFEST_PATH.read_bytes())}"
         or report.get("status") != "partial"
         or report.get("artifact_directory_verified") is not True
@@ -1006,6 +1042,18 @@ def _package_signature_evidence(
         raise MatrixEvidenceError(f"no unique pinned source signature for {declaration['symbol']}")
     row = matches[0]
     inspected = {item["path"]: f"sha256:{item['sha256']}" for item in package["inspected_sources"]}
+    selector_parameters = row.get("selector_parameters")
+    required_selectors = row.get("selector_required_parameters")
+    if (
+        not isinstance(selector_parameters, list)
+        or any(not isinstance(item, str) for item in selector_parameters)
+        or len(selector_parameters) != len(set(selector_parameters))
+        or not isinstance(required_selectors, list)
+        or any(not isinstance(item, str) for item in required_selectors)
+        or len(required_selectors) != len(set(required_selectors))
+        or any(item not in selector_parameters for item in required_selectors)
+    ):
+        raise MatrixEvidenceError("pinned required selector parameters are invalid")
     if row.get("selector_kind") == "TypedDict_fields":
         expected_selectors = _selector_parameter_names(declaration)
     else:
@@ -1024,7 +1072,7 @@ def _package_signature_evidence(
         or row.get("signature") != declaration["source_signature"]
         or row.get("source_sha256") != inspected.get(row.get("source_path"))
         or row.get("selector_source_sha256") != inspected.get(row.get("selector_source_path"))
-        or row.get("selector_parameters") != expected_selectors
+        or selector_parameters != expected_selectors
     ):
         raise MatrixEvidenceError(
             f"pinned source signature or selector evidence mismatch: {declaration['symbol']}"
@@ -1038,13 +1086,14 @@ def _package_signature_evidence(
         "selector_source_sha256": row["selector_source_sha256"],
         "selector_kind": row["selector_kind"],
         "selector_parameters": row["selector_parameters"],
+        "selector_required_parameters": required_selectors,
     }
 
 
 def _stub_method_signature(  # noqa: PLR0912
     evidence: dict[str, Any],
 ) -> tuple[str, set[str] | None]:
-    """Render a static stub with pinned parameter names/kinds and typed-dict keys."""
+    """Render a static stub with pinned names, binding kinds and required TypedDict keys."""
     signature = evidence["source_signature"]
     async_prefix = "async " if signature.startswith("async ") else ""
     signature = signature.removeprefix("async ")
@@ -1089,7 +1138,8 @@ def _stub_method_signature(  # noqa: PLR0912
         for key in evidence["selector_parameters"]:
             if key not in typed_dict_keys:
                 raise MatrixEvidenceError("typed dictionary selector key is invalid")
-            rendered.append(f"{key} = ...")
+            required_suffix = "" if key in evidence["selector_required_parameters"] else " = ..."
+            rendered.append(f"{key}{required_suffix}")
     elif args.kwarg is not None:
         rendered.append(f"**{args.kwarg.arg}")
     return (
@@ -1109,8 +1159,101 @@ def _validate_case_binding(case: dict[str, Any], typed_dict_keys: set[str] | Non
             )
 
 
+def _selector_rows(selector: dict[str, Any], role: str) -> list[dict[str, Any]]:
+    if selector.get("kind") == "composite":
+        components = selector.get("components")
+        if not isinstance(components, list):
+            raise MatrixEvidenceError("composite contract selector has invalid components")
+        return [{"role": role, "component": index, **item} for index, item in enumerate(components)]
+    return [{"role": role, "component": None, **selector}]
+
+
+def _contract_selector_bindings(
+    arguments: list[dict[str, Any]], contract_selectors: dict[str, Any]
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for role in ("resource", "value"):
+        selector = contract_selectors.get(role)
+        if selector is None:
+            continue
+        for item in _selector_rows(selector, role):
+            kind = item.get("kind")
+            if kind in {"none", "receiver"}:
+                rows.append({**item, "binding_status": "present", "argument_index": None})
+                continue
+            if item.get("path"):
+                raise MatrixEvidenceError("nested selector paths are outside package replay scope")
+            selected_index = None
+            if kind == "argument":
+                positional_index = item.get("index")
+                position = 0
+                for argument_index, argument in enumerate(arguments):
+                    if argument["kind"] != "positional":
+                        continue
+                    if position == positional_index:
+                        selected_index = argument_index
+                        break
+                    position += 1
+            elif kind == "keyword":
+                selected_index = next(
+                    (
+                        index
+                        for index, argument in enumerate(arguments)
+                        if argument["kind"] == "keyword" and argument["name"] == item.get("name")
+                    ),
+                    None,
+                )
+            else:
+                raise MatrixEvidenceError(f"unsupported contract selector kind: {kind}")
+            if selected_index is None:
+                selected_name = item.get("name") or f"argument index {item.get('index')}"
+                raise MatrixEvidenceError(
+                    f"contract-selected {role} argument is absent or wrongly bound: {selected_name}"
+                )
+            rows.append({**item, "binding_status": "present", "argument_index": selected_index})
+    return rows
+
+
+def _run_selector_binding_control(
+    case: dict[str, Any],
+    evidence: dict[str, Any],
+    contract_selectors: dict[str, Any],
+    *,
+    control_id: str,
+    arguments: list[dict[str, Any]],
+    expected_missing: str,
+    expected_contract_id: str,
+) -> dict[str, Any]:
+    altered = {**case, "arguments": arguments, "case_id": f"{case['case_id']}:{control_id}"}
+    replay = _replay_package_case(
+        altered, evidence, contract_selectors, allow_selector_mismatch=True
+    )
+    rows = replay["observations"]
+    if (
+        len(rows) != 2
+        or rows[0]["audit_status"] != "matched"
+        or rows[0]["contract_id"] != expected_contract_id
+        or replay["selector_binding_issue"] is None
+        or expected_missing not in replay["selector_binding_issue"]
+    ):
+        raise MatrixEvidenceError(f"selector binding negative control failed: {control_id}")
+    return {
+        "control_id": control_id,
+        "fixture_sha256": replay["fixture_sha256"],
+        "analyzer_audit_status": rows[0]["audit_status"],
+        "analyzer_contract_id": rows[0]["contract_id"],
+        "selector_binding_status": "rejected_incomplete_or_wrong_binding",
+        "selector_binding_issue": replay["selector_binding_issue"],
+        "observations": rows,
+    }
+
+
 def _replay_package_case(
-    case: dict[str, Any], signature_evidence: dict[str, Any]
+    case: dict[str, Any],
+    signature_evidence: dict[str, Any],
+    contract_selectors: dict[str, Any],
+    *,
+    allow_selector_mismatch: bool = False,
 ) -> dict[str, Any]:
     """Resolve a source-derived canonical receiver against one exact contract."""
     module, class_name, method = case["symbol"].rsplit(".", 2)
@@ -1118,6 +1261,14 @@ def _replay_package_case(
     arguments = _render_case_arguments(case["arguments"])
     method_signature, typed_dict_keys = _stub_method_signature(signature_evidence)
     _validate_case_binding(case, typed_dict_keys)
+    selector_binding_issue = None
+    try:
+        selector_bindings = _contract_selector_bindings(case["arguments"], contract_selectors)
+    except MatrixEvidenceError as exc:
+        if not allow_selector_mismatch:
+            raise
+        selector_binding_issue = str(exc)
+        selector_bindings = []
     app_call = f"client.{method}({arguments})"
     negative_call = f"foreign.{method}({arguments})"
     fixture = (
@@ -1165,6 +1316,8 @@ def _replay_package_case(
                 "resolver_version": analyzer.resolver_version,
                 "signature_evidence": signature_evidence,
                 "generated_signature": method_signature,
+                "selector_bindings": selector_bindings,
+                "selector_binding_issue": selector_binding_issue,
                 "observations": rows,
             }
     except (OSError, ValueError, RuntimeError) as exc:
@@ -1183,8 +1336,8 @@ def replay_package_analyzer_cases() -> list[dict[str, Any]]:
         not isinstance(case_data, dict)
         or set(case_data) != {"schema_version", "fixture_id", "cases", "unsupported_cases"}
         or type(case_data["schema_version"]) is not int
-        or case_data["schema_version"] != 1
-        or case_data["fixture_id"] != "gh97-package-analyzer-cases-v1"
+        or case_data["schema_version"] != 2
+        or case_data["fixture_id"] != "gh97-package-analyzer-cases-v2"
         or not isinstance(case_data["cases"], list)
     ):
         raise MatrixEvidenceError("package analyzer case fixture has invalid schema")
@@ -1236,7 +1389,26 @@ def replay_package_analyzer_cases() -> list[dict[str, Any]]:
         if contract_set_id is None or contract_set_id not in presets:
             raise MatrixEvidenceError("package analyzer case preset is not pinned")
         signature_evidence = _package_signature_evidence(package, declaration)
-        result = _replay_package_case(case, signature_evidence)
+        loaded_preset = load_effect_preset(case["preset_selector"])
+        contract = next(
+            (
+                item
+                for item in loaded_preset.document.contracts
+                if item.id == declaration["preset_contract"]
+            ),
+            None,
+        )
+        if contract is None:
+            raise MatrixEvidenceError(
+                "pinned preset does not contain the selected package contract"
+            )
+        contract_selectors = {
+            "resource": contract.resource.model_dump(mode="json"),
+            "value": (
+                contract.value.model_dump(mode="json") if contract.value is not None else None
+            ),
+        }
+        result = _replay_package_case(case, signature_evidence, contract_selectors)
         result.update(
             {
                 "case_id": case["case_id"],
@@ -1267,6 +1439,42 @@ def replay_package_analyzer_cases() -> list[dict[str, Any]]:
             raise MatrixEvidenceError(
                 f"controlled package case failed its exact control: {case['case_id']}"
             )
+        result["binding_controls"] = []
+        if case["case_id"] == "typed-s3-put-object-exact-release-symbol":
+            body = next(
+                (
+                    argument
+                    for argument in case["arguments"]
+                    if argument.get("kind") == "keyword" and argument.get("name") == "Body"
+                ),
+                None,
+            )
+            if body is None:
+                raise MatrixEvidenceError("typed S3 positive case lacks the selected Body")
+            omitted = [argument for argument in case["arguments"] if argument is not body]
+            result["binding_controls"] = [
+                _run_selector_binding_control(
+                    case,
+                    signature_evidence,
+                    contract_selectors,
+                    control_id="missing-selected-body",
+                    arguments=omitted,
+                    expected_missing="Body",
+                    expected_contract_id=declaration["preset_contract"],
+                ),
+                _run_selector_binding_control(
+                    case,
+                    signature_evidence,
+                    contract_selectors,
+                    control_id="body-bound-positionally",
+                    arguments=[
+                        *[argument for argument in case["arguments"] if argument is not body],
+                        {"kind": "positional", "value": body["value"]},
+                    ],
+                    expected_missing="Body",
+                    expected_contract_id=declaration["preset_contract"],
+                ),
+            ]
         results.append(result)
     return results
 
@@ -1376,13 +1584,13 @@ def load_package_analyzer_results(
         raise MatrixEvidenceError("package analyzer result has invalid fields")
     if (
         type(value["schema_version"]) is not int
-        or value["schema_version"] != 2
-        or value["result_id"] != "gh97-package-signature-analyzer-results-v2"
+        or value["schema_version"] != 3
+        or value["result_id"] != "gh97-package-selector-binding-results-v3"
         or value["status"] != "completed"
         or value["scope"]
         != (
-            "source-derived parameter and selector surfaces with same-name negatives; "
-            "installed package compatibility not evaluated"
+            "source-derived signature surfaces, contract-selected argument binding, and "
+            "same-name negatives; installed package compatibility not evaluated"
         )
         or value["source_execution"] is not False
         or value["upstream_package_code_imported_or_executed"] is not False
@@ -1413,6 +1621,9 @@ def load_package_analyzer_results(
         "unresolved_calls": sum(row["audit_status"] == "unresolved" for row in rows),
         "unrelated_same_name_negative_calls": sum(
             row["control_class"] == "unrelated_same_name_negative" for row in rows
+        ),
+        "selector_binding_negative_controls": sum(
+            len(case["binding_controls"]) for case in replayed
         ),
         "matched_exact_symbols": sorted(
             {row["canonical_symbol"] for row in rows if row["audit_status"] == "matched"}
@@ -1642,7 +1853,7 @@ def load_controlled_results(path: Path = RESULTS_PATH) -> dict[str, Any]:  # noq
     if not isinstance(audit, dict) or set(audit) != audit_fields:
         raise MatrixEvidenceError("controlled package source audit has invalid fields")
     if (
-        audit["manifest_path"] != "benchmarks/results/effect-preset-matrix-v2/package-symbols.json"
+        audit["manifest_path"] != MANIFEST_PATH.relative_to(PROJECT_ROOT).as_posix()
         or audit["manifest_sha256"] != manifest_hash
     ):
         raise MatrixEvidenceError("controlled results do not match the frozen package manifest")

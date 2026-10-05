@@ -277,6 +277,7 @@ def test_pinned_package_symbol_cases_replay_with_same_name_negatives() -> None:
     assert result["observed"]["matched_calls"] == 6
     assert result["observed"]["unrelated_same_name_negative_calls"] == 6
     assert result["observed"]["unmatched_calls"] == 6
+    assert result["observed"]["selector_binding_negative_controls"] == 2
     assert result["source_execution"] is False
     assert result["upstream_package_code_imported_or_executed"] is False
     s3_case = next(row for row in result["cases"] if row["case_id"].startswith("typed-s3-"))
@@ -284,7 +285,21 @@ def test_pinned_package_symbol_cases_replay_with_same_name_negatives() -> None:
         "(self, **kwargs: Unpack[PutObjectRequestRequestTypeDef])"
     )
     assert "Bucket" in s3_case["signature_evidence"]["selector_parameters"]
+    assert s3_case["signature_evidence"]["selector_required_parameters"] == ["Bucket", "Key"]
     assert "BogusField" not in s3_case["generated_signature"]
+    assert s3_case["generated_signature"].startswith(
+        "def method(self, Bucket, Key, ACL = ..., Body = ..."
+    )
+    assert all(row["binding_status"] == "present" for row in s3_case["selector_bindings"])
+    assert [row["control_id"] for row in s3_case["binding_controls"]] == [
+        "missing-selected-body",
+        "body-bound-positionally",
+    ]
+    assert all(
+        row["selector_binding_status"] == "rejected_incomplete_or_wrong_binding"
+        and row["analyzer_audit_status"] == "matched"
+        for row in s3_case["binding_controls"]
+    )
     assert {row["reason_code"] for row in result["unsupported_cases"]} == {
         "descriptor_signature_unavailable",
         "no_exact_preset_contract",
@@ -301,11 +316,42 @@ def test_pinned_typed_dict_signature_rejects_unknown_case_keyword() -> None:
     )
     evidence = matrix_provider._package_signature_evidence(package, declaration)
     case = json.loads(matrix_provider.PACKAGE_CASES_PATH.read_text(encoding="utf-8"))["cases"][-1]
+    preset = load_effect_preset(case["preset_selector"])
+    contract = next(
+        item for item in preset.document.contracts if item.id == declaration["preset_contract"]
+    )
+    assert contract.value is not None
+    selectors = {
+        "resource": contract.resource.model_dump(mode="json"),
+        "value": contract.value.model_dump(mode="json"),
+    }
     altered = json.loads(json.dumps(case))
     altered["arguments"][0]["name"] = "BogusField"
 
     with pytest.raises(MatrixEvidenceError, match="absent from pinned TypedDict selector"):
-        matrix_provider._replay_package_case(altered, evidence)
+        matrix_provider._replay_package_case(altered, evidence, selectors)
+
+    missing_body = json.loads(json.dumps(case))
+    missing_body["arguments"] = [arg for arg in missing_body["arguments"] if arg["name"] != "Body"]
+    with pytest.raises(MatrixEvidenceError, match=r"contract-selected value argument.*Body"):
+        matrix_provider._replay_package_case(missing_body, evidence, selectors)
+
+    wrong_binding = json.loads(json.dumps(case))
+    body_arg = next(arg for arg in wrong_binding["arguments"] if arg.get("name") == "Body")
+    wrong_binding["arguments"].remove(body_arg)
+    wrong_binding["arguments"].append({"kind": "positional", "value": body_arg["value"]})
+    with pytest.raises(MatrixEvidenceError, match=r"contract-selected value argument.*Body"):
+        matrix_provider._replay_package_case(wrong_binding, evidence, selectors)
+
+
+def test_package_case_rejects_duplicate_keyword_bindings() -> None:
+    with pytest.raises(MatrixEvidenceError, match="repeats a keyword binding"):
+        matrix_provider._render_case_arguments(
+            [
+                {"kind": "keyword", "name": "Body", "value": "first"},
+                {"kind": "keyword", "name": "Body", "value": "second"},
+            ]
+        )
 
 
 def test_package_symbol_results_reject_forged_aggregates(tmp_path: Path) -> None:
