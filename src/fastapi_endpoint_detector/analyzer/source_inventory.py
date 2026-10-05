@@ -23,6 +23,17 @@ class SourceFile:
 
 @dataclass(frozen=True)
 class SourceInventory:
+    """Canonical file scope and its known import-closure limitations.
+
+    ``files`` and :attr:`paths` are the authoritative allowlist for downstream
+    analyzers. A consumer may not broaden that selection by walking ``root``
+    or following an in-root import on its own. ``unresolved_imports`` records
+    known local import edges whose target was not selected, and ``limitations``
+    explains why parts of the discovered source scope may be incomplete.
+    Consumers should preserve these limitations in analysis results when they
+    affect the result.
+    """
+
     root: Path
     files: tuple[SourceFile, ...]
     unresolved_imports: tuple[tuple[str, str], ...]
@@ -30,9 +41,11 @@ class SourceInventory:
     follow_imports: bool
     max_depth: int
     limitations: tuple[str, ...] = ()
+    module_collisions: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
     @property
     def paths(self) -> tuple[Path, ...]:
+        """Return exactly the files selected by this inventory."""
         return tuple(item.path for item in self.files)
 
 
@@ -41,6 +54,14 @@ def _matches(relative: str, patterns: tuple[str, ...]) -> bool:
         fnmatch.fnmatchcase(relative, pattern) or fnmatch.fnmatchcase(f"/{relative}", pattern)
         for pattern in patterns
     )
+
+
+def _module_name(relative: Path, package_prefix: str) -> str:
+    stem = relative.with_suffix("") if relative.suffix == ".py" else relative
+    parts = list(stem.parts)
+    if parts and parts[-1] == "__init__":
+        parts.pop()
+    return ".".join(([package_prefix] if package_prefix else []) + parts)
 
 
 def build_source_inventory(  # noqa: PLR0912, PLR0915
@@ -57,7 +78,10 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
     max_depth: int = 10,
 ) -> SourceInventory:
     """Build an ordered inventory, following only resolvable project-local imports."""
-    source = source.resolve()
+    requested = Path(source).absolute()
+    if any(path.is_symlink() for path in (requested, *requested.parents)):
+        raise ValueError("source inventory roots and source files must not use symlink paths")
+    source = requested.resolve()
     root = source.parent if source.is_file() else source
     # Do not let pathlib's file-symlink handling pull files from outside the
     # selected tree (or count the same source through an alias).
@@ -68,18 +92,39 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
         and not any(parent.is_symlink() for parent in path.parents if parent != root.parent)
         and path.resolve().is_relative_to(root)
     )
+    package_init = root / "__init__.py"
+    package_prefix = root.name if not package_init.is_symlink() and package_init.is_file() else ""
+    module_paths: dict[str, list[Path]] = {}
+    symlink_modules: dict[str, str] = {}
+    for path in root.rglob("*"):
+        if not path.is_symlink():
+            continue
+        relative = path.relative_to(root)
+        module = _module_name(relative, package_prefix)
+        if module:
+            symlink_modules[module] = relative.as_posix()
     by_module: dict[str, Path] = {}
     rel_by_path: dict[Path, str] = {}
-    package_prefix = root.name if (root / "__init__.py").is_file() else ""
     for path in candidates:
         rel = path.relative_to(root).as_posix()
-        stem = Path(rel).with_suffix("")
-        parts = list(stem.parts)
-        if parts[-1] == "__init__":
-            parts.pop()
-        module = ".".join(([package_prefix] if package_prefix else []) + parts) or path.parent.name
-        by_module[module] = path
+        module = _module_name(Path(rel), package_prefix) or path.parent.name
+        module_paths.setdefault(module, []).append(path)
         rel_by_path[path] = rel
+
+    module_collisions = tuple(
+        (
+            module,
+            tuple(sorted(rel_by_path[path] for path in paths)),
+        )
+        for module, paths in sorted(module_paths.items())
+        if len(paths) > 1
+    )
+    ambiguous_modules = {module for module, _paths in module_collisions}
+    by_module = {
+        module: paths[0]
+        for module, paths in module_paths.items()
+        if module not in ambiguous_modules
+    }
 
     included = {
         path
@@ -92,6 +137,10 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
     hashes_by_path: dict[Path, str] = {}
     unresolved: set[tuple[str, str]] = set()
     limitations: set[str] = set()
+    for module, paths in module_collisions:
+        limitations.add(
+            f"Module identity {module!r} collides across source files: {', '.join(paths)}"
+        )
     for path in candidates:
         try:
             raw = path.read_bytes()
@@ -139,9 +188,40 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
         path = queue.pop(0)
         depth = distance[path]
         for imported in imports_by_path.get(path, ()):
-            local = by_module.get(imported)
-            if local is None and imported.rpartition(".")[0]:
-                local = by_module.get(imported.rpartition(".")[0])
+            local = None
+            ambiguous_import = None
+            parts = imported.split(".")
+            for stop in range(len(parts), 0, -1):
+                candidate_module = ".".join(parts[:stop])
+                if candidate_module in ambiguous_modules:
+                    ambiguous_import = candidate_module
+                    break
+                local = by_module.get(candidate_module)
+                if local is not None:
+                    break
+            if ambiguous_import is not None:
+                unresolved.add((rel_by_path[path], imported))
+                limitations.add(
+                    f"Local import {imported!r} from {rel_by_path[path]} is ambiguous because "
+                    f"module identity {ambiguous_import!r} has multiple source files"
+                )
+                continue
+            symlink_match = next(
+                (
+                    (module, relative)
+                    for module, relative in sorted(symlink_modules.items())
+                    if imported == module or imported.startswith(f"{module}.")
+                ),
+                None,
+            )
+            if local is None and symlink_match is not None:
+                module, relative = symlink_match
+                unresolved.add((rel_by_path[path], imported))
+                limitations.add(
+                    f"Local import {imported!r} from {rel_by_path[path]} resolves through "
+                    f"rejected symlink source {relative} (module {module!r})"
+                )
+                continue
             if local is None:
                 continue
             if local in excluded:
@@ -195,4 +275,5 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
         follow_imports,
         max_depth,
         tuple(sorted(limitations)),
+        module_collisions,
     )

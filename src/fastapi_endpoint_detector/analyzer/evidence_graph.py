@@ -5,6 +5,7 @@ Edges here document source relationships only and cannot assert runtime executio
 
 from __future__ import annotations
 
+import hashlib
 import platform
 from typing import TYPE_CHECKING, Literal
 
@@ -55,16 +56,18 @@ class EvidenceGraph(BaseModel):
     edges: tuple[EvidenceEdge, ...]
 
 
-def source_evidence_graph(
+def source_evidence_graph(  # noqa: PLR0912
     inventory: SourceInventory, *, side: Literal["baseline", "target"] = "target"
 ) -> EvidenceGraph:
     nodes: list[EvidenceNode] = []
     edges: list[EvidenceEdge] = []
     by_module: dict[str, str] = {}
+    ambiguous_modules = {module for module, _paths in inventory.module_collisions}
     seen_edges: set[tuple[str, str]] = set()
     for item in inventory.files:
         node_id = f"{side}:file:{item.relative_path}"
-        by_module[item.module] = node_id
+        if item.module not in ambiguous_modules:
+            by_module[item.module] = node_id
         provenance = EvidenceProvenance(
             side=side,
             source_path=item.relative_path,
@@ -90,9 +93,15 @@ def source_evidence_graph(
         )
     for item in inventory.files:
         for imported in item.imports:
-            target = by_module.get(imported)
-            if target is None and imported.rpartition(".")[0]:
-                target = by_module.get(imported.rpartition(".")[0])
+            target = None
+            parts = imported.split(".")
+            for stop in range(len(parts), 0, -1):
+                module = ".".join(parts[:stop])
+                if module in ambiguous_modules:
+                    break
+                target = by_module.get(module)
+                if target is not None:
+                    break
             if target is None:
                 continue
             edge_key = (f"{side}:file:{item.relative_path}", target)
@@ -117,6 +126,55 @@ def source_evidence_graph(
                             *inventory.limitations,
                         ),
                     ),
+                )
+            )
+    node_ids = {node.id for node in nodes}
+    source_nodes = {f"{side}:file:{item.relative_path}" for item in inventory.files}
+    for source_path, imported in inventory.unresolved_imports:
+        source_id = f"{side}:file:{source_path}"
+        if source_id not in source_nodes:
+            continue
+        digest = hashlib.sha256(f"{source_path}\0{imported}".encode()).hexdigest()
+        unresolved_id = f"{side}:unresolved-import:{digest}"
+        matching_limitations = tuple(
+            limitation
+            for limitation in inventory.limitations
+            if source_path in limitation and imported in limitation
+        )
+        reason = matching_limitations or (
+            f"Import {imported!r} from {source_path} was not resolved inside the inventory",
+        )
+        provenance = EvidenceProvenance(
+            side=side,
+            source_path=source_path,
+            engine="python-ast",
+            engine_version=_ast_engine_version(),
+            strength="reference",
+            confidence="low",
+            limitations=(
+                *reason,
+                "Unresolved import references do not establish execution",
+            ),
+        )
+        if unresolved_id not in node_ids:
+            nodes.append(
+                EvidenceNode(
+                    id=unresolved_id,
+                    kind="resource",
+                    attributes={"module": imported, "resolution": "unresolved"},
+                    provenance=provenance,
+                )
+            )
+            node_ids.add(unresolved_id)
+        edge_key = (source_id, unresolved_id)
+        if edge_key not in seen_edges:
+            seen_edges.add(edge_key)
+            edges.append(
+                EvidenceEdge(
+                    source=source_id,
+                    target=unresolved_id,
+                    kind="imports",
+                    provenance=provenance,
                 )
             )
     return EvidenceGraph(nodes=tuple(nodes), edges=tuple(edges))
