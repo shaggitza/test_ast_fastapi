@@ -231,30 +231,8 @@ class _BackgroundTaskAliasAnalysis:
                 right_aliases, right_suspect = self._statements(
                     statement.orelse, dict(incoming_aliases), set(incoming_suspect), stack
                 )
-                names = (
-                    set(incoming_aliases)
-                    | incoming_suspect
-                    | set(left_aliases)
-                    | left_suspect
-                    | set(right_aliases)
-                    | right_suspect
-                )
-                joined_aliases = {
-                    name: contract
-                    for name, contract in left_aliases.items()
-                    if right_aliases.get(name) == contract
-                }
-                joined_suspect = left_suspect | right_suspect
-                joined_suspect.update(
-                    name
-                    for name in names
-                    if left_aliases.get(name) != right_aliases.get(name)
-                    and (
-                        name in left_aliases
-                        or name in right_aliases
-                        or name in left_suspect
-                        or name in right_suspect
-                    )
+                joined_aliases, joined_suspect = self._join_states(
+                    [(left_aliases, left_suspect), (right_aliases, right_suspect)]
                 )
                 aliases.clear()
                 aliases.update(joined_aliases)
@@ -265,11 +243,9 @@ class _BackgroundTaskAliasAnalysis:
                 self._expression(statement.iter, aliases, suspect, stack)
                 iterable_aliases = self._literal_alias_values(statement.iter, aliases)
                 if iterable_aliases is not None:
-                    base_aliases = dict(aliases)
-                    base_suspect = set(suspect)
+                    loop_aliases = dict(aliases)
+                    loop_suspect = set(suspect)
                     for item_aliases in iterable_aliases:
-                        loop_aliases = dict(aliases)
-                        loop_suspect = set(suspect)
                         alias_value = item_aliases[0] if len(item_aliases) == 1 else None
                         self._bind(
                             statement.target,
@@ -281,54 +257,70 @@ class _BackgroundTaskAliasAnalysis:
                         loop_aliases, loop_suspect = self._statements(
                             statement.body, loop_aliases, loop_suspect, stack
                         )
-                        base_aliases = {
-                            name: contract
-                            for name, contract in base_aliases.items()
-                            if loop_aliases.get(name) == contract
-                        }
-                        base_suspect.update(loop_suspect)
-                    else_aliases, else_suspect = self._statements(
-                        statement.orelse, dict(base_aliases), set(base_suspect), stack
+                    loop_aliases, loop_suspect = self._statements(
+                        statement.orelse, loop_aliases, loop_suspect, stack
                     )
+                    loop_states = [(loop_aliases, loop_suspect)]
+                    if _contains_direct_loop_break(statement.body):
+                        loop_states.append((dict(aliases), set(suspect)))
+                    loop_aliases, loop_suspect = self._join_states(loop_states)
                     aliases.clear()
-                    aliases.update(else_aliases)
+                    aliases.update(loop_aliases)
                     suspect.clear()
-                    suspect.update(else_suspect)
+                    suspect.update(loop_suspect)
                 else:
-                    loop_aliases = dict(aliases)
-                    loop_suspect = set(suspect)
+                    incoming_aliases = dict(aliases)
+                    incoming_suspect = set(suspect)
+                    loop_aliases = dict(incoming_aliases)
+                    loop_suspect = set(incoming_suspect)
                     self._bind(statement.target, None, True, loop_aliases, loop_suspect)
                     loop_aliases, loop_suspect = self._statements(
                         statement.body, loop_aliases, loop_suspect, stack
                     )
-                    incoming_aliases = dict(aliases)
-                    aliases.clear()
-                    aliases.update(
-                        {
-                            name: contract
-                            for name, contract in incoming_aliases.items()
-                            if loop_aliases.get(name) == contract
-                        }
+                    joined_aliases, joined_suspect = self._join_states(
+                        [
+                            (incoming_aliases, incoming_suspect),
+                            (loop_aliases, loop_suspect),
+                        ]
                     )
-                    suspect.update(loop_suspect)
-                    aliases, suspect = self._statements(statement.orelse, aliases, suspect, stack)
+                    before_else = (dict(joined_aliases), set(joined_suspect))
+                    else_aliases, else_suspect = self._statements(
+                        statement.orelse, joined_aliases, joined_suspect, stack
+                    )
+                    branches = [(else_aliases, else_suspect)]
+                    if _contains_direct_loop_break(statement.body):
+                        branches.append(before_else)
+                    joined_aliases, joined_suspect = self._join_states(branches)
+                    aliases.clear()
+                    aliases.update(joined_aliases)
+                    suspect.clear()
+                    suspect.update(joined_suspect)
                 continue
             if isinstance(statement, ast.While):
                 self._expression(statement.test, aliases, suspect, stack)
+                incoming_aliases = dict(aliases)
+                incoming_suspect = set(suspect)
                 body_aliases, body_suspect = self._statements(
-                    statement.body, dict(aliases), set(suspect), stack
+                    statement.body, dict(incoming_aliases), set(incoming_suspect), stack
                 )
-                aliases_copy = dict(aliases)
+                joined_aliases, joined_suspect = self._join_states(
+                    [
+                        (incoming_aliases, incoming_suspect),
+                        (body_aliases, body_suspect),
+                    ]
+                )
+                before_else = (dict(joined_aliases), set(joined_suspect))
+                else_aliases, else_suspect = self._statements(
+                    statement.orelse, joined_aliases, joined_suspect, stack
+                )
+                branches = [(else_aliases, else_suspect)]
+                if _contains_direct_loop_break(statement.body):
+                    branches.append(before_else)
+                joined_aliases, joined_suspect = self._join_states(branches)
                 aliases.clear()
-                aliases.update(
-                    {
-                        name: contract
-                        for name, contract in aliases_copy.items()
-                        if body_aliases.get(name) == contract
-                    }
-                )
-                suspect.update(body_suspect)
-                aliases, suspect = self._statements(statement.orelse, aliases, suspect, stack)
+                aliases.update(joined_aliases)
+                suspect.clear()
+                suspect.update(joined_suspect)
                 continue
             if isinstance(statement, (ast.With, ast.AsyncWith)):
                 for item in statement.items:
@@ -363,55 +355,48 @@ class _BackgroundTaskAliasAnalysis:
                     and _pattern_is_irrefutable(statement.cases[-1].pattern)
                 ):
                     branch_states.append((incoming_aliases, incoming_suspect))
-                first_aliases = branch_states[0][0] if branch_states else incoming_aliases
+                aliases_joined, suspect_joined = self._join_states(branch_states)
                 aliases.clear()
-                aliases.update(
-                    {
-                        name: contract
-                        for name, contract in first_aliases.items()
-                        if all(state[0].get(name) == contract for state in branch_states[1:])
-                    }
-                )
+                aliases.update(aliases_joined)
                 suspect.clear()
-                for _, branch_suspect in branch_states:
-                    suspect.update(branch_suspect)
-                names = set(incoming_aliases) | incoming_suspect
-                for branch_aliases, branch_suspect in branch_states:
-                    names.update(branch_aliases)
-                    names.update(branch_suspect)
-                suspect.update(
-                    name
-                    for name in names
-                    if any(
-                        state[0].get(name) != first_aliases.get(name) for state in branch_states[1:]
-                    )
-                    and any(
-                        name in branch_aliases or name in branch_suspect
-                        for branch_aliases, branch_suspect in branch_states
-                    )
-                )
+                suspect.update(suspect_joined)
                 continue
             if isinstance(statement, ast.Try):
-                branches = [statement.body, *[handler.body for handler in statement.handlers]]
-                branch_states = [
-                    self._statements(items, dict(aliases), set(suspect), stack)
-                    for items in branches
-                ]
-                if statement.orelse:
-                    branch_states.append(
-                        self._statements(statement.orelse, dict(aliases), set(suspect), stack)
-                    )
-                aliases.clear()
-                aliases.update(
-                    {
-                        name: contract
-                        for name, contract in branch_states[0][0].items()
-                        if all(state[0].get(name) == contract for state in branch_states[1:])
-                    }
+                incoming_aliases = dict(aliases)
+                incoming_suspect = set(suspect)
+                try_aliases, try_suspect = self._statements(
+                    statement.body, dict(incoming_aliases), set(incoming_suspect), stack
                 )
+                normal_aliases, normal_suspect = self._statements(
+                    statement.orelse, try_aliases, try_suspect, stack
+                )
+                branch_states = [(normal_aliases, normal_suspect)]
+                if statement.handlers:
+                    exception_aliases, exception_suspect = self._join_states(
+                        [
+                            (incoming_aliases, incoming_suspect),
+                            (try_aliases, try_suspect),
+                        ]
+                    )
+                    for handler in statement.handlers:
+                        handler_aliases = dict(exception_aliases)
+                        handler_suspect = set(exception_suspect)
+                        if handler.name is not None:
+                            self._bind(
+                                ast.Name(id=handler.name, ctx=ast.Store()),
+                                None,
+                                True,
+                                handler_aliases,
+                                handler_suspect,
+                            )
+                        branch_states.append(
+                            self._statements(handler.body, handler_aliases, handler_suspect, stack)
+                        )
+                joined_aliases, joined_suspect = self._join_states(branch_states)
+                aliases.clear()
+                aliases.update(joined_aliases)
                 suspect.clear()
-                for _, branch_suspect in branch_states:
-                    suspect.update(branch_suspect)
+                suspect.update(joined_suspect)
                 aliases, suspect = self._statements(statement.finalbody, aliases, suspect, stack)
                 continue
             if isinstance(statement, (ast.Return, ast.Raise)):
@@ -429,6 +414,37 @@ class _BackgroundTaskAliasAnalysis:
                 elif isinstance(child, ast.stmt):
                     aliases, suspect = self._statements([child], aliases, suspect, stack)
         return aliases, suspect
+
+    @staticmethod
+    def _join_states(
+        states: list[tuple[dict[str, str], set[str]]],
+    ) -> tuple[dict[str, str], set[str]]:
+        if not states:
+            return {}, set()
+        first_aliases = states[0][0]
+        joined_aliases = {
+            name: contract
+            for name, contract in first_aliases.items()
+            if all(
+                aliases.get(name) == contract and name not in branch_suspect
+                for aliases, branch_suspect in states[1:]
+            )
+            and name not in states[0][1]
+        }
+        joined_suspect = set().union(*(branch_suspect for _, branch_suspect in states))
+        names = set().union(
+            *(set(branch_aliases) | branch_suspect for branch_aliases, branch_suspect in states)
+        )
+        for name in names:
+            values = [branch_aliases.get(name) for branch_aliases, _ in states]
+            differs = any(value != values[0] for value in values[1:])
+            is_receiver_candidate = any(
+                name in branch_aliases or name in branch_suspect
+                for branch_aliases, branch_suspect in states
+            )
+            if differs and is_receiver_candidate:
+                joined_suspect.add(name)
+        return joined_aliases, joined_suspect
 
     def _helper_environment(
         self,
@@ -480,7 +496,7 @@ class _BackgroundTaskAliasAnalysis:
         expression: ast.expr,
         aliases: dict[str, str],
     ) -> list[list[str]] | None:
-        if isinstance(expression, (ast.Tuple, ast.List, ast.Set)):
+        if isinstance(expression, (ast.Tuple, ast.List)):
             result: list[list[str]] = []
             for element in expression.elts:
                 if not isinstance(element, ast.Name) or element.id not in aliases:
@@ -532,6 +548,37 @@ def _pattern_is_irrefutable(pattern: ast.pattern) -> bool:
     if isinstance(pattern, ast.MatchOr):
         return any(_pattern_is_irrefutable(item) for item in pattern.patterns)
     return False
+
+
+def _contains_direct_loop_break(statements: list[ast.stmt]) -> bool:
+    class BreakFinder(ast.NodeVisitor):
+        found = False
+
+        def visit_Break(self, _node: ast.Break) -> None:
+            self.found = True
+
+        def visit_For(self, _node: ast.For) -> None:
+            return
+
+        def visit_AsyncFor(self, _node: ast.AsyncFor) -> None:
+            return
+
+        def visit_While(self, _node: ast.While) -> None:
+            return
+
+        def visit_FunctionDef(self, _node: ast.FunctionDef) -> None:
+            return
+
+        def visit_AsyncFunctionDef(self, _node: ast.AsyncFunctionDef) -> None:
+            return
+
+        def visit_Lambda(self, _node: ast.Lambda) -> None:
+            return
+
+    visitor = BreakFinder()
+    for statement in statements:
+        visitor.visit(statement)
+    return visitor.found
 
 
 def _local_names(function: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:

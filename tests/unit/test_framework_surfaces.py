@@ -612,6 +612,94 @@ def test_background_task_alias_match_join_remains_conditional(tmp_path: Path) ->
     assert any("untrusted, dynamic, or rebound" in item.reason for item in inventory.limitations)
 
 
+def test_background_task_alias_try_and_dynamic_loop_joins_remain_conditional(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import BackgroundTasks, FastAPI\n\n"
+        "async def send(): pass\n"
+        "app = FastAPI()\n"
+        "@app.post('/try')\n"
+        "async def try_join(tasks: BackgroundTasks):\n"
+        "    try:\n"
+        "        queue = tasks\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "    queue.add_task(send)\n"
+        "@app.post('/try-known')\n"
+        "async def try_known(tasks: BackgroundTasks):\n"
+        "    try:\n"
+        "        queue = tasks\n"
+        "    except Exception:\n"
+        "        queue = tasks\n"
+        "    queue.add_task(send)\n"
+        "@app.post('/while')\n"
+        "async def while_join(tasks: BackgroundTasks):\n"
+        "    while should_continue():\n"
+        "        queue = tasks\n"
+        "    queue.add_task(send)\n"
+        "@app.post('/for')\n"
+        "async def for_join(tasks: BackgroundTasks):\n"
+        "    for _ in dynamic_values():\n"
+        "        queue = tasks\n"
+        "    queue.add_task(send)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    task_endpoints = [
+        endpoint
+        for endpoint in inventory.endpoints
+        if endpoint.surface is not None
+        and endpoint.surface.surface_kind == "framework.background_task"
+    ]
+    assert [
+        (endpoint.handler.name, endpoint.surface.registration_line) for endpoint in task_endpoints
+    ] == [("send", 18)]
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert (
+        sum("untrusted, dynamic, or rebound" in item.reason for item in inventory.limitations) >= 3
+    )
+
+
+def test_literal_task_receiver_loop_preserves_alias_and_empty_loop_is_inert(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import BackgroundTasks, FastAPI\n\n"
+        "async def send(): pass\n"
+        "app = FastAPI()\n"
+        "@app.post('/known')\n"
+        "async def known(tasks: BackgroundTasks):\n"
+        "    for queue in (tasks,):\n"
+        "        pass\n"
+        "    queue.add_task(send)\n"
+        "@app.post('/empty')\n"
+        "async def empty(tasks: BackgroundTasks):\n"
+        "    for queue in ():\n"
+        "        queue = tasks\n"
+        "    queue.add_task(send)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    task_endpoints = [
+        endpoint
+        for endpoint in inventory.endpoints
+        if endpoint.surface is not None
+        and endpoint.surface.surface_kind == "framework.background_task"
+    ]
+    assert [
+        (endpoint.handler.name, endpoint.surface.registration_line) for endpoint in task_endpoints
+    ] == [("send", 9)]
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert not any(
+        "untrusted, dynamic, or rebound" in item.reason for item in inventory.limitations
+    )
+
+
 def test_arbitrary_queue_add_task_is_not_inferred_from_its_name(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text(
         "from fastapi import FastAPI\n\n"
