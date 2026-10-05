@@ -503,6 +503,142 @@ def test_pre_call_alias_kills_and_branch_uncertainty_affect_return_observation(
     assert result.evidence[0].observations == [DataObservationKind.RETURNED]
 
 
+def test_pre_and_post_call_binding_forms_do_not_establish_returned_aliases(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    bindings = (
+        "with manager() as alias:\n    pass",
+        "async with manager() as alias:\n    pass",
+        "for alias in values:\n    pass",
+        "try:\n    raise Error()\nexcept Exception as alias:\n    pass",
+        "(alias := replacement)",
+        "alias, other = (payload, {})",
+        "match replacement:\n    case alias:\n        pass",
+        "import package as alias\n",
+        "from package import member as alias\n",
+        "def alias():\n    pass",
+        "class alias:\n    pass",
+        "del alias\n",
+    )
+
+    for binding in bindings:
+        for bind_before_call in (False, True):
+            main = tmp_path / "main.py"
+            is_async = binding.startswith("async with")
+            function = "async def endpoint():\n" if is_async else "def endpoint():\n"
+            binding_source = "\n".join("    " + line for line in binding.splitlines()) + "\n"
+            if bind_before_call:
+                call_line = 4 + len(binding.splitlines())
+                statements = binding_source + "    dispatch(payload)\n"
+            else:
+                call_line = 4
+                statements = "    dispatch(payload)\n" + binding_source
+            main.write_text(
+                function
+                + "    payload = {}\n"
+                + "    alias = payload\n"
+                + statements
+                + "    return alias\n"
+            )
+            result = EffectAnalyzer(tmp_path).analyze(
+                str(service), {2}, [_stack(main, service, call_line)]
+            )
+            assert result is not None, (binding, bind_before_call)
+            assert result.confidence != ConfidenceLevel.HIGH, (binding, bind_before_call)
+            if binding.startswith(("with manager", "async with manager")):
+                assert DataObservationKind.RETURNED not in result.evidence[0].observations, (
+                    binding,
+                    bind_before_call,
+                )
+            if result.confidence == ConfidenceLevel.LOW:
+                assert DataObservationKind.RETURNED not in result.evidence[0].observations, (
+                    binding,
+                    bind_before_call,
+                )
+            else:
+                assert result.evidence[0].status.value == "conditional", (
+                    binding,
+                    bind_before_call,
+                )
+
+
+def test_post_call_context_binding_preserves_unrebound_alias_and_dead_branches(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def endpoint():\n"
+        "    payload = {}\n"
+        "    alias = payload\n"
+        "    dispatch(payload)\n"
+        "    with manager() as other:\n"
+        "        pass\n"
+        "    return alias\n"
+    )
+    result = EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 4)])
+    assert result is not None
+    assert result.confidence == ConfidenceLevel.HIGH
+    assert result.evidence[0].observations == [DataObservationKind.RETURNED]
+
+    main.write_text(
+        "def endpoint():\n"
+        "    payload = {}\n"
+        "    alias = payload\n"
+        "    dispatch(payload)\n"
+        "    if False:\n"
+        "        with manager() as alias:\n"
+        "            pass\n"
+        "    return alias\n"
+    )
+    result = EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 4)])
+    assert result is not None
+    assert result.confidence == ConfidenceLevel.HIGH
+    assert result.evidence[0].observations == [DataObservationKind.RETURNED]
+
+
+def test_same_line_rebinding_uses_call_source_order(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    main = tmp_path / "main.py"
+    for assigned, expect_high, expected_observation in (
+        ("{}", False, DataObservationKind.NOT_OBSERVED_AFTER_CALL),
+        ("payload", True, DataObservationKind.RETURNED),
+    ):
+        main.write_text(
+            "def endpoint():\n"
+            "    payload = {}\n"
+            "    alias = payload\n"
+            f"    dispatch(payload); alias = {assigned}\n"
+            "    return alias\n"
+        )
+        result = EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 4)])
+        assert result is not None
+        assert (result.confidence == ConfidenceLevel.HIGH) is expect_high
+        if expect_high:
+            assert result.evidence[0].observations == [expected_observation]
+        else:
+            assert DataObservationKind.RETURNED not in result.evidence[0].observations
+
+
+def test_call_in_with_expression_precedes_as_target_binding(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def endpoint():\n"
+        "    payload = {}\n"
+        "    with dispatch(payload) as alias:\n"
+        "        pass\n"
+        "    return alias\n"
+    )
+
+    result = EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 3)])
+
+    assert result is not None
+    assert result.confidence != ConfidenceLevel.HIGH
+    assert DataObservationKind.RETURNED not in result.evidence[0].observations
+
+
 def test_exhaustive_match_loop_break_and_unreachable_return_do_not_prove_effect(
     tmp_path: Path,
 ) -> None:

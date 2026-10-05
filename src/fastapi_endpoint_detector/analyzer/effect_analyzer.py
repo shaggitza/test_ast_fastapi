@@ -1339,6 +1339,8 @@ class EffectAnalyzer:
             )
         call_index = call_indexes[0]
         call_item = execution[call_index]
+        call_position = (call.lineno, call.col_offset)
+        call_nodes = set(ast.walk(call))
         alias_facts: dict[str, list[tuple[int, tuple[tuple[ast.AST, int], ...], bool | None]]] = {
             subject: [(-1, (), True)]
         }
@@ -1382,8 +1384,42 @@ class EffectAnalyzer:
                 targets = node.targets
             elif isinstance(node, (ast.For, ast.AsyncFor)):
                 targets = [node.target]
-            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            elif isinstance(node, (ast.With, ast.AsyncWith)):
+                targets = [
+                    item.optional_vars for item in node.items if item.optional_vars is not None
+                ]
+            elif (
+                isinstance(
+                    node, (ast.ExceptHandler, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+                )
+                and node.name
+            ):
                 targets = [ast.Name(id=node.name, ctx=ast.Store())]
+            elif isinstance(node, ast.Import):
+                targets = [
+                    ast.Name(id=alias.asname or alias.name.split(".")[0], ctx=ast.Store())
+                    for alias in node.names
+                ]
+            elif isinstance(node, ast.ImportFrom):
+                if any(alias.name == "*" for alias in node.names):
+                    for name in alias_facts:
+                        if name != subject:
+                            alias_facts.setdefault(name, []).append((index, item.path, False))
+                targets = [
+                    ast.Name(id=alias.asname or alias.name, ctx=ast.Store())
+                    for alias in node.names
+                    if alias.name != "*"
+                ]
+            elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+                targets = [ast.Name(id=node.name, ctx=ast.Store())]
+            elif isinstance(node, ast.MatchMapping) and node.rest:
+                targets = [ast.Name(id=node.rest, ctx=ast.Store())]
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                binding_parent = parents.get(node)
+                while isinstance(binding_parent, (ast.Tuple, ast.List, ast.Starred)):
+                    binding_parent = parents.get(binding_parent)
+                if isinstance(binding_parent, ast.withitem):
+                    targets = [node]
             if not targets:
                 continue
             state: bool | None = False
@@ -1393,7 +1429,7 @@ class EffectAnalyzer:
                 )
                 state = True if definite_alias else None if may_alias else False
             for target in targets:
-                bind_target(target, state, item, index)
+                bind_target(target, state if isinstance(target, ast.Name) else False, item, index)
 
         aliases: set[str] = set()
         uncertain_aliases: set[str] = set()
@@ -1405,49 +1441,126 @@ class EffectAnalyzer:
                 aliases.add(name)
                 if not definite_alias:
                     uncertain_aliases.add(name)
-        # Follow straight-line assignments after the call. A write kills that
-        # local's old identity; branch assignments are left conditional by the
-        # control-region classifier rather than joined as definite aliases.
-        killed_at: dict[str, int] = {}
-        ordered_statements = sorted(
-            (node for node in scope_nodes if isinstance(node, ast.stmt)),
-            key=lambda node: (getattr(node, "lineno", 0), getattr(node, "col_offset", 0)),
+        # Track local binding writes after the call in source order. Only a
+        # simple name-to-name assignment can establish another definite alias.
+        killed_at: dict[str, tuple[int, int]] = {}
+        binding_events: list[tuple[ast.AST, list[ast.expr], ast.expr | None, bool]] = []
+
+        def target_names(target: ast.AST) -> list[str]:
+            if isinstance(target, ast.Name):
+                return [target.id]
+            if isinstance(target, (ast.Tuple, ast.List)):
+                return [name for item in target.elts for name in target_names(item)]
+            if isinstance(target, ast.Starred):
+                return target_names(target.value)
+            return []
+
+        binding_nodes = set(scope_nodes)
+        binding_nodes.update(
+            item.node
+            for item in execution
+            if isinstance(item.node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and item.node is not function
         )
-        for statement in ordered_statements:
-            if getattr(statement, "lineno", 0) <= call_line:
-                continue
-            if statement not in reachable_nodes:
-                continue
-            control, _ = self._control_relationship(call, statement, parents)
-            value = getattr(statement, "value", None)
-            post_targets: list[ast.expr] = []
-            if isinstance(statement, ast.Assign):
-                post_targets.extend(statement.targets)
-            elif isinstance(statement, ast.AnnAssign):
-                if statement.value is None:
+        for node in binding_nodes:
+            event_targets: list[ast.expr] = []
+            event_value: ast.expr | None = None
+            wildcard_import = False
+            if isinstance(node, ast.Assign):
+                event_targets, event_value = node.targets, node.value
+            elif isinstance(node, ast.AnnAssign):
+                if node.value is None:
                     continue
-                post_targets.append(statement.target)
-            elif isinstance(statement, ast.AugAssign):
-                post_targets.append(statement.target)
+                event_targets, event_value = [node.target], node.value
+            elif isinstance(node, ast.NamedExpr):
+                event_targets, event_value = [node.target], node.value
+            elif isinstance(node, ast.AugAssign):
+                event_targets = [node.target]
+            elif isinstance(node, ast.Delete):
+                event_targets = node.targets
+            elif isinstance(node, (ast.For, ast.AsyncFor)):
+                event_targets = [node.target]
+            elif isinstance(node, (ast.With, ast.AsyncWith)):
+                for context_item in node.items:
+                    if context_item.optional_vars is not None:
+                        binding_events.append(
+                            (
+                                context_item.optional_vars,
+                                [context_item.optional_vars],
+                                None,
+                                False,
+                            )
+                        )
+                continue
+            elif (
+                isinstance(
+                    node, (ast.ExceptHandler, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+                )
+                and node.name
+            ):
+                event_targets = [ast.Name(id=node.name, ctx=ast.Store())]
+            elif isinstance(node, ast.Import):
+                event_targets = [
+                    ast.Name(
+                        id=alias.asname or alias.name.split(".")[0],
+                        ctx=ast.Store(),
+                    )
+                    for alias in node.names
+                ]
+            elif isinstance(node, ast.ImportFrom):
+                wildcard_import = any(alias.name == "*" for alias in node.names)
+                event_targets = [
+                    ast.Name(id=alias.asname or alias.name, ctx=ast.Store())
+                    for alias in node.names
+                    if alias.name != "*"
+                ]
+            elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+                event_targets = [ast.Name(id=node.name, ctx=ast.Store())]
+            elif isinstance(node, ast.MatchMapping) and node.rest:
+                event_targets = [ast.Name(id=node.rest, ctx=ast.Store())]
+            if event_targets or wildcard_import:
+                binding_events.append((node, event_targets, event_value, wildcard_import))
+
+        ordered_events = sorted(
+            binding_events,
+            key=lambda event: (
+                getattr(event[0], "lineno", 0),
+                getattr(event[0], "col_offset", 0),
+            ),
+        )
+        for event, post_targets, value, wildcard_import in ordered_events:
+            event_position = (
+                getattr(event, "lineno", 0),
+                getattr(event, "col_offset", 0),
+            )
+            if event_position <= call_position:
+                continue
+            if event not in reachable_nodes:
+                continue
+            if wildcard_import:
+                for name in aliases:
+                    killed_at[name] = event_position
+                continue
+            control, _ = self._control_relationship(call, event, parents)
             if control:
                 # An assignment in an opposite if arm cannot define a definite
                 # alias on the call's path.
                 for target in post_targets:
-                    if isinstance(target, ast.Name) and target.id in aliases:
-                        killed_at[target.id] = statement.lineno
+                    for name in target_names(target):
+                        if name in aliases:
+                            killed_at[name] = event_position
                 continue
             source_alias = value is not None and any(
                 isinstance(name, ast.Name) and isinstance(name.ctx, ast.Load) and name.id in aliases
                 for name in ast.walk(value)
             )
             for target in post_targets:
-                if not isinstance(target, ast.Name):
-                    continue
-                if target.id in aliases:
-                    killed_at[target.id] = statement.lineno
-                if source_alias:
-                    aliases.add(target.id)
-                    killed_at.pop(target.id, None)
+                for target_name in target_names(target):
+                    if target_name in aliases:
+                        killed_at[target_name] = event_position
+                    if source_alias and isinstance(target, ast.Name):
+                        aliases.add(target_name)
+                        killed_at.pop(target_name, None)
 
         observations: list[_Observation] = []
         for node in scope_nodes:
@@ -1455,10 +1568,12 @@ class EffectAnalyzer:
                 continue
             if node not in reachable_nodes:
                 continue
+            node_position = (node.lineno, node.col_offset)
             if (
                 node.id not in aliases
-                or node.lineno <= call_line
-                or node.lineno >= killed_at.get(node.id, 10**12)
+                or node in call_nodes
+                or node_position <= call_position
+                or node_position >= killed_at.get(node.id, (10**12, 10**12))
             ):
                 continue
             exclusive, conditional = self._control_relationship(call, node, parents)
