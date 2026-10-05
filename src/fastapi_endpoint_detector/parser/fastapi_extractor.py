@@ -37,8 +37,6 @@ from fastapi_endpoint_detector.models.endpoint import (
     Endpoint,
     EndpointDependencyGraph,
     EndpointDependencyOccurrence,
-    EndpointDiscoveryCondition,
-    EndpointDiscoveryStatus,
     EndpointMethod,
     HandlerInfo,
 )
@@ -1128,41 +1126,40 @@ class FastAPIExtractor:
             return endpoints
 
     def _mark_inventory_scope(self, endpoint: Endpoint) -> Endpoint:
-        """Retain source-scope and runtime-import limits on each returned endpoint."""
-        if self.source_inventory is None:
-            return endpoint
-        reasons = [
-            "Runtime import is not constrained by the canonical source inventory; handlers "
-            "outside its selected paths are omitted, but their imports may still affect runtime "
-            "registrations."
-        ]
-        if self.source_inventory.limitations:
-            reasons.append(
-                "Canonical source inventory limitations: "
-                + "; ".join(self.source_inventory.limitations)
-            )
-        condition = EndpointDiscoveryCondition(
-            source_path=endpoint.handler.file_path,
-            source_line=endpoint.handler.line_number,
-            reason=" ".join(reasons),
-        )
-        return endpoint.model_copy(
-            update={
-                "discovery_status": EndpointDiscoveryStatus.CONDITIONAL,
-                "discovery_conditions": (*endpoint.discovery_conditions, condition),
-            }
-        )
+        """Keep source scope separate from whether a returned route was observed.
+
+        A selected handler's runtime registration establishes that endpoint identity. Inventory
+        incompleteness and imports outside the selected scope limit negative claims about missing
+        endpoints, so they belong to inventory provenance rather than route discovery conditions.
+        Existing route conditions are preserved unchanged.
+        """
+        return endpoint
 
     @property
     def source_inventory_limitations(self) -> tuple[str, ...]:
-        """Limitations when a canonical inventory governs returned runtime endpoints."""
+        """Scope, completeness, and import limitations for inventory-filtered runtime results."""
         if self.source_inventory is None:
             return ()
+        inventory = self.source_inventory
+        completeness = (
+            f"{len(inventory.limitations)} source limitation(s) recorded"
+            if inventory.limitations
+            else "no source limitations recorded"
+        )
+        scope = (
+            f"Canonical source scope rooted at {inventory.root} selected {len(inventory.files)} "
+            f"files and excluded {len(inventory.excluded_files)} files; source inventory "
+            f"completeness: {completeness}. Local import following is "
+            f"{'enabled' if inventory.follow_imports else 'disabled'} with maximum depth "
+            f"{inventory.max_depth}; {len(inventory.unresolved_imports)} local imports were "
+            "unresolved or outside the selected scope."
+        )
         return (
+            scope,
             "Runtime import still executes Python imports outside the inventory; the inventory "
             "filters returned endpoint handlers but does not sandbox or constrain import side "
             "effects.",
-            *self.source_inventory.limitations,
+            *inventory.limitations,
         )
 
     def get_endpoint_handler_files(self) -> dict[Path, list[Endpoint]]:
