@@ -7,6 +7,7 @@ from difflib import unified_diff
 from pathlib import Path
 
 import pytest
+import yaml
 from click.testing import CliRunner
 
 from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
@@ -43,6 +44,7 @@ class TestCLI:
         assert "--app" in result.output
         assert "--diff" in result.output
         assert "--vm" in result.output
+
         assert "--secure-ast" in result.output
         assert "--scip" in result.output
         assert "--baseline-app" in result.output
@@ -460,6 +462,136 @@ contracts:
         result = runner.invoke(cli, ["list", "--app", str(app_file), "--vm", "--secure-ast"])
         assert result.exit_code != 0
         assert "--vm and --secure-ast cannot be used together" in result.output
+
+
+@pytest.mark.parametrize("output_format", ["text", "markdown", "html", "json", "yaml"])
+def test_runtime_list_serializes_source_scope_and_excludes_unselected_handlers(
+    runner: CliRunner,
+    tmp_path: Path,
+    output_format: str,
+) -> None:
+    app_file = tmp_path / "main.py"
+    app_file.write_text(
+        "from fastapi import FastAPI\n"
+        "from outside import router\n"
+        "app = FastAPI()\n"
+        "@app.get('/inside')\n"
+        "def inside(): return {}\n"
+        "app.include_router(router)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "outside.py").write_text(
+        "from fastapi import APIRouter\n"
+        "router = APIRouter()\n"
+        "@router.get('/outside')\n"
+        "def outside(): return {}\n",
+        encoding="utf-8",
+    )
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "parser:\n  include_patterns: ['main.py']\n  follow_imports: false\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "--config",
+            str(config),
+            "list",
+            "--app",
+            str(app_file),
+            "--format",
+            output_format,
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    if output_format in {"json", "yaml"}:
+        payload = (
+            json.loads(result.output) if output_format == "json" else yaml.safe_load(result.output)
+        )
+        assert payload["inventory_status"] == "conditional"
+        assert payload["source_scope"] == {"selected_file_count": 1, "follow_imports": False}
+        assert any("Runtime import still executes" in warning for warning in payload["warnings"])
+        assert any("source inventory is incomplete" in warning for warning in payload["warnings"])
+        listed_endpoints = {endpoint["path"]: endpoint for endpoint in payload["endpoints"]}
+        listed_paths = set(listed_endpoints)
+        assert "/inside" in listed_paths
+        assert "/outside" not in listed_paths
+        assert listed_endpoints["/inside"]["discovery_status"] == "established"
+        assert listed_endpoints["/inside"]["discovery_conditions"] == []
+        assert str(tmp_path) not in payload["warnings"]
+    else:
+        if output_format == "html":
+            assert "<p>Status: conditional</p>" in result.output
+        else:
+            assert "Inventory status: conditional" in result.output or "Status: `conditional`" in (
+                result.output
+            )
+        assert "Runtime import still executes" in result.output
+        assert "/inside" in result.output
+        assert "/outside" not in result.output
+
+
+@pytest.mark.parametrize("output_format", ["json", "yaml"])
+def test_runtime_analysis_serializes_recorded_inventory_limitations(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    output_format: str,
+) -> None:
+    app_file = tmp_path / "main.py"
+    app_file.write_text(
+        "from fastapi import FastAPI\n"
+        "from outside import router\n"
+        "app = FastAPI()\n"
+        "@app.get('/inside')\n"
+        "def inside(): return {}\n"
+        "app.include_router(router)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "outside.py").write_text(
+        "from fastapi import APIRouter\n"
+        "router = APIRouter()\n"
+        "@router.get('/outside')\n"
+        "def outside(): return {}\n",
+        encoding="utf-8",
+    )
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "parser:\n  include_patterns: ['main.py']\n  follow_imports: false\n",
+        encoding="utf-8",
+    )
+    diff_file = tmp_path / "empty.diff"
+    diff_file.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(ChangeMapper, "_preanalyze_mypy", lambda _self, _callback: None)
+
+    result = runner.invoke(
+        cli,
+        [
+            "--config",
+            str(config),
+            "analyze",
+            "--app",
+            str(app_file),
+            "--diff",
+            str(diff_file),
+            "--format",
+            output_format,
+            "--no-cache",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = (
+        json.loads(result.output) if output_format == "json" else yaml.safe_load(result.output)
+    )
+    assert payload["inventory_status"] is None
+    assert any("Target source inventory incomplete" in warning for warning in payload["warnings"])
+    assert any("unresolved local import" in warning for warning in payload["warnings"])
+    assert payload["summary"]["total_endpoints"] == 1
 
 
 class TestSecureASTMode:

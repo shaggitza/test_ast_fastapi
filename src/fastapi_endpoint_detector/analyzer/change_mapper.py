@@ -105,8 +105,6 @@ _CONFIDENCE_SCORE = {
     ConfidenceLevel.MEDIUM: 0.7,
     ConfidenceLevel.LOW: 0.3,
 }
-
-
 EndpointResultKey = tuple[str, str, int, str, str, str]
 
 
@@ -744,6 +742,38 @@ class ChangeMapper:
             bootstrap_entry=self.bootstrap_entry,
         ).extract_inventory()
         return merge_surface_inventory(native, custom)
+
+    def _source_inventory_warnings(self) -> list[str]:
+        """Report runtime source-scope caveats without changing route identity."""
+        if self.secure_ast:
+            return []
+
+        warnings: list[str] = []
+        snapshots = [("Target", self.source_inventory)]
+        if self.baseline_app_path is not None:
+            snapshots.append(("Baseline", self.baseline_source_inventory))
+
+        for side, inventory in snapshots:
+            extractor = self.extractor if side == "Target" else self._baseline_extractor
+            scope_limitations = (
+                extractor.source_inventory_limitations
+                if isinstance(extractor, FastAPIExtractor)
+                else ()
+            )
+            if scope_limitations:
+                follow_policy = "enabled" if inventory.follow_imports else "disabled"
+                warnings.append(
+                    f"{side} runtime source scope selected {len(inventory.files)} file(s); "
+                    f"local import following is {follow_policy}. {scope_limitations[1]}"
+                )
+            for limitation in inventory.limitations:
+                warnings.append(f"{side} source inventory incomplete: {limitation}")
+            if inventory.unresolved_imports:
+                warnings.append(
+                    f"{side} source inventory has {len(inventory.unresolved_imports)} "
+                    "unresolved local import(s)."
+                )
+        return warnings
 
     def _endpoint_lifecycle(self) -> list[EndpointLifecycle]:
         """Reconcile endpoint inventories by public route identity, failing closed."""
@@ -1928,6 +1958,8 @@ class ChangeMapper:
                 nodes=(*baseline_graph.nodes, *target_source_graph.nodes),
                 edges=(*baseline_graph.edges, *target_source_graph.edges),
             )
+
+        warnings.extend(self._source_inventory_warnings())
 
         # Initialize endpoints
         report_progress(5, 100, "Extracting endpoints...")

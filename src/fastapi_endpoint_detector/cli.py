@@ -5,9 +5,13 @@ This module provides the CLI using Click framework for argument parsing
 and orchestrates the analysis pipeline.
 """
 
+from __future__ import annotations
+
+import html
 import json
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
 import yaml
@@ -31,7 +35,88 @@ from fastapi_endpoint_detector.models.effect_contract import (
 )
 from fastapi_endpoint_detector.models.surface_contract import load_surface_contracts
 
+if TYPE_CHECKING:
+    from fastapi_endpoint_detector.analyzer.source_inventory import SourceInventory
+    from fastapi_endpoint_detector.models.endpoint import Endpoint
+    from fastapi_endpoint_detector.output.formatters import BaseFormatter
+    from fastapi_endpoint_detector.parser.fastapi_extractor import FastAPIExtractor
+
 console = Console()
+
+
+def _format_runtime_endpoint_list(
+    formatter: BaseFormatter,
+    output_format: str,
+    endpoints: list[Endpoint],
+    extractor: FastAPIExtractor,
+    source_inventory: SourceInventory,
+) -> str:
+    """Add whole-inventory scope metadata while preserving observed route records."""
+    rendered = formatter.format_endpoints(endpoints)
+    inventory_limitations = source_inventory.limitations
+    unresolved_imports = source_inventory.unresolved_imports
+    scope_limitations = extractor.source_inventory_limitations
+    warnings = [scope_limitations[1]] if len(scope_limitations) > 1 else []
+    if inventory_limitations or unresolved_imports:
+        warnings.append(
+            "Selected source inventory is incomplete "
+            f"({len(inventory_limitations)} recorded limitation(s), "
+            f"{len(unresolved_imports)} unresolved local import(s))."
+        )
+    inventory_status = (
+        "conditional" if inventory_limitations or unresolved_imports else "established"
+    )
+    source_scope = {
+        "selected_file_count": len(source_inventory.files),
+        "follow_imports": source_inventory.follow_imports,
+    }
+
+    if output_format == "json":
+        data = json.loads(rendered)
+        data["inventory_status"] = inventory_status
+        data["source_scope"] = source_scope
+        data["warnings"] = warnings
+        return json.dumps(data, indent=2)
+    if output_format == "yaml":
+        data = yaml.safe_load(rendered)
+        data["inventory_status"] = inventory_status
+        data["source_scope"] = source_scope
+        data["warnings"] = warnings
+        return yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    if output_format in {"text", "markdown"}:
+        if output_format == "markdown":
+            details = [
+                "## Source inventory",
+                "",
+                f"Status: `{inventory_status}`",
+                f"Selected files: {source_scope['selected_file_count']}",
+                f"Follow local imports: {source_scope['follow_imports']}",
+            ]
+            details.extend(f"- Warning: {warning}" for warning in warnings)
+            return "\n".join(details) + "\n\n" + rendered
+        details = [
+            f"Inventory status: {inventory_status}",
+            f"Selected source files: {source_scope['selected_file_count']}",
+            f"Follow local imports: {source_scope['follow_imports']}",
+        ]
+        details.extend(f"Warning: {warning}" for warning in warnings)
+        return "\n".join(details) + "\n\n" + rendered
+
+    if output_format == "html":
+        details = [
+            '<aside class="warning-box">',
+            "<h2>Source inventory</h2>",
+            f"<p>Status: {html.escape(inventory_status)}</p>",
+            f"<p>Selected files: {source_scope['selected_file_count']}</p>",
+            f"<p>Follow local imports: {source_scope['follow_imports']}</p>",
+        ]
+        if warnings:
+            details.append("<ul>")
+            details.extend(f"<li>{html.escape(warning)}</li>" for warning in warnings)
+            details.append("</ul>")
+        details.append("</aside>")
+        return rendered.replace("</body>", "\n".join(details) + "</body>", 1)
+    return rendered
 
 
 @click.group()
@@ -793,17 +878,24 @@ def list_endpoints(
             endpoints = inventory.endpoints
         else:
             # Use default runtime introspection
+            source_inventory = config.source_inventory(app)
             extractor = FastAPIExtractor(
                 app_path=app,
                 app_variable=app_var,
-                source_inventory=config.source_inventory(app),
+                source_inventory=source_inventory,
             )
             endpoints = extractor.extract_endpoints()
 
         formatted_output = (
             formatter.format_inventory(inventory)
             if secure_ast
-            else formatter.format_endpoints(endpoints)
+            else _format_runtime_endpoint_list(
+                formatter,
+                output_format,
+                endpoints,
+                extractor,
+                source_inventory,
+            )
         )
 
         if output:
