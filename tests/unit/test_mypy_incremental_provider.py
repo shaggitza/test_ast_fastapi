@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
+
+from fastapi_endpoint_detector.analyzer import mypy_incremental
 from fastapi_endpoint_detector.analyzer.mypy_incremental import (
     BuildConfig,
+    IncrementalBuildError,
     MypyIncrementalProvider,
     TypedBuild,
 )
@@ -43,10 +47,23 @@ def test_no_change_reuses_exact_typed_build(tmp_path: Path) -> None:
     assert warm.typed_snapshot() == cold.typed_snapshot()
 
 
+def test_unsupported_engine_is_rejected_before_cold_build(tmp_path: Path) -> None:
+    with pytest.raises(IncrementalBuildError, match="unsupported typed build engine"):
+        MypyIncrementalProvider(BuildConfig(tmp_path, engine="unsupported-engine"))
+
+
+def test_unvalidated_mypy_version_is_rejected_before_cold_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(mypy_incremental, "version", lambda _package: "2.4.0")
+    with pytest.raises(IncrementalBuildError, match="not validated for fine-grained updates"):
+        MypyIncrementalProvider(BuildConfig(tmp_path))
+
+
 def test_same_interface_edit_is_real_typed_incremental_update(tmp_path: Path) -> None:
     inventory = _dag(tmp_path)
     provider = MypyIncrementalProvider(BuildConfig(tmp_path))
-    provider.build(inventory)
+    cold = provider.build(inventory)
     (tmp_path / "m4.py").write_text(
         "from m5 import f5\n"
         "def f4(value: int) -> int:\n"
@@ -61,6 +78,8 @@ def test_same_interface_edit_is_real_typed_incremental_update(tmp_path: Path) ->
     assert updated.manager is not fresh.manager
     assert updated.typed_snapshot() == fresh.typed_snapshot()
     assert updated.type_maps
+    assert updated.report.source_digests_before == cold.report.source_digests_after
+    assert updated.report.source_digests_after != updated.report.source_digests_before
 
 
 def test_signature_change_invalidates_dependents_and_matches_fresh_snapshot(tmp_path: Path) -> None:
@@ -139,9 +158,13 @@ def test_config_content_change_invalidates_provider_state(tmp_path: Path) -> Non
     assert rebuilt.report.cache_fingerprint != cold.report.cache_fingerprint
     assert rebuilt.report.cache_fingerprint == fresh.report.cache_fingerprint
     assert rebuilt.typed_snapshot() == fresh.typed_snapshot()
+    assert rebuilt.report.source_digests_before == cold.report.source_digests_after
+    assert rebuilt.report.source_digests_after == cold.report.source_digests_after
 
     unchanged = provider.build(inventory)
     assert unchanged.report.mode == "no_change_reuse"
     assert unchanged.report.reason is None
     assert unchanged.report.cache_fingerprint == fresh.report.cache_fingerprint
     assert unchanged.typed_snapshot() == fresh.typed_snapshot()
+    assert unchanged.report.source_digests_before == rebuilt.report.source_digests_after
+    assert unchanged.report.source_digests_after == rebuilt.report.source_digests_after

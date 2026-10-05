@@ -4,22 +4,32 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import statistics
+import sys
 import tempfile
 import time
 from importlib.metadata import version
 from pathlib import Path
 
-from fastapi_endpoint_detector.analyzer.mypy_incremental import BuildConfig, MypyIncrementalProvider
+try:
+    import resource
+except ImportError:  # pragma: no cover - unavailable on Windows
+    resource = None  # type: ignore[assignment]
+
+from fastapi_endpoint_detector.analyzer.mypy_incremental import (
+    BuildConfig,
+    MypyIncrementalProvider,
+    TypedBuild,
+)
 
 
 def make_dag(root: Path, modules: int) -> dict[str, Path]:
     for index in range(modules):
         imported = f"from m{index + 1} import f{index + 1}\n" if index + 1 < modules else ""
         called = (
-            f"    return f{index + 1}(value)\n"
-            if index + 1 < modules else "    return value\n"
+            f"    return f{index + 1}(value)\n" if index + 1 < modules else "    return value\n"
         )
         (root / f"m{index}.py").write_text(
             f"{imported}\ndef f{index}(value: int) -> int:\n{called}", encoding="utf-8"
@@ -30,6 +40,95 @@ def make_dag(root: Path, modules: int) -> dict[str, Path]:
 def p95(samples: list[float]) -> float:
     ordered = sorted(samples)
     return ordered[max(0, int(0.95 * len(ordered) + 0.999999) - 1)]
+
+
+def _rss_stats() -> dict[str, int | None]:
+    current: int | None = None
+    peak: int | None = None
+    try:
+        fields = {}
+        for line in Path("/proc/self/status").read_text().splitlines():
+            if line.startswith(("VmRSS:", "VmHWM:")):
+                key, value, unit = line.split()
+                fields[key.rstrip(":")] = int(value) * (1024 if unit == "kB" else 1)
+        current = fields.get("VmRSS")
+        peak = fields.get("VmHWM")
+    except (OSError, ValueError):
+        try:
+            resident_pages = int(Path("/proc/self/statm").read_text().split()[1])
+            current = resident_pages * int(os.sysconf("SC_PAGE_SIZE"))
+        except (OSError, ValueError, IndexError, AttributeError):
+            pass
+    try:
+        if peak is not None:
+            return {"current_rss_bytes": current, "process_peak_rss_bytes": peak}
+        if resource is None:
+            raise RuntimeError("resource module unavailable")
+        peak = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        if sys.platform != "darwin":
+            peak *= 1024
+    except (AttributeError, OSError, RuntimeError):
+        pass
+    return {"current_rss_bytes": current, "process_peak_rss_bytes": peak}
+
+
+def _cache_stats(state: TypedBuild) -> dict[str, int]:
+    manager = state.manager.manager
+    fscache = manager.fscache
+    return {
+        "retained_module_count": len(state.modules),
+        "typed_expression_count": len(manager.all_types),
+        "ast_cache_entries": len(manager.ast_cache),
+        "filesystem_cached_files": len(fscache.read_cache),
+        "filesystem_cached_bytes": sum(len(content) for content in fscache.read_cache.values()),
+        "filesystem_hash_entries": len(fscache.hash_cache),
+    }
+
+
+def _source_hashes(report: object, field: str) -> list[dict[str, str]]:
+    return [{"module": module, "sha256": digest} for module, digest in getattr(report, field)]
+
+
+def _equivalence_check(
+    root: Path, inventory: dict[str, Path], state: TypedBuild
+) -> dict[str, object]:
+    started = time.perf_counter()
+    fresh = MypyIncrementalProvider(BuildConfig(root)).build(inventory)
+    elapsed = time.perf_counter() - started
+    equivalent = state.typed_snapshot() == fresh.typed_snapshot()
+    if not equivalent:
+        raise RuntimeError("retained typed snapshot differs from independent cold build")
+    fingerprint_matches = state.report.cache_fingerprint == fresh.report.cache_fingerprint
+    if not fingerprint_matches:
+        raise RuntimeError("retained cache fingerprint differs from independent cold build")
+    return {
+        "equivalent_to_independent_cold_build": True,
+        "cache_fingerprint_matches_independent_cold_build": True,
+        "cold_build_seconds": elapsed,
+        "fresh_cache_fingerprint": fresh.report.cache_fingerprint,
+    }
+
+
+def _phase_record(
+    state: TypedBuild,
+    elapsed: float,
+    rss_before: dict[str, int | None],
+    rss_after: dict[str, int | None],
+    equivalence: dict[str, object] | None = None,
+) -> dict[str, object]:
+    report = state.report
+    return {
+        "seconds": elapsed,
+        "mode": report.mode,
+        "reason": report.reason,
+        "cache_fingerprint": report.cache_fingerprint,
+        "source_sha256_before": _source_hashes(report, "source_digests_before"),
+        "source_sha256_after": _source_hashes(report, "source_digests_after"),
+        "rss_before": rss_before,
+        "rss_after": rss_after,
+        "retained_cache_stats_after": _cache_stats(state),
+        "cold_equivalence": equivalence,
+    }
 
 
 def main() -> None:  # noqa: PLR0915
@@ -44,7 +143,16 @@ def main() -> None:  # noqa: PLR0915
     signature_update: list[float] = []
     fallback: list[float] = []
     modes: list[str] = []
-    fingerprints: set[str] = set()
+    phase_records: dict[str, list[dict[str, object]]] = {
+        name: []
+        for name in (
+            "cold_build",
+            "no_change_reuse",
+            "incremental_update",
+            "signature_update_with_dependency_invalidation",
+            "fallback_full_rebuild",
+        )
+    }
     for _ in range(args.samples):
         with tempfile.TemporaryDirectory(prefix="mypy-dag-") as directory:
             root = Path(directory)
@@ -52,33 +160,55 @@ def main() -> None:  # noqa: PLR0915
             provider = MypyIncrementalProvider(
                 BuildConfig(root, python_version=args.python_version)
             )
+            rss_before = _rss_stats()
             started = time.perf_counter()
             state = provider.build(inventory)
-            cold.append(time.perf_counter() - started)
-            fingerprints.add(state.report.cache_fingerprint)
+            elapsed = time.perf_counter() - started
+            cold.append(elapsed)
+            phase_records["cold_build"].append(
+                _phase_record(state, elapsed, rss_before, _rss_stats())
+            )
+            rss_before = _rss_stats()
             started = time.perf_counter()
             warm_state = provider.build(inventory)
-            warm.append(time.perf_counter() - started)
+            elapsed = time.perf_counter() - started
+            warm.append(elapsed)
             if warm_state.report.mode != "no_change_reuse":
                 raise RuntimeError(
                     f"no-change phase did not reuse typed state: {warm_state.report.mode}"
                 )
+            phase_records["no_change_reuse"].append(
+                _phase_record(warm_state, elapsed, rss_before, _rss_stats())
+            )
             changed = root / f"m{args.modules // 2}.py"
             old_source = changed.read_text(encoding="utf-8")
             changed.write_text(old_source.replace("(value)", "(value + 1)"), encoding="utf-8")
+            rss_before = _rss_stats()
             started = time.perf_counter()
             update = provider.build(inventory)
-            incremental.append(time.perf_counter() - started)
+            elapsed = time.perf_counter() - started
+            incremental.append(elapsed)
             modes.append(update.report.mode)
             if update.report.mode != "incremental_update":
                 raise RuntimeError(f"same-interface update fell back: {update.report.reason}")
+            phase_records["incremental_update"].append(
+                _phase_record(
+                    update,
+                    elapsed,
+                    rss_before,
+                    _rss_stats(),
+                    _equivalence_check(root, inventory, update),
+                )
+            )
             changed.write_text(
                 old_source.replace("value: int", "value: str").replace("-> int", "-> str"),
                 encoding="utf-8",
             )
+            rss_before = _rss_stats()
             started = time.perf_counter()
             signature = provider.build(inventory)
-            signature_update.append(time.perf_counter() - started)
+            elapsed = time.perf_counter() - started
+            signature_update.append(elapsed)
             if signature.report.mode != "incremental_update":
                 raise RuntimeError("signature change was not processed incrementally")
             changed_index = args.modules // 2
@@ -88,32 +218,55 @@ def main() -> None:  # noqa: PLR0915
                 for target in signature.manager.processed_targets
             ):
                 raise RuntimeError("signature change did not recheck an imported caller")
+            phase_records["signature_update_with_dependency_invalidation"].append(
+                _phase_record(
+                    signature,
+                    elapsed,
+                    rss_before,
+                    _rss_stats(),
+                    _equivalence_check(root, inventory, signature),
+                )
+            )
             changed.write_text(
-                old_source.replace("from m49 import f49", "from m50 import f50")
-                .replace("f49(value)", "f50(value)"),
+                old_source.replace("from m49 import f49", "from m50 import f50").replace(
+                    "f49(value)", "f50(value)"
+                ),
                 encoding="utf-8",
             )
+            rss_before = _rss_stats()
             started = time.perf_counter()
             rebuilt = provider.build(inventory)
-            fallback.append(time.perf_counter() - started)
+            elapsed = time.perf_counter() - started
+            fallback.append(elapsed)
             if rebuilt.report.mode != "fallback_full_rebuild":
                 raise RuntimeError("import-retarget negative control did not force full rebuild")
+            phase_records["fallback_full_rebuild"].append(
+                _phase_record(
+                    rebuilt,
+                    elapsed,
+                    rss_before,
+                    _rss_stats(),
+                    _equivalence_check(root, inventory, rebuilt),
+                )
+            )
     result = {
         "provider": "MypyIncrementalProvider",
         "mypy_version": version("mypy"),
+        "supported_engine": "mypy-fine-grained",
         "python_version": platform.python_version(),
         "platform": platform.platform(),
-        "fixture": {"kind": "generated_import_dag", "modules": args.modules,
-                    "one_function_per_module": True, "samples": args.samples},
+        "fixture": {
+            "kind": "generated_import_dag",
+            "modules": args.modules,
+            "one_function_per_module": True,
+            "samples": args.samples,
+        },
         "seconds": {
-            "cold_build": {
-                "samples": cold, "p95": p95(cold), "mean": statistics.mean(cold)
-            },
-            "no_change_reuse": {
-                "samples": warm, "p95": p95(warm), "mean": statistics.mean(warm)
-            },
+            "cold_build": {"samples": cold, "p95": p95(cold), "mean": statistics.mean(cold)},
+            "no_change_reuse": {"samples": warm, "p95": p95(warm), "mean": statistics.mean(warm)},
             "incremental_update": {
-                "samples": incremental, "p95": p95(incremental),
+                "samples": incremental,
+                "p95": p95(incremental),
                 "mean": statistics.mean(incremental),
             },
             "signature_update_with_dependency_invalidation": {
@@ -122,13 +275,22 @@ def main() -> None:  # noqa: PLR0915
                 "mean": statistics.mean(signature_update),
             },
             "fallback_full_rebuild": {
-                "samples": fallback, "p95": p95(fallback),
+                "samples": fallback,
+                "p95": p95(fallback),
                 "mean": statistics.mean(fallback),
             },
         },
         "update_modes": modes,
-        "cache_fingerprint_unique_count": len(fingerprints),
+        "phase_provenance": phase_records,
         "incremental_valid": all(mode == "incremental_update" for mode in modes),
+        "all_update_phases_match_independent_cold_build": all(
+            record["cold_equivalence"] is not None
+            and record["cold_equivalence"]["equivalent_to_independent_cold_build"]
+            and record["cold_equivalence"]["cache_fingerprint_matches_independent_cold_build"]
+            for phase, records in phase_records.items()
+            if phase not in {"cold_build", "no_change_reuse"}
+            for record in records
+        ),
         "scope": "trusted generated fixture only; not a host-project corpus score",
     }
     print(json.dumps(result, indent=2, sort_keys=True))

@@ -79,6 +79,10 @@ class IncrementalBuildError(RuntimeError):
     """A requested typed build could not be safely updated."""
 
 
+SUPPORTED_ENGINES = frozenset({"mypy-fine-grained"})
+SUPPORTED_MYPY_VERSIONS = frozenset({"1.19.1"})
+
+
 @dataclass(frozen=True)
 class BuildConfig:
     """Inputs that affect module discovery and typing."""
@@ -100,6 +104,8 @@ class BuildReport:
     diagnostics: tuple[str, ...]
     inventory_fingerprint: str
     cache_fingerprint: str
+    source_digests_before: tuple[tuple[str, str], ...]
+    source_digests_after: tuple[tuple[str, str], ...]
 
 
 @dataclass
@@ -150,6 +156,17 @@ class MypyIncrementalProvider:
 
     def __init__(self, config: BuildConfig) -> None:
         self.config = config
+        if config.engine not in SUPPORTED_ENGINES:
+            raise IncrementalBuildError(
+                f"unsupported typed build engine {config.engine!r}; "
+                f"supported engines: {', '.join(sorted(SUPPORTED_ENGINES))}"
+            )
+        self._mypy_version = version("mypy")
+        if self._mypy_version not in SUPPORTED_MYPY_VERSIONS:
+            raise IncrementalBuildError(
+                f"mypy {self._mypy_version} is not validated for fine-grained updates; "
+                f"supported versions: {', '.join(sorted(SUPPORTED_MYPY_VERSIONS))}"
+            )
         self._typed: TypedBuild | None = None
         self._config_fingerprint = self._fingerprint_config()
 
@@ -161,7 +178,7 @@ class MypyIncrementalProvider:
         return _digest(
             {
                 "engine": self.config.engine,
-                "mypy": version("mypy"),
+                "mypy": self._mypy_version,
                 "python": self.config.python_version,
                 "options": self.config.mypy_options,
                 "config": config_hash,
@@ -238,6 +255,7 @@ class MypyIncrementalProvider:
                 (),
                 old.report.diagnostics,
                 inventory_fp,
+                source_digests_before=prior_files,
             )
             reused = TypedBuild(old.result, old.manager, report, old.module_paths)
             self._typed = reused
@@ -263,6 +281,8 @@ class MypyIncrementalProvider:
                 rebuilt.report.diagnostics,
                 inventory_fp,
                 rebuilt.report.cache_fingerprint,
+                rebuilt.report.source_digests_before,
+                rebuilt.report.source_digests_after,
             )
             return rebuilt
         result = old.result
@@ -276,6 +296,7 @@ class MypyIncrementalProvider:
             tuple(removed),
             diagnostics,
             inventory_fp,
+            source_digests_before=prior_files,
         )
         self._typed = TypedBuild(result, fg, report, canonical)
         return self._typed
@@ -310,6 +331,7 @@ class MypyIncrementalProvider:
             raise IncrementalBuildError("source files changed during full rebuild")
         fg = FineGrainedBuildManager(result)
         source_digests = _source_digests(source_snapshot)
+        source_digests_before = getattr(self, "_source_digests", source_digests)
         cache_fp = _cache_fingerprint(config_fp, inventory_fp, source_digests)
         report = BuildReport(
             mode,
@@ -320,6 +342,8 @@ class MypyIncrementalProvider:
             tuple(result.errors),
             inventory_fp,
             cache_fp,
+            tuple(sorted(source_digests_before.items())),
+            tuple(sorted(source_digests.items())),
         )
         typed = TypedBuild(result, fg, report, canonical)
         # Commit state only after the build and source/config validation succeed.
@@ -356,11 +380,16 @@ class MypyIncrementalProvider:
         removed: tuple[str, ...],
         diagnostics: Any,
         inventory_fp: str,
+        *,
+        source_digests_before: Mapping[str, str] | None = None,
     ) -> BuildReport:
+        source_digests_after = getattr(self, "_source_digests", {})
+        if source_digests_before is None:
+            source_digests_before = source_digests_after
         cache_fp = _cache_fingerprint(
             self._config_fingerprint,
             inventory_fp,
-            getattr(self, "_source_digests", {}),
+            source_digests_after,
         )
         return BuildReport(
             mode,
@@ -371,6 +400,8 @@ class MypyIncrementalProvider:
             tuple(diagnostics),
             inventory_fp,
             cache_fp,
+            tuple(sorted(source_digests_before.items())),
+            tuple(sorted(source_digests_after.items())),
         )
 
 
