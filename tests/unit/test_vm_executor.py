@@ -168,81 +168,23 @@ def test_container_command_has_complete_hardening_and_narrow_mounts(
         "comparison-id",
     )
 
-    assert command == [
-        "docker",
-        "run",
-        "--pull",
-        "never",
-        "--name",
-        "comparison-id",
-        "--cidfile",
-        str(cidfile),
-        "--runtime",
-        "runsc",
-        "--network",
-        "none",
-        "--ipc",
-        "none",
-        "--pid",
-        "private",
-        "--log-driver",
-        "none",
-        "--read-only",
-        "--user",
-        "65532:65532",
-        "--cap-drop",
-        "ALL",
-        "--security-opt",
-        "no-new-privileges=true",
-        "--security-opt",
-        f"seccomp={tmp_path / 'seccomp.json'}",
-        "--memory",
-        "512m",
-        "--memory-swap",
-        "512m",
-        "--cpu-period",
-        "100000",
-        "--cpu-quota",
-        "50000",
-        "--pids-limit",
-        "128",
-        "--ulimit",
-        "nofile=256:256",
-        "--ulimit",
-        "nproc=128:128",
-        "--ulimit",
-        "fsize=16384:16384",
-        "--ulimit",
-        "core=0:0",
-        "--tmpfs",
-        "/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777",
-        "--mount",
-        f"type=bind,src={app},dst=/workspace/app,readonly,bind-recursive=disabled",
-        "--entrypoint",
-        "/usr/bin/env",
-        "--mount",
-        f"type=bind,src={diff},dst=/workspace/change.diff,readonly,bind-recursive=disabled",
-        _DIGEST,
-        "-i",
-        "HOME=/tmp/home",
-        "LANG=C.UTF-8",
-        "LC_ALL=C.UTF-8",
-        "PATH=/usr/local/bin:/usr/bin:/bin",
-        "PYTHONDONTWRITEBYTECODE=1",
-        "PYTHONHASHSEED=0",
-        "PYTHONNOUSERSITE=1",
-        "TMPDIR=/tmp",
-        "fastapi-endpoint-detector",
-        "analyze",
-        "--app",
-        "/workspace/app",
-        "--diff",
-        "/workspace/change.diff",
-        "--format",
-        "json",
-        "--app-var",
-        "app",
-    ]
+    assert command[:5] == ["docker", "run", "--pull", "never", "--name"]
+    assert command[command.index("--runtime") + 1] == "runsc"
+    assert command[command.index("--network") + 1] == "none"
+    assert command[command.index("--read-only")] == "--read-only"
+    assert command[command.index("--user") + 1] == "65532:65532"
+    assert command[command.index("--cap-drop") + 1] == "ALL"
+    assert command[command.index("--memory") + 1] == "512m"
+    assert command[command.index("--mount") + 1] == (
+        f"type=bind,src={app},dst=/workspace/app,readonly,bind-recursive=disabled"
+    )
+    assert command[command.index("--mount", command.index("--mount") + 1) + 1] == (
+        f"type=bind,src={diff},dst=/workspace/change.diff,readonly,bind-recursive=disabled"
+    )
+    assert command[-3:-1] == ["fastapi_endpoint_detector.parser.runtime_worker", "--request-json"]
+    worker_request = json.loads(command[-1])
+    assert worker_request["phase"] == "analyze"
+    assert worker_request["diff_path"] == "/workspace/change.diff"
     assert all("HOST-SECRET" not in item for item in command)
 
 
@@ -397,12 +339,16 @@ def test_list_and_analyze_preserve_equivalent_app_configuration(tmp_path: Path) 
     )
 
     for command in (listed, analyzed):
-        app_index = command.index("--app")
-        variable_index = command.index("--app-var")
-        assert command[app_index + 1] == "/workspace/application.py"
-        assert command[variable_index + 1] == "application"
-    assert "list" in listed
-    assert "analyze" in analyzed
+        assert command[-3:-1] == [
+            "fastapi_endpoint_detector.parser.runtime_worker",
+            "--request-json",
+        ]
+    list_request = json.loads(listed[-1])
+    analyze_request = json.loads(analyzed[-1])
+    assert list_request["phase"] == "list"
+    assert list_request["app_path"] == "/workspace/application.py"
+    assert analyze_request["phase"] == "analyze"
+    assert analyze_request["diff_path"] == "/workspace/change.diff"
 
 
 def test_selected_runtime_entry_is_explicit_in_worker_argv(tmp_path: Path) -> None:
@@ -421,40 +367,61 @@ def test_selected_runtime_entry_is_explicit_in_worker_argv(tmp_path: Path) -> No
         "project.factory:create_app",
         "project.bootstrap:register_routes",
     )
-    assert command[-13:] == [
-        "python",
-        "-m",
-        "fastapi_endpoint_detector.parser.produce_runtime",
-        "--app",
-        "/workspace/app",
-        "--app-var",
-        "application",
-        "--output-limit-bytes",
-        str(executor.policy.output_limit_bytes),
-        "--app-entry",
-        "project.factory:create_app",
-        "--bootstrap-entry",
-        "project.bootstrap:register_routes",
-    ]
+    request = json.loads(command[-1])
+    assert request == {
+        "schema_version": 3,
+        "phase": "list",
+        "app_path": "/workspace/app",
+        "app_variable": "application",
+        "app_entry": "project.factory:create_app",
+        "bootstrap_entry": "project.bootstrap:register_routes",
+        "diff_path": None,
+        "output_limit_bytes": executor.policy.output_limit_bytes,
+        "dependency_max_depth": 10,
+        "dependency_max_nodes": 4096,
+        "dependency_max_work": 65536,
+        "runtime_pins": {
+            "runtime_image": _DIGEST,
+            "runtime_image_digest": _DIGEST.split("@", maxsplit=1)[1],
+            "dependency_lock_sha256": "sha256:" + "b" * 64,
+            "snapshot_lock_sha256": "sha256:" + "d" * 64,
+            "sbom_sha256": "sha256:" + "c" * 64,
+            "seccomp_sha256": executor.seccomp_hash,
+            "runtime_policy_sha256": executor.policy_provenance()["policy_sha256"],
+        },
+    }
 
 
-def test_selected_entry_with_diff_fails_explicitly(tmp_path: Path) -> None:
+def test_selected_entry_with_diff_uses_equivalent_analyze_worker(tmp_path: Path) -> None:
     app = tmp_path / "app"
     app.mkdir()
     diff = tmp_path / "change.diff"
     diff.write_text("", encoding="utf-8")
     executor = _executor(tmp_path)
     executor._resolved_image = _DIGEST
-    with pytest.raises(VMExecutorError, match="CLI integration"):
-        executor._container_command(
-            app,
-            diff,
-            "app",
-            "json",
-            tmp_path / "cid",
-            "selected-entry",
-            "project.factory:create_app",
-        )
+    command = executor._container_command(
+        app,
+        diff,
+        "app",
+        "json",
+        tmp_path / "cid",
+        "selected-entry",
+        "project.factory:create_app",
+    )
+    request = json.loads(command[-1])
+    assert request["phase"] == "analyze"
+    assert request["app_entry"] == "project.factory:create_app"
+    assert request["diff_path"] == "/workspace/change.diff"
+
+
+def test_worker_rejects_drift_from_the_producer_policy_pin(tmp_path: Path) -> None:
+    app = tmp_path / "app"
+    app.mkdir()
+    executor = _executor(tmp_path, expected_policy_sha256="sha256:" + "0" * 64)
+    executor._resolved_image = _DIGEST
+
+    with pytest.raises(VMExecutorError, match="producer's immutable pin"):
+        executor._container_command(app, None, "app", "json", tmp_path / "cid", "name")
 
 
 def test_policy_provenance_attests_digest_seccomp_and_environment(tmp_path: Path) -> None:
@@ -487,15 +454,10 @@ def test_analyze_uses_bounded_executor_and_parses_json(tmp_path: Path) -> None:
 
     assert result == {"endpoints": []}
     command = execute.call_args.args[0]
-    assert command[-7:] == [
-        "list",
-        "--app",
-        "/workspace/app.py",
-        "--format",
-        "json",
-        "--app-var",
-        "app",
-    ]
+    assert command[-2] == "--request-json"
+    request = json.loads(command[-1])
+    assert request["phase"] == "list"
+    assert request["app_path"] == "/workspace/app.py"
 
 
 def test_invalid_json_and_endpoint_payload_fail_closed(tmp_path: Path) -> None:

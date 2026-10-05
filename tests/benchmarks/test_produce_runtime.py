@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 from benchmarks.real_world import _secure_publish
+from benchmarks.real_world import produce_runtime as producer
 from benchmarks.real_world.compare_runtime import compare, compare_target_baseline
 from benchmarks.real_world.produce_runtime import (
     CommandRunner,
@@ -228,9 +229,7 @@ def test_caller_supplied_matching_json_cannot_open_runtime_lane(tmp_path: Path) 
     ],
     ids=["forged-digest", "stale", "mismatched-image", "forged-host"],
 )
-def test_forged_stale_and_mismatched_receipts_never_open_lane(
-    tmp_path: Path, tamper: Any
-) -> None:
+def test_forged_stale_and_mismatched_receipts_never_open_lane(tmp_path: Path, tamper: Any) -> None:
     runner = FakeRunner()
     initial = produce_snapshot_pair(
         _inputs(tmp_path),
@@ -373,6 +372,61 @@ def test_secure_command_runs_only_ast_over_local_fixture(tmp_path: Path) -> None
     assert result.inventory is not None
     assert result.inventory["inventory_status"] in {"established", "conditional", "unavailable"}
     assert any(endpoint.get("path") == "/" for endpoint in result.inventory["endpoints"])
+
+
+def test_runtime_command_uses_worker_phases_with_exact_configuration_pins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _request_for_source_only_test(_inputs(tmp_path))
+    request = replace(
+        request,
+        configuration=EntryConfiguration("main:create_app", "main:bootstrap", "app", "mypy"),
+    )
+    constructor_args: dict[str, Any] = {}
+    invocations: list[dict[str, Any]] = []
+
+    class FakeVMExecutor:
+        def __init__(self, **kwargs: Any) -> None:
+            constructor_args.update(kwargs)
+
+        def analyze_in_vm(self, **kwargs: Any) -> dict[str, Any]:
+            invocations.append(kwargs)
+            phase = "list" if kwargs["diff_path"] is None else "analyze"
+            return {
+                "status": "ok",
+                "phase": phase,
+                "endpoints": [{"path": "/fixture"}],
+                "candidate_endpoints": [],
+                "telemetry": {
+                    "container_peak_rss_bytes": 8192,
+                    "container_peak_rss_status": "measured",
+                    "source": "sampled-/proc/[pid]/statm",
+                },
+            }
+
+    monkeypatch.setattr(producer, "VMExecutor", FakeVMExecutor)
+    runner = CommandRunner()
+    listed = runner("runtime", "list", request)
+    analyzed = runner("runtime", "impact", request)
+
+    assert constructor_args == {
+        "image": request.runtime_image,
+        "dependency_lock_hash": request.dependency_lock_sha256,
+        "snapshot_lock_hash": request.snapshot_lock_sha256,
+        "sbom_hash": request.sbom_sha256,
+        "seccomp_hash": request.seccomp_sha256,
+        "expected_policy_sha256": request.runtime_policy_sha256,
+    }
+    assert [call["app_entry"] for call in invocations] == ["main:create_app"] * 2
+    assert [call["bootstrap_entry"] for call in invocations] == ["main:bootstrap"] * 2
+    assert invocations[0]["diff_path"] is None
+    assert invocations[1]["diff_path"] == request.snapshot.diff_path
+    assert listed.inventory == {
+        "inventory_status": "runtime_observed",
+        "endpoints": [{"path": "/fixture"}],
+    }
+    assert analyzed.impact == {"candidate_endpoints": []}
+    assert listed.peak_rss_bytes == analyzed.peak_rss_bytes == 8192
 
 
 def _request_for_source_only_test(spec: SnapshotInput) -> Any:

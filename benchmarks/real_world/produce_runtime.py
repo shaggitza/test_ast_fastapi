@@ -12,14 +12,16 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol
 
 from benchmarks.real_world._secure_publish import (
     SecurePathError,
@@ -32,6 +34,11 @@ from benchmarks.real_world.compare_runtime import (
     _validate,
     compare_target_baseline,
 )
+
+from fastapi_endpoint_detector.executor.vm_executor import VMExecutor, VMExecutorError
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 Mode = Literal["secure", "runtime"]
 Snapshot = Literal["target", "baseline"]
@@ -113,6 +120,68 @@ class RunRequest:
     runtime_policy_sha256: str
 
 
+def _run_runtime_phase(phase: Literal["list", "impact"], request: RunRequest) -> InvocationResult:
+    config = request.configuration
+    if config.backend != "mypy":
+        raise PhaseFailure("dependency", "runtime worker supports only the mypy backend")
+    executor = VMExecutor(
+        image=request.runtime_image,
+        dependency_lock_hash=request.dependency_lock_sha256,
+        snapshot_lock_hash=request.snapshot_lock_sha256,
+        sbom_hash=request.sbom_sha256,
+        seccomp_hash=request.seccomp_sha256,
+        expected_policy_sha256=request.runtime_policy_sha256,
+    )
+    started = time.monotonic()
+    try:
+        payload = executor.analyze_in_vm(
+            app_path=request.snapshot.app_path,
+            diff_path=request.snapshot.diff_path if phase == "impact" else None,
+            app_variable=config.app_variable,
+            output_format="json",
+            app_entry=config.app_entry,
+            bootstrap_entry=config.bootstrap_entry,
+        )
+    except VMExecutorError as error:
+        raise PhaseFailure(_failure_phase(str(error)), str(error)) from error
+    elapsed = time.monotonic() - started
+    if not isinstance(payload, dict):
+        raise PhaseFailure("extraction", f"runtime {phase} output must be an object")
+    worker_phase = "list" if phase == "list" else "analyze"
+    if payload.get("status") != "ok" or payload.get("phase") != worker_phase:
+        message = payload.get("message")
+        raise PhaseFailure(
+            _failure_phase(message if isinstance(message, str) else "runtime worker error"),
+            message if isinstance(message, str) else "runtime worker returned an error",
+        )
+    telemetry = payload.get("telemetry")
+    peak = (
+        telemetry.get("container_peak_rss_bytes")
+        if isinstance(telemetry, dict)
+        and telemetry.get("container_peak_rss_status") == "measured"
+        and telemetry.get("source") == "sampled-/proc/[pid]/statm"
+        else None
+    )
+    peak_rss = peak if isinstance(peak, int) and not isinstance(peak, bool) and peak >= 0 else None
+    if phase == "list":
+        endpoints = payload.get("endpoints")
+        if not isinstance(endpoints, list):
+            raise PhaseFailure("extraction", "runtime list output lacks endpoints")
+        return InvocationResult(
+            inventory={"inventory_status": "runtime_observed", "endpoints": endpoints},
+            seconds=elapsed,
+            peak_rss_bytes=peak_rss,
+        )
+    candidates = payload.get("candidate_endpoints")
+    if not isinstance(candidates, list):
+        raise PhaseFailure("extraction", "runtime impact output lacks candidate_endpoints")
+    return InvocationResult(
+        impact={"candidate_endpoints": candidates},
+        seconds=elapsed,
+        peak_rss_bytes=peak_rss,
+    )
+
+
 class CommandRunner:
     """Run the installed CLI in secure AST or gated VM mode."""
 
@@ -128,14 +197,10 @@ class CommandRunner:
         request: RunRequest,
     ) -> InvocationResult:
         config = request.configuration
-        # CLI/worker protocol v1 has no runtime factory or bootstrap support. Abstain
-        # before starting a container so the record keeps the requested config while
-        # making the semantic gap explicit to operational accounting.
-        if mode == "runtime" and (config.app_entry or config.bootstrap_entry):
-            raise PhaseFailure(
-                "app_resolution", "runtime worker lacks factory/bootstrap entry support"
-            )
         app = request.snapshot.app_path
+        if mode == "runtime":
+            return _run_runtime_phase(phase, request)
+
         args = [
             sys.executable,
             "-m",
@@ -358,10 +423,7 @@ def _revalidate_lane(request: RunRequest, source_hash: str, tool_hash: str) -> N
         raise ProducerError("snapshot source changed after producer preflight")
     if _tool_digest() != tool_hash:
         raise ProducerError("producer tool changed after producer preflight")
-    if (
-        _hash_file(request.snapshot.diff_path, "impact diff")
-        != request.snapshot.diff_path_sha256
-    ):
+    if _hash_file(request.snapshot.diff_path, "impact diff") != request.snapshot.diff_path_sha256:
         raise ProducerError("impact diff changed after producer preflight")
     if (
         _hash_file(request.snapshot.dependency_lock, "dependency lock")
@@ -380,6 +442,56 @@ def _revalidate_lane(request: RunRequest, source_hash: str, tool_hash: str) -> N
     )
     if _hash_file(seccomp, "packaged seccomp policy") != request.seccomp_sha256:
         raise ProducerError("packaged seccomp policy changed after producer preflight")
+
+
+@contextmanager
+def _frozen_lane_request(
+    request: RunRequest, source_hash: str, tool_hash: str
+) -> Iterator[RunRequest]:
+    """Run each phase against a private read-only copy and recheck all pins around it."""
+    _revalidate_lane(request, source_hash, tool_hash)
+    source_root = _verify_source_revision(
+        request.snapshot.app_path, request.snapshot.source_revision
+    )
+    ignored = {".git", ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache"}
+    with tempfile.TemporaryDirectory(prefix="secure-runtime-lane-") as temporary_name:
+        temporary = Path(temporary_name)
+        staged_root = temporary / "source"
+        shutil.copytree(
+            source_root,
+            staged_root,
+            ignore=lambda _directory, names: {name for name in names if name in ignored},
+        )
+        if _source_digest(staged_root) != source_hash:
+            raise ProducerError("snapshot source changed while staging the pinned lane")
+        try:
+            app_relative = request.snapshot.app_path.relative_to(source_root)
+        except ValueError as error:
+            raise ProducerError("application path is outside the pinned source checkout") from error
+        staged_app = staged_root / app_relative
+        staged_diff = temporary / "change.diff"
+        shutil.copyfile(request.snapshot.diff_path, staged_diff)
+        if _hash_file(staged_diff, "staged impact diff") != request.snapshot.diff_path_sha256:
+            raise ProducerError("impact diff changed while staging the pinned lane")
+        for path in sorted((*staged_root.rglob("*"), staged_root), reverse=True):
+            current_mode = path.stat(follow_symlinks=False).st_mode
+            path.chmod(stat.S_IMODE(current_mode) & ~0o222)
+        staged_diff.chmod(0o444)
+        staged_snapshot = replace(
+            request.snapshot,
+            app_path=staged_app,
+            diff_path=staged_diff,
+        )
+        staged_request = replace(request, snapshot=staged_snapshot)
+        _revalidate_lane(request, source_hash, tool_hash)
+        try:
+            yield staged_request
+        finally:
+            if _source_digest(staged_root) != source_hash:
+                raise ProducerError("read-only staged source changed during lane execution")
+            if _hash_file(staged_diff, "staged impact diff") != request.snapshot.diff_path_sha256:
+                raise ProducerError("staged impact diff changed during lane execution")
+            _revalidate_lane(request, source_hash, tool_hash)
 
 
 def _runtime_policy_digest(request_values: dict[str, str]) -> str:
@@ -421,7 +533,7 @@ def _runtime_policy_digest(request_values: dict[str, str]) -> str:
     return _sha256_bytes(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode())
 
 
-def _validate_evidence(evidence: TrustedRuntimeEvidence | None, request: RunRequest) -> None:
+def _validate_evidence(evidence: TrustedRuntimeEvidence | None, request: RunRequest) -> NoReturn:
     # Evidence is intentionally rejected until an independently configured trust
     # provider can authenticate receipt provenance, freshness, and host identity.
     # A caller-written JSON record and its self-reported digest are not authority.
@@ -485,7 +597,11 @@ def _record(  # noqa: PLR0911
         "resources": {
             "peak_rss_bytes": {
                 "status": "not_measured",
-                "reason": "isolated_peak_rss_collector_not_available",
+                "reason": (
+                    "phase_not_completed"
+                    if mode == "runtime"
+                    else "secure_host_process_rss_not_collected"
+                ),
             }
         },
         "failure": {"phase": "unavailable", "message": "run not started"},
@@ -499,19 +615,11 @@ def _record(  # noqa: PLR0911
         except ProducerError as error:
             record["failure"] = {"phase": "unavailable", "message": str(error)}
             return record
-        if config.app_entry or config.bootstrap_entry:
-            record["failure"] = {
-                "phase": "app_resolution",
-                "message": (
-                    "runtime CLI does not yet implement equivalent factory/bootstrap semantics"
-                ),
-            }
-            return record
     results: dict[str, InvocationResult] = {}
     for phase in ("list", "impact"):
         try:
-            _revalidate_lane(request, source_hash, tool_hash)
-            result = runner(mode, phase, request)
+            with _frozen_lane_request(request, source_hash, tool_hash) as lane_request:
+                result = runner(mode, phase, lane_request)
             if result.seconds is not None:
                 record["timing"][phase] = _measured(result.seconds)
             results[phase] = result
@@ -533,7 +641,13 @@ def _record(  # noqa: PLR0911
             return record
     inventory = results["list"].inventory
     impact = results["impact"].impact
-    if not isinstance(inventory, dict) or not isinstance(impact, dict):
+    if (
+        not isinstance(inventory, dict)
+        or not isinstance(inventory.get("endpoints"), list)
+        or not isinstance(inventory.get("inventory_status"), str)
+        or not isinstance(impact, dict)
+        or not isinstance(impact.get("candidate_endpoints"), list)
+    ):
         record["failure"] = {
             "phase": "extraction",
             "message": "runner omitted complete list or impact output",
@@ -544,6 +658,11 @@ def _record(  # noqa: PLR0911
         record["resources"]["peak_rss_bytes"] = {
             "status": "measured",
             "bytes": max(value for value in rss_values if value is not None),
+        }
+    elif mode == "runtime":
+        record["resources"]["peak_rss_bytes"] = {
+            "status": "not_measured",
+            "reason": "container_process_rss_unavailable",
         }
     record.update(status="success", failure=None, inventory=inventory, impact=impact)
     return record
@@ -612,7 +731,21 @@ def produce_snapshot_pair(
     invocation = {
         "program": "fastapi-endpoint-detector",
         "list_and_impact": True,
-        "mode_options": {"secure": ["--secure-ast"], "runtime": ["--vm"]},
+        "mode_options": {
+            "secure": ["--secure-ast"],
+            "runtime": ["runtime-worker-protocol-v3"],
+        },
+        "runtime_worker": {
+            "module": "fastapi_endpoint_detector.parser.runtime_worker",
+            "protocol_version": 3,
+            "phases": ["list", "analyze"],
+            "bounded_source_config": {
+                "dependency_max_depth": 10,
+                "dependency_max_nodes": 4096,
+                "dependency_max_work": 65536,
+            },
+            "peak_rss_source": "container sampled /proc/[pid]/statm resident pages",
+        },
         "app_path": str(app_path),
         "diff_path": str(diff_path),
         "diff_sha256": diff_hash,
@@ -719,10 +852,7 @@ def produce_target_baseline(
             for destination in destinations.values():
                 ensure_publishable(destination, forbidden_roots=PROTECTED_ROOTS)
             publish_exclusive_batch(
-                [
-                    (destinations[key], source.read_bytes())
-                    for key, source in staged.items()
-                ],
+                [(destinations[key], source.read_bytes()) for key, source in staged.items()],
                 forbidden_roots=PROTECTED_ROOTS,
             )
         except (SecurePathError, OSError) as error:

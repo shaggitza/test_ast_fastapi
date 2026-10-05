@@ -1,87 +1,275 @@
-"""Private fresh-interpreter worker for trusted runtime endpoint extraction."""
+"""Private bounded worker for selected runtime endpoint extraction and analysis."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import sys
+import threading
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any
 
+from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
+from fastapi_endpoint_detector.analyzer.endpoint_registry import EndpointRegistry
+from fastapi_endpoint_detector.config import AnalysisConfig, Config, ParserConfig
 from fastapi_endpoint_detector.parser.fastapi_extractor import FastAPIExtractor
 
-_PROTOCOL_VERSION = 2
+_HOST_PROTOCOL_VERSION = 2
+_PROTOCOL_VERSION = 3
 _DEFAULT_OUTPUT_LIMIT_BYTES = 4 * 1024 * 1024
+_PIN_FIELDS = {
+    "runtime_image",
+    "runtime_image_digest",
+    "dependency_lock_sha256",
+    "snapshot_lock_sha256",
+    "sbom_sha256",
+    "seccomp_sha256",
+    "runtime_policy_sha256",
+}
+_REQUEST_FIELDS = {
+    "schema_version",
+    "phase",
+    "app_path",
+    "app_variable",
+    "app_entry",
+    "bootstrap_entry",
+    "diff_path",
+    "output_limit_bytes",
+    "dependency_max_depth",
+    "dependency_max_nodes",
+    "dependency_max_work",
+    "runtime_pins",
+}
+_SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
+_IMAGE = re.compile(r"[^\s@]+@sha256:[0-9a-f]{64}")
 
 
-def _request() -> dict[str, Any]:
+def _container_process_rss_bytes() -> int | None:
+    """Sum resident pages for processes visible in this private PID namespace."""
+    total = 0
+    observed = False
     try:
-        value = json.load(sys.stdin)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("invalid runtime worker request") from exc
-    if not isinstance(value, dict) or value.get("schema_version") != _PROTOCOL_VERSION:
+        processes = tuple(Path("/proc").iterdir())
+        page_size = os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError):
+        return None
+    for process in processes:
+        if not process.name.isdecimal():
+            continue
+        try:
+            fields = (process / "statm").read_text(encoding="ascii").split()
+            if len(fields) < 3:
+                return None
+            resident_pages = int(fields[1])
+        except FileNotFoundError:
+            # A process exited between enumerating /proc and reading statm.
+            continue
+        except (OSError, UnicodeError, ValueError):
+            return None
+        if resident_pages < 0:
+            return None
+        observed = True
+        total += resident_pages * page_size
+    return total if observed else None
+
+
+class _ContainerRssSampler:
+    """Record an honest sampled peak of process RSS inside the isolated container."""
+
+    def __init__(self) -> None:
+        self.peak_bytes: int | None = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _sample(self) -> None:
+        value = _container_process_rss_bytes()
+        if value is not None:
+            self.peak_bytes = value if self.peak_bytes is None else max(self.peak_bytes, value)
+
+    def __enter__(self) -> _ContainerRssSampler:
+        self._sample()
+
+        def sample_until_stopped() -> None:
+            while not self._stop.wait(0.01):
+                self._sample()
+
+        self._thread = threading.Thread(target=sample_until_stopped, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1)
+        self._sample()
+
+
+def _positive_integer(request: dict[str, Any], field: str, maximum: int) -> int:
+    value = request.get(field)
+    if not isinstance(value, int) or isinstance(value, bool) or not 0 < value <= maximum:
+        raise ValueError(f"runtime worker {field} must be between 1 and {maximum}")
+    return value
+
+
+def _validate_request(value: Any) -> dict[str, Any]:
+    if (
+        not isinstance(value, dict)
+        or set(value) != _REQUEST_FIELDS
+        or value.get("schema_version") != _PROTOCOL_VERSION
+    ):
         raise ValueError("unsupported runtime worker request")
+    if value.get("phase") not in {"list", "analyze"}:
+        raise ValueError("runtime worker phase must be list or analyze")
+    for field in ("app_path", "app_variable"):
+        if not isinstance(value.get(field), str) or not value[field]:
+            raise ValueError(f"runtime worker request requires {field}")
+    for field in ("app_entry", "bootstrap_entry"):
+        if value.get(field) is not None and not isinstance(value[field], str):
+            raise ValueError(f"runtime worker {field} must be a string or null")
+    if value["phase"] == "analyze":
+        if not isinstance(value.get("diff_path"), str) or not value["diff_path"]:
+            raise ValueError("runtime worker analyze phase requires diff_path")
+    elif value.get("diff_path") is not None:
+        raise ValueError("runtime worker list phase cannot include diff_path")
+    _positive_integer(value, "output_limit_bytes", _DEFAULT_OUTPUT_LIMIT_BYTES)
+    _positive_integer(value, "dependency_max_depth", 64)
+    _positive_integer(value, "dependency_max_nodes", 4096)
+    _positive_integer(value, "dependency_max_work", 65536)
+    pins = value.get("runtime_pins")
+    if not isinstance(pins, dict) or set(pins) != _PIN_FIELDS:
+        raise ValueError("runtime worker requires the complete immutable pin set")
+    for field, pin in pins.items():
+        valid_image = field == "runtime_image" and isinstance(pin, str) and _IMAGE.fullmatch(pin)
+        valid_hash = field != "runtime_image" and isinstance(pin, str) and _SHA256.fullmatch(pin)
+        if not (valid_image or valid_hash):
+            raise ValueError(f"runtime worker pin {field} is malformed")
     return value
 
 
-def _required_string(request: dict[str, Any], field: str) -> str:
-    value = request.get(field)
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"runtime worker request requires {field}")
-    return value
+def _extractor(request: dict[str, Any]) -> FastAPIExtractor:
+    return FastAPIExtractor(
+        Path(request["app_path"]),
+        app_variable=request["app_variable"],
+        module_name=request.get("module_name"),
+        app_entry=request.get("app_entry"),
+        bootstrap_entry=request.get("bootstrap_entry"),
+        dependency_max_depth=request["dependency_max_depth"],
+        dependency_max_nodes=request["dependency_max_nodes"],
+        dependency_max_work=request["dependency_max_work"],
+        output_limit_bytes=request["output_limit_bytes"],
+    )
 
 
-def _positive_integer(request: dict[str, Any], field: str) -> int:
-    value = request.get(field)
-    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-        raise ValueError(f"runtime worker request requires positive integer {field}")
-    return value
+def _analyze(request: dict[str, Any], endpoints: list[Any]) -> dict[str, Any]:
+    # ChangeMapper's public options intentionally reserve explicit entry selection
+    # for secure-AST mode. Seed its registry from this worker's already selected
+    # runtime inventory so mypy impact analysis cannot rediscover a different app.
+    depth = request["dependency_max_depth"]
+    config = Config(parser=ParserConfig(max_depth=depth), analysis=AnalysisConfig())
+    mapper = ChangeMapper(
+        Path(request["app_path"]),
+        config=config,
+        app_variable=request["app_variable"],
+        use_cache=False,
+    )
+    registry = EndpointRegistry()
+    registry.register_many(endpoints)
+    mapper._registry = registry
+    report = mapper.analyze_diff(Path(request["diff_path"]))
+    return {
+        "candidate_endpoints": [
+            candidate.model_dump(mode="json") for candidate in report.candidate_endpoints
+        ],
+        "affected_endpoints": [
+            candidate.model_dump(mode="json") for candidate in report.affected_endpoints
+        ],
+        "total_endpoints": report.total_endpoints,
+        "total_files_changed": report.total_files_changed,
+        "python_files_changed": report.python_files_changed,
+    }
 
 
-def _write_result(result_path: Path, payload: dict[str, Any], output_limit: int) -> None:
-    encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    if len(encoded) > output_limit:
-        encoded = json.dumps(
-            {
-                "schema_version": _PROTOCOL_VERSION,
-                "status": "error",
-                "message": "serialized endpoint inventory exceeded the output limit",
+def run_request(raw_request: str) -> tuple[dict[str, Any], int]:
+    """Run one validated list/analyze request and return a bounded JSON payload."""
+    try:
+        request = _validate_request(json.loads(raw_request))
+        with _ContainerRssSampler() as rss_sampler:
+            extractor = _extractor(request)
+            # App code runs in FastAPIExtractor's isolated child, so it cannot
+            # monkeypatch this supervisor's pin validation or RSS telemetry.
+            endpoints = extractor.extract_endpoints()
+            result = (
+                {"endpoints": [endpoint.model_dump(mode="json") for endpoint in endpoints]}
+                if request["phase"] == "list"
+                else _analyze(request, endpoints)
+            )
+        peak = rss_sampler.peak_bytes
+        payload = {
+            "schema_version": _PROTOCOL_VERSION,
+            "status": "ok",
+            "phase": request["phase"],
+            **result,
+            "telemetry": {
+                "container_peak_rss_bytes": peak,
+                "container_peak_rss_status": "measured" if peak is not None else "unsupported",
+                "source": "sampled-/proc/[pid]/statm" if peak is not None else None,
             },
-            separators=(",", ":"),
-        ).encode("utf-8")
-    temporary = result_path.with_suffix(".tmp")
-    temporary.write_bytes(encoded)
-    temporary.replace(result_path)
+        }
+        if (
+            len(json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8"))
+            > (request["output_limit_bytes"])
+        ):
+            raise ValueError("serialized runtime worker output exceeded the byte limit")
+        return payload, 0
+    except Exception as exc:
+        message = str(exc)[:4096] or type(exc).__name__
+        return {
+            "schema_version": _PROTOCOL_VERSION,
+            "status": "error",
+            "message": message,
+        }, 1
 
 
-def _run(result_path: Path) -> int:
+def main() -> int:
+    parser = argparse.ArgumentParser(add_help=False)
+    request_mode = parser.add_mutually_exclusive_group(required=True)
+    request_mode.add_argument("--request-json")
+    request_mode.add_argument("--result", type=Path)
+    args = parser.parse_args()
+    if args.request_json is not None:
+        payload, _status = run_request(args.request_json)
+        sys.stdout.write(json.dumps(payload, separators=(",", ":"), allow_nan=False))
+        sys.stdout.write("\n")
+        return 0
+    return _run_host_request(args.result)
+
+
+def _run_host_request(result_path: Path) -> int:
+    """Preserve FastAPIExtractor's private v2 subprocess protocol."""
     output_limit = _DEFAULT_OUTPUT_LIMIT_BYTES
     try:
-        request = _request()
+        request = json.load(sys.stdin)
+        if not isinstance(request, dict) or request.get("schema_version") != _HOST_PROTOCOL_VERSION:
+            raise ValueError("unsupported runtime worker request")
         raw_limit = request.get("output_limit_bytes", output_limit)
         if not isinstance(raw_limit, int) or isinstance(raw_limit, bool) or raw_limit <= 0:
             raise ValueError("runtime worker output limit must be a positive integer")
         output_limit = raw_limit
-        module_name = request.get("module_name")
-        if module_name is not None and not isinstance(module_name, str):
-            raise ValueError("runtime worker module_name must be a string or null")
-        app_entry = request.get("app_entry")
-        bootstrap_entry = request.get("bootstrap_entry")
-        if app_entry is not None and not isinstance(app_entry, str):
-            raise ValueError("runtime worker app_entry must be a string or null")
-        if bootstrap_entry is not None and not isinstance(bootstrap_entry, str):
-            raise ValueError("runtime worker bootstrap_entry must be a string or null")
+        for field in ("dependency_max_depth", "dependency_max_nodes", "dependency_max_work"):
+            maximum = 64 if field.endswith("depth") else 4096 if field.endswith("nodes") else 65536
+            _positive_integer(request, field, maximum)
         extractor = FastAPIExtractor(
-            Path(_required_string(request, "app_path")),
-            app_variable=_required_string(request, "app_variable"),
-            module_name=module_name,
-            app_entry=app_entry,
-            bootstrap_entry=bootstrap_entry,
-            dependency_max_depth=_positive_integer(request, "dependency_max_depth"),
-            dependency_max_nodes=_positive_integer(request, "dependency_max_nodes"),
-            dependency_max_work=_positive_integer(request, "dependency_max_work"),
+            Path(request["app_path"]),
+            app_variable=request["app_variable"],
+            module_name=request.get("module_name"),
+            app_entry=request.get("app_entry"),
+            bootstrap_entry=request.get("bootstrap_entry"),
+            dependency_max_depth=request["dependency_max_depth"],
+            dependency_max_nodes=request["dependency_max_nodes"],
+            dependency_max_work=request["dependency_max_work"],
         )
         with (
             Path(os.devnull).open("w", encoding="utf-8") as sink,
@@ -90,30 +278,35 @@ def _run(result_path: Path) -> int:
         ):
             endpoints = extractor._extract_endpoints_in_process()
         payload = {
-            "schema_version": _PROTOCOL_VERSION,
+            "schema_version": _HOST_PROTOCOL_VERSION,
             "status": "ok",
             "endpoints": [endpoint.model_dump(mode="json") for endpoint in endpoints],
         }
         exit_code = 0
-    except BaseException as exc:
+    except Exception as exc:
         payload = {
-            "schema_version": _PROTOCOL_VERSION,
+            "schema_version": _HOST_PROTOCOL_VERSION,
             "status": "error",
             "message": str(exc)[:4096] or type(exc).__name__,
         }
         exit_code = 1
     try:
-        _write_result(result_path, payload, output_limit)
+        encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        if len(encoded) > output_limit:
+            encoded = json.dumps(
+                {
+                    "schema_version": _HOST_PROTOCOL_VERSION,
+                    "status": "error",
+                    "message": "serialized endpoint inventory exceeded the output limit",
+                },
+                separators=(",", ":"),
+            ).encode("utf-8")
+        temporary = result_path.with_suffix(".tmp")
+        temporary.write_bytes(encoded)
+        temporary.replace(result_path)
     except OSError:
         return 2
     return exit_code
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--result", type=Path, required=True)
-    args = parser.parse_args()
-    return _run(args.result.resolve())
 
 
 if __name__ == "__main__":

@@ -111,6 +111,7 @@ class VMExecutor:
         snapshot_lock_hash: str | None = None,
         sbom_hash: str | None = None,
         seccomp_hash: str | None = None,
+        expected_policy_sha256: str | None = None,
     ) -> None:
         if not network_disabled:
             raise ValueError("runtime comparator network access cannot be enabled")
@@ -151,6 +152,7 @@ class VMExecutor:
             "FASTAPI_ENDPOINT_DETECTOR_VM_SNAPSHOT_SHA256"
         )
         self.sbom_hash = sbom_hash or os.environ.get("FASTAPI_ENDPOINT_DETECTOR_VM_SBOM_SHA256")
+        self.expected_policy_sha256 = expected_policy_sha256
         self._resolved_image: str | None = None
 
     @classmethod
@@ -399,10 +401,10 @@ class VMExecutor:
         app_entry: str | None = None,
         bootstrap_entry: str | None = None,
     ) -> list[str]:
-        self._verified_seccomp_hash()
-        self._validated_hash(self.dependency_lock_hash, "dependency lock")
-        self._validated_hash(self.snapshot_lock_hash, "snapshot lock")
-        self._validated_hash(self.sbom_hash, "SBOM")
+        seccomp_hash = self._verified_seccomp_hash()
+        dependency_lock_hash = self._validated_hash(self.dependency_lock_hash, "dependency lock")
+        snapshot_lock_hash = self._validated_hash(self.snapshot_lock_hash, "snapshot lock")
+        sbom_hash = self._validated_hash(self.sbom_hash, "SBOM")
         app = self._validated_mount_source(app_path, "application", allow_directory=True)
         app_target = "/workspace/app" if app.is_dir() else f"/workspace/{app.name}"
         command = [
@@ -458,27 +460,57 @@ class VMExecutor:
             "--entrypoint",
             "/usr/bin/env",
         ]
-        if app_entry is not None or bootstrap_entry is not None:
-            if diff_path is not None:
-                raise VMExecutorError(
-                    "selected runtime entries with diff analysis require CLI integration"
-                )
+        diff_target: str | None = None
+        if diff_path is not None:
+            diff = self._validated_mount_source(diff_path, "diff", allow_directory=False)
+            diff_target = "/workspace/change.diff"
+            command.extend(["--mount", self._mount(diff, diff_target)])
+
+        if output_format == "json":
+            if app_entry is not None or bootstrap_entry is not None:
+                if not app.is_dir():
+                    raise VMExecutorError(
+                        "selected runtime entries require mounting the complete project root"
+                    )
+                app_target = "/workspace/app"
+            policy = self.policy_provenance()
+            if (
+                self.expected_policy_sha256 is not None
+                and policy["policy_sha256"] != self.expected_policy_sha256
+            ):
+                raise VMExecutorError("runtime policy does not match the producer's immutable pin")
+            worker_request = {
+                "schema_version": 3,
+                "phase": "analyze" if diff_target is not None else "list",
+                "app_path": app_target,
+                "app_variable": app_variable,
+                "app_entry": app_entry,
+                "bootstrap_entry": bootstrap_entry,
+                "diff_path": diff_target,
+                "output_limit_bytes": self.policy.output_limit_bytes,
+                "dependency_max_depth": 10,
+                "dependency_max_nodes": 4096,
+                "dependency_max_work": 65536,
+                "runtime_pins": {
+                    "runtime_image": self._resolve_image(),
+                    "runtime_image_digest": self._resolve_image().split("@", maxsplit=1)[-1],
+                    "dependency_lock_sha256": dependency_lock_hash,
+                    "snapshot_lock_sha256": snapshot_lock_hash,
+                    "sbom_sha256": sbom_hash,
+                    "seccomp_sha256": seccomp_hash,
+                    "runtime_policy_sha256": policy["policy_sha256"],
+                },
+            }
             cli = [
                 "python",
                 "-m",
-                "fastapi_endpoint_detector.parser.produce_runtime",
-                "--app",
-                app_target,
-                "--app-var",
-                app_variable,
-                "--output-limit-bytes",
-                str(self.policy.output_limit_bytes),
+                "fastapi_endpoint_detector.parser.runtime_worker",
+                "--request-json",
+                json.dumps(worker_request, separators=(",", ":"), allow_nan=False),
             ]
-            if app_entry is not None:
-                cli.extend(["--app-entry", app_entry])
-            if bootstrap_entry is not None:
-                cli.extend(["--bootstrap-entry", bootstrap_entry])
         else:
+            if app_entry is not None or bootstrap_entry is not None:
+                raise VMExecutorError("selected runtime entries require JSON worker output")
             cli = [
                 "fastapi-endpoint-detector",
                 "list",
@@ -489,21 +521,19 @@ class VMExecutor:
                 "--app-var",
                 app_variable,
             ]
-        if diff_path is not None:
-            diff = self._validated_mount_source(diff_path, "diff", allow_directory=False)
-            command.extend(["--mount", self._mount(diff, "/workspace/change.diff")])
-            cli = [
-                "fastapi-endpoint-detector",
-                "analyze",
-                "--app",
-                app_target,
-                "--diff",
-                "/workspace/change.diff",
-                "--format",
-                output_format,
-                "--app-var",
-                app_variable,
-            ]
+            if diff_target is not None:
+                cli = [
+                    "fastapi-endpoint-detector",
+                    "analyze",
+                    "--app",
+                    app_target,
+                    "--diff",
+                    diff_target,
+                    "--format",
+                    output_format,
+                    "--app-var",
+                    app_variable,
+                ]
         command.append(self._resolve_image())
         command.append("-i")
         command.extend(f"{key}={value}" for key, value in sorted(self.CLEAN_ENV.items()))
