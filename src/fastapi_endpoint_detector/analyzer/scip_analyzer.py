@@ -58,11 +58,23 @@ class SCIPOccurrence:
 
 @dataclass(frozen=True)
 class SCIPReverseCallEdge:
-    """A direct caller-to-callee edge proven at a source occurrence."""
+    """A source-bound reference; SCIP and AST syntax do not establish execution."""
 
     caller: SCIPDefinition
     callee: SCIPDefinition
     occurrence: SCIPOccurrence
+    execution_status: str = "reference_only"
+    confidence: str = "LOW"
+    limitations: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SCIPSourceScope:
+    """Selected evidence scope and the broader scope used to build SCIP's index."""
+
+    index_scope: str
+    selected_inventory_paths: tuple[str, ...] | None
+    limitations: tuple[str, ...]
 
 
 class SCIPAnalyzer:
@@ -71,6 +83,10 @@ class SCIPAnalyzer:
     QUERY_VERSION = "0.16.0"
     PYTHON_INDEXER_VERSION = "0.6.6"
     MAX_DEPTH = 1000
+    MAX_SOURCE_FILES = 50_000
+    MAX_SOURCE_FILE_BYTES = 32 * 1024 * 1024
+    MAX_SOURCE_SNAPSHOT_BYTES = 1024 * 1024 * 1024
+    MAX_SOURCE_READ_BYTES = MAX_SOURCE_FILE_BYTES + 1
 
     def __init__(
         self,
@@ -81,18 +97,25 @@ class SCIPAnalyzer:
         source_inventory: _SourceInventory | None = None,
     ):
         self.project_root = project_root.resolve()
+        try:
+            root_metadata = self.project_root.stat()
+        except OSError as error:
+            raise SCIPAnalyzerError(f"Invalid SCIP project root: {project_root}") from error
+        if not stat.S_ISDIR(root_metadata.st_mode):
+            raise SCIPAnalyzerError(f"SCIP project root is not a directory: {project_root}")
+        self._project_root_identity = self._directory_identity(root_metadata)
         self.use_cache = use_cache
         self.timeout = timeout
         self.source_inventory = source_inventory
         try:
-            self._inventory_paths = (
-                {
-                    path.resolve(strict=True).relative_to(self.project_root).as_posix()
-                    for path in source_inventory.paths
-                }
+            inventory_values = (
+                [self._inventory_relative_path(path).as_posix() for path in source_inventory.paths]
                 if source_inventory is not None
                 else None
             )
+            if inventory_values is not None and len(set(inventory_values)) != len(inventory_values):
+                raise SCIPAnalyzerError("SCIP source inventory contains duplicate canonical paths")
+            self._inventory_paths = set(inventory_values) if inventory_values is not None else None
         except (OSError, ValueError) as error:
             raise SCIPAnalyzerError(
                 "SCIP source inventory contains a missing or escaping path"
@@ -211,6 +234,7 @@ class SCIPAnalyzer:
             "sources": sources,
             "configs": self._config_manifest(),
             "inventory": self._inventory_configuration(),
+            "indexScope": "project_root",
         }
         digest = hashlib.sha256(
             json.dumps(provenance, sort_keys=True, separators=(",", ":")).encode()
@@ -371,31 +395,223 @@ class SCIPAnalyzer:
         return digest.hexdigest()
 
     def _source_manifest(self) -> list[dict[str, str]]:
-        if self.source_inventory is not None:
-            try:
-                paths = [path.resolve(strict=True) for path in self.source_inventory.paths]
-            except (OSError, ValueError) as error:
-                raise SCIPAnalyzerError("SCIP source inventory changed or escaped") from error
-            current_inventory = {path.relative_to(self.project_root).as_posix() for path in paths}
-            if current_inventory != self._inventory_paths:
-                raise SCIPAnalyzerError("SCIP source inventory changed after analyzer creation")
-        else:
-            paths = sorted(self.project_root.rglob("*.py"))
+        # scip-query reindexes the project root, even when callers select a
+        # narrower evidence inventory. Hash the actual broader index scope so
+        # edits outside that inventory cannot leave a stale index reusable.
+        self._verify_project_root_identity()
+        current_inventory = self._current_inventory_paths()
+        paths = self._python_source_paths()
+        if len(paths) > self.MAX_SOURCE_FILES:
+            raise SCIPAnalyzerError("SCIP project source snapshot exceeded the file-count cap")
         records: list[dict[str, str]] = []
         seen: set[str] = set()
+        total_bytes = 0
         for path in paths:
             try:
-                relative = path.relative_to(self.project_root).as_posix()
-                if relative in seen or not path.is_file():
+                relative_path = path.relative_to(self.project_root)
+                relative = relative_path.as_posix()
+                if relative in seen:
                     raise SCIPAnalyzerError(f"Invalid or duplicate SCIP source path: {relative}")
                 seen.add(relative)
-                content = path.read_bytes()
+                content_hash, identity, size, _ = self._read_source_snapshot(relative_path)
             except (OSError, ValueError) as error:
                 raise SCIPAnalyzerError(
                     f"SCIP source inventory changed or escaped: {path}"
                 ) from error
-            records.append({"path": relative, "sha256": hashlib.sha256(content).hexdigest()})
+            total_bytes += size
+            if total_bytes > self.MAX_SOURCE_SNAPSHOT_BYTES:
+                raise SCIPAnalyzerError("SCIP project source snapshot exceeded the byte-count cap")
+            records.append({"path": relative, "sha256": content_hash, "identity": identity})
+        if (
+            self._python_source_paths() != paths
+            or self._current_inventory_paths() != current_inventory
+        ):
+            raise SCIPAnalyzerError("SCIP source set changed while creating a stable snapshot")
         return sorted(records, key=lambda item: item["path"])
+
+    @staticmethod
+    def _directory_identity(metadata: os.stat_result) -> tuple[int, int, int]:
+        return (metadata.st_dev, metadata.st_ino, stat.S_IFMT(metadata.st_mode))
+
+    @staticmethod
+    def _source_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int]:
+        return (
+            metadata.st_dev,
+            metadata.st_ino,
+            stat.S_IFMT(metadata.st_mode),
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        )
+
+    def _verify_project_root_identity(self) -> None:
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(self.project_root, flags)
+        except OSError as error:
+            raise SCIPAnalyzerError("SCIP project root changed or became a symlink") from error
+        try:
+            metadata = os.fstat(descriptor)
+            if self._directory_identity(metadata) != self._project_root_identity:
+                raise SCIPAnalyzerError("SCIP project root changed after analyzer creation")
+        finally:
+            os.close(descriptor)
+
+    def _inventory_relative_path(self, value: Path) -> Path:
+        candidate = value if value.is_absolute() else self.project_root / value
+        if ".." in candidate.parts:
+            raise SCIPAnalyzerError("SCIP source inventory contains a non-canonical path")
+        lexical = candidate
+        try:
+            relative = lexical.relative_to(self.project_root)
+        except ValueError as error:
+            raise SCIPAnalyzerError(
+                "SCIP source inventory contains a missing or escaping path"
+            ) from error
+        if not relative.parts or any(part in {".", ".."} for part in relative.parts):
+            raise SCIPAnalyzerError("SCIP source inventory contains a non-canonical path")
+        current = self.project_root
+        try:
+            for part in relative.parts:
+                current = current / part
+                if current.is_symlink():
+                    raise SCIPAnalyzerError("SCIP source inventory contains a symlink path")
+            resolved = lexical.resolve(strict=True)
+        except OSError as error:
+            raise SCIPAnalyzerError("SCIP source inventory contains a missing path") from error
+        if resolved != lexical or not current.is_file():
+            raise SCIPAnalyzerError("SCIP source inventory contains a non-canonical file path")
+        return relative
+
+    def _current_inventory_paths(self) -> set[str] | None:
+        if self.source_inventory is None:
+            return None
+        try:
+            values = [
+                self._inventory_relative_path(path).as_posix()
+                for path in self.source_inventory.paths
+            ]
+        except (OSError, ValueError) as error:
+            raise SCIPAnalyzerError("SCIP source inventory changed or escaped") from error
+        current = set(values)
+        if len(current) != len(values):
+            raise SCIPAnalyzerError("SCIP source inventory contains duplicate canonical paths")
+        if current != self._inventory_paths:
+            raise SCIPAnalyzerError("SCIP source inventory changed after analyzer creation")
+        return current
+
+    def _python_source_paths(self) -> list[Path]:
+        try:
+            paths = sorted(self.project_root.rglob("*.py"))
+        except OSError as error:
+            raise SCIPAnalyzerError("Could not enumerate SCIP project sources") from error
+        if len(paths) > self.MAX_SOURCE_FILES:
+            raise SCIPAnalyzerError("SCIP project source snapshot exceeded the file-count cap")
+        return paths
+
+    def _read_source_snapshot(  # noqa: PLR0912, PLR0915 - explicit fail-closed descriptor audit
+        self, relative: Path
+    ) -> tuple[str, str, int, bytes]:
+        """Read and hash one bounded regular file through no-follow descriptors."""
+        if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+            raise SCIPAnalyzerError(f"Invalid SCIP source path: {relative}")
+        if not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd:
+            raise SCIPAnalyzerError("Platform lacks race-safe no-follow source snapshot support")
+        directory_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+        def open_chain() -> tuple[int, list[int], tuple[tuple[int, int, int], ...]]:
+            root_fd = os.open(self.project_root, directory_flags)
+            descriptors = [root_fd]
+            identities = [self._directory_identity(os.fstat(root_fd))]
+            if identities[0] != self._project_root_identity:
+                os.close(root_fd)
+                raise SCIPAnalyzerError("SCIP project root changed while hashing sources")
+            try:
+                for component in relative.parts[:-1]:
+                    child = os.open(component, directory_flags, dir_fd=descriptors[-1])
+                    metadata = os.fstat(child)
+                    if not stat.S_ISDIR(metadata.st_mode):
+                        os.close(child)
+                        raise SCIPAnalyzerError(
+                            f"SCIP source parent is not a directory: {relative}"
+                        )
+                    descriptors.append(child)
+                    identities.append(self._directory_identity(metadata))
+            except BaseException:
+                for descriptor in reversed(descriptors):
+                    os.close(descriptor)
+                raise
+            return descriptors[-1], descriptors, tuple(identities)
+
+        parent_fd, parent_descriptors, directory_identities = open_chain()
+        source_fd = -1
+        try:
+            source_fd = os.open(relative.parts[-1], file_flags, dir_fd=parent_fd)
+            before = os.fstat(source_fd)
+            if not stat.S_ISREG(before.st_mode):
+                raise SCIPAnalyzerError(f"SCIP source is not a regular file: {relative}")
+            if before.st_size > self.MAX_SOURCE_FILE_BYTES:
+                raise SCIPAnalyzerError(f"SCIP source exceeded the per-file byte cap: {relative}")
+            digest = hashlib.sha256()
+            size = 0
+            content: list[bytes] = []
+            while True:
+                block = os.read(source_fd, min(1024 * 1024, self.MAX_SOURCE_READ_BYTES - size))
+                if not block:
+                    break
+                size += len(block)
+                if size > self.MAX_SOURCE_FILE_BYTES:
+                    raise SCIPAnalyzerError(
+                        f"SCIP source exceeded the per-file byte cap: {relative}"
+                    )
+                digest.update(block)
+                content.append(block)
+            after = os.fstat(source_fd)
+            if self._source_identity(before) != self._source_identity(after):
+                raise SCIPAnalyzerError(f"SCIP source changed while hashing: {relative}")
+            named = os.stat(relative.parts[-1], dir_fd=parent_fd, follow_symlinks=False)
+            if self._source_identity(named) != self._source_identity(after):
+                raise SCIPAnalyzerError(f"SCIP source path was replaced while hashing: {relative}")
+        except OSError as error:
+            raise SCIPAnalyzerError(
+                f"Could not authenticate SCIP source path: {relative}"
+            ) from error
+        finally:
+            if source_fd >= 0:
+                os.close(source_fd)
+            for descriptor in reversed(parent_descriptors):
+                os.close(descriptor)
+
+        # Re-open the path from the root after reading. Directory and file
+        # identities must still match the chain held during the read, and the
+        # ordinary resolved path must remain the same canonical repository path.
+        check_parent_fd, check_descriptors, check_directories = open_chain()
+        try:
+            if check_directories != directory_identities:
+                raise SCIPAnalyzerError(
+                    f"SCIP source parent path changed while hashing: {relative}"
+                )
+            current = os.stat(relative.parts[-1], dir_fd=check_parent_fd, follow_symlinks=False)
+            if self._source_identity(current) != self._source_identity(after):
+                raise SCIPAnalyzerError(f"SCIP source path was replaced while hashing: {relative}")
+            canonical = (self.project_root / relative).resolve(strict=True)
+            if canonical != self.project_root / relative:
+                raise SCIPAnalyzerError(f"SCIP source path became a symlink: {relative}")
+        except OSError as error:
+            raise SCIPAnalyzerError(
+                f"SCIP source path changed while hashing: {relative}"
+            ) from error
+        finally:
+            for descriptor in reversed(check_descriptors):
+                os.close(descriptor)
+        identity = ":".join(str(value) for value in self._source_identity(after))
+        return digest.hexdigest(), identity, size, b"".join(content)
 
     def _config_manifest(self) -> list[dict[str, str]]:
         names = (
@@ -437,7 +653,31 @@ class SCIPAnalyzer:
             "unresolved_imports",
             "limitations",
         )
-        return {name: getattr(self.source_inventory, name, None) for name in names}
+        return {
+            "paths": sorted(self._inventory_paths or ()),
+            **{name: getattr(self.source_inventory, name, None) for name in names},
+        }
+
+    def source_scope(self) -> SCIPSourceScope:
+        """Describe the selected evidence inventory and actual broader index scope."""
+        if self._inventory_paths is None:
+            return SCIPSourceScope(
+                index_scope="project_root",
+                selected_inventory_paths=None,
+                limitations=(
+                    "No selected source inventory was supplied; SCIP evidence uses project scope.",
+                    "SCIP syntax/reference results are not execution observations.",
+                ),
+            )
+        return SCIPSourceScope(
+            index_scope="project_root",
+            selected_inventory_paths=tuple(sorted(self._inventory_paths)),
+            limitations=(
+                "The selected inventory filters returned evidence, but SCIP indexing remains "
+                "project-root-wide.",
+                "SCIP syntax/reference results are not execution observations.",
+            ),
+        )
 
     def _relative_file(  # noqa: PLR0912
         self, file_path: Path, *, repository_relative: bool = False
@@ -568,11 +808,7 @@ class SCIPAnalyzer:
                 collect(children)
 
         collect(result)
-        source_path = self.project_root / relative
-        try:
-            tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
-        except (OSError, SyntaxError, UnicodeError):
-            tree = None
+        tree = self._source_ast(relative, self.project_root / relative)
         if tree is not None:
             callable_ends = {
                 node.lineno: node.end_lineno
@@ -671,10 +907,13 @@ class SCIPAnalyzer:
             return ()
         class_name = parts[-2]
         method_name = parts[-1][:-2]
-        source = self.project_root / definition.file_path
         try:
-            tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
-        except (OSError, SyntaxError, UnicodeError):
+            relative = self._inventory_relative_path(definition.file_path)
+        except SCIPAnalyzerError:
+            self._base_method_cache[definition.symbol] = ()
+            return ()
+        tree = self._source_ast(relative, self.project_root / relative)
+        if tree is None:
             self._base_method_cache[definition.symbol] = ()
             return ()
         imports: dict[str, tuple[str, str] | None] = {}
@@ -734,9 +973,9 @@ class SCIPAnalyzer:
         if supplied.is_absolute() or ".." in supplied.parts:
             raise SCIPAnalyzerError(f"SCIP reference path is outside project: {value!r}")
         try:
-            absolute = (self.project_root / supplied).resolve(strict=True)
-            relative = absolute.relative_to(self.project_root)
-        except (OSError, ValueError) as error:
+            relative = self._inventory_relative_path(supplied)
+            absolute = self.project_root / relative
+        except (OSError, ValueError, SCIPAnalyzerError) as error:
             raise SCIPAnalyzerError(f"Invalid SCIP reference path: {value!r}") from error
         if not absolute.is_file():
             raise SCIPAnalyzerError(f"SCIP reference path is not a file: {value!r}")
@@ -745,10 +984,11 @@ class SCIPAnalyzer:
     def _source_ast(self, relative: Path, absolute: Path) -> ast.Module | None:
         if relative not in self._ast_cache:
             try:
+                _, _, _, content = self._read_source_snapshot(relative)
                 self._ast_cache[relative] = ast.parse(
-                    absolute.read_text(encoding="utf-8"), filename=str(absolute)
+                    content.decode("utf-8"), filename=str(absolute)
                 )
-            except (OSError, SyntaxError, UnicodeError):
+            except (OSError, SyntaxError, UnicodeError, SCIPAnalyzerError):
                 self._ast_cache[relative] = None
         return self._ast_cache[relative]
 
@@ -758,7 +998,7 @@ class SCIPAnalyzer:
         absolute: Path,
         line: int,
         callee: SCIPDefinition,
-    ) -> SCIPDefinition | None:
+    ) -> tuple[SCIPDefinition, ast.Module, ast.Call, ast.FunctionDef | ast.AsyncFunctionDef] | None:
         tree = self._source_ast(relative, absolute)
         if tree is None:
             return None
@@ -863,7 +1103,161 @@ class SCIPAnalyzer:
         ast_scope = enclosing_functions[0]
         if outline.start_line != ast_scope.lineno:
             return None
-        return outline
+        return outline, tree, calls[0], ast_scope
+
+    @staticmethod
+    def _scope_has_yield(scope: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+        pending: list[ast.AST] = list(scope.body)
+        while pending:
+            node = pending.pop()
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                continue
+            if isinstance(node, (ast.Yield, ast.YieldFrom)):
+                return True
+            pending.extend(ast.iter_child_nodes(node))
+        return False
+
+    @staticmethod
+    def _call_is_after_terminal(
+        scope: ast.FunctionDef | ast.AsyncFunctionDef, call: ast.Call
+    ) -> bool:
+        def contains_target(node: ast.AST) -> bool:
+            if node is call:
+                return True
+            if node is not scope and isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+            ):
+                return False
+            return any(contains_target(child) for child in ast.iter_child_nodes(node))
+
+        def scan_block(statements: list[ast.stmt], terminal_seen: bool = False) -> bool:
+            for statement in statements:
+                if contains_target(statement):
+                    if terminal_seen:
+                        return True
+                    for _, value in ast.iter_fields(statement):
+                        if (
+                            isinstance(value, list)
+                            and all(isinstance(item, ast.stmt) for item in value)
+                            and value
+                            and any(contains_target(item) for item in value)
+                        ):
+                            return scan_block(value)
+                    return False
+                if isinstance(statement, (ast.Return, ast.Raise)):
+                    terminal_seen = True
+            return False
+
+        return scan_block(scope.body)
+
+    @staticmethod
+    def _literal_truth(expression: ast.expr) -> bool | None:
+        try:
+            return bool(ast.literal_eval(expression))
+        except (ValueError, TypeError, SyntaxError):
+            return None
+
+    @staticmethod
+    def _call_is_in_lambda(
+        parents: dict[ast.AST, ast.AST],
+        call: ast.Call,
+        scope: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> bool:
+        current: ast.AST = call
+        while current is not scope and current in parents:
+            current = parents[current]
+            if isinstance(current, ast.Lambda):
+                return True
+        return False
+
+    def _callee_execution_kind(self, callee: SCIPDefinition) -> tuple[bool, bool]:
+        name = callee.short_name.split(":")[-1].removesuffix("()")
+        try:
+            tree = self._source_ast(callee.file_path, self.project_root / callee.file_path)
+        except (OSError, ValueError):
+            return False, False
+        if tree is None:
+            return False, False
+        definitions = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == name
+            and node.lineno == callee.start_line
+        ]
+        if len(definitions) != 1:
+            return False, False
+        definition = definitions[0]
+        return isinstance(definition, ast.AsyncFunctionDef), self._scope_has_yield(definition)
+
+    def _source_call_limitations(
+        self,
+        tree: ast.Module,
+        call: ast.Call,
+        scope: ast.FunctionDef | ast.AsyncFunctionDef,
+        callee: SCIPDefinition,
+    ) -> tuple[str, ...]:
+        limitations = {
+            "A SCIP reference and matching AST call are reference-only evidence; execution is "
+            "unverified (LOW)."
+        }
+        limitations.update(self.source_scope().limitations)
+        parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+        if self._call_is_after_terminal(scope, call):
+            limitations.add(
+                "The call follows a return or raise in its lexical block; execution is not "
+                "established."
+            )
+        if self._call_is_in_lambda(parents, call, scope):
+            limitations.add("The call is inside a lambda whose invocation is unverified.")
+        if isinstance(scope, ast.AsyncFunctionDef):
+            limitations.add(
+                "The enclosing async callable may be unawaited; its body execution is unverified."
+            )
+        if self._scope_has_yield(scope):
+            limitations.add(
+                "The enclosing generator may be unconsumed; its body execution is unverified."
+            )
+        current: ast.AST = call
+        while current in parents:
+            parent = parents[current]
+            if isinstance(parent, ast.If):
+                test_truth = self._literal_truth(parent.test)
+                body_contains = any(
+                    isinstance(node, ast.AST)
+                    and any(descendant is current for descendant in ast.walk(node))
+                    for node in parent.body
+                )
+                else_contains = any(
+                    isinstance(node, ast.AST)
+                    and any(descendant is current for descendant in ast.walk(node))
+                    for node in parent.orelse
+                )
+                if (body_contains and test_truth is False) or (
+                    else_contains and test_truth is True
+                ):
+                    limitations.add(
+                        "The call is guarded by a literal-false branch; execution is impossible "
+                        "there."
+                    )
+            if parent is scope:
+                break
+            current = parent
+        callee_is_async, callee_is_generator = self._callee_execution_kind(callee)
+        if (
+            callee_is_async
+            and parents.get(call) is not None
+            and not isinstance(parents[call], ast.Await)
+        ):
+            limitations.add(
+                "The async callee call is not directly awaited; coroutine body execution is "
+                "unverified."
+            )
+        if callee_is_generator:
+            limitations.add(
+                "The callee is a generator; its body executes only if the result is consumed."
+            )
+        return tuple(sorted(limitations))
 
     def reverse_call_edges(  # noqa: PLR0912, PLR0915
         self, callee: SCIPDefinition
@@ -891,6 +1285,14 @@ class SCIPAnalyzer:
         if resolved_short_name != callee.short_name:
             raise SCIPAnalyzerError("SCIP refs resolution has an inconsistent short name")
         resolved_relative, _ = self._validated_project_file(resolved_path)
+        try:
+            supplied_callee_relative = self._relative_file(callee.file_path)
+        except SCIPAnalyzerError as error:
+            raise SCIPAnalyzerError("SCIP refs callee path is invalid") from error
+        if resolved_relative != supplied_callee_relative:
+            raise SCIPAnalyzerError(
+                "SCIP refs resolution path does not match the supplied callee definition"
+            )
         canonical_callee = SCIPDefinition(
             callee.symbol,
             callee.short_name,
@@ -913,6 +1315,11 @@ class SCIPAnalyzer:
 
         edges: set[SCIPReverseCallEdge] = set()
         limitations: set[str] = set()
+        limitations.add(
+            "SCIP reverse-call edges are source-bound references only, not execution evidence "
+            "(LOW)."
+        )
+        limitations.update(self.source_scope().limitations)
         if not references:
             limitations.add("SCIP reported no references; absence is not proof of no callers")
         if other_matches:
@@ -936,14 +1343,26 @@ class SCIPAnalyzer:
                 limitations.add("SCIP reference was outside the selected source inventory")
                 continue
             line = zero_based_line + 1
-            caller = self._caller_at_reference(relative, absolute, line, canonical_callee)
-            if caller is None:
+            source_call = self._caller_at_reference(relative, absolute, line, canonical_callee)
+            if source_call is None:
                 limitations.add(
                     "SCIP reference was unsupported or ambiguous as a source-bound direct call"
                 )
                 continue
+            caller, tree, call, scope = source_call
+            edge_limitations = self._source_call_limitations(tree, call, scope, canonical_callee)
             occurrence = SCIPOccurrence(relative, line)
-            edges.add(SCIPReverseCallEdge(caller, canonical_callee, occurrence))
+            edges.add(
+                SCIPReverseCallEdge(
+                    caller,
+                    canonical_callee,
+                    occurrence,
+                    execution_status="reference_only",
+                    confidence="LOW",
+                    limitations=edge_limitations,
+                )
+            )
+            limitations.update(edge_limitations)
 
         value = tuple(
             sorted(

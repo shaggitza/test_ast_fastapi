@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -13,7 +14,6 @@ from fastapi_endpoint_detector.analyzer.scip_analyzer import (
     SCIPAnalyzerError,
     SCIPDefinition,
     SCIPOccurrence,
-    SCIPReverseCallEdge,
 )
 
 FIXTURE = Path("tests/fixtures/scip_controlled_project")
@@ -172,7 +172,7 @@ def test_inventory_deletion_and_cache_symlink_fail_closed(tmp_path: Path) -> Non
     inventory = type("Inventory", (), {"paths": (source,)})()
     analyzer = SCIPAnalyzer(tmp_path, source_inventory=inventory)  # type: ignore[arg-type]
     source.unlink()
-    with pytest.raises(SCIPAnalyzerError, match="changed or escaped"):
+    with pytest.raises(SCIPAnalyzerError, match="missing path"):
         analyzer._source_manifest()
 
     source.write_text("value = 2\n", encoding="utf-8")
@@ -194,6 +194,92 @@ def test_inventory_deletion_and_cache_symlink_fail_closed(tmp_path: Path) -> Non
         pytest.raises(SCIPAnalyzerError, match="symlink"),
     ):
         cache_analyzer.ensure_index()
+
+
+def test_selected_inventory_is_explicit_but_index_manifest_covers_project_scope(
+    tmp_path: Path,
+) -> None:
+    selected = tmp_path / "selected.py"
+    selected.write_text("value = 1\n", encoding="utf-8")
+    broader = tmp_path / "outside_selection.py"
+    broader.write_text("value = 2\n", encoding="utf-8")
+    inventory = type("Inventory", (), {"paths": (selected,)})()
+    analyzer = SCIPAnalyzer(tmp_path, source_inventory=inventory)  # type: ignore[arg-type]
+
+    manifest = analyzer._source_manifest()
+    scope = analyzer.source_scope()
+
+    assert [record["path"] for record in manifest] == ["outside_selection.py", "selected.py"]
+    assert scope.index_scope == "project_root"
+    assert scope.selected_inventory_paths == ("selected.py",)
+    assert any("remains project-root-wide" in item for item in scope.limitations)
+    assert analyzer._inventory_configuration() is not None
+    assert analyzer._inventory_configuration()["paths"] == ["selected.py"]  # type: ignore[index]
+
+    before = {record["path"]: record["sha256"] for record in manifest}
+    broader.write_text("value = 3\n", encoding="utf-8")
+    after = {record["path"]: record["sha256"] for record in analyzer._source_manifest()}
+    assert before["outside_selection.py"] != after["outside_selection.py"]
+
+
+def test_source_hashing_rejects_file_replacement_during_read(tmp_path: Path) -> None:
+    source = tmp_path / "app.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    replacement = tmp_path / "replacement.py"
+    replacement.write_text("value = 1\n", encoding="utf-8")
+    analyzer = SCIPAnalyzer(tmp_path)
+    original_read = os.read
+    replaced = False
+
+    def replace_after_read(descriptor: int, size: int) -> bytes:
+        nonlocal replaced
+        content = original_read(descriptor, size)
+        if content and not replaced:
+            replacement.replace(source)
+            replaced = True
+        return content
+
+    with (
+        patch("os.read", side_effect=replace_after_read),
+        pytest.raises(SCIPAnalyzerError, match="replaced while hashing"),
+    ):
+        analyzer._read_source_snapshot(Path("app.py"))
+
+
+def test_source_hashing_rejects_symlink_swap_during_read(tmp_path: Path) -> None:
+    source = tmp_path / "app.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.py"
+    outside.write_text("value = 2\n", encoding="utf-8")
+    link = tmp_path / "replacement.py"
+    link.symlink_to(outside)
+    analyzer = SCIPAnalyzer(tmp_path)
+    original_read = os.read
+    replaced = False
+
+    def replace_after_read(descriptor: int, size: int) -> bytes:
+        nonlocal replaced
+        content = original_read(descriptor, size)
+        if content and not replaced:
+            link.replace(source)
+            replaced = True
+        return content
+
+    with (
+        patch("os.read", side_effect=replace_after_read),
+        pytest.raises(SCIPAnalyzerError, match="replaced while hashing"),
+    ):
+        analyzer._read_source_snapshot(Path("app.py"))
+
+
+def test_source_hashing_fails_closed_at_per_file_limit(tmp_path: Path) -> None:
+    source = tmp_path / "app.py"
+    source.write_text("12345", encoding="utf-8")
+    analyzer = SCIPAnalyzer(tmp_path)
+    analyzer.MAX_SOURCE_FILE_BYTES = 4
+    analyzer.MAX_SOURCE_READ_BYTES = 5
+    with pytest.raises(SCIPAnalyzerError, match="per-file byte cap"):
+        analyzer._read_source_snapshot(Path("app.py"))
 
 
 def test_source_change_during_index_build_is_rejected(tmp_path: Path) -> None:
@@ -333,9 +419,13 @@ def test_aliased_reference_resolves_to_innermost_nested_callable(tmp_path: Path)
         patch.object(analyzer, "_executable", return_value="scip-query"),
         patch.object(analyzer, "outline", return_value=(outer, nested)),
     ):
-        assert analyzer.reverse_call_edges(callee) == (
-            SCIPReverseCallEdge(nested, callee, SCIPOccurrence(Path("caller.py"), 4)),
-        )
+        edges = analyzer.reverse_call_edges(callee)
+    assert len(edges) == 1
+    assert edges[0].caller == nested
+    assert edges[0].callee == callee
+    assert edges[0].occurrence == SCIPOccurrence(Path("caller.py"), 4)
+    assert edges[0].execution_status == "reference_only"
+    assert edges[0].confidence == "LOW"
 
 
 def test_multiple_same_line_calls_remain_unresolved(tmp_path: Path) -> None:
