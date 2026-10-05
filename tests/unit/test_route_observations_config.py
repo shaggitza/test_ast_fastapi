@@ -11,6 +11,8 @@ def test_route_observations_are_disabled_by_default() -> None:
 
     assert config.analysis.route_observations.enabled is False
     assert config.analysis.route_observations.trusted_server_origins == {}
+    assert config.analysis.route_observations.max_files == 10_000
+    assert config.analysis.route_observations.max_file_bytes == 2_000_000
     assert "**/*.Dockerfile" in config.analysis.route_observations.deployment_include_patterns
 
 

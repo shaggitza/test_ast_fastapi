@@ -152,14 +152,14 @@ class RouteObservationConfig(BaseModel):
         description="Application-root-relative globs for deployment observation files.",
     )
     max_files: int = Field(
-        default=256,
+        default=10_000,
         strict=True,
         ge=1,
         le=10_000,
         description="Maximum number of files read across both observation categories.",
     )
     max_file_bytes: int = Field(
-        default=262_144,
+        default=2_000_000,
         strict=True,
         ge=1,
         le=16 * 1024 * 1024,

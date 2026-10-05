@@ -14,10 +14,13 @@ from __future__ import annotations
 import ast
 import gc
 import hashlib
+import io
 import json
 import os
+import stat
 import sys
 import tempfile
+import tokenize
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
@@ -514,7 +517,17 @@ class MypyAnalyzer:
     and extract precise file/line information for all references.
     """
 
-    CACHE_SCHEMA_VERSION = 21
+    CACHE_SCHEMA_VERSION = 23
+    MAX_CALL_SPAN_SOURCE_BYTES = 2_000_000
+    MAX_CALL_SPAN_SOURCE_NODES = 100_000
+    MAX_CALL_SPAN_SOURCE_ITEMS = 200_000
+    MAX_CALL_SPAN_SOURCE_DEPTH = 128
+    MAX_CALL_SPAN_MYPY_NODES = 200_000
+    MAX_CALL_SPAN_MYPY_ITEMS = 400_000
+    MAX_CALL_SPAN_MYPY_DEPTH = 256
+    MAX_LAMBDA_SOURCE_FILE_BYTES = 1_048_576
+    MAX_LAMBDA_SOURCE_SNAPSHOT_BYTES = 16_777_216
+    MAX_LAMBDA_SOURCE_AST_NODES = 100_000
     MAX_POINTS_TO_TARGETS = 8
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
@@ -583,11 +596,19 @@ class MypyAnalyzer:
         self._global_value_cache: dict[str, SymbolReference | None] = {}
         self._python_dependency_cache: dict[tuple[str, int, str], set[str]] = {}
         self._python_ast_cache: dict[str, ast.Module | None] = {}
-        self._python_call_span_cache: dict[
-            str, dict[tuple[int, int], list[tuple[int, int, int]]]
-        ] = {}
+        self._python_ast_nodes_cache: dict[str, list[ast.AST] | None] = {}
         self._python_verified_call_spans: dict[str, dict[int, tuple[int, int, int, int]]] = {}
+        self._python_call_span_abstained: set[str] = set()
+        self._call_source_snapshot_cache: dict[str, bytes | None] = {}
         self._source_bytes_cache: dict[str, tuple[bytes, ...] | None] = {}
+        self._source_record_snapshots: dict[str, bytes | None] = {}
+        self._source_record_snapshot_bytes = 0
+        self._last_source_records: list[tuple[Path, str, str]] = []
+        self._analysis_source_snapshots: dict[str, bytes | None] = {}
+        self._lambda_source_ast_cache: dict[str, ast.Module | None] = {}
+        self._lambda_source_index_cache: dict[
+            str, dict[tuple[str, int, int], tuple[ast.Lambda, ...]] | None
+        ] = {}
         self._resolved_call_site_cache: dict[int, ResolvedCallSite | None] = {}
         self._finite_global_value_cache: dict[str, _FinitePointsTo | None] = {}
         self._finite_global_in_progress: set[str] = set()
@@ -653,12 +674,51 @@ class MypyAnalyzer:
             parts.pop()
         return ".".join(parts)
 
+    def _read_discovered_source(self, path: Path) -> bytes | None:
+        """Read one in-root regular source file without following a symlink."""
+        try:
+            relative = path.relative_to(self.source_root)
+        except ValueError:
+            return None
+        if not relative.parts:
+            return None
+        current = self.source_root
+        try:
+            for part in relative.parts:
+                current = current / part
+                if current.is_symlink():
+                    return None
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(self.source_root)
+            descriptor = os.open(
+                path,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+            )
+        except (OSError, ValueError):
+            return None
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                return None
+            with os.fdopen(descriptor, "rb") as source:
+                descriptor = -1
+                return source.read()
+        except OSError:
+            return None
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
     def _source_records(self) -> list[tuple[Path, str, str]]:
         """Return canonical (path, module, digest) inputs from inventory or disk."""
+        self._source_record_snapshots.clear()
+        self._source_record_snapshot_bytes = 0
         inventory = self.source_inventory
         if inventory is not None:
             records = []
-            for record in inventory.files:
+            for record in sorted(
+                inventory.files,
+                key=lambda item: (item.relative_path, item.module, str(item.path)),
+            ):
                 path = Path(record.path).resolve()
                 expected = (Path(inventory.root) / record.relative_path).resolve()
                 if path != expected:
@@ -666,29 +726,51 @@ class MypyAnalyzer:
                         f"source inventory path mismatch for {record.relative_path}"
                     )
                 try:
-                    actual_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                    source_bytes = path.read_bytes()
+                    actual_digest = hashlib.sha256(source_bytes).hexdigest()
                 except OSError as exc:
                     raise MypyAnalyzerError(
                         f"source inventory file is unavailable: {record.relative_path}"
                     ) from exc
                 if actual_digest != record.sha256:
                     raise MypyAnalyzerError(f"source inventory is stale for {record.relative_path}")
+                self._retain_source_record_snapshot(path, source_bytes)
                 records.append((path, record.module, record.sha256))
-            return sorted(records, key=lambda record: (str(record[0]), record[1]))
+            self._last_source_records = sorted(
+                records, key=lambda record: (str(record[0]), record[1])
+            )
+            return self._last_source_records
         records = []
-        for path in self.source_root.rglob("*.py"):
+        for path in sorted(self.source_root.rglob("*.py"), key=str):
             if any(part.startswith((".", "__pycache__")) for part in path.parts):
+                continue
+            discovered_bytes = self._read_discovered_source(path)
+            if discovered_bytes is None:
                 continue
             try:
                 try:
                     module = self._module_name_from_path(path, self.module_root)
                 except ValueError:
                     module = self._module_name_from_path(path, self.source_root)
-                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                digest = hashlib.sha256(discovered_bytes).hexdigest()
             except (OSError, ValueError):
                 continue
-            records.append((path.resolve(), module, digest))
-        return sorted(records, key=lambda record: (str(record[0]), record[1]))
+            self._retain_source_record_snapshot(path, discovered_bytes)
+            records.append((path, module, digest))
+        self._last_source_records = sorted(records, key=lambda record: (str(record[0]), record[1]))
+        return self._last_source_records
+
+    def _retain_source_record_snapshot(self, path: Path, source_bytes: bytes) -> None:
+        """Keep a bounded pre-build source snapshot for later verified reuse."""
+        canonical = str(path.resolve())
+        if len(source_bytes) > self.MAX_LAMBDA_SOURCE_FILE_BYTES or (
+            self._source_record_snapshot_bytes + len(source_bytes)
+            > self.MAX_LAMBDA_SOURCE_SNAPSHOT_BYTES
+        ):
+            self._source_record_snapshots[canonical] = None
+            return
+        self._source_record_snapshots[canonical] = source_bytes
+        self._source_record_snapshot_bytes += len(source_bytes)
 
     def _ensure_mypy_built(self) -> None:
         """Ensure mypy has analyzed the project and we have the typed ASTs."""
@@ -705,7 +787,12 @@ class MypyAnalyzer:
 
         # Collect all Python files using a repository-independent import root.
         sources: list[BuildSource] = []
-        for py_file, module_name, _digest in self._source_records():
+        source_records = (
+            self._last_source_records
+            if self._expected_source_fingerprint is not None
+            else self._source_records()
+        )
+        for py_file, module_name, _digest in source_records:
             sources.append(BuildSource(path=str(py_file), module=module_name))
             self._module_to_path[module_name] = str(py_file)
 
@@ -728,6 +815,7 @@ class MypyAnalyzer:
         try:
             fscache = FileSystemCache()
             self._build_result = mypy_build(sources=sources, options=options, fscache=fscache)
+            analyzed_source_hashes: dict[str, str] = {}
 
             # Store the types map
             self._types_map = self._build_result.types
@@ -743,11 +831,35 @@ class MypyAnalyzer:
             for module_name, state in self._build_result.graph.items():
                 if state.path:
                     state_path = str(Path(state.path).resolve())
+                    source_hash = getattr(state, "source_hash", None)
+                    if isinstance(source_hash, str):
+                        analyzed_source_hashes[state_path] = source_hash
                     if inventory_paths is None or state_path in inventory_paths:
                         self._module_to_path[module_name] = state_path
                 tree = state.tree
                 if tree is not None:
                     self._trees[module_name] = tree
+
+            # State.source_hash is mypy's digest of the exact text it parsed.
+            # Reuse a bounded pre-build byte snapshot only when that digest
+            # matches, so a concurrent disk edit causes abstention.
+            self._analysis_source_snapshots = {}
+            self._lambda_source_ast_cache.clear()
+            self._lambda_source_index_cache.clear()
+            retained_bytes = 0
+            for py_file, _module_name, _digest in source_records:
+                canonical = str(py_file.resolve())
+                snapshot = self._source_record_snapshots.get(canonical)
+                if (
+                    snapshot is None
+                    or analyzed_source_hashes.get(canonical) != hashlib.sha1(snapshot).hexdigest()
+                    or retained_bytes + len(snapshot) > self.MAX_LAMBDA_SOURCE_SNAPSHOT_BYTES
+                    or self._decode_analysis_source(snapshot) is None
+                ):
+                    self._analysis_source_snapshots[canonical] = None
+                    continue
+                self._analysis_source_snapshots[canonical] = snapshot
+                retained_bytes += len(snapshot)
 
             self._project_modules = set()
             modules_by_path: dict[str, list[str]] = {}
@@ -785,7 +897,12 @@ class MypyAnalyzer:
             return value
         raise MypyAnalyzerError(f"unsupported source inventory follow_imports policy: {value!r}")
 
-    def _reset_build_state(self, *, clear_endpoint_dependencies: bool = True) -> None:
+    def _reset_build_state(
+        self,
+        *,
+        clear_endpoint_dependencies: bool = True,
+        clear_source_records: bool = False,
+    ) -> None:
         """Discard one stale typed snapshot before an explicit bulk rebuild."""
         self._build_result = None
         self._trees.clear()
@@ -795,9 +912,18 @@ class MypyAnalyzer:
         self._global_value_cache.clear()
         self._python_dependency_cache.clear()
         self._python_ast_cache.clear()
-        self._python_call_span_cache.clear()
+        self._python_ast_nodes_cache.clear()
         self._python_verified_call_spans.clear()
+        self._python_call_span_abstained.clear()
+        self._call_source_snapshot_cache.clear()
         self._source_bytes_cache.clear()
+        if clear_source_records:
+            self._source_record_snapshots.clear()
+            self._source_record_snapshot_bytes = 0
+            self._last_source_records.clear()
+        self._analysis_source_snapshots.clear()
+        self._lambda_source_ast_cache.clear()
+        self._lambda_source_index_cache.clear()
         self._resolved_call_site_cache.clear()
         self._finite_global_value_cache.clear()
         self._finite_global_in_progress.clear()
@@ -813,7 +939,7 @@ class MypyAnalyzer:
 
     def release_typed_snapshot(self) -> None:
         """Release heavy mypy AST/type graphs while retaining materialized endpoint results."""
-        self._reset_build_state(clear_endpoint_dependencies=False)
+        self._reset_build_state(clear_endpoint_dependencies=False, clear_source_records=True)
         gc.collect()
 
     def _find_func_in_tree(
@@ -1027,36 +1153,78 @@ class MypyAnalyzer:
         lambda_line = int(getattr(lambda_node, "line", 0) or 0)
         if not isinstance(function_name, str) or function_line < 1 or lambda_line < 1:
             return None
-        try:
-            source = Path(file_path).read_text(encoding="utf-8")
-            module = ast.parse(source)
-        except (OSError, SyntaxError, UnicodeDecodeError):
+        canonical = str(Path(file_path).resolve())
+        if canonical not in self._lambda_source_ast_cache:
+            snapshot = self._analysis_source_snapshots.get(canonical)
+            if snapshot is None:
+                self._lambda_source_ast_cache[canonical] = None
+                return None
+            source = self._decode_analysis_source(snapshot)
+            if source is None:
+                self._lambda_source_ast_cache[canonical] = None
+                return None
+            try:
+                self._lambda_source_ast_cache[canonical] = ast.parse(source, filename=canonical)
+            except (SyntaxError, ValueError, RecursionError):
+                self._lambda_source_ast_cache[canonical] = None
+                return None
+        module = self._lambda_source_ast_cache[canonical]
+        if module is None:
             return None
-        definitions = [
-            item
-            for item in ast.walk(module)
-            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and item.name == function_name
-            and item.lineno == function_line
-        ]
-        if len(definitions) != 1:
+        index = self._lambda_source_index(canonical, module)
+        if index is None:
             return None
-        lambdas = [
-            item
-            for item in ast.walk(definitions[0])
-            if isinstance(item, ast.Lambda) and item.lineno == lambda_line
-        ]
+        lambdas = index.get((function_name, function_line, lambda_line), ())
         if len(lambdas) != 1:
             return None
         body = lambdas[0].body
         return SourceEvidenceSpan(
-            file_path=file_path,
+            file_path=canonical,
             start_line=body.lineno,
             start_column=body.col_offset,
             end_line=body.end_lineno or body.lineno,
             end_column=body.end_col_offset or body.col_offset,
             execution_state=execution_state,
         )
+
+    def _lambda_source_index(
+        self, canonical: str, module: ast.Module
+    ) -> dict[tuple[str, int, int], tuple[ast.Lambda, ...]] | None:
+        """Index lambda candidates by enclosing function and source line once per file."""
+        if canonical in self._lambda_source_index_cache:
+            return self._lambda_source_index_cache[canonical]
+        from collections import defaultdict
+
+        candidates: dict[tuple[str, int, int], list[ast.Lambda]] = defaultdict(list)
+        stack: list[tuple[ast.AST, tuple[tuple[str, int], ...]]] = [(module, ())]
+        visited = 0
+        while stack:
+            node, function_ancestors = stack.pop()
+            visited += 1
+            if visited > self.MAX_LAMBDA_SOURCE_AST_NODES:
+                self._lambda_source_index_cache[canonical] = None
+                return None
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                function_ancestors = (*function_ancestors, (node.name, node.lineno))
+            if isinstance(node, ast.Lambda):
+                for name, line in function_ancestors:
+                    candidates[(name, line, node.lineno)].append(node)
+            for child in reversed(list(ast.iter_child_nodes(node))):
+                stack.append((child, function_ancestors))
+        indexed = {key: tuple(values) for key, values in candidates.items()}
+        self._lambda_source_index_cache[canonical] = indexed
+        return indexed
+
+    @staticmethod
+    def _decode_analysis_source(source_bytes: bytes | None) -> str | None:
+        """Decode one captured source snapshot using Python's source encoding rules."""
+        if source_bytes is None:
+            return None
+        try:
+            encoding, _ = tokenize.detect_encoding(io.BytesIO(source_bytes).readline)
+            return source_bytes.decode(encoding)
+        except (SyntaxError, UnicodeDecodeError, LookupError):
+            return None
 
     def _resolve_fullname_to_file(self, fullname: str) -> tuple[str, str] | None:
         """Resolve one fullname with snapshot-local memoization."""
@@ -1719,23 +1887,24 @@ class MypyAnalyzer:
     ) -> tuple[int, int, int | None, int | None, str] | None:
         """Return a source AST span paired to this exact mypy call occurrence."""
         canonical = str(Path(current_file).resolve())
+        if canonical in self._python_call_span_abstained:
+            return None
         if canonical not in self._python_verified_call_spans:
             self._python_verified_call_spans[canonical] = self._match_python_and_mypy_calls(
                 canonical
             )
+        if canonical in self._python_call_span_abstained:
+            return None
         span = self._python_verified_call_spans[canonical].get(id(callee))
         if span is None:
             span = self._exact_coordinate_source_span(canonical, callee)
         if span is None:
             return None
+        source_snapshot = self._bounded_call_source_snapshot(canonical)
+        if source_snapshot is None:
+            return None
         line, column, end_line, end_column = span
-        if canonical not in self._source_bytes_cache:
-            try:
-                self._source_bytes_cache[canonical] = tuple(
-                    Path(canonical).read_bytes().splitlines(keepends=True)
-                )
-            except OSError:
-                self._source_bytes_cache[canonical] = None
+        self._source_bytes_cache[canonical] = tuple(source_snapshot.splitlines(keepends=True))
         lines = self._source_bytes_cache[canonical]
         spelling = ""
         if lines is not None and end_line is not None and end_line <= len(lines):
@@ -1757,6 +1926,27 @@ class MypyAnalyzer:
             return None
         return line, column, end_line, end_column, spelling
 
+    def _bounded_call_source_snapshot(self, canonical: str) -> bytes | None:
+        """Reuse frontend-matched bytes, or capture one bounded standalone snapshot."""
+        if canonical not in self._call_source_snapshot_cache:
+            if canonical in self._analysis_source_snapshots:
+                snapshot = self._analysis_source_snapshots[canonical]
+            else:
+                try:
+                    with Path(canonical).open("rb") as source_file:
+                        snapshot = source_file.read(self.MAX_CALL_SPAN_SOURCE_BYTES + 1)
+                except OSError:
+                    snapshot = None
+            self._call_source_snapshot_cache[canonical] = snapshot
+
+        snapshot = self._call_source_snapshot_cache[canonical]
+        if snapshot is not None and len(snapshot) > self.MAX_CALL_SPAN_SOURCE_BYTES:
+            self._python_call_span_abstained.add(canonical)
+            return None
+        if snapshot is None:
+            self._python_call_span_abstained.add(canonical)
+        return snapshot
+
     def _exact_coordinate_source_span(
         self,
         canonical: str,
@@ -1771,18 +1961,24 @@ class MypyAnalyzer:
             return None
         if line < 1 or column < 0 or end_line < line or end_column < 0:
             return None
+        source_snapshot = self._bounded_call_source_snapshot(canonical)
+        if source_snapshot is None:
+            return None
         if canonical not in self._python_ast_cache:
             try:
                 self._python_ast_cache[canonical] = ast.parse(
-                    Path(canonical).read_text(encoding="utf-8"), filename=canonical
+                    source_snapshot.decode("utf-8"), filename=canonical
                 )
-            except (OSError, SyntaxError, UnicodeError):
-                self._python_ast_cache[canonical] = None
+            except (OSError, SyntaxError, UnicodeError, RecursionError):
+                self._abstain_call_source_span(canonical)
         tree = self._python_ast_cache[canonical]
         if tree is None:
             return None
+        nodes = self._python_ast_nodes(canonical, tree)
+        if nodes is None:
+            return None
         try:
-            source_lines = Path(canonical).read_text(encoding="utf-8").splitlines()
+            source_lines = source_snapshot.decode("utf-8").splitlines()
 
             def forms(source_line: int, byte_column: int) -> set[int]:
                 raw = source_lines[source_line - 1].encode("utf-8")
@@ -1796,7 +1992,7 @@ class MypyAnalyzer:
 
             candidates = [
                 candidate.func
-                for candidate in ast.walk(tree)
+                for candidate in nodes
                 if isinstance(candidate, ast.Call)
                 and candidate.func.lineno == line
                 and candidate.func.end_lineno == end_line
@@ -1814,16 +2010,59 @@ class MypyAnalyzer:
             return None
         return function.lineno, function.col_offset, function.end_lineno, function.end_col_offset
 
+    def _python_ast_nodes(self, canonical: str, tree: ast.Module) -> list[ast.AST] | None:
+        """Return a bounded, cached source AST traversal, or cache abstention."""
+        if canonical in self._python_ast_nodes_cache:
+            return self._python_ast_nodes_cache[canonical]
+
+        nodes: list[ast.AST] = []
+        stack: list[tuple[ast.AST, int]] = [(tree, 0)]
+        item_count = 0
+        while stack:
+            node, depth = stack.pop()
+            if (
+                depth > self.MAX_CALL_SPAN_SOURCE_DEPTH
+                or len(nodes) >= self.MAX_CALL_SPAN_SOURCE_NODES
+            ):
+                self._python_ast_nodes_cache[canonical] = None
+                self._python_call_span_abstained.add(canonical)
+                return None
+            nodes.append(node)
+            for child in ast.iter_child_nodes(node):
+                item_count += 1
+                if item_count > self.MAX_CALL_SPAN_SOURCE_ITEMS:
+                    self._python_ast_nodes_cache[canonical] = None
+                    self._python_call_span_abstained.add(canonical)
+                    return None
+                stack.append((child, depth + 1))
+
+        self._python_ast_nodes_cache[canonical] = nodes
+        return nodes
+
+    def _abstain_call_source_span(self, canonical: str) -> None:
+        """Discard stale source-AST state when the current snapshot is unusable."""
+        self._python_ast_cache[canonical] = None
+        self._python_ast_nodes_cache[canonical] = None
+        self._python_verified_call_spans.pop(canonical, None)
+        self._python_call_span_abstained.add(canonical)
+
     def _match_python_and_mypy_calls(self, canonical: str) -> dict[int, tuple[int, int, int, int]]:
         """Pair calls only when both complete per-line source sequences agree."""
         from mypy.nodes import CallExpr, FuncDef, LambdaExpr, MemberExpr, NameExpr, Node
 
+        source_snapshot = self._bounded_call_source_snapshot(canonical)
+        if source_snapshot is None:
+            return {}
         try:
-            source = Path(canonical).read_text(encoding="utf-8")
+            source = source_snapshot.decode("utf-8")
             python_tree = ast.parse(source, filename=canonical)
-        except (OSError, SyntaxError, UnicodeError):
+        except (OSError, SyntaxError, UnicodeError, RecursionError):
+            self._abstain_call_source_span(canonical)
             return {}
         self._python_ast_cache[canonical] = python_tree
+        python_nodes = self._python_ast_nodes(canonical, python_tree)
+        if python_nodes is None:
+            return {}
         modules = self._modules_by_canonical_path.get(canonical, ())
         if len(modules) != 1:
             return {}
@@ -1833,6 +2072,9 @@ class MypyAnalyzer:
 
         calls: list[tuple[CallExpr, tuple[tuple[str, str, int], ...]]] = []
         seen_nodes: set[int] = set()
+        seen_containers: set[int] = set()
+        mypy_item_count = 0
+        traversal_exhausted = False
         ignored_edges = {
             "analyzed",
             "info",
@@ -1844,14 +2086,19 @@ class MypyAnalyzer:
             "unanalyzed_type",
         }
 
-        def visit_value(
-            value: Any,
-            scopes: tuple[tuple[str, str, int], ...] = (),
-        ) -> None:
+        stack: list[tuple[Any, tuple[tuple[str, str, int], ...], int]] = [(mypy_tree, (), 0)]
+        while stack:
+            value, scopes, depth = stack.pop()
+            if depth > self.MAX_CALL_SPAN_MYPY_DEPTH:
+                traversal_exhausted = True
+                break
             if isinstance(value, Node):
                 identity = id(value)
                 if identity in seen_nodes:
-                    return
+                    continue
+                if len(seen_nodes) >= self.MAX_CALL_SPAN_MYPY_NODES:
+                    traversal_exhausted = True
+                    break
                 seen_nodes.add(identity)
                 current_scopes = scopes
                 if isinstance(value, FuncDef):
@@ -1867,12 +2114,26 @@ class MypyAnalyzer:
                         child = getattr(value, name)
                     except Exception:
                         continue
-                    visit_value(child, current_scopes)
+                    if isinstance(child, (Node, list, tuple)):
+                        stack.append((child, current_scopes, depth + 1))
             elif isinstance(value, (list, tuple)):
+                identity = id(value)
+                if identity in seen_containers:
+                    continue
+                seen_containers.add(identity)
                 for item in value:
-                    visit_value(item, scopes)
+                    mypy_item_count += 1
+                    if mypy_item_count > self.MAX_CALL_SPAN_MYPY_ITEMS:
+                        traversal_exhausted = True
+                        break
+                    if isinstance(item, (Node, list, tuple)):
+                        stack.append((item, scopes, depth + 1))
+                if traversal_exhausted:
+                    break
 
-        visit_value(mypy_tree)
+        if traversal_exhausted:
+            self._python_call_span_abstained.add(canonical)
+            return {}
         mypy_by_scope_line: dict[tuple[int, tuple[tuple[str, str, int], ...]], list[CallExpr]] = {}
         for expression, scopes in calls:
             callee_line = getattr(expression.callee, "line", 0)
@@ -1880,7 +2141,7 @@ class MypyAnalyzer:
                 mypy_by_scope_line.setdefault((callee_line, scopes), []).append(expression)
 
         python_parents: dict[ast.AST, ast.AST] = {}
-        for parent in ast.walk(python_tree):
+        for parent in python_nodes:
             for child in ast.iter_child_nodes(parent):
                 python_parents[child] = parent
 
@@ -1898,7 +2159,7 @@ class MypyAnalyzer:
         python_by_scope_line: dict[
             tuple[int, tuple[tuple[str, str, int], ...]], list[ast.expr]
         ] = {}
-        for candidate in ast.walk(python_tree):
+        for candidate in python_nodes:
             if not isinstance(candidate, ast.Call):
                 continue
             function = candidate.func
@@ -1927,28 +2188,51 @@ class MypyAnalyzer:
 
         # Prefer independent exact coordinates when a supported mypy coordinate
         # scheme identifies one complete source AST function span.
+        coordinate_assignments: dict[int, set[tuple[int, int, int, int]]] = {}
         for (line, _scopes), source_calls in python_by_scope_line.items():
             typed_calls = mypy_by_scope_line.get((line, _scopes), [])
+            typed_by_coordinates: dict[tuple[int, int, int], list[CallExpr]] = {}
+            for call in typed_calls:
+                coordinates = (
+                    getattr(call.callee, "column", -1),
+                    getattr(call.callee, "end_line", -1),
+                    getattr(call.callee, "end_column", -1),
+                )
+                typed_by_coordinates.setdefault(coordinates, []).append(call)
             for source_call in source_calls:
                 if source_call.end_lineno is None or source_call.end_col_offset is None:
                     continue
-                candidates = [
-                    call
-                    for call in typed_calls
-                    if getattr(call.callee, "column", -1)
-                    in coordinate_forms(line, source_call.col_offset)
-                    and getattr(call.callee, "end_line", None) == source_call.end_lineno
-                    and getattr(call.callee, "end_column", -1)
-                    in coordinate_forms(source_call.end_lineno, source_call.end_col_offset)
-                ]
+                candidates: set[int] = set()
+                start_forms = coordinate_forms(line, source_call.col_offset)
+                end_forms = coordinate_forms(source_call.end_lineno, source_call.end_col_offset)
+                for start in start_forms:
+                    for end in end_forms:
+                        candidates.update(
+                            id(call)
+                            for call in typed_by_coordinates.get(
+                                (start, source_call.end_lineno, end), ()
+                            )
+                        )
                 if len(candidates) == 1:
-                    result[id(candidates[0].callee)] = (
-                        source_call.lineno,
-                        source_call.col_offset,
-                        source_call.end_lineno or line,
-                        source_call.end_col_offset or 0,
+                    typed_call_id = next(iter(candidates))
+                    coordinate_assignments.setdefault(typed_call_id, set()).add(
+                        (
+                            source_call.lineno,
+                            source_call.col_offset,
+                            source_call.end_lineno or line,
+                            source_call.end_col_offset or 0,
+                        )
                     )
 
+        calls_by_identity = {
+            id(call): call for typed_calls in mypy_by_scope_line.values() for call in typed_calls
+        }
+        for typed_call_id, spans in coordinate_assignments.items():
+            if len(spans) == 1:
+                span = next(iter(spans))
+                result[id(calls_by_identity[typed_call_id].callee)] = span
+
+        conflicting_calls: set[int] = set()
         for key, source_calls in python_by_scope_line.items():
             line, _scopes = key
             typed_calls = mypy_by_scope_line.get(key, [])
@@ -1983,12 +2267,19 @@ class MypyAnalyzer:
             for source_call, typed_call in zip(source_calls, typed_calls, strict=True):
                 assert source_call.end_lineno is not None
                 assert source_call.end_col_offset is not None
-                result[id(typed_call.callee)] = (
+                identity = id(typed_call.callee)
+                span = (
                     source_call.lineno,
                     source_call.col_offset,
                     source_call.end_lineno,
                     source_call.end_col_offset,
                 )
+                previous = result.get(identity)
+                if previous is not None and previous != span:
+                    result.pop(identity, None)
+                    conflicting_calls.add(identity)
+                elif identity not in conflicting_calls:
+                    result[identity] = span
         return result
 
     @staticmethod
@@ -3532,6 +3823,9 @@ class MypyAnalyzer:
     ) -> ResolvedCallSite | None:
         """Classify one mypy call expression without guessing symbol identity."""
         if string_environment or lexical_scope is not None:
+            # This same physical call can be reached under different endpoint
+            # actual-to-formal bindings; keep each trace's argument evidence
+            # separate instead of reusing the node-identity cache entry.
             site = self._resolved_call_site_uncached(
                 call,
                 current_file,
