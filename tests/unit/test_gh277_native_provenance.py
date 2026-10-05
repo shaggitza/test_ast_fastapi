@@ -40,9 +40,7 @@ def test_dependency_expressions_are_side_qualified_and_structurally_owned(
     assert evidence is not None
     assert evidence.side == SnapshotSide.BASELINE
     assert evidence.object_chain[0].dependency_expressions[0].scope == "app"
-    assert evidence.object_chain[0].dependency_expressions[0].callable_expressions == (
-        "app_dep",
-    )
+    assert evidence.object_chain[0].dependency_expressions[0].callable_expressions == ("app_dep",)
     assert evidence.object_chain[1].dependency_expressions[0].callable_expressions == (
         "router_dep",
     )

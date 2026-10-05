@@ -442,14 +442,10 @@ class NativeRouteProvenance(BaseModel):
         if any(side != self.side for side in evidence):
             raise ValueError("native route provenance cannot mix snapshot sides")
         dependency_evidence = [
-            dependency
-            for item in self.object_chain
-            for dependency in item.dependency_expressions
+            dependency for item in self.object_chain for dependency in item.dependency_expressions
         ]
         dependency_evidence.extend(
-            dependency
-            for item in self.assembly_chain
-            for dependency in item.dependency_expressions
+            dependency for item in self.assembly_chain for dependency in item.dependency_expressions
         )
         dependency_evidence.extend(self.registration.dependency_expressions)
         if any(dependency.side != self.side for dependency in dependency_evidence):

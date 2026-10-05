@@ -1559,7 +1559,9 @@ class SecureASTExtractor:
                         line=node.lineno,
                         source_span=_native_span(module.path, node),
                         dependency_expressions=_native_dependency_expressions(
-                            module.path, self.snapshot_side, constructor,
+                            module.path,
+                            self.snapshot_side,
+                            constructor,
                             _keyword_expr(value, "dependencies"),
                         ),
                     )
@@ -2240,7 +2242,9 @@ class SecureASTExtractor:
                         call_line,
                         source_span=_native_span(module.path, statement),
                         dependency_expressions=_native_dependency_expressions(
-                            module.path, self.snapshot_side, constructor,
+                            module.path,
+                            self.snapshot_side,
+                            constructor,
                             _keyword_expr(value, "dependencies"),
                         ),
                     )
@@ -4078,7 +4082,9 @@ class SecureASTExtractor:
                         operation=operation,
                         source_span=_native_span(module.path, call),
                         dependency_expressions=_native_dependency_expressions(
-                            module.path, self.snapshot_side, "route",
+                            module.path,
+                            self.snapshot_side,
+                            "route",
                             _keyword_expr(call, "dependencies"),
                         ),
                     )
@@ -4127,7 +4133,9 @@ class SecureASTExtractor:
                         operation=operation,
                         source_span=_native_span(module.path, call),
                         dependency_expressions=_native_dependency_expressions(
-                            module.path, self.snapshot_side, "route",
+                            module.path,
+                            self.snapshot_side,
+                            "route",
                             _keyword_expr(call, "dependencies"),
                         ),
                     )
@@ -4175,7 +4183,9 @@ class SecureASTExtractor:
                         "include_router",
                         _native_span(module.path, call),
                         _native_dependency_expressions(
-                            module.path, self.snapshot_side, "include",
+                            module.path,
+                            self.snapshot_side,
+                            "include",
                             _keyword_expr(call, "dependencies"),
                         ),
                     )
@@ -4207,7 +4217,9 @@ class SecureASTExtractor:
                     "mount",
                     _native_span(module.path, call),
                     _native_dependency_expressions(
-                        module.path, self.snapshot_side, "include",
+                        module.path,
+                        self.snapshot_side,
+                        "include",
                         _keyword_expr(call, "dependencies"),
                     ),
                 )
