@@ -24,6 +24,11 @@ from fastapi_endpoint_detector.analyzer.deployment_observations import (
 )
 from fastapi_endpoint_detector.analyzer.endpoint_registry import EndpointRegistry
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
+from fastapi_endpoint_detector.analyzer.project_observations import (
+    ProjectObservationSnapshot,
+    SourceObservationIssue,
+    scan_project_observations,
+)
 
 __all__ = [
     "ChangeMapper",
@@ -33,10 +38,13 @@ __all__ = [
     "EndpointRegistry",
     "EstablishedSurface",
     "MypyAnalyzer",
+    "ProjectObservationSnapshot",
+    "SourceObservationIssue",
     "established_surfaces",
     "extract_client_observations",
     "extract_dockerfile_observations",
     "extract_env_observations",
     "extract_subprocess_observations",
     "join_established_surfaces",
+    "scan_project_observations",
 ]
