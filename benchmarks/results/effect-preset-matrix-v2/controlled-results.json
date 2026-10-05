@@ -1,0 +1,698 @@
+{
+  "schema_version": 2,
+  "result_id": "effect-preset-controlled-results-v2",
+  "status": "completed",
+  "package_source_audit": {
+    "manifest_path": "benchmarks/results/effect-preset-matrix-v2/package-symbols.json",
+    "manifest_sha256": "sha256:2fd9d9c7b9878c8c23c5b81d2de68dde338dbb2e348f12007015421a7b7b87b5",
+    "release_artifacts": [
+      {
+        "distribution": "aiohttp",
+        "version": "3.11.11",
+        "artifact": "aiohttp-3.11.11-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+        "artifact_sha256": "sha256:249cc6912405917344192b9f9ea5cd5b139d49e0d2f5c7f70bdfaf6b4dbf3a2e",
+        "metadata_sha256": "sha256:3bfd44644295797288e1cf032e3bc73c62b757b7a252ea74efae67597d3e4c9d"
+      },
+      {
+        "distribution": "boto3",
+        "version": "1.35.92",
+        "artifact": "boto3-1.35.92-py3-none-any.whl",
+        "artifact_sha256": "sha256:786930d5f1cd13d03db59ff2abbb2b7ffc173fd66646d5d8bee07f316a5f16ca",
+        "metadata_sha256": "sha256:736311a60e8ddec3b05d139f6dda0f8be290821299b7b9029aba3790d7053d3c"
+      },
+      {
+        "distribution": "botocore",
+        "version": "1.35.92",
+        "artifact": "botocore-1.35.92-py3-none-any.whl",
+        "artifact_sha256": "sha256:f94ae1e056a675bd67c8af98a6858d06e3927d974d6c712ed6e27bb1d11bee1d",
+        "metadata_sha256": "sha256:ce24e69a318215777cdf361f5952b079ac38a38e97b3e8e15ee5e62853cb0179"
+      },
+      {
+        "distribution": "httpx",
+        "version": "0.28.1",
+        "artifact": "httpx-0.28.1-py3-none-any.whl",
+        "artifact_sha256": "sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad",
+        "metadata_sha256": "sha256:febb9b0f8f3e80d57c8199c304f35c4336e8581d1d18d7983c92766b82793b25"
+      },
+      {
+        "distribution": "motor",
+        "version": "3.6.0",
+        "artifact": "motor-3.6.0-py3-none-any.whl",
+        "artifact_sha256": "sha256:9f07ed96f1754963d4386944e1b52d403a5350c687edc60da487d66f98dbf894",
+        "metadata_sha256": "sha256:dce8b401625d673eed6b2c0c66d9d196a13de0649c0788da8b3e2a72edb2965d"
+      },
+      {
+        "distribution": "mypy-boto3-s3",
+        "version": "1.35.92",
+        "artifact": "mypy_boto3_s3-1.35.92-py3-none-any.whl",
+        "artifact_sha256": "sha256:ce302a635da78e1925d8ff4809184ba55618cd7e3707156bea405cde7fdcf67a",
+        "metadata_sha256": "sha256:bfed722c70de32e8451ec26799a8b413840e39fe57f8b479999b8823d2b6c884"
+      },
+      {
+        "distribution": "mypy-boto3-sqs",
+        "version": "1.35.91",
+        "artifact": "mypy_boto3_sqs-1.35.91-py3-none-any.whl",
+        "artifact_sha256": "sha256:346a87bc0a447bb4c005b04d3efa0008bfa0ddd498cadd97e0e53a58752f84e9",
+        "metadata_sha256": "sha256:1592eec6fb80ee450bf0c68a9867b4cb638d3d23ea0d841089e5918c60206609"
+      },
+      {
+        "distribution": "pymongo",
+        "version": "4.10.1",
+        "artifact": "pymongo-4.10.1-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+        "artifact_sha256": "sha256:cec237c305fcbeef75c0bcbe9d223d1e22a6e3ba1b53b2f0b79d3d29c742b45b",
+        "metadata_sha256": "sha256:8987a5ad4a49f4c30718e18b351deb204be66a238ebfc739c642836d946ac168"
+      },
+      {
+        "distribution": "python-stdlib",
+        "version": "3.11.16",
+        "artifact": "Python-3.11.16.tgz",
+        "artifact_sha256": "sha256:6c0bd76ab0ec7d94ed400b1497f01ac6c7751c8822615ee0855a3eb2d893ea76",
+        "metadata_sha256": null
+      },
+      {
+        "distribution": "redis",
+        "version": "5.2.1",
+        "artifact": "redis-5.2.1-py3-none-any.whl",
+        "artifact_sha256": "sha256:ee7e1056b9aea0f04c6c2ed59452947f34c4940ee025f5dd83e6a6418b6989e4",
+        "metadata_sha256": "sha256:04f889874b3113305e73dd752806406747db088e20178e8d06f61b315d1779ca"
+      },
+      {
+        "distribution": "requests",
+        "version": "2.32.3",
+        "artifact": "requests-2.32.3-py3-none-any.whl",
+        "artifact_sha256": "sha256:70761cfe03c773ceb22aa2f671b4757976145175cdfca038c02654d061d6dcc6",
+        "metadata_sha256": "sha256:658ee8454c1e2e76fb8c2127116f61156b3b22941b3559c00389dca70038581a"
+      }
+    ],
+    "versioned_contract_sets": [
+      {
+        "preset_id": "redis-py-effects",
+        "version": "1.0.0",
+        "revision": "1",
+        "preset_sha256": "sha256:a7b6dd01808d6f9275ed9aa99c67c577c04aa2ce30a5301d3ef957fe6695fcf8",
+        "preset_semantic_sha256": "sha256:ce681490563300ce01dec68cd42af26c5fe8e06c7d5d45ae652dfce73c531ca2",
+        "config_sha256": "sha256:733270f1a03860adc9cae1c70d081317353f918f994b8a7112e37aa22bdb3438"
+      },
+      {
+        "preset_id": "pymongo-effects",
+        "version": "1.0.0",
+        "revision": "1",
+        "preset_sha256": "sha256:df68200dc7df8e3176257815e1de2016bace4f9a049977fd31001d088f0f4d30",
+        "preset_semantic_sha256": "sha256:7e0f41e452ac61b7340f02215963e8aa765333988b67d441b7aece9dfa53191c",
+        "config_sha256": "sha256:40fc31d3da7d0b7f459923b7ef39cd62de26950039641d1ff5a21246fc524116"
+      },
+      {
+        "preset_id": "stdlib-filesystem-effects",
+        "version": "2.0.0",
+        "revision": "2",
+        "preset_sha256": "sha256:ece9515414a316b1fa6fec47e45699667e7d565b3c2537787dc91a203d0f88f3",
+        "preset_semantic_sha256": "sha256:5acc35da9d989ccafda0960090efefbbaa52ca5b70894882c24c4bf1355c2b96",
+        "config_sha256": "sha256:d168f95981e84b8e95dac49d0cc3072b51bbc18ec3a0c3a343f1ef02f9af0301"
+      },
+      {
+        "preset_id": "python-http-client-effects",
+        "version": "2.0.0",
+        "revision": "2",
+        "preset_sha256": "sha256:1999bca6c27a6b92cf448e21d56b213c8334273c1d92fe3da56ceba749cd9a7f",
+        "preset_semantic_sha256": "sha256:ab3d88b368db24f4c6c0879c8104105b09f23997997e63dd232856886bca6e2e",
+        "config_sha256": "sha256:2e09fa80796e9f4b3ad00e223d6d1c70c1b4b467e472291011708951596e3588"
+      },
+      {
+        "preset_id": "typed-s3-effects",
+        "version": "2.0.0",
+        "revision": "2",
+        "preset_sha256": "sha256:7c5cf82835f371e3ec8e3d422f3f5c4f324622c7bfeb928690cb11921749b871",
+        "preset_semantic_sha256": "sha256:99707cccf212f530bd2437a3cb154d5ebea775857cc7d65c777771f9771cc6c4",
+        "config_sha256": "sha256:62e9eaec796e3ffd042e69758c6893d417ee0889fdf83145d56f544ae952f64a"
+      }
+    ],
+    "artifact_directory_verified": true,
+    "artifact_directory_note": "The 11 exact artifacts were verified from /tmp/gh97-wheel-audit during the recorded run; bytes are not vendored. Verification is reproducible by verify_artifacts."
+  },
+  "controlled_evaluation": {
+    "case_id": "stdlib-pathlib-and-open-handles-v2",
+    "test_path": "tests/benchmarks/test_effect_preset_matrix.py",
+    "test_file_sha256": "sha256:eaddf8bf4fceb873e6d9efbb0a67bba83531b623c5979b3d2161a9e0ed2ac5a7",
+    "fixture_path": "benchmarks/results/effect-preset-matrix-v2/fixtures/pathlib_open_handles.py",
+    "fixture_sha256": "sha256:daf0971e1851bbcc8ad6437794ef9a6bc0c37ddbb2fc45f0efa7714cab833155",
+    "analyzer": "MypyAnalyzer plus audit_effect_contracts",
+    "analyzer_source_hashes": {
+      "src/fastapi_endpoint_detector/analyzer/mypy_analyzer.py": "sha256:2725b79f15a2d91bd95d3700b33696dff2c2888718ba78d57189cbd2a8af33be",
+      "src/fastapi_endpoint_detector/analyzer/effect_contract_auditor.py": "sha256:c6ecd7210e7c4fc054010c80e9df0961b1510fd9cb9599faa49a27e751258d57",
+      "src/fastapi_endpoint_detector/models/effect_contract.py": "sha256:392c7024633ea0d309447c1991f96d0f2293d52732371797538ca2f0637f92d8",
+      "src/fastapi_endpoint_detector/models/endpoint.py": "sha256:d5a01763444a26da525f3320d7adab34df281407073b80a5b1a755c737c1ffa7",
+      "src/fastapi_endpoint_detector/strict_data.py": "sha256:ba4b87f249f2e54a5ce4b507a3cbd4871d00ee03f6ea2fc44ca5e1a60236ea81",
+      "benchmarks/providers/effect_preset_matrix.py": "sha256:4ad88395afc0b8e61ab1d60563eb08d1b8d73819e649ad32124686a27b979a9e"
+    },
+    "resolver_version": "2.4.0",
+    "python_version": "3.11.16",
+    "package_runtime": {
+      "distribution": "python-stdlib",
+      "version": "3.11.16",
+      "artifact_sha256": "sha256:6c0bd76ab0ec7d94ed400b1497f01ac6c7751c8822615ee0855a3eb2d893ea76"
+    },
+    "source_tree_executed": false,
+    "external_client_imported_or_executed": false,
+    "fixture_contract_set": {
+      "selector": "filesystem-v1",
+      "preset_id": "stdlib-filesystem-effects",
+      "version": "2.0.0",
+      "revision": "2",
+      "preset_sha256": "sha256:ece9515414a316b1fa6fec47e45699667e7d565b3c2537787dc91a203d0f88f3",
+      "preset_semantic_sha256": "sha256:5acc35da9d989ccafda0960090efefbbaa52ca5b70894882c24c4bf1355c2b96",
+      "config_sha256": "sha256:d168f95981e84b8e95dac49d0cc3072b51bbc18ec3a0c3a343f1ef02f9af0301"
+    },
+    "observations": [
+      {
+        "id": "sha256:4cc84d94d5433e868cdda0e46359666a786ec56ddaa113d1dc8bc06891f75d60",
+        "file_path": "main.py",
+        "line": 11,
+        "column": 4,
+        "end_line": 11,
+        "end_column": 18,
+        "source_spelling": "path.read_text",
+        "resolver_status": "exact",
+        "audit_status": "matched",
+        "canonical_symbol": "pathlib.Path.read_text",
+        "invocation": "instance_method",
+        "resolver": "mypy",
+        "resolver_version": "2.4.0",
+        "receiver_candidates": [
+          "pathlib.Path"
+        ],
+        "reason_code": null,
+        "receiver_origin": {
+          "schema_version": 1,
+          "status": "unavailable",
+          "value_hashes": [],
+          "reason_code": "receiver_origin_unavailable"
+        },
+        "resource_identity": {
+          "schema_version": 1,
+          "status": "unavailable",
+          "value_hashes": [],
+          "reason_code": "receiver_origin_unavailable"
+        },
+        "contract_id": "pathlib-read-text",
+        "contract_hash": "sha256:225f733e6665b85aa9d9f2b143389b0080f8754df350101ec10ab107d0962d41",
+        "arguments": [
+          {
+            "source_index": 0,
+            "positional_index": null,
+            "keyword": "encoding",
+            "status": "exact",
+            "value_hashes": [
+              "sha256:5cf1fa8d836a5e82ead36fb0854a6a68a4b8f7542038a346357d2424ddb60f5e"
+            ],
+            "reason_code": null
+          }
+        ],
+        "control_class": "positive_or_neutral"
+      },
+      {
+        "id": "sha256:abb9e27751fc57ef0d76206da24ca713af8eb10c690eba0df62f20cf56cc2959",
+        "file_path": "main.py",
+        "line": 12,
+        "column": 4,
+        "end_line": 12,
+        "end_column": 19,
+        "source_spelling": "path.write_text",
+        "resolver_status": "exact",
+        "audit_status": "matched",
+        "canonical_symbol": "pathlib.Path.write_text",
+        "invocation": "instance_method",
+        "resolver": "mypy",
+        "resolver_version": "2.4.0",
+        "receiver_candidates": [
+          "pathlib.Path"
+        ],
+        "reason_code": null,
+        "receiver_origin": {
+          "schema_version": 1,
+          "status": "unavailable",
+          "value_hashes": [],
+          "reason_code": "receiver_origin_unavailable"
+        },
+        "resource_identity": {
+          "schema_version": 1,
+          "status": "unavailable",
+          "value_hashes": [],
+          "reason_code": "receiver_origin_unavailable"
+        },
+        "contract_id": "pathlib-write-text",
+        "contract_hash": "sha256:b70f1bc6375e9fed64cd5471485148ef0c095f8819ee0ece26caff9d614adbff",
+        "arguments": [
+          {
+            "source_index": 0,
+            "positional_index": 0,
+            "keyword": null,
+            "status": "exact",
+            "value_hashes": [
+              "sha256:96879611650f80a81392a52e0db9b0237669087c4518e1c130e541a505e0eeef"
+            ],
+            "reason_code": null
+          },
+          {
+            "source_index": 1,
+            "positional_index": null,
+            "keyword": "encoding",
+            "status": "exact",
+            "value_hashes": [
+              "sha256:5cf1fa8d836a5e82ead36fb0854a6a68a4b8f7542038a346357d2424ddb60f5e"
+            ],
+            "reason_code": null
+          }
+        ],
+        "control_class": "positive_or_neutral"
+      },
+      {
+        "id": "sha256:6822d1b02fd780b75879654c877144d8767994e72f3ea31be2454b485a53e398",
+        "file_path": "main.py",
+        "line": 13,
+        "column": 13,
+        "end_line": 13,
+        "end_column": 22,
+        "source_spelling": "path.open",
+        "resolver_status": "exact",
+        "audit_status": "unmatched",
+        "canonical_symbol": "pathlib.Path.open",
+        "invocation": "instance_method",
+        "resolver": "mypy",
+        "resolver_version": "2.4.0",
+        "receiver_candidates": [
+          "pathlib.Path"
+        ],
+        "reason_code": null,
+        "receiver_origin": {
+          "schema_version": 1,
+          "status": "unavailable",
+          "value_hashes": [],
+          "reason_code": "receiver_origin_unavailable"
+        },
+        "resource_identity": null,
+        "contract_id": null,
+        "contract_hash": null,
+        "arguments": [
+          {
+            "source_index": 0,
+            "positional_index": 0,
+            "keyword": null,
+            "status": "exact",
+            "value_hashes": [
+              "sha256:454349e422f05297191ead13e21d3db520e5abef52055e4964b82fb213f593a1"
+            ],
+            "reason_code": null
+          },
+          {
+            "source_index": 1,
+            "positional_index": null,
+            "keyword": "encoding",
+            "status": "exact",
+            "value_hashes": [
+              "sha256:5cf1fa8d836a5e82ead36fb0854a6a68a4b8f7542038a346357d2424ddb60f5e"
+            ],
+            "reason_code": null
+          }
+        ],
+        "control_class": "unmatched_open_constructor"
+      },
+      {
+        "id": "sha256:9c0e23178a14499aa609163764a8817711b49964e4fae83fc654fa2d4a4250fc",
+        "file_path": "main.py",
+        "line": 14,
+        "column": 4,
+        "end_line": 14,
+        "end_column": 15,
+        "source_spelling": "opened.read",
+        "resolver_status": "exact",
+        "audit_status": "matched",
+        "canonical_symbol": "_io._TextIOBase.read",
+        "invocation": "instance_method",
+        "resolver": "mypy",
+        "resolver_version": "2.4.0",
+        "receiver_candidates": [
+          "_io.TextIOWrapper"
+        ],
+        "reason_code": null,
+        "receiver_origin": {
+          "schema_version": 1,
+          "status": "unavailable",
+          "value_hashes": [],
+          "reason_code": "receiver_origin_unsupported"
+        },
+        "resource_identity": {
+          "schema_version": 1,
+          "status": "unavailable",
+          "value_hashes": [],
+          "reason_code": "receiver_origin_unsupported"
+        },
+        "contract_id": "io-text-read",
+        "contract_hash": "sha256:cdf565617ddb3793ab097375bfa675b2444287e518a1ba0e06b9431004de9c70",
+        "arguments": [],
+        "control_class": "positive_or_neutral"
+      },
+      {
+        "id": "sha256:8d6427c0bc1c31e275ab8c73e17a53c8365be2cd06d23670b3805839221672fc",
+        "file_path": "main.py",
+        "line": 15,
+        "column": 13,
+        "end_line": 15,
+        "end_column": 17,
+        "source_spelling": "open",
+        "resolver_status": "exact",
+        "audit_status": "unmatched",
+        "canonical_symbol": "builtins.open",
+        "invocation": "function",
+        "resolver": "mypy",
+        "resolver_version": "2.4.0",
+        "receiver_candidates": [],
+        "reason_code": null,
+        "receiver_origin": null,
+        "resource_identity": null,
+        "contract_id": null,
+        "contract_hash": null,
+        "arguments": [
+          {
+            "source_index": 0,
+            "positional_index": 0,
+            "keyword": null,
+            "status": "exact",
+            "value_hashes": [
+              "sha256:8753fcfdb2eea78a6429d76c6b3ba8d2cba223110090f56040d01efef98882a6"
+            ],
+            "reason_code": null
+          },
+          {
+            "source_index": 1,
+            "positional_index": 1,
+            "keyword": null,
+            "status": "exact",
+            "value_hashes": [
+              "sha256:454349e422f05297191ead13e21d3db520e5abef52055e4964b82fb213f593a1"
+            ],
+            "reason_code": null
+          },
+          {
+            "source_index": 2,
+            "positional_index": null,
+            "keyword": "encoding",
+            "status": "exact",
+            "value_hashes": [
+              "sha256:5cf1fa8d836a5e82ead36fb0854a6a68a4b8f7542038a346357d2424ddb60f5e"
+            ],
+            "reason_code": null
+          }
+        ],
+        "control_class": "unmatched_open_constructor"
+      },
+      {
+        "id": "sha256:ee5b86a0d173c895b41a2efae829eeec357e89d2d12d61f859eb7b727b0bc0df",
+        "file_path": "main.py",
+        "line": 16,
+        "column": 4,
+        "end_line": 16,
+        "end_column": 15,
+        "source_spelling": "handle.read",
+        "resolver_status": "exact",
+        "audit_status": "matched",
+        "canonical_symbol": "_io._TextIOBase.read",
+        "invocation": "instance_method",
+        "resolver": "mypy",
+        "resolver_version": "2.4.0",
+        "receiver_candidates": [
+          "_io.TextIOWrapper"
+        ],
+        "reason_code": null,
+        "receiver_origin": {
+          "schema_version": 1,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:8753fcfdb2eea78a6429d76c6b3ba8d2cba223110090f56040d01efef98882a6"
+          ],
+          "reason_code": null
+        },
+        "resource_identity": {
+          "schema_version": 1,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:8753fcfdb2eea78a6429d76c6b3ba8d2cba223110090f56040d01efef98882a6"
+          ],
+          "reason_code": null
+        },
+        "contract_id": "io-text-read",
+        "contract_hash": "sha256:cdf565617ddb3793ab097375bfa675b2444287e518a1ba0e06b9431004de9c70",
+        "arguments": [],
+        "control_class": "positive_or_neutral"
+      },
+      {
+        "id": "sha256:bfd0b342ff7cada36cb941a1df17e02e929febde358ea21d26e495353a5a5780",
+        "file_path": "main.py",
+        "line": 17,
+        "column": 4,
+        "end_line": 17,
+        "end_column": 21,
+        "source_spelling": "foreign.read_text",
+        "resolver_status": "exact",
+        "audit_status": "unmatched",
+        "canonical_symbol": "main.Foreign.read_text",
+        "invocation": "instance_method",
+        "resolver": "mypy",
+        "resolver_version": "2.4.0",
+        "receiver_candidates": [
+          "main.Foreign"
+        ],
+        "reason_code": null,
+        "receiver_origin": {
+          "schema_version": 1,
+          "status": "unavailable",
+          "value_hashes": [],
+          "reason_code": "receiver_origin_unavailable"
+        },
+        "resource_identity": null,
+        "contract_id": null,
+        "contract_hash": null,
+        "arguments": [],
+        "control_class": "unrelated_same_name_negative"
+      },
+      {
+        "id": "sha256:b7c65e0ba349d12384554121b61dce1e39035dee84567b5855cc85d98f80341c",
+        "file_path": "main.py",
+        "line": 18,
+        "column": 4,
+        "end_line": 18,
+        "end_column": 15,
+        "source_spelling": "foreign.get",
+        "resolver_status": "exact",
+        "audit_status": "unmatched",
+        "canonical_symbol": "main.Foreign.get",
+        "invocation": "instance_method",
+        "resolver": "mypy",
+        "resolver_version": "2.4.0",
+        "receiver_candidates": [
+          "main.Foreign"
+        ],
+        "reason_code": null,
+        "receiver_origin": {
+          "schema_version": 1,
+          "status": "unavailable",
+          "value_hashes": [],
+          "reason_code": "receiver_origin_unavailable"
+        },
+        "resource_identity": null,
+        "contract_id": null,
+        "contract_hash": null,
+        "arguments": [
+          {
+            "source_index": 0,
+            "positional_index": 0,
+            "keyword": null,
+            "status": "exact",
+            "value_hashes": [
+              "sha256:838e8d111acb467ca21bafbe37ad970e1e444fb46108b5f536396305d8b42c43"
+            ],
+            "reason_code": null
+          }
+        ],
+        "control_class": "unrelated_same_name_negative"
+      },
+      {
+        "id": "sha256:d1c96a6688209d4e984166bca6b2b786e1a3207f84695525a29d210af368f736",
+        "file_path": "main.py",
+        "line": 19,
+        "column": 4,
+        "end_line": 19,
+        "end_column": 15,
+        "source_spelling": "foreign.set",
+        "resolver_status": "exact",
+        "audit_status": "unmatched",
+        "canonical_symbol": "main.Foreign.set",
+        "invocation": "instance_method",
+        "resolver": "mypy",
+        "resolver_version": "2.4.0",
+        "receiver_candidates": [
+          "main.Foreign"
+        ],
+        "reason_code": null,
+        "receiver_origin": {
+          "schema_version": 1,
+          "status": "unavailable",
+          "value_hashes": [],
+          "reason_code": "receiver_origin_unavailable"
+        },
+        "resource_identity": null,
+        "contract_id": null,
+        "contract_hash": null,
+        "arguments": [
+          {
+            "source_index": 0,
+            "positional_index": 0,
+            "keyword": null,
+            "status": "exact",
+            "value_hashes": [
+              "sha256:838e8d111acb467ca21bafbe37ad970e1e444fb46108b5f536396305d8b42c43"
+            ],
+            "reason_code": null
+          },
+          {
+            "source_index": 1,
+            "positional_index": 1,
+            "keyword": null,
+            "status": "exact",
+            "value_hashes": [
+              "sha256:96879611650f80a81392a52e0db9b0237669087c4518e1c130e541a505e0eeef"
+            ],
+            "reason_code": null
+          }
+        ],
+        "control_class": "unrelated_same_name_negative"
+      },
+      {
+        "id": "sha256:581764650dbdca274921c1ce54dbbfd2ac31736991923712b74d8a49ccbd17c7",
+        "file_path": "main.py",
+        "line": 20,
+        "column": 4,
+        "end_line": 20,
+        "end_column": 17,
+        "source_spelling": "foreign.write",
+        "resolver_status": "exact",
+        "audit_status": "unmatched",
+        "canonical_symbol": "main.Foreign.write",
+        "invocation": "instance_method",
+        "resolver": "mypy",
+        "resolver_version": "2.4.0",
+        "receiver_candidates": [
+          "main.Foreign"
+        ],
+        "reason_code": null,
+        "receiver_origin": {
+          "schema_version": 1,
+          "status": "unavailable",
+          "value_hashes": [],
+          "reason_code": "receiver_origin_unavailable"
+        },
+        "resource_identity": null,
+        "contract_id": null,
+        "contract_hash": null,
+        "arguments": [
+          {
+            "source_index": 0,
+            "positional_index": 0,
+            "keyword": null,
+            "status": "exact",
+            "value_hashes": [
+              "sha256:96879611650f80a81392a52e0db9b0237669087c4518e1c130e541a505e0eeef"
+            ],
+            "reason_code": null
+          }
+        ],
+        "control_class": "unrelated_same_name_negative"
+      },
+      {
+        "id": "sha256:53dc222d57344939e6f8e0725f06a3b6aba8b9e8e9776946ba445cb0fdf70935",
+        "file_path": "main.py",
+        "line": 21,
+        "column": 4,
+        "end_line": 21,
+        "end_column": 16,
+        "source_spelling": "foreign.send",
+        "resolver_status": "exact",
+        "audit_status": "unmatched",
+        "canonical_symbol": "main.Foreign.send",
+        "invocation": "instance_method",
+        "resolver": "mypy",
+        "resolver_version": "2.4.0",
+        "receiver_candidates": [
+          "main.Foreign"
+        ],
+        "reason_code": null,
+        "receiver_origin": {
+          "schema_version": 1,
+          "status": "unavailable",
+          "value_hashes": [],
+          "reason_code": "receiver_origin_unavailable"
+        },
+        "resource_identity": null,
+        "contract_id": null,
+        "contract_hash": null,
+        "arguments": [
+          {
+            "source_index": 0,
+            "positional_index": 0,
+            "keyword": null,
+            "status": "exact",
+            "value_hashes": [
+              "sha256:862417b9e7c3720bcb3263cd873b09892d787823b6f9a0f453e42824c5a4d4b6"
+            ],
+            "reason_code": null
+          },
+          {
+            "source_index": 1,
+            "positional_index": 1,
+            "keyword": null,
+            "status": "exact",
+            "value_hashes": [
+              "sha256:239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5"
+            ],
+            "reason_code": null
+          }
+        ],
+        "control_class": "unrelated_same_name_negative"
+      }
+    ],
+    "observed": {
+      "physical_calls": 11,
+      "matched_calls": 4,
+      "unmatched_calls": 7,
+      "ambiguous_calls": 0,
+      "unresolved_calls": 0,
+      "matched_exact_symbols": [
+        "_io._TextIOBase.read",
+        "pathlib.Path.read_text",
+        "pathlib.Path.write_text"
+      ],
+      "unrelated_same_name_negative_calls": 5,
+      "unmatched_open_calls": 2,
+      "write_text_argument_binding": {
+        "positional_0": "exact",
+        "keyword_encoding": "exact"
+      },
+      "receiver_origin": {
+        "pathlib.Path.open.read": "unavailable:receiver_origin_unsupported",
+        "builtins.open.read": "exact"
+      }
+    },
+    "analysis_policy": "static analyzer replay only; fixture source never executed"
+  },
+  "environment": {
+    "python": "3.11.16",
+    "platform": "Linux-6.17.2-1-pve-x86_64-with-glibc2.39",
+    "mypy": "2.4.0",
+    "ruff": "0.16.10",
+    "execution_policy": "static analyzer replay only; fixture source never executed"
+  },
+  "real_world_evaluation": {
+    "status": "not_evaluated",
+    "frozen_source_diffs": 0,
+    "canonical_truth_claims": 0
+  }
+}

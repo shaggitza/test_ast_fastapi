@@ -1,0 +1,1223 @@
+{
+  "schema_version": 1,
+  "report_id": "effect-preset-source-signature-observations-v1",
+  "status": "partial",
+  "manifest_sha256": "sha256:2fd9d9c7b9878c8c23c5b81d2de68dde338dbb2e348f12007015421a7b7b87b5",
+  "release_artifacts": [
+    {
+      "distribution": "aiohttp",
+      "version": "3.11.11",
+      "artifact": "aiohttp-3.11.11-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "artifact_sha256": "sha256:249cc6912405917344192b9f9ea5cd5b139d49e0d2f5c7f70bdfaf6b4dbf3a2e"
+    },
+    {
+      "distribution": "boto3",
+      "version": "1.35.92",
+      "artifact": "boto3-1.35.92-py3-none-any.whl",
+      "artifact_sha256": "sha256:786930d5f1cd13d03db59ff2abbb2b7ffc173fd66646d5d8bee07f316a5f16ca"
+    },
+    {
+      "distribution": "botocore",
+      "version": "1.35.92",
+      "artifact": "botocore-1.35.92-py3-none-any.whl",
+      "artifact_sha256": "sha256:f94ae1e056a675bd67c8af98a6858d06e3927d974d6c712ed6e27bb1d11bee1d"
+    },
+    {
+      "distribution": "httpx",
+      "version": "0.28.1",
+      "artifact": "httpx-0.28.1-py3-none-any.whl",
+      "artifact_sha256": "sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad"
+    },
+    {
+      "distribution": "motor",
+      "version": "3.6.0",
+      "artifact": "motor-3.6.0-py3-none-any.whl",
+      "artifact_sha256": "sha256:9f07ed96f1754963d4386944e1b52d403a5350c687edc60da487d66f98dbf894"
+    },
+    {
+      "distribution": "mypy-boto3-s3",
+      "version": "1.35.92",
+      "artifact": "mypy_boto3_s3-1.35.92-py3-none-any.whl",
+      "artifact_sha256": "sha256:ce302a635da78e1925d8ff4809184ba55618cd7e3707156bea405cde7fdcf67a"
+    },
+    {
+      "distribution": "mypy-boto3-sqs",
+      "version": "1.35.91",
+      "artifact": "mypy_boto3_sqs-1.35.91-py3-none-any.whl",
+      "artifact_sha256": "sha256:346a87bc0a447bb4c005b04d3efa0008bfa0ddd498cadd97e0e53a58752f84e9"
+    },
+    {
+      "distribution": "pymongo",
+      "version": "4.10.1",
+      "artifact": "pymongo-4.10.1-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "artifact_sha256": "sha256:cec237c305fcbeef75c0bcbe9d223d1e22a6e3ba1b53b2f0b79d3d29c742b45b"
+    },
+    {
+      "distribution": "python-stdlib",
+      "version": "3.11.16",
+      "artifact": "Python-3.11.16.tgz",
+      "artifact_sha256": "sha256:6c0bd76ab0ec7d94ed400b1497f01ac6c7751c8822615ee0855a3eb2d893ea76"
+    },
+    {
+      "distribution": "redis",
+      "version": "5.2.1",
+      "artifact": "redis-5.2.1-py3-none-any.whl",
+      "artifact_sha256": "sha256:ee7e1056b9aea0f04c6c2ed59452947f34c4940ee025f5dd83e6a6418b6989e4"
+    },
+    {
+      "distribution": "requests",
+      "version": "2.32.3",
+      "artifact": "requests-2.32.3-py3-none-any.whl",
+      "artifact_sha256": "sha256:70761cfe03c773ceb22aa2f671b4757976145175cdfca038c02654d061d6dcc6"
+    }
+  ],
+  "artifact_directory_verified": true,
+  "source_execution": false,
+  "counts": {
+    "verified_callable_signatures": 52,
+    "partial_declarations": 10
+  },
+  "verified_callable_signatures": [
+    {
+      "distribution": "aiohttp",
+      "version": "3.11.11",
+      "symbol": "aiohttp.client.ClientSession.get",
+      "source_path": "aiohttp/client.py",
+      "source_sha256": "sha256:10f68efd8e15a5374801b70e7ccc011abcd27c151c61a9a963064ddc63b6566e",
+      "signature": "(self, url: StrOrURL, *, allow_redirects: bool=True, **kwargs: Any)",
+      "selector_source_path": "aiohttp/client.py",
+      "selector_source_sha256": "sha256:10f68efd8e15a5374801b70e7ccc011abcd27c151c61a9a963064ddc63b6566e",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "url",
+        "allow_redirects"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "aiohttp",
+      "version": "3.11.11",
+      "symbol": "aiohttp.client.ClientSession.post",
+      "source_path": "aiohttp/client.py",
+      "source_sha256": "sha256:10f68efd8e15a5374801b70e7ccc011abcd27c151c61a9a963064ddc63b6566e",
+      "signature": "(self, url: StrOrURL, *, data: Any=None, **kwargs: Any)",
+      "selector_source_path": "aiohttp/client.py",
+      "selector_source_sha256": "sha256:10f68efd8e15a5374801b70e7ccc011abcd27c151c61a9a963064ddc63b6566e",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "url",
+        "data"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "aiohttp",
+      "version": "3.11.11",
+      "symbol": "aiohttp.client.ClientSession.put",
+      "source_path": "aiohttp/client.py",
+      "source_sha256": "sha256:10f68efd8e15a5374801b70e7ccc011abcd27c151c61a9a963064ddc63b6566e",
+      "signature": "(self, url: StrOrURL, *, data: Any=None, **kwargs: Any)",
+      "selector_source_path": "aiohttp/client.py",
+      "selector_source_sha256": "sha256:10f68efd8e15a5374801b70e7ccc011abcd27c151c61a9a963064ddc63b6566e",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "url",
+        "data"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "aiohttp",
+      "version": "3.11.11",
+      "symbol": "aiohttp.client.ClientSession.patch",
+      "source_path": "aiohttp/client.py",
+      "source_sha256": "sha256:10f68efd8e15a5374801b70e7ccc011abcd27c151c61a9a963064ddc63b6566e",
+      "signature": "(self, url: StrOrURL, *, data: Any=None, **kwargs: Any)",
+      "selector_source_path": "aiohttp/client.py",
+      "selector_source_sha256": "sha256:10f68efd8e15a5374801b70e7ccc011abcd27c151c61a9a963064ddc63b6566e",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "url",
+        "data"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "aiohttp",
+      "version": "3.11.11",
+      "symbol": "aiohttp.client.ClientSession.delete",
+      "source_path": "aiohttp/client.py",
+      "source_sha256": "sha256:10f68efd8e15a5374801b70e7ccc011abcd27c151c61a9a963064ddc63b6566e",
+      "signature": "(self, url: StrOrURL, **kwargs: Any)",
+      "selector_source_path": "aiohttp/client.py",
+      "selector_source_sha256": "sha256:10f68efd8e15a5374801b70e7ccc011abcd27c151c61a9a963064ddc63b6566e",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "url"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "aiohttp",
+      "version": "3.11.11",
+      "symbol": "aiohttp.client.ClientSession.head",
+      "source_path": "aiohttp/client.py",
+      "source_sha256": "sha256:10f68efd8e15a5374801b70e7ccc011abcd27c151c61a9a963064ddc63b6566e",
+      "signature": "(self, url: StrOrURL, *, allow_redirects: bool=False, **kwargs: Any)",
+      "selector_source_path": "aiohttp/client.py",
+      "selector_source_sha256": "sha256:10f68efd8e15a5374801b70e7ccc011abcd27c151c61a9a963064ddc63b6566e",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "url",
+        "allow_redirects"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "aiohttp",
+      "version": "3.11.11",
+      "symbol": "aiohttp.client.ClientSession.options",
+      "source_path": "aiohttp/client.py",
+      "source_sha256": "sha256:10f68efd8e15a5374801b70e7ccc011abcd27c151c61a9a963064ddc63b6566e",
+      "signature": "(self, url: StrOrURL, *, allow_redirects: bool=True, **kwargs: Any)",
+      "selector_source_path": "aiohttp/client.py",
+      "selector_source_sha256": "sha256:10f68efd8e15a5374801b70e7ccc011abcd27c151c61a9a963064ddc63b6566e",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "url",
+        "allow_redirects"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "aiohttp",
+      "version": "3.11.11",
+      "symbol": "aiohttp.client.ClientSession.request",
+      "source_path": "aiohttp/client.py",
+      "source_sha256": "sha256:10f68efd8e15a5374801b70e7ccc011abcd27c151c61a9a963064ddc63b6566e",
+      "signature": "(self, method: str, url: StrOrURL, **kwargs: Any)",
+      "selector_source_path": "aiohttp/client.py",
+      "selector_source_sha256": "sha256:10f68efd8e15a5374801b70e7ccc011abcd27c151c61a9a963064ddc63b6566e",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "method",
+        "url"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "boto3",
+      "version": "1.35.92",
+      "symbol": "boto3.session.Session.client",
+      "source_path": "boto3/session.py",
+      "source_sha256": "sha256:41c45a3d533051bf3f5ff1785c5e2bc45f304c73a03fa666148a8da97543f483",
+      "signature": "(self, service_name, region_name=None, api_version=None, use_ssl=True, verify=None, endpoint_url=None, aws_access_key_id=None, aws_secret_access_key=None, aws_session_token=None, config=None)",
+      "selector_source_path": "boto3/session.py",
+      "selector_source_sha256": "sha256:41c45a3d533051bf3f5ff1785c5e2bc45f304c73a03fa666148a8da97543f483",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "service_name",
+        "region_name",
+        "api_version",
+        "use_ssl",
+        "verify",
+        "endpoint_url",
+        "aws_access_key_id",
+        "aws_secret_access_key",
+        "aws_session_token",
+        "config"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "botocore",
+      "version": "1.35.92",
+      "symbol": "botocore.client.BaseClient._make_api_call",
+      "source_path": "botocore/client.py",
+      "source_sha256": "sha256:e224e5accdba0e16813282bcb9e1dc943b57f0f4d8748cc0371d2cac4fdc924c",
+      "signature": "(self, operation_name, api_params)",
+      "selector_source_path": "botocore/client.py",
+      "selector_source_sha256": "sha256:e224e5accdba0e16813282bcb9e1dc943b57f0f4d8748cc0371d2cac4fdc924c",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "operation_name",
+        "api_params"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "httpx",
+      "version": "0.28.1",
+      "symbol": "httpx._client.Client.get",
+      "source_path": "httpx/_client.py",
+      "source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "signature": "(self, url: URL | str, *, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault | None=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+      "selector_source_path": "httpx/_client.py",
+      "selector_source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "url",
+        "params",
+        "headers",
+        "cookies",
+        "auth",
+        "follow_redirects",
+        "timeout",
+        "extensions"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "httpx",
+      "version": "0.28.1",
+      "symbol": "httpx._client.Client.post",
+      "source_path": "httpx/_client.py",
+      "source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "signature": "(self, url: URL | str, *, content: RequestContent | None=None, data: RequestData | None=None, files: RequestFiles | None=None, json: typing.Any | None=None, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+      "selector_source_path": "httpx/_client.py",
+      "selector_source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "url",
+        "content",
+        "data",
+        "files",
+        "json",
+        "params",
+        "headers",
+        "cookies",
+        "auth",
+        "follow_redirects",
+        "timeout",
+        "extensions"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "httpx",
+      "version": "0.28.1",
+      "symbol": "httpx._client.Client.put",
+      "source_path": "httpx/_client.py",
+      "source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "signature": "(self, url: URL | str, *, content: RequestContent | None=None, data: RequestData | None=None, files: RequestFiles | None=None, json: typing.Any | None=None, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+      "selector_source_path": "httpx/_client.py",
+      "selector_source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "url",
+        "content",
+        "data",
+        "files",
+        "json",
+        "params",
+        "headers",
+        "cookies",
+        "auth",
+        "follow_redirects",
+        "timeout",
+        "extensions"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "httpx",
+      "version": "0.28.1",
+      "symbol": "httpx._client.Client.patch",
+      "source_path": "httpx/_client.py",
+      "source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "signature": "(self, url: URL | str, *, content: RequestContent | None=None, data: RequestData | None=None, files: RequestFiles | None=None, json: typing.Any | None=None, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+      "selector_source_path": "httpx/_client.py",
+      "selector_source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "url",
+        "content",
+        "data",
+        "files",
+        "json",
+        "params",
+        "headers",
+        "cookies",
+        "auth",
+        "follow_redirects",
+        "timeout",
+        "extensions"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "httpx",
+      "version": "0.28.1",
+      "symbol": "httpx._client.Client.delete",
+      "source_path": "httpx/_client.py",
+      "source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "signature": "(self, url: URL | str, *, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+      "selector_source_path": "httpx/_client.py",
+      "selector_source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "url",
+        "params",
+        "headers",
+        "cookies",
+        "auth",
+        "follow_redirects",
+        "timeout",
+        "extensions"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "httpx",
+      "version": "0.28.1",
+      "symbol": "httpx._client.Client.head",
+      "source_path": "httpx/_client.py",
+      "source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "signature": "(self, url: URL | str, *, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+      "selector_source_path": "httpx/_client.py",
+      "selector_source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "url",
+        "params",
+        "headers",
+        "cookies",
+        "auth",
+        "follow_redirects",
+        "timeout",
+        "extensions"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "httpx",
+      "version": "0.28.1",
+      "symbol": "httpx._client.Client.options",
+      "source_path": "httpx/_client.py",
+      "source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "signature": "(self, url: URL | str, *, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+      "selector_source_path": "httpx/_client.py",
+      "selector_source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "url",
+        "params",
+        "headers",
+        "cookies",
+        "auth",
+        "follow_redirects",
+        "timeout",
+        "extensions"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "httpx",
+      "version": "0.28.1",
+      "symbol": "httpx._client.AsyncClient.get",
+      "source_path": "httpx/_client.py",
+      "source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "signature": "async (self, url: URL | str, *, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault | None=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+      "selector_source_path": "httpx/_client.py",
+      "selector_source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "url",
+        "params",
+        "headers",
+        "cookies",
+        "auth",
+        "follow_redirects",
+        "timeout",
+        "extensions"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "httpx",
+      "version": "0.28.1",
+      "symbol": "httpx._client.AsyncClient.post",
+      "source_path": "httpx/_client.py",
+      "source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "signature": "async (self, url: URL | str, *, content: RequestContent | None=None, data: RequestData | None=None, files: RequestFiles | None=None, json: typing.Any | None=None, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+      "selector_source_path": "httpx/_client.py",
+      "selector_source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "url",
+        "content",
+        "data",
+        "files",
+        "json",
+        "params",
+        "headers",
+        "cookies",
+        "auth",
+        "follow_redirects",
+        "timeout",
+        "extensions"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "httpx",
+      "version": "0.28.1",
+      "symbol": "httpx._client.AsyncClient.put",
+      "source_path": "httpx/_client.py",
+      "source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "signature": "async (self, url: URL | str, *, content: RequestContent | None=None, data: RequestData | None=None, files: RequestFiles | None=None, json: typing.Any | None=None, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+      "selector_source_path": "httpx/_client.py",
+      "selector_source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "url",
+        "content",
+        "data",
+        "files",
+        "json",
+        "params",
+        "headers",
+        "cookies",
+        "auth",
+        "follow_redirects",
+        "timeout",
+        "extensions"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "httpx",
+      "version": "0.28.1",
+      "symbol": "httpx._client.AsyncClient.patch",
+      "source_path": "httpx/_client.py",
+      "source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "signature": "async (self, url: URL | str, *, content: RequestContent | None=None, data: RequestData | None=None, files: RequestFiles | None=None, json: typing.Any | None=None, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+      "selector_source_path": "httpx/_client.py",
+      "selector_source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "url",
+        "content",
+        "data",
+        "files",
+        "json",
+        "params",
+        "headers",
+        "cookies",
+        "auth",
+        "follow_redirects",
+        "timeout",
+        "extensions"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "httpx",
+      "version": "0.28.1",
+      "symbol": "httpx._client.AsyncClient.delete",
+      "source_path": "httpx/_client.py",
+      "source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "signature": "async (self, url: URL | str, *, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+      "selector_source_path": "httpx/_client.py",
+      "selector_source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "url",
+        "params",
+        "headers",
+        "cookies",
+        "auth",
+        "follow_redirects",
+        "timeout",
+        "extensions"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "httpx",
+      "version": "0.28.1",
+      "symbol": "httpx._client.AsyncClient.head",
+      "source_path": "httpx/_client.py",
+      "source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "signature": "async (self, url: URL | str, *, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+      "selector_source_path": "httpx/_client.py",
+      "selector_source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "url",
+        "params",
+        "headers",
+        "cookies",
+        "auth",
+        "follow_redirects",
+        "timeout",
+        "extensions"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "httpx",
+      "version": "0.28.1",
+      "symbol": "httpx._client.AsyncClient.options",
+      "source_path": "httpx/_client.py",
+      "source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "signature": "async (self, url: URL | str, *, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+      "selector_source_path": "httpx/_client.py",
+      "selector_source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "url",
+        "params",
+        "headers",
+        "cookies",
+        "auth",
+        "follow_redirects",
+        "timeout",
+        "extensions"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "httpx",
+      "version": "0.28.1",
+      "symbol": "httpx._client.Client.request",
+      "source_path": "httpx/_client.py",
+      "source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "signature": "(self, method: str, url: URL | str, *, content: RequestContent | None=None, data: RequestData | None=None, files: RequestFiles | None=None, json: typing.Any | None=None, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault | None=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+      "selector_source_path": "httpx/_client.py",
+      "selector_source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "method",
+        "url",
+        "content",
+        "data",
+        "files",
+        "json",
+        "params",
+        "headers",
+        "cookies",
+        "auth",
+        "follow_redirects",
+        "timeout",
+        "extensions"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "httpx",
+      "version": "0.28.1",
+      "symbol": "httpx._client.AsyncClient.request",
+      "source_path": "httpx/_client.py",
+      "source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "signature": "async (self, method: str, url: URL | str, *, content: RequestContent | None=None, data: RequestData | None=None, files: RequestFiles | None=None, json: typing.Any | None=None, params: QueryParamTypes | None=None, headers: HeaderTypes | None=None, cookies: CookieTypes | None=None, auth: AuthTypes | UseClientDefault | None=USE_CLIENT_DEFAULT, follow_redirects: bool | UseClientDefault=USE_CLIENT_DEFAULT, timeout: TimeoutTypes | UseClientDefault=USE_CLIENT_DEFAULT, extensions: RequestExtensions | None=None)",
+      "selector_source_path": "httpx/_client.py",
+      "selector_source_sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "method",
+        "url",
+        "content",
+        "data",
+        "files",
+        "json",
+        "params",
+        "headers",
+        "cookies",
+        "auth",
+        "follow_redirects",
+        "timeout",
+        "extensions"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "mypy-boto3-s3",
+      "version": "1.35.92",
+      "symbol": "mypy_boto3_s3.client.S3Client.get_object",
+      "source_path": "mypy_boto3_s3/client.py",
+      "source_sha256": "sha256:e41cde1bc5682e1fc40449e36ea952ee2f953df336e805073219c3d5d6565432",
+      "signature": "(self, **kwargs: Unpack[GetObjectRequestRequestTypeDef])",
+      "selector_source_path": "mypy_boto3_s3/type_defs.py",
+      "selector_source_sha256": "sha256:acbc5700f9cfb70aea9cf39abc4ee4e3e84b90ad7d6130dbf5378a5edb2aa617",
+      "selector_kind": "TypedDict_fields",
+      "selector_parameters": [
+        "Bucket",
+        "Key",
+        "IfMatch",
+        "IfModifiedSince",
+        "IfNoneMatch",
+        "IfUnmodifiedSince",
+        "Range",
+        "ResponseCacheControl",
+        "ResponseContentDisposition",
+        "ResponseContentEncoding",
+        "ResponseContentLanguage",
+        "ResponseContentType",
+        "ResponseExpires",
+        "VersionId",
+        "SSECustomerAlgorithm",
+        "SSECustomerKey",
+        "RequestPayer",
+        "PartNumber",
+        "ExpectedBucketOwner",
+        "ChecksumMode"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "mypy-boto3-s3",
+      "version": "1.35.92",
+      "symbol": "mypy_boto3_s3.client.S3Client.put_object",
+      "source_path": "mypy_boto3_s3/client.py",
+      "source_sha256": "sha256:e41cde1bc5682e1fc40449e36ea952ee2f953df336e805073219c3d5d6565432",
+      "signature": "(self, **kwargs: Unpack[PutObjectRequestRequestTypeDef])",
+      "selector_source_path": "mypy_boto3_s3/type_defs.py",
+      "selector_source_sha256": "sha256:acbc5700f9cfb70aea9cf39abc4ee4e3e84b90ad7d6130dbf5378a5edb2aa617",
+      "selector_kind": "TypedDict_fields",
+      "selector_parameters": [
+        "Bucket",
+        "Key",
+        "ACL",
+        "Body",
+        "CacheControl",
+        "ContentDisposition",
+        "ContentEncoding",
+        "ContentLanguage",
+        "ContentLength",
+        "ContentMD5",
+        "ContentType",
+        "ChecksumAlgorithm",
+        "ChecksumCRC32",
+        "ChecksumCRC32C",
+        "ChecksumSHA1",
+        "ChecksumSHA256",
+        "Expires",
+        "IfMatch",
+        "IfNoneMatch",
+        "GrantFullControl",
+        "GrantRead",
+        "GrantReadACP",
+        "GrantWriteACP",
+        "WriteOffsetBytes",
+        "Metadata",
+        "ServerSideEncryption",
+        "StorageClass",
+        "WebsiteRedirectLocation",
+        "SSECustomerAlgorithm",
+        "SSECustomerKey",
+        "SSEKMSKeyId",
+        "SSEKMSEncryptionContext",
+        "BucketKeyEnabled",
+        "RequestPayer",
+        "Tagging",
+        "ObjectLockMode",
+        "ObjectLockRetainUntilDate",
+        "ObjectLockLegalHoldStatus",
+        "ExpectedBucketOwner"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "mypy-boto3-s3",
+      "version": "1.35.92",
+      "symbol": "mypy_boto3_s3.client.S3Client.delete_object",
+      "source_path": "mypy_boto3_s3/client.py",
+      "source_sha256": "sha256:e41cde1bc5682e1fc40449e36ea952ee2f953df336e805073219c3d5d6565432",
+      "signature": "(self, **kwargs: Unpack[DeleteObjectRequestRequestTypeDef])",
+      "selector_source_path": "mypy_boto3_s3/type_defs.py",
+      "selector_source_sha256": "sha256:acbc5700f9cfb70aea9cf39abc4ee4e3e84b90ad7d6130dbf5378a5edb2aa617",
+      "selector_kind": "TypedDict_fields",
+      "selector_parameters": [
+        "Bucket",
+        "Key",
+        "MFA",
+        "VersionId",
+        "RequestPayer",
+        "BypassGovernanceRetention",
+        "ExpectedBucketOwner",
+        "IfMatch",
+        "IfMatchLastModifiedTime",
+        "IfMatchSize"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "mypy-boto3-sqs",
+      "version": "1.35.91",
+      "symbol": "mypy_boto3_sqs.client.SQSClient.send_message",
+      "source_path": "mypy_boto3_sqs/client.py",
+      "source_sha256": "sha256:a79cac0f3445a6008f02b2def173dda53e868d9630d12ae4ae7806e41aefba3b",
+      "signature": "(self, **kwargs: Unpack[SendMessageRequestRequestTypeDef])",
+      "selector_source_path": "mypy_boto3_sqs/type_defs.py",
+      "selector_source_sha256": "sha256:76f2dfdc73b3fc623c8feb455d1fa079f22b4f4fd80b3f1f5df64fb7c8b5f013",
+      "selector_kind": "TypedDict_fields",
+      "selector_parameters": [
+        "QueueUrl",
+        "MessageBody",
+        "DelaySeconds",
+        "MessageAttributes",
+        "MessageSystemAttributes",
+        "MessageDeduplicationId",
+        "MessageGroupId"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "mypy-boto3-sqs",
+      "version": "1.35.91",
+      "symbol": "mypy_boto3_sqs.client.SQSClient.send_message_batch",
+      "source_path": "mypy_boto3_sqs/client.py",
+      "source_sha256": "sha256:a79cac0f3445a6008f02b2def173dda53e868d9630d12ae4ae7806e41aefba3b",
+      "signature": "(self, **kwargs: Unpack[SendMessageBatchRequestRequestTypeDef])",
+      "selector_source_path": "mypy_boto3_sqs/type_defs.py",
+      "selector_source_sha256": "sha256:76f2dfdc73b3fc623c8feb455d1fa079f22b4f4fd80b3f1f5df64fb7c8b5f013",
+      "selector_kind": "TypedDict_fields",
+      "selector_parameters": [
+        "QueueUrl",
+        "Entries"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "pymongo",
+      "version": "4.10.1",
+      "symbol": "pymongo.synchronous.collection.Collection.find_one",
+      "source_path": "pymongo/synchronous/collection.py",
+      "source_sha256": "sha256:6615eeda9469b9c401d3441c3fd5a815fa46f16f748dab13e2aca9775fe4139d",
+      "signature": "(self, filter: Optional[Any]=None, *args: Any, **kwargs: Any)",
+      "selector_source_path": "pymongo/synchronous/collection.py",
+      "selector_source_sha256": "sha256:6615eeda9469b9c401d3441c3fd5a815fa46f16f748dab13e2aca9775fe4139d",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "filter",
+        "*args"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "pymongo",
+      "version": "4.10.1",
+      "symbol": "pymongo.synchronous.collection.Collection.insert_one",
+      "source_path": "pymongo/synchronous/collection.py",
+      "source_sha256": "sha256:6615eeda9469b9c401d3441c3fd5a815fa46f16f748dab13e2aca9775fe4139d",
+      "signature": "(self, document: Union[_DocumentType, RawBSONDocument], bypass_document_validation: bool=False, session: Optional[ClientSession]=None, comment: Optional[Any]=None)",
+      "selector_source_path": "pymongo/synchronous/collection.py",
+      "selector_source_sha256": "sha256:6615eeda9469b9c401d3441c3fd5a815fa46f16f748dab13e2aca9775fe4139d",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "document",
+        "bypass_document_validation",
+        "session",
+        "comment"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "pymongo",
+      "version": "4.10.1",
+      "symbol": "pymongo.synchronous.collection.Collection.update_one",
+      "source_path": "pymongo/synchronous/collection.py",
+      "source_sha256": "sha256:6615eeda9469b9c401d3441c3fd5a815fa46f16f748dab13e2aca9775fe4139d",
+      "signature": "(self, filter: Mapping[str, Any], update: Union[Mapping[str, Any], _Pipeline], upsert: bool=False, bypass_document_validation: bool=False, collation: Optional[_CollationIn]=None, array_filters: Optional[Sequence[Mapping[str, Any]]]=None, hint: Optional[_IndexKeyHint]=None, session: Optional[ClientSession]=None, let: Optional[Mapping[str, Any]]=None, comment: Optional[Any]=None)",
+      "selector_source_path": "pymongo/synchronous/collection.py",
+      "selector_source_sha256": "sha256:6615eeda9469b9c401d3441c3fd5a815fa46f16f748dab13e2aca9775fe4139d",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "filter",
+        "update",
+        "upsert",
+        "bypass_document_validation",
+        "collation",
+        "array_filters",
+        "hint",
+        "session",
+        "let",
+        "comment"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "pymongo",
+      "version": "4.10.1",
+      "symbol": "pymongo.synchronous.collection.Collection.delete_one",
+      "source_path": "pymongo/synchronous/collection.py",
+      "source_sha256": "sha256:6615eeda9469b9c401d3441c3fd5a815fa46f16f748dab13e2aca9775fe4139d",
+      "signature": "(self, filter: Mapping[str, Any], collation: Optional[_CollationIn]=None, hint: Optional[_IndexKeyHint]=None, session: Optional[ClientSession]=None, let: Optional[Mapping[str, Any]]=None, comment: Optional[Any]=None)",
+      "selector_source_path": "pymongo/synchronous/collection.py",
+      "selector_source_sha256": "sha256:6615eeda9469b9c401d3441c3fd5a815fa46f16f748dab13e2aca9775fe4139d",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "filter",
+        "collation",
+        "hint",
+        "session",
+        "let",
+        "comment"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "python-stdlib",
+      "version": "3.11.16",
+      "symbol": "pathlib.Path.read_text",
+      "source_path": "Lib/pathlib.py",
+      "source_sha256": "sha256:3b21ac188fd9ac20bacc8ccd976fabd5d8ccf5000f8e157d3dfff005b228fb3d",
+      "signature": "(self, encoding=None, errors=None)",
+      "selector_source_path": "Lib/pathlib.py",
+      "selector_source_sha256": "sha256:3b21ac188fd9ac20bacc8ccd976fabd5d8ccf5000f8e157d3dfff005b228fb3d",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "encoding",
+        "errors"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "python-stdlib",
+      "version": "3.11.16",
+      "symbol": "pathlib.Path.read_bytes",
+      "source_path": "Lib/pathlib.py",
+      "source_sha256": "sha256:3b21ac188fd9ac20bacc8ccd976fabd5d8ccf5000f8e157d3dfff005b228fb3d",
+      "signature": "(self)",
+      "selector_source_path": "Lib/pathlib.py",
+      "selector_source_sha256": "sha256:3b21ac188fd9ac20bacc8ccd976fabd5d8ccf5000f8e157d3dfff005b228fb3d",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "python-stdlib",
+      "version": "3.11.16",
+      "symbol": "pathlib.Path.write_text",
+      "source_path": "Lib/pathlib.py",
+      "source_sha256": "sha256:3b21ac188fd9ac20bacc8ccd976fabd5d8ccf5000f8e157d3dfff005b228fb3d",
+      "signature": "(self, data, encoding=None, errors=None, newline=None)",
+      "selector_source_path": "Lib/pathlib.py",
+      "selector_source_sha256": "sha256:3b21ac188fd9ac20bacc8ccd976fabd5d8ccf5000f8e157d3dfff005b228fb3d",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "data",
+        "encoding",
+        "errors",
+        "newline"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "python-stdlib",
+      "version": "3.11.16",
+      "symbol": "pathlib.Path.write_bytes",
+      "source_path": "Lib/pathlib.py",
+      "source_sha256": "sha256:3b21ac188fd9ac20bacc8ccd976fabd5d8ccf5000f8e157d3dfff005b228fb3d",
+      "signature": "(self, data)",
+      "selector_source_path": "Lib/pathlib.py",
+      "selector_source_sha256": "sha256:3b21ac188fd9ac20bacc8ccd976fabd5d8ccf5000f8e157d3dfff005b228fb3d",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "data"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "python-stdlib",
+      "version": "3.11.16",
+      "symbol": "pathlib.Path.open",
+      "source_path": "Lib/pathlib.py",
+      "source_sha256": "sha256:3b21ac188fd9ac20bacc8ccd976fabd5d8ccf5000f8e157d3dfff005b228fb3d",
+      "signature": "(self, mode='r', buffering=-1, encoding=None, errors=None, newline=None)",
+      "selector_source_path": "Lib/pathlib.py",
+      "selector_source_sha256": "sha256:3b21ac188fd9ac20bacc8ccd976fabd5d8ccf5000f8e157d3dfff005b228fb3d",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "mode",
+        "buffering",
+        "encoding",
+        "errors",
+        "newline"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "redis",
+      "version": "5.2.1",
+      "symbol": "redis.commands.core.BasicKeyCommands.get",
+      "source_path": "redis/commands/core.py",
+      "source_sha256": "sha256:6250b30f8e18267173744288143065a0f8758af80729c14c66cc4fcda984f493",
+      "signature": "(self, name: KeyT)",
+      "selector_source_path": "redis/commands/core.py",
+      "selector_source_sha256": "sha256:6250b30f8e18267173744288143065a0f8758af80729c14c66cc4fcda984f493",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "name"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "redis",
+      "version": "5.2.1",
+      "symbol": "redis.commands.core.BasicKeyCommands.set",
+      "source_path": "redis/commands/core.py",
+      "source_sha256": "sha256:6250b30f8e18267173744288143065a0f8758af80729c14c66cc4fcda984f493",
+      "signature": "(self, name: KeyT, value: EncodableT, ex: Union[ExpiryT, None]=None, px: Union[ExpiryT, None]=None, nx: bool=False, xx: bool=False, keepttl: bool=False, get: bool=False, exat: Union[AbsExpiryT, None]=None, pxat: Union[AbsExpiryT, None]=None)",
+      "selector_source_path": "redis/commands/core.py",
+      "selector_source_sha256": "sha256:6250b30f8e18267173744288143065a0f8758af80729c14c66cc4fcda984f493",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "name",
+        "value",
+        "ex",
+        "px",
+        "nx",
+        "xx",
+        "keepttl",
+        "get",
+        "exat",
+        "pxat"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "redis",
+      "version": "5.2.1",
+      "symbol": "redis.commands.core.BasicKeyCommands.delete",
+      "source_path": "redis/commands/core.py",
+      "source_sha256": "sha256:6250b30f8e18267173744288143065a0f8758af80729c14c66cc4fcda984f493",
+      "signature": "(self, *names: KeyT)",
+      "selector_source_path": "redis/commands/core.py",
+      "selector_source_sha256": "sha256:6250b30f8e18267173744288143065a0f8758af80729c14c66cc4fcda984f493",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "*names"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "redis",
+      "version": "5.2.1",
+      "symbol": "redis.commands.core.PubSubCommands.publish",
+      "source_path": "redis/commands/core.py",
+      "source_sha256": "sha256:6250b30f8e18267173744288143065a0f8758af80729c14c66cc4fcda984f493",
+      "signature": "(self, channel: ChannelT, message: EncodableT, **kwargs)",
+      "selector_source_path": "redis/commands/core.py",
+      "selector_source_sha256": "sha256:6250b30f8e18267173744288143065a0f8758af80729c14c66cc4fcda984f493",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "channel",
+        "message"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "requests",
+      "version": "2.32.3",
+      "symbol": "requests.sessions.Session.get",
+      "source_path": "requests/sessions.py",
+      "source_sha256": "sha256:ca44c8f145864a5b4e7c7d3b1caa25947ee44c11b0e168620556901a67244f0e",
+      "signature": "(self, url, **kwargs)",
+      "selector_source_path": "requests/sessions.py",
+      "selector_source_sha256": "sha256:ca44c8f145864a5b4e7c7d3b1caa25947ee44c11b0e168620556901a67244f0e",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "url"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "requests",
+      "version": "2.32.3",
+      "symbol": "requests.sessions.Session.post",
+      "source_path": "requests/sessions.py",
+      "source_sha256": "sha256:ca44c8f145864a5b4e7c7d3b1caa25947ee44c11b0e168620556901a67244f0e",
+      "signature": "(self, url, data=None, json=None, **kwargs)",
+      "selector_source_path": "requests/sessions.py",
+      "selector_source_sha256": "sha256:ca44c8f145864a5b4e7c7d3b1caa25947ee44c11b0e168620556901a67244f0e",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "url",
+        "data",
+        "json"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "requests",
+      "version": "2.32.3",
+      "symbol": "requests.sessions.Session.put",
+      "source_path": "requests/sessions.py",
+      "source_sha256": "sha256:ca44c8f145864a5b4e7c7d3b1caa25947ee44c11b0e168620556901a67244f0e",
+      "signature": "(self, url, data=None, **kwargs)",
+      "selector_source_path": "requests/sessions.py",
+      "selector_source_sha256": "sha256:ca44c8f145864a5b4e7c7d3b1caa25947ee44c11b0e168620556901a67244f0e",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "url",
+        "data"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "requests",
+      "version": "2.32.3",
+      "symbol": "requests.sessions.Session.patch",
+      "source_path": "requests/sessions.py",
+      "source_sha256": "sha256:ca44c8f145864a5b4e7c7d3b1caa25947ee44c11b0e168620556901a67244f0e",
+      "signature": "(self, url, data=None, **kwargs)",
+      "selector_source_path": "requests/sessions.py",
+      "selector_source_sha256": "sha256:ca44c8f145864a5b4e7c7d3b1caa25947ee44c11b0e168620556901a67244f0e",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "url",
+        "data"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "requests",
+      "version": "2.32.3",
+      "symbol": "requests.sessions.Session.delete",
+      "source_path": "requests/sessions.py",
+      "source_sha256": "sha256:ca44c8f145864a5b4e7c7d3b1caa25947ee44c11b0e168620556901a67244f0e",
+      "signature": "(self, url, **kwargs)",
+      "selector_source_path": "requests/sessions.py",
+      "selector_source_sha256": "sha256:ca44c8f145864a5b4e7c7d3b1caa25947ee44c11b0e168620556901a67244f0e",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "url"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "requests",
+      "version": "2.32.3",
+      "symbol": "requests.sessions.Session.head",
+      "source_path": "requests/sessions.py",
+      "source_sha256": "sha256:ca44c8f145864a5b4e7c7d3b1caa25947ee44c11b0e168620556901a67244f0e",
+      "signature": "(self, url, **kwargs)",
+      "selector_source_path": "requests/sessions.py",
+      "selector_source_sha256": "sha256:ca44c8f145864a5b4e7c7d3b1caa25947ee44c11b0e168620556901a67244f0e",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "url"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "requests",
+      "version": "2.32.3",
+      "symbol": "requests.sessions.Session.options",
+      "source_path": "requests/sessions.py",
+      "source_sha256": "sha256:ca44c8f145864a5b4e7c7d3b1caa25947ee44c11b0e168620556901a67244f0e",
+      "signature": "(self, url, **kwargs)",
+      "selector_source_path": "requests/sessions.py",
+      "selector_source_sha256": "sha256:ca44c8f145864a5b4e7c7d3b1caa25947ee44c11b0e168620556901a67244f0e",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "url"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    },
+    {
+      "distribution": "requests",
+      "version": "2.32.3",
+      "symbol": "requests.sessions.Session.request",
+      "source_path": "requests/sessions.py",
+      "source_sha256": "sha256:ca44c8f145864a5b4e7c7d3b1caa25947ee44c11b0e168620556901a67244f0e",
+      "signature": "(self, method, url, params=None, data=None, headers=None, cookies=None, files=None, auth=None, timeout=None, allow_redirects=True, proxies=None, hooks=None, stream=None, verify=None, cert=None, json=None)",
+      "selector_source_path": "requests/sessions.py",
+      "selector_source_sha256": "sha256:ca44c8f145864a5b4e7c7d3b1caa25947ee44c11b0e168620556901a67244f0e",
+      "selector_kind": "callable_parameters",
+      "selector_parameters": [
+        "method",
+        "url",
+        "params",
+        "data",
+        "headers",
+        "cookies",
+        "files",
+        "auth",
+        "timeout",
+        "allow_redirects",
+        "proxies",
+        "hooks",
+        "stream",
+        "verify",
+        "cert",
+        "json"
+      ],
+      "status": "exact_source_signature_and_selector_match"
+    }
+  ],
+  "partial_declarations": [
+    {
+      "distribution": "motor",
+      "version": "3.6.0",
+      "symbol": "motor.core.AgnosticCollection.find_one",
+      "status": "not_function_definition_in_inspected_python_source",
+      "source_signature": "descriptor = AsyncRead(PyMongoCollection.find_one); delegated signature"
+    },
+    {
+      "distribution": "motor",
+      "version": "3.6.0",
+      "symbol": "motor.core.AgnosticCollection.insert_one",
+      "status": "not_function_definition_in_inspected_python_source",
+      "source_signature": "descriptor = AsyncCommand(PyMongoCollection.insert_one); delegated signature"
+    },
+    {
+      "distribution": "motor",
+      "version": "3.6.0",
+      "symbol": "motor.core.AgnosticCollection.update_one",
+      "status": "not_function_definition_in_inspected_python_source",
+      "source_signature": "descriptor = AsyncCommand(PyMongoCollection.update_one); delegated signature"
+    },
+    {
+      "distribution": "motor",
+      "version": "3.6.0",
+      "symbol": "motor.core.AgnosticCollection.delete_one",
+      "status": "not_function_definition_in_inspected_python_source",
+      "source_signature": "descriptor = AsyncCommand(PyMongoCollection.delete_one); delegated signature"
+    },
+    {
+      "distribution": "python-stdlib",
+      "version": "3.11.16",
+      "symbol": "builtins.open",
+      "status": "not_python_source_declared",
+      "source_signature": "(file, mode='r', buffering=-1, encoding=None, errors=None, newline=None, closefd=True, opener=None)"
+    },
+    {
+      "distribution": "python-stdlib",
+      "version": "3.11.16",
+      "symbol": "_io.open",
+      "status": "not_python_source_declared",
+      "source_signature": "(file, mode='r', buffering=-1, encoding=None, errors=None, newline=None, closefd=True, opener=None)"
+    },
+    {
+      "distribution": "python-stdlib",
+      "version": "3.11.16",
+      "symbol": "_io._TextIOBase.read",
+      "status": "not_python_source_declared",
+      "source_signature": "(size=-1)"
+    },
+    {
+      "distribution": "python-stdlib",
+      "version": "3.11.16",
+      "symbol": "_io._TextIOBase.write",
+      "status": "not_python_source_declared",
+      "source_signature": "(s)"
+    },
+    {
+      "distribution": "python-stdlib",
+      "version": "3.11.16",
+      "symbol": "_io._BufferedIOBase.read",
+      "status": "not_python_source_declared",
+      "source_signature": "(size=-1)"
+    },
+    {
+      "distribution": "python-stdlib",
+      "version": "3.11.16",
+      "symbol": "_io.BufferedWriter.write",
+      "status": "not_python_source_declared",
+      "source_signature": "(b)"
+    }
+  ]
+}

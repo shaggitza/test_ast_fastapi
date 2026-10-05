@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 from benchmarks.providers.effect_preset_matrix import (
@@ -11,8 +11,10 @@ from benchmarks.providers.effect_preset_matrix import (
     exact_release_status,
     load_controlled_results,
     load_manifest,
+    load_source_signature_observations,
     summarize_matrix,
     verify_artifacts,
+    verify_declared_python_signatures,
     verify_preset_contracts,
 )
 
@@ -25,9 +27,6 @@ from fastapi_endpoint_detector.models.endpoint import (
     EndpointMethod,
     HandlerInfo,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _endpoint(path: Path, line: int) -> Endpoint:
@@ -76,6 +75,11 @@ def test_exact_package_signatures_and_selectors_are_explicit() -> None:
     )
     assert requests_get["source_signature"] == "(self, url, **kwargs)"
     assert requests_get["resource"] == "arg0/url; kwargs forwarded to request(method,url)"
+    aiohttp = packages["aiohttp"]["declared_symbols"]
+    aiohttp_by_name = {row["symbol"].rsplit(".", 1)[-1]: row for row in aiohttp}
+    assert aiohttp_by_name["head"]["parameters"] == ["url", "allow_redirects=False", "**kwargs"]
+    assert aiohttp_by_name["post"]["parameters"] == ["url", "data=None", "**kwargs"]
+    assert "StrOrURL" in aiohttp_by_name["get"]["source_signature"]
     assert "mypy_boto3_s3/type_defs.py" in {
         item["path"] for item in packages["mypy-boto3-s3"]["inspected_sources"]
     }
@@ -139,15 +143,71 @@ def test_matrix_rejects_missing_signature_provenance(tmp_path: Path) -> None:
         load_manifest(altered)
 
 
-def test_preset_contract_hashes_fail_closed(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("version", "99.0.0"),
+        ("revision", "99"),
+        ("contract_count", 9999),
+        ("preset_semantic_sha256", "0" * 64),
+    ],
+)
+def test_preset_contract_verification_rejects_unbacked_identity_claims(
+    field: str, value: object
+) -> None:
     manifest = load_manifest()
-    contract = manifest["versioned_contract_sets"][0]
-    path = tmp_path / "altered-preset.yaml"
-    path.write_text("changed: true\n", encoding="utf-8")
-    contract["preset_path"] = str(path)
+    manifest["versioned_contract_sets"][0][field] = value
 
-    with pytest.raises(MatrixEvidenceError, match="preset contract source hash mismatch"):
+    with pytest.raises(MatrixEvidenceError, match="preset identity, count, selectors or hashes"):
         verify_preset_contracts(manifest)
+
+
+def test_preset_contract_verification_rejects_unbacked_selector_claims() -> None:
+    manifest = load_manifest()
+    declaration = next(
+        row
+        for package in manifest["packages"]
+        for row in package["declared_symbols"]
+        if row["preset_contract"] is not None
+    )
+    declaration["contract_resource_selector"]["index"] += 1
+
+    with pytest.raises(MatrixEvidenceError, match="preset selector semantics mismatch"):
+        verify_preset_contracts(manifest)
+
+
+def test_duplicate_and_nonfinite_json_fail_closed(tmp_path: Path) -> None:
+    duplicate = tmp_path / "duplicate.json"
+    duplicate.write_text('{"schema_version":2,"schema_version":2}', encoding="utf-8")
+    nonfinite = tmp_path / "nonfinite.json"
+    nonfinite.write_text('{"schema_version":NaN}', encoding="utf-8")
+
+    for path in (duplicate, nonfinite):
+        with pytest.raises(MatrixEvidenceError):
+            load_manifest(path)
+
+    duplicate_result = tmp_path / "duplicate-result.json"
+    duplicate_result.write_text('{"status":"completed","status":"failed"}', encoding="utf-8")
+    with pytest.raises(MatrixEvidenceError, match="duplicate JSON key"):
+        load_controlled_results(duplicate_result)
+
+
+def test_malformed_optional_artifact_metadata_raises_matrix_error() -> None:
+    manifest = load_manifest()
+    manifest["packages"][0]["metadata_sha256"] = None
+
+    with pytest.raises(MatrixEvidenceError, match="wheel metadata"):
+        verify_artifacts(Path("/unread-artifact-dir"), manifest)
+
+
+def test_source_signature_report_rejects_missing_artifacts(tmp_path: Path) -> None:
+    with pytest.raises(MatrixEvidenceError, match="missing frozen package artifact"):
+        load_source_signature_observations(tmp_path)
+
+
+def test_python_signature_audit_requires_exact_supplied_artifacts(tmp_path: Path) -> None:
+    with pytest.raises(MatrixEvidenceError, match="missing frozen package artifact"):
+        verify_declared_python_signatures(tmp_path)
 
 
 def test_artifact_verification_fails_closed_when_packages_are_not_supplied(tmp_path: Path) -> None:
@@ -163,7 +223,7 @@ def test_matrix_rejects_wildcard_or_grouped_symbol_claims(tmp_path: Path) -> Non
     altered = tmp_path / "altered-package-symbols.json"
     altered.write_text(json.dumps(manifest), encoding="utf-8")
 
-    with pytest.raises(MatrixEvidenceError, match="exact dotted names"):
+    with pytest.raises(MatrixEvidenceError, match="exact symbol evidence"):
         load_manifest(altered)
 
 
@@ -183,15 +243,47 @@ def test_controlled_result_provenance_and_denominator_are_valid() -> None:
     assert result["controlled_evaluation"]["observed"]["matched_calls"] == 4
     assert result["controlled_evaluation"]["observed"]["unmatched_calls"] == 7
     assert result["controlled_evaluation"]["observed"]["unresolved_calls"] == 0
+    assert len(result["controlled_evaluation"]["observations"]) == 11
+    assert result["controlled_evaluation"]["fixture_contract_set"]["version"] == "2.0.0"
 
 
-def test_controlled_results_reject_forged_denominator(tmp_path: Path) -> None:
+def test_controlled_results_reject_forged_aggregates(tmp_path: Path) -> None:
     result = json.loads(RESULTS_PATH.read_text(encoding="utf-8"))
-    result["controlled_evaluation"]["observed"]["unmatched_calls"] = 6
+    result["controlled_evaluation"]["observed"]["matched_calls"] = 11
+    result["controlled_evaluation"]["observed"]["unmatched_calls"] = 0
     altered = tmp_path / "altered-controlled-results.json"
     altered.write_text(json.dumps(result), encoding="utf-8")
 
-    with pytest.raises(MatrixEvidenceError, match="call totals"):
+    with pytest.raises(MatrixEvidenceError, match="aggregate does not match raw"):
+        load_controlled_results(altered)
+
+
+def test_controlled_results_reject_raw_rows_that_disagree_with_replay(
+    tmp_path: Path,
+) -> None:
+    result = json.loads(RESULTS_PATH.read_text(encoding="utf-8"))
+    row = next(
+        item
+        for item in result["controlled_evaluation"]["observations"]
+        if item["source_spelling"] == "foreign.get"
+    )
+    row["audit_status"] = "matched"
+    row["contract_id"] = "forged-contract"
+    row["contract_hash"] = "sha256:" + "0" * 64
+    altered = tmp_path / "altered-raw-observations.json"
+    altered.write_text(json.dumps(result), encoding="utf-8")
+
+    with pytest.raises(MatrixEvidenceError, match="negative fixture call unexpectedly matched"):
+        load_controlled_results(altered)
+
+
+def test_controlled_result_rejects_invalid_status_types(tmp_path: Path) -> None:
+    result = json.loads(RESULTS_PATH.read_text(encoding="utf-8"))
+    result["controlled_evaluation"]["observations"][0]["audit_status"] = []
+    altered = tmp_path / "malformed-status.json"
+    altered.write_text(json.dumps(result), encoding="utf-8")
+
+    with pytest.raises(MatrixEvidenceError, match="invalid identity or status"):
         load_controlled_results(altered)
 
 
