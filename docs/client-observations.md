@@ -51,7 +51,9 @@ its existing shape.
 
 `analyzer.project_observations` applies client and deployment glob selection,
 file-count and per-file byte budgets, records skipped-file issues, and emits
-source evidence only. CLI/configuration wiring is being integrated in PR #310.
+source evidence only. The opt-in `analyze` CLI and strict configuration schema,
+including default-disabled output behavior, are implemented in the stacked
+PR #312; public CLI fixtures cover enabled and disabled runs.
 `analyzer.deployment_observations` separately records
 simple `.env` and Dockerfile route settings, exposed ports, exec-form startup
 argv, and direct Python `subprocess` calls with literal argv. Only allowlisted
