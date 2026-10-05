@@ -24,4 +24,6 @@ The byte-preserved [ROOT diagnostic for analyzer 9c94428](root-diagnostic-runner
 
 The reviewed runner at `a3abf0c7ef50ba7d91f1d2a00b2cacd36503690a` was also run end-to-end against the separate clean analyzer checkout `8ccd5d38483d89527f3ef651a1575e3a67bf0e2d`; the validated result is [paired-run-a3abf0c-analyzer-8ccd5d3.json](paired-run-a3abf0c-analyzer-8ccd5d3.json). It recorded all 18 cases, all supported, one failed control, TP=14, FP=1, FN=0, precision=0.9333, recall=1.0, and one HIGH/MEDIUM control candidate (`deferred_lambda_control`, MEDIUM `GET /one`). Its `run_validity` is `valid`; the accuracy `gate_status` is `failed`. The old-runner 9c944 ROOT diagnostic above is not evidence for this a3abf0 runner.
 
+The timeout-only follow-up at runner `7d095a4350f8d714d9528da414676ab47840930e` has not yet had a full 18-case analyzer run. It is covered by the inherited-pipe regression and the focused harness suite. The a3abf0c result above must not be represented as a measurement from runner 7d095a4.
+
 This generated gate does not establish canonical truth or close GH283's original corpus, blind-release, bootstrap, or incremental-performance milestones. Those gates remain open.
