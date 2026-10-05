@@ -16,13 +16,20 @@ import json
 import math
 import platform
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 
-from benchmarks.real_world import typed_dag_accuracy as v1
+# Keep direct-file invocation equivalent to ``python -m`` for the harness-only
+# independent oracle import. This path is never passed to the analyzer process.
+HARNESS_ROOT = Path(__file__).resolve().parents[2]
+if str(HARNESS_ROOT) not in sys.path:
+    sys.path.insert(0, str(HARNESS_ROOT))
+
+from benchmarks.real_world import typed_dag_accuracy as v1  # noqa: E402
 
 SCHEMA = "typed-dag-paired-cli-accuracy-v2"
 RESULTS = Path(__file__).resolve().parents[1] / "results" / SCHEMA
@@ -679,6 +686,9 @@ def validate(document: dict[str, Any], analyzer_root: Path | None = None) -> Non
         "recall": overall_tp / (overall_tp + overall_fn) if overall_tp + overall_fn else 1.0,
     }
     aggregate = {
+        "tp": overall_tp,
+        "fp": overall_fp,
+        "fn": overall_fn,
         **overall,
         "high_medium_control_candidates": sum(
             row["confidence"] in {"high", "medium"}
@@ -1002,9 +1012,9 @@ def run(
         ),
         "cases": records,
     }
-    validate(document, analyzer_root)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    validate(document, analyzer_root)
     return document
 
 
