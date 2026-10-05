@@ -1308,6 +1308,14 @@ class MypyAnalyzer:
         end_line = end_line_value if end_line_value >= line and end_column_value >= 0 else None
         end_column = end_column_value if end_line is not None else None
         canonical = str(Path(current_file).resolve())
+        if canonical not in self._source_bytes_cache:
+            try:
+                self._source_bytes_cache[canonical] = tuple(
+                    Path(canonical).read_bytes().splitlines(keepends=True)
+                )
+            except OSError:
+                self._source_bytes_cache[canonical] = None
+        lines = self._source_bytes_cache[canonical]
         if end_line is None:
             if canonical not in self._python_ast_cache:
                 try:
@@ -1318,7 +1326,7 @@ class MypyAnalyzer:
                     self._python_ast_cache[canonical] = None
             tree = self._python_ast_cache[canonical]
             if canonical not in self._python_call_span_cache:
-                spans: dict[tuple[int, int], tuple[int, int]] = {}
+                recovered_spans: dict[tuple[int, int], tuple[int, int]] = {}
                 if tree is not None:
                     for candidate in ast.walk(tree):
                         function = candidate.func if isinstance(candidate, ast.Call) else None
@@ -1327,24 +1335,16 @@ class MypyAnalyzer:
                             and function.end_lineno is not None
                             and function.end_col_offset is not None
                         ):
-                            spans[(function.lineno, function.col_offset)] = (
+                            recovered_spans[(function.lineno, function.col_offset)] = (
                                 function.end_lineno,
                                 function.end_col_offset,
                             )
-                self._python_call_span_cache[canonical] = spans
+                self._python_call_span_cache[canonical] = recovered_spans
             fallback_span = self._python_call_span_cache[canonical].get((line, column))
             if fallback_span is not None:
                 end_line, end_column = fallback_span
         if end_line is None or end_column is None:
             return None
-        if canonical not in self._source_bytes_cache:
-            try:
-                self._source_bytes_cache[canonical] = tuple(
-                    Path(canonical).read_bytes().splitlines(keepends=True)
-                )
-            except OSError:
-                self._source_bytes_cache[canonical] = None
-        lines = self._source_bytes_cache[canonical]
         spelling = ""
         if lines is not None and end_line is not None and end_line <= len(lines):
             if end_line == line:
@@ -1361,6 +1361,68 @@ class MypyAnalyzer:
                 spelling = raw.decode("utf-8")
             except UnicodeDecodeError:
                 spelling = ""
+        expected_name = (
+            getattr(callee, "name", None) if type(callee).__name__ == "NameExpr" else None
+        )
+        if (
+            isinstance(expected_name, str)
+            and lines is not None
+            and line <= len(lines)
+            and spelling != expected_name
+        ):
+            if canonical not in self._python_call_span_cache:
+                if canonical not in self._python_ast_cache:
+                    try:
+                        self._python_ast_cache[canonical] = ast.parse(
+                            Path(canonical).read_text(encoding="utf-8"), filename=canonical
+                        )
+                    except (OSError, SyntaxError, UnicodeError):
+                        self._python_ast_cache[canonical] = None
+                tree = self._python_ast_cache[canonical]
+                spans: dict[tuple[int, int], tuple[int, int]] = {}
+                if tree is not None:
+                    for candidate in ast.walk(tree):
+                        function = candidate.func if isinstance(candidate, ast.Call) else None
+                        if (
+                            function is not None
+                            and function.end_lineno is not None
+                            and function.end_col_offset is not None
+                        ):
+                            spans[(function.lineno, function.col_offset)] = (
+                                function.end_lineno,
+                                function.end_col_offset,
+                            )
+                self._python_call_span_cache[canonical] = spans
+            candidates = []
+            for (start_line, start_column), span in self._python_call_span_cache[canonical].items():
+                if start_line != line:
+                    continue
+                stop_line, stop_column = span
+                if stop_line > len(lines):
+                    continue
+                if stop_line == start_line:
+                    raw_candidate = lines[start_line - 1][start_column:stop_column]
+                else:
+                    raw_candidate = b"".join(
+                        (
+                            lines[start_line - 1][start_column:],
+                            *lines[start_line : stop_line - 1],
+                            lines[stop_line - 1][:stop_column],
+                        )
+                    )
+                if raw_candidate.decode("utf-8", errors="replace") == expected_name:
+                    candidates.append((abs(start_column - column), start_column, span))
+            if candidates:
+                nearest_distance = min(candidate[0] for candidate in candidates)
+                nearest = [
+                    candidate for candidate in candidates if candidate[0] == nearest_distance
+                ]
+                if len(nearest) != 1:
+                    return None
+                _, column, (end_line, end_column) = nearest[0]
+                spelling = expected_name
+            else:
+                return None
         if not spelling.strip():
             return None
         return line, column, end_line, end_column, spelling
