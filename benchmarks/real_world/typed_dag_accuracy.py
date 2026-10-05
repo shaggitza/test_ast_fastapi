@@ -641,6 +641,9 @@ def _tier_metrics(
 def validate(document: dict[str, Any]) -> None:  # noqa: PLR0912
     if document.get("schema") != SCHEMA:
         raise ValueError("invalid schema")
+    evidence_kind = document.get("evidence_kind")
+    if evidence_kind not in {"cli_generated", "synthetic_validation_only"}:
+        raise ValueError("invalid evidence kind")
     runtime = document.get("runtime")
     if not isinstance(runtime, dict) or document.get("dependency_versions") != runtime:
         raise ValueError("missing dependency version provenance")
@@ -708,6 +711,8 @@ def validate(document: dict[str, Any]) -> None:  # noqa: PLR0912
         and aggregate["precision"] == aggregate["recall"] == 1.0
         and aggregate["high_medium_control_candidates"] == 0
     )
+    if evidence_kind == "synthetic_validation_only" and derived_pass:
+        raise ValueError("synthetic validation documents cannot claim a pass")
     if document.get("gate_status") != ("passed" if derived_pass else "failed"):
         raise ValueError("gate status contradicts validated cases and metrics")
 
@@ -938,6 +943,7 @@ def run(output: Path) -> dict[str, Any]:
 
     doc = {
         "schema": SCHEMA,
+        "evidence_kind": "cli_generated",
         "gate_status": "passed" if gate else "failed",
         "pass_criteria": "100% precision/recall; zero HIGH/MEDIUM dead/unrelated candidates",
         "revision": revision,
