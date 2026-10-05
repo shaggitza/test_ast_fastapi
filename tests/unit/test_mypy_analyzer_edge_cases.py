@@ -558,3 +558,47 @@ def handler(flag: bool):
         )
 
         assert analyzer.analyze_endpoint(endpoint).references_file(str(tmp_path / "effects.py"))
+
+    def test_invoked_wrappers_do_not_own_dead_deferred_or_unawaited_body_lines(
+        self, tmp_path: Path
+    ) -> None:
+        effects = tmp_path / "effects.py"
+        effects.write_text("def changed():\n    return 1\n", encoding="utf-8")
+        main = tmp_path / "main.py"
+        main.write_text(
+            "from effects import changed\n\n"
+            "def literal_false_dead():\n"
+            "    if False:\n"
+            "        changed()\n\n"
+            "def post_return_dead():\n"
+            "    return\n"
+            "    changed()\n\n"
+            "def deferred_closure_dead():\n"
+            "    def inner():\n"
+            "        changed()\n"
+            "    return None\n\n"
+            "def deferred_lambda_dead():\n"
+            "    callback = (\n"
+            "        lambda: changed()\n"
+            "    )\n"
+            "    return None\n\n"
+            "async def unawaited_coroutine_dead():\n"
+            "    changed()\n\n"
+            "def handler():\n"
+            "    literal_false_dead()\n"
+            "    post_return_dead()\n"
+            "    deferred_closure_dead()\n"
+            "    deferred_lambda_dead()\n"
+            "    unawaited_coroutine_dead()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/test",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="main", file_path=main, line_number=25),
+        )
+
+        deps = MypyAnalyzer(tmp_path).analyze_endpoint(endpoint)
+
+        assert deps.references_lines(str(main), {5, 9, 13, 18, 23}) == set()
+        assert not deps.references_file(str(effects))

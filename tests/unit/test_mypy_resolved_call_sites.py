@@ -237,6 +237,62 @@ def test_nested_helper_calls_and_branch_returned_closures_are_reachable(tmp_path
     )
 
 
+def test_bounded_callable_returns_parameters_and_partials_are_traced(tmp_path: Path) -> None:
+    (tmp_path / "effects.py").write_text(
+        "from typing import Callable\n\n"
+        "def returned_effect() -> None: pass\n"
+        "def parameter_effect() -> None: pass\n"
+        "def other_effect() -> None: pass\n"
+        "def partial_effect(value: int) -> None: pass\n\n"
+        "def make_callback() -> Callable[[], None]:\n"
+        "    return lambda: returned_effect()\n\n"
+        "def invoke(callback: Callable[[], None]) -> None:\n"
+        "    callback()\n",
+        encoding="utf-8",
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from functools import partial\n"
+        "from typing import Callable\n"
+        "from effects import parameter_effect, other_effect, partial_effect, "
+        "make_callback, invoke\n\n"
+        "def handler(unknown: Callable[[], None]) -> None:\n"
+        "    returned = make_callback()\n"
+        "    returned()\n"
+        "    invoke(parameter_effect)\n"
+        "    bound = partial(partial_effect, 1)\n"
+        "    bound()\n"
+        "    invoke(unknown)\n\n"
+        "def handler_other() -> None:\n"
+        "    invoke(other_effect)\n",
+        encoding="utf-8",
+    )
+    deps = MypyAnalyzer(tmp_path, max_depth=5).analyze_endpoint(_endpoint(main, line=5))
+
+    effects_path = str(tmp_path / "effects.py")
+    assert deps.references_file(effects_path)
+    reached_symbols = {reference.symbol_name for reference in deps.referenced_symbols}
+    assert any(symbol.endswith(".returned_effect") for symbol in reached_symbols)
+    assert any(symbol.endswith(".parameter_effect") for symbol in reached_symbols)
+    assert any(symbol.endswith(".partial_effect") for symbol in reached_symbols)
+    contextual_callback_sites = [
+        site
+        for site in deps.get_resolved_call_sites(effects_path)
+        if site.source_spelling == "callback"
+        and site.canonical_symbol is not None
+        and site.status == CallResolutionStatus.EXACT
+    ]
+    assert any(
+        site.canonical_symbol.endswith(".parameter_effect") for site in contextual_callback_sites
+    )
+    other = MypyAnalyzer(tmp_path, max_depth=5).analyze_endpoint(
+        _endpoint(main, line=12, name="handler_other")
+    )
+    other_symbols = {reference.symbol_name for reference in other.referenced_symbols}
+    assert any(symbol.endswith(".other_effect") for symbol in other_symbols)
+    assert not any(symbol.endswith(".parameter_effect") for symbol in other_symbols)
+
+
 def test_unused_nested_function_body_is_deferred_without_a_bundle(tmp_path: Path) -> None:
     main = tmp_path / "main.py"
     main.write_text(

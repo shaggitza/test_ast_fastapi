@@ -114,6 +114,32 @@ def test_sorted_consumes_generator_with_supported_keyword_arguments(tmp_path: Pa
     assert deps.references_lines_low_only("worker.py", {1})
 
 
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "sorted((changed() for _ in [1]), key=str)",
+        "list(value for value in (changed() for _ in [1]))",
+    ],
+)
+def test_nested_generator_consumers_execute_inner_generator_body(
+    tmp_path: Path,
+    expression: str,
+) -> None:
+    (tmp_path / "worker.py").write_text(
+        "def changed() -> int:\n    return 1\n",
+        encoding="utf-8",
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        f"from worker import changed\n\ndef handler():\n    return {expression}\n",
+        encoding="utf-8",
+    )
+
+    deps = MypyAnalyzer(tmp_path, max_depth=5).analyze_endpoint(_endpoint(main, line=3))
+
+    assert deps.references_symbol_at_line("worker.py", 1) is not None
+
+
 def test_sorted_rejects_unknown_generator_consumer_keywords(tmp_path: Path) -> None:
     _write_generator_project(tmp_path)
     main = tmp_path / "main.py"

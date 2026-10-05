@@ -5,6 +5,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
+from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, HandlerInfo
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,19 @@ def test_module_ids_use_explicit_root_for_src_namespace_and_app_paths(tmp_path: 
     assert [module for _path, module, _digest in namespace_analyzer._source_records()] == [
         "ns_pkg.worker"
     ]
+
+
+def test_flat_app_module_ids_ignore_ad_hoc_root_name(tmp_path: Path) -> None:
+    root = tmp_path / "repo.with-hyphen and spaces"
+    root.mkdir()
+    main = root / "main.py"
+    main.write_text("def handler():\n    return 1\n", encoding="utf-8")
+
+    directory_modules = {module for _path, module, _digest in MypyAnalyzer(root)._source_records()}
+    file_modules = {module for _path, module, _digest in MypyAnalyzer(main)._source_records()}
+
+    assert directory_modules == {"main"}
+    assert file_modules == directory_modules
 
 
 def test_canonical_inventory_controls_discovery_and_cache_identity(tmp_path: Path) -> None:
@@ -160,3 +174,43 @@ def test_stale_inventory_hash_fails_closed(tmp_path: Path) -> None:
         assert "source inventory is stale" in str(exc)
     else:
         raise AssertionError("stale inventory hashes must not produce a cache fingerprint")
+
+
+def test_followed_import_outside_inventory_is_not_project_evidence(tmp_path: Path) -> None:
+    package = tmp_path / "pkg"
+    package.mkdir()
+    main = package / "main.py"
+    helper = package / "helper.py"
+    main.write_text(
+        "from pkg.helper import changed\n\ndef handler():\n    changed()\n",
+        encoding="utf-8",
+    )
+    helper.write_text("def changed():\n    return None\n", encoding="utf-8")
+    inventory = _Inventory(
+        root=tmp_path,
+        files=(
+            _SourceFile(
+                str(main),
+                "pkg/main.py",
+                "pkg.main",
+                sha256(main.read_bytes()).hexdigest(),
+                imports=("pkg.helper",),
+            ),
+        ),
+        follow_imports=True,
+        excluded_files=("pkg/helper.py",),
+        unresolved_imports=(("pkg/main.py", "pkg.missing"),),
+    )
+    analyzer = MypyAnalyzer(main, source_inventory=inventory)
+    endpoint = Endpoint(
+        path="/test",
+        methods=[EndpointMethod.GET],
+        handler=HandlerInfo(name="handler", module="pkg.main", file_path=main, line_number=3),
+    )
+
+    deps = analyzer.analyze_endpoint(endpoint)
+
+    assert not deps.references_file(str(helper))
+    assert not analyzer._exact_project_identity("pkg.helper.changed")
+    assert deps.unresolved_imports == (("pkg/main.py", "pkg.missing"),)
+    assert deps.analysis_incomplete
