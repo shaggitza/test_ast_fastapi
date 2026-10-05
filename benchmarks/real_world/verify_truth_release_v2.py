@@ -228,7 +228,7 @@ def verify_release(  # noqa: PLR0912, PLR0915
         or set(counts) != COUNTS
         or any(type(value) is not int or value < 0 for value in counts.values())
         or type(selected) is not int
-        or selected < 1
+        or selected < 0
         or sum(counts.values()) != selected
     ):
         _fail("release terminal denominators are incomplete")
@@ -298,6 +298,8 @@ def verify_release(  # noqa: PLR0912, PLR0915
     adjudication_records = _jsonl_adjudications(adjudication_raw)
     if adjudication_records != records:
         _fail("broad-truth rows do not match adjudication projection")
+    _validate_release_provenance(verified_contents, manifest)
+    _validate_review_and_artifact_projections(verified_contents, manifest)
     return {
         "release_id": manifest.get("release_id"),
         "content_root": root_hash,
@@ -400,6 +402,8 @@ def _release_truth(  # noqa: PLR0912, PLR0915
     if len(pull_requests) != selected:
         _fail("canonical pull-request rows do not match selected corpus count")
     adjudications: dict[str, dict[str, Any]] = {}
+    latest_by_pr: dict[str, dict[str, Any]] = {}
+    versions_by_pr: dict[str, set[int]] = {}
     for row in _jsonl_rows(contents["tables/adjudication.jsonl"], "tables/adjudication.jsonl"):
         adjudication_id = row.get("adjudication_id")
         pr_id = row.get("pr_id")
@@ -409,9 +413,15 @@ def _release_truth(  # noqa: PLR0912, PLR0915
             or adjudication_id in adjudications
             or not isinstance(pr_id, str)
             or pr_id not in pull_requests
+            or type(row.get("version")) is not int
+            or row["version"] < 1
+            or row["version"] in versions_by_pr.get(pr_id, set())
         ):
             _fail("canonical adjudication table contains invalid or duplicate identities")
         adjudications[adjudication_id] = row
+        versions_by_pr.setdefault(pr_id, set()).add(row["version"])
+        if pr_id not in latest_by_pr or row["version"] > latest_by_pr[pr_id]["version"]:
+            latest_by_pr[pr_id] = row
     entrypoints: dict[str, list[dict[str, Any]]] = {}
     for row in _jsonl_rows(
         contents["tables/canonical_entrypoint.jsonl"], "tables/canonical_entrypoint.jsonl"
@@ -455,9 +465,11 @@ def _release_truth(  # noqa: PLR0912, PLR0915
             adjudications.get(adjudication_id) if isinstance(adjudication_id, str) else None
         )
         if (
-            not isinstance(adjudication_id, str)
+            not isinstance(pr_id, str)
+            or not isinstance(adjudication_id, str)
             or adjudication is None
             or adjudication.get("pr_id") != pr_id
+            or latest_by_pr.get(pr_id) is not adjudication
             or not isinstance(adjudication.get("terminal_status"), str)
             or adjudication.get("terminal_status") not in TERMINAL
         ):
@@ -479,6 +491,191 @@ def _release_truth(  # noqa: PLR0912, PLR0915
     if len(expected) != len([row for row in memberships if row.get("release_id") == release_id]):
         _fail("release membership contains duplicate pull request identities")
     return expected
+
+
+def _validate_release_provenance(contents: dict[str, bytes], manifest: dict[str, Any]) -> None:
+    release_id = manifest.get("release_id")
+    matches = [
+        row
+        for row in _jsonl_rows(contents["tables/release.jsonl"], "tables/release.jsonl")
+        if row.get("release_id") == release_id
+    ]
+    if len(matches) != 1:
+        _fail("canonical release table does not contain exactly one current release")
+    row = matches[0]
+    expected = {
+        "schema_version": manifest.get("schema_version"),
+        "corpus_id": manifest.get("corpus_id"),
+        "corpus_sha256": manifest.get("corpus_lock_sha256"),
+        "schema_sha256": manifest.get("schema_sha256"),
+        "prompt_set_sha256": manifest.get("prompt_set_sha256"),
+        "publication_review_sha256": manifest.get("publication_review_sha256"),
+        "created_at": manifest.get("created_at"),
+        "predecessor_release_id": manifest.get("predecessor_release_id"),
+        "content_root": {"self_reference": "manifest.json#content_root"},
+        "manifest_bytes": {"self_reference": "manifest.json"},
+    }
+    if any(row.get(field) != value for field, value in expected.items()):
+        _fail("manifest provenance differs from canonical release table")
+
+
+def _validate_review_and_artifact_projections(  # noqa: PLR0912, PLR0915
+    contents: dict[str, bytes], manifest: dict[str, Any]
+) -> None:
+    """Reconcile public review and artifact exports with canonical table snapshots."""
+    release_id = manifest.get("release_id")
+    if not isinstance(release_id, str) or not release_id:
+        _fail("release id is missing while verifying exported projections")
+    repositories: dict[str, tuple[str, str]] = {}
+    for row in _jsonl_rows(contents["tables/repository.jsonl"], "tables/repository.jsonl"):
+        repository_id = row.get("repository_id")
+        full_name, casefold = row.get("full_name"), row.get("full_name_casefold")
+        if (
+            not isinstance(repository_id, str)
+            or not repository_id
+            or repository_id in repositories
+            or not isinstance(full_name, str)
+            or not isinstance(casefold, str)
+        ):
+            _fail("canonical repository export is malformed for product-scope projection")
+        repositories[repository_id] = (full_name, casefold)
+    pull_requests: dict[str, tuple[str, str, int, int]] = {}
+    for row in _jsonl_rows(contents["tables/pull_request.jsonl"], "tables/pull_request.jsonl"):
+        pr_id, repository_id = row.get("pr_id"), row.get("repository_id")
+        repository = repositories.get(repository_id) if isinstance(repository_id, str) else None
+        number, rank = row.get("number"), row.get("rank")
+        if (
+            not isinstance(pr_id, str)
+            or not pr_id
+            or pr_id in pull_requests
+            or repository is None
+            or type(number) is not int
+            or number < 1
+            or type(rank) is not int
+            or rank < 1
+        ):
+            _fail("canonical pull-request export is malformed for product-scope projection")
+        pull_requests[pr_id] = (*repository, number, rank)
+    pull_request_rows = _jsonl_rows(
+        contents["tables/pull_request.jsonl"], "tables/pull_request.jsonl"
+    )
+    pull_request_by_id = {row["pr_id"]: row for row in pull_request_rows}
+    review_rows = []
+    runs = _jsonl_rows(contents["tables/reviewer_run.jsonl"], "tables/reviewer_run.jsonl")
+    for row in runs:
+        pr_id = row.get("pr_id")
+        pr = pull_request_by_id.get(pr_id) if isinstance(pr_id, str) else None
+        repository_id = pr.get("repository_id") if pr is not None else None
+        if pr is None or not isinstance(repository_id, str) or repository_id not in repositories:
+            _fail("reviewer run references a missing canonical pull request")
+        lane, digest = row.get("lane"), row.get("artifact_sha256")
+        if (
+            lane not in {"A", "B"}
+            or not isinstance(digest, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
+        ):
+            _fail("reviewer run has malformed review projection fields")
+        review_rows.append(
+            (
+                repositories[repository_id][1],
+                pr["rank"],
+                row.get("lane"),
+                {
+                    "repository": repositories[repository_id][0],
+                    "pr": pr["number"],
+                    "lane": row.get("lane"),
+                    "artifact_sha256": row.get("artifact_sha256"),
+                    "terminal_recommendation": row.get("terminal_recommendation"),
+                },
+            )
+        )
+    expected_reviews = [row for *_sort, row in sorted(review_rows, key=lambda item: item[:3])]
+    if _jsonl_rows(contents["reviews.jsonl"], "reviews.jsonl") != expected_reviews:
+        _fail("review projection does not match canonical reviewer runs")
+
+    review_artifacts: list[dict[str, Any]] = []
+    for row in runs:
+        artifact = row.get("artifact_bytes")
+        if (
+            not isinstance(artifact, dict)
+            or type(artifact.get("bytes")) is not int
+            or artifact["bytes"] < 0
+            or not isinstance(row.get("artifact_sha256"), str)
+        ):
+            _fail("reviewer run has malformed artifact metadata")
+        review_artifacts.append(
+            {
+                "artifact_type": "review",
+                "sha256": row.get("artifact_sha256"),
+                "bytes": artifact.get("bytes"),
+            }
+        )
+    adjudication_rows = _jsonl_rows(
+        contents["tables/adjudication.jsonl"], "tables/adjudication.jsonl"
+    )
+    adjudications_by_id = {}
+    adjudication_artifacts: list[dict[str, Any]] = []
+    for row in adjudication_rows:
+        adjudication_id = row.get("adjudication_id")
+        if not isinstance(adjudication_id, str) or adjudication_id in adjudications_by_id:
+            _fail("canonical adjudication export has invalid or duplicate identity")
+        adjudications_by_id[adjudication_id] = row
+        artifact = row.get("artifact_bytes")
+        if (
+            not isinstance(artifact, dict)
+            or type(artifact.get("bytes")) is not int
+            or artifact["bytes"] < 0
+            or not isinstance(row.get("artifact_sha256"), str)
+        ):
+            _fail("canonical adjudication has malformed artifact metadata")
+        adjudication_artifacts.append(
+            {
+                "artifact_type": "adjudication",
+                "sha256": row.get("artifact_sha256"),
+                "bytes": artifact.get("bytes"),
+            }
+        )
+    expected_index = sorted(review_artifacts, key=lambda item: item["sha256"]) + sorted(
+        adjudication_artifacts, key=lambda item: item["sha256"]
+    )
+    if _jsonl_rows(contents["artifact-index.jsonl"], "artifact-index.jsonl") != expected_index:
+        _fail("artifact index does not match canonical artifact metadata")
+
+    membership_rows = [
+        row
+        for row in _jsonl_rows(contents["tables/release_pr.jsonl"], "tables/release_pr.jsonl")
+        if row.get("release_id") == release_id
+    ]
+    expected_adjudications = []
+    for member in membership_rows:
+        pr_id, adjudication_id = member.get("pr_id"), member.get("adjudication_id")
+        pr = pull_request_by_id.get(pr_id) if isinstance(pr_id, str) else None
+        adjudication = (
+            adjudications_by_id.get(adjudication_id) if isinstance(adjudication_id, str) else None
+        )
+        if pr is None or adjudication is None or adjudication.get("pr_id") != pr_id:
+            _fail("release adjudication projection references invalid canonical identity")
+        repository_id = pr.get("repository_id")
+        if not isinstance(repository_id, str) or repository_id not in repositories:
+            _fail("release adjudication projection references invalid repository")
+        expected_adjudications.append(
+            (
+                repositories[repository_id][1],
+                pr["rank"],
+                {
+                    "repository": repositories[repository_id][0],
+                    "pr": pr["number"],
+                    "version": adjudication.get("version"),
+                    "artifact_sha256": adjudication.get("artifact_sha256"),
+                    "terminal_status": adjudication.get("terminal_status"),
+                },
+            )
+        )
+    expected_adjudications.sort(key=lambda item: item[:2])
+    if _jsonl_rows(contents["adjudications.jsonl"], "adjudications.jsonl") != [
+        row for _casefold, _rank, row in expected_adjudications
+    ]:
+        _fail("adjudication projection does not match canonical adjudications")
 
 
 def _verify_product_scopes(  # noqa: PLR0912, PLR0915
@@ -648,6 +845,15 @@ def _verify_product_scopes(  # noqa: PLR0912, PLR0915
                 entrypoint_record[2]
             )
 
+    selected_decisions = {
+        decision_id
+        for decision_id, (adjudication_id, _pr_id, _atom) in canonical_entrypoints.items()
+        if adjudication_id in adjudications
+    }
+    covered_decisions = {decision_id for _adj, decision_id, _scope, _version in seen_memberships}
+    if selected_decisions != covered_decisions:
+        _fail("product scope memberships do not cover every selected canonical entrypoint")
+
     expected_files: dict[str, list[dict[str, Any]]] = {}
     for scope_id, version in sorted(defined_scopes):
         product, digest = definitions[(scope_id, version)]
@@ -677,9 +883,7 @@ def _verify_product_scopes(  # noqa: PLR0912, PLR0915
         _fail("product-scope files do not match canonical scope memberships")
     for name, expected_rows in expected_files.items():
         actual_rows = _jsonl_rows(contents[name], name)
-        if sorted(canonical_json(row) for row in actual_rows) != sorted(
-            canonical_json(row) for row in expected_rows
-        ):
+        if actual_rows != expected_rows:
             _fail("product-scope projection does not match canonical scope membership")
 
 
