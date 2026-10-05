@@ -80,7 +80,7 @@ class IncrementalBuildError(RuntimeError):
 
 
 SUPPORTED_ENGINES = frozenset({"mypy-fine-grained"})
-SUPPORTED_MYPY_VERSIONS = frozenset({"1.19.1"})
+SUPPORTED_MYPY_VERSIONS = frozenset({"1.19.1", "2.4.0"})
 
 
 @dataclass(frozen=True)
@@ -151,7 +151,8 @@ class MypyIncrementalProvider:
 
     Inventory keys are canonical mypy module IDs and values are source paths.
     The provider owns one in-memory mypy daemon state and fails closed when its
-    engine/configuration/source-root fingerprint changes.
+    engine/configuration/source-root fingerprint changes. Fine-grained APIs are
+    validated for the explicit ``SUPPORTED_MYPY_VERSIONS`` set only.
     """
 
     def __init__(self, config: BuildConfig) -> None:

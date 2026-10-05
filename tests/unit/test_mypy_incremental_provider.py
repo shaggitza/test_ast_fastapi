@@ -52,12 +52,21 @@ def test_unsupported_engine_is_rejected_before_cold_build(tmp_path: Path) -> Non
         MypyIncrementalProvider(BuildConfig(tmp_path, engine="unsupported-engine"))
 
 
+@pytest.mark.parametrize("reported_version", ["1.20.0", "2.3.9", "2.5.0"])
 def test_unvalidated_mypy_version_is_rejected_before_cold_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reported_version: str
+) -> None:
+    monkeypatch.setattr(mypy_incremental, "version", lambda _package: reported_version)
+    with pytest.raises(IncrementalBuildError, match="not validated for fine-grained updates"):
+        MypyIncrementalProvider(BuildConfig(tmp_path))
+
+
+def test_independently_validated_mypy_24_is_allowed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(mypy_incremental, "version", lambda _package: "2.4.0")
-    with pytest.raises(IncrementalBuildError, match="not validated for fine-grained updates"):
-        MypyIncrementalProvider(BuildConfig(tmp_path))
+    provider = MypyIncrementalProvider(BuildConfig(tmp_path))
+    assert provider._mypy_version == "2.4.0"
 
 
 def test_same_interface_edit_is_real_typed_incremental_update(tmp_path: Path) -> None:
