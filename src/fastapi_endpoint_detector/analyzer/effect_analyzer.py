@@ -327,7 +327,11 @@ class EffectAnalyzer:
     def _dict_is_unshadowed(tree: ast.Module) -> bool:  # noqa: PLR0911 - explicit binding kinds
         # Any module binding may shadow builtins for a nested function too.
         for node in ast.walk(tree):
-            if isinstance(node, ast.Name) and node.id == "dict" and isinstance(node.ctx, ast.Store):
+            if (
+                isinstance(node, ast.Name)
+                and node.id == "dict"
+                and isinstance(node.ctx, (ast.Store, ast.Del))
+            ):
                 return False
             if isinstance(node, ast.arg) and node.arg == "dict":
                 return False
@@ -400,13 +404,20 @@ class EffectAnalyzer:
                     add_tree(node.elt, True, path)
                 return
             if isinstance(node, ast.BoolOp):
+                current_path = path
+                current_conditional = conditional
+                continues_on = isinstance(node.op, ast.And)
                 for index, value in enumerate(node.values):
-                    add_tree(value, conditional or index > 0, path)
+                    add_tree(value, current_conditional, current_path)
+                    if index == len(node.values) - 1:
+                        break
                     truth = self._literal_truth(value)
-                    if isinstance(node.op, ast.And) and truth is False:
-                        break
-                    if isinstance(node.op, ast.Or) and truth is True:
-                        break
+                    if truth is not None:
+                        if truth is not continues_on:
+                            break
+                        continue
+                    current_path = (*current_path, (value, int(continues_on)))
+                    current_conditional = True
                 return
             if isinstance(node, ast.IfExp):
                 add_tree(node.test, conditional, path)
@@ -515,16 +526,22 @@ class EffectAnalyzer:
                     )
                 elif isinstance(statement, ast.Match):
                     add_tree(statement.subject, path_conditional, path)
+                    exhaustive_terminal = False
                     for index, case in enumerate(statement.cases):
                         case_path = (*path, (statement, index))
                         add_tree(case.pattern, True, case_path)
                         if case.guard is not None:
                             add_tree(case.guard, True, case_path)
-                        visit_block(case.body, True, case_path)
-                    terminal = False
+                        case_terminal = visit_block(case.body, True, case_path)
+                        if case.guard is None and self._is_irrefutable_pattern(case.pattern):
+                            exhaustive_terminal = case_terminal
+                            break
+                    terminal = exhaustive_terminal
                 else:
                     add_tree(statement, path_conditional, path)
-                    terminal = isinstance(statement, (ast.Return, ast.Raise))
+                    terminal = isinstance(
+                        statement, (ast.Return, ast.Raise, ast.Break, ast.Continue)
+                    )
             return terminal
 
         visit_block(function.body, False, ())
@@ -532,24 +549,69 @@ class EffectAnalyzer:
 
     @staticmethod
     def _loop_has_break(loop: ast.While) -> bool:
-        pending: list[ast.AST] = list(loop.body)
-        while pending:
-            node = pending.pop()
-            if isinstance(node, ast.Break):
-                return True
-            if isinstance(
-                node,
-                (
-                    ast.For,
-                    ast.AsyncFor,
-                    ast.While,
-                    ast.FunctionDef,
-                    ast.AsyncFunctionDef,
-                    ast.Lambda,
-                ),
-            ):
-                continue
-            pending.extend(ast.iter_child_nodes(node))
+        def block_has_break(  # noqa: PLR0911, PLR0912 - explicit AST control flow
+            statements: list[ast.stmt],
+        ) -> bool:
+            for statement in statements:
+                if isinstance(statement, ast.Break):
+                    return True
+                if isinstance(statement, (ast.Return, ast.Raise, ast.Continue)):
+                    return False
+                if isinstance(statement, ast.If):
+                    truth = EffectAnalyzer._literal_truth(statement.test)
+                    if truth is True:
+                        if block_has_break(statement.body):
+                            return True
+                    elif truth is False:
+                        if block_has_break(statement.orelse):
+                            return True
+                    elif block_has_break(statement.body) or block_has_break(statement.orelse):
+                        return True
+                    if (truth is True and not statement.body) or (
+                        truth is False and not statement.orelse
+                    ):
+                        continue
+                elif isinstance(statement, ast.Try):
+                    if (
+                        block_has_break(statement.body)
+                        or any(block_has_break(handler.body) for handler in statement.handlers)
+                        or block_has_break(statement.finalbody)
+                    ):
+                        return True
+                    if statement.body and isinstance(statement.body[-1], (ast.Return, ast.Raise)):
+                        continue
+                    if block_has_break(statement.orelse):
+                        return True
+                elif isinstance(statement, ast.Match):
+                    exhaustive = False
+                    for case in statement.cases:
+                        if block_has_break(case.body):
+                            return True
+                        if case.guard is None and EffectAnalyzer._is_irrefutable_pattern(
+                            case.pattern
+                        ):
+                            exhaustive = True
+                            break
+                    if exhaustive:
+                        continue
+                elif isinstance(
+                    statement,
+                    (ast.For, ast.AsyncFor, ast.While, ast.FunctionDef, ast.AsyncFunctionDef),
+                ):
+                    continue
+            return False
+
+        return block_has_break(loop.body)
+
+    @staticmethod
+    def _is_irrefutable_pattern(pattern: ast.pattern) -> bool:
+        if isinstance(pattern, ast.MatchAs):
+            return pattern.pattern is None or (
+                pattern.pattern is not None
+                and EffectAnalyzer._is_irrefutable_pattern(pattern.pattern)
+            )
+        if isinstance(pattern, ast.MatchOr):
+            return any(EffectAnalyzer._is_irrefutable_pattern(item) for item in pattern.patterns)
         return False
 
     @staticmethod
@@ -771,10 +833,21 @@ class EffectAnalyzer:
             aliases: dict[str, list[tuple[int, tuple[tuple[ast.AST, int], ...], bool | None]]],
             binding_parents: dict[ast.AST, ast.AST],
         ) -> None:
+            def target_names(target: ast.expr) -> list[str]:
+                if isinstance(target, ast.Name):
+                    return [target.id]
+                if isinstance(target, (ast.Tuple, ast.List)):
+                    return [name for item in target.elts for name in target_names(item)]
+                if isinstance(target, ast.Starred):
+                    return target_names(target.value)
+                return []
+
             targets: list[ast.expr] = []
             value: ast.expr | None = None
             if isinstance(node, ast.Assign):
                 targets, value = node.targets, node.value
+            elif isinstance(node, ast.AnnAssign) and node.value is None:
+                return
             elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
                 targets, value = [node.target], node.value
             elif isinstance(node, ast.AugAssign):
@@ -801,8 +874,8 @@ class EffectAnalyzer:
                 targets = [ast.Name(id=node.rest, ctx=ast.Store())]
             state = binding_state(value, path, index, aliases)
             for target in targets:
-                if isinstance(target, ast.Name):
-                    aliases.setdefault(target.id, []).append((index, path, state))
+                for name in target_names(target):
+                    aliases.setdefault(name, []).append((index, path, state))
 
         def helper_effect(  # noqa: PLR0911, PLR0912 - fail-closed helper proof
             call: ast.Call, call_index: int, call_item: _ExecutionNode
@@ -822,6 +895,8 @@ class EffectAnalyzer:
             if isinstance(helper, ast.AsyncFunctionDef) and not self._is_awaited(call, parents):
                 return None
             helper_nodes = self._execution_nodes(helper)
+            if len(helper_nodes) > self._MAX_SCOPE_NODES:
+                return None
             helper_scope = self._same_scope_nodes(helper)
             helper_scope_set = set(helper_scope)
             helper_parents = {
@@ -830,6 +905,12 @@ class EffectAnalyzer:
                 for child in ast.iter_child_nodes(parent)
                 if child in helper_scope_set
             }
+            for body_node in helper_scope:
+                if isinstance(body_node, ast.Nonlocal):
+                    for name in body_node.names:
+                        may_alias, _ = self._alias_status(name, call_item.path, call_index, facts)
+                        if may_alias:
+                            facts.setdefault(name, []).append((call_index, call_item.path, None))
             if not helper_nodes or any(
                 isinstance(node, (ast.Yield, ast.YieldFrom, ast.Global, ast.Nonlocal))
                 for node in ast.walk(helper)
@@ -846,6 +927,12 @@ class EffectAnalyzer:
                     return None
             arguments = [*helper.args.posonlyargs, *helper.args.args, *helper.args.kwonlyargs]
             formal_names = {argument.arg for argument in arguments}
+            variadic_names = {
+                argument.arg
+                for argument in (helper.args.vararg, helper.args.kwarg)
+                if argument is not None
+            }
+            formal_names.update(variadic_names)
             locally_bound_names = {
                 name for body_node in helper_scope for name in self._binding_names(body_node)
             }
@@ -853,6 +940,8 @@ class EffectAnalyzer:
                 str, list[tuple[int, tuple[tuple[ast.AST, int], ...], bool | None]]
             ] = {}
             for name in locally_bound_names - formal_names:
+                helper_facts[name] = [(-1, (), False)]
+            for name in variadic_names:
                 helper_facts[name] = [(-1, (), False)]
             outer_names = set(facts) - formal_names - locally_bound_names
             for name in outer_names:
@@ -1239,20 +1328,83 @@ class EffectAnalyzer:
                 )
             ancestor = parents.get(ancestor)
 
-        aliases = {subject}
-        for node in scope_nodes:
-            if getattr(node, "lineno", 0) >= call_line:
+        execution = self._execution_nodes(function)
+        call_indexes = [index for index, item in enumerate(execution) if item.node is call]
+        if len(call_indexes) != 1:
+            return _Observation(
+                DataObservationKind.NOT_OBSERVED_AFTER_CALL,
+                ImpactChannel.IN_MEMORY_ALIASING,
+                EffectDisposition.NOT_OBSERVED_BY_CALLER,
+                CodeReference(file_path=str(path), line_number=call_line, symbol=function.name),
+            )
+        call_index = call_indexes[0]
+        call_item = execution[call_index]
+        alias_facts: dict[str, list[tuple[int, tuple[tuple[ast.AST, int], ...], bool | None]]] = {
+            subject: [(-1, (), True)]
+        }
+
+        def bind_target(
+            target: ast.expr, state: bool | None, item: _ExecutionNode, index: int
+        ) -> None:
+            names: list[str] = []
+            pending = [target]
+            while pending:
+                current = pending.pop()
+                if isinstance(current, ast.Name):
+                    names.append(current.id)
+                elif isinstance(current, (ast.Tuple, ast.List)):
+                    pending.extend(current.elts)
+                elif isinstance(current, ast.Starred):
+                    pending.append(current.value)
+            for name in names:
+                if name == subject:
+                    # The stack edge identifies this variable's value at the
+                    # call. Its earlier initializer does not describe whether
+                    # the copied argument is observed after the call.
+                    continue
+                alias_facts.setdefault(name, []).append((index, item.path, state))
+
+        for index, item in enumerate(execution[:call_index]):
+            node = item.node
+            targets: list[ast.expr] = []
+            value: ast.expr | None = None
+            if isinstance(node, ast.Assign):
+                targets, value = node.targets, node.value
+            elif isinstance(node, ast.AnnAssign):
+                if node.value is None:
+                    continue
+                targets, value = [node.target], node.value
+            elif isinstance(node, ast.NamedExpr):
+                targets, value = [node.target], node.value
+            elif isinstance(node, ast.AugAssign):
+                targets = [node.target]
+            elif isinstance(node, ast.Delete):
+                targets = node.targets
+            elif isinstance(node, (ast.For, ast.AsyncFor)):
+                targets = [node.target]
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                targets = [ast.Name(id=node.name, ctx=ast.Store())]
+            if not targets:
                 continue
-            if node not in reachable_nodes:
-                continue
-            if (
-                isinstance(node, ast.Assign)
-                and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name)
-                and isinstance(node.value, ast.Name)
-                and node.value.id in aliases
-            ):
-                aliases.add(node.targets[0].id)
+            state: bool | None = False
+            if isinstance(value, ast.Name):
+                may_alias, definite_alias = self._alias_status(
+                    value.id, item.path, index, alias_facts
+                )
+                state = True if definite_alias else None if may_alias else False
+            for target in targets:
+                bind_target(target, state, item, index)
+
+        aliases: set[str] = set()
+        uncertain_aliases: set[str] = set()
+        for name in alias_facts:
+            may_alias, definite_alias = self._alias_status(
+                name, call_item.path, call_index, alias_facts
+            )
+            if may_alias:
+                aliases.add(name)
+                if not definite_alias:
+                    uncertain_aliases.add(name)
         # Follow straight-line assignments after the call. A write kills that
         # local's old identity; branch assignments are left conditional by the
         # control-region classifier rather than joined as definite aliases.
@@ -1268,19 +1420,19 @@ class EffectAnalyzer:
                 continue
             control, _ = self._control_relationship(call, statement, parents)
             value = getattr(statement, "value", None)
-            targets: list[ast.expr] = []
+            post_targets: list[ast.expr] = []
             if isinstance(statement, ast.Assign):
-                targets.extend(statement.targets)
+                post_targets.extend(statement.targets)
             elif isinstance(statement, ast.AnnAssign):
                 if statement.value is None:
                     continue
-                targets.append(statement.target)
+                post_targets.append(statement.target)
             elif isinstance(statement, ast.AugAssign):
-                targets.append(statement.target)
+                post_targets.append(statement.target)
             if control:
                 # An assignment in an opposite if arm cannot define a definite
                 # alias on the call's path.
-                for target in targets:
+                for target in post_targets:
                     if isinstance(target, ast.Name) and target.id in aliases:
                         killed_at[target.id] = statement.lineno
                 continue
@@ -1288,7 +1440,7 @@ class EffectAnalyzer:
                 isinstance(name, ast.Name) and isinstance(name.ctx, ast.Load) and name.id in aliases
                 for name in ast.walk(value)
             )
-            for target in targets:
+            for target in post_targets:
                 if not isinstance(target, ast.Name):
                     continue
                 if target.id in aliases:
@@ -1334,7 +1486,14 @@ class EffectAnalyzer:
             DataObservationKind.READ: 3,
             DataObservationKind.DYNAMIC_ESCAPE: 2,
         }
-        return max(observations, key=lambda item: order.get(item.kind, 0))
+        observation = max(observations, key=lambda item: order.get(item.kind, 0))
+        if observation.kind is DataObservationKind.RETURNED and observation.conditional:
+            return observation
+        if observation.kind is DataObservationKind.RETURNED and uncertain_aliases:
+            # The return may observe the changed value only on some feasible
+            # pre-call alias paths, so it cannot support HIGH confidence.
+            return replace(observation, conditional=True)
+        return observation
 
     @staticmethod
     def _control_relationship(

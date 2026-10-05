@@ -235,6 +235,13 @@ def test_dict_constructor_capture_and_wildcard_import_are_not_builtin_proof(
             6,
         ),
         (
+            "def dispatch(payload):\n"
+            "    payload = dict(payload)\n"
+            "    del dict\n"
+            "    payload.update({'x': 1})\n",
+            2,
+        ),
+        (
             "from helpers import *\n"
             "def dispatch(payload):\n"
             "    payload = dict(payload)\n"
@@ -386,6 +393,186 @@ def test_alias_assigned_to_subject_on_both_branch_arms_remains_provable(
     assert result is not None
     assert result.confidence == ConfidenceLevel.HIGH
     assert result.evidence[0].status.value == "established"
+
+
+def test_short_circuit_walrus_alias_is_conditional_and_live_if_branch_remains_positive(
+    tmp_path: Path,
+) -> None:
+    service = tmp_path / "service.py"
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def endpoint():\n    payload = {}\n    dispatch(payload, False)\n    return payload\n"
+    )
+    service.write_text(
+        "def dispatch(payload, flag):\n"
+        "    payload = {**payload}\n"
+        "    alias = {}\n"
+        "    flag and (alias := payload)\n"
+        "    alias.update({'x': 1})\n"
+        "    return payload\n"
+    )
+    result = EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 3)])
+    assert result is not None
+    assert result.confidence == ConfidenceLevel.MEDIUM
+    assert result.evidence[0].status.value == "conditional"
+
+    service.write_text(
+        "def dispatch(payload, flag):\n"
+        "    payload = {**payload}\n"
+        "    alias = {}\n"
+        "    if flag:\n"
+        "        alias = payload\n"
+        "    else:\n"
+        "        alias = payload\n"
+        "    alias.update({'x': 1})\n"
+        "    return payload\n"
+    )
+    result = EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 3)])
+    assert result is not None
+    assert result.confidence == ConfidenceLevel.HIGH
+
+
+def test_unpacking_and_variadic_helper_bindings_do_not_alias_subject(tmp_path: Path) -> None:
+    service = tmp_path / "service.py"
+    main = tmp_path / "main.py"
+    main.write_text("def endpoint():\n    return dispatch({})\n")
+    cases = (
+        (
+            "def dispatch(payload):\n"
+            "    payload = {**payload}\n"
+            "    payload, other = {}, {}\n"
+            "    payload.update({'x': 1})\n",
+            2,
+        ),
+        (
+            "def dispatch(payload):\n"
+            "    payload = {**payload}\n"
+            "    def mutate(x):\n"
+            "        x, other = {}, {}\n"
+            "        x.update({'x': 1})\n"
+            "    mutate(payload)\n",
+            2,
+        ),
+        (
+            "def dispatch(payload):\n"
+            "    payload = {**payload}\n"
+            "    def mutate(**payload):\n"
+            "        payload.update({'x': 1})\n"
+            "    mutate()\n",
+            2,
+        ),
+    )
+    for source, copy_line in cases:
+        service.write_text(source)
+        assert (
+            EffectAnalyzer(tmp_path).analyze(str(service), {copy_line}, [_stack(main, service, 2)])
+            is None
+        )
+
+
+def test_pre_call_alias_kills_and_branch_uncertainty_affect_return_observation(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def endpoint(flag):\n"
+        "    payload = {}\n"
+        "    alias = payload\n"
+        "    alias = {}\n"
+        "    dispatch(payload)\n"
+        "    return alias\n"
+    )
+    result = EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 5)])
+    assert result is not None
+    assert result.confidence == ConfidenceLevel.LOW
+    assert result.evidence[0].observations == [DataObservationKind.NOT_OBSERVED_AFTER_CALL]
+
+    main.write_text(
+        "def endpoint(flag):\n"
+        "    payload = {}\n"
+        "    alias = {}\n"
+        "    if flag:\n"
+        "        alias = payload\n"
+        "    dispatch(payload)\n"
+        "    return alias\n"
+    )
+    result = EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 6)])
+    assert result is not None
+    assert result.confidence == ConfidenceLevel.MEDIUM
+    assert result.evidence[0].observations == [DataObservationKind.RETURNED]
+
+
+def test_exhaustive_match_loop_break_and_unreachable_return_do_not_prove_effect(
+    tmp_path: Path,
+) -> None:
+    service = tmp_path / "service.py"
+    main = tmp_path / "main.py"
+    main.write_text("def endpoint():\n    return dispatch({})\n")
+    blocks = (
+        "match flag:\n        case _:\n            return payload\n    payload.update({'x': 1})",
+        "while True:\n        break\n        payload.update({'x': 1})",
+    )
+    for block in blocks:
+        service.write_text(
+            "def dispatch(payload, flag=True):\n"
+            "    payload = {**payload}\n"
+            f"    {block.replace(chr(10), chr(10) + '    ')}\n"
+            "    return {'ok': True}\n"
+        )
+        assert (
+            EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 2)]) is None
+        )
+
+    service.write_text(
+        "def dispatch(payload):\n"
+        "    payload = {**payload}\n"
+        "    payload.update({'x': 1})\n"
+        "    return {'ok': True}\n"
+    )
+    main.write_text(
+        "def endpoint():\n"
+        "    payload = {}\n"
+        "    dispatch(payload)\n"
+        "    return {}\n"
+        "    return payload\n"
+    )
+    result = EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 3)])
+    assert result is not None
+    assert result.confidence == ConfidenceLevel.LOW
+    assert result.evidence[0].observations == [DataObservationKind.NOT_OBSERVED_AFTER_CALL]
+
+
+def test_nonlocal_helper_and_oversized_helper_do_not_leave_definite_mutation_proof(
+    tmp_path: Path,
+) -> None:
+    service = tmp_path / "service.py"
+    main = tmp_path / "main.py"
+    main.write_text("def endpoint():\n    return dispatch({})\n")
+    service.write_text(
+        "def dispatch(payload):\n"
+        "    payload = {**payload}\n"
+        "    def kill():\n"
+        "        nonlocal payload\n"
+        "        payload = {}\n"
+        "    kill()\n"
+        "    payload.update({'x': 1})\n"
+    )
+    result = EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 2)])
+    assert result is not None
+    assert result.confidence == ConfidenceLevel.MEDIUM
+
+    padding = "".join("        pass\n" for _ in range(2100))
+    service.write_text(
+        "def dispatch(payload):\n"
+        "    payload = {**payload}\n"
+        "    def mutate(x):\n"
+        "        x.update({'x': 1})\n"
+        f"{padding}"
+        "    mutate(payload)\n"
+    )
+    result = EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 2)])
+    assert result is None
 
 
 def test_dead_and_post_terminal_mutations_do_not_qualify_copy(tmp_path: Path) -> None:
