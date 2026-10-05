@@ -595,9 +595,7 @@ def test_utf8_coordinate_variants_preserve_same_line_call_identity(tmp_path: Pat
             f"    label = {prefix!r}; return emit() + emit()\n"
         )
         main.write_text(source_text, encoding="utf-8")
-        deps = MypyAnalyzer(tmp_path).analyze_endpoint(
-            _endpoint(main, line=2)
-        )
+        deps = MypyAnalyzer(tmp_path).analyze_endpoint(_endpoint(main, line=2))
         sites = _site_by_spelling(deps.get_resolved_call_sites(str(main)), "emit")
         ast_spans = sorted(
             (node.func.col_offset, node.func.end_col_offset)
@@ -614,6 +612,7 @@ def test_utf8_coordinate_variants_preserve_same_line_call_identity(tmp_path: Pat
         for site in sites:
             assert site.end_column is not None
             assert source[site.column : site.end_column].decode("utf-8") == "emit"
+
 
 def test_utf8_live_call_identity_is_stable_with_deferred_lambda_peer(tmp_path: Path) -> None:
     main = tmp_path / "main.py"
@@ -646,6 +645,7 @@ def test_utf8_live_call_identity_is_stable_with_deferred_lambda_peer(tmp_path: P
     assert first == second == (3, 64, 3, 68, "emit")
     assert deferred == (3, 49, 3, 53, "emit")
     assert [(site.column, site.end_column) for site in sites] == [(49, 53), (64, 68)]
+
 
 def test_utf8_live_call_identity_is_stable_with_dead_same_line_peer(tmp_path: Path) -> None:
     main = tmp_path / "main.py"

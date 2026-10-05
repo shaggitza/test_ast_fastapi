@@ -1390,6 +1390,7 @@ class MypyAnalyzer:
         if function.end_lineno is None or function.end_col_offset is None:
             return None
         return function.lineno, function.col_offset, function.end_lineno, function.end_col_offset
+
     def _match_python_and_mypy_calls(self, canonical: str) -> dict[int, tuple[int, int, int, int]]:
         """Pair calls only when both complete per-line source sequences agree."""
         from mypy.nodes import CallExpr, FuncDef, LambdaExpr, MemberExpr, NameExpr, Node
@@ -1566,7 +1567,6 @@ class MypyAnalyzer:
                     source_call.end_col_offset,
                 )
         return result
-
 
     @staticmethod
     def _callable_declaration(
