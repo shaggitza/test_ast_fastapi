@@ -55,6 +55,8 @@ dev = [
     "ruff>=0.1.0",
     "pre-commit>=3.0.0",
     "types-PyYAML>=6.0",
+    # mypy analyzes Python 3.10 imports even when CI runs on Python 3.11+.
+    "tomli>=2.0",
 ]
 analysis = [
     "mypy>=1.0.0",
