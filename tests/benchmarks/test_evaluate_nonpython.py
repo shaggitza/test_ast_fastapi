@@ -11,6 +11,7 @@ from benchmarks.real_world.evaluate_nonpython import (
     SCANNER_COMMIT,
     NonPythonFixtureError,
     scan_literal_case,
+    strict_json,
     validate_fixture,
 )
 
@@ -50,6 +51,21 @@ def test_rejects_manifest_schema_tampering(tmp_path: Path) -> None:
         validate_fixture(fixture)
 
 
+@pytest.mark.parametrize(
+    "raw_json",
+    [
+        '{"schema": "first", "schema": "second"}',
+        '{"outer": {"schema": "first", "schema": "second"}}',
+        '{"outer": [{"schema": "first", "schema": "second"}]}',
+    ],
+)
+def test_rejects_duplicate_json_keys_at_every_nesting_depth(tmp_path: Path, raw_json: str) -> None:
+    path = tmp_path / "duplicate-keys.json"
+    path.write_text(raw_json, encoding="utf-8")
+    with pytest.raises(NonPythonFixtureError, match="duplicate JSON object key"):
+        strict_json(path)
+
+
 def test_rejects_source_hash_metadata_tampering(tmp_path: Path) -> None:
     fixture = copied_fixture(tmp_path)
     manifest_path = fixture / "source_manifest.json"
@@ -76,6 +92,47 @@ def test_rejects_route_atom_count_tampering(tmp_path: Path) -> None:
     write_json(cases_path, cases)
     with pytest.raises(NonPythonFixtureError, match="unit-count mismatch"):
         validate_fixture(fixture)
+
+
+def test_rejects_duplicate_method_path_within_one_pr(tmp_path: Path) -> None:
+    fixture = copied_fixture(tmp_path)
+    cases_path = fixture / "evaluation_cases.json"
+    cases = read_json(cases_path)
+    atoms = cases["cases"][1]["atoms"]
+    atoms[2] = atoms[1].copy()
+    atoms[2]["query_evidence"] = "client=obsidian&source=duplicate-control"
+    write_json(cases_path, cases)
+    with pytest.raises(NonPythonFixtureError, match="duplicate audited route identity"):
+        validate_fixture(fixture)
+
+
+def test_rejects_duplicate_surface_id_within_one_pr(tmp_path: Path) -> None:
+    fixture = copied_fixture(tmp_path)
+    cases_path = fixture / "evaluation_cases.json"
+    cases = read_json(cases_path)
+    atoms = cases["cases"][1]["atoms"]
+    atoms[2]["surface_id"] = atoms[1]["surface_id"]
+    write_json(cases_path, cases)
+    with pytest.raises(NonPythonFixtureError, match="duplicate audited surface ID"):
+        validate_fixture(fixture)
+
+
+def test_same_route_and_surface_in_different_prs_remain_valid() -> None:
+    spec = validate_fixture()["spec"]
+    cases = {case["case_id"]: case for case in spec["cases"]}
+    first = next(
+        atom
+        for atom in cases["khoj-ai/khoj#1221"]["atoms"]
+        if atom["method"] == "PATCH" and atom["path"] == "/api/content"
+    )
+    second = next(
+        atom
+        for atom in cases["khoj-ai/khoj#1235"]["atoms"]
+        if atom["method"] == "PATCH" and atom["path"] == "/api/content"
+    )
+    assert first["surface_id"] == second["surface_id"]
+    assert first["query_evidence"] == "client=obsidian"
+    assert second["query_evidence"] == "client=obsidian"
 
 
 def test_vendored_python_sources_are_data_only() -> None:

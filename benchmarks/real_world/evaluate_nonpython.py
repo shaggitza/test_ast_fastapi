@@ -99,12 +99,22 @@ def strict_json(path: Path) -> Any:
     try:
         return json.loads(
             path.read_text(encoding="utf-8"),
+            object_pairs_hook=_unique_json_object,
             parse_constant=lambda value: (_ for _ in ()).throw(
                 NonPythonFixtureError(f"non-finite JSON constant in {path}: {value}")
             ),
         )
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise NonPythonFixtureError(f"invalid JSON input: {path}") from exc
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise NonPythonFixtureError(f"duplicate JSON object key: {key}")
+        result[key] = value
+    return result
 
 
 def safe_relative(value: Any, what: str) -> Path:
@@ -303,6 +313,8 @@ def validate_fixture(  # noqa: PLR0912, PLR0915
             raise NonPythonFixtureError(
                 f"case references source absent from hash manifest: {case['case_id']}"
             )
+        route_identities: set[tuple[str, str]] = set()
+        surface_ids: set[str] = set()
         for atom in atoms:
             if not isinstance(atom, dict):
                 raise NonPythonFixtureError("malformed audited route atom")
@@ -318,9 +330,18 @@ def validate_fixture(  # noqa: PLR0912, PLR0915
                 or not isinstance(atom.get("client_evidence"), str)
                 or not isinstance(atom.get("server_evidence"), str)
             ):
+                raise NonPythonFixtureError(f"malformed audited atom in {case['case_id']}")
+            route_identity = (method, path)
+            if route_identity in route_identities:
                 raise NonPythonFixtureError(
-                    f"malformed or duplicate audited atom in {case['case_id']}"
+                    f"duplicate audited route identity in {case['case_id']}: {method} {path}"
                 )
+            if surface_id in surface_ids:
+                raise NonPythonFixtureError(
+                    f"duplicate audited surface ID in {case['case_id']}: {surface_id}"
+                )
+            route_identities.add(route_identity)
+            surface_ids.add(surface_id)
             if mode == "docker_env_subprocess":
                 deployment_atom_count += 1
                 if (
