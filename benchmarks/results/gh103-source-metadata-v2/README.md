@@ -27,3 +27,10 @@ redirect stopped collection. The raw result SHA-256 is
 
 The v2 run is retained as a historical result. V3 increases bounded capacity
 and prioritizes package/license evidence before workflow files.
+
+The validator was subsequently hardened to require each repeated URL attempt
+to follow an actual retryable prior status (`truncated`, network unavailable,
+or HTTP 429/500/502/503/504). A prior success or terminal HTTP status cannot
+be followed by another attempt. The original collector digest above remains
+pinned for this unchanged historical artifact; its bytes and observation were
+not rewritten.

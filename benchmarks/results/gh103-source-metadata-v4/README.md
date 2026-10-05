@@ -45,6 +45,12 @@ and full candidate counts are recorded in the JSON; selected evidence remains
 available for each of those projects. The v1 0/50 HTTP 403 record is retained
 unchanged as a historical failed attempt.
 
+Request-log validation checks retry chronology per URL: each retry must follow
+a `truncated`, network-unavailable, or HTTP 429/500/502/503/504 result. Success
+and terminal HTTP statuses cannot be followed by another attempt. The original
+collector digest remains pinned for this unchanged historical artifact; its
+bytes and observation were not rewritten.
+
 Revalidation command:
 `python3 benchmarks/real_world/source_metadata_v4.py --validate benchmarks/results/gh103-source-metadata-v4/source-metadata-v4.json`.
 The synthetic validator suite is run with the pytest command above; it does not

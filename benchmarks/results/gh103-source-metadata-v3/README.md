@@ -52,3 +52,9 @@ uv run --with pytest python -m pytest tests/benchmarks/test_source_metadata_v3.p
 Collection is a dedicated bounded operation, not a test. Publication is
 deterministic and no-clobber. The result below records the exact command, code
 hash, observed counters, statuses, and result hash for the actual live run.
+
+The validator now checks retry chronology per URL: each retry must follow a
+`truncated`, network-unavailable, or HTTP 429/500/502/503/504 result. A
+successful response or terminal status cannot be retried. The recorded
+collector digest remains pinned for this unchanged historical artifact; its
+bytes and observation were not rewritten.

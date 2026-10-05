@@ -1,4 +1,5 @@
 import base64
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -251,6 +252,28 @@ def test_client_retries_cannot_exceed_request_budget(monkeypatch):
     with pytest.raises(sm.EvidenceError):
         client.get("https://api.github.com/repos/a/b/commits/" + "a" * 40, 1024)
     assert client.requests <= sm.MAX_REQUESTS
+
+
+def test_request_log_rejects_success_followed_by_retry():
+    payload = sample_payload()
+    project = make_complete_project(payload)
+    requests = []
+    for snapshot in (project["commit_evidence"], project["tree_evidence"]):
+        requests.append({"url": snapshot["request_url"], "attempt": 1, "status": "success", "bytes": snapshot["bytes"]})
+    file_item = project["files"][0]
+    requests.append({"url": file_item["request_url"], "attempt": 1, "status": "success", "bytes": file_item["bytes"]})
+    payload["collection"].update(requests=len(requests), response_bytes=sum(r["bytes"] for r in requests),
+                                  objects=len(requests), retries=0, request_log=requests)
+    sm.validate(payload)
+    forged = copy.deepcopy(payload)
+    retry = dict(forged["collection"]["request_log"][0], attempt=2)
+    forged["collection"]["request_log"].append(retry)
+    forged["collection"]["requests"] += 1
+    forged["collection"]["response_bytes"] += retry["bytes"]
+    forged["collection"]["objects"] += 1
+    forged["collection"]["retries"] += 1
+    with pytest.raises(sm.EvidenceError, match="retry_after_nonretryable_status"):
+        sm.validate(forged)
 
 
 def test_source_paths_are_canonical_and_no_clobber(tmp_path):

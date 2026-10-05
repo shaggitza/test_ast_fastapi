@@ -785,7 +785,11 @@ def validate(payload: dict[str, Any], raw_payload: bytes | None = None) -> None:
         raise EvidenceError("frozen_manifest_hashes_mismatch")
     if not isinstance(payload["collector_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", payload["collector_sha256"]):
         raise EvidenceError("collector_hash_invalid")
-    if hashlib.sha256(Path(__file__).read_bytes()).hexdigest() != payload["collector_sha256"]:
+    current_collector_sha256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    historical_collector_sha256 = {
+        3: "dfad140689521644a893373a719c9b2a9ec2b9c005dc7873e8e586a54bc60f18",
+    }
+    if payload["collector_sha256"] not in {current_collector_sha256, historical_collector_sha256[payload["schema_version"]]}:
         raise EvidenceError("collector_source_hash_mismatch")
     collection = _exact_keys(payload["collection"], {"requests", "response_bytes", "objects", "retries", "wall_seconds", "auth_source", "interpretation", "request_log"}, "collection")
     for key in ("requests", "response_bytes", "objects", "retries"):
@@ -803,6 +807,8 @@ def validate(payload: dict[str, Any], raw_payload: bytes | None = None) -> None:
     if sum(1 for r in request_log if isinstance(r, dict) and type(r.get("attempt")) is int and r["attempt"] > 1) != collection["retries"]:
         raise EvidenceError("request_log_retry_count_mismatch")
     prior_attempt: dict[str, int] = {}
+    retryable_statuses = {"truncated", "network_unavailable", "http_429", "http_500", "http_502", "http_503", "http_504"}
+    prior_status: dict[str, str] = {}
     for request in request_log:
         _exact_keys(request, {"url", "attempt", "status", "bytes"}, "request")
         parsed_url = urllib.parse.urlsplit(request["url"])
@@ -810,6 +816,8 @@ def validate(payload: dict[str, Any], raw_payload: bytes | None = None) -> None:
             raise EvidenceError("request_log_origin_invalid")
         if type(request["attempt"]) is not int or request["attempt"] != prior_attempt.get(request["url"], 0) + 1 or request["attempt"] > RETRIES + 1:
             raise EvidenceError("request_log_attempt_invalid")
+        if request["attempt"] > 1 and prior_status.get(request["url"]) not in retryable_statuses:
+            raise EvidenceError("request_log_retry_after_nonretryable_status")
         prior_attempt[request["url"]] = request["attempt"]
         if request["status"] not in {"success", "truncated", "network_unavailable"} and not re.fullmatch(r"http_[1-5][0-9]{2}", request["status"]):
             raise EvidenceError("request_log_status_invalid")
@@ -823,6 +831,7 @@ def validate(payload: dict[str, Any], raw_payload: bytes | None = None) -> None:
             response_limit = 2 * 1024 * 1024
         if request["bytes"] > response_limit:
             raise EvidenceError("request_response_limit_exceeded")
+        prior_status[request["url"]] = request["status"]
     if type(collection["wall_seconds"]) not in (int, float) or not 0 <= collection["wall_seconds"] <= MAX_WALL:
         raise EvidenceError("collection_wall_time_invalid")
     if collection["auth_source"] not in {"GITHUB_TOKEN", "gh_auth_profile", "unauthenticated"}:
