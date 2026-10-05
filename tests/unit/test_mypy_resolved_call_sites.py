@@ -194,32 +194,47 @@ def test_invoked_lambda_alias_traces_its_body(tmp_path: Path) -> None:
 def test_nested_helper_calls_and_branch_returned_closures_are_reachable(tmp_path: Path) -> None:
     main = tmp_path / "main.py"
     main.write_text(
-        "def changed() -> None: pass\n\n"
+        "def nested_effect() -> None: pass\n"
+        "def closure_effect() -> None: pass\n\n"
         "def nested_caller() -> None:\n"
         "    def local_helper() -> None:\n"
-        "        changed()\n"
+        "        nested_effect()\n"
         "    local_helper()\n\n"
         "def make_callback(flag: bool):\n"
         "    def callback() -> None:\n"
-        "        changed()\n"
+        "        closure_effect()\n"
         "    if flag:\n"
         "        return callback\n"
         "    return callback\n\n"
         "def handler(flag: bool) -> None:\n"
         "    nested_caller()\n"
         "    callback = make_callback(flag)\n"
-        "    callback()\n",
+        "    callback()\n\n"
+        "def handler_escape_only(flag: bool) -> None:\n"
+        "    make_callback(flag)\n",
         encoding="utf-8",
     )
 
-    deps = MypyAnalyzer(tmp_path, max_depth=6).analyze_endpoint(_endpoint(main, line=15))
+    analyzer = MypyAnalyzer(tmp_path, max_depth=6)
+    deps = analyzer.analyze_endpoint(_endpoint(main, line=17))
 
-    changed = [
-        reference
-        for reference in deps.referenced_symbols
-        if reference.symbol_name.endswith(".changed")
-    ]
-    assert changed
+    call_symbols = {site.canonical_symbol for site in deps.resolved_call_sites}
+    assert any(symbol and symbol.endswith(".nested_effect") for symbol in call_symbols)
+    assert any(symbol and symbol.endswith(".closure_effect") for symbol in call_symbols)
+    nested_call = _site_by_spelling(deps.resolved_call_sites, "local_helper")[0]
+    assert nested_call.canonical_symbol and nested_call.canonical_symbol.endswith(
+        ".nested_caller.local_helper"
+    )
+
+    escaped_only = analyzer.analyze_endpoint(_endpoint(main, line=21, name="handler_escape_only"))
+    assert not any(
+        site.canonical_symbol and site.canonical_symbol.endswith(".closure_effect")
+        for site in escaped_only.resolved_call_sites
+    )
+    assert any(
+        reference.symbol_name.endswith(".make_callback.callback") and reference.low_confidence
+        for reference in escaped_only.referenced_symbols
+    )
 
 
 def test_unused_nested_function_body_is_deferred_without_a_bundle(tmp_path: Path) -> None:

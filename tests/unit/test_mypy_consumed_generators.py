@@ -98,6 +98,37 @@ def test_exact_eager_builtin_consumes_generator_expression(tmp_path: Path) -> No
     assert deps.references_lines_low_only("worker.py", {1})
 
 
+def test_sorted_consumes_generator_with_supported_keyword_arguments(tmp_path: Path) -> None:
+    _write_generator_project(tmp_path)
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from streams import sync_stream\n\n"
+        "def handler():\n"
+        "    return sorted(sync_stream(), key=str, reverse=True)\n",
+        encoding="utf-8",
+    )
+
+    deps = MypyAnalyzer(tmp_path, max_depth=5).analyze_endpoint(_endpoint(main, line=3))
+
+    assert deps.references_symbol_at_line("worker.py", 1) is not None
+    assert deps.references_lines_low_only("worker.py", {1})
+
+
+def test_sorted_rejects_unknown_generator_consumer_keywords(tmp_path: Path) -> None:
+    _write_generator_project(tmp_path)
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from streams import sync_stream\n\n"
+        "def handler():\n"
+        "    return sorted(sync_stream(), unsupported=True)\n",
+        encoding="utf-8",
+    )
+
+    deps = MypyAnalyzer(tmp_path, max_depth=5).analyze_endpoint(_endpoint(main, line=3))
+
+    assert deps.references_symbol_at_line("worker.py", 1) is None
+
+
 @pytest.mark.parametrize(
     ("function_header", "expression"),
     [

@@ -737,7 +737,19 @@ class MypyAnalyzer:
         line_hint: int | None = None,
     ) -> tuple[Any, str] | None:
         """Resolve one function by qualified identity or source location."""
-        from mypy.nodes import ClassDef, Decorator, FuncDef, OverloadedFuncDef
+        from mypy.nodes import (
+            Block,
+            ClassDef,
+            Decorator,
+            ForStmt,
+            FuncDef,
+            IfStmt,
+            MatchStmt,
+            OverloadedFuncDef,
+            TryStmt,
+            WhileStmt,
+            WithStmt,
+        )
 
         candidates: list[tuple[Any, str]] = []
         for defn in tree.defs:
@@ -762,6 +774,77 @@ class MypyAnalyzer:
                         selected = implementation or (item.items[0] if item.items else None)
                         if selected is not None:
                             candidates.append((selected, f"{defn.name}.{item.name}"))
+
+        if qualified_name and "." in qualified_name:
+            nested_candidates: list[tuple[Any, str]] = []
+
+            def nested_statement(statement: Any, parent: str) -> None:
+                if isinstance(statement, Block):
+                    for child in statement.body:
+                        nested_statement(child, parent)
+                elif isinstance(statement, (FuncDef, Decorator, OverloadedFuncDef)):
+                    function = (
+                        statement.func
+                        if isinstance(statement, Decorator)
+                        else getattr(statement, "impl", None) or statement
+                    )
+                    nested_name = getattr(function, "name", None)
+                    if not isinstance(nested_name, str):
+                        return
+                    nested_fullname = f"{parent}.{nested_name}"
+                    if nested_fullname == qualified_name:
+                        nested_candidates.append((function, nested_fullname))
+                    body = getattr(function, "body", None)
+                    if body is not None:
+                        nested_statement(body, nested_fullname)
+                elif isinstance(statement, ClassDef):
+                    class_fullname = f"{parent}.{statement.name}"
+                    for child in statement.defs.body:
+                        nested_statement(child, class_fullname)
+                elif isinstance(statement, IfStmt):
+                    for block in statement.body:
+                        nested_statement(block, parent)
+                    if statement.else_body is not None:
+                        nested_statement(statement.else_body, parent)
+                elif isinstance(statement, (ForStmt, WhileStmt)):
+                    nested_statement(statement.body, parent)
+                    if statement.else_body is not None:
+                        nested_statement(statement.else_body, parent)
+                elif isinstance(statement, WithStmt):
+                    nested_statement(statement.body, parent)
+                elif isinstance(statement, TryStmt):
+                    nested_statement(statement.body, parent)
+                    for handler in statement.handlers:
+                        nested_statement(handler, parent)
+                    if statement.else_body is not None:
+                        nested_statement(statement.else_body, parent)
+                    if statement.finally_body is not None:
+                        nested_statement(statement.finally_body, parent)
+                elif isinstance(statement, MatchStmt):
+                    for body in statement.bodies:
+                        nested_statement(body, parent)
+
+            for definition in tree.defs:
+                if isinstance(definition, FuncDef):
+                    nested_statement(definition.body, definition.name)
+                elif isinstance(definition, Decorator):
+                    nested_statement(definition.func.body, definition.func.name)
+                elif isinstance(definition, OverloadedFuncDef):
+                    implementation = getattr(definition, "impl", None)
+                    if implementation is not None:
+                        nested_statement(implementation.body, definition.name)
+                elif isinstance(definition, ClassDef):
+                    for method in definition.defs.body:
+                        if isinstance(method, FuncDef):
+                            nested_statement(method.body, f"{definition.name}.{method.name}")
+                        elif isinstance(method, Decorator):
+                            nested_statement(
+                                method.func.body,
+                                f"{definition.name}.{method.func.name}",
+                            )
+            exact_nested = [item for item in nested_candidates if item[1] == qualified_name]
+            if len(exact_nested) == 1:
+                return exact_nested[0]
 
         if qualified_name:
             exact = [candidate for candidate in candidates if candidate[1] == qualified_name]
@@ -2365,6 +2448,77 @@ class MypyAnalyzer:
 
         return returned(getattr(parent, "body", None))
 
+    def _returned_project_callable(self, fullname: str) -> tuple[str, InvocationKind] | None:
+        """Resolve a callable returned on every explicit path of one project function."""
+        from mypy.nodes import (
+            Block,
+            Decorator,
+            ForStmt,
+            FuncDef,
+            IfStmt,
+            LambdaExpr,
+            NameExpr,
+            ReturnStmt,
+            TryStmt,
+            WhileStmt,
+            WithStmt,
+        )
+
+        resolved = self._function_node_for_fullname(fullname)
+        if resolved is None:
+            return None
+        function = self._actual_function(resolved[0])
+        returns: list[Any] = []
+
+        def collect(statement: Any) -> None:
+            if isinstance(statement, ReturnStmt):
+                returns.append(statement.expr)
+            elif isinstance(statement, Block):
+                for item in statement.body:
+                    collect(item)
+                    if isinstance(item, (ReturnStmt,)):
+                        break
+            elif isinstance(statement, IfStmt):
+                for block in statement.body:
+                    collect(block)
+                if statement.else_body is not None:
+                    collect(statement.else_body)
+            elif isinstance(statement, (ForStmt, WhileStmt)):
+                collect(statement.body)
+                if statement.else_body is not None:
+                    collect(statement.else_body)
+            elif isinstance(statement, WithStmt):
+                collect(statement.body)
+            elif isinstance(statement, TryStmt):
+                collect(statement.body)
+                for handler in statement.handlers:
+                    collect(handler)
+                if statement.else_body is not None:
+                    collect(statement.else_body)
+                if statement.finally_body is not None:
+                    collect(statement.finally_body)
+            elif isinstance(statement, (FuncDef, Decorator, LambdaExpr)):
+                return
+
+        collect(function.body)
+        if not returns or any(not isinstance(expression, NameExpr) for expression in returns):
+            return None
+        declarations = [
+            self._callable_declaration(getattr(expression, "node", None)) for expression in returns
+        ]
+        if declarations[0] is None or any(item != declarations[0] for item in declarations[1:]):
+            return None
+        declaration = declarations[0]
+        if declaration is None:
+            return None
+        if self._exact_project_identity(declaration[0]) is None:
+            declaration = (f"{fullname}.{declaration[0]}", declaration[1])
+            if self._function_node_for_fullname(declaration[0]) is None:
+                return None
+        elif self._function_node_for_fullname(declaration[0]) is None:
+            return None
+        return declaration
+
     def _finite_constructor_value(
         self,
         info: Any,
@@ -2612,7 +2766,7 @@ class MypyAnalyzer:
     @staticmethod
     def _valid_builtin_generator_consumer(call: Any, fullname: str) -> bool:
         """Accept only eager builtin iterator consumers with exact call shapes."""
-        from mypy.nodes import ARG_POS
+        from mypy.nodes import ARG_NAMED, ARG_POS
 
         counts = {
             "builtins.all": {1},
@@ -2624,10 +2778,19 @@ class MypyAnalyzer:
             "builtins.sum": {1, 2},
             "builtins.min": {1},
             "builtins.max": {1},
-            "builtins.sorted": {1},
             "builtins.next": {1, 2},
             "builtins.anext": {1, 2},
         }
+        if fullname == "builtins.sorted":
+            if not call.args or call.arg_kinds[0] != ARG_POS or call.arg_names[0] is not None:
+                return False
+            if sum(kind == ARG_POS for kind in call.arg_kinds) != 1:
+                return False
+            return all(
+                (kind == ARG_POS and name is None)
+                or (kind == ARG_NAMED and name in {"key", "reverse"})
+                for kind, name in zip(call.arg_kinds[1:], call.arg_names[1:], strict=True)
+            )
         return len(call.args) in counts.get(fullname, set()) and all(
             kind == ARG_POS and name is None
             for kind, name in zip(call.arg_kinds, call.arg_names, strict=True)
@@ -3021,10 +3184,16 @@ class MypyAnalyzer:
         current_file: str,
         import_map: dict[str, str],
         string_environment: dict[str, tuple[str, ...]] | None = None,
+        lexical_scope: str | None = None,
     ) -> ResolvedCallSite | None:
         """Classify one mypy call expression without guessing symbol identity."""
-        if string_environment:
-            site = self._resolved_call_site_uncached(call, current_file, import_map)
+        if string_environment or lexical_scope is not None:
+            site = self._resolved_call_site_uncached(
+                call,
+                current_file,
+                import_map,
+                lexical_scope=lexical_scope,
+            )
             if site is None:
                 return None
             return site.model_copy(
@@ -3285,6 +3454,8 @@ class MypyAnalyzer:
         call: Any,
         current_file: str,
         import_map: dict[str, str],
+        *,
+        lexical_scope: str | None = None,
     ) -> ResolvedCallSite | None:
         """Resolve one physical project-source call for the analyzer-wide cache."""
         from mypy.nodes import MemberExpr, NameExpr, SuperExpr, TypeInfo, Var
@@ -3326,6 +3497,14 @@ class MypyAnalyzer:
                     reason_code = "dynamic_callable"
             else:
                 declaration = self._callable_declaration(callee.node)
+                if (
+                    declaration is not None
+                    and lexical_scope is not None
+                    and self._exact_project_identity(declaration[0]) is None
+                ):
+                    local_fullname = f"{lexical_scope}.{declaration[0]}"
+                    if self._function_node_for_fullname(local_fullname) is not None:
+                        declaration = (local_fullname, declaration[1])
                 if declaration is not None:
                     status = CallResolutionStatus.EXACT
                     canonical_symbol, invocation = declaration
@@ -3480,6 +3659,9 @@ class MypyAnalyzer:
         flow_environment: dict[str, _FinitePointsTo] = dict(initial_environment or {})
         string_environment: dict[str, tuple[str, ...]] = dict(initial_string_environment or {})
         function_node = self._actual_function(node)
+        lexical_scope = call_stack[-1].function_name if call_stack else ""
+        if not lexical_scope.startswith(f"{current_module}."):
+            lexical_scope = f"{current_module}.{getattr(function_node, 'name', '')}"
         if receiver_value is not None and getattr(function_node, "arguments", None):
             self_name = function_node.arguments[0].variable.name
             flow_environment[self_name] = receiver_value
@@ -3708,7 +3890,13 @@ class MypyAnalyzer:
         def handle_call_expr(call: CallExpr) -> None:
             """Trace exact calls, adding bounded finite receiver edges as LOW only."""
             nonlocal string_environment
-            call_site = self._resolved_call_site(call, current_file, import_map, string_environment)
+            call_site = self._resolved_call_site(
+                call,
+                current_file,
+                import_map,
+                string_environment,
+                lexical_scope,
+            )
             if call_site is not None:
                 deps.add_resolved_call_site(call_site)
             callee = call.callee
@@ -4033,9 +4221,22 @@ class MypyAnalyzer:
                         walk_node(decorator)
                 # A nested function definition evaluates its signature and
                 # decorators here; its body executes only through a call edge.
-                if n is function_node or self._returned_nested_function(function_node, n):
+                if n is function_node:
                     if hasattr(n, "body"):
                         walk_node(n.body)
+                elif self._returned_nested_function(function_node, n):
+                    fullname = getattr(n, "fullname", None)
+                    if isinstance(fullname, str):
+                        if self._exact_project_identity(fullname) is None:
+                            fullname = f"{lexical_scope}.{fullname}"
+                        start, end = self._get_func_lines(n)
+                        deps.add_symbol_reference(
+                            current_file,
+                            fullname,
+                            start,
+                            end,
+                            low_confidence=True,
+                        )
 
             elif isinstance(n, Block):
                 for stmt in n.body:
@@ -4099,6 +4300,24 @@ class MypyAnalyzer:
                     )
                     if declaration is not None:
                         callable_value = (declaration, receiver)
+                elif isinstance(n.rvalue, CallExpr):
+                    returned_call = self._resolved_call_site(
+                        n.rvalue,
+                        current_file,
+                        import_map,
+                        string_environment,
+                        lexical_scope,
+                    )
+                    if (
+                        returned_call is not None
+                        and returned_call.status == CallResolutionStatus.EXACT
+                        and returned_call.canonical_symbol is not None
+                    ):
+                        returned_declaration = self._returned_project_callable(
+                            returned_call.canonical_symbol
+                        )
+                        if returned_declaration is not None:
+                            callable_value = (returned_declaration, None)
                 walk_node(n.rvalue)
                 for lv in n.lvalues:
                     if isinstance(lv, NameExpr):
