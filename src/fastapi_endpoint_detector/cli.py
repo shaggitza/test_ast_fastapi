@@ -773,7 +773,11 @@ def list_endpoints(
             endpoints = inventory.endpoints
         else:
             # Use default runtime introspection
-            extractor = FastAPIExtractor(app_path=app, app_variable=app_var)
+            extractor = FastAPIExtractor(
+                app_path=app,
+                app_variable=app_var,
+                source_inventory=config.source_inventory(app),
+            )
             endpoints = extractor.extract_endpoints()
 
         formatted_output = (

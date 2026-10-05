@@ -32,7 +32,6 @@ from fastapi_endpoint_detector.analyzer.scip_analyzer import (
     SCIPDefinition,
     SCIPReachedDefinition,
 )
-from fastapi_endpoint_detector.analyzer.source_inventory import SourceFile, SourceInventory
 from fastapi_endpoint_detector.analyzer.sql_transaction import (
     build_sql_transaction_diagnostics,
 )
@@ -77,6 +76,7 @@ from fastapi_endpoint_detector.parser.fastapi_extractor import FastAPIExtractor
 from fastapi_endpoint_detector.parser.secure_ast_extractor import SecureASTExtractor
 
 if TYPE_CHECKING:
+    from fastapi_endpoint_detector.analyzer.source_inventory import SourceFile, SourceInventory
     from fastapi_endpoint_detector.models.diff import DiffFile
     from fastapi_endpoint_detector.models.effect_contract import LoadedEffectContracts
     from fastapi_endpoint_detector.models.effect_contract_audit import (
@@ -270,7 +270,7 @@ class _MypySourceInventory:
 
     root: Path
     files: tuple[SourceFile, ...]
-    unresolved_imports: tuple[tuple[str, str], ...]
+    unresolved_imports: tuple[str, ...]
     excluded_files: tuple[str, ...]
     follow_imports: str
     max_depth: int
@@ -291,7 +291,9 @@ def _mypy_inventory(inventory: SourceInventory) -> tuple[_MypySourceInventory, P
         _MypySourceInventory(
             root=inventory.root,
             files=tuple(files),
-            unresolved_imports=inventory.unresolved_imports,
+            unresolved_imports=tuple(
+                f"{source}\0{imported}" for source, imported in inventory.unresolved_imports
+            ),
             excluded_files=inventory.excluded_files,
             follow_imports="normal" if inventory.follow_imports else "skip",
             max_depth=inventory.max_depth,
@@ -561,6 +563,7 @@ class ChangeMapper:
         self._baseline_registry: EndpointRegistry | None = None
         self._baseline_scip_analyzer: SCIPAnalyzer | None = None
         self.source_inventory = self.config.source_inventory(self.app_path)
+        self._baseline_source_inventory: SourceInventory | None = None
         self._baseline_extractor: FastAPIExtractor | SecureASTExtractor | None = None
         self._baseline_failure: str | None = None
 
@@ -578,7 +581,7 @@ class ChangeMapper:
             effective_depth = (
                 self.config.parser.max_depth if self.config.analysis.track_transitive else 1
             )
-            inventory = self.config.source_inventory(self.baseline_app_path)
+            inventory = self.baseline_source_inventory
             mypy_inventory, module_root = _mypy_inventory(inventory)
             self._baseline_mypy_analyzer = MypyAnalyzer(
                 package_path,
@@ -601,6 +604,7 @@ class ChangeMapper:
                     app_entry=self.app_entry,
                     bootstrap_entry=self.bootstrap_entry,
                     snapshot_side=SnapshotSide.BASELINE,
+                    source_paths=self.baseline_source_inventory.paths,
                 )
                 self._baseline_inventory = self._merge_surface_inventory(
                     self.baseline_app_path, secure_extractor.extract_inventory()
@@ -611,12 +615,23 @@ class ChangeMapper:
                 extractor = FastAPIExtractor(
                     app_path=self.baseline_app_path,
                     app_variable=self.app_variable,
+                    source_inventory=self.baseline_source_inventory,
                 )
                 endpoints = extractor.extract_endpoints()
             self._baseline_extractor = extractor
             self._baseline_registry = EndpointRegistry()
             self._baseline_registry.register_many(endpoints)
         return self._baseline_registry
+
+    @property
+    def baseline_source_inventory(self) -> SourceInventory:
+        """Return the canonical source selection for the explicit baseline snapshot."""
+        if self.baseline_app_path is None:
+            raise ChangeMapperError("A baseline source inventory requires --baseline-app")
+        if self._baseline_source_inventory is None:
+            self._baseline_source_inventory = self.config.source_inventory(self.baseline_app_path)
+        return self._baseline_source_inventory
+
     @property
     def extractor(self) -> FastAPIExtractor | SecureASTExtractor:
         """Get the configured endpoint extractor, initializing if needed."""
@@ -633,6 +648,7 @@ class ChangeMapper:
                 self._extractor = FastAPIExtractor(
                     app_path=self.app_path,
                     app_variable=self.app_variable,
+                    source_inventory=self.source_inventory,
                 )
         return self._extractor
 
@@ -773,7 +789,7 @@ class ChangeMapper:
                 app_entry=self.app_entry,
                 bootstrap_entry=self.bootstrap_entry,
                 snapshot_side=SnapshotSide.BASELINE,
-                source_paths=self.config.source_inventory(self.baseline_app_path).paths,
+                source_paths=self.baseline_source_inventory.paths,
             )
             self._baseline_registry = EndpointRegistry()
             native = extractor.extract_inventory()
@@ -792,7 +808,7 @@ class ChangeMapper:
                 if self.baseline_app_path.is_file()
                 else self.baseline_app_path
             )
-            baseline_inventory = self.config.source_inventory(self.baseline_app_path)
+            baseline_inventory = self.baseline_source_inventory
             self._baseline_scip_analyzer = SCIPAnalyzer(
                 package_path, use_cache=self.use_cache, source_inventory=baseline_inventory
             )
@@ -1774,9 +1790,7 @@ class ChangeMapper:
             )
         target_source_graph = source_evidence_graph(self.source_inventory)
         if self.baseline_app_path is not None:
-            baseline_graph = source_evidence_graph(
-                self.config.source_inventory(self.baseline_app_path), side="baseline"
-            )
+            baseline_graph = source_evidence_graph(self.baseline_source_inventory, side="baseline")
             target_source_graph = EvidenceGraph(
                 nodes=(*baseline_graph.nodes, *target_source_graph.nodes),
                 edges=(*baseline_graph.edges, *target_source_graph.edges),

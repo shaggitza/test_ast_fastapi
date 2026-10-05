@@ -7,6 +7,7 @@ import pytest
 from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
 from fastapi_endpoint_detector.analyzer.endpoint_registry import EndpointRegistry
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import CallFrame, EndpointDependencies
+from fastapi_endpoint_detector.config import Config
 from fastapi_endpoint_detector.models.diff import ChangeType, DiffFile, DiffHunk
 from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, HandlerInfo
 
@@ -312,6 +313,46 @@ def test_baseline_registry_uses_the_selected_snapshot(tmp_path: Path, secure_ast
 
     assert mapper.baseline_mypy_registry.get_all()[0].handler.file_path == baseline_app
     assert mapper.registry.get_all()[0].handler.file_path == target_app
+
+
+def test_mypy_uses_side_specific_canonical_inventory_and_module_identity(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    baseline = tmp_path / "baseline"
+    target.mkdir()
+    baseline.mkdir()
+    for snapshot in (target, baseline):
+        (snapshot / "app.py").write_text("app = None\n")
+        (snapshot / "service.py").write_text("value = 1\n")
+        (snapshot / "excluded.py").write_text("ignored = 1\n")
+
+    config = Config(
+        parser={
+            "exclude_patterns": ["**/excluded.py"],
+            "follow_imports": False,
+        }
+    )
+    mapper = ChangeMapper(target / "app.py", config, baseline_app_path=baseline / "app.py")
+
+    target_analyzer = mapper.mypy_analyzer
+    baseline_analyzer = mapper.baseline_mypy_analyzer
+    assert target_analyzer.source_inventory is not None
+    assert baseline_analyzer.source_inventory is not None
+    assert target_analyzer.source_root == target.resolve()
+    assert baseline_analyzer.source_root == baseline.resolve()
+    assert target_analyzer.module_root == target.parent.resolve()
+    assert baseline_analyzer.module_root == baseline.parent.resolve()
+    assert [record.module for record in target_analyzer.source_inventory.files] == [
+        "target.app",
+        "target.service",
+    ]
+    assert [record.module for record in baseline_analyzer.source_inventory.files] == [
+        "baseline.app",
+        "baseline.service",
+    ]
+    assert target_analyzer.source_inventory.follow_imports == "skip"
+    assert baseline_analyzer.source_inventory.follow_imports == "skip"
+    assert target_analyzer.source_inventory.excluded_files == ("excluded.py",)
+    assert baseline_analyzer.source_inventory.excluded_files == ("excluded.py",)
 
 
 def test_lifecycle_marks_duplicate_public_identity_ambiguous(tmp_path: Path) -> None:
