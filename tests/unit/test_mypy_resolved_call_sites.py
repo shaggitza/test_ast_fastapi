@@ -753,6 +753,24 @@ def test_missing_end_coordinates_and_malformed_source_abstain(tmp_path: Path) ->
     assert analyzer._call_source_identity(str(main), malformed) is None
 
 
+def test_malformed_snapshot_invalidates_previously_cached_valid_ast(tmp_path: Path) -> None:
+    main = tmp_path / "main.py"
+    main.write_text("emit()\n", encoding="utf-8")
+    analyzer = MypyAnalyzer(tmp_path)
+    canonical = str(main.resolve())
+    valid_tree = ast.parse(main.read_text(encoding="utf-8"))
+    analyzer._python_ast_cache[canonical] = valid_tree
+    assert analyzer._python_ast_nodes(canonical, valid_tree) is not None
+
+    main.write_text("emit(\n", encoding="utf-8")
+    callee = SimpleNamespace(line=1, column=0, end_line=1, end_column=4)
+
+    assert analyzer._call_source_identity(str(main), callee) is None
+    assert analyzer._python_ast_cache[canonical] is None
+    assert analyzer._python_ast_nodes_cache[canonical] is None
+    assert canonical in analyzer._python_call_span_abstained
+
+
 def test_growth_after_stale_size_check_is_rejected_before_ast_parse(
     tmp_path: Path, monkeypatch
 ) -> None:

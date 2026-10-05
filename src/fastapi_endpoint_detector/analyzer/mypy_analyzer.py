@@ -1387,7 +1387,7 @@ class MypyAnalyzer:
                     source_snapshot.decode("utf-8"), filename=canonical
                 )
             except (OSError, SyntaxError, UnicodeError, RecursionError):
-                self._python_ast_cache[canonical] = None
+                self._abstain_call_source_span(canonical)
         tree = self._python_ast_cache[canonical]
         if tree is None:
             return None
@@ -1456,6 +1456,13 @@ class MypyAnalyzer:
         self._python_ast_nodes_cache[canonical] = nodes
         return nodes
 
+    def _abstain_call_source_span(self, canonical: str) -> None:
+        """Discard stale source-AST state when the current snapshot is unusable."""
+        self._python_ast_cache[canonical] = None
+        self._python_ast_nodes_cache[canonical] = None
+        self._python_verified_call_spans.pop(canonical, None)
+        self._python_call_span_abstained.add(canonical)
+
     def _match_python_and_mypy_calls(self, canonical: str) -> dict[int, tuple[int, int, int, int]]:
         """Pair calls only when both complete per-line source sequences agree."""
         from mypy.nodes import CallExpr, FuncDef, LambdaExpr, MemberExpr, NameExpr, Node
@@ -1467,6 +1474,7 @@ class MypyAnalyzer:
             source = source_snapshot.decode("utf-8")
             python_tree = ast.parse(source, filename=canonical)
         except (OSError, SyntaxError, UnicodeError, RecursionError):
+            self._abstain_call_source_span(canonical)
             return {}
         self._python_ast_cache[canonical] = python_tree
         python_nodes = self._python_ast_nodes(canonical, python_tree)
