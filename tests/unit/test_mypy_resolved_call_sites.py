@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 from pathlib import Path
+
+from mypy.nodes import CallExpr, FuncDef, OpExpr
 
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import (
     EndpointDependencies,
@@ -581,3 +584,107 @@ def test_resolved_call_sites_round_trip_through_cache(tmp_path: Path) -> None:
     malformed.set_cache_path(cache)
     assert not malformed._load_cache()
     assert malformed._endpoint_deps == {}
+
+
+def test_utf8_coordinate_variants_preserve_same_line_call_identity(tmp_path: Path) -> None:
+    main = tmp_path / "main.py"
+    for prefix in ("é" * 10, "€" * 10, "😀" * 10, "é😀" * 5):
+        source_text = (
+            "def emit() -> int: return 1\n"
+            "def handler() -> int:\n"
+            f"    label = {prefix!r}; return emit() + emit()\n"
+        )
+        main.write_text(source_text, encoding="utf-8")
+        deps = MypyAnalyzer(tmp_path).analyze_endpoint(
+            _endpoint(main, line=2)
+        )
+        sites = _site_by_spelling(deps.get_resolved_call_sites(str(main)), "emit")
+        ast_spans = sorted(
+            (node.func.col_offset, node.func.end_col_offset)
+            for node in ast.walk(ast.parse(source_text))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        )
+
+        assert len(sites) == 2
+        assert [(site.column, site.end_column) for site in sites] == [
+            (start, end) for start, end in ast_spans
+        ]
+        assert sites[0].line == sites[1].line == 3
+        source = main.read_bytes().splitlines()[2]
+        for site in sites:
+            assert site.end_column is not None
+            assert source[site.column : site.end_column].decode("utf-8") == "emit"
+
+def test_utf8_live_call_identity_is_stable_with_deferred_lambda_peer(tmp_path: Path) -> None:
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def emit() -> int: return 1\n"
+        "def handler() -> int:\n"
+        f"    label = {'é' * 10!r}; cb = lambda: emit(); return emit()\n",
+        encoding="utf-8",
+    )
+    analyzer = MypyAnalyzer(tmp_path)
+    deps = analyzer.analyze_endpoint(_endpoint(main, line=2))
+    handler = next(
+        node
+        for tree in analyzer._trees.values()
+        for node in tree.defs
+        if isinstance(node, FuncDef) and node.name == "handler"
+    )
+    assignment = handler.body.body[1]
+    returned = handler.body.body[2]
+    lambda_call = assignment.rvalue.body.body[0].expr
+    live_call = returned.expr
+    assert isinstance(lambda_call, CallExpr)
+    assert isinstance(live_call, CallExpr)
+
+    first = analyzer._call_source_identity(str(main), live_call.callee)
+    second = analyzer._call_source_identity(str(main), live_call.callee)
+    deferred = analyzer._call_source_identity(str(main), lambda_call.callee)
+    sites = _site_by_spelling(deps.get_resolved_call_sites(str(main)), "emit")
+
+    assert first == second == (3, 64, 3, 68, "emit")
+    assert deferred == (3, 49, 3, 53, "emit")
+    assert [(site.column, site.end_column) for site in sites] == [(49, 53), (64, 68)]
+
+def test_utf8_live_call_identity_is_stable_with_dead_same_line_peer(tmp_path: Path) -> None:
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def emit() -> int: return 1\n"
+        "def handler() -> int:\n"
+        f"    label = {'é' * 10!r}; ignored = False and emit(); return emit()\n",
+        encoding="utf-8",
+    )
+    analyzer = MypyAnalyzer(tmp_path)
+    analyzer.analyze_endpoint(_endpoint(main, line=2))
+    handler = next(
+        node
+        for tree in analyzer._trees.values()
+        for node in tree.defs
+        if isinstance(node, FuncDef) and node.name == "handler"
+    )
+    dead_expression = handler.body.body[1].rvalue
+    live_return = handler.body.body[2]
+    assert isinstance(dead_expression, OpExpr)
+    dead_call = dead_expression.right
+    live_call = live_return.expr
+    assert isinstance(dead_call, CallExpr)
+    assert isinstance(live_call, CallExpr)
+
+    first = analyzer._call_source_identity(str(main), live_call.callee)
+    second = analyzer._call_source_identity(str(main), live_call.callee)
+    dead = analyzer._call_source_identity(str(main), dead_call.callee)
+    source_calls = sorted(
+        (
+            node.func.lineno,
+            node.func.col_offset,
+            node.func.end_lineno,
+            node.func.end_col_offset,
+            "emit",
+        )
+        for node in ast.walk(ast.parse(main.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "emit"
+    )
+
+    assert first == second == source_calls[1]
+    assert dead == source_calls[0]

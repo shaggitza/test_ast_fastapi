@@ -376,7 +376,7 @@ class MypyAnalyzer:
     and extract precise file/line information for all references.
     """
 
-    CACHE_SCHEMA_VERSION = 18
+    CACHE_SCHEMA_VERSION = 19
     MAX_POINTS_TO_TARGETS = 8
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
@@ -427,7 +427,7 @@ class MypyAnalyzer:
         self._global_value_cache: dict[str, SymbolReference | None] = {}
         self._python_dependency_cache: dict[tuple[str, int, str], set[str]] = {}
         self._python_ast_cache: dict[str, ast.Module | None] = {}
-        self._python_call_span_cache: dict[str, dict[tuple[int, int], tuple[int, int]]] = {}
+        self._python_verified_call_spans: dict[str, dict[int, tuple[int, int, int, int]]] = {}
         self._source_bytes_cache: dict[str, tuple[bytes, ...] | None] = {}
         self._resolved_call_site_cache: dict[int, ResolvedCallSite | None] = {}
         self._finite_global_value_cache: dict[str, _FinitePointsTo | None] = {}
@@ -567,7 +567,7 @@ class MypyAnalyzer:
         self._global_value_cache.clear()
         self._python_dependency_cache.clear()
         self._python_ast_cache.clear()
-        self._python_call_span_cache.clear()
+        self._python_verified_call_spans.clear()
         self._source_bytes_cache.clear()
         self._resolved_call_site_cache.clear()
         self._finite_global_value_cache.clear()
@@ -1294,49 +1294,18 @@ class MypyAnalyzer:
         current_file: str,
         callee: Any,
     ) -> tuple[int, int, int | None, int | None, str] | None:
-        """Return mypy's UTF-8 byte span and the exact source spelling."""
-        line_value = getattr(callee, "line", 0)
-        column_value = getattr(callee, "column", -1)
-        end_line_raw = getattr(callee, "end_line", 0)
-        end_column_raw = getattr(callee, "end_column", -1)
-        line = int(line_value) if isinstance(line_value, int) else 0
-        column = int(column_value) if isinstance(column_value, int) else -1
-        end_line_value = int(end_line_raw) if isinstance(end_line_raw, int) else 0
-        end_column_value = int(end_column_raw) if isinstance(end_column_raw, int) else -1
-        if line < 1 or column < 0:
-            return None
-        end_line = end_line_value if end_line_value >= line and end_column_value >= 0 else None
-        end_column = end_column_value if end_line is not None else None
+        """Return a source AST span paired to this exact mypy call occurrence."""
         canonical = str(Path(current_file).resolve())
-        if end_line is None:
-            if canonical not in self._python_ast_cache:
-                try:
-                    self._python_ast_cache[canonical] = ast.parse(
-                        Path(canonical).read_text(encoding="utf-8"), filename=canonical
-                    )
-                except (OSError, SyntaxError, UnicodeError):
-                    self._python_ast_cache[canonical] = None
-            tree = self._python_ast_cache[canonical]
-            if canonical not in self._python_call_span_cache:
-                spans: dict[tuple[int, int], tuple[int, int]] = {}
-                if tree is not None:
-                    for candidate in ast.walk(tree):
-                        function = candidate.func if isinstance(candidate, ast.Call) else None
-                        if (
-                            function is not None
-                            and function.end_lineno is not None
-                            and function.end_col_offset is not None
-                        ):
-                            spans[(function.lineno, function.col_offset)] = (
-                                function.end_lineno,
-                                function.end_col_offset,
-                            )
-                self._python_call_span_cache[canonical] = spans
-            fallback_span = self._python_call_span_cache[canonical].get((line, column))
-            if fallback_span is not None:
-                end_line, end_column = fallback_span
-        if end_line is None or end_column is None:
+        if canonical not in self._python_verified_call_spans:
+            self._python_verified_call_spans[canonical] = self._match_python_and_mypy_calls(
+                canonical
+            )
+        span = self._python_verified_call_spans[canonical].get(id(callee))
+        if span is None:
+            span = self._exact_coordinate_source_span(canonical, callee)
+        if span is None:
             return None
+        line, column, end_line, end_column = span
         if canonical not in self._source_bytes_cache:
             try:
                 self._source_bytes_cache[canonical] = tuple(
@@ -1364,6 +1333,240 @@ class MypyAnalyzer:
         if not spelling.strip():
             return None
         return line, column, end_line, end_column, spelling
+
+    def _exact_coordinate_source_span(
+        self,
+        canonical: str,
+        callee: Any,
+    ) -> tuple[int, int, int, int] | None:
+        """Normalize exact mypy coordinates only when a full AST span is unique."""
+        line = getattr(callee, "line", 0)
+        column = getattr(callee, "column", -1)
+        end_line = getattr(callee, "end_line", 0)
+        end_column = getattr(callee, "end_column", -1)
+        if not all(isinstance(value, int) for value in (line, column, end_line, end_column)):
+            return None
+        if line < 1 or column < 0 or end_line < line or end_column < 0:
+            return None
+        if canonical not in self._python_ast_cache:
+            try:
+                self._python_ast_cache[canonical] = ast.parse(
+                    Path(canonical).read_text(encoding="utf-8"), filename=canonical
+                )
+            except (OSError, SyntaxError, UnicodeError):
+                self._python_ast_cache[canonical] = None
+        tree = self._python_ast_cache[canonical]
+        if tree is None:
+            return None
+        try:
+            source_lines = Path(canonical).read_text(encoding="utf-8").splitlines()
+
+            def forms(source_line: int, byte_column: int) -> set[int]:
+                raw = source_lines[source_line - 1].encode("utf-8")
+                prefix = raw[:byte_column].decode("utf-8")
+                codepoint_column = len(prefix)
+                return {
+                    byte_column,
+                    codepoint_column,
+                    codepoint_column - sum(not character.isascii() for character in prefix),
+                }
+
+            candidates = [
+                candidate.func
+                for candidate in ast.walk(tree)
+                if isinstance(candidate, ast.Call)
+                and candidate.func.lineno == line
+                and candidate.func.end_lineno == end_line
+                and column in forms(candidate.func.lineno, candidate.func.col_offset)
+                and candidate.func.end_col_offset is not None
+                and end_column
+                in forms(candidate.func.end_lineno or line, candidate.func.end_col_offset)
+            ]
+        except (OSError, UnicodeError, IndexError):
+            return None
+        if len(candidates) != 1:
+            return None
+        function = candidates[0]
+        if function.end_lineno is None or function.end_col_offset is None:
+            return None
+        return function.lineno, function.col_offset, function.end_lineno, function.end_col_offset
+    def _match_python_and_mypy_calls(self, canonical: str) -> dict[int, tuple[int, int, int, int]]:
+        """Pair calls only when both complete per-line source sequences agree."""
+        from mypy.nodes import CallExpr, FuncDef, LambdaExpr, MemberExpr, NameExpr, Node
+
+        try:
+            source = Path(canonical).read_text(encoding="utf-8")
+            python_tree = ast.parse(source, filename=canonical)
+        except (OSError, SyntaxError, UnicodeError):
+            return {}
+        self._python_ast_cache[canonical] = python_tree
+        modules = self._modules_by_canonical_path.get(canonical, ())
+        if len(modules) != 1:
+            return {}
+        mypy_tree = self._trees.get(modules[0])
+        if mypy_tree is None:
+            return {}
+
+        calls: list[tuple[CallExpr, tuple[tuple[str, str, int], ...]]] = []
+        seen_nodes: set[int] = set()
+        ignored_edges = {
+            "analyzed",
+            "info",
+            "method_type",
+            "node",
+            "original_def",
+            "type",
+            "type_args",
+            "unanalyzed_type",
+        }
+
+        def visit_value(
+            value: Any,
+            scopes: tuple[tuple[str, str, int], ...] = (),
+        ) -> None:
+            if isinstance(value, Node):
+                identity = id(value)
+                if identity in seen_nodes:
+                    return
+                seen_nodes.add(identity)
+                current_scopes = scopes
+                if isinstance(value, FuncDef):
+                    current_scopes = (*scopes, ("function", value.name, value.line))
+                elif isinstance(value, LambdaExpr):
+                    current_scopes = (*scopes, ("lambda", "", value.line))
+                if isinstance(value, CallExpr):
+                    calls.append((value, current_scopes))
+                for name in dir(value):
+                    if name.startswith("_") or name in ignored_edges:
+                        continue
+                    try:
+                        child = getattr(value, name)
+                    except Exception:
+                        continue
+                    visit_value(child, current_scopes)
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    visit_value(item, scopes)
+
+        visit_value(mypy_tree)
+        mypy_by_scope_line: dict[tuple[int, tuple[tuple[str, str, int], ...]], list[CallExpr]] = {}
+        for expression, scopes in calls:
+            callee_line = getattr(expression.callee, "line", 0)
+            if isinstance(callee_line, int) and callee_line > 0:
+                mypy_by_scope_line.setdefault((callee_line, scopes), []).append(expression)
+
+        python_parents: dict[ast.AST, ast.AST] = {}
+        for parent in ast.walk(python_tree):
+            for child in ast.iter_child_nodes(parent):
+                python_parents[child] = parent
+
+        def python_scope(candidate: ast.AST) -> tuple[tuple[str, str, int], ...]:
+            scopes: list[tuple[str, str, int]] = []
+            parent = python_parents.get(candidate)
+            while parent is not None:
+                if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    scopes.append(("function", parent.name, parent.lineno))
+                elif isinstance(parent, ast.Lambda):
+                    scopes.append(("lambda", "", parent.lineno))
+                parent = python_parents.get(parent)
+            return tuple(reversed(scopes))
+
+        python_by_scope_line: dict[
+            tuple[int, tuple[tuple[str, str, int], ...]], list[ast.expr]
+        ] = {}
+        for candidate in ast.walk(python_tree):
+            if not isinstance(candidate, ast.Call):
+                continue
+            function = candidate.func
+            if function.end_lineno is None or function.end_col_offset is None:
+                continue
+            key = (function.lineno, python_scope(candidate))
+            python_by_scope_line.setdefault(key, []).append(function)
+
+        result: dict[int, tuple[int, int, int, int]] = {}
+        source_lines = source.splitlines()
+
+        def coordinate_forms(line: int, byte_column: int) -> set[int]:
+            if line < 1 or line > len(source_lines):
+                return set()
+            raw = source_lines[line - 1].encode("utf-8")
+            try:
+                prefix = raw[:byte_column].decode("utf-8")
+            except UnicodeDecodeError:
+                return set()
+            codepoint_column = len(prefix)
+            return {
+                byte_column,
+                codepoint_column,
+                codepoint_column - sum(not character.isascii() for character in prefix),
+            }
+
+        # Prefer independent exact coordinates when a supported mypy coordinate
+        # scheme identifies one complete source AST function span.
+        for (line, _scopes), source_calls in python_by_scope_line.items():
+            typed_calls = mypy_by_scope_line.get((line, _scopes), [])
+            for source_call in source_calls:
+                if source_call.end_lineno is None or source_call.end_col_offset is None:
+                    continue
+                candidates = [
+                    call
+                    for call in typed_calls
+                    if getattr(call.callee, "column", -1)
+                    in coordinate_forms(line, source_call.col_offset)
+                    and getattr(call.callee, "end_line", None) == source_call.end_lineno
+                    and getattr(call.callee, "end_column", -1)
+                    in coordinate_forms(source_call.end_lineno, source_call.end_col_offset)
+                ]
+                if len(candidates) == 1:
+                    result[id(candidates[0].callee)] = (
+                        source_call.lineno,
+                        source_call.col_offset,
+                        source_call.end_lineno or line,
+                        source_call.end_col_offset or 0,
+                    )
+
+        for key, source_calls in python_by_scope_line.items():
+            line, _scopes = key
+            typed_calls = mypy_by_scope_line.get(key, [])
+            if len(source_calls) != len(typed_calls):
+                continue
+            source_calls.sort(
+                key=lambda call: (call.col_offset, call.end_lineno, call.end_col_offset)
+            )
+            typed_calls.sort(key=lambda call: (call.callee.column, call.callee.end_line or line))
+            typed_columns = [call.callee.column for call in typed_calls]
+            source_columns = [call.col_offset for call in source_calls]
+            if len(set(typed_columns)) != len(typed_columns) or len(set(source_columns)) != len(
+                source_columns
+            ):
+                continue
+
+            source_names = [
+                function.id
+                if isinstance(function, ast.Name)
+                else function.attr
+                if isinstance(function, ast.Attribute)
+                else None
+                for function in source_calls
+            ]
+            typed_names = [
+                call.callee.name if isinstance(call.callee, (NameExpr, MemberExpr)) else None
+                for call in typed_calls
+            ]
+            if source_names != typed_names or any(name is None for name in source_names):
+                continue
+
+            for source_call, typed_call in zip(source_calls, typed_calls, strict=True):
+                assert source_call.end_lineno is not None
+                assert source_call.end_col_offset is not None
+                result[id(typed_call.callee)] = (
+                    source_call.lineno,
+                    source_call.col_offset,
+                    source_call.end_lineno,
+                    source_call.end_col_offset,
+                )
+        return result
+
 
     @staticmethod
     def _callable_declaration(
