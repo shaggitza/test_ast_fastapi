@@ -14,6 +14,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from fastapi_endpoint_detector.analyzer.evidence_graph import EvidenceGraph  # noqa: TC001
 from fastapi_endpoint_detector.models.effect_contract import (
     EffectContract,
     FiniteValueStatus,
@@ -412,6 +413,9 @@ class AnalysisReport(BaseModel):
     inventory_limitations: tuple[EndpointDiscoveryCondition, ...] = Field(
         default_factory=tuple,
         description="Source-backed limitations on the target execution-free inventory",
+    )
+    source_evidence_graph: "EvidenceGraph | None" = Field(
+        default=None, description="Versioned low-strength source and import provenance graph."
     )
     affected_endpoints: list[AffectedEndpoint] = Field(
         default_factory=list,

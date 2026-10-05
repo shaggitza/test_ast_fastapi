@@ -710,12 +710,14 @@ class SecureASTExtractor:
         app_entry: str | None = None,
         bootstrap_entry: str | None = None,
         snapshot_side: SnapshotSide | Literal["target", "baseline"] = SnapshotSide.TARGET,
+        source_paths: tuple[Path, ...] | None = None,
     ) -> None:
         self.app_path = app_path.resolve()
         self.app_variable = app_variable
         self.app_entry = app_entry
         self.bootstrap_entry = bootstrap_entry
         self.snapshot_side = SnapshotSide(snapshot_side)
+        self.source_paths = source_paths
         self._app_entry_parts = self._parse_entry(app_entry, "--app-entry")
         self._bootstrap_entry_parts = self._parse_entry(bootstrap_entry, "--bootstrap-entry")
 
@@ -1243,6 +1245,12 @@ class SecureASTExtractor:
         return package
 
     def _find_python_files(self, root: Path) -> list[Path]:
+        if self.source_paths is not None:
+            return sorted(
+                path.resolve()
+                for path in self.source_paths
+                if path.resolve().is_file() and path.resolve().is_relative_to(root.resolve())
+            )
         if self.app_path.is_dir():
             return sorted(root.rglob("*.py"))
         # Parsing project-local files is execution-free. Exact root selection below

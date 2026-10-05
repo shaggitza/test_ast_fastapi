@@ -13,7 +13,7 @@ import heapq
 import os
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -23,6 +23,7 @@ from fastapi_endpoint_detector.analyzer.effect_contract_auditor import (
     build_audit_endpoint,
 )
 from fastapi_endpoint_detector.analyzer.endpoint_registry import EndpointRegistry
+from fastapi_endpoint_detector.analyzer.evidence_graph import EvidenceGraph, source_evidence_graph
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.analyzer.resource_coupling import build_resource_coupling_graph
 from fastapi_endpoint_detector.analyzer.scip_analyzer import (
@@ -31,6 +32,7 @@ from fastapi_endpoint_detector.analyzer.scip_analyzer import (
     SCIPDefinition,
     SCIPReachedDefinition,
 )
+from fastapi_endpoint_detector.analyzer.source_inventory import SourceFile, SourceInventory
 from fastapi_endpoint_detector.analyzer.sql_transaction import (
     build_sql_transaction_diagnostics,
 )
@@ -262,6 +264,42 @@ class _ExpandedSCIPDefinition:
     dependency_chain: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class _MypySourceInventory:
+    """Mypy-facing view of the canonical inventory with stable import identities."""
+
+    root: Path
+    files: tuple[SourceFile, ...]
+    unresolved_imports: tuple[tuple[str, str], ...]
+    excluded_files: tuple[str, ...]
+    follow_imports: str
+    max_depth: int
+
+
+def _mypy_inventory(inventory: SourceInventory) -> tuple[_MypySourceInventory, Path]:
+    """Adapt inventory controls without changing its selected files or provenance."""
+    module_root = MypyAnalyzer._infer_module_root(inventory.root)
+    files = []
+    for record in inventory.files:
+        path = record.path.resolve()
+        try:
+            module = MypyAnalyzer._module_name_from_path(path, module_root)
+        except ValueError:
+            module = MypyAnalyzer._module_name_from_path(path, inventory.root)
+        files.append(replace(record, module=module))
+    return (
+        _MypySourceInventory(
+            root=inventory.root,
+            files=tuple(files),
+            unresolved_imports=inventory.unresolved_imports,
+            excluded_files=inventory.excluded_files,
+            follow_imports="normal" if inventory.follow_imports else "skip",
+            max_depth=inventory.max_depth,
+        ),
+        module_root,
+    )
+
+
 def _scip_definition_key(definition: SCIPDefinition) -> tuple[str, str, str, int, int]:
     return (
         definition.symbol,
@@ -487,6 +525,10 @@ class ChangeMapper:
         self.use_cache = use_cache
         self.secure_ast = secure_ast
         self.use_scip = use_scip
+        if not self.config.integrations.use_mypy and not use_scip:
+            raise ChangeMapperError(
+                "integrations.use_mypy=false requires the explicitly selected --scip backend"
+            )
         if app_entry is not None and not secure_ast:
             raise ChangeMapperError("app_entry requires secure_ast=True")
         if bootstrap_entry is not None and not secure_ast:
@@ -518,6 +560,7 @@ class ChangeMapper:
         self._scip_analyzer: SCIPAnalyzer | None = None
         self._baseline_registry: EndpointRegistry | None = None
         self._baseline_scip_analyzer: SCIPAnalyzer | None = None
+        self.source_inventory = self.config.source_inventory(self.app_path)
         self._baseline_extractor: FastAPIExtractor | SecureASTExtractor | None = None
         self._baseline_failure: str | None = None
 
@@ -535,7 +578,14 @@ class ChangeMapper:
             effective_depth = (
                 self.config.parser.max_depth if self.config.analysis.track_transitive else 1
             )
-            self._baseline_mypy_analyzer = MypyAnalyzer(package_path, max_depth=effective_depth)
+            inventory = self.config.source_inventory(self.baseline_app_path)
+            mypy_inventory, module_root = _mypy_inventory(inventory)
+            self._baseline_mypy_analyzer = MypyAnalyzer(
+                package_path,
+                max_depth=effective_depth,
+                module_root=module_root,
+                source_inventory=mypy_inventory,
+            )
         return self._baseline_mypy_analyzer
 
     @property
@@ -567,7 +617,6 @@ class ChangeMapper:
             self._baseline_registry = EndpointRegistry()
             self._baseline_registry.register_many(endpoints)
         return self._baseline_registry
-
     @property
     def extractor(self) -> FastAPIExtractor | SecureASTExtractor:
         """Get the configured endpoint extractor, initializing if needed."""
@@ -578,6 +627,7 @@ class ChangeMapper:
                     app_variable=self.app_variable,
                     app_entry=self.app_entry,
                     bootstrap_entry=self.bootstrap_entry,
+                    source_paths=self.source_inventory.paths,
                 )
             else:
                 self._extractor = FastAPIExtractor(
@@ -706,7 +756,9 @@ class ChangeMapper:
         """Get the SCIP analyzer, initializing if needed."""
         if self._scip_analyzer is None:
             package_path = self.app_path.parent if self.app_path.is_file() else self.app_path
-            self._scip_analyzer = SCIPAnalyzer(package_path, use_cache=self.use_cache)
+            self._scip_analyzer = SCIPAnalyzer(
+                package_path, use_cache=self.use_cache, source_inventory=self.source_inventory
+            )
         return self._scip_analyzer
 
     @property
@@ -721,6 +773,7 @@ class ChangeMapper:
                 app_entry=self.app_entry,
                 bootstrap_entry=self.bootstrap_entry,
                 snapshot_side=SnapshotSide.BASELINE,
+                source_paths=self.config.source_inventory(self.baseline_app_path).paths,
             )
             self._baseline_registry = EndpointRegistry()
             native = extractor.extract_inventory()
@@ -739,7 +792,10 @@ class ChangeMapper:
                 if self.baseline_app_path.is_file()
                 else self.baseline_app_path
             )
-            self._baseline_scip_analyzer = SCIPAnalyzer(package_path, use_cache=self.use_cache)
+            baseline_inventory = self.config.source_inventory(self.baseline_app_path)
+            self._baseline_scip_analyzer = SCIPAnalyzer(
+                package_path, use_cache=self.use_cache, source_inventory=baseline_inventory
+            )
         return self._baseline_scip_analyzer
 
     @property
@@ -751,7 +807,13 @@ class ChangeMapper:
             effective_depth = (
                 self.config.parser.max_depth if self.config.analysis.track_transitive else 1
             )
-            self._mypy_analyzer = MypyAnalyzer(package_path, max_depth=effective_depth)
+            mypy_inventory, module_root = _mypy_inventory(self.source_inventory)
+            self._mypy_analyzer = MypyAnalyzer(
+                package_path,
+                max_depth=effective_depth,
+                module_root=module_root,
+                source_inventory=mypy_inventory,
+            )
             # NOTE: We don't pre-analyze here - that's done in _preanalyze_mypy
             # with progress reporting
         return self._mypy_analyzer
@@ -1701,6 +1763,24 @@ class ChangeMapper:
 
         # Filter to Python files
         python_files = DiffParser.get_python_files(diff_files)
+        unsupported_changes = [
+            item.path.as_posix() for item in diff_files if item not in python_files
+        ]
+        if unsupported_changes:
+            warnings.extend(
+                f"Unresolved non-Python/configuration change: {path}; "
+                "no finite dependency contract was applied"
+                for path in unsupported_changes
+            )
+        target_source_graph = source_evidence_graph(self.source_inventory)
+        if self.baseline_app_path is not None:
+            baseline_graph = source_evidence_graph(
+                self.config.source_inventory(self.baseline_app_path), side="baseline"
+            )
+            target_source_graph = EvidenceGraph(
+                nodes=(*baseline_graph.nodes, *target_source_graph.nodes),
+                edges=(*baseline_graph.edges, *target_source_graph.edges),
+            )
 
         # Initialize endpoints
         report_progress(5, 100, "Extracting endpoints...")
@@ -1747,6 +1827,7 @@ class ChangeMapper:
                     )
                     else "complete"
                 ),
+                source_evidence_graph=target_source_graph,
             )
 
         # Pre-analyze endpoints with mypy
@@ -1919,6 +2000,7 @@ class ChangeMapper:
                 )
                 else "complete"
             ),
+            source_evidence_graph=target_source_graph,
             effect_contract_audit=self._effect_contract_audit,
             resource_coupling_graph=self._resource_coupling_graph,
             sql_transaction_report=self._sql_transaction_report,

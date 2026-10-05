@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 from fastapi import Depends, FastAPI
 
+from fastapi_endpoint_detector.analyzer.source_inventory import build_source_inventory
 from fastapi_endpoint_detector.models.endpoint import (
     DependencyCallableKind,
     DependencyDeclarationKind,
@@ -52,6 +53,32 @@ app.mount("/sub", sub)
         endpoint.identifier for endpoint in endpoints if endpoint.path in {"/events", "/sub/status"}
     }
     assert custom == {"GET /sub/status", "WEBSOCKET /events"}
+
+
+def test_runtime_extractor_filters_handlers_to_canonical_inventory(tmp_path: Path) -> None:
+    app_file = tmp_path / "main.py"
+    other_file = tmp_path / "other.py"
+    app_file.write_text(
+        "from fastapi import FastAPI\n"
+        "from other import outside\n"
+        "app = FastAPI()\n"
+        "@app.get('/inside')\n"
+        "def inside(): return {}\n"
+        "app.add_api_route('/outside', outside, methods=['GET'])\n",
+        encoding="utf-8",
+    )
+    other_file.write_text("def outside(): return {}\n", encoding="utf-8")
+    inventory = build_source_inventory(
+        tmp_path, include_patterns=("main.py",), follow_imports=False
+    )
+
+    extractor = FastAPIExtractor(app_file, source_inventory=inventory)
+
+    assert [endpoint.identifier for endpoint in extractor.extract_endpoints()] == ["GET /inside"]
+    assert (
+        "does not sandbox or constrain import side effects"
+        in (extractor.source_inventory_limitations[0])
+    )
 
 
 def test_runtime_extractor_preserves_slashes_websocket_dependencies_and_mount_cycles(

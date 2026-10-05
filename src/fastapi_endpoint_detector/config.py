@@ -11,6 +11,10 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
+from fastapi_endpoint_detector.analyzer.source_inventory import (
+    SourceInventory,
+    build_source_inventory,
+)
 from fastapi_endpoint_detector.models.effect_contract import (
     LoadedEffectContracts,
     load_effect_contracts,
@@ -191,6 +195,15 @@ class Config(BaseModel):
     output: OutputConfig = Field(default_factory=OutputConfig)
     integrations: IntegrationConfig = Field(default_factory=IntegrationConfig)
 
+    @model_validator(mode="after")
+    def validate_typed_integration(self) -> "Config":
+        if self.integrations.mypy_config is not None:
+            raise ValueError(
+                "integrations.mypy_config is not supported by the current mypy analyzer; "
+                "remove it rather than relying on an ignored configuration path"
+            )
+        return self
+
     def load_surface_contract_snapshot(self) -> LoadedSurfaceContracts | None:
         """Load configured custom surfaces once to prevent analysis-time drift."""
         path = self.analysis.surface_contracts
@@ -227,6 +240,21 @@ class Config(BaseModel):
                 else load_effect_preset(preset or "")
             )
         return self._effect_contract_snapshot
+
+    def source_inventory(self, source: Path) -> SourceInventory:
+        """Return the canonical configured inventory for one source snapshot."""
+        excludes = self.parser.exclude_patterns
+        if self.analysis.include_test_endpoints:
+            excludes = [
+                p for p in excludes if p not in {"**/test_*.py", "**/*_test.py", "**/tests/**"}
+            ]
+        return build_source_inventory(
+            source,
+            include_patterns=tuple(self.parser.include_patterns),
+            exclude_patterns=tuple(excludes),
+            follow_imports=self.parser.follow_imports,
+            max_depth=self.parser.max_depth,
+        )
 
 
 def load_config(config_path: Path | None = None) -> Config:

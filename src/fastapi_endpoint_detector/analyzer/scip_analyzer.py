@@ -9,7 +9,10 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from fastapi_endpoint_detector.analyzer.source_inventory import SourceInventory
 
 
 class SCIPAnalyzerError(RuntimeError):
@@ -59,10 +62,26 @@ class SCIPAnalyzer:
     PYTHON_INDEXER_VERSION = "0.6.6"
     MAX_DEPTH = 1000
 
-    def __init__(self, project_root: Path, *, use_cache: bool = True, timeout: float = 300.0):
+    def __init__(
+        self,
+        project_root: Path,
+        *,
+        use_cache: bool = True,
+        timeout: float = 300.0,
+        source_inventory: SourceInventory | None = None,
+    ):
         self.project_root = project_root.resolve()
         self.use_cache = use_cache
         self.timeout = timeout
+        self.source_inventory = source_inventory
+        self._inventory_paths = (
+            {
+                path.resolve().relative_to(self.project_root).as_posix()
+                for path in source_inventory.paths
+            }
+            if source_inventory is not None
+            else None
+        )
         self._outline_cache: dict[Path, tuple[SCIPDefinition, ...]] = {}
         self._base_method_cache: dict[str, tuple[SCIPDefinition, ...]] = {}
         self._reverse_call_edge_cache: dict[
@@ -187,6 +206,8 @@ class SCIPAnalyzer:
 
     def outline(self, file_path: Path) -> tuple[SCIPDefinition, ...]:
         relative = self._relative_file(file_path)
+        if self._inventory_paths is not None and relative.as_posix() not in self._inventory_paths:
+            return ()
         if relative in self._outline_cache:
             return self._outline_cache[relative]
         result = self._run(
