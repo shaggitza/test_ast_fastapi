@@ -26,6 +26,7 @@ from fastapi_endpoint_detector.models.endpoint import (
 from fastapi_endpoint_detector.models.surface_contract import (
     CallbackMode,
     CallbackRangeMode,
+    ContractMultiplicity,
     HandlerNameNormalization,
     HandlerSelectorKind,
     LoadedSurfaceContracts,
@@ -37,6 +38,11 @@ from fastapi_endpoint_detector.parser._static_evaluation import (
     MAX_CUSTOM_RESOURCE_CHARS,
     StaticEvaluationResult,
     StaticStringEvaluator,
+)
+from fastapi_endpoint_detector.parser.framework_ownership import (
+    direct_route_callback,
+    eager_calls,
+    route_callback_selector,
 )
 
 
@@ -86,9 +92,17 @@ class _FrameworkIncludeEvent:
     parent: _FrameworkToken
     child: _FrameworkToken | None
     condition: EndpointDiscoveryCondition | None
+    routes_only: bool = False
 
 
-_FrameworkEvent = _FrameworkRegistrationEvent | _FrameworkIncludeEvent
+@dataclass(frozen=True)
+class _FrameworkRouteEvent:
+    token: _FrameworkToken
+    callback: tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef] | None
+    condition: EndpointDiscoveryCondition | None
+
+
+_FrameworkEvent = _FrameworkRegistrationEvent | _FrameworkIncludeEvent | _FrameworkRouteEvent
 
 
 @dataclass(frozen=True)
@@ -739,6 +753,9 @@ class CustomSurfaceExtractor:
         self._building_states = False
         self._inventory_unavailable = False
         self._framework_events: list[_FrameworkEvent] = []
+        self._framework_owned_routes: list[
+            tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef]
+        ] = []
         self._framework_selected_tokens: set[_FrameworkToken] = set()
         self._framework_root_condition: EndpointDiscoveryCondition | None = None
         self._framework_factory: tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef] | None = (
@@ -751,7 +768,7 @@ class CustomSurfaceExtractor:
             if contract.registration.receiver_type is not None
         }
 
-    def extract_inventory(self) -> EndpointInventory:
+    def extract_inventory(self) -> EndpointInventory:  # noqa: PLR0912
         """Return all finite registrations and inventory-strength evidence."""
         self._load_modules()
         if self._inventory_unavailable:
@@ -792,12 +809,25 @@ class CustomSurfaceExtractor:
         self._process_app_factory()
         self._process_bootstrap()
         self._filter_framework_surfaces()
-        collapsed: dict[tuple[str, str, int], Endpoint] = {}
+        collapsed: dict[tuple[str, str, int, int], Endpoint] = {}
         for endpoint in self._endpoints:
+            declared = next(
+                (
+                    contract
+                    for contract in self.contracts.document.contracts
+                    if endpoint.surface is not None and contract.id == endpoint.surface.contract_id
+                ),
+                None,
+            )
             key = (
                 endpoint.identifier,
                 str(endpoint.handler.file_path),
                 endpoint.handler.line_number,
+                endpoint.surface.registration_line
+                if declared is not None
+                and declared.multiplicity == ContractMultiplicity.ALL_EXECUTE
+                and endpoint.surface is not None
+                else 0,
             )
             previous = collapsed.get(key)
             if previous is None or (
@@ -813,6 +843,21 @@ class CustomSurfaceExtractor:
         normalized: list[Endpoint] = []
         for identifier, matches in by_identifier.items():
             if len(matches) == 1:
+                normalized.extend(matches)
+                continue
+            if all(
+                endpoint.surface is not None
+                and next(
+                    (
+                        contract.multiplicity
+                        for contract in self.contracts.document.contracts
+                        if contract.id == endpoint.surface.contract_id
+                    ),
+                    None,
+                )
+                == ContractMultiplicity.ALL_EXECUTE
+                for endpoint in matches
+            ):
                 normalized.extend(matches)
                 continue
             for endpoint in matches:
@@ -1090,13 +1135,18 @@ class CustomSurfaceExtractor:
             )
         return tuple(conditions)
 
-    def _filter_framework_surfaces(self) -> None:
+    def _filter_framework_surfaces(self) -> None:  # noqa: PLR0912, PLR0915
         """Apply selected-app identity and APIRouter copy-at-include semantics."""
         if not self._scope_framework_surfaces:
             return
         live: dict[_FrameworkToken, list[Endpoint]] = {}
+        routes: dict[
+            _FrameworkToken,
+            list[tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef]],
+        ] = {}
         conditions: dict[_FrameworkToken, list[EndpointDiscoveryCondition]] = {}
         included_by: dict[_FrameworkToken, set[_FrameworkToken]] = {}
+        mounted_by: dict[_FrameworkToken, set[_FrameworkToken]] = {}
         for event in self._framework_events:
             if isinstance(event, _FrameworkRegistrationEvent):
                 live.setdefault(event.token, []).append(event.endpoint)
@@ -1113,13 +1163,25 @@ class CustomSurfaceExtractor:
                     for ancestor in self._framework_include_ancestors(event.token, included_by):
                         conditions.setdefault(ancestor, []).append(condition)
                 continue
+            if isinstance(event, _FrameworkRouteEvent):
+                if event.callback is not None:
+                    routes.setdefault(event.token, []).append(event.callback)
+                    for parent in self._framework_mount_ancestors(event.token, mounted_by):
+                        routes.setdefault(parent, []).append(event.callback)
+                if event.condition is not None:
+                    conditions.setdefault(event.token, []).append(event.condition)
+                    for parent in self._framework_mount_ancestors(event.token, mounted_by):
+                        conditions.setdefault(parent, []).append(event.condition)
+                continue
             if event.child is None:
                 if event.condition is not None:
                     conditions.setdefault(event.parent, []).append(event.condition)
                     for ancestor in self._framework_include_ancestors(event.parent, included_by):
                         conditions.setdefault(ancestor, []).append(event.condition)
                 continue
-            copied_endpoints = tuple(live.get(event.child, ()))
+            copied_endpoints = () if event.routes_only else tuple(live.get(event.child, ()))
+            copied_routes = tuple(routes.get(event.child, ()))
+            routes.setdefault(event.parent, []).extend(copied_routes)
             copied_conditions = tuple(conditions.get(event.child, ()))
             live.setdefault(event.parent, []).extend(copied_endpoints)
             conditions.setdefault(event.parent, []).extend(copied_conditions)
@@ -1129,13 +1191,45 @@ class CustomSurfaceExtractor:
             for ancestor in self._framework_include_ancestors(event.parent, included_by):
                 conditions.setdefault(ancestor, []).extend(copied_conditions)
                 conditions[ancestor].extend(copied_lifecycle_conditions)
-            included_by.setdefault(event.child, set()).add(event.parent)
+            if event.routes_only:
+                mounted_by.setdefault(event.child, set()).add(event.parent)
+            else:
+                included_by.setdefault(event.child, set()).add(event.parent)
 
+        for token, endpoints in tuple(live.items()):
+            latest: dict[tuple[str, str], Endpoint] = {}
+            retained: list[Endpoint] = []
+            for endpoint in endpoints:
+                surface = endpoint.surface
+                contract = next(
+                    (
+                        item
+                        for item in self.contracts.document.contracts
+                        if surface is not None and item.id == surface.contract_id
+                    ),
+                    None,
+                )
+                if (
+                    surface is not None
+                    and contract is not None
+                    and contract.multiplicity == ContractMultiplicity.LAST_WINS
+                ):
+                    latest[(surface.surface_kind, surface.resource)] = endpoint
+                else:
+                    retained.append(endpoint)
+            live[token] = retained + list(latest.values())
         accepted = {
             id(endpoint)
             for token in self._framework_selected_tokens
             for endpoint in live.get(token, ())
         }
+        owned_routes: dict[
+            tuple[str, int], tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef]
+        ] = {}
+        for token in self._framework_selected_tokens:
+            for route in routes.get(token, ()):
+                owned_routes[(route[0].name, id(route[1]))] = route
+        self._framework_owned_routes = list(owned_routes.values())
         self._endpoints = [
             endpoint
             for endpoint in self._endpoints
@@ -1145,6 +1239,254 @@ class CustomSurfaceExtractor:
             self._limitations.extend(conditions.get(token, ()))
         if self._framework_root_condition is not None:
             self._limitations.append(self._framework_root_condition)
+        self._emit_background_task_surfaces()
+
+    @staticmethod
+    def _framework_mount_ancestors(
+        token: _FrameworkToken,
+        mounted_by: dict[_FrameworkToken, set[_FrameworkToken]],
+    ) -> tuple[_FrameworkToken, ...]:
+        ancestors: list[_FrameworkToken] = []
+        pending = list(mounted_by.get(token, ()))
+        seen = {token}
+        while pending:
+            parent = pending.pop()
+            if parent in seen:
+                continue
+            seen.add(parent)
+            ancestors.append(parent)
+            pending.extend(mounted_by.get(parent, ()))
+        return tuple(ancestors)
+
+    def _emit_background_task_surfaces(self) -> None:  # noqa: PLR0912
+        """Attribute annotated BackgroundTasks.add_task calls to selected route handlers."""
+        task_contracts = {
+            contract.id: contract
+            for contract in self.contracts.document.contracts
+            if contract.surface.kind == "framework.background_task"
+        }
+        if not task_contracts:
+            return
+        for route_module, route in self._framework_owned_routes:
+            route_state = self._module_states.get(route_module.name, {})
+            task_parameters: dict[str, str] = {}
+            for argument in (*route.args.posonlyargs, *route.args.args, *route.args.kwonlyargs):
+                annotation = argument.annotation
+                if annotation is None:
+                    continue
+                identity = self._symbol_identity(annotation, route_state)
+                if identity in {
+                    "fastapi.BackgroundTasks",
+                    "fastapi.datastructures.BackgroundTasks",
+                    "starlette.background.BackgroundTasks",
+                }:
+                    task_parameters[argument.arg] = (
+                        "fastapi-backgroundtasks-add-task"
+                        if identity.startswith("fastapi.")
+                        else "starlette-backgroundtasks-add-task"
+                    )
+            for call in eager_calls(route):
+                response_identity = self._symbol_identity(call.func, route_state)
+                if response_identity in {
+                    "starlette.responses.Response",
+                    "starlette.responses.JSONResponse",
+                    "starlette.responses.PlainTextResponse",
+                    "starlette.responses.StreamingResponse",
+                    "fastapi.responses.JSONResponse",
+                    "fastapi.responses.PlainTextResponse",
+                }:
+                    background = next(
+                        (item.value for item in call.keywords if item.arg == "background"),
+                        call.args[4] if len(call.args) > 4 else None,
+                    )
+                    if background is not None:
+                        matched_background_task = False
+                        for nested in ast.walk(background):
+                            if not isinstance(nested, ast.Call):
+                                continue
+                            resolved_identity = self._symbol_identity(nested.func, route_state)
+                            if (
+                                resolved_identity is None
+                                or resolved_identity != "starlette.background.BackgroundTask"
+                            ):
+                                continue
+                            matched_background_task = True
+                            contract = task_contracts.get("starlette-background-task-response")
+                            callback_expression = (
+                                nested.args[0]
+                                if nested.args
+                                else next(
+                                    (
+                                        item.value
+                                        for item in nested.keywords
+                                        if item.arg in {"func", "callback"}
+                                    ),
+                                    None,
+                                )
+                            )
+                            self._emit_background_task(
+                                contract,
+                                callback_expression,
+                                nested,
+                                route_module,
+                                route,
+                                route_state,
+                            )
+                        if not matched_background_task:
+                            self._limitations.append(
+                                EndpointDiscoveryCondition(
+                                    source_path=route_module.path,
+                                    source_line=call.lineno,
+                                    reason=(
+                                        "selected route response has a dynamic or unsupported "
+                                        "background callback; task inventory is incomplete"
+                                    ),
+                                )
+                            )
+                if not isinstance(call.func, ast.Attribute) or call.func.attr != "add_task":
+                    continue
+                if not isinstance(call.func.value, ast.Name):
+                    continue
+                contract_id = task_parameters.get(call.func.value.id)
+                contract = task_contracts.get(contract_id or "")
+                if contract is None:
+                    if call.func.value.id in {
+                        argument.arg
+                        for argument in (
+                            *route.args.posonlyargs,
+                            *route.args.args,
+                            *route.args.kwonlyargs,
+                        )
+                    }:
+                        self._limitations.append(
+                            EndpointDiscoveryCondition(
+                                source_path=route_module.path,
+                                source_line=call.lineno,
+                                reason=(
+                                    "selected route add_task receiver type is unresolved; "
+                                    "task inventory is incomplete"
+                                ),
+                            )
+                        )
+                    continue
+                callback_expression = (
+                    call.args[0]
+                    if call.args
+                    else next(
+                        (item.value for item in call.keywords if item.arg in {"func", "callback"}),
+                        None,
+                    )
+                )
+                self._emit_background_task(
+                    contract,
+                    callback_expression,
+                    call,
+                    route_module,
+                    route,
+                    route_state,
+                )
+
+    def _emit_background_task(
+        self,
+        contract: SurfaceContract | None,
+        callback_expression: ast.expr | None,
+        call: ast.Call,
+        route_module: _Module,
+        route: ast.FunctionDef | ast.AsyncFunctionDef,
+        route_state: dict[str, _Binding | None],
+    ) -> None:
+        if contract is None:
+            return
+        callback = (
+            self._resolve_handler(callback_expression, route_state)
+            if callback_expression is not None
+            else None
+        )
+        if callback is None or not (
+            self._callback_matches(CallbackMode.SYNC, callback[1])
+            or self._callback_matches(CallbackMode.ASYNC, callback[1])
+        ):
+            self._limitations.append(
+                EndpointDiscoveryCondition(
+                    source_path=route_module.path,
+                    source_line=call.lineno,
+                    reason=(
+                        "selected route background callback is unresolved or not an "
+                        "executable sync/async function; "
+                        "task inventory is incomplete"
+                    ),
+                )
+            )
+            return
+        handler_module, function = callback
+        resource_result = self._resources(
+            contract,
+            call,
+            function,
+            route_state,
+            handler_module.name,
+        )
+        if resource_result.values is None:
+            self._limitations.append(
+                EndpointDiscoveryCondition(
+                    source_path=route_module.path,
+                    source_line=call.lineno,
+                    reason=(
+                        "selected route background callback identity could not be represented "
+                        "by its contract"
+                    ),
+                )
+            )
+            return
+        resource = resource_result.values[0]
+        surface_id = contract.surface.id_template.replace("{resource}", resource)
+        evidence = SurfaceRegistrationEvidence(
+            schema_version=self.contracts.document.schema_version,
+            surface_kind=contract.surface.kind,
+            surface_id=surface_id,
+            resource=resource,
+            callback_mode=contract.callback_mode,
+            callback_range=contract.callback_range,
+            execution_mode=contract.execution_mode,
+            activates_routes=False,
+            contract_id=contract.id,
+            match_kind=contract.registration.match_kind,
+            registration_symbol=contract.registration.symbol,
+            registration_file=route_module.path,
+            registration_line=call.lineno,
+            registration_column=call.col_offset,
+            registration_source_hash=self._source_hash(route_module, call),
+            handler_source_hash=self._source_hash(handler_module, function),
+            contract_source_path=str(self.contracts.source_path),
+            raw_hash=self.contracts.raw_hash,
+            config_hash=self.contracts.config_hash,
+            preset_hash=self.contracts.preset_hash,
+            contract_hash=self.contracts.contract_hashes[contract.id],
+            conditions=contract.conditions,
+        )
+        condition = EndpointDiscoveryCondition(
+            source_path=route_module.path,
+            source_line=route.lineno,
+            reason=(
+                "background task runs only if this selected route executes and sends its response"
+            ),
+        )
+        self._endpoints.append(
+            Endpoint(
+                path=surface_id,
+                methods=[EndpointMethod.CUSTOM],
+                handler=HandlerInfo(
+                    name=function.name,
+                    module=handler_module.name,
+                    file_path=handler_module.path,
+                    line_number=function.lineno,
+                    end_line_number=getattr(function, "end_lineno", function.lineno),
+                ),
+                discovery_status=EndpointDiscoveryStatus.CONDITIONAL,
+                discovery_conditions=(condition,),
+                surface=evidence,
+            )
+        )
 
     def _process_bootstrap(self) -> None:
         if self.bootstrap_entry is None:
@@ -2424,20 +2766,23 @@ class CustomSurfaceExtractor:
     ) -> None:
         if not self._scope_framework_surfaces or not isinstance(call.func, ast.Attribute):
             return
-        if call.func.attr != "include_router":
+        if call.func.attr not in {"include_router", "mount"}:
             return
         parent = self._framework_call_token(call, evaluation, state)
         if parent is None:
             return
+        child_index = 1 if call.func.attr == "mount" else 0
         capture = (
-            evaluation.positional[0] if evaluation is not None and evaluation.positional else None
+            evaluation.positional[child_index]
+            if evaluation is not None and len(evaluation.positional) > child_index
+            else None
         )
         if capture is None and evaluation is not None:
             capture = next(
                 (
                     item
                     for keyword, item in zip(call.keywords, evaluation.keywords, strict=True)
-                    if keyword.arg == "router"
+                    if keyword.arg == ("app" if call.func.attr == "mount" else "router")
                 ),
                 None,
             )
@@ -2448,13 +2793,73 @@ class CustomSurfaceExtractor:
                 source_path=module.path,
                 source_line=call.lineno,
                 reason=(
-                    "selected application include_router target is dynamic or unresolved; "
+                    "selected application include_router target is dynamic or unresolved, or "
+                    "mount target is unresolved; "
                     "framework surface inventory is incomplete"
                 ),
             )
         self._framework_events.append(
-            _FrameworkIncludeEvent(parent=parent, child=child, condition=condition)
+            _FrameworkIncludeEvent(
+                parent=parent,
+                child=child,
+                condition=condition,
+                routes_only=call.func.attr == "mount",
+            )
         )
+
+    def _record_framework_route(  # noqa: PLR0912
+        self,
+        module: _Module,
+        call: ast.Call,
+        state: dict[str, _Binding | None],
+        evaluation: _CallEvaluation | None,
+        resolved: tuple[str, InvocationKind, str | None],
+        decorated_handler: ast.FunctionDef | ast.AsyncFunctionDef | None,
+    ) -> None:
+        if not self._scope_framework_surfaces:
+            return
+        symbol, _invocation, _receiver_type = resolved
+        selector = route_callback_selector(symbol)
+        if selector is None:
+            return
+        token = self._framework_call_token(call, evaluation, state)
+        if token is None:
+            return
+        callback = (
+            (module, decorated_handler)
+            if selector == "decorator"
+            and decorated_handler
+            and len(decorated_handler.decorator_list) == 1
+            else None
+        )
+        if selector != "decorator":
+            capture = None
+            expression = direct_route_callback(call, selector)
+            if expression is not None and evaluation is not None:
+                for index, argument in enumerate(call.args):
+                    if argument is expression and index < len(evaluation.positional):
+                        capture = evaluation.positional[index]
+                        break
+                if capture is None:
+                    for index, keyword in enumerate(call.keywords):
+                        if keyword.value is expression and index < len(evaluation.keywords):
+                            capture = evaluation.keywords[index]
+                            break
+            if capture is not None:
+                callback = self._resolve_captured_handler(capture)
+                if callback is not None and callback[1].decorator_list:
+                    callback = None
+        condition = None
+        if callback is None:
+            condition = EndpointDiscoveryCondition(
+                source_path=module.path,
+                source_line=call.lineno,
+                reason=(
+                    "selected route callback is dynamic, unresolved, or has untrusted "
+                    "decorators; background task inventory is incomplete"
+                ),
+            )
+        self._framework_events.append(_FrameworkRouteEvent(token, callback, condition))
 
     def _record_framework_registration(
         self,
@@ -2527,6 +2932,7 @@ class CustomSurfaceExtractor:
             return
         symbol, invocation, receiver_type = resolved
         self._record_framework_include(module, call, state, evaluation)
+        self._record_framework_route(module, call, state, evaluation, resolved, decorated_handler)
         endpoint_count_before = len(self._endpoints)
         for contract in self.contracts.document.contracts:
             if not self._matches(contract, symbol, invocation, receiver_type):
@@ -2729,6 +3135,7 @@ class CustomSurfaceExtractor:
                 call,
                 function,
                 evaluation.callable_state if evaluation is not None else state,
+                handler_module.name,
             )
             resources = resource_result.values
             if resources is None:
@@ -4613,6 +5020,7 @@ class CustomSurfaceExtractor:
         call: ast.Call,
         handler: ast.FunctionDef | ast.AsyncFunctionDef,
         state: dict[str, _Binding | None],
+        handler_module_name: str | None = None,
     ) -> _ResolvedResources:
         """Resolve one bounded literal resource set without widening dynamic values."""
         selector = contract.surface.resource
@@ -4652,6 +5060,10 @@ class CustomSurfaceExtractor:
             values = (identity,)
         elif selector.kind == ResourceSelectorKind.HANDLER_NAME:
             values = (cls._handler_resource(handler.name, selector.handler_name_normalization),)
+        elif selector.kind == ResourceSelectorKind.HANDLER_IDENTITY:
+            if handler_module_name is None:
+                return _ResolvedResources(None, "handler module identity was unavailable")
+            values = (f"{handler_module_name}.{handler.name}",)
         elif selector.kind == ResourceSelectorKind.LITERAL:
             if selector.value is None:
                 return _ResolvedResources(None, failure)

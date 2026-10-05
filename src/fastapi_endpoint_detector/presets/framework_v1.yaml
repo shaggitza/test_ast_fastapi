@@ -1,13 +1,14 @@
 schema_version: 5
 preset:
   id: framework-callbacks
-  version: "6"
+  version: "7"
   provenance:
     kind: preset
     source: fastapi-endpoint-detector
-    revision: "6"
+    revision: "7"
 contracts:
   - id: fastapi-constructor-on-startup-list
+    multiplicity: all_execute
     registration:
       symbol: fastapi.FastAPI
       invocation: constructor
@@ -22,6 +23,7 @@ contracts:
     activates_routes: true
 
   - id: fastapi-constructor-on-shutdown-list
+    multiplicity: all_execute
     registration:
       symbol: fastapi.FastAPI
       invocation: constructor
@@ -35,6 +37,7 @@ contracts:
     execution_mode: framework
 
   - id: fastapi-router-constructor-on-startup-list
+    multiplicity: all_execute
     registration:
       symbol: fastapi.APIRouter
       invocation: constructor
@@ -48,6 +51,7 @@ contracts:
     execution_mode: framework
 
   - id: fastapi-router-constructor-on-shutdown-list
+    multiplicity: all_execute
     registration:
       symbol: fastapi.APIRouter
       invocation: constructor
@@ -61,6 +65,7 @@ contracts:
     execution_mode: framework
 
   - id: fastapi-lifespan-startup
+    multiplicity: all_execute
     registration:
       symbol: fastapi.FastAPI
       invocation: constructor
@@ -76,6 +81,7 @@ contracts:
     activates_routes: true
 
   - id: fastapi-lifespan-shutdown
+    multiplicity: all_execute
     registration:
       symbol: fastapi.FastAPI
       invocation: constructor
@@ -90,6 +96,7 @@ contracts:
     execution_mode: framework
 
   - id: fastapi-on-event
+    multiplicity: all_execute
     registration:
       symbol: fastapi.FastAPI.on_event
       invocation: instance_method
@@ -104,6 +111,7 @@ contracts:
     activates_routes: true
 
   - id: fastapi-add-event-handler
+    multiplicity: all_execute
     registration:
       symbol: fastapi.FastAPI.add_event_handler
       invocation: instance_method
@@ -118,6 +126,7 @@ contracts:
     activates_routes: true
 
   - id: fastapi-router-on-event
+    multiplicity: all_execute
     registration:
       symbol: fastapi.APIRouter.on_event
       invocation: instance_method
@@ -131,6 +140,7 @@ contracts:
     execution_mode: framework
 
   - id: fastapi-router-add-event-handler
+    multiplicity: all_execute
     registration:
       symbol: fastapi.APIRouter.add_event_handler
       invocation: instance_method
@@ -144,6 +154,7 @@ contracts:
     execution_mode: framework
 
   - id: starlette-on-event
+    multiplicity: all_execute
     registration:
       symbol: starlette.applications.Starlette.on_event
       invocation: instance_method
@@ -158,6 +169,7 @@ contracts:
     activates_routes: true
 
   - id: starlette-add-event-handler
+    multiplicity: all_execute
     registration:
       symbol: starlette.applications.Starlette.add_event_handler
       invocation: instance_method
@@ -172,6 +184,7 @@ contracts:
     activates_routes: true
 
   - id: fastapi-http-middleware
+    multiplicity: all_execute
     registration:
       symbol: fastapi.FastAPI.middleware
       invocation: instance_method
@@ -185,6 +198,7 @@ contracts:
     execution_mode: framework
 
   - id: fastapi-base-http-middleware
+    multiplicity: all_execute
     registration:
       symbol: fastapi.FastAPI.add_middleware
       invocation: instance_method
@@ -202,6 +216,7 @@ contracts:
     execution_mode: framework
 
   - id: starlette-base-http-middleware
+    multiplicity: all_execute
     registration:
       symbol: starlette.applications.Starlette.add_middleware
       invocation: instance_method
@@ -219,6 +234,7 @@ contracts:
     execution_mode: framework
 
   - id: fastapi-pure-asgi-middleware
+    multiplicity: all_execute
     registration:
       symbol: fastapi.FastAPI.add_middleware
       invocation: instance_method
@@ -236,6 +252,7 @@ contracts:
     execution_mode: framework
 
   - id: starlette-pure-asgi-middleware
+    multiplicity: all_execute
     registration:
       symbol: starlette.applications.Starlette.add_middleware
       invocation: instance_method
@@ -253,6 +270,7 @@ contracts:
     execution_mode: framework
 
   - id: fastapi-exception-handler
+    multiplicity: last_wins
     registration:
       symbol: fastapi.FastAPI.exception_handler
       invocation: instance_method
@@ -266,6 +284,7 @@ contracts:
     execution_mode: framework
 
   - id: fastapi-add-exception-handler
+    multiplicity: last_wins
     registration:
       symbol: fastapi.FastAPI.add_exception_handler
       invocation: instance_method
@@ -279,6 +298,7 @@ contracts:
     execution_mode: framework
 
   - id: starlette-exception-handler
+    multiplicity: last_wins
     registration:
       symbol: starlette.applications.Starlette.exception_handler
       invocation: instance_method
@@ -292,6 +312,7 @@ contracts:
     execution_mode: framework
 
   - id: starlette-add-exception-handler
+    multiplicity: last_wins
     registration:
       symbol: starlette.applications.Starlette.add_exception_handler
       invocation: instance_method
@@ -301,5 +322,46 @@ contracts:
       kind: framework.exception_handler
       id_template: "exception:{resource}"
       resource: {kind: literal, value: registered}
+    callback_mode: either
+    execution_mode: framework
+
+  - id: fastapi-backgroundtasks-add-task
+    multiplicity: all_execute
+    registration:
+      symbol: fastapi.BackgroundTasks.add_task
+      invocation: instance_method
+      receiver_type: fastapi.BackgroundTasks
+    handler: {kind: argument, index: 0}
+    surface:
+      kind: framework.background_task
+      id_template: "background:{resource}"
+      resource: {kind: handler_identity}
+    callback_mode: either
+    execution_mode: framework
+
+  - id: starlette-backgroundtasks-add-task
+    multiplicity: all_execute
+    registration:
+      symbol: starlette.background.BackgroundTasks.add_task
+      invocation: instance_method
+      receiver_type: starlette.background.BackgroundTasks
+    handler: {kind: argument, index: 0}
+    surface:
+      kind: framework.background_task
+      id_template: "background:{resource}"
+      resource: {kind: handler_identity}
+    callback_mode: either
+    execution_mode: framework
+
+  - id: starlette-background-task-response
+    multiplicity: all_execute
+    registration:
+      symbol: starlette.background.BackgroundTask
+      invocation: constructor
+    handler: {kind: argument, index: 0}
+    surface:
+      kind: framework.background_task
+      id_template: "background:{resource}"
+      resource: {kind: handler_identity}
     callback_mode: either
     execution_mode: framework

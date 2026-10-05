@@ -111,12 +111,18 @@ def test_constructor_lifecycle_lists_keep_all_selected_app_callbacks(tmp_path: P
 
     assert [(item.identifier, item.handler.name) for item in inventory.endpoints] == [
         ("FRAMEWORK.LIFECYCLE event:shutdown", "second"),
+        ("FRAMEWORK.LIFECYCLE event:shutdown", "second"),
         ("FRAMEWORK.LIFECYCLE event:startup", "first"),
+        ("FRAMEWORK.LIFECYCLE event:startup", "first"),
+        ("FRAMEWORK.LIFECYCLE event:startup", "second"),
         ("FRAMEWORK.LIFECYCLE event:startup", "second"),
     ]
     assert "unused_only" not in {item.handler.name for item in inventory.endpoints}
-    assert inventory.status == InventoryStatus.CONDITIONAL
-    assert all(item.surface is not None for item in inventory.endpoints)
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert all(
+        item.surface is not None and item.discovery_status == EndpointDiscoveryStatus.ESTABLISHED
+        for item in inventory.endpoints
+    )
 
 
 def test_keyword_add_event_handler_resolves_positional_or_keyword_parameters(
@@ -159,6 +165,24 @@ def test_exception_handlers_are_keyed_and_selected_app_scoped(tmp_path: Path) ->
         ("FRAMEWORK.EXCEPTION_HANDLER exception:builtins.ValueError", "value_error"),
     ]
     assert inventory.status == InventoryStatus.ESTABLISHED
+
+
+def test_exception_handler_contract_uses_last_wins_multiplicity(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "@app.exception_handler(ValueError)\n"
+        "async def replaced(request, exc): return None\n"
+        "@app.exception_handler(ValueError)\n"
+        "async def effective(request, exc): return None\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert [(item.identifier, item.handler.name) for item in inventory.endpoints] == [
+        ("FRAMEWORK.EXCEPTION_HANDLER exception:builtins.ValueError", "effective")
+    ]
 
 
 def test_pure_asgi_middleware_resolves_local_call_protocol(tmp_path: Path) -> None:
@@ -362,7 +386,120 @@ def test_framework_surfaces_are_scoped_to_selected_app_not_mounted_lifespan(
     inventory = _extract(tmp_path)
 
     assert [endpoint.handler.name for endpoint in inventory.endpoints] == ["parent_startup"]
-    assert inventory.status == InventoryStatus.ESTABLISHED
+
+
+def test_background_tasks_follow_selected_route_ownership_and_preserve_task_identity(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import BackgroundTasks, FastAPI\n\n"
+        "async def selected_work(): pass\n"
+        "async def unused_work(): pass\n\n"
+        "unused = FastAPI()\n"
+        "@unused.post('/unused')\n"
+        "async def unused_route(tasks: BackgroundTasks):\n"
+        "    tasks.add_task(unused_work)\n\n"
+        "app = FastAPI()\n"
+        "@app.post('/selected')\n"
+        "async def selected_route(tasks: BackgroundTasks):\n"
+        "    tasks.add_task(selected_work)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    task_endpoints = [
+        endpoint
+        for endpoint in inventory.endpoints
+        if endpoint.surface is not None
+        and endpoint.surface.surface_kind == "framework.background_task"
+    ]
+    assert [(item.identifier, item.handler.name) for item in task_endpoints] == [
+        ("FRAMEWORK.BACKGROUND_TASK background:main.selected_work", "selected_work")
+    ]
+    assert task_endpoints[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+    assert (
+        "only if this selected route executes" in task_endpoints[0].discovery_conditions[0].reason
+    )
+
+
+def test_background_task_dynamic_callback_fails_closed_for_selected_route(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import BackgroundTasks, FastAPI\n\n"
+        "app = FastAPI()\n"
+        "@app.post('/selected')\n"
+        "async def selected_route(tasks: BackgroundTasks, callback):\n"
+        "    tasks.add_task(callback)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert not any(
+        endpoint.surface is not None
+        and endpoint.surface.surface_kind == "framework.background_task"
+        for endpoint in inventory.endpoints
+    )
+    assert any(
+        "callback is unresolved or not an executable" in item.reason
+        for item in inventory.limitations
+    )
+    assert inventory.status == InventoryStatus.CONDITIONAL
+
+
+def test_response_background_task_is_conditional_on_selected_route(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "from starlette.background import BackgroundTask\n"
+        "from starlette.responses import Response\n\n"
+        "async def after_response(): pass\n\n"
+        "app = FastAPI()\n"
+        "@app.get('/selected')\n"
+        "async def selected_route():\n"
+        "    return Response('ok', background=BackgroundTask(after_response))\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    tasks = [
+        endpoint
+        for endpoint in inventory.endpoints
+        if endpoint.surface is not None
+        and endpoint.surface.surface_kind == "framework.background_task"
+    ]
+    assert [(item.handler.name, item.surface.contract_id) for item in tasks] == [
+        ("after_response", "starlette-background-task-response")
+    ]
+    assert tasks[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+
+
+def test_mounted_app_route_tasks_belong_to_parent_even_when_registered_later(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import BackgroundTasks, FastAPI\n\n"
+        "child = FastAPI()\n"
+        "app = FastAPI()\n"
+        "app.mount('/child', child)\n\n"
+        "async def work(): pass\n"
+        "@child.post('/run')\n"
+        "async def child_route(tasks: BackgroundTasks):\n"
+        "    tasks.add_task(work)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    tasks = [
+        endpoint
+        for endpoint in inventory.endpoints
+        if endpoint.surface is not None
+        and endpoint.surface.surface_kind == "framework.background_task"
+    ]
+    assert [item.handler.name for item in tasks] == ["work"]
 
 
 def test_router_lifecycle_uses_copy_at_include_order(tmp_path: Path) -> None:
@@ -712,7 +849,7 @@ def test_imported_class_rebound_in_defining_module_fails_closed(tmp_path: Path) 
     assert inventory.status == InventoryStatus.CONDITIONAL
 
 
-def test_duplicate_middleware_protocol_retains_physical_handlers_conditionally(
+def test_duplicate_middleware_protocol_retains_physical_handlers_as_all_execute(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "main.py").write_text(
@@ -727,10 +864,10 @@ def test_duplicate_middleware_protocol_retains_physical_handlers_conditionally(
 
     inventory = _extract(tmp_path)
 
-    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert inventory.status == InventoryStatus.ESTABLISHED
     assert [endpoint.handler.name for endpoint in inventory.endpoints] == ["first", "second"]
     assert all(
-        endpoint.discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+        endpoint.discovery_status == EndpointDiscoveryStatus.ESTABLISHED
         for endpoint in inventory.endpoints
     )
 
