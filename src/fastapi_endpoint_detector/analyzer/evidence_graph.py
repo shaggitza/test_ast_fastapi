@@ -5,12 +5,18 @@ Edges here document source relationships only and cannot assert runtime executio
 
 from __future__ import annotations
 
+import platform
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict
 
 if TYPE_CHECKING:
     from fastapi_endpoint_detector.analyzer.source_inventory import SourceInventory
+
+
+def _ast_engine_version() -> str:
+    """Identify the interpreter implementation and version supplying the AST parser."""
+    return f"{platform.python_implementation()} {platform.python_version()}"
 
 
 class EvidenceProvenance(BaseModel):
@@ -66,7 +72,10 @@ def source_evidence_graph(
             engine_version="1",
             strength="inventory",
             confidence="low",
-            limitations=("Import reachability does not establish execution",),
+            limitations=(
+                "Import reachability does not establish execution",
+                *inventory.limitations,
+            ),
         )
         nodes.append(
             EvidenceNode(
@@ -98,13 +107,14 @@ def source_evidence_graph(
                     provenance=EvidenceProvenance(
                         side=side,
                         source_path=item.relative_path,
-                        engine="cpython-ast",
-                        engine_version="stdlib",
+                        engine="python-ast",
+                        engine_version=_ast_engine_version(),
                         strength="reference",
                         confidence="low",
                         limitations=(
                             "Import statements may be conditional or dynamically bypassed",
                             "Import reachability does not establish execution",
+                            *inventory.limitations,
                         ),
                     ),
                 )

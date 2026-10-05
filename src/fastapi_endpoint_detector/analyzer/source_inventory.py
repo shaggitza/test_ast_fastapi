@@ -29,6 +29,7 @@ class SourceInventory:
     excluded_files: tuple[str, ...]
     follow_imports: bool
     max_depth: int
+    limitations: tuple[str, ...] = ()
 
     @property
     def paths(self) -> tuple[Path, ...]:
@@ -88,12 +89,25 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
     }
     excluded = {path for path in candidates if _matches(rel_by_path[path], exclude_patterns)}
     imports_by_path: dict[Path, tuple[str, ...]] = {}
+    hashes_by_path: dict[Path, str] = {}
     unresolved: set[tuple[str, str]] = set()
+    limitations: set[str] = set()
     for path in candidates:
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        except (OSError, UnicodeError, SyntaxError, RecursionError):
+            raw = path.read_bytes()
+            hashes_by_path[path] = hashlib.sha256(raw).hexdigest()
+            source_text = raw.decode("utf-8")
+            tree = ast.parse(source_text, filename=str(path))
+        except (OSError, UnicodeError, SyntaxError, RecursionError) as exc:
             imports_by_path[path] = ()
+            if isinstance(exc, OSError):
+                reason = "could not be read"
+                hashes_by_path[path] = ""
+            elif isinstance(exc, UnicodeError):
+                reason = "could not be decoded as UTF-8"
+            else:
+                reason = "could not be parsed as Python"
+            limitations.add(f"{rel_by_path[path]} {reason}: {type(exc).__name__}")
             continue
         relative_path = Path(rel_by_path[path]).with_suffix("")
         parts = list(relative_path.parts)
@@ -132,25 +146,46 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
                 continue
             if local in excluded:
                 unresolved.add((rel_by_path[path], imported))
+                limitations.add(
+                    f"Local import {imported!r} from {rel_by_path[path]} resolves to excluded "
+                    f"source {rel_by_path[local]}"
+                )
                 continue
-            if follow_imports and depth < max_depth and local not in distance:
+            if local in distance:
+                continue
+            if not follow_imports:
+                unresolved.add((rel_by_path[path], imported))
+                limitations.add(
+                    f"Local import {imported!r} from {rel_by_path[path]} was not followed "
+                    "because follow_imports is disabled"
+                )
+                continue
+            if depth >= max_depth:
+                unresolved.add((rel_by_path[path], imported))
+                limitations.add(
+                    f"Local import {imported!r} from {rel_by_path[path]} was not followed "
+                    f"because the maximum import depth {max_depth} was reached"
+                )
+                continue
+            if local not in distance:
                 selected.add(local)
                 distance[local] = depth + 1
                 queue.append(local)
     records: list[SourceFile] = []
     for path in sorted(selected):
-        try:
-            raw = path.read_bytes()
-            digest = hashlib.sha256(raw).hexdigest()
-        except OSError:
-            digest = ""
         relative_path = Path(rel_by_path[path]).with_suffix("")
         parts = list(relative_path.parts)
         if parts[-1] == "__init__":
             parts.pop()
         module = ".".join(([package_prefix] if package_prefix else []) + parts)
         records.append(
-            SourceFile(path, rel_by_path[path], module, digest, imports_by_path.get(path, ()))
+            SourceFile(
+                path,
+                rel_by_path[path],
+                module,
+                hashes_by_path.get(path, ""),
+                imports_by_path.get(path, ()),
+            )
         )
     return SourceInventory(
         root,
@@ -159,4 +194,5 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
         tuple(sorted(rel_by_path[p] for p in excluded)),
         follow_imports,
         max_depth,
+        tuple(sorted(limitations)),
     )
