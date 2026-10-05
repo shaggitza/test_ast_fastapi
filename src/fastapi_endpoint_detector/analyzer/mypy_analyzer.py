@@ -14,11 +14,13 @@ from __future__ import annotations
 import ast
 import gc
 import hashlib
+import io
 import json
 import os
 import stat
 import sys
 import tempfile
+import tokenize
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
@@ -515,7 +517,10 @@ class MypyAnalyzer:
     and extract precise file/line information for all references.
     """
 
-    CACHE_SCHEMA_VERSION = 21
+    CACHE_SCHEMA_VERSION = 22
+    MAX_LAMBDA_SOURCE_FILE_BYTES = 1_048_576
+    MAX_LAMBDA_SOURCE_SNAPSHOT_BYTES = 16_777_216
+    MAX_LAMBDA_SOURCE_AST_NODES = 100_000
     MAX_POINTS_TO_TARGETS = 8
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
@@ -589,6 +594,14 @@ class MypyAnalyzer:
         ] = {}
         self._python_verified_call_spans: dict[str, dict[int, tuple[int, int, int, int]]] = {}
         self._source_bytes_cache: dict[str, tuple[bytes, ...] | None] = {}
+        self._source_record_snapshots: dict[str, bytes | None] = {}
+        self._source_record_snapshot_bytes = 0
+        self._last_source_records: list[tuple[Path, str, str]] = []
+        self._analysis_source_snapshots: dict[str, bytes | None] = {}
+        self._lambda_source_ast_cache: dict[str, ast.Module | None] = {}
+        self._lambda_source_index_cache: dict[
+            str, dict[tuple[str, int, int], tuple[ast.Lambda, ...]] | None
+        ] = {}
         self._resolved_call_site_cache: dict[int, ResolvedCallSite | None] = {}
         self._finite_global_value_cache: dict[str, _FinitePointsTo | None] = {}
         self._finite_global_in_progress: set[str] = set()
@@ -690,10 +703,15 @@ class MypyAnalyzer:
 
     def _source_records(self) -> list[tuple[Path, str, str]]:
         """Return canonical (path, module, digest) inputs from inventory or disk."""
+        self._source_record_snapshots.clear()
+        self._source_record_snapshot_bytes = 0
         inventory = self.source_inventory
         if inventory is not None:
             records = []
-            for record in inventory.files:
+            for record in sorted(
+                inventory.files,
+                key=lambda item: (item.relative_path, item.module, str(item.path)),
+            ):
                 path = Path(record.path).resolve()
                 expected = (Path(inventory.root) / record.relative_path).resolve()
                 if path != expected:
@@ -701,32 +719,51 @@ class MypyAnalyzer:
                         f"source inventory path mismatch for {record.relative_path}"
                     )
                 try:
-                    actual_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                    source_bytes = path.read_bytes()
+                    actual_digest = hashlib.sha256(source_bytes).hexdigest()
                 except OSError as exc:
                     raise MypyAnalyzerError(
                         f"source inventory file is unavailable: {record.relative_path}"
                     ) from exc
                 if actual_digest != record.sha256:
                     raise MypyAnalyzerError(f"source inventory is stale for {record.relative_path}")
+                self._retain_source_record_snapshot(path, source_bytes)
                 records.append((path, record.module, record.sha256))
-            return sorted(records, key=lambda record: (str(record[0]), record[1]))
+            self._last_source_records = sorted(
+                records, key=lambda record: (str(record[0]), record[1])
+            )
+            return self._last_source_records
         records = []
-        for path in self.source_root.rglob("*.py"):
+        for path in sorted(self.source_root.rglob("*.py"), key=str):
             if any(part.startswith((".", "__pycache__")) for part in path.parts):
                 continue
-            source_bytes = self._read_discovered_source(path)
-            if source_bytes is None:
+            discovered_bytes = self._read_discovered_source(path)
+            if discovered_bytes is None:
                 continue
             try:
                 try:
                     module = self._module_name_from_path(path, self.module_root)
                 except ValueError:
                     module = self._module_name_from_path(path, self.source_root)
-                digest = hashlib.sha256(source_bytes).hexdigest()
+                digest = hashlib.sha256(discovered_bytes).hexdigest()
             except (OSError, ValueError):
                 continue
+            self._retain_source_record_snapshot(path, discovered_bytes)
             records.append((path, module, digest))
-        return sorted(records, key=lambda record: (str(record[0]), record[1]))
+        self._last_source_records = sorted(records, key=lambda record: (str(record[0]), record[1]))
+        return self._last_source_records
+
+    def _retain_source_record_snapshot(self, path: Path, source_bytes: bytes) -> None:
+        """Keep a bounded pre-build source snapshot for later verified reuse."""
+        canonical = str(path.resolve())
+        if len(source_bytes) > self.MAX_LAMBDA_SOURCE_FILE_BYTES or (
+            self._source_record_snapshot_bytes + len(source_bytes)
+            > self.MAX_LAMBDA_SOURCE_SNAPSHOT_BYTES
+        ):
+            self._source_record_snapshots[canonical] = None
+            return
+        self._source_record_snapshots[canonical] = source_bytes
+        self._source_record_snapshot_bytes += len(source_bytes)
 
     def _ensure_mypy_built(self) -> None:
         """Ensure mypy has analyzed the project and we have the typed ASTs."""
@@ -743,7 +780,12 @@ class MypyAnalyzer:
 
         # Collect all Python files using a repository-independent import root.
         sources: list[BuildSource] = []
-        for py_file, module_name, _digest in self._source_records():
+        source_records = (
+            self._last_source_records
+            if self._expected_source_fingerprint is not None
+            else self._source_records()
+        )
+        for py_file, module_name, _digest in source_records:
             sources.append(BuildSource(path=str(py_file), module=module_name))
             self._module_to_path[module_name] = str(py_file)
 
@@ -766,6 +808,7 @@ class MypyAnalyzer:
         try:
             fscache = FileSystemCache()
             self._build_result = mypy_build(sources=sources, options=options, fscache=fscache)
+            analyzed_source_hashes: dict[str, str] = {}
 
             # Store the types map
             self._types_map = self._build_result.types
@@ -781,11 +824,35 @@ class MypyAnalyzer:
             for module_name, state in self._build_result.graph.items():
                 if state.path:
                     state_path = str(Path(state.path).resolve())
+                    source_hash = getattr(state, "source_hash", None)
+                    if isinstance(source_hash, str):
+                        analyzed_source_hashes[state_path] = source_hash
                     if inventory_paths is None or state_path in inventory_paths:
                         self._module_to_path[module_name] = state_path
                 tree = state.tree
                 if tree is not None:
                     self._trees[module_name] = tree
+
+            # State.source_hash is mypy's digest of the exact text it parsed.
+            # Reuse a bounded pre-build byte snapshot only when that digest
+            # matches, so a concurrent disk edit causes abstention.
+            self._analysis_source_snapshots = {}
+            self._lambda_source_ast_cache.clear()
+            self._lambda_source_index_cache.clear()
+            retained_bytes = 0
+            for py_file, _module_name, _digest in source_records:
+                canonical = str(py_file.resolve())
+                snapshot = self._source_record_snapshots.get(canonical)
+                if (
+                    snapshot is None
+                    or analyzed_source_hashes.get(canonical) != hashlib.sha1(snapshot).hexdigest()
+                    or retained_bytes + len(snapshot) > self.MAX_LAMBDA_SOURCE_SNAPSHOT_BYTES
+                    or self._decode_analysis_source(snapshot) is None
+                ):
+                    self._analysis_source_snapshots[canonical] = None
+                    continue
+                self._analysis_source_snapshots[canonical] = snapshot
+                retained_bytes += len(snapshot)
 
             self._project_modules = set()
             modules_by_path: dict[str, list[str]] = {}
@@ -823,7 +890,12 @@ class MypyAnalyzer:
             return value
         raise MypyAnalyzerError(f"unsupported source inventory follow_imports policy: {value!r}")
 
-    def _reset_build_state(self, *, clear_endpoint_dependencies: bool = True) -> None:
+    def _reset_build_state(
+        self,
+        *,
+        clear_endpoint_dependencies: bool = True,
+        clear_source_records: bool = False,
+    ) -> None:
         """Discard one stale typed snapshot before an explicit bulk rebuild."""
         self._build_result = None
         self._trees.clear()
@@ -836,6 +908,13 @@ class MypyAnalyzer:
         self._python_call_span_cache.clear()
         self._python_verified_call_spans.clear()
         self._source_bytes_cache.clear()
+        if clear_source_records:
+            self._source_record_snapshots.clear()
+            self._source_record_snapshot_bytes = 0
+            self._last_source_records.clear()
+        self._analysis_source_snapshots.clear()
+        self._lambda_source_ast_cache.clear()
+        self._lambda_source_index_cache.clear()
         self._resolved_call_site_cache.clear()
         self._finite_global_value_cache.clear()
         self._finite_global_in_progress.clear()
@@ -851,7 +930,7 @@ class MypyAnalyzer:
 
     def release_typed_snapshot(self) -> None:
         """Release heavy mypy AST/type graphs while retaining materialized endpoint results."""
-        self._reset_build_state(clear_endpoint_dependencies=False)
+        self._reset_build_state(clear_endpoint_dependencies=False, clear_source_records=True)
         gc.collect()
 
     def _find_func_in_tree(
@@ -1065,36 +1144,78 @@ class MypyAnalyzer:
         lambda_line = int(getattr(lambda_node, "line", 0) or 0)
         if not isinstance(function_name, str) or function_line < 1 or lambda_line < 1:
             return None
-        try:
-            source = Path(file_path).read_text(encoding="utf-8")
-            module = ast.parse(source)
-        except (OSError, SyntaxError, UnicodeDecodeError):
+        canonical = str(Path(file_path).resolve())
+        if canonical not in self._lambda_source_ast_cache:
+            snapshot = self._analysis_source_snapshots.get(canonical)
+            if snapshot is None:
+                self._lambda_source_ast_cache[canonical] = None
+                return None
+            source = self._decode_analysis_source(snapshot)
+            if source is None:
+                self._lambda_source_ast_cache[canonical] = None
+                return None
+            try:
+                self._lambda_source_ast_cache[canonical] = ast.parse(source, filename=canonical)
+            except (SyntaxError, ValueError, RecursionError):
+                self._lambda_source_ast_cache[canonical] = None
+                return None
+        module = self._lambda_source_ast_cache[canonical]
+        if module is None:
             return None
-        definitions = [
-            item
-            for item in ast.walk(module)
-            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and item.name == function_name
-            and item.lineno == function_line
-        ]
-        if len(definitions) != 1:
+        index = self._lambda_source_index(canonical, module)
+        if index is None:
             return None
-        lambdas = [
-            item
-            for item in ast.walk(definitions[0])
-            if isinstance(item, ast.Lambda) and item.lineno == lambda_line
-        ]
+        lambdas = index.get((function_name, function_line, lambda_line), ())
         if len(lambdas) != 1:
             return None
         body = lambdas[0].body
         return SourceEvidenceSpan(
-            file_path=file_path,
+            file_path=canonical,
             start_line=body.lineno,
             start_column=body.col_offset,
             end_line=body.end_lineno or body.lineno,
             end_column=body.end_col_offset or body.col_offset,
             execution_state=execution_state,
         )
+
+    def _lambda_source_index(
+        self, canonical: str, module: ast.Module
+    ) -> dict[tuple[str, int, int], tuple[ast.Lambda, ...]] | None:
+        """Index lambda candidates by enclosing function and source line once per file."""
+        if canonical in self._lambda_source_index_cache:
+            return self._lambda_source_index_cache[canonical]
+        from collections import defaultdict
+
+        candidates: dict[tuple[str, int, int], list[ast.Lambda]] = defaultdict(list)
+        stack: list[tuple[ast.AST, tuple[tuple[str, int], ...]]] = [(module, ())]
+        visited = 0
+        while stack:
+            node, function_ancestors = stack.pop()
+            visited += 1
+            if visited > self.MAX_LAMBDA_SOURCE_AST_NODES:
+                self._lambda_source_index_cache[canonical] = None
+                return None
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                function_ancestors = (*function_ancestors, (node.name, node.lineno))
+            if isinstance(node, ast.Lambda):
+                for name, line in function_ancestors:
+                    candidates[(name, line, node.lineno)].append(node)
+            for child in reversed(list(ast.iter_child_nodes(node))):
+                stack.append((child, function_ancestors))
+        indexed = {key: tuple(values) for key, values in candidates.items()}
+        self._lambda_source_index_cache[canonical] = indexed
+        return indexed
+
+    @staticmethod
+    def _decode_analysis_source(source_bytes: bytes | None) -> str | None:
+        """Decode one captured source snapshot using Python's source encoding rules."""
+        if source_bytes is None:
+            return None
+        try:
+            encoding, _ = tokenize.detect_encoding(io.BytesIO(source_bytes).readline)
+            return source_bytes.decode(encoding)
+        except (SyntaxError, UnicodeDecodeError, LookupError):
+            return None
 
     def _resolve_fullname_to_file(self, fullname: str) -> tuple[str, str] | None:
         """Resolve one fullname with snapshot-local memoization."""
