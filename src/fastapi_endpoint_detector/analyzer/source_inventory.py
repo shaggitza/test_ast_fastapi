@@ -124,10 +124,13 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
     # If it aliases an otherwise selected module, do not pretend the regular
     # path is the only possible identity for that import.
     symlink_collision_paths: dict[str, set[str]] = {}
-    for module, relative in symlink_modules.items():
-        if module in module_paths:
-            symlink_collision_paths.setdefault(module, set()).update(
-                [*(rel_by_path[path] for path in module_paths[module]), relative]
+    for symlink_module_name, symlink_relative in symlink_modules.items():
+        if symlink_module_name in module_paths:
+            symlink_collision_paths.setdefault(symlink_module_name, set()).update(
+                [
+                    *(rel_by_path[path] for path in module_paths[symlink_module_name]),
+                    symlink_relative,
+                ]
             )
     collision_paths = {module: set(paths) for module, paths in module_collisions}
     for module, paths in symlink_collision_paths.items():
@@ -160,9 +163,10 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
             "Root package initializer __init__.py is a rejected symlink; package-prefix "
             "identity may differ from Python import resolution"
         )
-    for module, paths in module_collisions:
+    for colliding_module, colliding_paths in module_collisions:
         limitations.add(
-            f"Module identity {module!r} collides across source files: {', '.join(paths)}"
+            f"Module identity {colliding_module!r} collides across source files: "
+            f"{', '.join(colliding_paths)}"
         )
     for path in candidates:
         try:
@@ -238,11 +242,11 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
                 None,
             )
             if local is None and symlink_match is not None:
-                module, relative = symlink_match
+                symlink_module_name, symlink_relative = symlink_match
                 unresolved.add((rel_by_path[path], imported))
                 limitations.add(
                     f"Local import {imported!r} from {rel_by_path[path]} resolves through "
-                    f"rejected symlink source {relative} (module {module!r})"
+                    f"rejected symlink source {symlink_relative} (module {symlink_module_name!r})"
                 )
                 continue
             if local is None:
