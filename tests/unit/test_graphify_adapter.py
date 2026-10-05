@@ -114,6 +114,64 @@ def test_loads_pinned_fixture_with_exact_source_provenance_and_orientation(
     assert snapshot.edges[3].traversable is False
 
 
+@pytest.mark.parametrize(
+    ("source_location", "edge_key", "expected_span"),
+    [
+        ("L2", "second-occurrence", (2, 2)),
+        ("L1-L2", "range-occurrence", (1, 2)),
+    ],
+)
+def test_node_link_multigraph_preserves_parallel_edge_key_provenance_and_span(
+    tmp_path: Path,
+    source_location: str,
+    edge_key: str,
+    expected_span: tuple[int, int],
+) -> None:
+    project = _project(tmp_path)
+    payload = _payload()
+    second = dict(payload["links"][0])
+    second["key"] = edge_key
+    second["source_location"] = source_location
+    second["confidence"] = "INFERRED"
+    payload["links"].append(second)
+    graph = tmp_path / "parallel-node-link.json"
+    _write_payload(graph, payload)
+
+    snapshot = load_graphify_snapshot(graph, project_root=project, side="target")
+    original, parallel = snapshot.edges[0], snapshot.edges[-1]
+    assert len(snapshot.edges) == len(payload["links"])
+    assert (parallel.source_id, parallel.target_id, parallel.relation) == (
+        original.source_id,
+        original.target_id,
+        original.relation,
+    )
+    assert parallel.edge_key == edge_key
+    assert parallel.extractor_strength == "INFERRED"
+    assert parallel.span is not None
+    assert (parallel.span.start_line, parallel.span.end_line) == expected_span
+
+
+def test_node_link_multigraph_preserves_same_key_relation_at_distinct_locations(
+    tmp_path: Path,
+) -> None:
+    project = _project(tmp_path)
+    payload = _payload()
+    second = dict(payload["links"][1])
+    second["key"] = "later-call"
+    second["source_location"] = "L4"
+    payload["links"].append(second)
+    graph = tmp_path / "same-relation-two-locations.json"
+    _write_payload(graph, payload)
+
+    snapshot = load_graphify_snapshot(graph, project_root=project, side="target")
+    assert len(snapshot.edges) == len(payload["links"])
+    assert snapshot.edges[1].span is not None
+    assert snapshot.edges[-1].span is not None
+    assert snapshot.edges[1].span.start_line == 3
+    assert snapshot.edges[-1].span.start_line == 4
+    assert snapshot.edges[-1].edge_key == "later-call"
+
+
 def test_loads_explicit_raw_schema_without_promoting_line_markers_to_ranges(tmp_path: Path) -> None:
     project = _project(tmp_path)
     snapshot = load_graphify_snapshot(
@@ -155,7 +213,10 @@ def test_raw_schema_requires_explicit_version_and_rejects_unknown_selectors(
         (lambda value: value["edges"][0].update({"confidence": "HIGH"}), "confidence"),
         (lambda value: value["edges"][0].update({"source_file": "../app.py"}), "confined"),
         (lambda value: value["edges"][0].update({"target": "not-present"}), "unknown node"),
-        (lambda value: value["edges"].append(dict(value["edges"][0])), "ambiguous duplicate"),
+        (
+            lambda value: value["edges"].append(dict(value["edges"][0])),
+            "identical raw edge occurrence",
+        ),
     ],
     ids=[
         "negative-token-counter",
@@ -193,6 +254,26 @@ def test_raw_schema_rejects_absolute_source_paths_and_symlinks(tmp_path: Path) -
             load_graphify_snapshot(
                 graph, project_root=project, side="target", schema=GRAPHIFY_RAW_SCHEMA
             )
+
+
+def test_raw_schema_retains_same_relation_at_distinct_source_locations(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    payload = json.loads(RAW_FIXTURE.read_text(encoding="utf-8"))
+    repeated = dict(payload["edges"][0])
+    repeated["source_location"] = "L3"
+    payload["edges"].append(repeated)
+    graph = tmp_path / "raw-distinct-occurrences.json"
+    _write_payload(graph, payload)
+
+    snapshot = load_graphify_snapshot(
+        graph, project_root=project, side="target", schema=GRAPHIFY_RAW_SCHEMA
+    )
+    assert len(snapshot.edges) == len(payload["edges"])
+    assert snapshot.edges[0].source_id == snapshot.edges[-1].source_id
+    assert snapshot.edges[0].target_id == snapshot.edges[-1].target_id
+    assert snapshot.edges[0].relation == snapshot.edges[-1].relation
+    assert snapshot.edges[0].span is not None and snapshot.edges[0].span.start_line == 4
+    assert snapshot.edges[-1].span is not None and snapshot.edges[-1].span.start_line == 3
 
 
 def test_snapshot_hash_is_checked_against_the_same_byte_snapshot(tmp_path: Path) -> None:

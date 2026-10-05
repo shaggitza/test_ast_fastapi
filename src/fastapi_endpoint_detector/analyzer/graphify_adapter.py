@@ -125,6 +125,7 @@ class GraphifyEdge:
     orientation: GraphifyRelationOrientation
     extractor_strength: GraphifyStrength
     span: GraphifySourceSpan | None
+    edge_key: int | str | None = None
 
     @property
     def traversable(self) -> bool:
@@ -573,7 +574,7 @@ def _adapt_edges(
     raw_schema: bool = False,
 ) -> tuple[GraphifyEdge, ...]:
     edges: list[GraphifyEdge] = []
-    seen_relations: set[tuple[str, str, str]] = set()
+    seen_raw_edges: set[tuple[str, str, str, str, str, str | None]] = set()
     for index, raw_edge in enumerate(raw_edges):
         location = f"links[{index}]"
         if not isinstance(raw_edge, dict):
@@ -591,10 +592,6 @@ def _adapt_edges(
         if source_id not in node_ids or target_id not in node_ids:
             raise GraphifyAdapterError(f"{location} references an unknown node")
         relation = _bounded_string(edge["relation"], f"{location}.relation")
-        relation_key = (source_id, target_id, relation)
-        if relation_key in seen_relations:
-            raise GraphifyAdapterError(f"{location} is an ambiguous duplicate relation")
-        seen_relations.add(relation_key)
         orientation = _RELATION_ORIENTATIONS.get(relation)
         if orientation is None:
             raise GraphifyAdapterError(
@@ -602,19 +599,42 @@ def _adapt_edges(
             )
         strength = _strength(edge["confidence"], f"{location}.confidence")
         assert strength is not None
+        _validate_optional_fields(edge, location)
         if raw_schema and ("source_file" not in edge or edge.get("source_location") is None):
             raise GraphifyAdapterError(
                 f"{location} requires source_file and line-only source_location"
             )
-        if raw_schema and re.fullmatch(
-            r"L[1-9][0-9]*", cast("str", edge["source_location"])
-        ) is None:
-            raise GraphifyAdapterError(
-                f"{location}.source_location must be a line-only Graphify marker"
+        raw_source_file: str | None = None
+        raw_source_location: str | None = None
+        if raw_schema:
+            raw_source_file = _bounded_string(edge["source_file"], f"{location}.source_file")
+            raw_source_location = _bounded_string(
+                edge["source_location"], f"{location}.source_location"
             )
+            if re.fullmatch(r"L[1-9][0-9]*", raw_source_location) is None:
+                raise GraphifyAdapterError(
+                    f"{location}.source_location must be a line-only Graphify marker"
+                )
+            raw_edge_key = (
+                source_id,
+                target_id,
+                relation,
+                raw_source_file,
+                raw_source_location,
+                cast("str | None", edge.get("context")),
+            )
+            if raw_edge_key in seen_raw_edges:
+                raise GraphifyAdapterError(
+                    f"{location} duplicates an identical raw edge occurrence"
+                )
+            seen_raw_edges.add(raw_edge_key)
         span = _optional_edge_span(registry, edge, location)
-        _validate_optional_fields(edge, location)
-        edges.append(GraphifyEdge(source_id, target_id, relation, orientation, strength, span))
+        edge_key = edge.get("key")
+        if isinstance(edge_key, bool) or not isinstance(edge_key, (int, str, type(None))):
+            raise GraphifyAdapterError(f"{location}.key must be an integer, string, or null")
+        edges.append(
+            GraphifyEdge(source_id, target_id, relation, orientation, strength, span, edge_key)
+        )
     return tuple(edges)
 
 

@@ -7,7 +7,13 @@ strict and unchanged. The raw top level is exactly `nodes`, `edges`,
 `hyperedges`, `input_tokens`, and `output_tokens`; this parser rejects extra or
 missing top-level keys, invalid counters, nonempty hyperedges, unsupported
 record fields, invalid provenance, missing endpoints, duplicate IDs, and
-ambiguous repeated `(source, target, relation)` edges.
+identical raw edge occurrences. Raw occurrences with the same endpoints and
+relation but distinct source locations or contexts remain separate.
+
+Source-path validation applies to both selectors: source paths must be relative
+to the project root and cannot traverse `..` or symlink components. This
+deliberately tightens legacy node-link acceptance of absolute paths or symlink
+aliases; callers must use confined project-relative paths.
 
 Raw edge `source` and `target` order is retained for known semantic relations.
 The adapter maps `calls` to caller-to-callee, `imports` and `imports_from` to
@@ -15,14 +21,17 @@ importer-to-imported, `inherits` to subclass-to-base, and `references` to
 referencer-to-referenced. `confidence` carries Graphify provenance
 (`EXTRACTED`, `INFERRED`, or `AMBIGUOUS`); it is not a HIGH/MEDIUM/LOW quality
 rating. Other relation names fail closed. Raw `source_location` is line-only
-(`L<number>` or a line range where the adapter already permits it); the
+(`L<number>`); the
 adapter stores those as line spans and never infers byte, column, or function
 end positions.
 
 The adapter's normalized raw snapshots record directed semantic edges while
 reporting `multigraph=false`: Graphify's raw merge deduplicates edge tuples and
 does not provide a directed multigraph contract. It can therefore lose
-repeated same-relation evidence in extraction before this adapter sees it.
+repeated same-relation evidence in extraction before this adapter sees it. The
+existing `node-link-v1` path retains parallel edges and their NetworkX `key`,
+provenance, and source span independently; a shared relation name is not
+treated as a duplicate physical occurrence.
 This support removes the node-link format gate for imports; it is not evidence
 that a Graphify extraction ran or that the result meets GH110 quality goals.
 
