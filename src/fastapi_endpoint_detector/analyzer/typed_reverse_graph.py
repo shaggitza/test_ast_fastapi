@@ -121,6 +121,11 @@ class EndpointOccurrenceBinding:
     confidence: Literal["HIGH", "MEDIUM", "LOW"] = "HIGH"
     binding_kind: Literal["handler", "dependency"] = "handler"
     dependency_symbols: tuple[str, ...] = ()
+    conditional: bool = False
+
+    def __post_init__(self) -> None:
+        if self.conditional and self.confidence != "LOW":
+            object.__setattr__(self, "confidence", "LOW")
 
 
 @dataclass(frozen=True)
@@ -162,12 +167,28 @@ class ImpactEvidence:
 
 
 @dataclass(frozen=True)
+class PotentialImpactEvidence:
+    """LOW-only route candidate whose changed-symbol relation is unresolved."""
+
+    side: GraphSide
+    occurrence: EndpointOccurrenceBinding
+    seed: ChangedSeed
+    uncertainty: UncertaintyWitness
+    supporting_witnesses: tuple[EdgeWitness, ...]
+    incomplete: Incompleteness
+    confidence: Literal["LOW"] = "LOW"
+    execution_state: Literal["unknown"] = "unknown"
+    reference_state: Literal["unknown"] = "unknown"
+
+
+@dataclass(frozen=True)
 class ReverseQueryResult:
     evidence: tuple[ImpactEvidence, ...]
     incomplete: Incompleteness
     visited_nodes: int
     enqueued_nodes: int
     examined_witnesses: int
+    uncertain_evidence: tuple[PotentialImpactEvidence, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -210,6 +231,7 @@ class TypedReverseGraph:
         for binding in bindings:
             by_symbol.setdefault(binding.symbol, []).append(binding)
         evidence: dict[tuple[str, str, str], ImpactEvidence] = {}
+        uncertain_evidence: dict[tuple[str, str, str, str], PotentialImpactEvidence] = {}
         uncertainties_by_owner: dict[str, tuple[UncertaintyWitness, ...]] = {}
         for item in self.uncertainties:
             uncertainties_by_owner.setdefault(item.owner, ())
@@ -297,6 +319,86 @@ class TypedReverseGraph:
                         break
                     queue.append((edge.caller, (*path, edge), path_symbols | {edge.caller}))
                     enqueued_count += 1
+            # Unknown target/binding relations cannot be matched to a changed
+            # fullname safely. Walk their exact callers backwards and report
+            # separate LOW potential evidence rather than fabricating an edge.
+            uncertain_capped = False
+            for uncertainty in self.uncertainties:
+                if uncertainty.category == "effect_summary":
+                    continue
+                uncertainty_queue: deque[
+                    tuple[str, tuple[EdgeWitness, ...], frozenset[str]]
+                ] = deque([(uncertainty.owner, (), frozenset({uncertainty.owner}))])
+                uncertainty_seen: set[tuple[str, tuple[str, ...]]] = set()
+                while uncertainty_queue:
+                    if len(uncertainty_queue) > budgets.frontier:
+                        reasons.add("frontier_budget")
+                        affected.add(seed.symbol)
+                        uncertain_capped = True
+                        break
+                    current, path, path_symbols = uncertainty_queue.popleft()
+                    state_key = (current, tuple(edge.witness_id for edge in path))
+                    if state_key in uncertainty_seen:
+                        continue
+                    uncertainty_seen.add(state_key)
+                    if current not in visited_symbols:
+                        visited_symbols.add(current)
+                        visited_count += 1
+                    if len(visited_symbols) > budgets.nodes:
+                        reasons.add("node_budget")
+                        affected.add(seed.symbol)
+                        uncertain_capped = True
+                        break
+                    for occurrence in sorted(by_symbol.get(current, ()), key=_binding_key):
+                        path_id = "/".join(edge.witness_id for edge in path)
+                        record = PotentialImpactEvidence(
+                            side,
+                            occurrence,
+                            seed,
+                            uncertainty,
+                            tuple(reversed(path)),
+                            Incompleteness(
+                                bool(reasons),
+                                tuple(sorted(reasons | {uncertainty.reason_code})),
+                                (seed.symbol,),
+                            ),
+                        )
+                        uncertain_evidence[
+                            (
+                                occurrence.occurrence_id,
+                                seed.symbol,
+                                uncertainty.uncertainty_id,
+                                path_id,
+                            )
+                        ] = record
+                    if len(path) >= budgets.depth:
+                        if index.get(current):
+                            reasons.add("depth_budget")
+                            affected.add(seed.symbol)
+                            uncertain_capped = True
+                        continue
+                    for edge in index.get(current, ()):
+                        witness_count += 1
+                        if witness_count > budgets.witnesses:
+                            reasons.add("witness_budget")
+                            affected.add(seed.symbol)
+                            uncertain_capped = True
+                            break
+                        if edge.caller in path_symbols:
+                            continue
+                        if enqueued_count >= budgets.enqueues:
+                            reasons.add("enqueue_budget")
+                            affected.add(seed.symbol)
+                            uncertain_capped = True
+                            break
+                        uncertainty_queue.append(
+                            (edge.caller, (*path, edge), path_symbols | {edge.caller})
+                        )
+                        enqueued_count += 1
+                    if uncertain_capped:
+                        break
+                if uncertain_capped:
+                    break
         if reasons:
             # Any returned evidence potentially depends on truncated traversal;
             # cap state is explicit on all evidence and the overall result.
@@ -319,15 +421,48 @@ class TypedReverseGraph:
                 )
                 for key, value in evidence.items()
             }
+            uncertain_evidence = {
+                key: PotentialImpactEvidence(
+                    value.side,
+                    value.occurrence,
+                    value.seed,
+                    value.uncertainty,
+                    value.supporting_witnesses,
+                    Incompleteness(
+                        True,
+                        tuple(sorted(set(value.incomplete.reasons) | reasons)),
+                        tuple(sorted(set(value.incomplete.affected_seeds) | affected)),
+                    ),
+                )
+                for key, value in uncertain_evidence.items()
+            }
         ordered = tuple(sorted(evidence.values(), key=_evidence_key))
+        ordered_uncertain = tuple(
+            sorted(
+                uncertain_evidence.values(),
+                key=lambda item: (
+                    item.occurrence.occurrence_id,
+                    item.side,
+                    item.seed.symbol,
+                    item.uncertainty.uncertainty_id,
+                    tuple(edge.witness_id for edge in item.supporting_witnesses),
+                ),
+            )
+        )
         result_reasons = reasons | {
             reason for item in ordered for reason in item.incomplete.reasons
         }
+        result_reasons.update(
+            reason
+            for item in ordered_uncertain
+            for reason in item.incomplete.reasons
+        )
         result_affected = affected | {
             item.seed.symbol
             for item in ordered
             if item.incomplete.reasons
         }
+        result_affected.update(item.seed.symbol for item in ordered_uncertain)
         return ReverseQueryResult(
             ordered,
             Incompleteness(
@@ -338,6 +473,7 @@ class TypedReverseGraph:
             visited_count,
             enqueued_count,
             witness_count,
+            ordered_uncertain,
         )
 
 
@@ -404,13 +540,16 @@ class _ModuleWalker:
         for child in _mypy_children(node):
             self._collect_write_names(child)
 
-    def _walk(self, node: Any) -> None:
+    def _walk(self, node: Any) -> None:  # noqa: PLR0912
         if id(node) in self._seen:
             return
         self._seen.add(id(node))
         if isinstance(node, FuncDef):
+            fullname = _fullname(node)
+            if fullname and not fullname.startswith(self.module + "."):
+                return
             previous_owner = self.owner
-            fullname = _fullname(node) or previous_owner
+            fullname = fullname or previous_owner
             self.owner = fullname
             self.symbols[fullname] = self._symbol(fullname, "function", node)
             for child in _mypy_children(node):
@@ -419,6 +558,8 @@ class _ModuleWalker:
             return
         if isinstance(node, Decorator):
             fullname = _fullname(node) or _fullname(node.func)
+            if fullname and not fullname.startswith(self.module + "."):
+                return
             if fullname:
                 self.symbols[fullname] = self._symbol(fullname, "function", node.func)
             for child in _mypy_children(node):
@@ -749,11 +890,7 @@ def build_typed_reverse_graph(  # noqa: PLR0912, PLR0915
     for binding in endpoint_bindings:
         binding_path = str(Path(binding.span.path).resolve())
         lines = source_lines.get(binding_path, ())
-        span_valid = (
-            1 <= binding.span.start_line <= binding.span.end_line <= len(lines)
-            and binding.span.start_column <= len(lines[binding.span.start_line - 1])
-            and binding.span.end_column <= len(lines[binding.span.end_line - 1])
-        )
+        span_valid = _source_span_is_valid(binding.span, lines)
         if (
             binding_path not in source_by_path
             or source_by_path[binding_path] != binding.span.source_sha256
@@ -805,8 +942,11 @@ def build_typed_reverse_graph(  # noqa: PLR0912, PLR0915
     provenance = str(getattr(report, "cache_fingerprint", ""))
     if not provenance:
         raise ValueError("typed snapshot lacks provider cache provenance")
+    reported_sources = tuple(sorted(getattr(report, "source_digests_after", ())))
+    if reported_sources != tuple(sorted(source_hashes)):
+        raise ValueError("typed provider source digests do not match canonical inventory bytes")
     return TypedReverseGraph(
-        1,
+        3,
         str(root),
         inventory_fingerprint,
         tuple(source_hashes),
@@ -1120,6 +1260,7 @@ class TypedGraphCache:
         snapshot_provenance = str(getattr(report, "cache_fingerprint", ""))
         snapshot_engine = str(getattr(report, "engine", "mypy-fine-grained"))
         snapshot_version = str(getattr(report, "mypy_version", version("mypy")))
+        snapshot_sources = tuple(sorted(getattr(report, "source_digests_after", ())))
         try:
             snapshot_paths = {
                 str(Path(path).resolve(strict=True))
@@ -1133,11 +1274,12 @@ class TypedGraphCache:
             return False
         return (
             tuple(current) == graph.source_hashes
-            and graph.schema_version == 1
+            and graph.schema_version == 3
             and graph.inventory_fingerprint == inventory_fingerprint
             and inventoried_paths.issubset(snapshot_paths)
             and bool(snapshot_provenance)
             and graph.graph_provenance == snapshot_provenance
+            and snapshot_sources == graph.source_hashes
             and graph.engine == snapshot_engine
             and graph.engine_version == snapshot_version == version("mypy")
         )

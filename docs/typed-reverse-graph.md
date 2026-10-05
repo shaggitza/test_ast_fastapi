@@ -17,9 +17,13 @@ target the typed `__init__`; global reads and writes are represented separately.
 Directly invoked lambda bodies are distinguished from deferred lambda bodies.
 Per-evidence uncertainty witnesses record unknown/external call bindings,
 member dispatch, deferred lambda capture, dependency parameter transfer, and
-unmodeled effect summaries. Any such evidence is downgraded to LOW; uncertainty
-reason codes appear alongside any traversal cap reason in `incomplete.reasons`.
-The cap boolean remains specific to traversal budgets.
+unmodeled effect summaries. Evidence on a proven path is downgraded to LOW when
+one of these omissions touches the path. When an unresolved relation has no
+proven edge to the seed, `uncertain_evidence` emits a separate LOW potential
+candidate with only exact supporting caller witnesses and the explicit
+uncertainty; it never fabricates an edge. Uncertainty reason codes appear
+alongside any traversal cap reason in `incomplete.reasons`. The cap boolean
+remains specific to traversal budgets.
 
 Each query has independent node, depth, enqueue, frontier, and witness budgets.
 The result always carries explicit cap reasons and affected seeds. If traversal
@@ -28,13 +32,22 @@ deletions are queried against the baseline graph; target additions are queried
 against the target graph. Coordinates are mapped only inside the selected
 side's validated source inventory. A route and each declared dependency must be
 supplied as separate physical `EndpointOccurrenceBinding` values. Conditional
-routes must enter with LOW confidence.
+routes set `conditional=True`; the immutable binding enforces LOW confidence.
 
 `TypedGraphCache` currently provides provenance keying and strict reuse
 validation, not persistent serialization. Its key includes schema, canonical
 root/inventory/source hashes, engine/version, configuration fingerprint, and
-provider graph provenance. Validation rejects mismatched roots, changed bytes,
-symlinks, paths outside the root, and schema changes.
+provider graph provenance. Validation also requires the current `TypedBuild`,
+and matches its exact cache fingerprint and full `source_digests_after` table
+against the graph. It rejects mismatched roots, changed bytes, symlinks, paths
+outside the root, schema changes, engine changes, and a different retained
+provider build.
+
+Mypy AST edge and symbol spans, plus endpoint registration spans, are validated
+against the exact source bytes, including end-line/end-column boundaries. Call
+arguments retain both the actual expression type and formal parameter type
+from the retained provider's `type_maps` when mypy has a finding; absent type
+entries remain `None` rather than being guessed.
 
 ## Minimal integration plan
 
@@ -48,7 +61,9 @@ branch:
    registrations as separate occurrence IDs. For each handler occurrence,
    populate `dependency_symbols` only from exact typed targets returned by the
    analyzer's finite Depends/Security resolver; the graph makes these edges
-   LOW-confidence until callable and parameter transfer is proven.
+   LOW-confidence until callable and parameter transfer is proven. Pass
+   `conditional=True` for conditional registrations so the binding enforces
+   the LOW cap.
 3. Build one graph per snapshot, map added target and removed baseline hunks to
    exact symbol seeds, and query the matching side.
 4. Convert `ImpactEvidence` back to existing mapper evidence while retaining
@@ -112,11 +127,11 @@ coordinates. The report includes physical occurrence IDs, per-edge witness
 identities, source locations, confidence, execution and reference state,
 argument bindings, receiver/environment, cap state, and resolved-call-site
 totals. A candidate or physical path mismatch stops the run.
-It prints raw sample timings and empirical p95 values for cold typed build,
-cold graph construction, warm graph query, one-file full typed rebuild, and
-one-file graph reconstruction. Because the retained provider is not on this
-base branch, the one-file timing is explicitly a fresh full typed rebuild; it
-must not be read as incremental update latency. The endpoint output has no
+It prints raw sample timings and empirical p95 values for retained provider
+cold typing, independent full-depth oracle typing, cold graph construction,
+warm query, actual one-file provider update, graph reconstruction from the
+updated retained snapshot, fresh typed rebuild after the edit, and cold graph
+construction from that fresh typed build. The endpoint output has no
 corresponding graph-wide cap or effect summary, so those semantics cannot be
 compared here. The generated DAG does not establish production-corpus parity
 or cover DI transfer, multi-target dispatch, effect-helper closures,
@@ -125,27 +140,15 @@ exact physical call paths therefore do not establish no-quality-regression for
 GH107.
 
 The latest recorded run on Python 3.11.16 / mypy 1.19.1 (24 modules, five
-samples, 15 physical-path oracle checks) reported p95s of 2.427 s for typed
-cold build, 0.080 s for graph construction, 0.281 ms for a warm query, 2.560 s
-for the fresh full typed rebuild after one-file change, and 0.060 s for graph
-reconstruction. Positive graph evidence was LOW because the graph now exposes
-unmodeled effect summaries per witness; the full-depth callstack oracle does not
-provide a corresponding confidence/effect field, so that dimension remains
-explicitly non-comparable. These are generated-fixture observations, not
-latency targets or corpus performance claims.
-
-## Retained-provider compatibility probe
-
-The main branch does not contain PR #326's provider. A temporary, uncommitted
-scratch checkout based on the provider branch composed `TypedBuild` directly
-with `build_typed_reverse_graph`; no provider-owned file was changed. The
-builder consumed the provider's `modules`, `module_paths`, `type_maps`, and
-`report.cache_fingerprint`. On a generated 24-module chain, one exploratory
-sample measured provider cold typing at 3.893 s, graph construction at 0.053 s,
-the provider's actual one-file `incremental_update` at 0.013 s, and full graph
-reconstruction from the updated snapshot at 0.080 s. A separate eight-module
-provider snapshot matched one independent cold `MypyAnalyzer` terminal path
-and all eight physical call-edge coordinates. These single-sample scratch
-measurements have no p95 and do not establish DI/effect parity or the speed of
-the proposed integrated analyzer; the normal benchmark above remains a full
-typed rebuild on this branch.
+samples, 25 paired physical-path checks) reported p95s of 5.621 s for retained
+provider cold typing, 2.510 s for independent full-depth analyzer typing,
+0.069 s for cold graph construction, 0.209 ms for a warm query, 0.014 s for the
+actual one-file provider update, 0.055 s for graph reconstruction from that
+updated snapshot, 1.507 s for a fresh provider rebuild after the edit, 1.994 s
+for an independent cold analyzer rebuild, and 0.055 s for graph construction
+from that fresh typed build. Provider reports confirmed `incremental_update`
+and updated only `m23` on each sample. Positive graph evidence was LOW because
+effect summaries are unmodeled; the full-depth callstack oracle does not expose
+confidence/effect fields, so those dimensions remain non-comparable. These are
+generated-fixture measurements, not latency targets or corpus performance
+claims.

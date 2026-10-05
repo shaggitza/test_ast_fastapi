@@ -16,10 +16,10 @@ from dataclasses import dataclass
 from importlib.metadata import version
 from itertools import pairwise
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
+from fastapi_endpoint_detector.analyzer.mypy_incremental import BuildConfig, MypyIncrementalProvider
 from fastapi_endpoint_detector.analyzer.typed_reverse_graph import (
     ChangedSeed,
     EndpointOccurrenceBinding,
@@ -65,14 +65,10 @@ def _write_fixture(root: Path, modules: int, leaf_increment: int = 0) -> dict[st
     return sources
 
 
-def _retained_snapshot(root: Path, *, max_depth: int) -> tuple[Inventory, Any, MypyAnalyzer]:
-    analyzer = MypyAnalyzer(root, max_depth=max_depth)
-    analyzer._ensure_mypy_built()
-    module_paths = {
-        module: Path(path)
-        for module, path in analyzer._module_to_path.items()
-        if Path(path).suffix == ".py" and Path(path).is_relative_to(root)
-    }
+def _retained_snapshot(root: Path, *, max_depth: int):
+    module_paths = {path.stem: path for path in sorted(root.glob("*.py"))}
+    provider = MypyIncrementalProvider(BuildConfig(source_root=root))
+    typed = provider.build(module_paths)
     records = tuple(
         SourceRecord(
             module,
@@ -82,18 +78,68 @@ def _retained_snapshot(root: Path, *, max_depth: int) -> tuple[Inventory, Any, M
         )
         for module, path in sorted(module_paths.items())
     )
-    modules = {name: SimpleNamespace(tree=tree) for name, tree in analyzer._trees.items()}
-    typed = SimpleNamespace(
-        modules=modules,
-        module_paths={module: str(path) for module, path in module_paths.items()},
-        type_maps=analyzer._types_map,
-        report=SimpleNamespace(
-            cache_fingerprint=f"mypy:{version('mypy')}:{root.resolve()}",
-            engine="mypy-build-api",
-            mypy_version=version("mypy"),
-        ),
+    provider_elapsed = typed.report.elapsed_seconds
+    analyzer = MypyAnalyzer(root, max_depth=max_depth)
+    oracle_start = time.perf_counter()
+    analyzer._ensure_mypy_built()
+    oracle_elapsed = time.perf_counter() - oracle_start
+    return (
+        Inventory(root, records),
+        typed,
+        analyzer,
+        provider,
+        module_paths,
+        provider_elapsed,
+        oracle_elapsed,
     )
-    return Inventory(root, records), typed, analyzer
+
+
+def _physical_oracle_paths(
+    analyzer: MypyAnalyzer, endpoint: Endpoint, terminal_name: str, root: Path
+) -> list[tuple[tuple[str, int], ...]]:
+    dependencies = analyzer.analyze_endpoint(endpoint)
+    paths: list[tuple[tuple[str, int], ...]] = []
+    for stacks in dependencies.call_stacks.values():
+        for stack in stacks:
+            terminal_indexes = [
+                index
+                for index, frame in enumerate(stack)
+                if frame.function_name.rsplit(".", maxsplit=1)[-1] == terminal_name
+            ]
+            if not terminal_indexes:
+                continue
+            terminal = terminal_indexes[-1]
+            physical = []
+            for caller, callee in pairwise(stack[: terminal + 1]):
+                if callee.caller_line_number is None:
+                    raise AssertionError("full-depth oracle path lacks caller line coordinate")
+                physical.append(
+                    (
+                        Path(caller.file_path).resolve().relative_to(root.resolve()).as_posix(),
+                        callee.caller_line_number,
+                    )
+                )
+            paths.append(tuple(physical))
+    return sorted(set(paths))
+
+
+def _graph_physical_paths(
+    graph: Any, seed: str, *, side: str = "target"
+) -> list[tuple[tuple[str, int], ...]]:
+    result = graph.query([ChangedSeed(side, seed)], side=side)
+    return sorted(
+        {
+            tuple(
+                (
+                    Path(edge.span.path).resolve().relative_to(Path(graph.root)).as_posix(),
+                    edge.span.start_line,
+                )
+                for edge in evidence.witnesses
+                if edge.kind in {"call", "constructor"}
+            )
+            for evidence in result.evidence
+        }
+    )
 
 
 def _inventory_module(snapshot: Any, short: str) -> str:
@@ -129,10 +175,36 @@ def _endpoint(root: Path, snapshot: Any) -> tuple[Endpoint, EndpointOccurrenceBi
     return endpoint, binding
 
 
-def _oracle_set(analyzer: MypyAnalyzer, endpoint: Endpoint, changed_symbol: str) -> set[str]:
+def _oracle_endpoint(root: Path, analyzer: MypyAnalyzer) -> Endpoint:
+    path = (root / "app.py").resolve()
+    module = next(
+        name
+        for name, candidate in analyzer._module_to_path.items()
+        if Path(candidate).resolve() == path
+    )
+    return Endpoint(
+        path="/generated",
+        methods=[EndpointMethod.GET],
+        handler=HandlerInfo(
+            name="handler", module=module, file_path=path, line_number=2, end_line_number=3
+        ),
+    )
+
+
+def _seed_path(root: Path, seed: str) -> Path:
+    module = seed.rsplit(".", maxsplit=1)[0]
+    return root.joinpath(*module.split(".")).with_suffix(".py").resolve()
+
+
+def _oracle_set(
+    analyzer: MypyAnalyzer, endpoint: Endpoint, changed_symbol: str, root: Path
+) -> set[str]:
     dependencies = analyzer.analyze_endpoint(endpoint)
+    expected_path = _seed_path(root, changed_symbol)
+    expected_name = changed_symbol.rsplit(".", maxsplit=1)[-1]
     found = any(
-        frame.function_name == changed_symbol
+        Path(frame.file_path).resolve() == expected_path
+        and frame.function_name.rsplit(".", maxsplit=1)[-1] == expected_name
         for call_stacks in dependencies.call_stacks.values()
         for stack in call_stacks
         for frame in stack
@@ -158,10 +230,20 @@ def _compare_full_depth_evidence(
     }
     for stacks in dependencies.call_stacks.values():
         for stack in stacks:
-            names = [frame.function_name for frame in stack]
-            if seed not in names:
+            if not any(
+                Path(frame.file_path).resolve() == _seed_path(root, seed)
+                and frame.function_name.rsplit(".", maxsplit=1)[-1]
+                == seed.rsplit(".", maxsplit=1)[-1]
+                for frame in stack
+            ):
                 continue
-            terminal = names.index(seed)
+            terminal = max(
+                index
+                for index, frame in enumerate(stack)
+                if Path(frame.file_path).resolve() == _seed_path(root, seed)
+                and frame.function_name.rsplit(".", maxsplit=1)[-1]
+                == seed.rsplit(".", maxsplit=1)[-1]
+            )
             rows: list[tuple[str, int, str]] = []
             for caller, callee in pairwise(stack[: terminal + 1]):
                 # CallFrame stores the physical call line on the callee frame.
@@ -193,7 +275,16 @@ def _compare_full_depth_evidence(
                     (
                         caller_path.relative_to(root.resolve()).as_posix(),
                         line,
-                        target_site.canonical_symbol,
+                        (
+                            Path(callee.file_path)
+                            .resolve()
+                            .relative_to(root.resolve())
+                            .with_suffix("")
+                            .as_posix()
+                            .replace("/", ".")
+                            + "."
+                            + callee.function_name.rsplit(".", maxsplit=1)[-1]
+                        ),
                     )
                 )
             oracle_paths.append(tuple(rows))
@@ -283,6 +374,29 @@ def _compare_full_depth_evidence(
             for item in query.evidence
             for uncertainty in item.uncertainties
         ],
+        "uncertain_candidate_ids": sorted(
+            {item.occurrence.endpoint_id for item in query.uncertain_evidence}
+        ),
+        "uncertain_evidence": [
+            {
+                "occurrence_id": item.occurrence.occurrence_id,
+                "endpoint_id": item.occurrence.endpoint_id,
+                "seed": item.seed.symbol,
+                "confidence": item.confidence,
+                "uncertainty_category": item.uncertainty.category,
+                "reason_code": item.uncertainty.reason_code,
+                "source_spelling": item.uncertainty.source_spelling,
+                "supporting_witness_ids": [
+                    edge.witness_id for edge in item.supporting_witnesses
+                ],
+                "incomplete": {
+                    "capped": item.incomplete.capped,
+                    "reasons": list(item.incomplete.reasons),
+                    "affected_seeds": list(item.incomplete.affected_seeds),
+                },
+            }
+            for item in query.uncertain_evidence
+        ],
         "graph_incompleteness": {
             "capped": query.incomplete.capped,
             "reasons": list(query.incomplete.reasons),
@@ -309,11 +423,15 @@ def _measure(modules: int, samples: int) -> dict[str, Any]:  # noqa: PLR0915
     phases: dict[str, list[float]] = {
         name: []
         for name in (
-            "typed_cold_build_seconds",
+            "typed_provider_cold_build_seconds",
+            "oracle_full_depth_cold_build_seconds",
             "graph_cold_build_seconds",
             "warm_query_seconds",
-            "one_file_typed_full_rebuild_seconds",
-            "one_file_graph_rebuild_seconds",
+            "one_file_provider_cold_rebuild_seconds",
+            "one_file_oracle_full_depth_rebuild_seconds",
+            "one_file_cold_graph_rebuild_seconds",
+            "one_file_provider_incremental_update_seconds",
+            "one_file_provider_graph_rebuild_seconds",
         )
     }
     oracle_checks = 0
@@ -323,9 +441,19 @@ def _measure(modules: int, samples: int) -> dict[str, Any]:  # noqa: PLR0915
             root = Path(directory)
             sources = _write_fixture(root, modules)
             start = time.perf_counter()
-            inventory, snapshot, analyzer = _retained_snapshot(root, max_depth=modules + 2)
-            phases["typed_cold_build_seconds"].append(time.perf_counter() - start)
-            endpoint, binding = _endpoint(root, snapshot)
+            (
+                inventory,
+                snapshot,
+                analyzer,
+                provider,
+                provider_paths,
+                provider_elapsed,
+                oracle_elapsed,
+            ) = _retained_snapshot(root, max_depth=modules + 2)
+            phases["typed_provider_cold_build_seconds"].append(provider_elapsed)
+            phases["oracle_full_depth_cold_build_seconds"].append(oracle_elapsed)
+            _endpoint_value, binding = _endpoint(root, snapshot)
+            oracle_endpoint = _oracle_endpoint(root, analyzer)
             changed_module = _inventory_module(snapshot, f"m{modules - 1}")
             positive_seed = _fullname(snapshot, changed_module, f"f{modules - 1}")
             start = time.perf_counter()
@@ -333,13 +461,32 @@ def _measure(modules: int, samples: int) -> dict[str, Any]:  # noqa: PLR0915
                 inventory, snapshot, [binding], config_fingerprint="generated-v1"
             )
             phases["graph_cold_build_seconds"].append(time.perf_counter() - start)
-            positive_evidence = _compare_full_depth_evidence(
-                analyzer, endpoint, graph, positive_seed, side="target", root=root
+            initial_oracle_paths = _physical_oracle_paths(
+                analyzer, oracle_endpoint, f"f{modules - 1}", root
             )
-            expected = _oracle_set(analyzer, endpoint, positive_seed)
+            initial_provider_paths = _graph_physical_paths(graph, positive_seed, side="baseline")
+            if initial_provider_paths != initial_oracle_paths:
+                raise AssertionError(
+                    "retained provider cold graph physical parity mismatch: "
+                    f"provider={initial_provider_paths!r}, oracle={initial_oracle_paths!r}"
+                )
+            oracle_checks += 1
+            evidence_comparisons.append(
+                {
+                    "phase": "provider_cold",
+                    "oracle_terminal_paths": initial_oracle_paths,
+                    "provider_terminal_paths": initial_provider_paths,
+                    "provider_report_mode": provider._typed.report.mode,
+                    "provider_cache_fingerprint": provider._typed.report.cache_fingerprint,
+                }
+            )
+            positive_evidence = _compare_full_depth_evidence(
+                analyzer, oracle_endpoint, graph, positive_seed, side="baseline", root=root
+            )
+            expected = _oracle_set(analyzer, oracle_endpoint, positive_seed, root)
             actual = set(positive_evidence["candidate_ids"])
             if actual != expected:
-                dependencies = analyzer.analyze_endpoint(endpoint)
+                dependencies = analyzer.analyze_endpoint(oracle_endpoint)
                 frame_names = [
                     frame.function_name
                     for stacks in dependencies.call_stacks.values()
@@ -354,15 +501,15 @@ def _measure(modules: int, samples: int) -> dict[str, Any]:  # noqa: PLR0915
             evidence_comparisons.append(positive_evidence)
             negative_module = _inventory_module(snapshot, "m0")
             negative_seed = _fullname(snapshot, negative_module, "unused")
-            expected_negative = _oracle_set(analyzer, endpoint, negative_seed)
+            expected_negative = _oracle_set(analyzer, oracle_endpoint, negative_seed, root)
             actual_negative = {
                 item.occurrence.endpoint_id
                 for item in graph.query(
-                    [ChangedSeed("target", negative_seed)], side="target"
+                    [ChangedSeed("baseline", negative_seed)], side="baseline"
                 ).evidence
             }
             negative_evidence = _compare_full_depth_evidence(
-                analyzer, endpoint, graph, negative_seed, side="target", root=root
+                analyzer, oracle_endpoint, graph, negative_seed, side="baseline", root=root
             )
             actual_negative = set(negative_evidence["candidate_ids"])
             if actual_negative != expected_negative:
@@ -374,7 +521,7 @@ def _measure(modules: int, samples: int) -> dict[str, Any]:  # noqa: PLR0915
             evidence_comparisons.append(negative_evidence)
             start = time.perf_counter()
             for _ in range(5):
-                graph.query([ChangedSeed("target", positive_seed)], side="target")
+                graph.query([ChangedSeed("baseline", positive_seed)], side="baseline")
             phases["warm_query_seconds"].append((time.perf_counter() - start) / 5)
 
             updated_sources = dict(sources)
@@ -385,11 +532,48 @@ def _measure(modules: int, samples: int) -> dict[str, Any]:  # noqa: PLR0915
                 updated_sources[f"m{modules - 1}"], encoding="utf-8"
             )
             start = time.perf_counter()
-            updated_inventory, updated_snapshot, updated_analyzer = _retained_snapshot(
-                root, max_depth=modules + 2
+            provider_typed = provider.build(provider_paths)
+            phases["one_file_provider_incremental_update_seconds"].append(
+                time.perf_counter() - start
             )
-            phases["one_file_typed_full_rebuild_seconds"].append(time.perf_counter() - start)
-            _endpoint_value, updated_binding = _endpoint(root, updated_snapshot)
+            provider_inventory = Inventory(
+                root,
+                tuple(
+                    SourceRecord(
+                        module,
+                        path,
+                        path.relative_to(root).as_posix(),
+                        hashlib.sha256(path.read_bytes()).hexdigest(),
+                    )
+                    for module, path in sorted(provider_paths.items())
+                ),
+            )
+            _provider_endpoint, provider_binding = _endpoint(root, provider_typed)
+            start = time.perf_counter()
+            provider_graph = build_typed_reverse_graph(
+                provider_inventory,
+                provider_typed,
+                [provider_binding],
+                config_fingerprint="generated-v1",
+            )
+            phases["one_file_provider_graph_rebuild_seconds"].append(
+                time.perf_counter() - start
+            )
+            start = time.perf_counter()
+            (
+                updated_inventory,
+                updated_snapshot,
+                updated_analyzer,
+                _updated_provider,
+                _updated_paths,
+                updated_provider_elapsed,
+                updated_oracle_elapsed,
+            ) = _retained_snapshot(root, max_depth=modules + 2)
+            phases["one_file_provider_cold_rebuild_seconds"].append(
+                updated_provider_elapsed
+            )
+            phases["one_file_oracle_full_depth_rebuild_seconds"].append(updated_oracle_elapsed)
+            _updated_endpoint, updated_binding = _endpoint(root, updated_snapshot)
             start = time.perf_counter()
             updated_graph = build_typed_reverse_graph(
                 updated_inventory,
@@ -397,8 +581,8 @@ def _measure(modules: int, samples: int) -> dict[str, Any]:  # noqa: PLR0915
                 [updated_binding],
                 config_fingerprint="generated-v1",
             )
-            phases["one_file_graph_rebuild_seconds"].append(time.perf_counter() - start)
-            updated_endpoint, _ = _endpoint(root, updated_snapshot)
+            phases["one_file_cold_graph_rebuild_seconds"].append(time.perf_counter() - start)
+            updated_oracle_endpoint = _oracle_endpoint(root, updated_analyzer)
             updated_seed = _fullname(
                 updated_snapshot,
                 _inventory_module(updated_snapshot, f"m{modules - 1}"),
@@ -406,14 +590,16 @@ def _measure(modules: int, samples: int) -> dict[str, Any]:  # noqa: PLR0915
             )
             updated_evidence = _compare_full_depth_evidence(
                 updated_analyzer,
-                updated_endpoint,
+                updated_oracle_endpoint,
                 updated_graph,
                 updated_seed,
                 side="target",
                 root=root,
             )
             updated_actual = set(updated_evidence["candidate_ids"])
-            updated_expected = _oracle_set(updated_analyzer, updated_endpoint, updated_seed)
+            updated_expected = _oracle_set(
+                updated_analyzer, updated_oracle_endpoint, updated_seed, root
+            )
             if updated_actual != updated_expected:
                 raise AssertionError(
                     "one-file parity mismatch: "
@@ -421,9 +607,37 @@ def _measure(modules: int, samples: int) -> dict[str, Any]:  # noqa: PLR0915
                 )
             oracle_checks += 1
             evidence_comparisons.append(updated_evidence)
+            updated_oracle_paths = _physical_oracle_paths(
+                updated_analyzer, updated_oracle_endpoint, f"f{modules - 1}", root
+            )
+            updated_provider_paths = _graph_physical_paths(
+                provider_graph,
+                f"m{modules - 1}.f{modules - 1}",
+            )
+            if updated_provider_paths != updated_oracle_paths:
+                raise AssertionError(
+                    "retained provider incremental graph physical parity mismatch: "
+                    f"provider={updated_provider_paths!r}, oracle={updated_oracle_paths!r}"
+                )
+            if provider_typed.report.mode != "incremental_update":
+                raise AssertionError(
+                    "one-file provider phase fell back instead of testing retained update: "
+                    f"{provider_typed.report.mode!r}"
+                )
+            oracle_checks += 1
+            evidence_comparisons.append(
+                {
+                    "phase": "provider_incremental_update",
+                    "oracle_terminal_paths": updated_oracle_paths,
+                    "provider_terminal_paths": updated_provider_paths,
+                    "provider_report_mode": provider_typed.report.mode,
+                    "provider_updated_modules": list(provider_typed.report.updated_modules),
+                    "provider_cache_fingerprint": provider_typed.report.cache_fingerprint,
+                }
+            )
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "fixture": (
             "generated typed call DAG with one endpoint, a positive path, "
             "and an uncalled negative function"
@@ -441,7 +655,8 @@ def _measure(modules: int, samples: int) -> dict[str, Any]:  # noqa: PLR0915
         "raw_samples": phases,
         "p95_seconds": {name: _p95(values) for name, values in phases.items()},
         "notes": [
-            "one-file phase is a fresh full typed rebuild here, not a fine-grained provider update",
+            "baseline and target graphs use separate retained provider snapshots",
+            "one-file phases separate PR #326 incremental update from fresh typed rebuild",
             "fixture parity does not establish corpus, DI, dispatch, or effect parity",
             "oracle does not expose effect summaries or route confidence caps; "
             "those remain unproven",

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, replace
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
+from fastapi_endpoint_detector.analyzer.mypy_incremental import BuildConfig, MypyIncrementalProvider
 from fastapi_endpoint_detector.analyzer.typed_reverse_graph import (
     ChangedSeed,
     EndpointOccurrenceBinding,
@@ -38,28 +40,18 @@ def _snapshot(root: Path, sources: dict[str, str]):
         path.write_text(source, encoding="utf-8")
     analyzer = MypyAnalyzer(root)
     analyzer._ensure_mypy_built()
-    modules = {name: SimpleNamespace(tree=tree) for name, tree in analyzer._trees.items()}
-    records = [
+    provider = MypyIncrementalProvider(BuildConfig(source_root=root))
+    typed = provider.build({module: root / f"{module}.py" for module in sources})
+    records = tuple(
         _Record(
             module,
-            Path(path),
-            Path(path).name,
-            hashlib.sha256(Path(path).read_bytes()).hexdigest(),
+            root / f"{module}.py",
+            Path(f"{module}.py").as_posix(),
+            hashlib.sha256((root / f"{module}.py").read_bytes()).hexdigest(),
         )
-        for module, path in analyzer._module_to_path.items()
-        if Path(path).suffix == ".py" and Path(path).is_relative_to(root)
-    ]
-    typed = SimpleNamespace(
-        modules=modules,
-        module_paths=analyzer._module_to_path,
-        type_maps=analyzer._types_map,
-        report=SimpleNamespace(
-            cache_fingerprint="test-provider-fingerprint",
-            engine="mypy-fine-grained",
-            mypy_version="1.19.1",
-        ),
+        for module in sorted(sources)
     )
-    return _Inventory(root, tuple(records)), typed, analyzer
+    return _Inventory(root, records), typed, analyzer
 
 
 def _binding(root: Path, module: str, symbol: str, occurrence: str) -> EndpointOccurrenceBinding:
@@ -221,6 +213,27 @@ def test_cache_rejects_changed_bytes_symlinks_and_root_mismatch(tmp_path: Path) 
         snapshot,
         config_fingerprint="cfg",
     )
+    assert not TypedGraphCache.validate(
+        graph,
+        inventory,
+        replace(
+            snapshot,
+            report=replace(snapshot.report, cache_fingerprint="other-build"),
+        ),
+        config_fingerprint="cfg",
+    )
+    assert not TypedGraphCache.validate(
+        graph,
+        inventory,
+        replace(
+            snapshot,
+            report=replace(
+                snapshot.report,
+                source_digests_after=(("app", "0" * 64),),
+            ),
+        ),
+        config_fingerprint="cfg",
+    )
     inventory.files[0].path.write_text("def handler():\n    return 2\n", encoding="utf-8")
     assert not TypedGraphCache.validate(
         graph, inventory, snapshot, config_fingerprint="cfg"
@@ -254,6 +267,30 @@ def test_constructor_seed_uses_typed_constructor_target(tmp_path: Path) -> None:
     assert result.evidence and result.evidence[0].occurrence.occurrence_id == "route"
 
 
+def test_typed_arguments_and_utf8_end_columns_use_provider_findings(tmp_path: Path) -> None:
+    inventory, snapshot, _ = _snapshot(
+        tmp_path,
+        {
+            "app": (
+                "from service import changed\n"
+                "def handler() -> str:\n"
+                '    return changed("café")\n'
+            ),
+            "service": "def changed(value: str) -> str:\n    return value\n",
+        },
+    )
+    edge = next(item for item in build_typed_reverse_graph(
+        inventory, snapshot, [], config_fingerprint="cfg"
+    ).edges if item.callee.endswith("service.changed"))
+    raw_line = (tmp_path / "app.py").read_bytes().splitlines()[edge.span.start_line - 1]
+
+    assert edge.arguments[0].actual_type is not None
+    assert "café" in edge.arguments[0].actual_type
+    assert edge.arguments[0].formal_type == "builtins.str"
+    source_slice = raw_line[edge.span.start_column : edge.span.end_column].decode("utf-8")
+    assert source_slice == 'changed("café")'
+
+
 def test_unmodeled_binding_effect_and_virtual_dispatch_are_per_evidence(
     tmp_path: Path,
 ) -> None:
@@ -267,7 +304,7 @@ def test_unmodeled_binding_effect_and_virtual_dispatch_are_per_evidence(
                 "    callback()\n"
                 "    return changed()\n"
             ),
-            "service": "def changed():\n    return None\n",
+            "service": "def changed():\n    return None\ndef other():\n    return None\n",
         },
     )
     app_module = _module(snapshot, "app")
@@ -291,6 +328,17 @@ def test_unmodeled_binding_effect_and_virtual_dispatch_are_per_evidence(
     assert "unknown_binding" in categories
     assert "virtual_dispatch" in categories
     assert "effect_transfer_not_imported" in evidence.incomplete.reasons
+    unknown = graph.query(
+        [ChangedSeed("target", _fullname(snapshot, _module(snapshot, "service"), "other"))],
+        side="target",
+    )
+    assert unknown.evidence == ()
+    assert unknown.uncertain_evidence
+    assert all(item.confidence == "LOW" for item in unknown.uncertain_evidence)
+    assert all(
+        item.uncertainty.category in {"unknown_binding", "virtual_dispatch"}
+        for item in unknown.uncertain_evidence
+    )
 
 
 def test_dependency_occurrence_binding_creates_uncertain_typed_edge(tmp_path: Path) -> None:
@@ -317,6 +365,17 @@ def test_dependency_occurrence_binding_creates_uncertain_typed_edge(tmp_path: Pa
     assert result.evidence[0].witnesses[0].kind == "dependency"
     assert result.evidence[0].uncertainties[0].category == "dependency_injection"
     assert "dependency_parameter_transfer_not_proven" in result.incomplete.reasons
+
+
+def test_conditional_route_binding_forces_low_confidence() -> None:
+    binding = EndpointOccurrenceBinding(
+        "conditional-route",
+        "GET /conditional",
+        "app.handler",
+        SourceSpan("app", "/project/app.py", "0" * 64, 1, 0, 1, 12),
+        conditional=True,
+    )
+    assert binding.confidence == "LOW"
 
 
 def test_removed_baseline_and_added_target_use_separate_typed_snapshots(
@@ -381,6 +440,109 @@ def test_removed_baseline_and_added_target_use_separate_typed_snapshots(
     assert baseline_result.evidence and baseline_result.evidence[0].side == "baseline"
     assert target_result.evidence and target_result.evidence[0].side == "target"
     assert wrong_side.evidence == ()
+
+
+def test_pr326_retained_update_graph_matches_independent_cold_call_path(
+    tmp_path: Path,
+) -> None:
+    paths = {
+        "app": tmp_path / "app.py",
+        "m0": tmp_path / "m0.py",
+        "m1": tmp_path / "m1.py",
+        "leaf": tmp_path / "leaf.py",
+    }
+    paths["app"].write_text(
+        "from m0 import first\ndef handler(value: int) -> int:\n    return first(value)\n",
+        encoding="utf-8",
+    )
+    paths["m0"].write_text(
+        "from m1 import second\ndef first(value: int) -> int:\n    return second(value)\n",
+        encoding="utf-8",
+    )
+    paths["m1"].write_text(
+        "from leaf import changed\ndef second(value: int) -> int:\n    return changed(value)\n",
+        encoding="utf-8",
+    )
+    paths["leaf"].write_text(
+        "def changed(value: int) -> int:\n    return value\n", encoding="utf-8"
+    )
+    provider = MypyIncrementalProvider(BuildConfig(source_root=tmp_path))
+    source_inventory = dict(paths)
+    provider.build(source_inventory)
+    paths["leaf"].write_text(
+        "def changed(value: int) -> int:\n    return value + 1\n", encoding="utf-8"
+    )
+    typed = provider.build(source_inventory)
+    assert typed.report.mode == "incremental_update"
+    assert "leaf" in typed.report.updated_modules
+
+    records = tuple(
+        _Record(
+            module,
+            path,
+            path.relative_to(tmp_path).as_posix(),
+            hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
+        for module, path in sorted(paths.items())
+    )
+    inventory = _Inventory(tmp_path, records)
+    handler_symbol = typed.modules["app"].tree.names["handler"].node.fullname
+    app_digest = hashlib.sha256(paths["app"].read_bytes()).hexdigest()
+    binding = EndpointOccurrenceBinding(
+        "provider-route",
+        "GET /provider",
+        handler_symbol,
+        SourceSpan("app", str(paths["app"].resolve()), app_digest, 2, 0, 3, 0),
+    )
+    graph = build_typed_reverse_graph(
+        inventory, typed, [binding], config_fingerprint="provider-integration-test"
+    )
+    result = graph.query([ChangedSeed("target", "leaf.changed")], side="target")
+
+    analyzer = MypyAnalyzer(tmp_path, max_depth=16)
+    analyzer._ensure_mypy_built()
+    analyzer_app = _module(
+        SimpleNamespace(modules={
+            module: SimpleNamespace(tree=tree)
+            for module, tree in analyzer._trees.items()
+        }),
+        "app",
+    )
+    endpoint = Endpoint(
+        path="/provider",
+        methods=[EndpointMethod.GET],
+        handler=HandlerInfo(
+            name="handler",
+            module=analyzer_app,
+            file_path=paths["app"],
+            line_number=2,
+            end_line_number=3,
+        ),
+    )
+    oracle = analyzer.analyze_endpoint(endpoint)
+    oracle_paths = [
+        stack
+        for stacks in oracle.call_stacks.values()
+        for stack in stacks
+        if any(frame.function_name.endswith(".changed") for frame in stack)
+    ]
+    oracle_edges = sorted(
+        (
+            Path(caller.file_path).relative_to(tmp_path).as_posix(),
+            callee.caller_line_number,
+        )
+        for stack in oracle_paths
+        for caller, callee in pairwise(stack)
+    )
+    graph_edges = sorted(
+        (Path(edge.span.path).relative_to(tmp_path).as_posix(), edge.span.start_line)
+        for evidence in result.evidence
+        for edge in evidence.witnesses
+        if edge.kind in {"call", "constructor"}
+    )
+    assert result.evidence and result.evidence[0].confidence == "LOW"
+    assert oracle_paths
+    assert graph_edges == oracle_edges
 
 
 def test_generated_fixture_matches_current_full_depth_candidate_oracle(tmp_path: Path) -> None:
