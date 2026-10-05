@@ -7,6 +7,7 @@ import json
 import math
 import subprocess
 import sys
+import time
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -239,3 +240,17 @@ def test_cli_output_is_bounded_while_reading(
     )
     assert result.output_limit_exceeded
     assert len(result.stdout.encode()) + len(result.stderr.encode()) <= 1024
+
+
+def test_cli_deadline_covers_descendants_holding_pipes_open(tmp_path: Path) -> None:
+    command = [
+        sys.executable,
+        "-c",
+        "import subprocess,sys; subprocess.Popen([sys.executable,'-c',"
+        "'import time; time.sleep(30)']); print('parent exited')",
+    ]
+    started = time.perf_counter()
+    result = gate._run_bounded_cli(command, tmp_path, timeout_seconds=1)
+    elapsed = time.perf_counter() - started
+    assert result.timed_out
+    assert elapsed < 3

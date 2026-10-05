@@ -848,7 +848,9 @@ class _CliResult:
     output_limit_exceeded: bool
 
 
-def _run_bounded_cli(command: list[str], cwd: Path, timeout_seconds: int) -> _CliResult:
+def _run_bounded_cli(  # noqa: PLR0915
+    command: list[str], cwd: Path, timeout_seconds: int
+) -> _CliResult:
     process = subprocess.Popen(
         command,
         cwd=cwd,
@@ -869,15 +871,25 @@ def _run_bounded_cli(command: list[str], cwd: Path, timeout_seconds: int) -> _Cl
     timed_out = False
     output_limit_exceeded = False
     killed = False
+    drain_deadline: float | None = None
     while selector.get_map():
-        remaining = deadline - time.perf_counter()
-        if remaining <= 0 and process.poll() is None:
+        now = time.perf_counter()
+        remaining = deadline - now
+        if remaining <= 0 and not timed_out and not output_limit_exceeded:
             timed_out = True
         if (timed_out or output_limit_exceeded) and not killed:
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGKILL)
             killed = True
-        events = selector.select(min(0.1, max(0.0, remaining)))
+            drain_deadline = now + 0.25
+        if drain_deadline is not None and now >= drain_deadline:
+            for key in list(selector.get_map().values()):
+                selector.unregister(key.fileobj)
+            break
+        wait_for = min(0.1, max(0.0, remaining))
+        if drain_deadline is not None:
+            wait_for = min(0.05, max(0.0, drain_deadline - now))
+        events = selector.select(wait_for)
         for key, _ in events:
             descriptor = key.data
             chunk = os.read(descriptor, 65536)
@@ -891,7 +903,13 @@ def _run_bounded_cli(command: list[str], cwd: Path, timeout_seconds: int) -> _Cl
                 output_limit_exceeded = True
         if process.poll() is not None and not selector.get_map():
             break
-    returncode = process.wait()
+    try:
+        returncode = process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        polled_returncode = process.poll()
+        returncode = -signal.SIGKILL if polled_returncode is None else polled_returncode
     selector.close()
     process.stdout.close()
     process.stderr.close()
