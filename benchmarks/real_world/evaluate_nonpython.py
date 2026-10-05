@@ -18,7 +18,7 @@ import sys
 import tarfile
 import tempfile
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, cast
 
 SCANNER_COMMIT = "84efc3d877c2d93a25bdd2c625120e6a6d918139"
 HISTORICAL_SCANNER_COMMIT = "1d9242d0d1d411b529c3227918aa2d05e98e8943"
@@ -453,7 +453,7 @@ def scan_literal_case(
     with tempfile.TemporaryDirectory(prefix="nonpython-test-scanner-") as temp:
         target = Path(temp)
         _archive_scanner(repo_root, scanner_commit, target)
-        return _run_worker(
+        result = _run_worker(
             target,
             {
                 "cases": [
@@ -464,7 +464,8 @@ def scan_literal_case(
                     }
                 ],
             },
-        )["direct-test"]
+        )
+        return cast("dict[str, Any]", result["direct-test"])
 
 
 def _decode_source_snapshot(source_bytes: bytes, source_path: str) -> str:

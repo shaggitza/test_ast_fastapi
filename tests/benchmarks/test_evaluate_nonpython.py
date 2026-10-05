@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any, cast
 
 import benchmarks.real_world.evaluate_nonpython as evaluator
 import pytest
@@ -26,15 +29,25 @@ def copied_fixture(tmp_path: Path) -> Path:
     return target
 
 
-def read_json(path: Path) -> dict:
-    return json.loads(path.read_text(encoding="utf-8"))
+JsonObject = dict[str, Any]
+ScannerPayload = dict[str, Any]
+ScannerWorker = Callable[[Path, ScannerPayload], JsonObject]
 
 
-def write_json(path: Path, value: dict) -> None:
+def read_json(path: Path) -> JsonObject:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise AssertionError(f"expected JSON object in {path}")
+    return cast("JsonObject", value)
+
+
+def write_json(path: Path, value: JsonObject) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
 
-def install_self_contained_scanner_double(monkeypatch: pytest.MonkeyPatch, worker) -> None:
+def install_self_contained_scanner_double(
+    monkeypatch: pytest.MonkeyPatch, worker: ScannerWorker
+) -> None:
     scanner_metadata = read_json(FIXTURE / "results/evaluation.json")["scanner"]
 
     def approved_archive(repo_root: Path, scanner_commit: str, target: Path) -> tuple[str, str]:
@@ -50,7 +63,7 @@ def install_self_contained_scanner_double(monkeypatch: pytest.MonkeyPatch, worke
     monkeypatch.setattr(evaluator, "_run_worker", worker)
 
 
-def literal_probe_worker(_scanner_source: Path, payload: dict) -> dict:
+def literal_probe_worker(_scanner_source: Path, payload: ScannerPayload) -> JsonObject:
     result = {}
     for case in payload["cases"]:
         observations = []
@@ -82,7 +95,7 @@ def literal_probe_worker(_scanner_source: Path, payload: dict) -> dict:
     return result
 
 
-def empty_scanner_worker(_scanner_source: Path, payload: dict) -> dict:
+def empty_scanner_worker(_scanner_source: Path, payload: ScannerPayload) -> JsonObject:
     return {
         case["case_id"]: {
             "client_observations": [],
@@ -194,7 +207,7 @@ def test_rejects_unapproved_full_scanner_sha_before_git_archive(
         calls.append((args, kwargs))
         raise AssertionError("unapproved scanner SHA reached Git")
 
-    monkeypatch.setattr(evaluator.subprocess, "run", unexpected_git_call)
+    monkeypatch.setattr(subprocess, "run", unexpected_git_call)
     with pytest.raises(NonPythonFixtureError, match=r"not in the approved.*allowlist"):
         evaluator._archive_scanner(ROOT, "682e6239eb7ab8e75b39bfd736b1bfe3a5fd2c7d", tmp_path)
     assert calls == []
@@ -269,7 +282,7 @@ def test_build_result_scans_the_exact_bytes_validated_before_a_race(
 
     def validate_then_mutate(
         candidate: Path = evaluator.FIXTURE, evidence_root: Path | None = None
-    ) -> dict:
+    ) -> JsonObject:
         validated = real_validate(candidate, evidence_root)
         source_path.write_bytes(validated_bytes + race_payload)
         return validated
@@ -319,9 +332,9 @@ def test_vendored_python_sources_are_data_only() -> None:
 def test_build_result_keeps_queries_and_unattested_origins_separate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: dict[str, dict] = {}
+    captured: dict[str, JsonObject] = {}
 
-    def record_worker(_scanner_source: Path, payload: dict) -> dict:
+    def record_worker(_scanner_source: Path, payload: ScannerPayload) -> JsonObject:
         captured.update({case["case_id"]: case for case in payload["cases"]})
         return empty_scanner_worker(_scanner_source, payload)
 
