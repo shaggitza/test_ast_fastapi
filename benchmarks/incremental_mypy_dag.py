@@ -137,6 +137,10 @@ def main() -> None:  # noqa: PLR0915
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument("--python-version", default="3.11")
     args = parser.parse_args()
+    if args.modules < 3:
+        parser.error("--modules must be at least 3 for distinct DAG retarget controls")
+    if args.samples < 1:
+        parser.error("--samples must be at least 1")
     cold: list[float] = []
     warm: list[float] = []
     incremental: list[float] = []
@@ -227,12 +231,20 @@ def main() -> None:  # noqa: PLR0915
                     _equivalence_check(root, inventory, signature),
                 )
             )
-            changed.write_text(
-                old_source.replace("from m49 import f49", "from m50 import f50").replace(
-                    "f49(value)", "f50(value)"
-                ),
-                encoding="utf-8",
-            )
+            changed_index = args.modules // 2
+            original_target = changed_index + 1
+            # Pick a different in-inventory module so even small supported DAGs
+            # exercise a real topology change instead of a no-op text replace.
+            retarget_index = (changed_index + 2) % args.modules
+            if retarget_index == original_target:
+                raise RuntimeError("fixture could not choose a distinct import target")
+            retargeted_source = old_source.replace(
+                f"from m{original_target} import f{original_target}",
+                f"from m{retarget_index} import f{retarget_index}",
+            ).replace(f"f{original_target}(value)", f"f{retarget_index}(value)")
+            if retargeted_source == old_source:
+                raise RuntimeError("import-retarget fixture did not change source")
+            changed.write_text(retargeted_source, encoding="utf-8")
             rss_before = _rss_stats()
             started = time.perf_counter()
             rebuilt = provider.build(inventory)
