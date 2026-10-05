@@ -2,161 +2,147 @@
 
 from __future__ import annotations
 
-import hashlib
+import copy
 import json
 import math
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from benchmarks.real_world import typed_dag_accuracy as gate
 
 from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
 
+if TYPE_CHECKING:
+    from pathlib import Path
 
-def _record(case: gate.Case, *, supported: bool) -> dict[str, Any]:
-    expected = list(gate.oracle(case.symbol))
-    actual = (
-        [{"endpoint": endpoint, "confidence": "low"} for endpoint in expected] if supported else []
+
+def _evidence() -> dict[str, Any]:
+    return cast(
+        "dict[str, Any]",
+        json.loads((gate.RESULTS / "current-main.json").read_text(encoding="utf-8")),
     )
-    tp = len(expected) if supported else 0
-    return {
-        "case_id": case.case_id,
-        "symbol": case.symbol,
-        "supported": supported,
-        "control": case.control,
-        "status": "passed" if supported else "unsupported",
-        "expected": expected,
-        "actual": actual,
-        "tp": tp,
-        "fp": 0,
-        "fn": 0,
-        "precision": 1.0 if supported else None,
-        "recall": 1.0 if supported else None,
-        "input_material": {"source": case.case_id},
-        "input_hashes": {"source": gate.sha(case.case_id)},
-    }
 
 
-def _passing_document() -> dict[str, Any]:
-    cases: list[dict[str, Any]] = [_record(case, supported=case.supported) for case in gate.CASES]
-    runtime = {
-        "python": "test",
-        "mypy": "test",
-        "fastapi": "test",
-        "pydantic": "test",
-        "ruff": "test",
-    }
-    configuration = {"backend": "mypy", "secure_ast": True, "transitive": True, "cache": False}
-    return {
-        "schema": gate.SCHEMA,
-        "gate_status": "passed",
-        "cases": cases,
-        "revision": "test-revision",
-        "tool_revision_hash": gate.sha("test-revision"),
-        "runtime": runtime,
-        "dependency_versions": runtime,
-        "dependency_version_hash": gate.sha(json.dumps(runtime, sort_keys=True)),
-        "configuration": configuration,
-        "configuration_hash": gate.sha(json.dumps(configuration, sort_keys=True)),
-        "harness_sha256": "sha256:" + hashlib.sha256(Path(gate.__file__).read_bytes()).hexdigest(),
-        "metrics": {
-            "tp": sum(case["tp"] for case in cases if case["supported"]),
-            "fp": 0,
-            "fn": 0,
-            "precision": 1.0,
-            "recall": 1.0,
-            "high_medium_control_candidates": 0,
-        },
-    }
-
-
-def test_oracle_is_graph_spec_derived_and_exercises_shared_paths() -> None:
+def test_oracle_and_source_guards_cover_live_and_dead_paths() -> None:
     assert gate.oracle("leaf_alias") == ("GET /one", "GET /two")
     assert gate.oracle("shared_live") == ("GET /one", "GET /two")
     assert gate.oracle("direct_one") == ("GET /one",)
-    for control in (
-        "literal_false_dead",
-        "post_return_dead",
-        "deferred_closure_dead",
-        "deferred_lambda_dead",
-        "unawaited_coroutine_dead",
-        "unrelated_dead",
+    for dead_site in (
+        "literal_false_site",
+        "post_return_site",
+        "deferred_closure_site",
+        "deferred_lambda_site",
+        "unawaited_coroutine_site",
     ):
-        assert gate.oracle(control) == ()
+        assert gate.oracle(dead_site) == ()
+    for live_site in (
+        "literal_true_live",
+        "post_return_live",
+        "invoked_closure_live",
+        "invoked_lambda_live",
+    ):
+        assert gate.oracle(live_site) == ("GET /one",)
+    for case in gate.CASES:
+        gate.validate_generated_fixture(case, gate.case_inputs(case))
 
 
-def test_validator_accepts_a_derived_pass() -> None:
-    gate.validate(_passing_document())
+def test_checked_in_cli_run_is_valid_but_fails_the_gate() -> None:
+    document = _evidence()
+    gate.validate(document)
+    assert document["gate_status"] == "failed"
+    assert document["case_coverage"]["recorded"] == len(gate.CASES)
 
 
 def test_validator_rejects_duplicate_or_missing_cases() -> None:
-    document = _passing_document()
+    document = _evidence()
     document["cases"] = document["cases"][:-1]
+    with pytest.raises(ValueError, match="duplicate, missing"):
+        gate.validate(document)
+    document = _evidence()
+    document["cases"][-1] = copy.deepcopy(document["cases"][0])
     with pytest.raises(ValueError, match="duplicate, missing"):
         gate.validate(document)
 
 
 def test_validator_rejects_tampered_input_hash() -> None:
-    document = _passing_document()
-    document["cases"][0]["input_hashes"]["source"] = "sha256:bad"
-    with pytest.raises(ValueError, match="tampered/missing"):
+    document = _evidence()
+    document["cases"][0]["input_hashes"]["baseline"] = "sha256:bad"
+    with pytest.raises(ValueError, match="tampered/missing input hashes"):
         gate.validate(document)
 
 
-def test_validator_rejects_inconsistent_metrics_even_when_marked_passed() -> None:
-    document = _passing_document()
-    document["cases"][0]["fp"] = 1
-    with pytest.raises(ValueError, match="inconsistent metrics"):
+def test_validator_rejects_rehashed_but_forged_fixture_material() -> None:
+    document = _evidence()
+    case = document["cases"][0]
+    case["input_material"] = {"source": case["case_id"]}
+    case["input_hashes"] = {"source": gate.sha(case["case_id"])}
+    with pytest.raises(ValueError, match="source/diff/config do not match generator"):
         gate.validate(document)
 
 
-def test_validator_rejects_nonfinite_metrics() -> None:
-    document = _passing_document()
+def test_validator_rejects_incomplete_inventory_and_analyzer_errors() -> None:
+    document = _evidence()
+    case = document["cases"][0]
+    case["inventory_status"] = "incomplete"
+    case["total_endpoints"] = 0
+    case["analyzer_errors"] = ["build failed"]
+    with pytest.raises(ValueError, match=r"diagnostics differ|endpoint inventory differs"):
+        gate.validate(document)
+
+
+def test_validator_rejects_control_metadata_tampering() -> None:
+    document = _evidence()
+    control = next(item for item in document["cases"] if item["control"])
+    control["control"] = False
+    with pytest.raises(ValueError, match="case metadata differs"):
+        gate.validate(document)
+
+
+def test_validator_rejects_forged_case_coverage() -> None:
+    document = _evidence()
+    document["case_coverage"] = {"declared": 999, "recorded": 1, "supported": 0, "unsupported": 0}
+    with pytest.raises(ValueError, match="case coverage"):
+        gate.validate(document)
+
+
+def test_validator_rejects_metrics_and_false_pass_tampering() -> None:
+    document = _evidence()
     document["cases"][0]["precision"] = math.nan
     with pytest.raises(ValueError, match="non-finite"):
         gate.validate(document)
-
-
-def test_validator_rejects_false_pass_with_failed_supported_case() -> None:
-    document = _passing_document()
-    document["cases"][0]["status"] = "failed"
+    document = _evidence()
+    document["gate_status"] = "passed"
     with pytest.raises(ValueError, match="gate status"):
         gate.validate(document)
 
 
-def test_checked_in_analyzer_result_is_a_valid_failed_baseline() -> None:
-    evidence = gate.RESULTS / "current-main.json"
-    document = json.loads(evidence.read_text(encoding="utf-8"))
-    gate.validate(document)
-    assert document["gate_status"] == "failed"
-    assert document["metrics"]["fp"] == 1
-    assert document["metrics"]["high_medium_control_candidates"] == 1
+def test_validator_rejects_candidate_rows_that_disagree_with_cli_report() -> None:
+    document = _evidence()
+    document["cases"][0]["actual"] = []
+    with pytest.raises(ValueError, match="candidate rows differ"):
+        gate.validate(document)
 
 
 def test_real_cli_change_mapper_on_secure_generated_project(tmp_path: Path) -> None:
-    """One real analyzer path protects against a generator-only false green."""
     case = gate.CASES[0]
     result = gate.execute_case(case, tmp_path)
     assert result["supported"] is True
     assert result["source_discovery"] == "secure_ast"
     assert result["expected"] == ["GET /one", "GET /two"]
-    assert result["status"] == "passed", result
+    assert result["cli_evidence"]["exit_code"] == 0
 
 
 def test_real_change_mapper_public_api_on_secure_generated_project(tmp_path: Path) -> None:
-    """The supported ChangeMapper API reports candidates from generated source."""
     case = gate.CASES[1]
-    original = gate.sources(case.symbol, "return 1")
-    modified = gate.sources(case.symbol, "return 2")
+    material = gate.case_inputs(case)
+    target_sources = json.loads(material["target"])
     target = tmp_path / "target"
-    for relative, source in modified.items():
+    for relative, source in target_sources.items():
         path = target / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(source, encoding="utf-8")
     diff = tmp_path / "direct.diff"
-    changed = "app/service.py"
-    diff.write_text(gate.make_diff(changed, original[changed], modified[changed]), encoding="utf-8")
+    diff.write_text(material["diff"], encoding="utf-8")
     report = ChangeMapper(target / "app", secure_ast=True, use_cache=False).analyze_diff(diff)
     actual = {
         f"{item.endpoint.methods[0].value} {item.endpoint.path}"
