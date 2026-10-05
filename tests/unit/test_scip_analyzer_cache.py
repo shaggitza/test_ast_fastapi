@@ -241,9 +241,10 @@ def test_source_hashing_rejects_file_replacement_during_read(tmp_path: Path) -> 
 
     with (
         patch("os.read", side_effect=replace_after_read),
-        pytest.raises(SCIPAnalyzerError, match="replaced while hashing"),
+        pytest.raises(SCIPAnalyzerError, match=r"(?:changed|replaced) while hashing"),
     ):
         analyzer._read_source_snapshot(Path("app.py"))
+    assert replaced
 
 
 def test_source_hashing_rejects_symlink_swap_during_read(tmp_path: Path) -> None:
@@ -267,9 +268,10 @@ def test_source_hashing_rejects_symlink_swap_during_read(tmp_path: Path) -> None
 
     with (
         patch("os.read", side_effect=replace_after_read),
-        pytest.raises(SCIPAnalyzerError, match="replaced while hashing"),
+        pytest.raises(SCIPAnalyzerError, match=r"(?:changed|replaced) while hashing"),
     ):
         analyzer._read_source_snapshot(Path("app.py"))
+    assert replaced
 
 
 def test_source_hashing_fails_closed_at_per_file_limit(tmp_path: Path) -> None:
