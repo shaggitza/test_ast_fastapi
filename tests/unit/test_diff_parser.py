@@ -104,6 +104,53 @@ class TestDiffParser:
         assert parsed[0].source_path == Path("café\told.py")
         assert parsed[0].get_side_qualified_lines() == ([1], [1])
 
+    def test_real_git_no_newline_markers_keep_source_and_target_lines(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        self._git(repo, "config", "user.email", "test@example.com")
+        self._git(repo, "config", "user.name", "Test")
+        source = repo / "app.py"
+        source.write_bytes(b"old = 1")
+        self._git(repo, "add", "--", "app.py")
+        self._git(repo, "commit", "-qm", "baseline")
+
+        source.write_bytes(b"new = 1")
+        diff = self._git(repo, "diff", "--no-ext-diff", "--unified=0", "HEAD").stdout
+
+        assert "\\ No newline at end of file" in diff
+        parsed = DiffParser.parse_string(diff)
+        assert DiffParser.get_changed_line_numbers(parsed[0]) == ([1], [1])
+
+    def test_real_git_repository_prefixed_paths_strip_only_git_side_prefix(
+        self, tmp_path: Path
+    ) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        self._git(repo, "config", "user.email", "test@example.com")
+        self._git(repo, "config", "user.name", "Test")
+        source = repo / "pkg" / "module.py"
+        source.parent.mkdir()
+        source.write_text("value = 1\n", encoding="utf-8")
+        self._git(repo, "add", "--", "pkg/module.py")
+        self._git(repo, "commit", "-qm", "baseline")
+
+        source.write_text("value = 2\n", encoding="utf-8")
+        diff = self._git(
+            repo,
+            "diff",
+            "--no-ext-diff",
+            "--unified=0",
+            "--src-prefix=a/repository/",
+            "--dst-prefix=b/repository/",
+            "HEAD",
+        ).stdout
+
+        parsed = DiffParser.parse_string(diff)
+        assert parsed[0].path == Path("repository/pkg/module.py")
+        assert parsed[0].source_path == Path("repository/pkg/module.py")
+
     def test_rename_preserves_old_path_and_python_identity(self) -> None:
         diff = """diff --git a/old.py b/new.txt
 similarity index 100%

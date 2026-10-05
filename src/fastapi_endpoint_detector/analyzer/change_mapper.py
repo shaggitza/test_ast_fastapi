@@ -626,6 +626,21 @@ class ChangeMapper:
             return []
         target = self.registry.get_all()
         identities = sorted({item.identifier for item in baseline + target})
+
+        baseline_root = (
+            self.baseline_app_path.parent
+            if self.baseline_app_path.is_file()
+            else self.baseline_app_path
+        )
+
+        def snapshot_path(endpoint: Endpoint, root: Path) -> Path:
+            """Compare endpoint locations inside each snapshot, not temp roots."""
+            path = endpoint.handler.file_path.resolve()
+            try:
+                return path.relative_to(root.resolve())
+            except ValueError:
+                return path
+
         records: list[EndpointLifecycle] = []
         for identity in identities:
             old = [item for item in baseline if item.identifier == identity]
@@ -657,9 +672,11 @@ class ChangeMapper:
                 previous, current = old[0], new[0]
                 prior, present = previous.handler, current.handler
                 lifecycle = EndpointLifecycleKind.TARGET
-                if prior.file_path.resolve() != present.file_path.resolve():
+                if snapshot_path(previous, baseline_root) != snapshot_path(
+                    current, self.target_project_root
+                ):
                     lifecycle = EndpointLifecycleKind.MOVED
-                elif (prior.name, prior.module) != (present.name, present.module):
+                elif prior.name != present.name:
                     lifecycle = EndpointLifecycleKind.RENAMED
                 records.append(
                     EndpointLifecycle(
@@ -1050,10 +1067,15 @@ class ChangeMapper:
                 if side_registry is None:
                     continue
                 for endpoint in side_registry.get_by_file(changed_path):
+                    reported_endpoint = (
+                        self._target_equivalent_endpoint(endpoint)
+                        if side == "baseline"
+                        else endpoint
+                    )
                     _merge_affected(
                         affected,
                         AffectedEndpoint(
-                            endpoint=endpoint,
+                            endpoint=reported_endpoint,
                             confidence=ConfidenceLevel.HIGH,
                             reason=f"Line-less {side} file change affects endpoint source",
                             dependency_chain=[str(changed_path), endpoint.handler.name],
