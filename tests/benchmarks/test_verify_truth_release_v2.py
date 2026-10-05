@@ -363,6 +363,50 @@ def test_release_membership_denominator_must_match_canonical_corpus(tmp_path: Pa
         verify_release(root)
 
 
+def test_canonical_entrypoint_must_reference_included_decision(tmp_path: Path) -> None:
+    root = _release(tmp_path)
+    decision_path = root / "tables/adjudication_decision.jsonl"
+    decision = json.loads(decision_path.read_text())
+    decision["outcome"] = "exclude"
+    decision_path.write_bytes(canonical_json(decision))
+    manifest = json.loads((root / "manifest.json").read_text())
+    _reseal(root, manifest)
+    with pytest.raises(
+        GroundTruthError, match="canonical entrypoint table contains a malformed row"
+    ):
+        verify_release(root)
+
+
+def test_manifest_corpus_hash_must_match_canonical_corpus(tmp_path: Path) -> None:
+    root = _release(tmp_path)
+    forged_hash = "sha256:" + "0" * 64
+    manifest = json.loads((root / "manifest.json").read_text())
+    manifest["corpus_lock_sha256"] = forged_hash
+    release_path = root / "tables/release.jsonl"
+    release_row = json.loads(release_path.read_text())
+    release_row["corpus_sha256"] = forged_hash
+    release_path.write_bytes(canonical_json(release_row))
+    _reseal(root, manifest)
+    with pytest.raises(GroundTruthError, match="canonical corpus table does not match"):
+        verify_release(root)
+
+
+def test_manifest_prompt_set_must_match_canonical_prompt_records(tmp_path: Path) -> None:
+    root = _release(tmp_path)
+    forged_prompt = "sha256:" + "0" * 64
+    forged_root = "sha256:" + "1" * 64
+    manifest = json.loads((root / "manifest.json").read_text())
+    manifest["prompt_hashes"] = [forged_prompt]
+    manifest["prompt_set_sha256"] = forged_root
+    release_path = root / "tables/release.jsonl"
+    release_row = json.loads(release_path.read_text())
+    release_row["prompt_set_sha256"] = forged_root
+    release_path.write_bytes(canonical_json(release_row))
+    _reseal(root, manifest)
+    with pytest.raises(GroundTruthError, match="manifest prompt set does not match"):
+        verify_release(root)
+
+
 def test_product_scope_projection_must_match_canonical_membership(tmp_path: Path) -> None:
     root = _release(tmp_path)
     sidecar = next((root / "product-scopes").glob("*.jsonl"))

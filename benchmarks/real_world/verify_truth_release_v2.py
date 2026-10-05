@@ -299,6 +299,7 @@ def verify_release(  # noqa: PLR0912, PLR0915
     if adjudication_records != records:
         _fail("broad-truth rows do not match adjudication projection")
     _validate_release_provenance(verified_contents, manifest)
+    _validate_prompt_set(verified_contents, manifest)
     _validate_review_and_artifact_projections(verified_contents, manifest)
     return {
         "release_id": manifest.get("release_id"),
@@ -367,8 +368,9 @@ def _release_truth(  # noqa: PLR0912, PLR0915
         or corpus_rows[0].get("corpus_id") != corpus_id
         or type(corpus_rows[0].get("selected_count")) is not int
         or corpus_rows[0]["selected_count"] != selected
+        or corpus_rows[0].get("lock_sha256") != manifest.get("corpus_lock_sha256")
     ):
-        _fail("canonical corpus table does not match release identity and count")
+        _fail("canonical corpus table does not match release identity, hash, and count")
     repositories: dict[str, str] = {}
     for row in _jsonl_rows(contents["tables/repository.jsonl"], "tables/repository.jsonl"):
         repository_id, full_name = row.get("repository_id"), row.get("full_name")
@@ -422,11 +424,39 @@ def _release_truth(  # noqa: PLR0912, PLR0915
         versions_by_pr.setdefault(pr_id, set()).add(row["version"])
         if pr_id not in latest_by_pr or row["version"] > latest_by_pr[pr_id]["version"]:
             latest_by_pr[pr_id] = row
+    decisions: dict[str, dict[str, Any]] = {}
+    for row in _jsonl_rows(
+        contents["tables/adjudication_decision.jsonl"], "tables/adjudication_decision.jsonl"
+    ):
+        decision_id, adjudication_id, pr_id = (
+            row.get("decision_id"),
+            row.get("adjudication_id"),
+            row.get("pr_id"),
+        )
+        adjudication = (
+            adjudications.get(adjudication_id) if isinstance(adjudication_id, str) else None
+        )
+        if (
+            not isinstance(decision_id, str)
+            or not decision_id
+            or decision_id in decisions
+            or adjudication is None
+            or not isinstance(pr_id, str)
+            or adjudication.get("pr_id") != pr_id
+            or not isinstance(row.get("decision_kind"), str)
+            or row["decision_kind"] not in {"entrypoint", "terminal", "unknown"}
+            or not isinstance(row.get("outcome"), str)
+            or row["outcome"] not in {"include", "exclude"}
+        ):
+            _fail("canonical adjudication decision table contains an invalid row")
+        decisions[decision_id] = row
     entrypoints: dict[str, list[dict[str, Any]]] = {}
     for row in _jsonl_rows(
         contents["tables/canonical_entrypoint.jsonl"], "tables/canonical_entrypoint.jsonl"
     ):
         adjudication_id = row.get("adjudication_id")
+        decision_id, pr_id = row.get("decision_id"), row.get("pr_id")
+        decision = decisions.get(decision_id) if isinstance(decision_id, str) else None
         public_id, kind, confidence = (
             row.get("public_id"),
             row.get("kind"),
@@ -434,6 +464,12 @@ def _release_truth(  # noqa: PLR0912, PLR0915
         )
         if (
             not isinstance(adjudication_id, str)
+            or decision is None
+            or decision.get("adjudication_id") != adjudication_id
+            or decision.get("pr_id") != pr_id
+            or decision.get("decision_kind") != "entrypoint"
+            or decision.get("outcome") != "include"
+            or not isinstance(pr_id, str)
             or not isinstance(public_id, str)
             or not isinstance(kind, str)
             or not isinstance(row.get("entrypoint_id"), str)
@@ -517,6 +553,27 @@ def _validate_release_provenance(contents: dict[str, bytes], manifest: dict[str,
     }
     if any(row.get(field) != value for field, value in expected.items()):
         _fail("manifest provenance differs from canonical release table")
+
+
+def _validate_prompt_set(contents: dict[str, bytes], manifest: dict[str, Any]) -> None:
+    prompts: set[str] = set()
+    for name in ("tables/reviewer_run.jsonl", "tables/adjudication.jsonl"):
+        for row in _jsonl_rows(contents[name], name):
+            prompt = row.get("prompt_sha256")
+            if not isinstance(prompt, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", prompt) is None:
+                _fail("canonical prompt record contains an invalid digest")
+            prompts.add(prompt)
+    ordered_prompts = sorted(prompts)
+    digest = hashlib.sha256(b"ground-truth-prompt-set-v1\0")
+    for prompt in ordered_prompts:
+        raw = prompt.encode()
+        digest.update(raw + b"\0" + hashlib.sha256(raw).digest())
+    expected_root = "sha256:" + digest.hexdigest()
+    if (
+        manifest.get("prompt_hashes") != ordered_prompts
+        or manifest.get("prompt_set_sha256") != expected_root
+    ):
+        _fail("manifest prompt set does not match canonical prompt records")
 
 
 def _validate_review_and_artifact_projections(  # noqa: PLR0912, PLR0915
