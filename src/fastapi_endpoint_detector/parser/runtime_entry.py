@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import importlib
+import importlib.abc
+import importlib.machinery
+import importlib.util
 import inspect
 import sys
 import threading
@@ -14,7 +17,8 @@ from typing import TYPE_CHECKING, Any
 from fastapi import FastAPI
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Sequence
+    from types import ModuleType
 
 
 class RuntimeEntryError(ValueError):
@@ -31,9 +35,8 @@ def _project_module_inventory(root: Path) -> tuple[set[str], set[str]]:
     prefixes: set[str] = set()
     for source_path in root.rglob("*.py"):
         try:
-            relative = source_path.resolve().relative_to(resolved_root)
+            relative = source_path.relative_to(root)
         except (OSError, ValueError):
-            # Symlinks outside the selected checkout do not authorize imports.
             continue
         parts = (
             relative.parts[:-1]
@@ -42,9 +45,82 @@ def _project_module_inventory(root: Path) -> tuple[set[str], set[str]]:
         )
         if not parts or not all(part.isidentifier() for part in parts):
             continue
-        modules.add(".".join(parts))
+        # Retain the lexical name even for rejected symlinks so the scoped finder
+        # blocks fallback to an outside module with that same import name.
         prefixes.add(parts[0])
+        try:
+            source_path.resolve().relative_to(resolved_root)
+        except (OSError, ValueError):
+            # Symlinks outside the selected checkout do not authorize imports.
+            continue
+        modules.add(".".join(parts))
+    for path in root.rglob("*"):
+        if not path.is_symlink():
+            continue
+        try:
+            relative = path.relative_to(root)
+        except ValueError:
+            continue
+        if relative.parts and relative.parts[0].isidentifier():
+            prefixes.add(relative.parts[0])
     return modules, prefixes
+
+
+class _ProjectSourceFinder(importlib.abc.MetaPathFinder):
+    """Resolve every cached project-local name from this root, including namespaces."""
+
+    def __init__(self, root: Path, modules: set[str], prefixes: set[str]) -> None:
+        self.root = root.resolve()
+        self.modules = modules
+        self.prefixes = prefixes
+
+    def find_spec(
+        self,
+        fullname: str,
+        path: Sequence[str] | None = None,
+        target: ModuleType | None = None,
+    ) -> importlib.machinery.ModuleSpec | None:
+        del path, target
+        parts = fullname.split(".")
+        if parts[0] not in self.prefixes:
+            return None
+        module_path = self.root.joinpath(*parts)
+        package_init = module_path / "__init__.py"
+        module_file = module_path.with_suffix(".py")
+        source_path: Path | None = None
+        search_locations: list[str] | None = None
+        if package_init.is_file():
+            source_path = package_init
+            search_locations = [str(module_path)]
+        elif module_file.is_file():
+            source_path = module_file
+        elif module_path.is_dir() and any(name.startswith(fullname + ".") for name in self.modules):
+            try:
+                module_path.resolve().relative_to(self.root)
+            except (OSError, ValueError) as exc:
+                raise ModuleNotFoundError(
+                    f"Package {fullname!r} resolves outside the configured project source"
+                ) from exc
+            # Returning a namespace spec here prevents an outside regular package
+            # from replacing this local implicit namespace package.
+            namespace = importlib.machinery.ModuleSpec(fullname, loader=None, is_package=True)
+            namespace.submodule_search_locations = [str(module_path)]
+            return namespace
+        if source_path is None:
+            raise ModuleNotFoundError(
+                f"No module named {fullname!r} in the configured project source"
+            )
+        try:
+            source_path.resolve().relative_to(self.root)
+        except (OSError, ValueError) as exc:
+            raise ModuleNotFoundError(
+                f"Module {fullname!r} resolves outside the configured project source"
+            ) from exc
+        return importlib.util.spec_from_file_location(
+            fullname,
+            source_path,
+            submodule_search_locations=search_locations,
+        )
 
 
 def parse_entry(value: str | None, option: str) -> tuple[str, str] | None:
@@ -75,6 +151,7 @@ def _project_import_context(root: Path, module_names: tuple[str, ...]) -> Iterat
     root_text = str(resolved_root)
     with _IMPORT_CONTEXT_LOCK:
         original_path = sys.path.copy()
+        original_meta_path = sys.meta_path.copy()
         saved_modules = {
             name: module
             for name, module in tuple(sys.modules.items())
@@ -82,6 +159,8 @@ def _project_import_context(root: Path, module_names: tuple[str, ...]) -> Iterat
         }
         for name in saved_modules:
             sys.modules.pop(name, None)
+        finder = _ProjectSourceFinder(resolved_root, module_inventory, prefixes)
+        sys.meta_path.insert(0, finder)
         sys.path.insert(0, root_text)
         importlib.invalidate_caches()
         try:
@@ -90,6 +169,7 @@ def _project_import_context(root: Path, module_names: tuple[str, ...]) -> Iterat
             # Entry code can mutate both process-global import structures. Restore the
             # exact pre-entry view even when loading or invocation fails.
             sys.path[:] = original_path
+            sys.meta_path[:] = original_meta_path
             for name in tuple(sys.modules):
                 if any(name == prefix or name.startswith(prefix + ".") for prefix in prefixes):
                     sys.modules.pop(name, None)
@@ -137,9 +217,10 @@ def select_runtime_app(  # noqa: PLR0912
                 continue
             if f"{app_variable} =" in source or f"{app_variable}=" in source:
                 rel = file_path.relative_to(root).with_suffix("")
-                module_name = ".".join(rel.parts)
-                if module_name == "__init__":
+                parts = rel.parts[:-1] if rel.name == "__init__" else rel.parts
+                if not parts:
                     continue
+                module_name = ".".join(parts)
                 matching.append((file_path, module_name))
         if len(matching) != 1:
             raise RuntimeEntryError("runtime app selection is ambiguous; provide --app-entry")

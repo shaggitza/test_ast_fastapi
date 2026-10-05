@@ -15,6 +15,7 @@ from typing import Any
 from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
 from fastapi_endpoint_detector.analyzer.endpoint_registry import EndpointRegistry
 from fastapi_endpoint_detector.config import AnalysisConfig, Config, ParserConfig
+from fastapi_endpoint_detector.parser.bounded_output import bounded_json_bytes
 from fastapi_endpoint_detector.parser.fastapi_extractor import FastAPIExtractor
 
 _HOST_PROTOCOL_VERSION = 2
@@ -118,18 +119,19 @@ def _positive_integer(request: dict[str, Any], field: str, maximum: int) -> int:
 def _collect_bounded_models(
     values: Any, *, field: str, remaining_bytes: int
 ) -> tuple[list[Any], int]:
-    """Serialize models one at a time, stopping before an oversized output list forms."""
+    """Serialize one value at a time without first dumping an unbounded model tree."""
     collected: list[Any] = []
     used_bytes = 0
     for value in values:
-        dump = getattr(value, "model_dump", None)
-        item = dump(mode="json") if callable(dump) else value
-        encoded = json.dumps(item, separators=(",", ":"), allow_nan=False).encode("utf-8")
-        additional_bytes = len(encoded) + (1 if collected else 0)
-        if used_bytes + additional_bytes > remaining_bytes:
+        separator_bytes = 1 if collected else 0
+        available_bytes = remaining_bytes - used_bytes - separator_bytes
+        if available_bytes <= 0:
             raise ValueError(f"runtime worker {field} exceeded the serialized output limit")
-        collected.append(item)
-        used_bytes += additional_bytes
+        encoded = bounded_json_bytes(
+            value, max_bytes=available_bytes, field=f"runtime worker {field}"
+        )
+        collected.append(json.loads(encoded))
+        used_bytes += len(encoded) + separator_bytes
     return collected, used_bytes
 
 
@@ -235,7 +237,9 @@ def run_request(raw_request: str) -> tuple[dict[str, Any], int]:
             "telemetry": telemetry,
         }
         remaining_bytes = request["output_limit_bytes"] - len(
-            json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
+            json.dumps(payload, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode(
+                "utf-8"
+            )
         )
         if remaining_bytes < 0:
             raise ValueError("runtime worker output envelope exceeded the byte limit")
@@ -249,7 +253,11 @@ def run_request(raw_request: str) -> tuple[dict[str, Any], int]:
                 payload[key] = value
         # The incremental row budget above includes the exact empty-array envelope.
         if (
-            len(json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8"))
+            len(
+                json.dumps(
+                    payload, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+                ).encode("utf-8")
+            )
             > (request["output_limit_bytes"])
         ):
             raise ValueError("serialized runtime worker output exceeded the byte limit")
@@ -271,7 +279,9 @@ def main() -> int:
     args = parser.parse_args()
     if args.request_json is not None:
         payload, _status = run_request(args.request_json)
-        sys.stdout.write(json.dumps(payload, separators=(",", ":"), allow_nan=False))
+        sys.stdout.write(
+            json.dumps(payload, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        )
         sys.stdout.write("\n")
         return 0
     return _run_host_request(args.result)
@@ -300,6 +310,7 @@ def _run_host_request(result_path: Path) -> int:
             dependency_max_depth=request["dependency_max_depth"],
             dependency_max_nodes=request["dependency_max_nodes"],
             dependency_max_work=request["dependency_max_work"],
+            output_limit_bytes=output_limit,
         )
         with (
             Path(os.devnull).open("w", encoding="utf-8") as sink,

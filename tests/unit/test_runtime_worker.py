@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from pydantic import BaseModel
+
 from fastapi_endpoint_detector.parser import runtime_worker
 
 if TYPE_CHECKING:
@@ -101,19 +103,21 @@ def test_worker_stops_collecting_before_serialized_inventory_exceeds_limit(
     yielded = 0
     dumped = 0
 
-    class OversizedEndpoint:
+    class OversizedEndpoint(BaseModel):
+        path: str
+
         def model_dump(self, *, mode: str) -> dict[str, str]:
             nonlocal dumped
             assert mode == "json"
             dumped += 1
-            return {"path": "/" + "x" * 2048}
+            return super().model_dump(mode=mode)
 
     class FakeExtractor:
         def extract_endpoints(self):
             nonlocal yielded
             for _ in range(100):
                 yielded += 1
-                yield OversizedEndpoint()
+                yield OversizedEndpoint(path="/" + "x" * 2048)
 
     monkeypatch.setattr(runtime_worker, "_extractor", lambda _request: FakeExtractor())
     monkeypatch.setattr(runtime_worker, "_container_process_rss_bytes", lambda: None)
@@ -125,7 +129,8 @@ def test_worker_stops_collecting_before_serialized_inventory_exceeds_limit(
     assert status == 1
     assert payload["status"] == "error"
     assert "exceeded the serialized output limit" in payload["message"]
-    assert yielded == dumped == 1
+    assert yielded == 1
+    assert dumped == 0
 
 
 def test_worker_analyze_uses_the_selected_runtime_inventory(tmp_path: Path, monkeypatch) -> None:
