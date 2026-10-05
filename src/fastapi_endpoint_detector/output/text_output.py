@@ -8,9 +8,14 @@ from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointInventory
-from fastapi_endpoint_detector.models.report import AnalysisReport, ConfidenceLevel
+from fastapi_endpoint_detector.models.report import (
+    AffectedEndpoint,
+    AnalysisReport,
+    ConfidenceLevel,
+)
 from fastapi_endpoint_detector.output.formatters import BaseFormatter, register_formatter
 
 
@@ -58,6 +63,33 @@ class TextFormatter(BaseFormatter):
             ConfidenceLevel.LOW: "🟢",
         }
         return icons.get(confidence, "⚪")
+
+    @staticmethod
+    def _display_path(path: str) -> str:
+        """Keep paths on one terminal line and escape terminal control characters."""
+        visible: list[str] = []
+        for char in path:
+            codepoint = ord(char)
+            if char == "\n":
+                visible.append("\\n")
+            elif char == "\r":
+                visible.append("\\r")
+            elif char == "\t":
+                visible.append("\\t")
+            elif codepoint < 0x20 or 0x7F <= codepoint <= 0x9F:
+                visible.append(f"\\x{codepoint:02x}")
+            elif char in {"\u2028", "\u2029"}:
+                visible.append(f"\\u{codepoint:04x}")
+            else:
+                visible.append(char)
+        return "".join(visible)
+
+    @classmethod
+    def _changed_files_line(cls, indent: str, paths: list[str]) -> Text:
+        """Render paths as literal Rich text without parsing or highlighting them."""
+        line = Text(f"{indent}Changed files: ")
+        line.append(", ".join(cls._display_path(path) for path in paths))
+        return line
 
     def format(self, report: AnalysisReport) -> str:
         """Format an analysis report as text."""
@@ -146,7 +178,7 @@ class TextFormatter(BaseFormatter):
             console.print()
 
             # Group by confidence
-            groups = (
+            groups: list[tuple[ConfidenceLevel | None, list[AffectedEndpoint]]] = (
                 [
                     (confidence, report.get_endpoints_by_confidence(confidence))
                     for confidence in [
@@ -231,7 +263,7 @@ class TextFormatter(BaseFormatter):
                         for line in traceback_lines:
                             console.print(f"      {line}")
                     if self.verbose and ae.changed_files:
-                        console.print(f"      Changed files: {', '.join(ae.changed_files)}")
+                        console.print(self._changed_files_line("      ", ae.changed_files))
                     console.print()
         else:
             console.print("[green]No endpoints selected by the confidence threshold.[/green]")
@@ -257,7 +289,7 @@ class TextFormatter(BaseFormatter):
                 )
                 console.print(f"  {methods} {candidate.endpoint.path}{confidence_label}{discovery}")
                 if self.verbose and candidate.changed_files:
-                    console.print(f"    Changed files: {', '.join(candidate.changed_files)}")
+                    console.print(self._changed_files_line("    ", candidate.changed_files))
                 if candidate.endpoint.surface is not None:
                     surface = candidate.endpoint.surface
                     console.print(

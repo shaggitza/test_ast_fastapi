@@ -5,7 +5,11 @@ Markdown output formatter.
 from pathlib import Path
 
 from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointInventory
-from fastapi_endpoint_detector.models.report import AnalysisReport, ConfidenceLevel
+from fastapi_endpoint_detector.models.report import (
+    AffectedEndpoint,
+    AnalysisReport,
+    ConfidenceLevel,
+)
 from fastapi_endpoint_detector.output.formatters import BaseFormatter, register_formatter
 
 
@@ -120,7 +124,7 @@ class MarkdownFormatter(BaseFormatter):
             lines.append("")
 
             # Group by confidence
-            groups = (
+            groups: list[tuple[ConfidenceLevel | None, list[AffectedEndpoint]]] = (
                 [
                     (confidence, report.get_endpoints_by_confidence(confidence))
                     for confidence in [
