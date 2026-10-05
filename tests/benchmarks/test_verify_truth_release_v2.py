@@ -88,6 +88,29 @@ def _release_with_superseding_adjudication(tmp_path: Path) -> Path:
     return tmp_path / "published" / "release-1"
 
 
+def _empty_release(tmp_path: Path) -> Path:
+    empty = corpus().model_copy(
+        update={
+            "repositories": tuple(
+                repository.model_copy(update={"pull_requests": ()})
+                for repository in corpus().repositories
+            )
+        }
+    )
+    db = tmp_path / "empty.sqlite"
+    initialize_database(db, empty, allow_synthetic=True)
+    import_reviews(db, [], validator_factory=validator_factory)
+    import_adjudications(db, [])
+    release(
+        db,
+        tmp_path / "empty-published",
+        _publication(),
+        release_id="release-1",
+        created_at="2025-01-03T00:00:00Z",
+    )
+    return tmp_path / "empty-published" / "release-1"
+
+
 def _release_with_two_prs(tmp_path: Path) -> Path:
     original_corpus = corpus()
     repository = original_corpus.repositories[0]
@@ -560,6 +583,30 @@ def test_release_membership_requires_latest_canonical_adjudication(tmp_path: Pat
     first = min(adjudications, key=lambda row: row["version"])
     membership["adjudication_id"] = first["adjudication_id"]
     membership_path.write_bytes(canonical_json(membership))
+    entrypoint_path = root / "tables/canonical_entrypoint.jsonl"
+    entrypoints = [json.loads(line) for line in entrypoint_path.read_text().splitlines()]
+    stale_entrypoint = next(
+        row for row in entrypoints if row["adjudication_id"] == first["adjudication_id"]
+    )
+    stale_entrypoint["public_id"] = "HTTP POST /stale"
+    _write_jsonl(entrypoint_path, entrypoints)
+    projection_path = root / "adjudications.jsonl"
+    projection = json.loads(projection_path.read_text())
+    projection["version"] = first["version"]
+    projection["artifact_sha256"] = first["artifact_sha256"]
+    projection_path.write_bytes(canonical_json(projection))
+    truth_path = root / "broad-truth.jsonl"
+    truth = json.loads(truth_path.read_text())
+    truth["affected_entrypoints"] = [
+        {"id": "HTTP POST /stale", "kind": "http", "confidence": "confirmed"}
+    ]
+    truth_path.write_bytes(canonical_json(truth))
+    for sidecar in (root / "product-scopes").glob("*.jsonl"):
+        sidecar_row = json.loads(sidecar.read_text())
+        sidecar_row["affected_entrypoints"] = [
+            {"id": "HTTP POST /stale", "kind": "http", "confidence": "confirmed"}
+        ]
+        sidecar.write_bytes(canonical_json(sidecar_row))
     manifest = json.loads((root / "manifest.json").read_text())
     _reseal(root, manifest)
     with pytest.raises(GroundTruthError, match="invalid canonical adjudication"):
@@ -575,6 +622,34 @@ def test_manifest_provenance_matches_canonical_release_row(tmp_path: Path) -> No
     manifest = json.loads((root / "manifest.json").read_text())
     _reseal(root, manifest)
     with pytest.raises(GroundTruthError, match="manifest provenance"):
+        verify_release(root)
+
+
+def test_resealed_release_id_relabel_does_not_override_canonical_release_row(
+    tmp_path: Path,
+) -> None:
+    root = _release(tmp_path)
+    forged_id = "release-forged"
+    manifest = json.loads((root / "manifest.json").read_text())
+    manifest["release_id"] = forged_id
+
+    publication_path = root / "publication-review.json"
+    publication = json.loads(publication_path.read_text())
+    publication["release_id"] = forged_id
+    publication_raw = canonical_json(publication)
+    publication_path.write_bytes(publication_raw)
+    manifest["publication_review_sha256"] = artifact_sha256(publication_raw)
+
+    membership_path = root / "tables/release_pr.jsonl"
+    memberships = [json.loads(line) for line in membership_path.read_text().splitlines()]
+    for membership in memberships:
+        membership["release_id"] = forged_id
+    _write_jsonl(membership_path, memberships)
+
+    _reseal(root, manifest)
+    with pytest.raises(
+        GroundTruthError, match="canonical release table does not contain exactly one"
+    ):
         verify_release(root)
 
 
@@ -694,28 +769,48 @@ def test_reconciliation_uses_verified_member_snapshots(
 
 
 def test_zero_selected_corpus_can_be_verified(tmp_path: Path) -> None:
-    empty = corpus().model_copy(
-        update={
-            "repositories": tuple(
-                repository.model_copy(update={"pull_requests": ()})
-                for repository in corpus().repositories
-            )
-        }
-    )
-    db = tmp_path / "empty.sqlite"
-    initialize_database(db, empty, allow_synthetic=True)
-    import_reviews(db, [], validator_factory=validator_factory)
-    import_adjudications(db, [])
-    release(
-        db,
-        tmp_path / "empty-published",
-        _publication(),
-        release_id="release-1",
-        created_at="2025-01-03T00:00:00Z",
-    )
-    result = verify_release(tmp_path / "empty-published" / "release-1")
+    root = _empty_release(tmp_path)
+    result = verify_release(root)
     assert result["selected_prs"] == 0
     assert result["truth_rows_verified"] == 0
+    for member in (
+        "broad-truth.jsonl",
+        "reviews.jsonl",
+        "adjudications.jsonl",
+        "artifact-index.jsonl",
+        "tables/release_pr.jsonl",
+        "tables/reviewer_run.jsonl",
+        "tables/adjudication.jsonl",
+    ):
+        assert (root / member).read_bytes() == b""
+
+
+@pytest.mark.parametrize(
+    ("member", "expected"),
+    [
+        ("broad-truth.jsonl", "broad-truth rows do not match selected and terminal denominators"),
+        ("reviews.jsonl", "review projection does not match canonical reviewer runs"),
+        ("adjudications.jsonl", "broad-truth rows do not match adjudication projection"),
+        ("artifact-index.jsonl", "artifact index does not match canonical artifact metadata"),
+        ("tables/release_pr.jsonl", "release membership references an unknown pull request"),
+        ("product-scopes/endpoint-detector-v1.jsonl", "product-scope files do not match"),
+    ],
+)
+def test_zero_selected_release_rejects_nonempty_truth_or_projection(
+    tmp_path: Path, member: str, expected: str
+) -> None:
+    empty_root = _empty_release(tmp_path / "empty")
+    populated_root = _release(tmp_path / "populated")
+    source = populated_root / member
+    destination = empty_root / member
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(source.read_bytes())
+    manifest = json.loads((empty_root / "manifest.json").read_text())
+    if member not in manifest["files"]:
+        manifest["files"][member] = {}
+    _reseal(empty_root, manifest)
+    with pytest.raises(GroundTruthError, match=expected):
+        verify_release(empty_root)
 
 
 def test_expected_content_root_and_symlink_aliases(tmp_path: Path) -> None:
