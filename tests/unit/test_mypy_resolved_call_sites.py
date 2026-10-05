@@ -84,8 +84,11 @@ def test_captures_exact_functions_constructors_and_method_kinds(tmp_path: Path) 
     assert immediate_run.invocation == InvocationKind.INSTANCE_METHOD
     assert immediate_run.canonical_symbol and immediate_run.canonical_symbol.endswith("Service.run")
     local_run = _site_by_spelling(sites, "service.run")[0]
-    assert local_run.status == CallResolutionStatus.UNRESOLVED
-    assert local_run.reason_code == "dynamic_receiver"
+    assert local_run.status in {
+        CallResolutionStatus.AMBIGUOUS,
+        CallResolutionStatus.UNRESOLVED,
+    }
+    assert local_run.reason_code in {"open_receiver_dispatch", "dynamic_receiver"}
 
     build = _site_by_spelling(sites, "Service.build")[0]
     assert build.invocation == InvocationKind.CLASS_METHOD

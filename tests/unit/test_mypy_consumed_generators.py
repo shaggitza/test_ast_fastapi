@@ -274,7 +274,7 @@ def test_protocol_mismatch_does_not_consume_generator(
     "intervening",
     [
         "    pending = 0\n",
-            "    unknown(pending)\n",
+        "    unknown(pending)\n",
     ],
 )
 def test_reassignment_or_unknown_call_invalidates_generator_alias(
