@@ -3,7 +3,10 @@ from pathlib import Path
 import pytest
 
 from fastapi_endpoint_detector.analyzer.client_observations import established_surfaces
-from fastapi_endpoint_detector.analyzer.project_observations import scan_project_observations
+from fastapi_endpoint_detector.analyzer.project_observations import (
+    SourceObservationIssue,
+    scan_project_observations,
+)
 from fastapi_endpoint_detector.parser.secure_ast_extractor import SecureASTExtractor
 
 
@@ -174,3 +177,19 @@ def test_project_adapter_rejects_malformed_source_patterns(tmp_path: Path, patte
 def test_project_adapter_rejects_invalid_scan_budgets(tmp_path: Path, limit: int) -> None:
     with pytest.raises(ValueError, match="limits must be positive"):
         scan_project_observations(tmp_path, max_files=limit)
+
+
+def test_project_adapter_marks_selected_symlinks_as_incomplete(tmp_path: Path) -> None:
+    skipped = tmp_path / "node_modules"
+    skipped.mkdir()
+    source = skipped / "outside.ts"
+    source.write_text("fetch('/outside')", encoding="utf-8")
+    (tmp_path / "client.ts").symlink_to(source)
+
+    snapshot = scan_project_observations(tmp_path)
+
+    assert not snapshot.complete
+    assert snapshot.client_observations == ()
+    assert snapshot.issues == (
+        SourceObservationIssue("client.ts", "symlink source was not followed"),
+    )

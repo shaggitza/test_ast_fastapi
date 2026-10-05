@@ -22,6 +22,33 @@ origin, method, and path matches are returned. Endpoint projection alone does
 not imply trust or origin. No global URL fanout or inferred server candidate
 is produced.
 
+Repository scanning is opt-in through `analysis.route_observations`:
+
+```yaml
+analysis:
+  route_observations:
+    enabled: false
+    client_include_patterns:
+      - "**/*.ts"
+      - "**/*.svelte"
+    deployment_include_patterns:
+      - "**/Dockerfile*"
+      - "**/*.Dockerfile"
+      - "**/.env*"
+      - "**/*.py"
+    max_files: 256
+    max_file_bytes: 262144
+    trusted_server_origins: {}
+```
+
+`trusted_server_origins` maps exact established server surface IDs to explicit
+HTTP(S) or WS(S) origins. Only those mappings can authorize joins. Invalid
+origins, traversal or malformed globs, and invalid budgets are rejected by
+configuration validation. When enabled, the analysis report contains an
+optional `source_observations` section; JSON/YAML retain full evidence while
+human-readable formats show its bounded-scan summary. Disabled output retains
+its existing shape.
+
 `analyzer.project_observations` applies client and deployment glob selection,
 file-count and per-file byte budgets, records skipped-file issues, and emits
 source evidence only. CLI/configuration wiring is being integrated in PR #310.

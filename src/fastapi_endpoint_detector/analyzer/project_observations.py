@@ -319,15 +319,22 @@ def scan_project_observations(  # noqa: PLR0912, PLR0915
 
     for directory, dirnames, filenames in os.walk(base, topdown=True, followlinks=False):
         current = Path(directory)
-        dirnames[:] = sorted(
-            dirname
-            for dirname in dirnames
-            if dirname not in _SKIP_DIRS and not (current / dirname).is_symlink()
-        )
+        retained_directories: list[str] = []
+        for dirname in sorted(dirnames):
+            if dirname in _SKIP_DIRS:
+                continue
+            child = current / dirname
+            if child.is_symlink():
+                issues.append(
+                    SourceObservationIssue(
+                        child.relative_to(base).as_posix(), "symlink directory was not followed"
+                    )
+                )
+                continue
+            retained_directories.append(dirname)
+        dirnames[:] = retained_directories
         for filename in sorted(filenames):
             path = current / filename
-            if path.is_symlink():
-                continue
             is_candidate, kind = _is_candidate(path)
             if not is_candidate:
                 continue
@@ -336,6 +343,9 @@ def scan_project_observations(  # noqa: PLR0912, PLR0915
                 client_include_patterns if kind == "client" else deployment_include_patterns
             )
             if not _matches_any(relative, include_patterns):
+                continue
+            if path.is_symlink():
+                issues.append(SourceObservationIssue(relative, "symlink source was not followed"))
                 continue
             if scanned_files >= max_files:
                 issues.append(SourceObservationIssue(relative, "maximum source-file count reached"))
