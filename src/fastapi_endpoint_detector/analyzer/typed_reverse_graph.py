@@ -71,6 +71,8 @@ class ArgumentBinding:
     positional_index: int | None
     keyword: str | None
     expression_fullname: str | None
+    actual_type: str | None = None
+    formal_type: str | None = None
 
 
 @dataclass(frozen=True, order=True)
@@ -89,6 +91,25 @@ class EdgeWitness:
     environment: tuple[tuple[str, str], ...] = ()
 
 
+@dataclass(frozen=True, order=True)
+class UncertaintyWitness:
+    """Typed source-backed relation the snapshot graph cannot safely resolve."""
+
+    uncertainty_id: str
+    owner: str
+    span: SourceSpan
+    category: Literal[
+        "unknown_binding",
+        "virtual_dispatch",
+        "deferred_callable",
+        "dependency_injection",
+        "effect_summary",
+        "source_coverage",
+    ]
+    reason_code: str
+    source_spelling: str
+
+
 @dataclass(frozen=True)
 class EndpointOccurrenceBinding:
     """One physical route occurrence; equal handlers remain separate rows."""
@@ -99,6 +120,7 @@ class EndpointOccurrenceBinding:
     span: SourceSpan
     confidence: Literal["HIGH", "MEDIUM", "LOW"] = "HIGH"
     binding_kind: Literal["handler", "dependency"] = "handler"
+    dependency_symbols: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -136,6 +158,7 @@ class ImpactEvidence:
     reference_state: Literal["reference", "invocation", "unknown"]
     depth: int
     incomplete: Incompleteness
+    uncertainties: tuple[UncertaintyWitness, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -160,6 +183,7 @@ class TypedReverseGraph:
     symbols: tuple[Symbol, ...]
     edges: tuple[EdgeWitness, ...]
     endpoint_bindings: tuple[EndpointOccurrenceBinding, ...]
+    uncertainties: tuple[UncertaintyWitness, ...] = ()
     limitations: tuple[str, ...] = ()
 
     def reverse_index(self) -> dict[str, tuple[EdgeWitness, ...]]:
@@ -186,6 +210,10 @@ class TypedReverseGraph:
         for binding in bindings:
             by_symbol.setdefault(binding.symbol, []).append(binding)
         evidence: dict[tuple[str, str, str], ImpactEvidence] = {}
+        uncertainties_by_owner: dict[str, tuple[UncertaintyWitness, ...]] = {}
+        for item in self.uncertainties:
+            uncertainties_by_owner.setdefault(item.owner, ())
+            uncertainties_by_owner[item.owner] += (item,)
         reasons: set[str] = set()
         affected: set[str] = set()
         visited_count = enqueued_count = witness_count = 0
@@ -218,21 +246,35 @@ class TypedReverseGraph:
                     confidence = _confidence((occurrence.confidence, *(e.confidence for e in path)))
                     exec_state = _join_execution(edge.execution_state for edge in path)
                     ref_state = _join_reference(edge.reference_state for edge in path)
+                    path_owners = {
+                        occurrence.symbol,
+                        seed.symbol,
+                        *(edge.caller for edge in path),
+                    }
+                    path_uncertainties = tuple(
+                        sorted(
+                            uncertainty
+                            for owner in path_owners
+                            for uncertainty in uncertainties_by_owner.get(owner, ())
+                        )
+                    )
+                    uncertainty_reasons = {item.reason_code for item in path_uncertainties}
                     incomplete = Incompleteness(
                         bool(reasons),
-                        tuple(sorted(reasons)),
-                        (seed.symbol,) if reasons else (),
+                        tuple(sorted(reasons | uncertainty_reasons)),
+                        (seed.symbol,) if reasons or uncertainty_reasons else (),
                     )
                     record = ImpactEvidence(
                         side,
                         occurrence,
                         seed,
                         tuple(reversed(path)),
-                        confidence,
+                        "LOW" if path_uncertainties and confidence == "HIGH" else confidence,
                         exec_state,
                         ref_state,
                         len(path),
                         incomplete,
+                        path_uncertainties,
                     )
                     path_id = "/".join(edge.witness_id for edge in record.witnesses)
                     evidence[(occurrence.occurrence_id, seed.symbol, path_id)] = record
@@ -268,14 +310,31 @@ class TypedReverseGraph:
                     value.execution_state,
                     value.reference_state,
                     value.depth,
-                    Incompleteness(True, tuple(sorted(reasons)), tuple(sorted(affected))),
+                    Incompleteness(
+                        True,
+                        tuple(sorted(set(value.incomplete.reasons) | reasons)),
+                        tuple(sorted(set(value.incomplete.affected_seeds) | affected)),
+                    ),
+                    value.uncertainties,
                 )
                 for key, value in evidence.items()
             }
         ordered = tuple(sorted(evidence.values(), key=_evidence_key))
+        result_reasons = reasons | {
+            reason for item in ordered for reason in item.incomplete.reasons
+        }
+        result_affected = affected | {
+            item.seed.symbol
+            for item in ordered
+            if item.incomplete.reasons
+        }
         return ReverseQueryResult(
             ordered,
-            Incompleteness(bool(reasons), tuple(sorted(reasons)), tuple(sorted(affected))),
+            Incompleteness(
+                bool(reasons),
+                tuple(sorted(result_reasons)),
+                tuple(sorted(result_affected)),
+            ),
             visited_count,
             enqueued_count,
             witness_count,
@@ -293,6 +352,7 @@ class _ModuleWalker:
         module_ids: frozenset[str],
         tree: Any,
         definitions: dict[str, Any],
+        type_maps: Any,
     ) -> None:
         self.module = module
         self.path = path
@@ -300,9 +360,11 @@ class _ModuleWalker:
         self.module_ids = module_ids
         self.import_aliases = _module_import_aliases(tree, module, module_ids)
         self.definitions = definitions
+        self.type_maps = type_maps
         self.owner = module
         self.symbols: dict[str, Symbol] = {}
         self.edges: list[EdgeWitness] = []
+        self.uncertainties: list[UncertaintyWitness] = []
         self.execution_state: Literal["executed", "deferred", "unknown"] = "executed"
         self._seen: set[int] = set()
         self._invoked_lambdas: set[int] = set()
@@ -369,6 +431,14 @@ class _ModuleWalker:
             invoked = id(node) in self._invoked_lambdas
             self.owner = lambda_name
             self.execution_state = "executed" if invoked else "deferred"
+            if not invoked:
+                self._record_uncertainty(
+                    previous_owner,
+                    node,
+                    "deferred_callable",
+                    "lambda_capture_not_proven_invoked",
+                    "<lambda>",
+                )
             self.symbols[lambda_name] = self._symbol(lambda_name, "lambda", node)
             for child in _mypy_children(node):
                 self._walk(child)
@@ -415,6 +485,7 @@ class _ModuleWalker:
             arguments = _argument_bindings(
                 node,
                 resolved_target_node,
+                type_maps=self.type_maps,
                 skip_receiver=kind == "constructor"
                 or (receiver is not None and bool(getattr(resolved_target_node, "info", None))),
             )
@@ -432,8 +503,69 @@ class _ModuleWalker:
             )
             self.edges.append(edge)
             self.symbols.setdefault(self.owner, self._symbol(self.owner, "function", node))
-            target_kind = "lambda" if "<lambda>@" in target else "function"
-            self.symbols.setdefault(target, self._symbol(target, target_kind, resolved_target_node))
+            if isinstance(node.callee, MemberExpr):
+                self._record_uncertainty(
+                    self.owner,
+                    node,
+                    "virtual_dispatch",
+                    "finite_receiver_targets_not_imported",
+                    node.callee.name,
+                )
+            self._record_uncertainty(
+                self.owner,
+                node,
+                "effect_summary",
+                "effect_transfer_not_imported",
+                target,
+            )
+        elif not isinstance(node.callee, LambdaExpr):
+            spelling = _call_spelling(node.callee)
+            self._record_uncertainty(
+                self.owner,
+                node,
+                "unknown_binding",
+                "call_target_outside_typed_project_graph"
+                if target
+                else "typed_call_target_unavailable",
+                spelling,
+            )
+            if isinstance(node.callee, MemberExpr):
+                self._record_uncertainty(
+                    self.owner,
+                    node,
+                    "virtual_dispatch",
+                    "member_target_unavailable_or_finite_targets_not_imported",
+                    spelling,
+                )
+
+    def _record_uncertainty(
+        self,
+        owner: str,
+        node: Node,
+        category: Literal[
+            "unknown_binding",
+            "virtual_dispatch",
+            "deferred_callable",
+            "dependency_injection",
+            "effect_summary",
+            "source_coverage",
+        ],
+        reason_code: str,
+        source_spelling: str,
+    ) -> None:
+        span = self._span(node)
+        material = (owner, span, category, reason_code, source_spelling)
+        identity = hashlib.sha256(repr(material).encode()).hexdigest()
+        self.uncertainties.append(
+            UncertaintyWitness(
+                identity,
+                owner,
+                span,
+                category,
+                reason_code,
+                source_spelling,
+            )
+        )
 
     def _record_name(self, node: NameExpr) -> None:
         if id(node) in self._call_callees:
@@ -465,8 +597,10 @@ class _ModuleWalker:
     def _span(self, node: Node) -> SourceSpan:
         line = int(getattr(node, "line", 0) or 0)
         column = int(getattr(node, "column", 0) or 0)
-        end_line = int(getattr(node, "end_line", 0) or line)
-        end_column = int(getattr(node, "end_column", 0) or column)
+        raw_end_line = getattr(node, "end_line", None)
+        raw_end_column = getattr(node, "end_column", None)
+        end_line = int(raw_end_line if raw_end_line is not None else line)
+        end_column = int(raw_end_column if raw_end_column is not None else column)
         return SourceSpan(
             self.module,
             self.path,
@@ -564,6 +698,7 @@ def build_typed_reverse_graph(  # noqa: PLR0912, PLR0915
     module_ids = frozenset(module_paths)
     symbols: dict[str, Symbol] = {}
     edges: dict[str, EdgeWitness] = {}
+    uncertainties: dict[str, UncertaintyWitness] = {}
     definitions: dict[str, Any] = {}
     for state in typed_snapshot.modules.values():
         tree = getattr(state, "tree", None)
@@ -579,14 +714,38 @@ def build_typed_reverse_graph(  # noqa: PLR0912, PLR0915
             raise ValueError(f"typed snapshot has no AST for module {module}")
         path = module_paths[module]
         digest = dict(source_hashes)[module]
-        walker = _ModuleWalker(module, path, digest, module_ids, tree, definitions)
+        walker = _ModuleWalker(
+            module,
+            path,
+            digest,
+            module_ids,
+            tree,
+            definitions,
+            typed_snapshot.type_maps,
+        )
         walker.visit_mypy_file(tree)
         symbols.update(walker.symbols)
         edges.update((edge.witness_id, edge) for edge in walker.edges)
+        uncertainties.update(
+            (item.uncertainty_id, item) for item in walker.uncertainties
+        )
     source_by_path = {
         str(Path(module_paths[module]).resolve()): digest for module, digest in source_hashes
     }
     module_by_path = {path: module for module, path in module_paths.items()}
+    built_spans = (
+        *(symbol.span for symbol in symbols.values() if symbol.span is not None),
+        *(edge.span for edge in edges.values()),
+        *(item.span for item in uncertainties.values()),
+    )
+    for span in built_spans:
+        raw_lines = source_lines.get(str(Path(span.path).resolve()))
+        if raw_lines is None or not _source_span_is_valid(span, raw_lines):
+            raise ValueError(
+                "typed AST emitted invalid source span: "
+                f"{span.module}:{span.start_line}:{span.start_column}-"
+                f"{span.end_line}:{span.end_column}"
+            )
     for binding in endpoint_bindings:
         binding_path = str(Path(binding.span.path).resolve())
         lines = source_lines.get(binding_path, ())
@@ -601,9 +760,41 @@ def build_typed_reverse_graph(  # noqa: PLR0912, PLR0915
             or module_by_path.get(binding_path) != binding.span.module
             or not span_valid
             or binding.symbol not in symbols
+            or any(dependency not in symbols for dependency in binding.dependency_symbols)
         ):
             raise ValueError(
                 f"endpoint occurrence is not bound to this typed snapshot: {binding.occurrence_id}"
+            )
+        for dependency in sorted(set(binding.dependency_symbols)):
+            edge_material = (
+                binding.symbol,
+                dependency,
+                "dependency",
+                binding.span,
+                binding.occurrence_id,
+            )
+            identity = hashlib.sha256(repr(edge_material).encode()).hexdigest()
+            edges[identity] = EdgeWitness(
+                identity,
+                binding.symbol,
+                dependency,
+                "dependency",
+                binding.span,
+                "LOW",
+                "executed",
+                "invocation",
+                "framework_dependency_binding",
+            )
+            uncertainty_id = hashlib.sha256(
+                repr((edge_material, "dependency_parameter_transfer_not_proven")).encode()
+            ).hexdigest()
+            uncertainties[uncertainty_id] = UncertaintyWitness(
+                uncertainty_id,
+                binding.symbol,
+                binding.span,
+                "dependency_injection",
+                "dependency_parameter_transfer_not_proven",
+                dependency,
             )
     inventory_fingerprint = _sha256(
         tuple((item.module, item.relative_path, item.sha256) for item in records)
@@ -626,6 +817,7 @@ def build_typed_reverse_graph(  # noqa: PLR0912, PLR0915
         tuple(sorted(symbols.values())),
         tuple(sorted(edges.values(), key=lambda item: item.witness_id)),
         tuple(sorted(endpoint_bindings, key=_binding_key)),
+        tuple(sorted(uncertainties.values())),
         (
             "DI callable-value transfer from route parameter/default/Depends is not integrated",
             "finite receiver dispatch beyond mypy's direct typed target is not integrated",
@@ -639,6 +831,27 @@ def build_typed_reverse_graph(  # noqa: PLR0912, PLR0915
 def _fullname(node: Any) -> str | None:
     value = getattr(node, "fullname", None)
     return value if isinstance(value, str) and value else None
+
+
+def _call_spelling(expression: Any) -> str:
+    if isinstance(expression, NameExpr):
+        return expression.name
+    if isinstance(expression, MemberExpr):
+        base = _call_spelling(expression.expr)
+        return f"{base}.{expression.name}" if base else expression.name
+    if isinstance(expression, LambdaExpr):
+        return "<lambda>"
+    return type(expression).__name__
+
+
+def _source_span_is_valid(span: SourceSpan, lines: tuple[bytes, ...]) -> bool:
+    if not (1 <= span.start_line <= span.end_line <= len(lines)):
+        return False
+    start_line = lines[span.start_line - 1].rstrip(b"\r\n")
+    end_line = lines[span.end_line - 1].rstrip(b"\r\n")
+    if span.start_column > len(start_line) or span.end_column > len(end_line):
+        return False
+    return (span.start_line, span.start_column) <= (span.end_line, span.end_column)
 
 
 def _module_import_aliases(tree: Any, module: str, module_ids: frozenset[str]) -> dict[str, str]:
@@ -709,11 +922,17 @@ def _is_project_symbol(fullname: str, module_ids: frozenset[str]) -> bool:
 
 
 def _argument_bindings(
-    call: CallExpr, target: Any, *, skip_receiver: bool = False
+    call: CallExpr,
+    target: Any,
+    *,
+    type_maps: Any,
+    skip_receiver: bool = False,
 ) -> tuple[ArgumentBinding, ...]:
     args: list[ArgumentBinding] = []
     callable_node = getattr(target, "node", target)
     arg_names = tuple(getattr(callable_node, "arg_names", ()) or ())
+    callable_type = getattr(callable_node, "type", None)
+    formal_types = tuple(getattr(callable_type, "arg_types", ()) or ())
     offset = 1 if skip_receiver and arg_names else 0
     if offset:
         args.append(
@@ -725,6 +944,8 @@ def _argument_bindings(
                 _expression_fullname(call.callee.expr, {})
                 if isinstance(call.callee, MemberExpr)
                 else None,
+                None,
+                _render_type(formal_types[0]) if formal_types else None,
             )
         )
     pos = 0
@@ -741,15 +962,31 @@ def _argument_bindings(
             if positional is not None and formal_index < len(arg_names)
             else None
         )
+        actual_type = _render_type(type_maps.get(expr)) if hasattr(type_maps, "get") else None
+        formal_index = arg_names.index(formal) if formal in arg_names else None
+        formal_type = (
+            _render_type(formal_types[formal_index])
+            if formal_index is not None and formal_index < len(formal_types)
+            else None
+        )
         value = (
             _fullname(getattr(expr, "node", None))
             if isinstance(expr, (NameExpr, MemberExpr))
             else None
         )
-        args.append(ArgumentBinding(index, formal, positional, keyword, value))
+        args.append(
+            ArgumentBinding(index, formal, positional, keyword, value, actual_type, formal_type)
+        )
         if kind == ARG_POS:
             pos += 1
     return tuple(args)
+
+
+def _render_type(value: Any) -> str | None:
+    if value is None:
+        return None
+    rendered = str(value).strip()
+    return rendered or None
 
 
 def _sha256(value: Any) -> str:
@@ -842,7 +1079,11 @@ class TypedGraphCache:
 
     @staticmethod
     def validate(  # noqa: PLR0911
-        graph: TypedReverseGraph, inventory: Any, *, config_fingerprint: str
+        graph: TypedReverseGraph,
+        inventory: Any,
+        typed_snapshot: TypedSnapshot,
+        *,
+        config_fingerprint: str,
     ) -> bool:
         inventory_root = Path(inventory.root)
         if inventory_root.is_symlink():
@@ -875,12 +1116,30 @@ class TypedGraphCache:
                 for record in sorted(inventory.files, key=lambda item: item.module)
             )
         )
+        report = typed_snapshot.report
+        snapshot_provenance = str(getattr(report, "cache_fingerprint", ""))
+        snapshot_engine = str(getattr(report, "engine", "mypy-fine-grained"))
+        snapshot_version = str(getattr(report, "mypy_version", version("mypy")))
+        try:
+            snapshot_paths = {
+                str(Path(path).resolve(strict=True))
+                for path in typed_snapshot.module_paths.values()
+                if Path(path).suffix == ".py"
+            }
+            inventoried_paths = {
+                str(Path(record.path).resolve(strict=True)) for record in inventory.files
+            }
+        except (OSError, ValueError):
+            return False
         return (
             tuple(current) == graph.source_hashes
             and graph.schema_version == 1
             and graph.inventory_fingerprint == inventory_fingerprint
-            and bool(graph.graph_provenance)
-            and graph.engine_version == version("mypy")
+            and inventoried_paths.issubset(snapshot_paths)
+            and bool(snapshot_provenance)
+            and graph.graph_provenance == snapshot_provenance
+            and graph.engine == snapshot_engine
+            and graph.engine_version == snapshot_version == version("mypy")
         )
 
 

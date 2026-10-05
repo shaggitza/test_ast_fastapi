@@ -15,6 +15,11 @@ Calls carry source coordinates, confidence, execution/reference state, formal
 argument bindings, receiver identity, and an argument environment. Constructors
 target the typed `__init__`; global reads and writes are represented separately.
 Directly invoked lambda bodies are distinguished from deferred lambda bodies.
+Per-evidence uncertainty witnesses record unknown/external call bindings,
+member dispatch, deferred lambda capture, dependency parameter transfer, and
+unmodeled effect summaries. Any such evidence is downgraded to LOW; uncertainty
+reason codes appear alongside any traversal cap reason in `incomplete.reasons`.
+The cap boolean remains specific to traversal budgets.
 
 Each query has independent node, depth, enqueue, frontier, and witness budgets.
 The result always carries explicit cap reasons and affected seeds. If traversal
@@ -40,7 +45,10 @@ branch:
    inventory.
 2. Bind each discovered handler and dependency occurrence to its exact typed
    fullname and physical registration/source span. Keep same-handler route
-   registrations as separate occurrence IDs.
+   registrations as separate occurrence IDs. For each handler occurrence,
+   populate `dependency_symbols` only from exact typed targets returned by the
+   analyzer's finite Depends/Security resolver; the graph makes these edges
+   LOW-confidence until callable and parameter transfer is proven.
 3. Build one graph per snapshot, map added target and removed baseline hunks to
    exact symbol seeds, and query the matching side.
 4. Convert `ImpactEvidence` back to existing mapper evidence while retaining
@@ -55,11 +63,39 @@ material integration gaps: it does not import the analyzer's finite DI
 callable/parameter/receiver points-to environments; it handles only mypy's
 direct typed dispatch target, not its finite virtual target sets; assigned or
 returned lambdas need execution-state transfer from the callable analyzer; and
-effect, deferred-generator, dependency, and conditional route summary
-propagation is not wired. Dependency occurrence bindings must currently come
-from the existing runtime/native route evidence. Consequently this module is a
-reviewable step toward GH107, not proof that GH107 is closed or safe to enable
-by default.
+effect, deferred-generator, and conditional route summaries are not wired.
+Uncertainty witnesses expose these omissions per impacted evidence but do not
+recover the missing paths. Consequently this module is a reviewable step
+toward GH107, not proof that GH107 is closed or safe to enable by default.
+
+### Proposed parent-owned phase bridge
+
+These are narrow patches for the owners of PRs #311, #312, and #326; they are
+not applied here:
+
+1. In #311, expose the already-retained `TypedBuild` (or a snapshot accessor)
+and a public exact resolver for each endpoint's `Depends`/`Security` symbols.
+The current private `_python_dependency_fullnames` returns source spellings;
+the bridge must resolve each against the retained snapshot to an exact
+`Symbol.fullname` or return a per-item unresolved status. It must not suffix
+match. Construct one handler `EndpointOccurrenceBinding` per physical route
+registration, pass its exact dependency symbols in `dependency_symbols`, and
+set its confidence from conditional route discovery.
+2. In #326, pass the update's `TypedBuild` and exact `BuildReport` provenance to
+the graph builder after **each** retained update. Rebuild the graph from that
+snapshot (no edge patching yet), reuse a cached graph only if
+`TypedGraphCache.validate` succeeds against the full canonical inventory,
+source bytes, engine, configuration, and provider fingerprint.
+3. In #312, map added coordinates to target graph seeds and removed coordinates
+to baseline graph seeds using `seeds_for_changed_coordinates`. Query each side
+independently. Preserve every path's edge coordinates and uncertainty witnesses
+when converting to mapper candidates. Any `incomplete.capped` or semantic
+uncertainty keeps the candidate LOW and must survive the output as a reason;
+do not merge path evidence by endpoint before storing witnesses.
+4. Keep the feature behind an explicit opt-in setting and have the caller retain
+the legacy mapper result for parity comparison and rollback. Compare terminal,
+edge/witness, occurrence, confidence, uncertainty, effects, and route caps before
+enabling it.
 
 ## Focused parity and performance run
 
@@ -88,12 +124,15 @@ conditional routes, baseline deletions, or every analyzer evidence type. Its
 exact physical call paths therefore do not establish no-quality-regression for
 GH107.
 
-One recorded run on Python 3.11.16 / mypy 1.19.1 (24 modules, five samples,
-15 exact oracle checks) reported p95s of 3.233 s for typed cold build, 0.094 s
-for graph construction, 0.532 ms for a warm query, 3.513 s for the fresh full
-typed rebuild after one-file change, and 0.123 s for graph reconstruction.
-These are generated-fixture observations, not latency targets or corpus
-performance claims.
+The latest recorded run on Python 3.11.16 / mypy 1.19.1 (24 modules, five
+samples, 15 physical-path oracle checks) reported p95s of 2.427 s for typed
+cold build, 0.080 s for graph construction, 0.281 ms for a warm query, 2.560 s
+for the fresh full typed rebuild after one-file change, and 0.060 s for graph
+reconstruction. Positive graph evidence was LOW because the graph now exposes
+unmodeled effect summaries per witness; the full-depth callstack oracle does not
+provide a corresponding confidence/effect field, so that dimension remains
+explicitly non-comparable. These are generated-fixture observations, not
+latency targets or corpus performance claims.
 
 ## Retained-provider compatibility probe
 

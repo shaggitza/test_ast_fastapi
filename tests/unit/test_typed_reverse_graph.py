@@ -52,7 +52,7 @@ def _snapshot(root: Path, sources: dict[str, str]):
     typed = SimpleNamespace(
         modules=modules,
         module_paths=analyzer._module_to_path,
-        type_maps={},
+        type_maps=analyzer._types_map,
         report=SimpleNamespace(
             cache_fingerprint="test-provider-fingerprint",
             engine="mypy-fine-grained",
@@ -133,7 +133,14 @@ def test_global_relations_and_lambda_execution_state_are_distinct(tmp_path: Path
             "service": "def changed():\n    return None\n",
         },
     )
-    graph = build_typed_reverse_graph(inventory, snapshot, [], config_fingerprint="cfg")
+    app_module = _module(snapshot, "app")
+    binding = _binding(
+        tmp_path,
+        app_module,
+        _fullname(snapshot, app_module, "handler"),
+        "route",
+    )
+    graph = build_typed_reverse_graph(inventory, snapshot, [binding], config_fingerprint="cfg")
     service_module = _module(snapshot, "service")
     changed = _fullname(snapshot, service_module, "changed")
     lambda_edges = [edge for edge in graph.edges if edge.callee == changed]
@@ -142,6 +149,13 @@ def test_global_relations_and_lambda_execution_state_are_distinct(tmp_path: Path
     assert any(edge.kind == "global_read" and edge.callee.endswith("VALUE") for edge in graph.edges)
     assert any(
         edge.kind == "global_write" and edge.callee.endswith("VALUE") for edge in graph.edges
+    )
+    result = graph.query([ChangedSeed("target", changed)], side="target")
+    assert result.evidence
+    assert all(item.confidence == "LOW" for item in result.evidence)
+    assert all(
+        any(uncertainty.category == "deferred_callable" for uncertainty in item.uncertainties)
+        for item in result.evidence
     )
 
 
@@ -174,24 +188,50 @@ def test_cache_rejects_changed_bytes_symlinks_and_root_mismatch(tmp_path: Path) 
     binding = _binding(tmp_path, app_module, _fullname(snapshot, app_module, "handler"), "route")
     graph = build_typed_reverse_graph(inventory, snapshot, [binding], config_fingerprint="cfg")
 
-    assert TypedGraphCache.validate(graph, inventory, config_fingerprint="cfg")
+    assert TypedGraphCache.validate(
+        graph, inventory, snapshot, config_fingerprint="cfg"
+    )
     assert TypedGraphCache.cache_key(graph) != TypedGraphCache.cache_key(
         replace(graph, engine_version="different")
     )
-    assert not TypedGraphCache.validate(graph, inventory, config_fingerprint="other")
     assert not TypedGraphCache.validate(
-        graph, replace(inventory, root=tmp_path / "other"), config_fingerprint="cfg"
+        graph, inventory, snapshot, config_fingerprint="other"
     )
     assert not TypedGraphCache.validate(
-        replace(graph, schema_version=99), inventory, config_fingerprint="cfg"
+        graph,
+        replace(inventory, root=tmp_path / "other"),
+        snapshot,
+        config_fingerprint="cfg",
+    )
+    assert not TypedGraphCache.validate(
+        replace(graph, schema_version=99),
+        inventory,
+        snapshot,
+        config_fingerprint="cfg",
+    )
+    assert not TypedGraphCache.validate(
+        replace(graph, graph_provenance="different-provider-build"),
+        inventory,
+        snapshot,
+        config_fingerprint="cfg",
+    )
+    assert not TypedGraphCache.validate(
+        replace(graph, engine="different-engine"),
+        inventory,
+        snapshot,
+        config_fingerprint="cfg",
     )
     inventory.files[0].path.write_text("def handler():\n    return 2\n", encoding="utf-8")
-    assert not TypedGraphCache.validate(graph, inventory, config_fingerprint="cfg")
+    assert not TypedGraphCache.validate(
+        graph, inventory, snapshot, config_fingerprint="cfg"
+    )
 
     alias = tmp_path / "alias.py"
     alias.symlink_to(inventory.files[0].path)
     bad = _Inventory(tmp_path, (_Record("app", alias, "alias.py", graph.source_hashes[0][1]),))
-    assert not TypedGraphCache.validate(graph, bad, config_fingerprint="cfg")
+    assert not TypedGraphCache.validate(
+        graph, bad, snapshot, config_fingerprint="cfg"
+    )
 
 
 def test_constructor_seed_uses_typed_constructor_target(tmp_path: Path) -> None:
@@ -209,8 +249,138 @@ def test_constructor_seed_uses_typed_constructor_target(tmp_path: Path) -> None:
     constructor = next(edge for edge in graph.edges if edge.relation == "typed_constructor")
     assert constructor.arguments[0].formal_name == "self"
     assert constructor.arguments[1].formal_name == "key"
+    assert constructor.arguments[1].formal_type == "builtins.int"
     result = graph.query([ChangedSeed("target", constructor.callee)], side="target")
     assert result.evidence and result.evidence[0].occurrence.occurrence_id == "route"
+
+
+def test_unmodeled_binding_effect_and_virtual_dispatch_are_per_evidence(
+    tmp_path: Path,
+) -> None:
+    inventory, snapshot, _ = _snapshot(
+        tmp_path,
+        {
+            "app": (
+                "from service import changed\n"
+                "def handler(obj, callback):\n"
+                "    obj.run()\n"
+                "    callback()\n"
+                "    return changed()\n"
+            ),
+            "service": "def changed():\n    return None\n",
+        },
+    )
+    app_module = _module(snapshot, "app")
+    binding = _binding(
+        tmp_path,
+        app_module,
+        _fullname(snapshot, app_module, "handler"),
+        "route",
+    )
+    graph = build_typed_reverse_graph(inventory, snapshot, [binding], config_fingerprint="cfg")
+    result = graph.query(
+        [ChangedSeed("target", _fullname(snapshot, _module(snapshot, "service"), "changed"))],
+        side="target",
+    )
+
+    assert len(result.evidence) == 1
+    evidence = result.evidence[0]
+    assert evidence.confidence == "LOW"
+    categories = {item.category for item in evidence.uncertainties}
+    assert "effect_summary" in categories
+    assert "unknown_binding" in categories
+    assert "virtual_dispatch" in categories
+    assert "effect_transfer_not_imported" in evidence.incomplete.reasons
+
+
+def test_dependency_occurrence_binding_creates_uncertain_typed_edge(tmp_path: Path) -> None:
+    inventory, snapshot, _ = _snapshot(
+        tmp_path,
+        {
+            "app": "def handler(value):\n    return value\n",
+            "service": "def dependency():\n    return 1\n",
+        },
+    )
+    app_module = _module(snapshot, "app")
+    service_module = _module(snapshot, "service")
+    handler = _fullname(snapshot, app_module, "handler")
+    dependency = _fullname(snapshot, service_module, "dependency")
+    binding = replace(
+        _binding(tmp_path, app_module, handler, "route"),
+        dependency_symbols=(dependency,),
+    )
+    graph = build_typed_reverse_graph(inventory, snapshot, [binding], config_fingerprint="cfg")
+    result = graph.query([ChangedSeed("target", dependency)], side="target")
+
+    assert len(result.evidence) == 1
+    assert result.evidence[0].confidence == "LOW"
+    assert result.evidence[0].witnesses[0].kind == "dependency"
+    assert result.evidence[0].uncertainties[0].category == "dependency_injection"
+    assert "dependency_parameter_transfer_not_proven" in result.incomplete.reasons
+
+
+def test_removed_baseline_and_added_target_use_separate_typed_snapshots(
+    tmp_path: Path,
+) -> None:
+    baseline_inventory, baseline_snapshot, _ = _snapshot(
+        tmp_path,
+        {
+            "app": "from service import old\ndef handler():\n    return old()\n",
+            "service": "def old():\n    return 1\n",
+        },
+    )
+    app_module = _module(baseline_snapshot, "app")
+    baseline_binding = _binding(
+        tmp_path,
+        app_module,
+        _fullname(baseline_snapshot, app_module, "handler"),
+        "same-route",
+    )
+    baseline_graph = build_typed_reverse_graph(
+        baseline_inventory,
+        baseline_snapshot,
+        [baseline_binding],
+        config_fingerprint="paired-cfg",
+    )
+    service_module = _module(baseline_snapshot, "service")
+    removed_seed = seeds_for_changed_coordinates(
+        "baseline", [(str(tmp_path / "service.py"), 1, 4)], baseline_graph
+    )
+
+    target_inventory, target_snapshot, _ = _snapshot(
+        tmp_path,
+        {
+            "app": "from service import new\ndef handler():\n    return new()\n",
+            "service": "def new():\n    return 2\n",
+        },
+    )
+    target_app_module = _module(target_snapshot, "app")
+    target_binding = _binding(
+        tmp_path,
+        target_app_module,
+        _fullname(target_snapshot, target_app_module, "handler"),
+        "same-route",
+    )
+    target_graph = build_typed_reverse_graph(
+        target_inventory,
+        target_snapshot,
+        [target_binding],
+        config_fingerprint="paired-cfg",
+    )
+    added_seed = seeds_for_changed_coordinates(
+        "target", [(str(tmp_path / "service.py"), 1, 4)], target_graph
+    )
+
+    baseline_result = baseline_graph.query(removed_seed, side="baseline")
+    target_result = target_graph.query(added_seed, side="target")
+    wrong_side = target_graph.query(
+        [ChangedSeed("target", _fullname(baseline_snapshot, service_module, "old"))],
+        side="target",
+    )
+    assert removed_seed and added_seed
+    assert baseline_result.evidence and baseline_result.evidence[0].side == "baseline"
+    assert target_result.evidence and target_result.evidence[0].side == "target"
+    assert wrong_side.evidence == ()
 
 
 def test_generated_fixture_matches_current_full_depth_candidate_oracle(tmp_path: Path) -> None:

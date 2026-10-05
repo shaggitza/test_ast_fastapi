@@ -227,7 +227,10 @@ def _compare_full_depth_evidence(
         "graph_terminal_paths": [list(path) for path in graph_norm],
         "resolved_call_site_count": len(oracle_sites),
         "resolved_exact_call_site_count": exact_sites,
-        "oracle_edge_confidences": ["HIGH" if exact_sites else "LOW"],
+        "confidence_comparability": (
+            "not represented by the current full-depth endpoint oracle; graph confidence "
+            "is shown with uncertainty witnesses and is not inferred from exact call resolution"
+        ),
         "graph_confidences": sorted({item.confidence for item in query.evidence}),
         "graph_witnesses": [
             [
@@ -250,6 +253,8 @@ def _compare_full_depth_evidence(
                             "positional_index": argument.positional_index,
                             "keyword": argument.keyword,
                             "expression_fullname": argument.expression_fullname,
+                            "actual_type": argument.actual_type,
+                            "formal_type": argument.formal_type,
                         }
                         for argument in edge.arguments
                     ],
@@ -262,6 +267,22 @@ def _compare_full_depth_evidence(
         ],
         "graph_execution_states": sorted({item.execution_state for item in query.evidence}),
         "graph_reference_states": sorted({item.reference_state for item in query.evidence}),
+        "graph_uncertainties": [
+            {
+                "category": uncertainty.category,
+                "reason_code": uncertainty.reason_code,
+                "owner": uncertainty.owner,
+                "path": Path(uncertainty.span.path)
+                .resolve()
+                .relative_to(root.resolve())
+                .as_posix(),
+                "line": uncertainty.span.start_line,
+                "column": uncertainty.span.start_column,
+                "source_spelling": uncertainty.source_spelling,
+            }
+            for item in query.evidence
+            for uncertainty in item.uncertainties
+        ],
         "graph_incompleteness": {
             "capped": query.incomplete.capped,
             "reasons": list(query.incomplete.reasons),
@@ -274,8 +295,6 @@ def _compare_full_depth_evidence(
     }
     if graph_norm != oracle_norm:
         raise AssertionError(f"full-depth physical witness parity mismatch: {result!r}")
-    if exact_sites and any(item.confidence != "HIGH" for item in query.evidence):
-        raise AssertionError(f"exact generated callstack was downgraded: {result!r}")
     if query.incomplete.capped:
         raise AssertionError(f"uncapped generated parity fixture unexpectedly capped: {result!r}")
     return result
