@@ -25,6 +25,9 @@ GRAPHIFY_PACKAGE_VERSION = "0.9.30"
 GRAPHIFY_COMMAND_NAME = "graphify"
 GRAPHIFY_EXPECTED_VERSION_OUTPUT = "graphify 0.9.30"
 GRAPHIFY_GRAPH_SCHEMA_VERSION = 1
+GRAPHIFY_RAW_SCHEMA_VERSION = 2
+GRAPHIFY_NODE_LINK_SCHEMA = "node-link-v1"
+GRAPHIFY_RAW_SCHEMA = "graphify-raw-0.9.30-v1"
 GRAPHIFY_EXPECTED_DIRECTED = True
 GRAPHIFY_EXPECTED_MULTIGRAPH = True
 MAX_GRAPH_BYTES = 64 * 1024 * 1024
@@ -122,6 +125,8 @@ class GraphifyEdge:
     orientation: GraphifyRelationOrientation
     extractor_strength: GraphifyStrength
     span: GraphifySourceSpan | None
+    edge_key: int | str | None = None
+    context_identity: str | None = None
 
     @property
     def traversable(self) -> bool:
@@ -278,7 +283,7 @@ def _validate_json_numbers(value: object) -> None:
             pending.extend(current)
 
 
-def _strict_json(raw: bytes, source: Path) -> dict[str, object]:
+def _strict_json(raw: bytes, source: Path, schema: str) -> dict[str, object]:
     try:
         text = raw.decode("utf-8")
         value = load_json_unique(text)
@@ -287,9 +292,16 @@ def _strict_json(raw: bytes, source: Path) -> dict[str, object]:
     _validate_json_numbers(value)
     if not isinstance(value, dict):
         raise GraphifyAdapterError("graph.json must contain an object")
-    required = _TOP_LEVEL_KEYS - {"built_at_commit"}
-    if not required.issubset(value) or not set(value).issubset(_TOP_LEVEL_KEYS):
-        extra = sorted(set(value) - _TOP_LEVEL_KEYS)
+    if schema == GRAPHIFY_NODE_LINK_SCHEMA:
+        allowed = _TOP_LEVEL_KEYS
+        required = _TOP_LEVEL_KEYS - {"built_at_commit"}
+    elif schema == GRAPHIFY_RAW_SCHEMA:
+        allowed = frozenset({"nodes", "edges", "hyperedges", "input_tokens", "output_tokens"})
+        required = allowed
+    else:
+        raise GraphifyAdapterError(f"unsupported Graphify schema selector: {schema!r}")
+    if not required.issubset(value) or not set(value).issubset(allowed):
+        extra = sorted(set(value) - allowed)
         missing = sorted(required - set(value))
         raise GraphifyAdapterError(
             f"unsupported graph.json top-level schema; extra={extra}, missing={missing}"
@@ -305,13 +317,19 @@ class _SourceRegistry:
     def read(self, value: object, location: str) -> _FileSnapshot:
         source = _bounded_string(value, location)
         supplied = Path(source)
+        if supplied.is_absolute() or ".." in supplied.parts:
+            raise GraphifyAdapterError(f"{location} must be a confined relative path: {source!r}")
         try:
-            absolute = (
-                supplied.resolve(strict=True)
-                if supplied.is_absolute()
-                else (self.project_root / supplied).resolve(strict=True)
-            )
+            candidate = self.project_root / supplied
+            cursor = self.project_root
+            for part in supplied.parts:
+                cursor = cursor / part
+                if stat.S_ISLNK(cursor.lstat().st_mode):
+                    raise GraphifyAdapterError(f"{location} traverses a symlink: {source!r}")
+            absolute = candidate.resolve(strict=True)
             relative = absolute.relative_to(self.project_root)
+        except GraphifyAdapterError:
+            raise
         except (OSError, RuntimeError, ValueError) as error:
             raise GraphifyAdapterError(
                 f"{location} does not identify a confined project file: {source!r}"
@@ -431,7 +449,7 @@ def _validate_optional_fields(item: dict[str, object], location: str) -> None:
 
 
 def _read_graph_payload(
-    graph_path: Path, expected_sha256: str | None
+    graph_path: Path, expected_sha256: str | None, schema: str
 ) -> tuple[str, dict[str, object]]:
     if expected_sha256 is not None and _SHA256.fullmatch(expected_sha256) is None:
         raise GraphifyAdapterError("expected_sha256 must be a lowercase SHA-256 digest")
@@ -440,12 +458,37 @@ def _read_graph_payload(
         raise GraphifyAdapterError(
             f"Graphify snapshot hash mismatch: expected {expected_sha256}, got {snapshot.sha256}"
         )
-    return snapshot.sha256, _strict_json(raw, graph_path)
+    return snapshot.sha256, _strict_json(raw, graph_path, schema)
+
+
+def _raw_payload_collections(payload: dict[str, object]) -> tuple[list[object], list[object]]:
+    for field in ("input_tokens", "output_tokens"):
+        count = payload[field]
+        if type(count) is not int or count < 0:
+            raise GraphifyAdapterError(f"raw Graphify {field} must be a non-negative integer")
+    raw_nodes, raw_edges, hyperedges = payload["nodes"], payload["edges"], payload["hyperedges"]
+    if not isinstance(raw_nodes, list) or not isinstance(raw_edges, list):
+        raise GraphifyAdapterError("raw Graphify nodes and edges must be lists")
+    if not isinstance(hyperedges, list):
+        raise GraphifyAdapterError("raw Graphify hyperedges must be a list")
+    if hyperedges:
+        raise GraphifyAdapterError(
+            "raw code-only Graphify hyperedges are unsupported by this adapter"
+        )
+    if len(raw_nodes) > MAX_GRAPH_NODES or len(raw_edges) > MAX_GRAPH_EDGES:
+        raise GraphifyAdapterError("raw Graphify snapshot exceeds the bounded node or edge limit")
+    return raw_nodes, raw_edges
 
 
 def _payload_collections(
     payload: dict[str, object],
+    schema: str,
 ) -> tuple[list[object], list[object], str | None]:
+    if schema == GRAPHIFY_RAW_SCHEMA:
+        raw_nodes, raw_edges = _raw_payload_collections(payload)
+        return raw_nodes, raw_edges, None
+    if schema != GRAPHIFY_NODE_LINK_SCHEMA:
+        raise GraphifyAdapterError(f"unsupported Graphify schema selector: {schema!r}")
     if payload["directed"] is not GRAPHIFY_EXPECTED_DIRECTED:
         raise GraphifyAdapterError(
             f"graph.json directed must be attested value {GRAPHIFY_EXPECTED_DIRECTED}"
@@ -459,22 +502,22 @@ def _payload_collections(
     hyperedges = payload["hyperedges"]
     if not isinstance(hyperedges, list) or hyperedges:
         raise GraphifyAdapterError("code-only Graphify snapshots must have no semantic hyperedges")
-    raw_nodes = payload["nodes"]
-    raw_edges = payload["links"]
-    if not isinstance(raw_nodes, list) or not isinstance(raw_edges, list):
+    node_values = payload["nodes"]
+    edge_values = payload["links"]
+    if not isinstance(node_values, list) or not isinstance(edge_values, list):
         raise GraphifyAdapterError("graph.json nodes and links must be lists")
-    if len(raw_nodes) > MAX_GRAPH_NODES or len(raw_edges) > MAX_GRAPH_EDGES:
+    if len(node_values) > MAX_GRAPH_NODES or len(edge_values) > MAX_GRAPH_EDGES:
         raise GraphifyAdapterError("graph.json exceeds the bounded node or edge limit")
     built_at_commit = payload.get("built_at_commit")
     if built_at_commit is not None:
         built_at_commit = _bounded_string(built_at_commit, "built_at_commit")
         if _GIT_OID.fullmatch(built_at_commit) is None:
             raise GraphifyAdapterError("built_at_commit must be a lowercase full Git OID")
-    return raw_nodes, raw_edges, built_at_commit
+    return node_values, edge_values, built_at_commit
 
 
 def _adapt_nodes(
-    raw_nodes: list[object], registry: _SourceRegistry
+    raw_nodes: list[object], registry: _SourceRegistry, *, raw_schema: bool = False
 ) -> tuple[tuple[GraphifyNode, ...], set[str]]:
     nodes: list[GraphifyNode] = []
     node_ids: set[str] = set()
@@ -503,6 +546,14 @@ def _adapt_nodes(
             node.get("source_location"),
             location,
         )
+        if (
+            raw_schema
+            and node.get("source_location") is not None
+            and re.fullmatch(r"L[1-9][0-9]*", cast("str", node["source_location"])) is None
+        ):
+            raise GraphifyAdapterError(
+                f"{location}.source_location must be a line-only Graphify marker"
+            )
         strength = _strength(node.get("confidence"), f"{location}.confidence", optional=True)
         _validate_optional_fields(node, location)
         assert source.relative_path is not None
@@ -520,9 +571,14 @@ def _adapt_nodes(
 
 
 def _adapt_edges(
-    raw_edges: list[object], registry: _SourceRegistry, node_ids: set[str]
+    raw_edges: list[object],
+    registry: _SourceRegistry,
+    node_ids: set[str],
+    *,
+    raw_schema: bool = False,
 ) -> tuple[GraphifyEdge, ...]:
     edges: list[GraphifyEdge] = []
+    seen_raw_edges: set[tuple[str, str, str, str, str, str | None]] = set()
     for index, raw_edge in enumerate(raw_edges):
         location = f"links[{index}]"
         if not isinstance(raw_edge, dict):
@@ -547,9 +603,57 @@ def _adapt_edges(
             )
         strength = _strength(edge["confidence"], f"{location}.confidence")
         assert strength is not None
-        span = _optional_edge_span(registry, edge, location)
         _validate_optional_fields(edge, location)
-        edges.append(GraphifyEdge(source_id, target_id, relation, orientation, strength, span))
+        if raw_schema and ("source_file" not in edge or edge.get("source_location") is None):
+            raise GraphifyAdapterError(
+                f"{location} requires source_file and line-only source_location"
+            )
+        raw_source_file: str | None = None
+        raw_source_location: str | None = None
+        if raw_schema:
+            raw_source_file = _bounded_string(edge["source_file"], f"{location}.source_file")
+            raw_source_location = _bounded_string(
+                edge["source_location"], f"{location}.source_location"
+            )
+            if re.fullmatch(r"L[1-9][0-9]*", raw_source_location) is None:
+                raise GraphifyAdapterError(
+                    f"{location}.source_location must be a line-only Graphify marker"
+                )
+            raw_edge_key = (
+                source_id,
+                target_id,
+                relation,
+                raw_source_file,
+                raw_source_location,
+                cast("str | None", edge.get("context")),
+            )
+            if raw_edge_key in seen_raw_edges:
+                raise GraphifyAdapterError(
+                    f"{location} duplicates an identical raw edge occurrence"
+                )
+            seen_raw_edges.add(raw_edge_key)
+        span = _optional_edge_span(registry, edge, location)
+        edge_key = edge.get("key")
+        if isinstance(edge_key, bool) or not isinstance(edge_key, (int, str, type(None))):
+            raise GraphifyAdapterError(f"{location}.key must be an integer, string, or null")
+        context_identity = None
+        if raw_schema and "context" in edge:
+            context = cast("str", edge["context"])
+            context_identity = hashlib.sha256(
+                b"graphify-raw-edge-context-v1\0" + context.encode("utf-8")
+            ).hexdigest()
+        edges.append(
+            GraphifyEdge(
+                source_id,
+                target_id,
+                relation,
+                orientation,
+                strength,
+                span,
+                edge_key,
+                context_identity,
+            )
+        )
     return tuple(edges)
 
 
@@ -571,27 +675,34 @@ def load_graphify_snapshot(
     project_root: Path,
     side: GraphSide,
     expected_sha256: str | None = None,
+    schema: str = GRAPHIFY_NODE_LINK_SCHEMA,
 ) -> GraphifySnapshot:
     """Read and validate one offline graph snapshot; never execute Graphify."""
     if side not in {"baseline", "target"}:
         raise GraphifyAdapterError(f"unsupported snapshot side: {side!r}")
     root = _resolve_project_root(project_root)
-    graph_sha256, payload = _read_graph_payload(graph_path, expected_sha256)
-    raw_nodes, raw_edges, built_at_commit = _payload_collections(payload)
+    if schema not in {GRAPHIFY_NODE_LINK_SCHEMA, GRAPHIFY_RAW_SCHEMA}:
+        raise GraphifyAdapterError(f"unsupported Graphify schema selector: {schema!r}")
+    graph_sha256, payload = _read_graph_payload(graph_path, expected_sha256, schema)
+    raw_nodes, raw_edges, built_at_commit = _payload_collections(payload, schema)
     registry = _SourceRegistry(root)
-    nodes, node_ids = _adapt_nodes(raw_nodes, registry)
-    edges = _adapt_edges(raw_edges, registry, node_ids)
+    nodes, node_ids = _adapt_nodes(raw_nodes, registry, raw_schema=schema == GRAPHIFY_RAW_SCHEMA)
+    edges = _adapt_edges(raw_edges, registry, node_ids, raw_schema=schema == GRAPHIFY_RAW_SCHEMA)
     registry.verify_unchanged()
     return GraphifySnapshot(
         side=side,
         graph_sha256=graph_sha256,
-        graph_schema_version=GRAPHIFY_GRAPH_SCHEMA_VERSION,
+        graph_schema_version=(
+            GRAPHIFY_RAW_SCHEMA_VERSION
+            if schema == GRAPHIFY_RAW_SCHEMA
+            else GRAPHIFY_GRAPH_SCHEMA_VERSION
+        ),
         expected_graphify_package=GRAPHIFY_PACKAGE_NAME,
         expected_graphify_version=GRAPHIFY_PACKAGE_VERSION,
         expected_graphify_command=GRAPHIFY_COMMAND_NAME,
         expected_version_output=GRAPHIFY_EXPECTED_VERSION_OUTPUT,
-        directed=GRAPHIFY_EXPECTED_DIRECTED,
-        multigraph=GRAPHIFY_EXPECTED_MULTIGRAPH,
+        directed=True,
+        multigraph=(schema == GRAPHIFY_NODE_LINK_SCHEMA),
         built_at_commit=built_at_commit,
         nodes=nodes,
         edges=edges,
@@ -621,6 +732,7 @@ def import_graphify_snapshot(
     side: GraphSide,
     receipt_path: Path,
     expected_sha256: str | None = None,
+    schema: str = GRAPHIFY_NODE_LINK_SCHEMA,
 ) -> GraphifySnapshot:
     """Validate an offline snapshot and exclusively publish its import receipt."""
     snapshot = load_graphify_snapshot(
@@ -628,6 +740,7 @@ def import_graphify_snapshot(
         project_root=project_root,
         side=side,
         expected_sha256=expected_sha256,
+        schema=schema,
     )
     try:
         with receipt_path.open("x", encoding="utf-8") as handle:

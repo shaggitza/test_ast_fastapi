@@ -92,6 +92,42 @@ def test_semantic_hashes_ignore_yaml_key_and_contract_order(tmp_path: Path) -> N
     assert left.contract_hashes == right.contract_hashes
 
 
+def test_yield_receiver_opt_in_changes_hash_without_changing_legacy_default(
+    tmp_path: Path,
+) -> None:
+    legacy = _document(
+        contracts=[
+            {
+                "id": "sql-begin",
+                "symbol": "sqlalchemy.orm.Session.begin",
+                "invocation": "instance_method",
+                "operation": "begin",
+                "channel": "sql",
+                "behavior": {
+                    "timing": "context_enter",
+                    "transaction_scope": "transaction",
+                    "context_exit": "transaction_commit_rollback",
+                },
+            }
+        ]
+    )
+    legacy["schema_version"] = 2
+    opted_in = json.loads(json.dumps(legacy))
+    opted_in["contracts"][0]["behavior"]["stage_receiver_from_yield"] = True
+    first = tmp_path / "legacy.yaml"
+    second = tmp_path / "opted-in.yaml"
+    _write_yaml(first, legacy)
+    _write_yaml(second, opted_in)
+
+    legacy_loaded = load_effect_contracts(first)
+    opted_in_loaded = load_effect_contracts(second)
+
+    assert legacy_loaded.preset_hash != opted_in_loaded.preset_hash
+    assert (
+        legacy_loaded.contract_hashes["sql-begin"] != opted_in_loaded.contract_hashes["sql-begin"]
+    )
+
+
 def test_loads_toml_document(tmp_path: Path) -> None:
     path = tmp_path / "effects.toml"
     path.write_text(
