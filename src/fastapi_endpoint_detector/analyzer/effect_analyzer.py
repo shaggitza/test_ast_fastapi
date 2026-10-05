@@ -347,11 +347,12 @@ class EffectAnalyzer:
                 continue
             for node in helper_nodes:
                 if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
-                    target = (
-                        node.targets[0]
-                        if isinstance(node, ast.Assign) and node.targets
-                        else node.target
-                    )
+                    if isinstance(node, ast.Assign):
+                        if not node.targets:
+                            continue
+                        target = node.targets[0]
+                    else:
+                        target = node.target
                     if self._root_name(target) == subject:
                         return True
                 if isinstance(node, ast.Delete) and any(
@@ -792,7 +793,7 @@ class EffectAnalyzer:
     @staticmethod
     def _control_relationship(
         call: ast.Call,
-        use: ast.Name,
+        use: ast.AST,
         parents: dict[ast.AST, ast.AST],
     ) -> tuple[bool, bool]:
         def signature(  # noqa: PLR0912 - explicit control-region taxonomy
