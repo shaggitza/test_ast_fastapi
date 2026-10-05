@@ -66,6 +66,7 @@ class _CallIndexer(ast.NodeVisitor):
         self.file_path = file_path
         self.qualname: list[str] = []
         self.calls: dict[tuple[int, int, int, int], _SourceCall] = {}
+        self._indexed_context_nodes: set[int] = set()
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         self.qualname.append(node.name)
@@ -82,6 +83,18 @@ class _CallIndexer(ast.NodeVisitor):
         if self.qualname:
             self._record(node, ".".join(self.qualname), None, None, overwrite=False)
         self.generic_visit(node)
+
+    def visit_With(self, node: ast.With) -> None:
+        self._visit_nested_context(node)
+        self.generic_visit(node)
+
+    def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
+        self._visit_nested_context(node)
+        self.generic_visit(node)
+
+    def _visit_nested_context(self, node: ast.With | ast.AsyncWith) -> None:
+        if self.qualname and id(node) not in self._indexed_context_nodes:
+            self._record_context(node, ".".join(self.qualname), None, ())
 
     def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         self.qualname.append(node.name)
@@ -108,6 +121,7 @@ class _CallIndexer(ast.NodeVisitor):
         *,
         context_id: str | None = None,
         context_body_index: int | None = None,
+        receiver_key_override: tuple[str, ...] | None = None,
         overwrite: bool = True,
     ) -> None:
         function = call.func
@@ -119,7 +133,7 @@ class _CallIndexer(ast.NodeVisitor):
             function.end_lineno,
             function.end_col_offset,
         )
-        receiver_key = (
+        receiver_key = receiver_key_override or (
             _receiver_key(function.value) if isinstance(function, ast.Attribute) else None
         )
         record = _SourceCall(
@@ -146,10 +160,22 @@ class _CallIndexer(ast.NodeVisitor):
         statement_index: int,
         function_body: tuple[ast.stmt, ...],
     ) -> None:
-        if len(statement.items) != 1 or statement.items[0].optional_vars is not None:
+        self._indexed_context_nodes.add(id(statement))
+        if len(statement.items) != 1:
             return
-        begin = _unwrap_call(statement.items[0].context_expr)
+        item = statement.items[0]
+        begin = _unwrap_call(item.context_expr)
         if begin is None:
+            return
+        captured_receiver = (
+            _target_key(item.optional_vars) if item.optional_vars is not None else None
+        )
+        if item.optional_vars is not None and captured_receiver is None:
+            return
+        begin_receiver = (
+            _receiver_key(begin.func.value) if isinstance(begin.func, ast.Attribute) else None
+        )
+        if begin_receiver is None and captured_receiver is None:
             return
         context_id = _semantic_hash(
             {
@@ -166,6 +192,7 @@ class _CallIndexer(ast.NodeVisitor):
             statement_index,
             function_body,
             context_id=context_id,
+            receiver_key_override=begin_receiver or captured_receiver,
         )
         context_body = tuple(statement.body)
         for body_index, body_statement in enumerate(context_body):
