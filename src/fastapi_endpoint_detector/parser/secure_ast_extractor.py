@@ -217,7 +217,11 @@ def _native_dependency_expressions(
                 )
                 if resolved is not None:
                     callable_expressions = (resolved,)
-                if known_shape and resolved is not None:
+                if (
+                    known_shape
+                    and resolved is not None
+                    and _is_local_function_dependency(extractor, module, target, value.lineno)
+                ):
                     confidence = "established"
         result.append(
             NativeRouteDependencyExpressionEvidence(
@@ -271,6 +275,17 @@ def _qualified_dependency_callable(
         if binding is not None and binding.symbol is None:
             return f"{binding.module}.{target.attr}"
     return None
+
+
+def _is_local_function_dependency(
+    extractor: SecureASTExtractor, module: _Module, target: ast.expr | None, line: int
+) -> bool:
+    """Only assert a callable is established when its local function binding is exact."""
+    return (
+        isinstance(target, ast.Name)
+        and not _lexically_bound_name(module, target.id, line)
+        and extractor._function_at(module, target.id, line) is not None
+    )
 
 
 def _lexically_bound_name(module: _Module, name: str, line: int) -> bool:
@@ -1325,6 +1340,9 @@ class SecureASTExtractor:
                     and route.source_span is not None
                 ):
                     source_owners: list[NativeRouteSourceOwnerEvidence] = []
+                    handler_dependency_expressions: list[
+                        NativeRouteDependencyExpressionEvidence
+                    ] = []
                     handler_module = modules.get(route.handler.module)
                     if handler_module is not None:
                         handler_node = next(
@@ -1338,6 +1356,46 @@ class SecureASTExtractor:
                             None,
                         )
                         if handler_node is not None:
+                            parameter_expressions: list[ast.expr] = [
+                                argument.annotation
+                                for argument in (
+                                    *handler_node.args.posonlyargs,
+                                    *handler_node.args.args,
+                                    *handler_node.args.kwonlyargs,
+                                )
+                                if argument.annotation is not None
+                            ]
+                            parameter_expressions.extend(handler_node.args.defaults)
+                            parameter_expressions.extend(
+                                item for item in handler_node.args.kw_defaults if item is not None
+                            )
+                            for parameter_expression in parameter_expressions:
+                                for candidate in ast.walk(parameter_expression):
+                                    if not isinstance(candidate, ast.Call):
+                                        continue
+                                    constructor_name = (
+                                        candidate.func.id
+                                        if isinstance(candidate.func, ast.Name)
+                                        else candidate.func.attr
+                                        if isinstance(candidate.func, ast.Attribute)
+                                        else None
+                                    )
+                                    if (
+                                        constructor_name not in {"Depends", "Security"}
+                                        and _canonical_dependency_constructor(
+                                            self,
+                                            handler_module,
+                                            candidate.func,
+                                            candidate.lineno,
+                                        )
+                                        is None
+                                    ):
+                                        continue
+                                    dependency_expression = _native_dependency_expressions(
+                                        self, handler_module, "route", candidate
+                                    )
+                                    if dependency_expression:
+                                        handler_dependency_expressions.extend(dependency_expression)
                             source_owners.append(
                                 NativeRouteSourceOwnerEvidence(
                                     side=self.snapshot_side,
@@ -1478,17 +1536,56 @@ class SecureASTExtractor:
                             candidate
                             for candidate in ast.walk(parent_module.tree)
                             if isinstance(candidate, ast.Call)
-                            and candidate.lineno == structural_edge.source_span.start_line
+                            and _native_span(parent_module.path, candidate)
+                            == structural_edge.source_span
+                            and isinstance(candidate.func, ast.Attribute)
+                            and candidate.func.attr == structural_edge.operation
                         ]
                         for edge_call in edge_calls:
+                            assert isinstance(edge_call.func, ast.Attribute)
+                            resolved_parent = self._resolve_object(
+                                edge_call.func.value,
+                                parent_module,
+                                aliases,
+                                modules,
+                                edge_call.lineno,
+                            )
+                            if (
+                                resolved_parent is None
+                                and isinstance(edge_call.func.value, ast.Attribute)
+                                and edge_call.func.value.attr == "router"
+                            ):
+                                resolved_parent = self._resolve_object(
+                                    edge_call.func.value.value,
+                                    parent_module,
+                                    aliases,
+                                    modules,
+                                    edge_call.lineno,
+                                )
+                            if resolved_parent is None or resolved_parent.key != (
+                                structural_edge.parent_module,
+                                structural_edge.parent_symbol,
+                            ):
+                                continue
                             arguments = edge_call.args
+                            child_keyword = (
+                                "router" if structural_edge.operation == "include_router" else "app"
+                            )
+                            keyword_arguments = [
+                                item.value
+                                for item in edge_call.keywords
+                                if item.arg == child_keyword
+                            ]
+                            positional_index = 0 if child_keyword == "router" else 1
                             child_argument = (
-                                arguments[0]
-                                if structural_edge.operation == "include_router" and arguments
-                                else arguments[1]
-                                if structural_edge.operation == "mount" and len(arguments) > 1
+                                keyword_arguments[0]
+                                if len(keyword_arguments) == 1
+                                else arguments[positional_index]
+                                if not keyword_arguments and len(arguments) > positional_index
                                 else None
                             )
+                            if len(keyword_arguments) > 1:
+                                continue
                             if isinstance(child_argument, ast.Call) and isinstance(
                                 child_argument.func, ast.Name
                             ):
@@ -1506,6 +1603,18 @@ class SecureASTExtractor:
                                     for statement in parent_module.tree.body
                                     if isinstance(statement, (ast.Import, ast.ImportFrom))
                                     and statement.lineno == import_binding.line
+                                    and any(
+                                        (
+                                            alias.asname
+                                            or (
+                                                alias.name.split(".")[0]
+                                                if isinstance(statement, ast.Import)
+                                                else alias.name
+                                            )
+                                        )
+                                        == child_argument.id
+                                        for alias in statement.names
+                                    )
                                 ),
                                 None,
                             )
@@ -1537,6 +1646,11 @@ class SecureASTExtractor:
                                             for statement in exported_module.tree.body
                                             if isinstance(statement, (ast.Import, ast.ImportFrom))
                                             and statement.lineno == forward_binding.line
+                                            and any(
+                                                (alias.asname or alias.name)
+                                                == import_binding.symbol
+                                                for alias in statement.names
+                                            )
                                         ),
                                         None,
                                     )
@@ -1601,7 +1715,10 @@ class SecureASTExtractor:
                             owner_symbol=route.owner[1],
                             occurrence_order=route.line,
                             source_span=route.source_span,
-                            dependency_expressions=route.dependency_expressions,
+                            dependency_expressions=(
+                                *route.dependency_expressions,
+                                *handler_dependency_expressions,
+                            ),
                         ),
                         object_chain=current_object_chain,
                         assembly_chain=assembly_chain,

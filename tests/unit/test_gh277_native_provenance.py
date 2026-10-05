@@ -124,6 +124,18 @@ def test_dependency_binding_alias_keyword_and_shadowing_are_conservative(tmp_pat
             "established",
             ("keyword.dep",),
         ),
+        "external.py": (
+            "from fastapi import APIRouter, FastAPI, Depends\n"
+            "from thirdparty.dependencies import dep\n"
+            "router = APIRouter(dependencies=[Depends(dep)])\n"
+            "@router.get('/external')\n"
+            "def external(): pass\n"
+            "app = FastAPI()\n"
+            "app.include_router(router)\n",
+            "depends",
+            "conditional",
+            ("thirdparty.dependencies.dep",),
+        ),
     }
     for filename, (source, kind, confidence, callables) in cases.items():
         path = tmp_path / filename
@@ -270,3 +282,133 @@ def test_bootstrap_registration_owner_is_exact_to_the_bootstrap_route_call(
         item.owner_kind == "bootstrap_registration"
         for item in native_route_structural_owners(endpoint, app_file, {3})
     )
+
+
+def test_same_line_keyword_include_calls_keep_exact_import_owners(tmp_path: Path) -> None:
+    first_file = tmp_path / "first_routes.py"
+    first_file.write_text(
+        "from fastapi import APIRouter\n"
+        "router = APIRouter()\n"
+        "@router.get('/first')\n"
+        "def first(): pass\n",
+        encoding="utf-8",
+    )
+    second_file = tmp_path / "second_routes.py"
+    second_file.write_text(
+        "from fastapi import APIRouter\n"
+        "router = APIRouter()\n"
+        "@router.get('/second')\n"
+        "def second(): pass\n",
+        encoding="utf-8",
+    )
+    exports_file = tmp_path / "exports.py"
+    exports_file.write_text(
+        "from first_routes import router as first\n__all__ = ['first']\n",
+        encoding="utf-8",
+    )
+    app_file = tmp_path / "main.py"
+    app_file.write_text(
+        "from fastapi import FastAPI\n"
+        "from exports import first as alias1; from second_routes import router as alias2\n"
+        "app = FastAPI()\n"
+        "app.router.include_router(router=alias1); app.include_router(router=alias2)\n",
+        encoding="utf-8",
+    )
+
+    endpoints = SecureASTExtractor(app_file).extract_endpoints()
+    first = next(endpoint for endpoint in endpoints if endpoint.identifier == "GET /first")
+    second = next(endpoint for endpoint in endpoints if endpoint.identifier == "GET /second")
+    first_evidence = first.native_provenance
+    second_evidence = second.native_provenance
+    assert first_evidence is not None and second_evidence is not None
+    first_imports = {
+        owner.qualified_binding: owner.related_binding
+        for owner in first_evidence.source_owners
+        if owner.owner_kind == "import_binding"
+    }
+    second_imports = {
+        owner.qualified_binding: owner.related_binding
+        for owner in second_evidence.source_owners
+        if owner.owner_kind == "import_binding"
+    }
+    assert first_imports == {"main.alias1": "exports.first"}
+    assert second_imports == {"main.alias2": "second_routes.router"}
+    assert any(owner.owner_kind == "reexport" for owner in first_evidence.source_owners)
+    first_edge = first_evidence.assembly_chain[0]
+    second_edge = second_evidence.assembly_chain[0]
+    assert first_edge.source_span != second_edge.source_span
+    assert first_edge.source_span.start_line == second_edge.source_span.start_line == 4
+
+
+def test_annotated_and_security_handler_dependencies_are_route_scoped(tmp_path: Path) -> None:
+    app_file = tmp_path / "main.py"
+    app_file.write_text(
+        "from typing import Annotated\n"
+        "from fastapi import Depends, FastAPI, Security as Guard\n"
+        "def nested(): pass\n"
+        "def scopes(): pass\n"
+        "app = FastAPI()\n"
+        "@app.get('/annotated')\n"
+        "def annotated(\n"
+        "    value: Annotated[int, Depends(nested)],\n"
+        "    token=Guard(dependency=scopes, scopes=['x']),\n"
+        "): pass\n",
+        encoding="utf-8",
+    )
+    endpoint = SecureASTExtractor(app_file).extract_endpoints()[0]
+    provenance = endpoint.native_provenance
+    assert provenance is not None
+    expressions = provenance.registration.dependency_expressions
+    assert [(item.kind, item.callable_expressions) for item in expressions] == [
+        ("depends", ("main.nested",)),
+        ("security", ("main.scopes",)),
+    ]
+    assert all(item.scope == "route" and item.confidence == "established" for item in expressions)
+
+
+def test_same_line_mount_keyword_apps_keep_distinct_import_owners(tmp_path: Path) -> None:
+    first_file = tmp_path / "first_apps.py"
+    first_file.write_text(
+        "from fastapi import FastAPI\nchild = FastAPI()\n@child.get('/first')\ndef first(): pass\n",
+        encoding="utf-8",
+    )
+    second_file = tmp_path / "second_apps.py"
+    second_file.write_text(
+        "from fastapi import FastAPI\n"
+        "child = FastAPI()\n"
+        "@child.get('/second')\n"
+        "def second(): pass\n",
+        encoding="utf-8",
+    )
+    app_file = tmp_path / "main.py"
+    app_file.write_text(
+        "from fastapi import FastAPI\n"
+        "from first_apps import child as first; from second_apps import child as second\n"
+        "app = FastAPI()\n"
+        "app.mount('/one', app=first); app.mount('/two', app=second)\n",
+        encoding="utf-8",
+    )
+    endpoints = SecureASTExtractor(app_file).extract_endpoints()
+    first = next(endpoint for endpoint in endpoints if endpoint.identifier == "GET /one/first")
+    second = next(endpoint for endpoint in endpoints if endpoint.identifier == "GET /two/second")
+    first_provenance = first.native_provenance
+    second_provenance = second.native_provenance
+    assert first_provenance is not None and second_provenance is not None
+    assert first_provenance.assembly_chain[0].operation == "mount"
+    assert second_provenance.assembly_chain[0].operation == "mount"
+    assert (
+        first_provenance.assembly_chain[0].source_span
+        != second_provenance.assembly_chain[0].source_span
+    )
+    first_bindings = [
+        owner.qualified_binding
+        for owner in first_provenance.source_owners
+        if owner.owner_kind == "import_binding"
+    ]
+    second_bindings = [
+        owner.qualified_binding
+        for owner in second_provenance.source_owners
+        if owner.owner_kind == "import_binding"
+    ]
+    assert first_bindings == ["main.first"]
+    assert second_bindings == ["main.second"]
