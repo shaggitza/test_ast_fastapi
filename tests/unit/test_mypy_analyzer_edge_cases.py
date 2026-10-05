@@ -559,6 +559,75 @@ def handler(flag: bool):
 
         assert analyzer.analyze_endpoint(endpoint).references_file(str(tmp_path / "effects.py"))
 
+    @pytest.mark.parametrize(
+        ("function_name", "expected_state", "executes_effect"),
+        [
+            ("deferred_lambda_dead", "deferred", False),
+            ("invoked_lambda_live", "executed", True),
+            ("ambiguous_lambda_dead", None, False),
+        ],
+    )
+    def test_same_line_lambda_bodies_keep_precise_execution_state(
+        self,
+        tmp_path: Path,
+        function_name: str,
+        expected_state: str | None,
+        executes_effect: bool,
+    ) -> None:
+        effects = tmp_path / "effects.py"
+        effects.write_text("def leaf_alias() -> int:\n    return 1\n", encoding="utf-8")
+        service = tmp_path / "service.py"
+        service.write_text(
+            "from effects import leaf_alias\n\n"
+            "def deferred_lambda_dead() -> int: label = 'é😀'; "
+            "hidden = lambda: leaf_alias(); return 0\n"
+            "def invoked_lambda_live() -> int: label = 'é😀'; "
+            "hidden = lambda: leaf_alias(); return hidden()\n"
+            "def ambiguous_lambda_dead() -> int: label = 'é😀'; "
+            "first = lambda: leaf_alias(); "
+            "second = lambda: leaf_alias(); return 0\n",
+            encoding="utf-8",
+        )
+        main = tmp_path / "main.py"
+        main.write_text(
+            f"from service import {function_name}\n\n"
+            f"def handler() -> int:\n    return {function_name}()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/test",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(
+                name="handler",
+                module="main",
+                file_path=main,
+                line_number=3,
+            ),
+        )
+        analyzer = MypyAnalyzer(tmp_path)
+        deps = analyzer.analyze_endpoint(endpoint)
+
+        spans = deps.get_source_evidence_spans(str(service))
+        if expected_state is None:
+            assert spans == []
+        else:
+            assert len(spans) == 1
+            assert spans[0].execution_state == expected_state
+            lambda_line = service.read_text(encoding="utf-8").splitlines()[spans[0].start_line - 1]
+            lambda_bytes = lambda_line.encode("utf-8")
+            assert lambda_bytes[spans[0].start_column : spans[0].end_column] == b"leaf_alias()"
+        assert deps.references_file(str(effects)) is executes_effect
+
+        cache = tmp_path / "analysis-cache.json"
+        analyzer.set_cache_path(cache)
+        analyzer.analyze_endpoints([endpoint], use_cache=True)
+        cached = MypyAnalyzer(tmp_path)
+        cached.set_cache_path(cache)
+        loaded = cached.analyze_endpoints([endpoint], use_cache=True)[
+            cached._endpoint_key(endpoint)
+        ]
+        assert loaded.get_source_evidence_spans(str(service)) == spans
+
     def test_invoked_wrappers_do_not_own_dead_deferred_or_unawaited_body_lines(
         self, tmp_path: Path
     ) -> None:
