@@ -4,10 +4,32 @@ Diff data models.
 Models representing parsed diff files and changes.
 """
 
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
 from pydantic import BaseModel, Field
+
+
+class DiffLineContent(BaseModel):
+    """Changed source-line text retained for precise side-aware mapping."""
+
+    line_number: int = Field(ge=1)
+    group: int = Field(ge=1)
+    text: str
+
+    class Config:
+        frozen = True
+
+
+@dataclass(frozen=True)
+class ChangedByteSpan:
+    """A changed half-open UTF-8 byte interval on one source line."""
+
+    line_number: int
+    start_column: int
+    end_column: int
+    exact: bool = True
 
 
 class ChangeType(str, Enum):
@@ -34,6 +56,8 @@ class DiffHunk(BaseModel):
         default_factory=list,
         description="Line numbers of removed lines (in source)",
     )
+    added_content: list[DiffLineContent] = Field(default_factory=list)
+    removed_content: list[DiffLineContent] = Field(default_factory=list)
 
     class Config:
         frozen = True

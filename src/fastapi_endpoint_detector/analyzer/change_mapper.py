@@ -76,8 +76,12 @@ from fastapi_endpoint_detector.parser.fastapi_extractor import FastAPIExtractor
 from fastapi_endpoint_detector.parser.secure_ast_extractor import SecureASTExtractor
 
 if TYPE_CHECKING:
+    from fastapi_endpoint_detector.analyzer.mypy_analyzer import (
+        EndpointDependencies,
+        SourceEvidenceSpan,
+    )
     from fastapi_endpoint_detector.analyzer.source_inventory import SourceFile, SourceInventory
-    from fastapi_endpoint_detector.models.diff import DiffFile
+    from fastapi_endpoint_detector.models.diff import ChangedByteSpan, DiffFile
     from fastapi_endpoint_detector.models.effect_contract import LoadedEffectContracts
     from fastapi_endpoint_detector.models.effect_contract_audit import (
         EffectContractAudit,
@@ -923,6 +927,9 @@ class ChangeMapper:
         overlap = deps.references_lines(file_path, changed_lines)
 
         if overlap:
+            side = "source" if analyzer is not None else "target"
+            if self._change_is_deferred_lambda_only(deps, diff_file, overlap, side=side):
+                return None
             display_lines = overlap
 
             # Get call stacks for traceback-style output - all paths
@@ -1104,6 +1111,61 @@ class ChangeMapper:
             )
 
         return None
+
+    @staticmethod
+    def _change_is_deferred_lambda_only(
+        deps: EndpointDependencies,
+        diff_file: DiffFile,
+        overlap_lines: set[int],
+        *,
+        side: str,
+    ) -> bool:
+        """Suppress only exact edits wholly inside deferred lambda bodies.
+
+        Side-qualified diff spans and CPython UTF-8 AST columns must both be
+        available. Missing or inexact source alignment fails closed to the
+        existing dependency candidate.
+        """
+        changes = DiffParser.get_changed_byte_spans(diff_file, side=side)
+        expected_lines = set(
+            DiffParser.get_changed_line_numbers(diff_file)[0 if side == "target" else 1]
+        )
+        content_lines = {
+            line.line_number
+            for hunk in diff_file.hunks
+            for line in (hunk.added_content if side == "target" else hunk.removed_content)
+        }
+        if not expected_lines <= content_lines:
+            return False
+        relevant_changes = [change for change in changes if change.line_number in overlap_lines]
+        if any(not change.exact for change in relevant_changes):
+            return False
+        deferred_spans = deps.get_source_evidence_spans(
+            str(diff_file.path), execution_state="deferred"
+        )
+        if not deferred_spans:
+            return False
+        executed_spans = deps.get_source_evidence_spans(
+            str(diff_file.path), execution_state="executed"
+        )
+        if not relevant_changes:
+            # This side has no changed bytes (for example, a suffix deletion
+            # represented by a replacement line). The opposite side owns the
+            # actual text edit; do not attribute it to this snapshot.
+            return True
+
+        def contained(change: ChangedByteSpan, span: SourceEvidenceSpan) -> bool:
+            if not span.start_line <= change.line_number <= span.end_line:
+                return False
+            if change.line_number == span.start_line and change.start_column < span.start_column:
+                return False
+            return not (change.line_number == span.end_line and change.end_column > span.end_column)
+
+        return all(
+            any(contained(change, span) for span in deferred_spans)
+            and not any(contained(change, span) for span in executed_spans)
+            for change in relevant_changes
+        )
 
     def _analyze_diff_file(
         self,

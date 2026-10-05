@@ -3,6 +3,7 @@ Integration tests for the CLI.
 """
 
 import json
+from difflib import unified_diff
 from pathlib import Path
 
 import pytest
@@ -245,6 +246,105 @@ contracts:
         )
 
         assert result.exit_code == 0, result.output
+
+    @pytest.mark.parametrize(
+        ("function_name", "invoke_lambda", "same_line_call", "expected_candidate"),
+        [
+            ("deferred_lambda_control", False, False, False),
+            ("live_invoked_lambda_counterpart", True, False, True),
+            ("same_line_executed_call_counterpart", False, True, True),
+        ],
+    )
+    def test_cli_maps_only_executed_lambda_body_edits(
+        self,
+        runner: CliRunner,
+        tmp_path: Path,
+        function_name: str,
+        invoke_lambda: bool,
+        same_line_call: bool,
+        expected_candidate: bool,
+    ) -> None:
+        baseline_app = tmp_path / "baseline" / "app"
+        target_app = tmp_path / "target" / "app"
+        baseline_app.mkdir(parents=True)
+        target_app.mkdir(parents=True)
+        (baseline_app / "helpers.py").write_text(
+            "def leaf_alias() -> int:\n    return 1\n", encoding="utf-8"
+        )
+        (target_app / "helpers.py").write_text(
+            "def leaf_alias() -> int:\n    return 1\n", encoding="utf-8"
+        )
+
+        before = "hidden = lambda: leaf_alias()"
+        after = "hidden = lambda: leaf_alias() + 1"
+        if same_line_call:
+            baseline_service = (
+                "from .helpers import leaf_alias\n\n"
+                f"def {function_name}() -> int:\n"
+                f"    {before}; return leaf_alias()\n"
+            )
+            target_service = baseline_service.replace(
+                before + "; return leaf_alias()",
+                after + "; return leaf_alias() + 2",
+            )
+        else:
+            baseline_service = (
+                "from .helpers import leaf_alias\n\n"
+                f"def {function_name}() -> int:\n"
+                f"    {before}\n" + ("    return hidden()\n" if invoke_lambda else "    return 0\n")
+            )
+            target_service = baseline_service.replace(before, after)
+        (baseline_app / "service.py").write_text(baseline_service, encoding="utf-8")
+        (target_app / "service.py").write_text(target_service, encoding="utf-8")
+
+        app_source = (
+            "from fastapi import FastAPI\n"
+            f"from .service import {function_name}\n"
+            "app = FastAPI()\n"
+            "@app.get('/one')\n"
+            f"def route_one() -> int:\n    return {function_name}()\n"
+        )
+        (baseline_app / "__init__.py").write_text(app_source, encoding="utf-8")
+        (target_app / "__init__.py").write_text(app_source, encoding="utf-8")
+
+        diff_text = "".join(
+            unified_diff(
+                baseline_service.splitlines(keepends=True),
+                target_service.splitlines(keepends=True),
+                fromfile="a/service.py",
+                tofile="b/service.py",
+                n=0,
+            )
+        )
+        diff_file = tmp_path / "lambda-body.diff"
+        diff_file.write_text(
+            "diff --git a/service.py b/service.py\n" + diff_text,
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(
+            cli,
+            [
+                "analyze",
+                "--app",
+                str(target_app),
+                "--baseline-app",
+                str(baseline_app),
+                "--diff",
+                str(diff_file),
+                "--format",
+                "json",
+                "--no-cache",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        candidates = json.loads(result.output)["candidate_endpoints"]
+        if expected_candidate:
+            assert [item["endpoint"]["path"] for item in candidates] == ["/one"]
+            assert candidates[0]["confidence"] == "medium"
+        else:
+            assert candidates == []
 
     def test_baseline_app_rejected_by_runtime_mode(self, runner: CliRunner, tmp_path: Path) -> None:
         app = tmp_path / "app"

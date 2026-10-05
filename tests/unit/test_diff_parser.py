@@ -246,6 +246,38 @@ index 1111111..2222222 100644
         assert len(added) > 0  # Should have added lines
         assert all(isinstance(line, int) for line in added)
 
+    def test_changed_byte_spans_are_column_qualified_on_both_sides(self) -> None:
+        before = "label = 'é😀'; hidden = lambda: get_value() + 1"
+        after = "label = 'é😀'; hidden = lambda: get_value()"
+        diff = (
+            "diff --git a/service.py b/service.py\n"
+            "--- a/service.py\n"
+            "+++ b/service.py\n"
+            "@@ -1 +1 @@\n"
+            f"-{before}\n"
+            f"+{after}\n"
+        )
+
+        parsed = DiffParser.parse_string(diff)[0]
+        source_changes = DiffParser.get_changed_byte_spans(parsed, side="source")
+        target_changes = DiffParser.get_changed_byte_spans(parsed, side="target")
+
+        expected_start = len(before[: before.index(" + 1")].encode("utf-8"))
+        assert [
+            (item.line_number, item.start_column, item.end_column) for item in source_changes
+        ] == [(1, expected_start, len(before.encode("utf-8")))]
+        assert target_changes == []
+
+        inserted = after + " + 2"
+        insertion_diff = diff.replace(f"-{before}\n", f"-{after}\n").replace(
+            f"+{after}\n", f"+{inserted}\n"
+        )
+        inserted_file = DiffParser.parse_string(insertion_diff)[0]
+        target_insertion = DiffParser.get_changed_byte_spans(inserted_file, side="target")
+        assert [
+            (item.line_number, item.start_column, item.end_column) for item in target_insertion
+        ] == [(1, len(after.encode("utf-8")), len(inserted.encode("utf-8")))]
+
     def test_parse_file_not_found(self) -> None:
         """Test that parsing a non-existent file raises an error."""
         with pytest.raises(DiffParserError):
