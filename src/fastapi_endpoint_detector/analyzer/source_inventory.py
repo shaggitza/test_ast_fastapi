@@ -215,11 +215,11 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
                 None,
             )
             if local is None and symlink_match is not None:
-                module, relative = symlink_match
+                symlink_module_name, symlink_relative = symlink_match
                 unresolved.add((rel_by_path[path], imported))
                 limitations.add(
                     f"Local import {imported!r} from {rel_by_path[path]} resolves through "
-                    f"rejected symlink source {relative} (module {module!r})"
+                    f"rejected symlink source {symlink_relative} (module {symlink_module_name!r})"
                 )
                 continue
             if local is None:
