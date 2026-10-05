@@ -263,8 +263,9 @@ def _shadowed_client_names(tokens: list[_Token]) -> tuple[set[str], set[str]]:  
             shadowed.add(token.value)
 
     def bind_parameters(start: int, end: int) -> None:
-        # Capture the first identifier in each top-level parameter, which is
-        # sufficient for simple names and conservative for destructuring.
+        # Mark every client-like identifier in the parameter pattern. This can
+        # suppress a global for a type/default reference too, but never guesses
+        # that a destructured local is the browser global.
         begin = start
         depth = 0
         for pos in range(start, end + 1):
@@ -276,12 +277,29 @@ def _shadowed_client_names(tokens: list[_Token]) -> tuple[set[str], set[str]]:  
                 depth -= 1
             elif value == "," and depth == 0:
                 for candidate in tokens[begin:pos]:
-                    if candidate.kind == "id":
+                    if candidate.kind == "id" and candidate.value in names:
                         bind(candidate)
-                        break
                 begin = pos + 1
 
     for index, token in enumerate(tokens):
+        # This structural check must run for punctuation tokens too; arrow
+        # parameters are enclosed by the closing-parenthesis token.
+        if (
+            token.value == ")"
+            and index + 2 < len(tokens)
+            and tokens[index + 1].value == "="
+            and tokens[index + 2].value == ">"
+        ):
+            opening = index - 1
+            depth = 1
+            while opening >= 0 and depth:
+                if tokens[opening].value == ")":
+                    depth += 1
+                elif tokens[opening].value == "(":
+                    depth -= 1
+                opening -= 1
+            if depth == 0:
+                bind_parameters(opening + 2, index)
         if token.kind != "id":
             continue
         if token.value in {"const", "let", "var", "class", "function"} and index + 1 < len(tokens):
@@ -307,23 +325,18 @@ def _shadowed_client_names(tokens: list[_Token]) -> tuple[set[str], set[str]]:  
             if parsed is not None:
                 _args, closing = parsed
                 bind_parameters(index + 2, closing)
-        # Parenthesized arrow parameters.
-        if (
-            token.value == ")"
-            and index + 2 < len(tokens)
-            and tokens[index + 1].value == "="
-            and tokens[index + 2].value == ">"
-        ):
-            opening = index - 1
-            depth = 1
-            while opening >= 0 and depth:
-                if tokens[opening].value == ")":
-                    depth += 1
-                elif tokens[opening].value == "(":
-                    depth -= 1
-                opening -= 1
-            if depth == 0:
-                bind_parameters(opening + 2, index)
+        if token.value == "for" and index + 2 < len(tokens):
+            opening = index + 1 if tokens[index + 1].value == "(" else index
+            candidate = opening + 1
+            while candidate < len(tokens) and tokens[candidate].value not in {"of", "in", ";", "}"}:
+                candidate += 1
+            if (
+                candidate < len(tokens)
+                and tokens[candidate].value in {"of", "in"}
+                and opening + 1 < len(tokens)
+            ):
+                for binding in tokens[opening + 1 : candidate]:
+                    bind(binding)
         # Single-identifier arrow parameter.
         if (
             index + 2 < len(tokens)
@@ -332,7 +345,22 @@ def _shadowed_client_names(tokens: list[_Token]) -> tuple[set[str], set[str]]:  
         ):
             bind(token)
         # Any direct assignment may rebind a global before or after a call.
-        if token.value in names and index + 1 < len(tokens) and tokens[index + 1].value == "=":
+        if (
+            token.value in names
+            and index + 1 < len(tokens)
+            and tokens[index + 1].value
+            in {
+                "=",
+                "+",
+                "-",
+                "*",
+                "/",
+                "%",
+                "&",
+                "|",
+                "?",
+            }
+        ):
             bind(token)
         # Imported axios default/namespace bindings are accepted only from the
         # canonical package. Other imported names shadow browser globals.

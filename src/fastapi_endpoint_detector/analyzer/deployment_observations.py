@@ -241,82 +241,324 @@ def _literal_argv(node: ast.AST) -> tuple[str, ...] | None:
     return tuple(values)
 
 
-def extract_subprocess_observations(  # noqa: PLR0912
+@dataclass
+class _PythonScope:
+    kind: str
+    parent: _PythonScope | None
+    local_names: set[str]
+    writes: set[str]
+    globals: set[str]
+    nonlocals: set[str]
+    imports: dict[str, list[tuple[int, tuple[str, str] | None, bool]]]
+
+
+class _ScopeBindings(ast.NodeVisitor):
+    """Collect one Python scope without leaking nested imports or locals."""
+
+    def __init__(self) -> None:
+        self.local_names: set[str] = set()
+        self.writes: set[str] = set()
+        self.globals: set[str] = set()
+        self.nonlocals: set[str] = set()
+        self.imports: dict[str, list[tuple[int, tuple[str, str] | None, bool]]] = {}
+        self.conditional = False
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, (ast.Store, ast.Del)):
+            self.local_names.add(node.id)
+            self.writes.add(node.id)
+
+    def visit_arg(self, node: ast.arg) -> None:
+        self.local_names.add(node.arg)
+        self.writes.add(node.arg)
+
+    def visit_Global(self, node: ast.Global) -> None:
+        self.globals.update(node.names)
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+        self.nonlocals.update(node.names)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.name is not None:
+            self.local_names.add(node.name)
+            self.writes.add(node.name)
+        if node.type is not None:
+            self.visit(node.type)
+        self._visit_conditional_statements(node.body)
+
+    def _visit_conditional_statements(self, statements: list[ast.stmt]) -> None:
+        previous = self.conditional
+        self.conditional = True
+        for statement in statements:
+            self.visit(statement)
+        self.conditional = previous
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            local = alias.asname or alias.name.split(".")[0]
+            self.local_names.add(local)
+            binding = ("module", "subprocess") if alias.name == "subprocess" else None
+            self.imports.setdefault(local, []).append((node.lineno, binding, self.conditional))
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        for alias in node.names:
+            local = alias.asname or alias.name
+            self.local_names.add(local)
+            binding = (
+                ("function", alias.name)
+                if node.module == "subprocess" and alias.name in _SUBPROCESS_CALLS
+                else None
+            )
+            self.imports.setdefault(local, []).append((node.lineno, binding, self.conditional))
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function_scope(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function_scope(node)
+
+    def _visit_function_scope(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        self.local_names.add(node.name)
+        self.writes.add(node.name)
+        for expression in (*node.decorator_list, *node.args.defaults, *node.args.kw_defaults):
+            if expression is not None:
+                self.visit(expression)
+        if node.returns is not None:
+            self.visit(node.returns)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.local_names.add(node.name)
+        self.writes.add(node.name)
+        for expression in (*node.decorator_list, *node.bases, *node.keywords):
+            self.visit(expression)
+
+    def _visit_conditional(self, node: ast.AST) -> None:
+        previous = self.conditional
+        self.conditional = True
+        self.generic_visit(node)
+        self.conditional = previous
+
+    visit_If = _visit_conditional
+    visit_For = _visit_conditional
+    visit_AsyncFor = _visit_conditional
+    visit_While = _visit_conditional
+    visit_Try = _visit_conditional
+    visit_TryStar = _visit_conditional
+    visit_With = _visit_conditional
+    visit_AsyncWith = _visit_conditional
+
+    def visit_Match(self, node: ast.Match) -> None:
+        self.visit(node.subject)
+        previous = self.conditional
+        self.conditional = True
+        for case in node.cases:
+            self.visit(case)
+        self.conditional = previous
+
+    def visit_match_case(self, node: ast.match_case) -> None:
+        self.visit(node.pattern)
+        if node.guard is not None:
+            self.visit(node.guard)
+        for statement in node.body:
+            self.visit(statement)
+
+    def visit_MatchAs(self, node: ast.MatchAs) -> None:
+        if node.name is not None:
+            self.local_names.add(node.name)
+            self.writes.add(node.name)
+        if node.pattern is not None:
+            self.visit(node.pattern)
+
+    def visit_MatchStar(self, node: ast.MatchStar) -> None:
+        if node.name is not None:
+            self.local_names.add(node.name)
+            self.writes.add(node.name)
+
+    def visit_comprehension(self, node: ast.comprehension) -> None:
+        # Comprehension targets belong to their implicit scope, not this one.
+        self.visit(node.iter)
+        for condition in node.ifs:
+            self.visit(condition)
+
+    def scope(self, kind: str, parent: _PythonScope | None) -> _PythonScope:
+        return _PythonScope(
+            kind,
+            parent,
+            self.local_names - self.globals - self.nonlocals,
+            self.writes - self.globals - self.nonlocals,
+            self.globals,
+            self.nonlocals,
+            self.imports,
+        )
+
+
+def _scope_for(
+    kind: str,
+    parent: _PythonScope | None,
+    body: list[ast.stmt],
+    arguments: ast.arguments | None = None,
+) -> _PythonScope:
+    collector = _ScopeBindings()
+    if arguments is not None:
+        collector.visit(arguments)
+    for statement in body:
+        collector.visit(statement)
+    return collector.scope(kind, parent)
+
+
+def _scope_import(scope: _PythonScope, name: str, line: int) -> tuple[str, str] | None:
+    """Resolve an imported client only when it is active and unambiguous."""
+    current: _PythonScope | None = scope
+    while current is not None:
+        if name in current.globals:
+            current = current.parent
+            while current is not None and current.kind != "module":
+                current = current.parent
+            continue
+        if name in current.nonlocals:
+            return None
+        if name in current.local_names:
+            if name in current.writes:
+                return None
+            candidates = current.imports.get(name, [])
+            active = [item for item in candidates if item[0] <= line]
+            if not active or any(conditional for _, _, conditional in active):
+                return None
+            return active[-1][1]
+        current = current.parent
+    return None
+
+
+class _SubprocessObserver(ast.NodeVisitor):
+    def __init__(self, path: Path, module: ast.Module) -> None:
+        self.path = path
+        self.module = module
+        self.scope = _scope_for("module", None, module.body)
+        self.observations: list[DeploymentObservation] = []
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function(node)
+
+    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        for expression in (*node.decorator_list, *node.args.defaults, *node.args.kw_defaults):
+            if expression is not None:
+                self.visit(expression)
+        if node.returns is not None:
+            self.visit(node.returns)
+        parent = self.scope.parent if self.scope.kind == "class" else self.scope
+        previous = self.scope
+        self.scope = _scope_for("function", parent, node.body, node.args)
+        for statement in node.body:
+            self.visit(statement)
+        self.scope = previous
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        for expression in (*node.decorator_list, *node.bases, *node.keywords):
+            self.visit(expression)
+        previous = self.scope
+        self.scope = _scope_for("class", previous, node.body)
+        for statement in node.body:
+            self.visit(statement)
+        self.scope = previous
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        for expression in (*node.args.defaults, *node.args.kw_defaults):
+            if expression is not None:
+                self.visit(expression)
+        previous = self.scope
+        self.scope = _scope_for("function", previous, [], node.args)
+        self.visit(node.body)
+        self.scope = previous
+
+    def _visit_comprehension(
+        self,
+        generators: list[ast.comprehension],
+        expressions: tuple[ast.AST, ...],
+    ) -> None:
+        if generators:
+            self.visit(generators[0].iter)
+        collector = _ScopeBindings()
+        for generator in generators:
+            collector.visit(generator.target)
+        previous = self.scope
+        self.scope = collector.scope("comprehension", previous)
+        for index, generator in enumerate(generators):
+            if index:
+                self.visit(generator.iter)
+            for condition in generator.ifs:
+                self.visit(condition)
+        for expression in expressions:
+            self.visit(expression)
+        self.scope = previous
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        self._visit_comprehension(node.generators, (node.elt,))
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        self._visit_comprehension(node.generators, (node.elt,))
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        self._visit_comprehension(node.generators, (node.elt,))
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        self._visit_comprehension(node.generators, (node.key, node.value))
+
+    def visit_Call(self, node: ast.Call) -> None:
+        call_name: str | None = None
+        if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+            binding = _scope_import(self.scope, node.func.value.id, node.lineno)
+            if binding == ("module", "subprocess") and node.func.attr in _SUBPROCESS_CALLS:
+                call_name = node.func.attr
+        elif isinstance(node.func, ast.Name):
+            binding = _scope_import(self.scope, node.func.id, node.lineno)
+            if binding is not None and binding[0] == "function":
+                call_name = binding[1]
+        if call_name is not None:
+            shell = next(
+                (keyword.value for keyword in node.keywords if keyword.arg == "shell"),
+                ast.Constant(value=False),
+            )
+            argv = _literal_argv(node.args[0]) if node.args else None
+            if isinstance(shell, ast.Constant) and shell.value is False and argv is not None:
+                self.observations.append(
+                    DeploymentObservation(
+                        self.path, node.lineno, "subprocess_argv", call_name, argv, "exact"
+                    )
+                )
+            else:
+                reason = (
+                    "shell execution is excluded"
+                    if isinstance(shell, ast.Constant) and shell.value is True
+                    else "dynamic argv or shell mode"
+                )
+                self.observations.append(
+                    DeploymentObservation(
+                        self.path,
+                        node.lineno,
+                        "subprocess_argv",
+                        call_name,
+                        None,
+                        "uncertain",
+                        reason,
+                    )
+                )
+        self.generic_visit(node)
+
+
+def extract_subprocess_observations(
     source: str, source_path: Path | str = "<memory>"
 ) -> tuple[DeploymentObservation, ...]:
-    """Observe calls through a canonical subprocess import with literal argv.
-
-    Import aliases are supported. Any parameter or assignment that can rebind
-    an imported name invalidates that name file-wide, a conservative policy
-    that avoids resolving Python lexical scopes approximately.
-    """
+    """Observe canonical subprocess imports without leaking bindings across scopes."""
     path = Path(source_path)
     try:
         tree = ast.parse(source, filename=str(path))
     except SyntaxError:
         return ()
-    module_names: set[str] = set()
-    function_names: dict[str, str] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name == "subprocess":
-                    module_names.add(alias.asname or alias.name)
-        elif isinstance(node, ast.ImportFrom) and node.module == "subprocess":
-            for alias in node.names:
-                if alias.name in _SUBPROCESS_CALLS:
-                    function_names[alias.asname or alias.name] = alias.name
-
-    imported_names = module_names | set(function_names)
-    rebound_names: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
-            if node.id in imported_names:
-                rebound_names.add(node.id)
-        elif isinstance(node, ast.arg) and node.arg in imported_names:
-            rebound_names.add(node.arg)
-        elif (
-            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-            and node.name in imported_names
-        ):
-            rebound_names.add(node.name)
-
-    module_names -= rebound_names
-    function_names = {
-        name: function for name, function in function_names.items() if name not in rebound_names
-    }
-    observations: list[DeploymentObservation] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        call_name: str | None = None
-        if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
-            if node.func.value.id in module_names and node.func.attr in _SUBPROCESS_CALLS:
-                call_name = node.func.attr
-        elif isinstance(node.func, ast.Name) and node.func.id in function_names:
-            call_name = function_names[node.func.id]
-        if call_name is None:
-            continue
-        shell = next(
-            (keyword.value for keyword in node.keywords if keyword.arg == "shell"),
-            ast.Constant(value=False),
-        )
-        argv = _literal_argv(node.args[0]) if node.args else None
-        if isinstance(shell, ast.Constant) and shell.value is False and argv is not None:
-            observations.append(
-                DeploymentObservation(
-                    path, node.lineno, "subprocess_argv", call_name, argv, "exact"
-                )
-            )
-        else:
-            reason = (
-                "shell execution is excluded"
-                if isinstance(shell, ast.Constant) and shell.value is True
-                else "dynamic argv or shell mode"
-            )
-            observations.append(
-                DeploymentObservation(
-                    path, node.lineno, "subprocess_argv", call_name, None, "uncertain", reason
-                )
-            )
-    return tuple(sorted(observations, key=lambda item: (item.line, item.kind, item.key or "")))
+    observer = _SubprocessObserver(path, tree)
+    observer.visit(tree)
+    return tuple(
+        sorted(observer.observations, key=lambda item: (item.line, item.kind, item.key or ""))
+    )

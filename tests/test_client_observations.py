@@ -141,3 +141,16 @@ def test_unshadowed_browser_and_canonical_axios_imports_remain_supported() -> No
         ("GET", "/items"),
         ("GET", "/items"),
     ]
+
+
+def test_parenthesized_arrow_and_destructured_parameters_shadow_client_globals() -> None:
+    source = """
+(fetch) => fetch('https://api.test/a');
+(axios) => axios.get('https://api.test/a');
+({fetch}) => fetch('https://api.test/b');
+({client: axios}) => axios.get('https://api.test/c');
+"""
+    observations = extract_client_observations(source)
+    server = EstablishedSurface("server:a", "/a", "GET", "https://api.test", True)
+    assert observations == ()
+    assert join_established_surfaces(observations, (server,)) == ()

@@ -93,3 +93,23 @@ def test_subprocess_requires_canonical_import_and_rejects_shadowing() -> None:
         ""
     )
     assert untrusted == ()
+
+
+def test_subprocess_import_aliases_are_scope_local_and_resolved_at_callsite() -> None:
+    observations = extract_subprocess_observations(
+        "import subprocess as proc\n"
+        "def local():\n"
+        "    import subprocess\n"
+        "    subprocess.run(['inside-function'])\n"
+        "class Runner:\n"
+        "    from subprocess import run as launch\n"
+        "    launch(['inside-class'])\n"
+        "def shadowed(proc):\n"
+        "    proc.run(['parameter'])\n"
+        "proc.run(['module-global'])\n"
+    )
+    assert [(item.key, item.value, item.certainty) for item in observations] == [
+        ("run", ("inside-function",), "exact"),
+        ("run", ("inside-class",), "exact"),
+        ("run", ("module-global",), "exact"),
+    ]
