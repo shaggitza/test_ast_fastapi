@@ -20,8 +20,7 @@ def _dag(root: Path, size: int = 6) -> dict[str, Path]:
     for index in range(size):
         next_import = f"from m{index + 1} import f{index + 1}\n" if index + 1 < size else ""
         next_call = (
-            f"    return f{index + 1}(value)\n"
-            if index + 1 < size else "    return value\n"
+            f"    return f{index + 1}(value)\n" if index + 1 < size else "    return value\n"
         )
         (root / f"m{index}.py").write_text(
             f"{next_import}\ndef f{index}(value: int) -> int:\n{next_call}", encoding="utf-8"
@@ -123,14 +122,26 @@ def test_unrelated_module_edit_does_not_disturb_unchanged_typed_modules(tmp_path
 def test_config_content_change_invalidates_provider_state(tmp_path: Path) -> None:
     inventory = _dag(tmp_path)
     config = tmp_path / "mypy.ini"
-    config.write_text("[mypy]\npython_version = 3.11\n", encoding="utf-8")
-    provider = MypyIncrementalProvider(BuildConfig(tmp_path, config_file=config))
-    provider.build(inventory)
     config.write_text(
-        "[mypy]\npython_version = 3.11\nstrict_optional = True\n", encoding="utf-8"
+        "[mypy]\npython_version = 3.11\nignore_missing_imports = False\n",
+        encoding="utf-8",
+    )
+    provider = MypyIncrementalProvider(BuildConfig(tmp_path, config_file=config))
+    cold = provider.build(inventory)
+    config.write_text(
+        "[mypy]\npython_version = 3.11\nignore_missing_imports = True\n",
+        encoding="utf-8",
     )
     rebuilt = provider.build(inventory)
     fresh = MypyIncrementalProvider(BuildConfig(tmp_path, config_file=config)).build(inventory)
     assert rebuilt.report.mode == "fallback_full_rebuild"
     assert "configuration/cache fingerprint" in (rebuilt.report.reason or "")
+    assert rebuilt.report.cache_fingerprint != cold.report.cache_fingerprint
+    assert rebuilt.report.cache_fingerprint == fresh.report.cache_fingerprint
     assert rebuilt.typed_snapshot() == fresh.typed_snapshot()
+
+    unchanged = provider.build(inventory)
+    assert unchanged.report.mode == "no_change_reuse"
+    assert unchanged.report.reason is None
+    assert unchanged.report.cache_fingerprint == fresh.report.cache_fingerprint
+    assert unchanged.typed_snapshot() == fresh.typed_snapshot()

@@ -20,9 +20,11 @@ from typing import TYPE_CHECKING, Any
 
 from mypy.build import BuildSource, build
 from mypy.config_parser import parse_config_file
+from mypy.fscache import FileSystemCache
 from mypy.nodes import CallExpr
 from mypy.options import Options
 from mypy.server.update import FineGrainedBuildManager
+from mypy.util import hash_digest
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -44,8 +46,17 @@ class _CallTypeCollector:
         self.seen.add(id(node))
         if isinstance(node, CallExpr):
             self.calls.append(node)
-        ignored = {"node", "info", "type", "unanalyzed_type", "original_def",
-                   "original_first_arg", "def_var", "expanded", "analyzed"}
+        ignored = {
+            "node",
+            "info",
+            "type",
+            "unanalyzed_type",
+            "original_def",
+            "original_first_arg",
+            "def_var",
+            "expanded",
+            "analyzed",
+        }
         for cls in type(node).__mro__:
             for field in getattr(cls, "__mypyc_attrs__", ()):
                 if field.startswith("_") or field in ignored:
@@ -120,10 +131,7 @@ class TypedBuild:
                 visitor._visit(tree)
                 for expr in visitor.calls:
                     typ = self.manager.manager.all_types.get(expr)
-                    rows.append(
-                        f"call-type:{expr.line}:{expr.column}:"
-                        f"{expr!s}:{typ!r}"
-                    )
+                    rows.append(f"call-type:{expr.line}:{expr.column}:{expr!s}:{typ!r}")
             snapshot[module] = tuple(sorted(rows))
         return snapshot
 
@@ -150,14 +158,16 @@ class MypyIncrementalProvider:
         config_hash = None
         if config_path is not None:
             config_hash = hashlib.sha256(config_path.read_bytes()).hexdigest()
-        return _digest({
-            "engine": self.config.engine,
-            "mypy": version("mypy"),
-            "python": self.config.python_version,
-            "options": self.config.mypy_options,
-            "config": config_hash,
-            "root": str(self.config.source_root.resolve()),
-        })
+        return _digest(
+            {
+                "engine": self.config.engine,
+                "mypy": version("mypy"),
+                "python": self.config.python_version,
+                "options": self.config.mypy_options,
+                "config": config_hash,
+                "root": str(self.config.source_root.resolve()),
+            }
+        )
 
     def _options(self) -> Options:
         opts = Options()
@@ -192,45 +202,41 @@ class MypyIncrementalProvider:
         old = self._typed
         start = time.perf_counter()
         if old is None:
-            result = build(
-                [BuildSource(path, module, None, str(self.config.source_root.resolve()))
-                 for module, path in sorted(canonical.items())],
-                self._options(),
+            return self._full_rebuild(
+                canonical, inventory_fp, start, mode="cold_build", reason=None
             )
-            fg = FineGrainedBuildManager(result)
-            self._source_digests = {m: _file_digest(p) for m, p in canonical.items()}
-            report = self._report(
-                "cold_build", None, start, tuple(sorted(canonical)), (), result.errors,
-                inventory_fp,
-            )
-            self._typed = TypedBuild(result, fg, report, canonical)
-            self._imports = _import_fingerprint(canonical)
-            return self._typed
 
-        reason = self._fallback_reason(old, canonical)
+        source_snapshot = _capture_sources(canonical)
+        reason = self._fallback_reason(old, canonical, source_snapshot)
         if reason:
             self._typed = None
-            current = self.build(canonical)
-            current.report = BuildReport(
-                "fallback_full_rebuild", reason, time.perf_counter() - start,
-                current.report.updated_modules, current.report.removed_modules,
-                current.report.diagnostics, inventory_fp, current.report.cache_fingerprint,
+            return self._full_rebuild(
+                canonical,
+                inventory_fp,
+                start,
+                mode="fallback_full_rebuild",
+                reason=reason,
             )
-            return current
 
-        # mypy's fine-grained API consumes source paths and clears its AST cache
-        # before each update; changed file contents are detected by the caller's
-        # inventory snapshot below, stored independently of mypy's parse cache.
+        # Capture and prime mypy's filesystem cache so typechecking consumes the
+        # exact bytes represented by the digests and import topology below.
+        source_digests = _source_digests(source_snapshot)
         prior_files = getattr(self, "_source_digests", {})
         changed = sorted(
-            module for module, path in canonical.items()
+            module
+            for module, path in canonical.items()
             if old.module_paths.get(module) != path
-            or prior_files.get(module) != _file_digest(path)
+            or prior_files.get(module) != source_digests[module]
         )
         removed = sorted(set(old.module_paths) - set(canonical))
         if not changed and not removed:
             report = self._report(
-                "no_change_reuse", None, start, (), (), old.report.diagnostics,
+                "no_change_reuse",
+                None,
+                start,
+                (),
+                (),
+                old.report.diagnostics,
                 inventory_fp,
             )
             reused = TypedBuild(old.result, old.manager, report, old.module_paths)
@@ -239,6 +245,7 @@ class MypyIncrementalProvider:
         fg = old.manager
         fg.flush_cache()
         fg.manager.fscache.flush()
+        _prime_source_snapshot(fg.manager.fscache, canonical, source_snapshot)
         try:
             diagnostics = fg.update(
                 [(m, canonical[m]) for m in changed],
@@ -259,21 +266,80 @@ class MypyIncrementalProvider:
             )
             return rebuilt
         result = old.result
-        self._source_digests = {m: _file_digest(p) for m, p in canonical.items()}
-        self._imports = _import_fingerprint(canonical)
+        self._source_digests = source_digests
+        self._imports = _import_fingerprint_from_sources(canonical, source_snapshot)
         report = self._report(
-            "incremental_update", None, start, tuple(fg.updated_modules),
-            tuple(removed), diagnostics, inventory_fp,
+            "incremental_update",
+            None,
+            start,
+            tuple(fg.updated_modules),
+            tuple(removed),
+            diagnostics,
+            inventory_fp,
         )
         self._typed = TypedBuild(result, fg, report, canonical)
         return self._typed
 
-    def _fallback_reason(self, old: TypedBuild, inventory: Mapping[str, str]) -> str | None:
+    def _full_rebuild(
+        self,
+        canonical: dict[str, str],
+        inventory_fp: str,
+        start: float,
+        *,
+        mode: str,
+        reason: str | None,
+    ) -> TypedBuild:
+        """Build against one captured source snapshot and commit its fingerprint."""
+        config_fp = self._fingerprint_config()
+        source_snapshot = _capture_sources(canonical)
+        fscache = FileSystemCache()
+        _prime_source_snapshot(fscache, canonical, source_snapshot)
+        result = build(
+            [
+                BuildSource(path, module, None, str(self.config.source_root.resolve()))
+                for module, path in sorted(canonical.items())
+            ],
+            self._options(),
+            fscache=fscache,
+        )
+        # The caller's configuration or files may have changed while mypy ran.
+        # Do not publish a cache identity that does not describe this build.
+        if self._fingerprint_config() != config_fp:
+            raise IncrementalBuildError("configuration changed during full rebuild")
+        if _capture_sources(canonical) != source_snapshot:
+            raise IncrementalBuildError("source files changed during full rebuild")
+        fg = FineGrainedBuildManager(result)
+        source_digests = _source_digests(source_snapshot)
+        cache_fp = _cache_fingerprint(config_fp, inventory_fp, source_digests)
+        report = BuildReport(
+            mode,
+            reason,
+            time.perf_counter() - start,
+            tuple(sorted(canonical)),
+            (),
+            tuple(result.errors),
+            inventory_fp,
+            cache_fp,
+        )
+        typed = TypedBuild(result, fg, report, canonical)
+        # Commit state only after the build and source/config validation succeed.
+        self._config_fingerprint = config_fp
+        self._source_digests = source_digests
+        self._imports = _import_fingerprint_from_sources(canonical, source_snapshot)
+        self._typed = typed
+        return typed
+
+    def _fallback_reason(
+        self,
+        old: TypedBuild,
+        inventory: Mapping[str, str],
+        sources: Mapping[str, bytes],
+    ) -> str | None:
         if self._fingerprint_config() != self._config_fingerprint:
             return "engine/configuration/cache fingerprint changed"
         if set(old.module_paths) != set(inventory):
             return "source inventory identities changed; fine-grained root graph must be rebuilt"
-        if getattr(self, "_imports", None) != _import_fingerprint(inventory):
+        if getattr(self, "_imports", None) != _import_fingerprint_from_sources(inventory, sources):
             return "import topology changed; rebuilding to remove stale import edges"
         if any(old.module_paths[m] != path for m, path in inventory.items()):
             return "canonical module paths changed"
@@ -281,28 +347,72 @@ class MypyIncrementalProvider:
             return "non-canonical module identity"
         return None
 
-    def _report(self, mode: str, reason: str | None, start: float,
-                updated: tuple[str, ...], removed: tuple[str, ...], diagnostics: Any,
-                inventory_fp: str) -> BuildReport:
-        cache_fp = _digest({"config": self._config_fingerprint, "inventory": inventory_fp,
-                            "sources": getattr(self, "_source_digests", {})})
-        return BuildReport(mode, reason, time.perf_counter() - start, updated, removed,
-                           tuple(diagnostics), inventory_fp, cache_fp)
+    def _report(
+        self,
+        mode: str,
+        reason: str | None,
+        start: float,
+        updated: tuple[str, ...],
+        removed: tuple[str, ...],
+        diagnostics: Any,
+        inventory_fp: str,
+    ) -> BuildReport:
+        cache_fp = _cache_fingerprint(
+            self._config_fingerprint,
+            inventory_fp,
+            getattr(self, "_source_digests", {}),
+        )
+        return BuildReport(
+            mode,
+            reason,
+            time.perf_counter() - start,
+            updated,
+            removed,
+            tuple(diagnostics),
+            inventory_fp,
+            cache_fp,
+        )
 
 
-def _file_digest(path: str) -> str:
-    try:
-        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
-    except OSError:
-        return "<missing>"
-
-
-def _import_fingerprint(inventory: Mapping[str, str]) -> str:
-    rows: list[tuple[str, tuple[str, ...]]] = []
+def _capture_sources(inventory: Mapping[str, str]) -> dict[str, bytes]:
+    snapshot: dict[str, bytes] = {}
     for module, path in sorted(inventory.items()):
         try:
-            tree = ast.parse(Path(path).read_text(encoding="utf-8"))
-        except (OSError, SyntaxError, UnicodeError):
+            snapshot[module] = Path(path).read_bytes()
+        except OSError as exc:
+            raise IncrementalBuildError(
+                f"cannot capture source for module {module!r}: {path}"
+            ) from exc
+    return snapshot
+
+
+def _source_digests(sources: Mapping[str, bytes]) -> dict[str, str]:
+    return {module: hashlib.sha256(content).hexdigest() for module, content in sources.items()}
+
+
+def _cache_fingerprint(config_fp: str, inventory_fp: str, sources: Mapping[str, str]) -> str:
+    return _digest({"config": config_fp, "inventory": inventory_fp, "sources": sources})
+
+
+def _prime_source_snapshot(
+    fscache: FileSystemCache,
+    inventory: Mapping[str, str],
+    sources: Mapping[str, bytes],
+) -> None:
+    for module, path in inventory.items():
+        content = sources[module]
+        fscache.read_cache[path] = content
+        fscache.hash_cache[path] = hash_digest(content)
+
+
+def _import_fingerprint_from_sources(
+    inventory: Mapping[str, str], sources: Mapping[str, bytes]
+) -> str:
+    rows: list[tuple[str, tuple[str, ...]]] = []
+    for module, _path in sorted(inventory.items()):
+        try:
+            tree = ast.parse(sources[module].decode("utf-8"))
+        except (KeyError, SyntaxError, UnicodeError):
             rows.append((module, ("<unreadable>",)))
             continue
         imports: list[str] = []
