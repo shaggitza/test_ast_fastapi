@@ -1,0 +1,111 @@
+{
+  "schema_version": 2,
+  "fixture_id": "gh97-package-analyzer-cases-v2",
+  "cases": [
+    {
+      "case_id": "requests-session-get-exact-release-symbol",
+      "distribution": "requests",
+      "version": "2.32.3",
+      "symbol": "requests.sessions.Session.get",
+      "preset_selector": "http-clients-v1",
+      "arguments": [
+        {
+          "kind": "positional",
+          "value": "https://example.test/resource"
+        }
+      ]
+    },
+    {
+      "case_id": "aiohttp-session-get-exact-release-symbol",
+      "distribution": "aiohttp",
+      "version": "3.11.11",
+      "symbol": "aiohttp.client.ClientSession.get",
+      "preset_selector": "http-clients-v1",
+      "arguments": [
+        {
+          "kind": "positional",
+          "value": "https://example.test/resource"
+        }
+      ]
+    },
+    {
+      "case_id": "redis-get-exact-release-symbol",
+      "distribution": "redis",
+      "version": "5.2.1",
+      "symbol": "redis.commands.core.BasicKeyCommands.get",
+      "preset_selector": "redis-v1",
+      "arguments": [
+        {
+          "kind": "positional",
+          "value": "account:42"
+        }
+      ]
+    },
+    {
+      "case_id": "pymongo-insert-one-exact-release-symbol",
+      "distribution": "pymongo",
+      "version": "4.10.1",
+      "symbol": "pymongo.synchronous.collection.Collection.insert_one",
+      "preset_selector": "mongodb-v1",
+      "arguments": [
+        {
+          "kind": "positional",
+          "value": "document:42"
+        }
+      ]
+    },
+    {
+      "case_id": "sqlalchemy-session-add-exact-release-symbol",
+      "distribution": "sqlalchemy",
+      "version": "2.0.36",
+      "symbol": "sqlalchemy.orm.session.Session.add",
+      "preset_selector": "sqlalchemy-v1",
+      "arguments": [
+        {
+          "kind": "positional",
+          "value": "record:42"
+        }
+      ]
+    },
+    {
+      "case_id": "typed-s3-put-object-exact-release-symbol",
+      "distribution": "mypy-boto3-s3",
+      "version": "1.35.92",
+      "symbol": "mypy_boto3_s3.client.S3Client.put_object",
+      "preset_selector": "object-storage-v1",
+      "arguments": [
+        {
+          "kind": "keyword",
+          "name": "Bucket",
+          "value": "fixture-bucket"
+        },
+        {
+          "kind": "keyword",
+          "name": "Key",
+          "value": "fixture-key"
+        },
+        {
+          "kind": "keyword",
+          "name": "Body",
+          "value": "fixture-payload"
+        }
+      ]
+    }
+  ],
+  "unsupported_cases": [
+    {
+      "case_id": "motor-async-descriptor-not-evaluated",
+      "distribution": "motor",
+      "version": "3.6.0",
+      "symbol": "motor.core.AgnosticCollection.insert_one",
+      "reason_code": "descriptor_signature_unavailable"
+    },
+    {
+      "case_id": "sqs-send-message-no-exact-contract",
+      "distribution": "mypy-boto3-sqs",
+      "version": "1.35.91",
+      "symbol": "mypy_boto3_sqs.client.SQSClient.send_message",
+      "reason_code": "no_exact_preset_contract"
+    }
+  ]
+}
