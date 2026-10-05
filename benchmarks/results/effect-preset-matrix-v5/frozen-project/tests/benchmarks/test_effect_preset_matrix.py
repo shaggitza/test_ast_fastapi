@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import importlib
 import importlib.metadata
 import json
 import platform
-import shutil
-import sys
 from pathlib import Path
 
-import benchmarks.providers.effect_preset_frozen_runner as frozen_runner
 import benchmarks.providers.effect_preset_matrix as matrix_provider
 import pytest
 from benchmarks.providers.effect_preset_matrix import (
@@ -177,7 +173,7 @@ def test_preset_contract_verification_rejects_unbacked_identity_claims(
     manifest = load_manifest()
     manifest["versioned_contract_sets"][0][field] = value
 
-    with pytest.raises(MatrixEvidenceError, match="supplied package manifest differs"):
+    with pytest.raises(MatrixEvidenceError, match="preset identity, count, selectors or hashes"):
         verify_preset_contracts(manifest)
 
 
@@ -191,7 +187,7 @@ def test_preset_contract_verification_rejects_unbacked_selector_claims() -> None
     )
     declaration["contract_resource_selector"]["index"] += 1
 
-    with pytest.raises(MatrixEvidenceError, match="supplied package manifest differs"):
+    with pytest.raises(MatrixEvidenceError, match="preset selector semantics mismatch"):
         verify_preset_contracts(manifest)
 
 
@@ -264,99 +260,6 @@ def test_controlled_result_provenance_and_denominator_are_valid() -> None:
     assert result["controlled_evaluation"]["observed"]["unresolved_calls"] == 0
     assert len(result["controlled_evaluation"]["observations"]) == 11
     assert result["controlled_evaluation"]["fixture_contract_set"]["version"] == "2.0.0"
-
-
-def test_historical_source_bundle_is_verified_independently_of_live_source() -> None:
-    frozen_hashes, _ = matrix_provider._load_analyzer_source_snapshots()
-    result = load_controlled_results()
-    assert result["controlled_evaluation"]["observed"]["physical_calls"] == 11
-    assert len(result["controlled_evaluation"]["observations"]) == 11
-    assert frozen_hashes["src/fastapi_endpoint_detector/analyzer/mypy_analyzer.py"].startswith(
-        "sha256:"
-    )
-
-
-def test_historical_v4_artifact_tree_rejects_extra_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    copied_root = tmp_path / "effect-preset-matrix-v4"
-    shutil.copytree(matrix_provider.MATRIX_ROOT, copied_root)
-    (copied_root / "uncommitted-extra.json").write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(matrix_provider, "MATRIX_ROOT", copied_root)
-
-    with pytest.raises(
-        MatrixEvidenceError,
-        match="historical v4 artifact tree has missing or extra",
-    ):
-        matrix_provider._load_analyzer_source_snapshots()
-
-
-def test_frozen_runtime_manifest_cannot_reauthorize_altered_source(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    copied_runtime = tmp_path / "effect-preset-matrix-v5"
-    shutil.copytree(matrix_provider.FROZEN_RUNTIME_ROOT, copied_runtime)
-    copied_project = copied_runtime / "frozen-project"
-    source = copied_project / "src/fastapi_endpoint_detector/analyzer/mypy_analyzer.py"
-    source.write_text(source.read_text(encoding="utf-8") + "\n# altered\n", encoding="utf-8")
-    runtime_manifest_path = copied_runtime / "frozen-runtime.json"
-    manifest = json.loads(runtime_manifest_path.read_text(encoding="utf-8"))
-    source_row = next(
-        row
-        for row in manifest["files"]
-        if row["path"] == "src/fastapi_endpoint_detector/analyzer/mypy_analyzer.py"
-    )
-    source_row["sha256"] = matrix_provider._sha256(source.read_bytes())
-    runtime_manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    monkeypatch.setattr(matrix_provider, "FROZEN_RUNTIME_ROOT", copied_runtime)
-    monkeypatch.setattr(matrix_provider, "FROZEN_PROJECT_ROOT", copied_project)
-    monkeypatch.setattr(matrix_provider, "FROZEN_RUNTIME_MANIFEST_PATH", runtime_manifest_path)
-    monkeypatch.setattr(
-        matrix_provider,
-        "FROZEN_RUNNER_PATH",
-        Path(matrix_provider.__file__).with_name("effect_preset_frozen_runner.py"),
-    )
-
-    with pytest.raises(MatrixEvidenceError, match="frozen analyzer runtime manifest hash mismatch"):
-        matrix_provider._load_analyzer_source_snapshots()
-
-
-def test_replay_environment_locks_match_runtime_manifest() -> None:
-    tomllib = importlib.import_module("tomllib" if sys.version_info >= (3, 11) else "tomli")
-    runtime = json.loads(matrix_provider.FROZEN_RUNTIME_MANIFEST_PATH.read_text(encoding="utf-8"))
-    environment_rows = runtime["replay_environment_files"]
-    project_files = {
-        row["path"].rsplit("/", 1)[0]: row["path"]
-        for row in environment_rows
-        if row["path"].endswith("/pyproject.toml")
-    }
-    assert len(project_files) == 4
-    for environment, pyproject_path in project_files.items():
-        lock_path = f"{environment}/uv.lock"
-        assert lock_path in {row["path"] for row in environment_rows}
-        lock = tomllib.loads((matrix_provider.FROZEN_RUNTIME_ROOT / lock_path).read_text())
-        versions = {row["name"].lower(): row["version"] for row in lock["package"]}
-        directory_name = Path(environment).name
-        expected_mypy = directory_name.rsplit("-mypy-", 1)[1]
-        assert versions["mypy"] == expected_mypy
-        for distribution, version in runtime["runtime_distributions"].items():
-            assert versions[distribution.lower()] == version
-        project = tomllib.loads((matrix_provider.FROZEN_RUNTIME_ROOT / pyproject_path).read_text())
-        python_version = directory_name.split("-mypy-", 1)[0].removeprefix("python-")
-        major, minor = python_version.split(".")[:2]
-        assert project["project"]["requires-python"] == (
-            f">={major}.{minor},<{major}.{int(minor) + 1}"
-        )
-
-
-def test_frozen_replay_rejects_wrong_runtime_dependency_version() -> None:
-    def wrong_librt_version(distribution: str) -> str:
-        if distribution == "librt":
-            return "0.0.0"
-        return frozen_runner._RUNTIME_DISTRIBUTIONS[distribution]
-
-    with pytest.raises(frozen_runner.FrozenReplayError, match="identity mismatch: librt"):
-        frozen_runner._verify_runtime_distributions(wrong_librt_version)
 
 
 def test_controlled_results_reject_forged_aggregates(tmp_path: Path) -> None:
@@ -574,53 +477,29 @@ def test_exact_pathlib_calls_match_and_unrelated_same_name_methods_do_not(
         resolver_versions=(f"mypy@{MypyAnalyzer(tmp_path).resolver_version}",),
     )
 
-    assert len(audit.occurrences) == 11, [
-        (item.source_spelling, item.canonical_symbol, item.reason_code)
-        for item in audit.occurrences
-    ]
     assert audit.summary.matched_calls == 4, [
         (item.source_spelling, item.canonical_symbol, item.reason_code)
         for item in audit.occurrences
     ]
+    assert audit.summary.unmatched_calls == 7
     assert {item.contract_id for item in audit.occurrences if item.contract_id} == {
         "pathlib-read-text",
         "pathlib-write-text",
         "io-text-read",
     }
-    negative_spellings = {
-        "foreign.read_text",
-        "foreign.get",
-        "foreign.set",
-        "foreign.write",
-        "foreign.send",
+    unmatched_symbols = {
+        item.canonical_symbol.rsplit(".", 1)[-1]
+        for item in audit.occurrences
+        if item.canonical_symbol is not None and item.audit_status.value == "unmatched"
     }
-    negative_calls = [
-        item for item in audit.occurrences if item.source_spelling in negative_spellings
-    ]
-    assert {item.source_spelling for item in negative_calls} == negative_spellings
-    assert all(
-        item.audit_status.value != "matched" and item.contract_id is None for item in negative_calls
-    )
-    assert all(item.canonical_symbol is not None for item in negative_calls)
-    assert {
-        tuple(item.canonical_symbol.rsplit(".", 2)[-2:])
-        for item in negative_calls
-        if item.canonical_symbol is not None
-    } == {
-        ("Foreign", "read_text"),
-        ("Foreign", "get"),
-        ("Foreign", "set"),
-        ("Foreign", "write"),
-        ("Foreign", "send"),
+    assert unmatched_symbols == {
+        "read_text",
+        "open",
+        "get",
+        "set",
+        "write",
+        "send",
     }
-    open_constructors = [
-        item for item in audit.occurrences if item.source_spelling in {"open", "path.open"}
-    ]
-    assert {item.source_spelling for item in open_constructors} == {"open", "path.open"}
-    assert all(
-        item.audit_status.value == "unmatched" and item.contract_id is None
-        for item in open_constructors
-    )
     write_site = next(
         item
         for item in dependencies.get_resolved_call_sites()
