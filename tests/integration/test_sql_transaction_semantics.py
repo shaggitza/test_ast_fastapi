@@ -119,7 +119,7 @@ def _candidate_projection(report: AnalysisReport) -> list[dict[str, object]]:
 
 
 def _fixture_endpoint_calls(fixture: Path) -> tuple[Endpoint, tuple[ResolvedCallSite, ...]]:
-    """Build resolver inputs from the pinned handler AST and its explicit imports."""
+    """Resolve only call names proven by imports; leave untyped receiver calls unresolved."""
     relative = Path("source/langflow/api/v1/traces.py.txt")
     file_path = fixture / relative
     source = file_path.read_bytes()
@@ -129,6 +129,12 @@ def _fixture_endpoint_calls(fixture: Path) -> tuple[Endpoint, tuple[ResolvedCall
         for node in tree.body
         if isinstance(node, ast.AsyncFunctionDef) and node.name == "delete_traces_by_flow"
     )
+    imported_symbols = {
+        alias.asname or alias.name: f"{node.module}.{alias.name}"
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+        for alias in node.names
+    }
     prefix = next(
         keyword.value.value
         for node in tree.body
@@ -173,32 +179,24 @@ def _fixture_endpoint_calls(fixture: Path) -> tuple[Endpoint, tuple[ResolvedCall
             "resolver": "pinned_fixture_ast",
             "resolver_version": "1",
         }
-        exact = {
-            "session.execute": (
-                "sqlalchemy.ext.asyncio.session.AsyncSession.execute",
-                InvocationKind.INSTANCE_METHOD,
-            ),
-            "session_scope": (
-                "langflow.services.deps.session_scope",
-                InvocationKind.FUNCTION,
-            ),
-        }.get(source_spelling)
-        if exact is None:
+        imported_symbol = (
+            imported_symbols.get(node.func.id) if isinstance(node.func, ast.Name) else None
+        )
+        if imported_symbol == "langflow.services.deps.session_scope":
+            sites.append(
+                ResolvedCallSite(
+                    **common,
+                    canonical_symbol=imported_symbol,
+                    invocation=InvocationKind.FUNCTION,
+                    status=CallResolutionStatus.EXACT,
+                )
+            )
+        else:
             sites.append(
                 ResolvedCallSite(
                     **common,
                     status=CallResolutionStatus.UNRESOLVED,
-                    reason_code="not_resolved_by_fixture_call_map",
-                )
-            )
-        else:
-            symbol, invocation = exact
-            sites.append(
-                ResolvedCallSite(
-                    **common,
-                    canonical_symbol=symbol,
-                    invocation=invocation,
-                    status=CallResolutionStatus.EXACT,
+                    reason_code="fixture_type_proof_unavailable",
                 )
             )
     return endpoint, tuple(sites)
@@ -297,33 +295,17 @@ def _assert_langflow_source_transaction_evidence(
     assert contract.behavior.context_exit.value == "transaction_commit_rollback"
 
     audit, transaction, paths = _langflow_fixture_transaction_reports(fixture)
-    assert audit.summary.matched_calls == 2
+    assert audit.summary.matched_calls == 1
     assert audit.summary.unresolved_calls > 0
-    assert transaction.summary.endpoints_with_staging == 1
-    assert transaction.summary.pending_persistence == 1
+    assert transaction.summary.endpoints_with_staging == 0
+    assert transaction.summary.pending_persistence == 0
     assert transaction.summary.commit_reachable == 0
     assert transaction.summary.rollback_reachable == 0
-    evidence = transaction.endpoint_evidence[0]
-    assert len(evidence.stage_occurrence_ids) == 1
-    assert len(evidence.begin_occurrence_ids) == 1
-    assert evidence.flush_occurrence_ids == ()
-    assert evidence.commit_occurrence_ids == ()
-    assert evidence.rollback_occurrence_ids == ()
-    assert evidence.begin_scopes[0].context_exit.value == "transaction_commit_rollback"
-    assert evidence.begin_scopes[0].stage_receiver_from_yield is True
-    assert evidence.persistence_status == "not_established"
-    assert any("transaction identity" in item for item in evidence.limitations)
-    assert any("durable write" in item for item in evidence.limitations)
+    assert transaction.endpoint_evidence == ()
     assert paths.effect_audit_hash == audit.provenance.audit_hash
     assert paths.transaction_report_hash == transaction.report_hash
     assert paths.ordered_paths == ()
-    assert len(paths.context_paths) == 1
-    langflow_context = paths.context_paths[0]
-    assert langflow_context.normal_exit == "commit_reachable"
-    assert langflow_context.exceptional_exit == "rollback_reachable"
-    assert langflow_context.status == "conditional_on_context_exit"
-    assert langflow_context.persistence_status == "not_established"
-    assert any("runtime transaction identity" in item for item in langflow_context.limitations)
+    assert paths.context_paths == ()
 
 
 def test_sql_diagnostics_separate_pending_and_reachable_boundaries(tmp_path: Path) -> None:
@@ -454,6 +436,7 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
         "    def __enter__(self) -> Session: return Session()\n"
         "    def __exit__(self, exc_type, exc, tb): return False\n\n"
         "def begin_context() -> ReceiverlessContext: return ReceiverlessContext()\n\n"
+        "def trusted_begin_context() -> ReceiverlessContext: return ReceiverlessContext()\n\n"
         "def stage_helper(session: Session) -> None:\n"
         "    session.add('helper')\n\n"
         "@app.post('/ordered')\n"
@@ -499,6 +482,10 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
         "def receiverless_captured_context() -> None:\n"
         "    with begin_context() as transaction:\n"
         "        transaction.add('unproven')\n\n"
+        "@app.post('/trusted-receiverless-captured-context')\n"
+        "def trusted_receiverless_captured_context() -> None:\n"
+        "    with trusted_begin_context() as transaction:\n"
+        "        transaction.add('contracted')\n\n"
         "@app.post('/attribute')\n"
         "def attribute_receiver() -> None:\n"
         "    holder = Holder()\n"
@@ -632,6 +619,19 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
                             "context_exit": "transaction_commit_rollback",
                         },
                     },
+                    {
+                        "id": "trusted-receiverless-begin",
+                        "symbol": f"{root.name}.main.trusted_begin_context",
+                        "invocation": "function",
+                        "operation": "begin",
+                        "channel": "sql",
+                        "behavior": {
+                            "timing": "context_enter",
+                            "transaction_scope": "transaction",
+                            "context_exit": "transaction_commit_rollback",
+                            "stage_receiver_from_yield": True,
+                        },
+                    },
                 ]
                 + [
                     {
@@ -708,8 +708,8 @@ def test_ordered_paths_require_same_scope_receiver_and_straight_line(tmp_path: P
         "ordered_flushes": 1,
         "ordered_commits": 3,
         "ordered_rollbacks": 0,
-        "context_manager_paths": 5,
-        "context_transactions": 4,
+        "context_manager_paths": 6,
+        "context_transactions": 5,
         "context_savepoints": 1,
         "unresolved_pairs": 8,
     }
@@ -738,6 +738,7 @@ def test_ordered_paths_require_same_scope_receiver_and_straight_line(tmp_path: P
         "managed_savepoint",
         "wrapper_context",
         "captured_context",
+        "trusted_receiverless_captured_context",
     }
     assert all(
         item.function_name != "receiverless_captured_context" for item in paths.context_paths

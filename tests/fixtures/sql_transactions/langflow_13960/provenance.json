@@ -7,7 +7,7 @@
       "src/lfx/src/lfx/services/deps.py"
     ],
     "path": "effects.yaml",
-    "sha256": "36230dca9036152ba563eea906ec843c6b0bc66c6bdca4214b638fac661f23b4",
+    "sha256": "780a60623e05b11923cf32ebf88423061ecebaed20596f614b16b3aeb69862ed",
     "symbol": "langflow.services.deps.session_scope"
   },
   "fixture_schema": 1,

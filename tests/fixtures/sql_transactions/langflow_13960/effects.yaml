@@ -18,11 +18,3 @@ contracts:
       transaction_scope: transaction
       context_exit: transaction_commit_rollback
       stage_receiver_from_yield: true
-  - id: langflow-async-session-execute
-    symbol: sqlalchemy.ext.asyncio.session.AsyncSession.execute
-    invocation: instance_method
-    operation: stage
-    channel: sql
-    behavior:
-      async_mode: async
-      timing: await
