@@ -270,6 +270,87 @@ def test_invoked_helper_maps_argument_to_formal_mutation_target(tmp_path: Path) 
     assert result.confidence == ConfidenceLevel.HIGH
 
 
+def test_helper_local_rebinding_does_not_mutate_captured_copy(tmp_path: Path) -> None:
+    service = tmp_path / "service.py"
+    examples = (
+        "def dispatch(payload):\n"
+        "    payload = {**payload}\n"
+        "    def mutate_captured():\n"
+        "        payload = {}\n"
+        "        payload.update({'x': 1})\n"
+        "    mutate_captured()\n"
+        "    return payload\n",
+        "def dispatch(payload):\n"
+        "    payload = {**payload}\n"
+        "    def mutate_captured():\n"
+        "        payload.update({'x': 1})\n"
+        "        payload = {}\n"
+        "    mutate_captured()\n"
+        "    return payload\n",
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def endpoint():\n    payload = {}\n    dispatch(payload)\n    return payload\n"
+    )
+
+    for source in examples:
+        service.write_text(source)
+        assert (
+            EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 3)]) is None
+        )
+
+
+def test_branch_alias_join_is_uncertain_when_only_one_arm_aliases_subject(
+    tmp_path: Path,
+) -> None:
+    service = tmp_path / "service.py"
+    service.write_text(
+        "def dispatch(payload, enabled):\n"
+        "    payload = {**payload}\n"
+        "    alias = {}\n"
+        "    if enabled:\n"
+        "        alias = payload\n"
+        "    alias.update({'x': 1})\n"
+        "    return payload\n"
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def endpoint():\n    payload = {}\n    dispatch(payload, False)\n    return payload\n"
+    )
+
+    result = EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 3)])
+
+    assert result is not None
+    assert result.confidence == ConfidenceLevel.MEDIUM
+    assert result.evidence[0].status.value == "conditional"
+
+
+def test_alias_assigned_to_subject_on_both_branch_arms_remains_provable(
+    tmp_path: Path,
+) -> None:
+    service = tmp_path / "service.py"
+    service.write_text(
+        "def dispatch(payload, enabled):\n"
+        "    payload = {**payload}\n"
+        "    if enabled:\n"
+        "        alias = payload\n"
+        "    else:\n"
+        "        alias = payload\n"
+        "    alias.update({'x': 1})\n"
+        "    return payload\n"
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def endpoint():\n    payload = {}\n    dispatch(payload, False)\n    return payload\n"
+    )
+
+    result = EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 3)])
+
+    assert result is not None
+    assert result.confidence == ConfidenceLevel.HIGH
+    assert result.evidence[0].status.value == "established"
+
+
 def test_dead_and_post_terminal_mutations_do_not_qualify_copy(tmp_path: Path) -> None:
     service = tmp_path / "service.py"
     main = tmp_path / "main.py"

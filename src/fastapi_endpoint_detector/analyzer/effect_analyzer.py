@@ -832,10 +832,15 @@ class EffectAnalyzer:
                     return None
             arguments = [*helper.args.posonlyargs, *helper.args.args, *helper.args.kwonlyargs]
             formal_names = {argument.arg for argument in arguments}
+            locally_bound_names = {
+                name for body_node in helper_scope for name in self._binding_names(body_node)
+            }
             helper_facts: dict[
                 str, list[tuple[int, tuple[tuple[ast.AST, int], ...], bool | None]]
             ] = {}
-            outer_names = set(facts) - formal_names
+            for name in locally_bound_names - formal_names:
+                helper_facts[name] = [(-1, (), False)]
+            outer_names = set(facts) - formal_names - locally_bound_names
             for name in outer_names:
                 may_alias, definite_alias = self._alias_status(
                     name, call_item.path, call_index, facts
