@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import importlib
 import importlib.metadata
 import json
 import platform
 import shutil
+import sys
 from pathlib import Path
 
+import benchmarks.providers.effect_preset_frozen_runner as frozen_runner
 import benchmarks.providers.effect_preset_matrix as matrix_provider
 import pytest
 from benchmarks.providers.effect_preset_matrix import (
@@ -316,6 +319,44 @@ def test_frozen_runtime_manifest_cannot_reauthorize_altered_source(
 
     with pytest.raises(MatrixEvidenceError, match="frozen analyzer runtime manifest hash mismatch"):
         matrix_provider._load_analyzer_source_snapshots()
+
+
+def test_replay_environment_locks_match_runtime_manifest() -> None:
+    tomllib = importlib.import_module("tomllib" if sys.version_info >= (3, 11) else "tomli")
+    runtime = json.loads(matrix_provider.FROZEN_RUNTIME_MANIFEST_PATH.read_text(encoding="utf-8"))
+    environment_rows = runtime["replay_environment_files"]
+    project_files = {
+        row["path"].rsplit("/", 1)[0]: row["path"]
+        for row in environment_rows
+        if row["path"].endswith("/pyproject.toml")
+    }
+    assert len(project_files) == 4
+    for environment, pyproject_path in project_files.items():
+        lock_path = f"{environment}/uv.lock"
+        assert lock_path in {row["path"] for row in environment_rows}
+        lock = tomllib.loads((matrix_provider.FROZEN_RUNTIME_ROOT / lock_path).read_text())
+        versions = {row["name"].lower(): row["version"] for row in lock["package"]}
+        directory_name = Path(environment).name
+        expected_mypy = directory_name.rsplit("-mypy-", 1)[1]
+        assert versions["mypy"] == expected_mypy
+        for distribution, version in runtime["runtime_distributions"].items():
+            assert versions[distribution.lower()] == version
+        project = tomllib.loads((matrix_provider.FROZEN_RUNTIME_ROOT / pyproject_path).read_text())
+        python_version = directory_name.split("-mypy-", 1)[0].removeprefix("python-")
+        major, minor = python_version.split(".")[:2]
+        assert project["project"]["requires-python"] == (
+            f">={major}.{minor},<{major}.{int(minor) + 1}"
+        )
+
+
+def test_frozen_replay_rejects_wrong_runtime_dependency_version() -> None:
+    def wrong_librt_version(distribution: str) -> str:
+        if distribution == "librt":
+            return "0.0.0"
+        return frozen_runner._RUNTIME_DISTRIBUTIONS[distribution]
+
+    with pytest.raises(frozen_runner.FrozenReplayError, match="identity mismatch: librt"):
+        frozen_runner._verify_runtime_distributions(wrong_librt_version)
 
 
 def test_controlled_results_reject_forged_aggregates(tmp_path: Path) -> None:

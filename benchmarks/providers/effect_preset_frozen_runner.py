@@ -12,10 +12,14 @@ import re
 import sys
 import tempfile
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 RUNTIME_DIR = Path(__file__).resolve().parents[1] / "results" / "effect-preset-matrix-v5"
 FROZEN_PROJECT = RUNTIME_DIR / "frozen-project"
+REPLAY_ENVIRONMENTS = RUNTIME_DIR / "replay-envs"
 RUNTIME_MANIFEST = RUNTIME_DIR / "frozen-runtime.json"
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _RUNTIME_DISTRIBUTIONS = {
@@ -33,6 +37,20 @@ _SUPPORTED_ENVS = {
     ("3.12.14", "1.19.1"),
     ("3.11.16", "2.4.0"),
 }
+
+
+def _verify_runtime_distributions(version_lookup: Callable[[str], str] | None = None) -> None:
+    """Reject runtimes whose installed replay dependencies differ from the recorded set."""
+    lookup = version_lookup or importlib.metadata.version
+    for distribution, expected_version in _RUNTIME_DISTRIBUTIONS.items():
+        try:
+            actual_version = lookup(distribution)
+        except importlib.metadata.PackageNotFoundError as exc:
+            raise FrozenReplayError(
+                f"runtime dependency metadata is unavailable: {distribution}"
+            ) from exc
+        if actual_version != expected_version:
+            raise FrozenReplayError(f"runtime dependency identity mismatch: {distribution}")
 
 
 class FrozenReplayError(ValueError):
@@ -60,7 +78,7 @@ def _reject_constant(value: str) -> None:
     raise FrozenReplayError(f"non-finite frozen runtime manifest value: {value}")
 
 
-def _verify_snapshot(artifact_root: Path) -> dict[str, Any]:  # noqa: PLR0912
+def _verify_snapshot(artifact_root: Path) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
     try:
         raw = RUNTIME_MANIFEST.read_bytes()
         manifest = json.loads(raw, object_pairs_hook=_unique_pairs, parse_constant=_reject_constant)
@@ -75,6 +93,8 @@ def _verify_snapshot(artifact_root: Path) -> dict[str, Any]:  # noqa: PLR0912
             "source_commit",
             "v4_snapshot_sha256",
             "v4_artifact_files",
+            "replay_environment_files",
+            "replay_lock_tool",
             "runner_sha256",
             "runtime_distributions",
             "files",
@@ -89,6 +109,8 @@ def _verify_snapshot(artifact_root: Path) -> dict[str, Any]:  # noqa: PLR0912
         or _SHA256.fullmatch(manifest["runner_sha256"]) is None
         or not isinstance(manifest["files"], list)
         or not isinstance(manifest["v4_artifact_files"], list)
+        or not isinstance(manifest["replay_environment_files"], list)
+        or manifest["replay_lock_tool"] != {"name": "uv", "version": "0.12.19"}
         or manifest["runtime_distributions"] != _RUNTIME_DISTRIBUTIONS
     ):
         raise FrozenReplayError("frozen runtime manifest has invalid schema or identity")
@@ -168,6 +190,42 @@ def _verify_snapshot(artifact_root: Path) -> dict[str, Any]:  # noqa: PLR0912
         path = artifact_root / row["path"]
         if path.is_symlink() or _sha256(path) != row["sha256"]:
             raise FrozenReplayError(f"historical v4 artifact changed: {row['path']}")
+
+    environment_rows = manifest["replay_environment_files"]
+    environment_paths: list[str] = []
+    for row in environment_rows:
+        if (
+            not isinstance(row, dict)
+            or set(row) != {"path", "sha256"}
+            or not isinstance(row["path"], str)
+            or not row["path"].startswith("replay-envs/")
+            or "\\" in row["path"]
+            or PurePosixPath(row["path"]).is_absolute()
+            or ".." in PurePosixPath(row["path"]).parts
+            or PurePosixPath(row["path"]).as_posix() != row["path"]
+            or not isinstance(row["sha256"], str)
+            or _SHA256.fullmatch(row["sha256"]) is None
+        ):
+            raise FrozenReplayError("replay environment file row is malformed")
+        environment_paths.append(row["path"])
+    if (
+        not environment_paths
+        or environment_paths != sorted(environment_paths)
+        or len(environment_paths) != len(set(environment_paths))
+    ):
+        raise FrozenReplayError("replay environment file set is not unique and sorted")
+    expected_environment_paths = set(environment_paths)
+    actual_environment_paths = {
+        path.relative_to(RUNTIME_DIR).as_posix()
+        for path in REPLAY_ENVIRONMENTS.rglob("*")
+        if path.is_file() and ".venv" not in path.relative_to(REPLAY_ENVIRONMENTS).parts
+    }
+    if actual_environment_paths != expected_environment_paths:
+        raise FrozenReplayError("replay environment file tree has missing or extra files")
+    for row in environment_rows:
+        environment_file = RUNTIME_DIR / row["path"]
+        if environment_file.is_symlink() or _sha256(environment_file) != row["sha256"]:
+            raise FrozenReplayError(f"replay environment file hash mismatch: {row['path']}")
     return manifest
 
 
@@ -218,15 +276,7 @@ def main() -> int:
             args.mypy_version,
         ):
             raise FrozenReplayError("child process exact Python/mypy identity mismatch")
-        for distribution, expected_version in _RUNTIME_DISTRIBUTIONS.items():
-            try:
-                actual_version = importlib.metadata.version(distribution)
-            except importlib.metadata.PackageNotFoundError as exc:
-                raise FrozenReplayError(
-                    f"runtime dependency metadata is unavailable: {distribution}"
-                ) from exc
-            if actual_version != expected_version:
-                raise FrozenReplayError(f"runtime dependency identity mismatch: {distribution}")
+        _verify_runtime_distributions()
         with tempfile.TemporaryDirectory(prefix="gh97_frozen_replay_") as work_dir:
             os.chdir(work_dir)
             provider = _load_frozen_provider(args.artifact_root.resolve())

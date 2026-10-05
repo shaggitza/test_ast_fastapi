@@ -57,7 +57,45 @@
       "sha256": "aabb58de11b9084caca5c39052ef625d49d681c83805914642eb345b49fe74f1"
     }
   ],
-  "runner_sha256": "c7cd0fd58f9568117139a15594568279b1fea7896d0e468187510f47ff680b3c",
+  "replay_environment_files": [
+    {
+      "path": "replay-envs/python-3.10.21-mypy-1.19.1/pyproject.toml",
+      "sha256": "26801287ed20b16edc9d3208d5f24a3cc771620827dc1afc5babe226ca30a8d4"
+    },
+    {
+      "path": "replay-envs/python-3.10.21-mypy-1.19.1/uv.lock",
+      "sha256": "cd9571e02db769ea61d103faaa39a835ada610f4c75cc55fb40a969e8d759bff"
+    },
+    {
+      "path": "replay-envs/python-3.11.16-mypy-1.19.1/pyproject.toml",
+      "sha256": "a22bda3d967fc72f055d41c927001a9f8267c0fc8253119ad6658dde470f97a4"
+    },
+    {
+      "path": "replay-envs/python-3.11.16-mypy-1.19.1/uv.lock",
+      "sha256": "db50d592b0b13ae20c9fd1875b3032957f3c72a3f5e2e31ffe9cb1c04957fc74"
+    },
+    {
+      "path": "replay-envs/python-3.11.16-mypy-2.4.0/pyproject.toml",
+      "sha256": "2a2b99eb11ae6347ea7be984c16d9581068ef3981a5a8f8e1c69518d9a7a690e"
+    },
+    {
+      "path": "replay-envs/python-3.11.16-mypy-2.4.0/uv.lock",
+      "sha256": "0a1100eb256aec4e22a6554c02873ff754c48acbdc39be01757d88182da2e37c"
+    },
+    {
+      "path": "replay-envs/python-3.12.14-mypy-1.19.1/pyproject.toml",
+      "sha256": "2960199bd0853e184dc31c8ee878cd3a6bad9473747463c1d67dcaaa457d8d3e"
+    },
+    {
+      "path": "replay-envs/python-3.12.14-mypy-1.19.1/uv.lock",
+      "sha256": "9eeba5e668425ae48ab9e640d370449b8622305a463d7f380f94dc73416f1f2a"
+    }
+  ],
+  "replay_lock_tool": {
+    "name": "uv",
+    "version": "0.12.19"
+  },
+  "runner_sha256": "f76c118ea6c38d6c4a2c192663909e605309efade9976d9a3d1c692e91c5b7d5",
   "runtime_distributions": {
     "librt": "0.16.0",
     "mypy-extensions": "1.1.0",

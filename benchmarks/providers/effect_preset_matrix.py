@@ -38,9 +38,10 @@ class MatrixEvidenceError(ValueError):
 MATRIX_ROOT = Path(__file__).resolve().parents[1] / "results" / "effect-preset-matrix-v4"
 FROZEN_RUNTIME_ROOT = Path(__file__).resolve().parents[1] / "results" / "effect-preset-matrix-v5"
 FROZEN_PROJECT_ROOT = FROZEN_RUNTIME_ROOT / "frozen-project"
+REPLAY_ENV_ROOT = FROZEN_RUNTIME_ROOT / "replay-envs"
 FROZEN_RUNTIME_MANIFEST_PATH = FROZEN_RUNTIME_ROOT / "frozen-runtime.json"
 FROZEN_RUNNER_PATH = Path(__file__).with_name("effect_preset_frozen_runner.py")
-FROZEN_RUNTIME_MANIFEST_SHA256 = "0fbac4c6357c7189500097986815d8f868c37c845f8a61a05d846cbf209e7cf8"
+FROZEN_RUNTIME_MANIFEST_SHA256 = "ae6e9aa07ae47fc080a251820e0d606be3d665c078ef91d971340f8fe6daa872"
 MANIFEST_PATH = MATRIX_ROOT / "package-symbols.json"
 FIXTURE_PATH = MATRIX_ROOT / "fixtures" / "pathlib_open_handles.py"
 ANALYZER_SNAPSHOT_PATH = MATRIX_ROOT / "analyzer-source-snapshots.json"
@@ -153,6 +154,8 @@ def _load_analyzer_source_snapshots() -> tuple[dict[str, str], str]:  # noqa: PL
             "source_commit",
             "v4_snapshot_sha256",
             "v4_artifact_files",
+            "replay_environment_files",
+            "replay_lock_tool",
             "runner_sha256",
             "runtime_distributions",
             "files",
@@ -175,6 +178,8 @@ def _load_analyzer_source_snapshots() -> tuple[dict[str, str], str]:  # noqa: PL
         }
         or not isinstance(runtime["files"], list)
         or not isinstance(runtime["v4_artifact_files"], list)
+        or not isinstance(runtime["replay_environment_files"], list)
+        or runtime["replay_lock_tool"] != {"name": "uv", "version": "0.12.19"}
     ):
         raise MatrixEvidenceError("frozen analyzer runtime identity is invalid")
     runtime_rows = runtime["files"]
@@ -250,6 +255,37 @@ def _load_analyzer_source_snapshots() -> tuple[dict[str, str], str]:  # noqa: PL
         path = MATRIX_ROOT / row["path"]
         if path.is_symlink() or f"sha256:{_sha256(path.read_bytes())}" != f"sha256:{row['sha256']}":
             raise MatrixEvidenceError(f"historical v4 artifact changed: {row['path']}")
+
+    environment_rows = runtime["replay_environment_files"]
+    environment_paths: list[str] = []
+    for row in environment_rows:
+        if (
+            not isinstance(row, dict)
+            or set(row) != {"path", "sha256"}
+            or not _safe_relative(row["path"])
+            or not row["path"].startswith("replay-envs/")
+            or not _is_sha(row["sha256"])
+        ):
+            raise MatrixEvidenceError("replay environment file row is invalid")
+        environment_paths.append(row["path"])
+    if (
+        not environment_paths
+        or environment_paths != sorted(environment_paths)
+        or len(environment_paths) != len(set(environment_paths))
+    ):
+        raise MatrixEvidenceError("replay environment file set is not unique and sorted")
+    expected_environment_paths = set(environment_paths)
+    actual_environment_paths = {
+        path.relative_to(FROZEN_RUNTIME_ROOT).as_posix()
+        for path in REPLAY_ENV_ROOT.rglob("*")
+        if path.is_file() and ".venv" not in path.relative_to(REPLAY_ENV_ROOT).parts
+    }
+    if actual_environment_paths != expected_environment_paths:
+        raise MatrixEvidenceError("replay environment file tree has missing or extra files")
+    for row in environment_rows:
+        path = FROZEN_RUNTIME_ROOT / row["path"]
+        if path.is_symlink() or f"sha256:{_sha256(path.read_bytes())}" != f"sha256:{row['sha256']}":
+            raise MatrixEvidenceError(f"replay environment file hash mismatch: {row['path']}")
     return hashes, f"sha256:{_sha256(raw)}"
 
 
