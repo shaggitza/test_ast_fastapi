@@ -20,6 +20,7 @@ from fastapi_endpoint_detector.analyzer.graphify_adapter import (
     GRAPHIFY_GRAPH_SCHEMA_VERSION,
     GRAPHIFY_PACKAGE_NAME,
     GRAPHIFY_PACKAGE_VERSION,
+    GRAPHIFY_RAW_SCHEMA,
     GraphifyAdapterError,
     GraphifySourceSpan,
     import_graphify_snapshot,
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
 
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "graphify_0_9_30_graph.json"
+RAW_FIXTURE = Path(__file__).parents[1] / "fixtures" / "graphify_0_9_30_raw_synthetic.json"
 
 
 def _project(tmp_path: Path) -> Path:
@@ -110,6 +112,87 @@ def test_loads_pinned_fixture_with_exact_source_provenance_and_orientation(
     assert snapshot.edges[3].orientation == "symmetric"
     assert snapshot.edges[3].extractor_strength == "AMBIGUOUS"
     assert snapshot.edges[3].traversable is False
+
+
+def test_loads_explicit_raw_schema_without_promoting_line_markers_to_ranges(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    snapshot = load_graphify_snapshot(
+        RAW_FIXTURE, project_root=project, side="target", schema=GRAPHIFY_RAW_SCHEMA
+    )
+    assert snapshot.graph_schema_version == 2
+    assert snapshot.graph_sha256 == hashlib.sha256(RAW_FIXTURE.read_bytes()).hexdigest()
+    assert snapshot.directed is True
+    assert snapshot.multigraph is False
+    assert snapshot.edges[0].orientation == "caller-to-callee"
+    assert snapshot.edges[1].orientation == "importer-to-imported"
+    assert snapshot.edges[2].orientation == "subclass-to-base"
+    assert snapshot.edges[3].orientation == "referencer-to-referenced"
+    assert [edge.extractor_strength for edge in snapshot.edges] == [
+        "EXTRACTED", "INFERRED", "EXTRACTED", "AMBIGUOUS"
+    ]
+    assert snapshot.edges[0].span == GraphifySourceSpan(
+        Path("app.py"), 4, 4, hashlib.sha256((project / "app.py").read_bytes()).hexdigest()
+    )
+
+
+def test_raw_schema_requires_explicit_version_and_rejects_unknown_selectors(
+    tmp_path: Path,
+) -> None:
+    project = _project(tmp_path)
+    with pytest.raises(GraphifyAdapterError, match="top-level schema"):
+        load_graphify_snapshot(RAW_FIXTURE, project_root=project, side="target")
+    with pytest.raises(GraphifyAdapterError, match="schema selector"):
+        load_graphify_snapshot(RAW_FIXTURE, project_root=project, side="target", schema="guess")
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda value: value.update({"output_tokens": -1}), "output_tokens"),
+        (lambda value: value.update({"extra": True}), "top-level schema"),
+        (lambda value: value["hyperedges"].append({"nodes": []}), "hyperedges"),
+        (lambda value: value["edges"][0].update({"source_location": "L3-L4"}), "line-only"),
+        (lambda value: value["edges"][0].update({"confidence": "HIGH"}), "confidence"),
+        (lambda value: value["edges"][0].update({"source_file": "../app.py"}), "confined"),
+        (lambda value: value["edges"][0].update({"target": "not-present"}), "unknown node"),
+        (lambda value: value["edges"].append(dict(value["edges"][0])), "ambiguous duplicate"),
+    ],
+    ids=[
+        "negative-token-counter",
+        "unknown-field",
+        "unsupported-hyperedge",
+        "not-a-line-marker",
+        "quality-is-not-provenance",
+        "path-traversal",
+        "missing-target",
+        "duplicate-edge",
+    ],
+)
+def test_raw_schema_negative_controls(tmp_path: Path, mutate: Any, message: str) -> None:
+    project = _project(tmp_path)
+    payload = json.loads(RAW_FIXTURE.read_text(encoding="utf-8"))
+    mutate(payload)
+    graph = tmp_path / "raw-mutated.json"
+    _write_payload(graph, payload)
+    with pytest.raises(GraphifyAdapterError, match=message):
+        load_graphify_snapshot(
+            graph, project_root=project, side="target", schema=GRAPHIFY_RAW_SCHEMA
+        )
+
+
+def test_raw_schema_rejects_absolute_source_paths_and_symlinks(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    for source_path in (str(project / "app.py"), "app-link.py"):
+        if source_path == "app-link.py":
+            (project / source_path).symlink_to(project / "app.py")
+        payload = json.loads(RAW_FIXTURE.read_text(encoding="utf-8"))
+        payload["nodes"][0]["source_file"] = source_path
+        graph = tmp_path / f"{Path(source_path).name}.json"
+        _write_payload(graph, payload)
+        with pytest.raises(GraphifyAdapterError, match=r"relative path|symlink"):
+            load_graphify_snapshot(
+                graph, project_root=project, side="target", schema=GRAPHIFY_RAW_SCHEMA
+            )
 
 
 def test_snapshot_hash_is_checked_against_the_same_byte_snapshot(tmp_path: Path) -> None:
@@ -314,7 +397,7 @@ def test_source_paths_must_remain_inside_the_analyzed_project(tmp_path: Path) ->
     graph = tmp_path / "escape.json"
     _write_payload(graph, payload)
 
-    with pytest.raises(GraphifyAdapterError, match="confined project file"):
+    with pytest.raises(GraphifyAdapterError, match="confined relative path"):
         load_graphify_snapshot(graph, project_root=project, side="target")
 
 
