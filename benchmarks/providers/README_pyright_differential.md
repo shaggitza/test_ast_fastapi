@@ -50,7 +50,10 @@ attestations.
 
 Each provider invocation has a 25-second wall-clock deadline, a combined
 2,000,000-byte stdout/stderr cap, and a dedicated process group. Timeout or
-output overflow kills that process group. Each fixture is limited to 32 files
+output overflow kills that process group, including ordinary descendants that
+remain in it. A provider that deliberately creates a new session can escape
+this process-group cleanup; this pilot is resource-bounded for controlled
+official CLIs, not a hostile-code sandbox. Each fixture is limited to 32 files
 and 256,000 input bytes; symlinks, non-source files, and inherited Pyright
 configuration are rejected. Inputs are snapshotted and checked before and
 after each invocation. Reproduction writes only to the new immutable v3 result
