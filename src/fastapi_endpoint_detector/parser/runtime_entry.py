@@ -24,6 +24,29 @@ class RuntimeEntryError(ValueError):
 _IMPORT_CONTEXT_LOCK = threading.RLock()
 
 
+def _project_module_inventory(root: Path) -> tuple[set[str], set[str]]:
+    """Return importable modules and top-level names sourced under ``root``."""
+    resolved_root = root.resolve()
+    modules: set[str] = set()
+    prefixes: set[str] = set()
+    for source_path in root.rglob("*.py"):
+        try:
+            relative = source_path.resolve().relative_to(resolved_root)
+        except (OSError, ValueError):
+            # Symlinks outside the selected checkout do not authorize imports.
+            continue
+        parts = (
+            relative.parts[:-1]
+            if relative.name == "__init__.py"
+            else relative.with_suffix("").parts
+        )
+        if not parts or not all(part.isidentifier() for part in parts):
+            continue
+        modules.add(".".join(parts))
+        prefixes.add(parts[0])
+    return modules, prefixes
+
+
 def parse_entry(value: str | None, option: str) -> tuple[str, str] | None:
     if value is None:
         return None
@@ -42,7 +65,12 @@ def _project_import_context(root: Path, module_names: tuple[str, ...]) -> Iterat
     """Keep selected project packages importable only for the whole invocation."""
     if not root.is_dir():
         raise RuntimeEntryError("runtime app root must be a directory")
-    prefixes = {name.split(".", maxsplit=1)[0] for name in module_names}
+    module_inventory, prefixes = _project_module_inventory(root)
+    for module_name in module_names:
+        if module_name not in module_inventory:
+            raise RuntimeEntryError(
+                f"selected runtime module {module_name!r} is not present in the project source"
+            )
     resolved_root = root.resolve()
     root_text = str(resolved_root)
     with _IMPORT_CONTEXT_LOCK:
