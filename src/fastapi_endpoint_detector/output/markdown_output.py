@@ -107,6 +107,11 @@ class MarkdownFormatter(BaseFormatter):
                 f"{paths.summary.unresolved_pairs} unresolved pairs; "
                 "lexical and conditional only, persistence not established"
             )
+        if report.source_observations is not None:
+            lines.append(
+                f"- **Source Observations:** "
+                f"{self.summarize_source_observations(report.source_observations)}"
+            )
         lines.append("")
 
         # Affected endpoints

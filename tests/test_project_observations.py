@@ -3,7 +3,10 @@ from pathlib import Path
 import pytest
 
 from fastapi_endpoint_detector.analyzer.client_observations import established_surfaces
-from fastapi_endpoint_detector.analyzer.project_observations import scan_project_observations
+from fastapi_endpoint_detector.analyzer.project_observations import (
+    SourceObservationIssue,
+    scan_project_observations,
+)
 from fastapi_endpoint_detector.parser.secure_ast_extractor import SecureASTExtractor
 
 
@@ -28,6 +31,10 @@ def test_project_adapter_preserves_occurrences_queries_and_explicit_origin_join(
     (tmp_path / "Dockerfile").write_text(
         'EXPOSE 8000\nCMD ["uvicorn", "app:app"]\n',
         encoding="utf-8",
+    )
+    (tmp_path / "docker").mkdir()
+    (tmp_path / "docker" / "build_and_push_base.Dockerfile").write_text(
+        'ENTRYPOINT ["python", "-m", "app"]\n', encoding="utf-8"
     )
     (tmp_path / "launch.py").write_text(
         "import subprocess as sp\nsp.run(['echo', 'ok'])\n", encoding="utf-8"
@@ -75,17 +82,26 @@ def test_project_adapter_preserves_occurrences_queries_and_explicit_origin_join(
     )
     assert any(item.kind == "container_argv" for item in snapshot.deployment_observations)
     assert any(
+        item.source_path.as_posix() == "docker/build_and_push_base.Dockerfile"
+        and item.kind == "container_argv"
+        for item in snapshot.deployment_observations
+    )
+    assert any(
         item.kind == "subprocess_argv" and item.certainty == "exact"
         for item in snapshot.deployment_observations
     )
 
 
 def test_project_adapter_never_infers_origin_or_trust(tmp_path: Path) -> None:
-    (tmp_path / "client.ts").write_text("fetch('https://api.example.test/items')", encoding="utf-8")
+    (tmp_path / "client.ts").write_text(
+        "fetch('https://api.example.test/items'); fetch(`${origin}/dynamic`);",
+        encoding="utf-8",
+    )
     (tmp_path / ".env").write_text("API_BASE_URL=${API_ORIGIN}\n", encoding="utf-8")
     snapshot = scan_project_observations(tmp_path)
 
     assert not snapshot.surface_matches
+    assert [item.reason for item in snapshot.client_uncertainties] == ["dynamic_or_nonliteral_url"]
     assert snapshot.deployment_observations[0].certainty == "uncertain"
     assert snapshot.to_dict()["scope"] == "bounded_source_observations_only"
     with pytest.raises(ValueError, match="not established"):
@@ -161,3 +177,19 @@ def test_project_adapter_rejects_malformed_source_patterns(tmp_path: Path, patte
 def test_project_adapter_rejects_invalid_scan_budgets(tmp_path: Path, limit: int) -> None:
     with pytest.raises(ValueError, match="limits must be positive"):
         scan_project_observations(tmp_path, max_files=limit)
+
+
+def test_project_adapter_marks_selected_symlinks_as_incomplete(tmp_path: Path) -> None:
+    skipped = tmp_path / "node_modules"
+    skipped.mkdir()
+    source = skipped / "outside.ts"
+    source.write_text("fetch('/outside')", encoding="utf-8")
+    (tmp_path / "client.ts").symlink_to(source)
+
+    snapshot = scan_project_observations(tmp_path)
+
+    assert not snapshot.complete
+    assert snapshot.client_observations == ()
+    assert snapshot.issues == (
+        SourceObservationIssue("client.ts", "symlink source was not followed"),
+    )

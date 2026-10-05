@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
     from fastapi_endpoint_detector.analyzer.client_observations import (
         ClientObservation,
+        ClientObservationIssue,
         ClientSurfaceMatch,
         EstablishedSurface,
     )
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
 _EXPORT_MODULES = {
     "ChangeMapper": "change_mapper",
     "ClientObservation": "client_observations",
+    "ClientObservationIssue": "client_observations",
     "ClientSurfaceMatch": "client_observations",
     "DeploymentObservation": "deployment_observations",
     "EndpointRegistry": "endpoint_registry",
@@ -37,6 +39,7 @@ _EXPORT_MODULES = {
     "SourceObservationIssue": "project_observations",
     "established_surfaces": "client_observations",
     "extract_client_observations": "client_observations",
+    "extract_client_observation_inventory": "client_observations",
     "extract_dockerfile_observations": "deployment_observations",
     "extract_env_observations": "deployment_observations",
     "extract_subprocess_observations": "deployment_observations",
@@ -59,10 +62,10 @@ def __dir__() -> list[str]:
     """Expose public exports without eagerly importing their implementations."""
     return sorted(set(globals()) | set(_EXPORT_MODULES))
 
-
 __all__ = [
     "ChangeMapper",
     "ClientObservation",
+    "ClientObservationIssue",
     "ClientSurfaceMatch",
     "DeploymentObservation",
     "EndpointRegistry",
@@ -71,6 +74,7 @@ __all__ = [
     "ProjectObservationSnapshot",
     "SourceObservationIssue",
     "established_surfaces",
+    "extract_client_observation_inventory",
     "extract_client_observations",
     "extract_dockerfile_observations",
     "extract_env_observations",
