@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import sys
 from typing import TYPE_CHECKING
 
 import pytest
-from benchmarks.incremental_mypy_dag import make_dag, retarget_import_source
+from benchmarks.incremental_mypy_dag import (
+    _equivalence_check,
+    make_dag,
+    retarget_import_source,
+)
 
 from fastapi_endpoint_detector.analyzer import mypy_incremental
 from fastapi_endpoint_detector.analyzer.mypy_incremental import (
@@ -148,6 +153,23 @@ def test_cold_build_rejects_followed_local_modules_missing_from_inventory(
 
     with pytest.raises(IncrementalBuildError, match="omits followed local module 'm1'"):
         provider.build({"m0": tmp_path / "m0.py"})
+
+
+@pytest.mark.parametrize(
+    "python_target", ["3.10", f"{sys.version_info.major}.{sys.version_info.minor}"]
+)
+def test_benchmark_cold_comparison_uses_the_retained_python_target(
+    tmp_path: Path, python_target: str
+) -> None:
+    inventory = make_dag(tmp_path, 4)
+    config = BuildConfig(tmp_path, python_version=python_target)
+    retained = MypyIncrementalProvider(config).build(inventory)
+
+    equivalence = _equivalence_check(config, inventory, retained)
+
+    assert equivalence["equivalent_to_independent_cold_build"] is True
+    assert equivalence["cache_fingerprint_matches_independent_cold_build"] is True
+    assert equivalence["python_version"] == python_target
 
 
 @pytest.mark.parametrize("module_count", [4, 6])

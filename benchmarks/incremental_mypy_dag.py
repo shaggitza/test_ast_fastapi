@@ -124,6 +124,7 @@ def _equivalence_check(
     return {
         "equivalent_to_independent_cold_build": True,
         "cache_fingerprint_matches_independent_cold_build": True,
+        "python_version": config.python_version,
         "cold_build_seconds": elapsed,
         "fresh_cache_fingerprint": fresh.report.cache_fingerprint,
     }

@@ -6,8 +6,12 @@
 `TypedBuild` + `BuildReport` out. `TypedBuild` retains mypy's graph, ASTs,
 symbol tables, and exported expression type map for later analyzers.
 
-The implementation uses only the project lock's mypy 1.19.1 fine-grained API
-and rejects other engine names or mypy versions before starting a cold build:
+The provider accepts only engine `mypy-fine-grained` and mypy versions 1.19.1
+and 2.4.0, the exact versions validated for this private fine-grained API. The
+normal project install remains pinned to mypy 1.19.1 in `pyproject.toml` and
+`uv.lock`; 2.4.0 is accepted when supplied by a caller but is not the locked
+project dependency. Unsupported engines and versions are rejected before a
+cold build:
 `mypy.build.build` creates the initial graph and
 `mypy.server.update.FineGrainedBuildManager.update` retains typed state and
 propagates changed triggers to dependent targets. Before every update it
