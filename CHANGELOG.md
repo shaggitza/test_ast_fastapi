@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with staged queue timing. Untyped message clients and Redis's timing-ambiguous
   shared sync/async owners are omitted; receiver HTTP clients and S3 object
   operations abstain from incomplete URL or Key-only resource identities.
+  Filesystem rename/replace/move operations also abstain because the current
+  contract schema cannot represent both source removal and destination creation.
   This preset tranche does not include real-world evaluation, and Issue #97
   remains open for unsupported families and evaluation.
 - **Mypy integration**: Added mypy's build API for type-aware dependency analysis

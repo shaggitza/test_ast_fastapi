@@ -169,9 +169,15 @@ and kombu rows are also omitted. The message-bus preset contains only typed
 confluent-kafka `Producer.produce`, conservatively declared as a staged queue
 operation.
 
-Each family has an independent identity and semantic hash. Filesystem and HTTP
-contracts are version `3.0.0`; MongoDB/Motor and typed S3 contracts are version
-`2.0.0`; message bus starts at `1.0.0`. Requests support starts at its resolver-
+The filesystem preset is version `4.0.0` because rename/replace/move operations
+are omitted until the contract schema can identify both the removed source and
+produced destination resources. Treating one path selector as the update target
+would misstate the moved-from path as a producer. `os.rename`, `os.replace`,
+`pathlib.Path.rename`, `pathlib.Path.replace`, and `shutil.move` therefore abstain.
+
+Each family has an independent identity and semantic hash. Filesystem contracts
+are version `4.0.0`; HTTP contracts are version `3.0.0`; MongoDB/Motor and
+typed S3 contracts are version `2.0.0`; message bus starts at `1.0.0`. Requests support starts at its resolver-
 typed `2.34` release. HTTP receiver-client contracts abstain from URL resource
 identity because constructor `base_url` can make the call argument incomplete;
 top-level requests/httpx convenience calls retain finite URL evidence. aiohttp
