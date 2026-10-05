@@ -450,6 +450,12 @@ def _release_truth(  # noqa: PLR0912, PLR0915
         ):
             _fail("canonical adjudication decision table contains an invalid row")
         decisions[decision_id] = row
+    included_decisions = {
+        decision_id
+        for decision_id, decision in decisions.items()
+        if decision["decision_kind"] == "entrypoint" and decision["outcome"] == "include"
+    }
+    canonical_entrypoint_decisions: set[str] = set()
     entrypoints: dict[str, list[dict[str, Any]]] = {}
     for row in _jsonl_rows(
         contents["tables/canonical_entrypoint.jsonl"], "tables/canonical_entrypoint.jsonl"
@@ -464,6 +470,8 @@ def _release_truth(  # noqa: PLR0912, PLR0915
         )
         if (
             not isinstance(adjudication_id, str)
+            or not isinstance(decision_id, str)
+            or decision_id in canonical_entrypoint_decisions
             or decision is None
             or decision.get("adjudication_id") != adjudication_id
             or decision.get("pr_id") != pr_id
@@ -476,7 +484,10 @@ def _release_truth(  # noqa: PLR0912, PLR0915
             or not isinstance(confidence, str)
         ):
             _fail("canonical entrypoint table contains a malformed row")
+        canonical_entrypoint_decisions.add(decision_id)
         entrypoints.setdefault(adjudication_id, []).append(row)
+    if canonical_entrypoint_decisions != included_decisions:
+        _fail("canonical entrypoint table does not cover included entrypoint decisions")
     for rows in entrypoints.values():
         rows.sort(key=lambda item: (item["public_id"], item["kind"], item["entrypoint_id"]))
     memberships = _jsonl_rows(contents["tables/release_pr.jsonl"], "tables/release_pr.jsonl")

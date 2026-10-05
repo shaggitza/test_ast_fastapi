@@ -377,6 +377,18 @@ def test_canonical_entrypoint_must_reference_included_decision(tmp_path: Path) -
         verify_release(root)
 
 
+def test_canonical_entrypoints_cover_all_included_decisions(tmp_path: Path) -> None:
+    root = _release(tmp_path)
+    entrypoints_path = root / "tables/canonical_entrypoint.jsonl"
+    entrypoints_path.write_bytes(b"")
+    manifest = json.loads((root / "manifest.json").read_text())
+    _reseal(root, manifest)
+    with pytest.raises(
+        GroundTruthError, match="canonical entrypoint table does not cover included"
+    ):
+        verify_release(root)
+
+
 def test_manifest_corpus_hash_must_match_canonical_corpus(tmp_path: Path) -> None:
     root = _release(tmp_path)
     forged_hash = "sha256:" + "0" * 64
@@ -394,7 +406,10 @@ def test_manifest_corpus_hash_must_match_canonical_corpus(tmp_path: Path) -> Non
 def test_manifest_prompt_set_must_match_canonical_prompt_records(tmp_path: Path) -> None:
     root = _release(tmp_path)
     forged_prompt = "sha256:" + "0" * 64
-    forged_root = "sha256:" + "1" * 64
+    prompt_bytes = forged_prompt.encode()
+    digest = hashlib.sha256(b"ground-truth-prompt-set-v1\0")
+    digest.update(prompt_bytes + b"\0" + hashlib.sha256(prompt_bytes).digest())
+    forged_root = "sha256:" + digest.hexdigest()
     manifest = json.loads((root / "manifest.json").read_text())
     manifest["prompt_hashes"] = [forged_prompt]
     manifest["prompt_set_sha256"] = forged_root
