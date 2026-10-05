@@ -473,6 +473,12 @@ class AnalysisReport(BaseModel):
         default=None,
         description="Bounded source-backed same-scope SQL ordering diagnostics.",
     )
+    source_observations: dict[str, object] | None = Field(
+        default=None,
+        description=(
+            "Optional bounded client and deployment source observations; report-only evidence."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_inventory_strength(self) -> "AnalysisReport":

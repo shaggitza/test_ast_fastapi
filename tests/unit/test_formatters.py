@@ -108,6 +108,29 @@ def test_unavailable_report_inventory_is_visible_in_all_formats() -> None:
         assert limitation.reason in rendered
 
 
+def test_source_observations_are_optional_structured_json_and_yaml() -> None:
+    report = AnalysisReport(
+        app_path="/app/main.py",
+        diff_source="change.diff",
+        total_endpoints=0,
+    )
+    json_default = json.loads(JsonFormatter().format(report))
+    yaml_default = yaml.safe_load(YamlFormatter().format(report))
+    assert "source_observations" not in json_default
+    assert "source_observations" not in yaml_default
+
+    source_observations = {
+        "scope": "bounded_source_observations_only",
+        "client_observations": [{"route_path": "/items", "query": "q=1"}],
+        "deployment_observations": [{"certainty": "uncertain"}],
+    }
+    report.source_observations = source_observations
+    json_result = json.loads(JsonFormatter().format(report))
+    yaml_result = yaml.safe_load(YamlFormatter().format(report))
+    assert json_result["source_observations"] == source_observations
+    assert yaml_result["source_observations"] == source_observations
+
+
 def test_json_and_yaml_preserve_optional_dependency_graph() -> None:
     endpoint = Endpoint(
         path="/graph",

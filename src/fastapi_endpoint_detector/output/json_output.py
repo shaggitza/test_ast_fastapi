@@ -153,6 +153,8 @@ class JsonFormatter(BaseFormatter):
                 else None
             ),
         }
+        if report.source_observations is not None:
+            data["source_observations"] = report.source_observations
 
         return json.dumps(data, indent=self.indent, default=str)
 

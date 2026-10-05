@@ -145,6 +145,8 @@ class YamlFormatter(BaseFormatter):
                 else None
             ),
         }
+        if report.source_observations is not None:
+            data["source_observations"] = report.source_observations
 
         return yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
