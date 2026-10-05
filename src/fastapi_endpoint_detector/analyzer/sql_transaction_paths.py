@@ -159,7 +159,7 @@ class _CallIndexer(ast.NodeVisitor):
         if overwrite or key not in self.calls:
             self.calls[key] = record
 
-    def _record_context(
+    def _record_context(  # noqa: PLR0911
         self,
         statement: ast.With | ast.AsyncWith,
         function_name: str,
@@ -187,13 +187,27 @@ class _CallIndexer(ast.NodeVisitor):
             function.end_lineno,
             function.end_col_offset,
         )
+        captured_receiver = (
+            _target_key(item.optional_vars) if item.optional_vars is not None else None
+        )
+        receiver_is_shadowed = (
+            begin_receiver is not None
+            and captured_receiver is not None
+            and len(captured_receiver) <= len(begin_receiver)
+            and begin_receiver[: len(captured_receiver)] == captured_receiver
+        )
+        receiver_yield_is_authorized = begin_key in self.captured_context_receivers
+        if receiver_is_shadowed:
+            if not receiver_yield_is_authorized:
+                return
+            begin_receiver = captured_receiver
         # `as name` captures __enter__/__aenter__'s yielded value. It can stand
         # in for the receiver only when the exact begin contract explicitly
         # declares that the context yields the receiver used by its scoped stage.
         if begin_receiver is None:
-            if begin_key not in self.captured_context_receivers or item.optional_vars is None:
+            if not receiver_yield_is_authorized or item.optional_vars is None:
                 return
-            begin_receiver = _target_key(item.optional_vars)
+            begin_receiver = captured_receiver
             if begin_receiver is None:
                 return
         context_id = _semantic_hash(

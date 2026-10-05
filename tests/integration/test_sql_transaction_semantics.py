@@ -408,6 +408,7 @@ def test_sql_report_tampering_is_rejected_and_formats_disclose_limitations(
 
 def _ordered_project(root: Path) -> tuple[Path, Path]:
     (root / "main.py").write_text(
+        "from __future__ import annotations\n"
         "from fastapi import FastAPI\n\n"
         "app = FastAPI()\n\n"
         "class Session:\n"
@@ -432,6 +433,12 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
         "    def __enter__(self): return self\n"
         "    def __exit__(self, exc_type, exc, tb): return False\n"
         "    def add(self, value: str) -> None: pass\n\n"
+        "class YieldedUnitOfWork:\n"
+        "    def __enter__(self) -> YieldedUnitOfWork: return self\n"
+        "    def __exit__(self, exc_type, exc, tb): return False\n"
+        "    def add(self, value: str) -> None: pass\n\n"
+        "class UnitOfWorkFactory:\n"
+        "    def begin(self) -> YieldedUnitOfWork: return YieldedUnitOfWork()\n\n"
         "class ReceiverlessContext:\n"
         "    def __enter__(self) -> Session: return Session()\n"
         "    def __exit__(self, exc_type, exc, tb): return False\n\n"
@@ -486,6 +493,11 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
         "def trusted_receiverless_captured_context() -> None:\n"
         "    with trusted_begin_context() as transaction:\n"
         "        transaction.add('contracted')\n\n"
+        "@app.post('/receiver-shadow-context')\n"
+        "def receiver_shadow_context() -> None:\n"
+        "    work = UnitOfWorkFactory()\n"
+        "    with work.begin() as work:\n"
+        "        work.add('shadowed')\n\n"
         "@app.post('/attribute')\n"
         "def attribute_receiver() -> None:\n"
         "    holder = Holder()\n"
@@ -606,6 +618,25 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
                         "invocation": "instance_method",
                         "operation": "stage",
                         "channel": "sql",
+                    },
+                    {
+                        "id": "yielded-uow-add",
+                        "symbol": f"{root.name}.main.YieldedUnitOfWork.add",
+                        "invocation": "instance_method",
+                        "operation": "stage",
+                        "channel": "sql",
+                    },
+                    {
+                        "id": "uow-factory-begin",
+                        "symbol": f"{root.name}.main.UnitOfWorkFactory.begin",
+                        "invocation": "instance_method",
+                        "operation": "begin",
+                        "channel": "sql",
+                        "behavior": {
+                            "timing": "context_enter",
+                            "transaction_scope": "transaction",
+                            "context_exit": "transaction_commit_rollback",
+                        },
                     },
                     {
                         "id": "receiverless-begin",
@@ -741,7 +772,8 @@ def test_ordered_paths_require_same_scope_receiver_and_straight_line(tmp_path: P
         "trusted_receiverless_captured_context",
     }
     assert all(
-        item.function_name != "receiverless_captured_context" for item in paths.context_paths
+        item.function_name not in {"receiverless_captured_context", "receiver_shadow_context"}
+        for item in paths.context_paths
     )
     managed = next(item for item in paths.context_paths if item.function_name == "managed_context")
     assert managed.normal_exit == "commit_reachable"
