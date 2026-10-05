@@ -1308,35 +1308,34 @@ class MypyAnalyzer:
         end_line = end_line_value if end_line_value >= line and end_column_value >= 0 else None
         end_column = end_column_value if end_line is not None else None
         canonical = str(Path(current_file).resolve())
-        if end_line is None:
-            if canonical not in self._python_ast_cache:
-                try:
-                    self._python_ast_cache[canonical] = ast.parse(
-                        Path(canonical).read_text(encoding="utf-8"), filename=canonical
-                    )
-                except (OSError, SyntaxError, UnicodeError):
-                    self._python_ast_cache[canonical] = None
-            tree = self._python_ast_cache[canonical]
-            if canonical not in self._python_call_span_cache:
-                spans: dict[tuple[int, int], tuple[int, int]] = {}
-                if tree is not None:
-                    for candidate in ast.walk(tree):
-                        function = candidate.func if isinstance(candidate, ast.Call) else None
-                        if (
-                            function is not None
-                            and function.end_lineno is not None
-                            and function.end_col_offset is not None
-                        ):
-                            spans[(function.lineno, function.col_offset)] = (
-                                function.end_lineno,
-                                function.end_col_offset,
-                            )
-                self._python_call_span_cache[canonical] = spans
-            fallback_span = self._python_call_span_cache[canonical].get((line, column))
-            if fallback_span is not None:
-                end_line, end_column = fallback_span
-        if end_line is None or end_column is None:
-            return None
+        if canonical not in self._python_ast_cache:
+            try:
+                self._python_ast_cache[canonical] = ast.parse(
+                    Path(canonical).read_text(encoding="utf-8"), filename=canonical
+                )
+            except (OSError, SyntaxError, UnicodeError):
+                self._python_ast_cache[canonical] = None
+        tree = self._python_ast_cache[canonical]
+        if canonical not in self._python_call_span_cache:
+            spans: dict[tuple[int, int], tuple[int, int]] = {}
+            if tree is not None:
+                for candidate in ast.walk(tree):
+                    function = candidate.func if isinstance(candidate, ast.Call) else None
+                    if (
+                        function is not None
+                        and function.end_lineno is not None
+                        and function.end_col_offset is not None
+                    ):
+                        spans[(function.lineno, function.col_offset)] = (
+                            function.end_lineno,
+                            function.end_col_offset,
+                        )
+            self._python_call_span_cache[canonical] = spans
+        spans = self._python_call_span_cache[canonical]
+
+        # Mypy has used both UTF-8 byte offsets and Unicode character offsets
+        # for node columns. Match its complete span against Python's AST (which
+        # always uses UTF-8 byte offsets) before slicing source bytes.
         if canonical not in self._source_bytes_cache:
             try:
                 self._source_bytes_cache[canonical] = tuple(
@@ -1344,6 +1343,52 @@ class MypyAnalyzer:
                 )
             except OSError:
                 self._source_bytes_cache[canonical] = None
+        source_lines = self._source_bytes_cache[canonical]
+
+        def byte_column(line_number: int, character_column: int) -> int | None:
+            if source_lines is None or not 1 <= line_number <= len(source_lines):
+                return None
+            try:
+                text = source_lines[line_number - 1].decode("utf-8")
+            except UnicodeDecodeError:
+                return None
+            if character_column > len(text):
+                return None
+            return len(text[:character_column].encode("utf-8"))
+
+        if end_line is not None and end_column is not None:
+            span_candidates = [(column, end_column)]
+            for offset in (0, 1):
+                byte_start = byte_column(line, column + offset)
+                byte_end = byte_column(end_line, end_column + offset)
+                if byte_start is not None and byte_end is not None:
+                    span_candidates.append((byte_start, byte_end))
+            matched_span = next(
+                (
+                    (start, end)
+                    for start, end in span_candidates
+                    if spans.get((line, start)) == (end_line, end)
+                ),
+                None,
+            )
+            if matched_span is not None:
+                column, end_column = matched_span
+        if end_line is None or end_column is None:
+            start_candidates = {column}
+            for offset in (0, 1):
+                converted_column = byte_column(line, column + offset)
+                if converted_column is not None:
+                    start_candidates.add(converted_column)
+            matched_start = next(
+                (start for start in start_candidates if (line, start) in spans), None
+            )
+            fallback_span = spans.get((line, matched_start)) if matched_start is not None else None
+            if fallback_span is not None and matched_start is not None:
+                column = matched_start
+            if fallback_span is not None:
+                end_line, end_column = fallback_span
+        if end_line is None or end_column is None:
+            return None
         lines = self._source_bytes_cache[canonical]
         spelling = ""
         if lines is not None and end_line is not None and end_line <= len(lines):
