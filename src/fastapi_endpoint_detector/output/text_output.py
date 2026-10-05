@@ -20,7 +20,13 @@ class TextFormatter(BaseFormatter):
     Format output as human-readable text using Rich.
     """
 
-    def __init__(self, colorize: bool = True) -> None:
+    def __init__(
+        self,
+        colorize: bool = True,
+        show_confidence: bool = True,
+        show_dependency_chain: bool = True,
+        verbose: bool = False,
+    ) -> None:
         """
         Initialize the text formatter.
 
@@ -28,6 +34,9 @@ class TextFormatter(BaseFormatter):
             colorize: Whether to use colors in output.
         """
         self.colorize = colorize
+        self.show_confidence = show_confidence
+        self.show_dependency_chain = show_dependency_chain
+        self.verbose = verbose
 
     def _confidence_style(self, confidence: ConfidenceLevel) -> str:
         """Get the style for a confidence level."""
@@ -132,21 +141,38 @@ class TextFormatter(BaseFormatter):
             console.print()
 
             # Group by confidence
-            for confidence in [ConfidenceLevel.HIGH, ConfidenceLevel.MEDIUM, ConfidenceLevel.LOW]:
-                endpoints = report.get_endpoints_by_confidence(confidence)
+            groups = (
+                [
+                    (confidence, report.get_endpoints_by_confidence(confidence))
+                    for confidence in [
+                        ConfidenceLevel.HIGH,
+                        ConfidenceLevel.MEDIUM,
+                        ConfidenceLevel.LOW,
+                    ]
+                ]
+                if self.show_confidence
+                else [(None, report.affected_endpoints)]
+            )
+            for confidence, endpoints in groups:
                 if not endpoints:
                     continue
 
-                icon = self._confidence_icon(confidence)
-                style = self._confidence_style(confidence)
-                console.print(
-                    f"  {icon} [bold]{confidence.value.upper()} Confidence[/bold] ({len(endpoints)})"
-                )
+                style = self._confidence_style(confidence) if confidence is not None else ""
+                if confidence is not None:
+                    icon = self._confidence_icon(confidence)
+                    console.print(
+                        f"  {icon} [bold]{confidence.value.upper()} Confidence[/bold] ({len(endpoints)})"
+                    )
+                else:
+                    console.print(f"  Endpoints ({len(endpoints)})")
 
                 for ae in endpoints:
                     ep = ae.endpoint
                     methods = ",".join(m.value for m in ep.methods)
-                    console.print(f"    [{style}]{methods} {ep.path}[/{style}]")
+                    if style:
+                        console.print(f"    [{style}]{methods} {ep.path}[/{style}]")
+                    else:
+                        console.print(f"    {methods} {ep.path}", markup=False)
                     console.print(
                         f"      Handler: {ep.handler.name} ({ep.handler.file_path}:{ep.handler.line_number})"
                     )
@@ -166,7 +192,11 @@ class TextFormatter(BaseFormatter):
                                 f"        {condition.source_path}:{condition.source_line}: "
                                 f"{condition.reason}"
                             )
-                    if ae.dependency_chain and len(ae.dependency_chain) > 1:
+                    if (
+                        self.show_dependency_chain
+                        and ae.dependency_chain
+                        and len(ae.dependency_chain) > 1
+                    ):
                         chain = " → ".join(ae.dependency_chain)
                         console.print(f"      Chain: {chain}")
                     for evidence in ae.effect_evidence:
@@ -189,12 +219,14 @@ class TextFormatter(BaseFormatter):
                         )
 
                     # Show traceback-style call stack if available
-                    if ae.call_stacks:
+                    if self.show_dependency_chain and ae.call_stacks:
                         console.print()
                         console.print("      [bold cyan]Call Stack (traceback style):[/bold cyan]")
                         traceback_lines = ae.format_traceback().strip().split("\n")
                         for line in traceback_lines:
                             console.print(f"      {line}")
+                    if self.verbose and ae.changed_files:
+                        console.print(f"      Changed files: {', '.join(ae.changed_files)}")
                     console.print()
         else:
             console.print("[green]No endpoints selected by the confidence threshold.[/green]")
@@ -215,10 +247,12 @@ class TextFormatter(BaseFormatter):
                 discovery = (
                     " [CONDITIONAL DISCOVERY]" if candidate.endpoint.discovery_conditions else ""
                 )
-                console.print(
-                    f"  {methods} {candidate.endpoint.path} "
-                    f"({candidate.confidence.value}){discovery}"
+                confidence_label = (
+                    f" ({candidate.confidence.value})" if self.show_confidence else ""
                 )
+                console.print(f"  {methods} {candidate.endpoint.path}{confidence_label}{discovery}")
+                if self.verbose and candidate.changed_files:
+                    console.print(f"    Changed files: {', '.join(candidate.changed_files)}")
                 if candidate.endpoint.surface is not None:
                     surface = candidate.endpoint.surface
                     console.print(
