@@ -5,6 +5,8 @@ from __future__ import annotations
 import copy
 import json
 import math
+import subprocess
+import sys
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -145,3 +147,95 @@ def test_non_finite_case_metrics_are_not_accepted() -> None:
     metrics = gate._metrics(["GET /one"], [])
     assert metrics == {"tp": 0, "fp": 0, "fn": 1, "precision": 0.0, "recall": 0.0}
     assert all(math.isfinite(value) for value in metrics.values() if isinstance(value, float))
+
+
+def test_unsupported_capability_probe_cannot_satisfy_gate() -> None:
+    cases = [
+        {"supported": True, "status": "passed"},
+        {"supported": False, "status": "unsupported"},
+    ]
+    coverage = {"unsupported": 1, "failed": 0}
+    metrics = {"precision": 1.0, "recall": 1.0, "high_medium_control_candidates": 0}
+    assert not gate._gate_passed(cases, coverage, metrics)
+
+
+def test_source_identity_snapshot_detects_changes_between_cases(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.email", "accuracy@example.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.name", "Accuracy Harness"],
+        check=True,
+    )
+    source = tmp_path / "src" / "analyzer.py"
+    source.parent.mkdir()
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "src/analyzer.py"], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "commit", "-m", "pin"], check=True, capture_output=True
+    )
+    pinned = {"src/analyzer.py": gate.sha_bytes(source.read_bytes())}
+    before = gate._source_identity_snapshot(tmp_path, pinned)
+    assert before["worktree_clean"] is True
+    source.write_text("VALUE = 2\n", encoding="utf-8")
+    after = gate._source_identity_snapshot(tmp_path, pinned)
+    assert after["worktree_clean"] is False
+    assert after["source_tree_hash"] != before["source_tree_hash"]
+
+
+def test_self_consistent_fabricated_cli_document_requires_runtime_receipt() -> None:
+    artifact = gate.RESULTS / "paired-run-88365f0-analyzer-8ccd5d3.json"
+    document = json.loads(artifact.read_text(encoding="utf-8"))
+    target = next(
+        case for case in document["cases"] if case["case_id"] == "deferred_lambda_control"
+    )
+    evidence = target["cli_evidence"]
+    report = evidence["report"]
+    assert report["candidate_endpoints"]
+    report["candidate_endpoints"] = []
+    target["actual"] = []
+    target.update(gate._metrics(target["expected"], []))
+    target["status"] = "passed"
+    target["error"] = None
+    evidence["stdout"] = json.dumps(report)
+    evidence["stdout_sha256"] = gate.sha_text(evidence["stdout"])
+    evidence["report_hash"] = gate.sha_text(gate._canonical_json(report))
+    evidence["execution_receipt"] = "forged-self-consistent-receipt"
+    supported = [case for case in document["cases"] if case["supported"]]
+    tp = sum(case["tp"] for case in supported)
+    fp = sum(case["fp"] for case in supported)
+    fn = sum(case["fn"] for case in supported)
+    document["metrics"] = {
+        "tp": tp,
+        "fp": fp,
+        "fn": fn,
+        "precision": tp / (tp + fp),
+        "recall": tp / (tp + fn),
+        "high_medium_control_candidates": 0,
+        "high_medium": gate._tier_metrics(supported, {"high", "medium"}),
+        "low_report_only": gate._tier_metrics(supported, {"low"}),
+    }
+    document["case_coverage"]["failed"] = 0
+    document["gate_status"] = "passed"
+    document["run_validity"] = "valid"
+    document["integrity_errors"] = []
+    document["final_source_identity"] = {
+        "worktree_clean": True,
+        "source_tree_hash": document["analyzer_provenance"]["source_tree_hash"],
+    }
+    assert document["metrics"]["precision"] == document["metrics"]["recall"] == 1.0
+    with pytest.raises(ValueError, match="in-memory subprocess execution context"):
+        gate.validate(document)
+
+
+def test_cli_output_is_bounded_while_reading(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(gate, "CLI_OUTPUT_LIMIT_BYTES", 1024)
+    result = gate._run_bounded_cli(
+        [sys.executable, "-c", "print('x' * 200_000)"], tmp_path, timeout_seconds=10
+    )
+    assert result.output_limit_exceeded
+    assert len(result.stdout.encode()) + len(result.stderr.encode()) <= 1024

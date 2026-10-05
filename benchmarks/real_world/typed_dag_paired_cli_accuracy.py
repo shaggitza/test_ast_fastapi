@@ -10,11 +10,16 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import difflib
 import hashlib
 import json
 import math
+import os
 import platform
+import secrets
+import selectors
+import signal
 import subprocess
 import sys
 import time
@@ -34,6 +39,7 @@ from benchmarks.real_world import typed_dag_accuracy as v1  # noqa: E402
 SCHEMA = "typed-dag-paired-cli-accuracy-v2"
 RESULTS = Path(__file__).resolve().parents[1] / "results" / SCHEMA
 CLI_TIMEOUT_SECONDS = 240
+CLI_OUTPUT_LIMIT_BYTES = 4 * 1024 * 1024
 ROOTS = v1.ROOTS
 
 
@@ -333,6 +339,22 @@ def analyzer_provenance(analyzer_root: Path) -> dict[str, Any]:
     }
 
 
+def _source_identity_snapshot(analyzer_root: Path, pinned: dict[str, str]) -> dict[str, Any]:
+    try:
+        current = {
+            relative: sha_bytes((analyzer_root / relative).read_bytes()) for relative in pinned
+        }
+        clean = not bool(_git(analyzer_root, "status", "--porcelain", "--untracked-files=all"))
+    except (OSError, subprocess.CalledProcessError):
+        current = {}
+        clean = False
+    return {
+        "worktree_clean": clean,
+        "source_tree_hash": sha_text(_canonical_json(current)),
+        "source_sha256": current,
+    }
+
+
 def validate_provenance(document: dict[str, Any], analyzer_root: Path) -> None:
     actual = analyzer_provenance(analyzer_root)
     expected = document.get("analyzer_provenance")
@@ -381,6 +403,21 @@ def _tier_metrics(cases: list[dict[str, Any]], tiers: set[str]) -> dict[str, Any
         "precision": tp / (tp + fp) if tp + fp else None,
         "recall": tp / (tp + fn) if tp + fn else (1.0 if not fn else 0.0),
     }
+
+
+def _gate_passed(
+    cases: list[dict[str, Any]], coverage: dict[str, int], metrics: dict[str, Any]
+) -> bool:
+    supported = [case for case in cases if case.get("supported") is True]
+    return (
+        bool(supported)
+        and coverage["unsupported"] == 0
+        and coverage["failed"] == 0
+        and all(case.get("status") == "passed" for case in cases)
+        and all(case.get("status") == "passed" for case in supported)
+        and metrics["precision"] == metrics["recall"] == 1.0
+        and metrics["high_medium_control_candidates"] == 0
+    )
 
 
 def _explicit_unsupported(report: dict[str, Any]) -> str | None:
@@ -483,7 +520,11 @@ def _validate_synthetic_probe(document: dict[str, Any]) -> None:  # noqa: PLR091
         raise ValueError("synthetic aggregate metrics mismatch")
 
 
-def validate(document: dict[str, Any], analyzer_root: Path | None = None) -> None:  # noqa: PLR0912, PLR0915
+def validate(  # noqa: PLR0912, PLR0915
+    document: dict[str, Any],
+    analyzer_root: Path | None = None,
+    execution_context: _ExecutionContext | None = None,
+) -> None:
     if document.get("schema") != SCHEMA:
         raise ValueError("invalid schema")
     if document.get("evidence_kind") == "synthetic_validation_only":
@@ -491,6 +532,19 @@ def validate(document: dict[str, Any], analyzer_root: Path | None = None) -> Non
         return
     if document.get("evidence_kind") != "cli_generated":
         raise ValueError("only v2 CLI-generated evidence is valid gate input")
+    if (
+        document.get("run_validity") != "valid"
+        or document.get("integrity_errors") != []
+        or document.get("final_source_identity", {}).get("worktree_clean") is not True
+        or document.get("final_source_identity", {}).get("source_tree_hash")
+        != document.get("analyzer_provenance", {}).get("source_tree_hash")
+    ):
+        raise ValueError("run or final analyzer source identity is invalid")
+    if not isinstance(execution_context, _ExecutionContext):
+        raise ValueError(
+            "serialized CLI evidence is replay-only; validation requires the in-memory "
+            "subprocess execution context"
+        )
     runner = document.get("runner_provenance")
     if not isinstance(runner, dict):
         raise ValueError("runner provenance is missing")
@@ -544,6 +598,18 @@ def validate(document: dict[str, Any], analyzer_root: Path | None = None) -> Non
         }
         if any(row.get(key) != value for key, value in metadata.items()):
             raise ValueError(f"case metadata mismatch: {declared.case_id}")
+        expected_tree_hash = document["analyzer_provenance"]["source_tree_hash"]
+        if row.get("source_identity_valid") is not True:
+            raise ValueError(f"analyzer source identity is untrusted: {declared.case_id}")
+        for side in ("source_identity_before", "source_identity_after"):
+            identity = row.get(side)
+            if (
+                not isinstance(identity, dict)
+                or identity.get("worktree_clean") is not True
+                or identity.get("source_tree_hash") != expected_tree_hash
+                or identity.get("source_sha256") != document["analyzer_provenance"]["source_sha256"]
+            ):
+                raise ValueError(f"analyzer changed during case: {declared.case_id}")
         expected_material = case_inputs(declared)
         if row.get("expected") != list(expected_for(declared)):
             raise ValueError(
@@ -561,6 +627,10 @@ def validate(document: dict[str, Any], analyzer_root: Path | None = None) -> Non
             if row.get("status") != "failed" or not row.get("error"):
                 raise ValueError(f"missing CLI evidence must fail explicitly: {declared.case_id}")
             continue
+        if not execution_context.verify(row):
+            raise ValueError(
+                f"CLI evidence lacks an in-process subprocess receipt: {declared.case_id}"
+            )
         report = evidence.get("report")
         if report is None:
             if row.get("status") != "failed" or not row.get("error"):
@@ -612,6 +682,16 @@ def validate(document: dict[str, Any], analyzer_root: Path | None = None) -> Non
             or elapsed_ms < 0
         ):
             raise ValueError(f"invalid CLI timing: {declared.case_id}")
+        output_bytes = sum(
+            len(str(evidence.get(key, "")).encode("utf-8")) for key in ("stdout", "stderr")
+        )
+        if (
+            evidence.get("output_limit_bytes") != CLI_OUTPUT_LIMIT_BYTES
+            or output_bytes > CLI_OUTPUT_LIMIT_BYTES
+            or evidence.get("output_limit_exceeded") is True
+            or evidence.get("timed_out") is True
+        ) and row.get("status") != "failed":
+            raise ValueError(f"CLI output exceeded its bounds: {declared.case_id}")
         actual = _actual_from_report(report)
         if any(row["confidence"] not in {"high", "medium", "low"} for row in actual):
             raise ValueError(f"invalid confidence tier: {declared.case_id}")
@@ -701,14 +781,7 @@ def validate(document: dict[str, Any], analyzer_root: Path | None = None) -> Non
     }
     if document.get("metrics") != aggregate:
         raise ValueError("aggregate or tier metrics do not match case records")
-    gate_passed = (
-        bool(supported)
-        and coverage["failed"] == 0
-        and all(row["status"] in {"passed", "unsupported"} for row in rows)
-        and all(row["status"] == "passed" for row in supported)
-        and aggregate["precision"] == aggregate["recall"] == 1.0
-        and aggregate["high_medium_control_candidates"] == 0
-    )
+    gate_passed = _gate_passed(rows, coverage, aggregate)
     if document.get("gate_status") != ("passed" if gate_passed else "failed"):
         raise ValueError("gate status contradicts measured case coverage and metrics")
 
@@ -722,11 +795,122 @@ def _write_snapshot(root: Path, label: str, sources: dict[str, str]) -> Path:
     return app_root / "app"
 
 
+@dataclass
+class _ExecutionContext:
+    """Ephemeral evidence that this process collected each case from a subprocess."""
+
+    secret: str
+    receipts: dict[str, str]
+
+    @classmethod
+    def create(cls) -> _ExecutionContext:
+        return cls(secrets.token_hex(32), {})
+
+    def record(self, case_id: str, evidence: dict[str, Any]) -> None:
+        payload = {
+            "case_id": case_id,
+            "command_hash": evidence["command_hash"],
+            "exit_code": evidence["exit_code"],
+            "stdout_sha256": evidence["stdout_sha256"],
+            "stderr_sha256": evidence["stderr_sha256"],
+            "report_hash": evidence["report_hash"],
+        }
+        evidence["execution_receipt"] = sha_text(self.secret + _canonical_json(payload))
+        self.receipts[case_id] = evidence["execution_receipt"]
+
+    def verify(self, row: dict[str, Any]) -> bool:
+        evidence = row.get("cli_evidence")
+        if not isinstance(evidence, dict):
+            return False
+        payload = {
+            "case_id": row.get("case_id"),
+            "command_hash": evidence.get("command_hash"),
+            "exit_code": evidence.get("exit_code"),
+            "stdout_sha256": evidence.get("stdout_sha256"),
+            "stderr_sha256": evidence.get("stderr_sha256"),
+            "report_hash": evidence.get("report_hash"),
+        }
+        case_id = row.get("case_id")
+        if not isinstance(case_id, str):
+            return False
+        expected = sha_text(self.secret + _canonical_json(payload))
+        return (
+            self.receipts.get(case_id) == expected and evidence.get("execution_receipt") == expected
+        )
+
+
+@dataclass
+class _CliResult:
+    returncode: int
+    stdout: str
+    stderr: str
+    timed_out: bool
+    output_limit_exceeded: bool
+
+
+def _run_bounded_cli(command: list[str], cwd: Path, timeout_seconds: int) -> _CliResult:
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    assert process.stdout is not None and process.stderr is not None
+    stdout_fd = process.stdout.fileno()
+    stderr_fd = process.stderr.fileno()
+    selector = selectors.DefaultSelector()
+    buffers = {stdout_fd: bytearray(), stderr_fd: bytearray()}
+    streams = {stdout_fd: process.stdout, stderr_fd: process.stderr}
+    for descriptor, stream in streams.items():
+        selector.register(stream, selectors.EVENT_READ, descriptor)
+    started = time.perf_counter()
+    deadline = started + timeout_seconds
+    timed_out = False
+    output_limit_exceeded = False
+    killed = False
+    while selector.get_map():
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0 and process.poll() is None:
+            timed_out = True
+        if (timed_out or output_limit_exceeded) and not killed:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            killed = True
+        events = selector.select(min(0.1, max(0.0, remaining)))
+        for key, _ in events:
+            descriptor = key.data
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                selector.unregister(key.fileobj)
+                continue
+            total = sum(map(len, buffers.values()))
+            room = max(0, CLI_OUTPUT_LIMIT_BYTES - total)
+            buffers[descriptor].extend(chunk[:room])
+            if len(chunk) > room and not output_limit_exceeded:
+                output_limit_exceeded = True
+        if process.poll() is not None and not selector.get_map():
+            break
+    returncode = process.wait()
+    selector.close()
+    process.stdout.close()
+    process.stderr.close()
+    return _CliResult(
+        returncode,
+        buffers[stdout_fd].decode("utf-8", errors="replace"),
+        buffers[stderr_fd].decode("utf-8", errors="replace"),
+        timed_out,
+        output_limit_exceeded,
+    )
+
+
 def _run_case(
     case: Case,
     analyzer_root: Path,
     fixture_root: Path,
     timeout_seconds: int,
+    execution_context: _ExecutionContext,
+    analyzer_sources: dict[str, str],
 ) -> dict[str, Any]:
     material = case_inputs(case)
     validate_generated_fixture(case, material)
@@ -750,27 +934,28 @@ def _run_case(
         "--no-cache",
     ]
     command = ["uv", "run", "--project", str(analyzer_root), "fastapi-endpoint-detector", *options]
+    identity_before = _source_identity_snapshot(analyzer_root, analyzer_sources)
     started = time.perf_counter()
-    try:
-        result = subprocess.run(
-            command,
-            cwd=analyzer_root,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise TimeoutError(f"CLI timeout after {timeout_seconds}s for {case.case_id}") from exc
+    result = _run_bounded_cli(command, analyzer_root, timeout_seconds)
     elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
+    identity_after = _source_identity_snapshot(analyzer_root, analyzer_sources)
+    source_identity_valid = all(
+        identity["worktree_clean"]
+        and identity["source_tree_hash"] == sha_text(_canonical_json(analyzer_sources))
+        for identity in (identity_before, identity_after)
+    )
 
     report: dict[str, Any] | None = None
     parse_error = None
     try:
+        if result.output_limit_exceeded or result.timed_out:
+            raise ValueError(
+                "CLI output limit exceeded" if result.output_limit_exceeded else "CLI timeout"
+            )
         report = json.loads(result.stdout)
         if not isinstance(report, dict):
             raise TypeError("CLI JSON report must be an object")
-    except (json.JSONDecodeError, TypeError) as exc:
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
         parse_error = str(exc)
     errors = report.get("errors", []) if report else []
     warnings = report.get("warnings", []) if report else []
@@ -782,6 +967,9 @@ def _run_case(
     total_endpoints = report.get("summary", {}).get("total_endpoints") if report else None
     operational = (
         result.returncode == 0
+        and not result.timed_out
+        and not result.output_limit_exceeded
+        and source_identity_valid
         and report is not None
         and not errors
         and inventory_status == "established"
@@ -809,7 +997,7 @@ def _run_case(
         )
         reason = None
     else:
-        supported = True
+        supported = source_identity_valid
         status = (
             "passed"
             if operational
@@ -831,6 +1019,9 @@ def _run_case(
         "elapsed_ms": elapsed_ms,
         "stdout": result.stdout,
         "timeout_seconds": timeout_seconds,
+        "output_limit_bytes": CLI_OUTPUT_LIMIT_BYTES,
+        "output_limit_exceeded": result.output_limit_exceeded,
+        "timed_out": result.timed_out,
         "stdout_sha256": sha_text(result.stdout),
         "stderr": result.stderr,
         "stderr_sha256": sha_text(result.stderr),
@@ -838,6 +1029,7 @@ def _run_case(
         "report_hash": sha_text(report_material) if report is not None else None,
         "parse_error": parse_error,
     }
+    execution_context.record(case.case_id, evidence)
     return {
         "case_id": case.case_id,
         "symbol": case.symbol,
@@ -852,14 +1044,21 @@ def _run_case(
         "actual": actual,
         **metrics,
         "source_discovery": "secure_ast",
+        "source_identity_before": identity_before,
+        "source_identity_after": identity_after,
+        "source_identity_valid": source_identity_valid,
         "inventory_status": inventory_status,
         "inventory_limitations": inventory_limitations,
         "total_endpoints": total_endpoints,
         "analyzer_errors": errors if isinstance(errors, list) else [str(errors)],
         "analyzer_warnings": warnings if isinstance(warnings, list) else [str(warnings)],
         "error": (
-            f"CLI exit {result.returncode}; {parse_error or result.stderr.strip()}"
-            if result.returncode != 0 or parse_error
+            (
+                "analyzer source identity changed during this case"
+                if not source_identity_valid
+                else f"CLI exit {result.returncode}; {parse_error or result.stderr.strip()}"
+            )
+            if result.returncode != 0 or parse_error or not source_identity_valid
             else None
         ),
         "cli_evidence": evidence,
@@ -879,7 +1078,22 @@ def run(
     run_started = time.perf_counter()
     analyzer_root = analyzer_root.resolve()
     runner_root = Path(__file__).resolve().parents[2]
-    analyzer_pin = analyzer_provenance(analyzer_root)
+    try:
+        analyzer_pin = analyzer_provenance(analyzer_root)
+    except Exception as exc:
+        failure = {
+            "schema": SCHEMA,
+            "evidence_kind": "cli_generated",
+            "gate_status": "failed",
+            "run_validity": "invalid",
+            "integrity_errors": [f"analyzer provenance could not be pinned: {exc}"],
+            "initial_source_identity": _source_identity_snapshot(analyzer_root, {}),
+            "cases": [],
+        }
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(failure, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return failure
+    execution_context = _ExecutionContext.create()
     runner_revision = _git(runner_root, "rev-parse", "HEAD")
     records = []
     with __import__("tempfile").TemporaryDirectory(prefix="typed-dag-paired-v2-") as tmp:
@@ -887,7 +1101,14 @@ def run(
         for case in CASES:
             material = case_inputs(case)
             try:
-                record = _run_case(case, analyzer_root, fixture_root, timeout_seconds)
+                record = _run_case(
+                    case,
+                    analyzer_root,
+                    fixture_root,
+                    timeout_seconds,
+                    execution_context,
+                    analyzer_pin["source_sha256"],
+                )
             except Exception as exc:
                 expected = list(expected_for(case))
                 record = {
@@ -947,18 +1168,24 @@ def run(
         "unsupported": sum(row["status"] == "unsupported" for row in records),
         "failed": sum(row["status"] == "failed" for row in records),
     }
-    gate_passed = (
-        bool(supported)
-        and coverage["failed"] == 0
-        and all(row["status"] in {"passed", "unsupported"} for row in records)
-        and all(row["status"] == "passed" for row in supported)
-        and metrics["precision"] == metrics["recall"] == 1.0
-        and metrics["high_medium_control_candidates"] == 0
-    )
+    gate_passed = _gate_passed(records, coverage, metrics)
+    final_source_identity = _source_identity_snapshot(analyzer_root, analyzer_pin["source_sha256"])
+    integrity_errors = []
+    if (
+        not final_source_identity["worktree_clean"]
+        or final_source_identity["source_tree_hash"] != analyzer_pin["source_tree_hash"]
+    ):
+        integrity_errors.append(
+            "analyzer source/worktree differs from its initially pinned identity"
+        )
+    run_validity = "valid" if not integrity_errors else "invalid"
     document = {
         "schema": SCHEMA,
         "evidence_kind": "cli_generated",
-        "gate_status": "passed" if gate_passed else "failed",
+        "gate_status": "passed" if gate_passed and run_validity == "valid" else "failed",
+        "run_validity": run_validity,
+        "integrity_errors": integrity_errors,
+        "final_source_identity": final_source_identity,
         "pass_criteria": (
             "100% precision/recall for all proven supported cases; "
             "zero HIGH/MEDIUM control candidates"
@@ -1000,7 +1227,7 @@ def run(
             )
         ),
         "case_coverage": coverage,
-        "metrics": metrics,
+        "metrics": metrics if run_validity == "valid" else None,
         "limitations": [
             "the edge oracle covers the declared generated Python call graph only",
             "original GH283 corpus, blind-release corpus, bootstrap, and "
@@ -1014,7 +1241,20 @@ def run(
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    validate(document, analyzer_root)
+    if run_validity == "valid":
+        try:
+            validate(document, analyzer_root, execution_context)
+        except Exception as exc:
+            document["gate_status"] = "failed"
+            document["run_validity"] = "invalid"
+            document["metrics"] = None
+            document["integrity_errors"] = [
+                *cast("list[str]", document["integrity_errors"]),
+                f"generated result validation failed: {exc}",
+            ]
+            output.write_text(
+                json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
     return document
 
 
