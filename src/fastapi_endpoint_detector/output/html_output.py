@@ -108,8 +108,18 @@ class HtmlFormatter(BaseFormatter):
     Format output as interactive HTML with hover features.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        show_confidence: bool = True,
+        show_dependency_chain: bool = True,
+        colorize: bool = True,
+        verbose: bool = False,
+    ) -> None:
         """Initialize the HTML formatter."""
+        self.show_confidence = show_confidence
+        self.show_dependency_chain = show_dependency_chain
+        self.colorize = colorize
+        self.verbose = verbose
         self._file_cache: dict[str, list[str]] = {}
         self._code_ref_index = 0
 
@@ -2631,20 +2641,36 @@ class HtmlFormatter(BaseFormatter):
             content_lines.append("<h2>Affected Endpoints</h2>")
 
             # Group by confidence
-            for confidence in [ConfidenceLevel.HIGH, ConfidenceLevel.MEDIUM, ConfidenceLevel.LOW]:
-                endpoints = report.get_endpoints_by_confidence(confidence)
+            groups = (
+                [
+                    (confidence, report.get_endpoints_by_confidence(confidence))
+                    for confidence in [
+                        ConfidenceLevel.HIGH,
+                        ConfidenceLevel.MEDIUM,
+                        ConfidenceLevel.LOW,
+                    ]
+                ]
+                if self.show_confidence
+                else [(None, report.affected_endpoints)]
+            )
+            for confidence, endpoints in groups:
                 if not endpoints:
                     continue
 
-                emoji = self._confidence_emoji(confidence)
-                content_lines.append(
-                    f"<h3>{emoji} {confidence.value.upper()} Confidence ({len(endpoints)})</h3>"
-                )
+                if confidence is not None:
+                    emoji = self._confidence_emoji(confidence)
+                    content_lines.append(
+                        f"<h3>{emoji} {confidence.value.upper()} Confidence ({len(endpoints)})</h3>"
+                    )
+                else:
+                    content_lines.append(f"<h3>Endpoints ({len(endpoints)})</h3>")
 
                 for ae in endpoints:
                     call_path_index += 1
                     ep = ae.endpoint
-                    confidence_class = self._confidence_color(ae.confidence)
+                    confidence_class = (
+                        self._confidence_color(ae.confidence) if self.show_confidence else ""
+                    )
 
                     content_lines.append(f'<div class="endpoint-card {confidence_class}">')
 
@@ -2695,6 +2721,11 @@ class HtmlFormatter(BaseFormatter):
                         f'<span class="label">Reason:</span> {html.escape(ae.reason)}'
                         f"</div>"
                     )
+                    if self.verbose and ae.changed_files:
+                        changed = ", ".join(html.escape(path) for path in ae.changed_files)
+                        content_lines.append(
+                            f'<div class="info-item"><span class="label">Changed files:</span> {changed}</div>'
+                        )
 
                     for evidence in ae.effect_evidence:
                         content_lines.append(
@@ -2732,7 +2763,11 @@ class HtmlFormatter(BaseFormatter):
                             )
 
                     # Dependency chain
-                    if ae.dependency_chain and len(ae.dependency_chain) > 1:
+                    if (
+                        self.show_dependency_chain
+                        and ae.dependency_chain
+                        and len(ae.dependency_chain) > 1
+                    ):
                         chain_html = " → ".join(
                             f"<code>{html.escape(dep)}</code>" for dep in ae.dependency_chain
                         )
@@ -2744,7 +2779,7 @@ class HtmlFormatter(BaseFormatter):
 
                     # Keep the verbose traceback as an optional diagnostic fallback.
                     # The condensed graph below is the primary way to inspect many paths.
-                    if ae.call_stacks:
+                    if self.show_dependency_chain and ae.call_stacks:
                         content_lines.append(
                             '<details class="call-stack legacy-call-stack">'
                             f"<summary>Show linear tracebacks ({len(ae.call_stacks)} paths)</summary>"
@@ -2781,13 +2816,12 @@ class HtmlFormatter(BaseFormatter):
                                 content_lines.append("<br>")
                         content_lines.append("</details>")
 
-                    content_lines.append(
-                        self._format_call_path_view(
-                            ae,
-                            report.app_path,
-                            f"affected-call-path-{call_path_index}",
+                    if self.show_dependency_chain:
+                        content_lines.append(
+                            self._format_call_path_view(
+                                ae, report.app_path, f"affected-call-path-{call_path_index}"
+                            )
                         )
-                    )
                     content_lines.append("</div>")  # end endpoint-card
         else:
             content_lines.append('<div class="no-endpoints">')
@@ -2807,7 +2841,9 @@ class HtmlFormatter(BaseFormatter):
             for candidate in additional:
                 call_path_index += 1
                 endpoint = candidate.endpoint
-                confidence_class = self._confidence_color(candidate.confidence)
+                confidence_class = (
+                    self._confidence_color(candidate.confidence) if self.show_confidence else ""
+                )
                 content_lines.append(f'<div class="endpoint-card {confidence_class}">')
                 content_lines.append('<div class="endpoint-header">')
                 for method in endpoint.methods:
@@ -2817,10 +2853,16 @@ class HtmlFormatter(BaseFormatter):
                 content_lines.append(
                     f'<span class="endpoint-path">{html.escape(endpoint.path)}</span></div>'
                 )
-                content_lines.append(
-                    f'<div class="info-item"><span class="label">Confidence:</span> '
-                    f"{html.escape(candidate.confidence.value)}</div>"
-                )
+                if self.show_confidence:
+                    content_lines.append(
+                        f'<div class="info-item"><span class="label">Confidence:</span> '
+                        f"{html.escape(candidate.confidence.value)}</div>"
+                    )
+                if self.verbose and candidate.changed_files:
+                    changed = ", ".join(html.escape(path) for path in candidate.changed_files)
+                    content_lines.append(
+                        f'<div class="info-item"><span class="label">Changed files:</span> {changed}</div>'
+                    )
                 if endpoint.surface is not None:
                     surface = endpoint.surface
                     content_lines.append(
@@ -2865,13 +2907,12 @@ class HtmlFormatter(BaseFormatter):
                         "Potential cross-request coupling:</span> exact added producer "
                         f"callsite; {html.escape(coupling.strength.value)}; LOW-only</div>"
                     )
-                content_lines.append(
-                    self._format_call_path_view(
-                        candidate,
-                        report.app_path,
-                        f"candidate-call-path-{call_path_index}",
+                if self.show_dependency_chain:
+                    content_lines.append(
+                        self._format_call_path_view(
+                            candidate, report.app_path, f"candidate-call-path-{call_path_index}"
+                        )
                     )
-                )
                 content_lines.append("</div>")
 
         # Orphan changes
