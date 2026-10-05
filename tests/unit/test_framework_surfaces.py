@@ -423,6 +423,117 @@ def test_background_tasks_follow_selected_route_ownership_and_preserve_task_iden
     )
 
 
+def test_background_tasks_follow_trusted_lexical_aliases_and_nested_helper_control(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import BackgroundTasks as TaskBatch, FastAPI\n\n"
+        "async def send(): pass\n"
+        "app = FastAPI()\n"
+        "@app.post('/selected')\n"
+        "async def selected_route(tasks: TaskBatch):\n"
+        "    queue = tasks\n"
+        "    queue.add_task(send)\n"
+        "    for receiver in (tasks,):\n"
+        "        receiver.add_task(send)\n"
+        "    for item in dynamic_values():\n"
+        "        pass\n"
+        "    tasks.add_task(send)\n"
+        "    def schedule(queue):\n"
+        "        if enabled():\n"
+        "            queue.add_task(send)\n"
+        "    schedule(tasks)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    tasks = [
+        endpoint
+        for endpoint in inventory.endpoints
+        if endpoint.surface is not None
+        and endpoint.surface.surface_kind == "framework.background_task"
+    ]
+    assert [item.handler.name for item in tasks] == ["send", "send", "send", "send"]
+    assert len({item.surface.registration_line for item in tasks if item.surface}) == 4
+
+
+def test_untrusted_dynamic_and_rebound_task_receivers_fail_closed(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import BackgroundTasks, FastAPI\n\n"
+        "async def send(): pass\n"
+        "app = FastAPI()\n"
+        "@app.post('/selected')\n"
+        "async def selected_route(tasks: BackgroundTasks):\n"
+        "    queue = choose(tasks)\n"
+        "    queue.add_task(send)\n"
+        "@app.post('/rebound')\n"
+        "async def rebound_route(tasks: BackgroundTasks):\n"
+        "    queue = tasks\n"
+        "    queue = choose(queue)\n"
+        "    queue.add_task(send)\n"
+        "@app.post('/untrusted')\n"
+        "async def untrusted_route(tasks):\n"
+        "    tasks.add_task(send)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert not any(
+        endpoint.surface is not None
+        and endpoint.surface.surface_kind == "framework.background_task"
+        for endpoint in inventory.endpoints
+    )
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any("untrusted, dynamic, or rebound" in item.reason for item in inventory.limitations)
+
+
+def test_arbitrary_queue_add_task_is_not_inferred_from_its_name(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "async def send(): pass\n"
+        "app = FastAPI()\n"
+        "@app.post('/selected')\n"
+        "async def selected_route(queue):\n"
+        "    queue.add_task(send)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert not any(
+        endpoint.surface is not None
+        and endpoint.surface.surface_kind == "framework.background_task"
+        for endpoint in inventory.endpoints
+    )
+    assert inventory.status == InventoryStatus.ESTABLISHED
+
+
+def test_nested_import_shadow_does_not_inherit_trusted_task_alias(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import BackgroundTasks, FastAPI\n\n"
+        "async def send(): pass\n"
+        "app = FastAPI()\n"
+        "@app.post('/selected')\n"
+        "async def selected_route(tasks: BackgroundTasks):\n"
+        "    def helper():\n"
+        "        import queue as tasks\n"
+        "        tasks.add_task(send)\n"
+        "    helper()\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert not any(
+        endpoint.surface is not None
+        and endpoint.surface.surface_kind == "framework.background_task"
+        for endpoint in inventory.endpoints
+    )
+    assert inventory.status == InventoryStatus.CONDITIONAL
+
+
 def test_background_task_dynamic_callback_fails_closed_for_selected_route(
     tmp_path: Path,
 ) -> None:

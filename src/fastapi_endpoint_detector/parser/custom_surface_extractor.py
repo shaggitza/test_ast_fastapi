@@ -40,6 +40,7 @@ from fastapi_endpoint_detector.parser._static_evaluation import (
     StaticStringEvaluator,
 )
 from fastapi_endpoint_detector.parser.framework_ownership import (
+    background_task_calls,
     direct_route_callback,
     eager_calls,
     route_callback_selector,
@@ -1343,32 +1344,21 @@ class CustomSurfaceExtractor:
                                     ),
                                 )
                             )
-                if not isinstance(call.func, ast.Attribute) or call.func.attr != "add_task":
-                    continue
-                if not isinstance(call.func.value, ast.Name):
-                    continue
-                contract_id = task_parameters.get(call.func.value.id)
-                contract = task_contracts.get(contract_id or "")
+            for task_call in background_task_calls(route, task_parameters):
+                contract = task_contracts.get(task_call.contract_id or "")
                 if contract is None:
-                    if call.func.value.id in {
-                        argument.arg
-                        for argument in (
-                            *route.args.posonlyargs,
-                            *route.args.args,
-                            *route.args.kwonlyargs,
+                    self._limitations.append(
+                        EndpointDiscoveryCondition(
+                            source_path=route_module.path,
+                            source_line=task_call.call.lineno,
+                            reason=(
+                                "selected route add_task receiver is untrusted, dynamic, or "
+                                "rebound; task inventory is incomplete"
+                            ),
                         )
-                    }:
-                        self._limitations.append(
-                            EndpointDiscoveryCondition(
-                                source_path=route_module.path,
-                                source_line=call.lineno,
-                                reason=(
-                                    "selected route add_task receiver type is unresolved; "
-                                    "task inventory is incomplete"
-                                ),
-                            )
-                        )
+                    )
                     continue
+                call = task_call.call
                 callback_expression = (
                     call.args[0]
                     if call.args
