@@ -346,9 +346,9 @@ class TypedReverseGraph:
             for uncertainty in self.uncertainties:
                 if uncertainty.category == "effect_summary":
                     continue
-                uncertainty_queue: deque[
-                    tuple[str, tuple[EdgeWitness, ...], frozenset[str]]
-                ] = deque([(uncertainty.owner, (), frozenset({uncertainty.owner}))])
+                uncertainty_queue: deque[tuple[str, tuple[EdgeWitness, ...], frozenset[str]]] = (
+                    deque([(uncertainty.owner, (), frozenset({uncertainty.owner}))])
+                )
                 uncertainty_seen: set[tuple[str, tuple[str, ...]]] = set()
                 while uncertainty_queue:
                     if len(uncertainty_queue) > budgets.frontier:
@@ -477,14 +477,10 @@ class TypedReverseGraph:
             reason for item in ordered for reason in item.incomplete.reasons
         }
         result_reasons.update(
-            reason
-            for item in ordered_uncertain
-            for reason in item.incomplete.reasons
+            reason for item in ordered_uncertain for reason in item.incomplete.reasons
         )
         result_affected = affected | {
-            item.seed.symbol
-            for item in ordered
-            if item.incomplete.reasons
+            item.seed.symbol for item in ordered if item.incomplete.reasons
         }
         result_affected.update(item.seed.symbol for item in ordered_uncertain)
         return ReverseQueryResult(
@@ -626,9 +622,7 @@ class _ModuleWalker:
         elif isinstance(node.callee, MemberExpr):
             base_expression = node.callee.expr
             base_node = getattr(base_expression, "node", None)
-            imported_base = _expression_fullname(
-                base_expression, self.import_aliases, self.owner
-            )
+            imported_base = _expression_fullname(base_expression, self.import_aliases, self.owner)
             if isinstance(base_node, TypeInfo):
                 member_symbol = base_node.get(node.callee.name)
                 resolved_target_node = getattr(member_symbol, "node", None)
@@ -701,10 +695,7 @@ class _ModuleWalker:
                 import_aliases=self.import_aliases,
                 owner=self.owner,
                 skip_receiver=kind == "constructor"
-                or (
-                    receiver is not None
-                    and invocation in {"instance_method", "class_method"}
-                ),
+                or (receiver is not None and invocation in {"instance_method", "class_method"}),
             )
             edge = self._edge(
                 self.owner,
@@ -969,9 +960,7 @@ def build_typed_reverse_graph(  # noqa: PLR0912, PLR0915
         walker.visit_mypy_file(tree)
         symbols.update(walker.symbols)
         edges.update((edge.witness_id, edge) for edge in walker.edges)
-        uncertainties.update(
-            (item.uncertainty_id, item) for item in walker.uncertainties
-        )
+        uncertainties.update((item.uncertainty_id, item) for item in walker.uncertainties)
     source_by_path = {
         str(Path(module_paths[module]).resolve()): digest for module, digest in source_hashes
     }
@@ -1212,7 +1201,9 @@ def _argument_bindings(
         keyword = name if kind in keyword_kinds else None
         formal_index = pos + offset
         formal = (
-            name if keyword in arg_names else None
+            name
+            if keyword in arg_names
+            else None
             if keyword is not None
             else arg_names[formal_index]
             if positional is not None and formal_index < len(arg_names)

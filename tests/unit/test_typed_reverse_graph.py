@@ -211,15 +211,11 @@ def test_cache_rejects_changed_bytes_symlinks_and_root_mismatch(tmp_path: Path) 
     binding = _binding(tmp_path, app_module, _fullname(snapshot, app_module, "handler"), "route")
     graph = build_typed_reverse_graph(inventory, snapshot, [binding], config_fingerprint="cfg")
 
-    assert TypedGraphCache.validate(
-        graph, inventory, snapshot, config_fingerprint="cfg"
-    )
+    assert TypedGraphCache.validate(graph, inventory, snapshot, config_fingerprint="cfg")
     assert TypedGraphCache.cache_key(graph) != TypedGraphCache.cache_key(
         replace(graph, engine_version="different")
     )
-    assert not TypedGraphCache.validate(
-        graph, inventory, snapshot, config_fingerprint="other"
-    )
+    assert not TypedGraphCache.validate(graph, inventory, snapshot, config_fingerprint="other")
     assert not TypedGraphCache.validate(
         graph,
         replace(inventory, root=tmp_path / "other"),
@@ -266,16 +262,12 @@ def test_cache_rejects_changed_bytes_symlinks_and_root_mismatch(tmp_path: Path) 
         config_fingerprint="cfg",
     )
     inventory.files[0].path.write_text("def handler():\n    return 2\n", encoding="utf-8")
-    assert not TypedGraphCache.validate(
-        graph, inventory, snapshot, config_fingerprint="cfg"
-    )
+    assert not TypedGraphCache.validate(graph, inventory, snapshot, config_fingerprint="cfg")
 
     alias = tmp_path / "alias.py"
     alias.symlink_to(inventory.files[0].path)
     bad = _Inventory(tmp_path, (_Record("app", alias, "alias.py", graph.source_hashes[0][1]),))
-    assert not TypedGraphCache.validate(
-        graph, bad, snapshot, config_fingerprint="cfg"
-    )
+    assert not TypedGraphCache.validate(graph, bad, snapshot, config_fingerprint="cfg")
 
 
 def test_constructor_seed_uses_typed_constructor_target(tmp_path: Path) -> None:
@@ -344,16 +336,18 @@ def test_typed_arguments_and_utf8_end_columns_use_provider_findings(tmp_path: Pa
         tmp_path,
         {
             "app": (
-                "from service import changed\n"
-                "def handler() -> str:\n"
-                '    return changed("café")\n'
+                'from service import changed\ndef handler() -> str:\n    return changed("café")\n'
             ),
             "service": "def changed(value: str) -> str:\n    return value\n",
         },
     )
-    edge = next(item for item in build_typed_reverse_graph(
-        inventory, snapshot, [], config_fingerprint="cfg"
-    ).edges if item.callee.endswith("service.changed"))
+    edge = next(
+        item
+        for item in build_typed_reverse_graph(
+            inventory, snapshot, [], config_fingerprint="cfg"
+        ).edges
+        if item.callee.endswith("service.changed")
+    )
     raw_line = (tmp_path / "app.py").read_bytes().splitlines()[edge.span.start_line - 1]
     target_span = edge.target_span
     assert target_span is not None
@@ -378,10 +372,7 @@ def test_keyword_formals_resolve_exactly_and_starred_formals_abstain(tmp_path: P
                 "    join(second=second, first=first)\n"
                 "    join(*values)\n"
             ),
-            "service": (
-                "def combine(first: str, second: str) -> None:\n"
-                "    return None\n"
-            ),
+            "service": ("def combine(first: str, second: str) -> None:\n    return None\n"),
         },
     )
     graph = build_typed_reverse_graph(inventory, snapshot, [], config_fingerprint="cfg")
@@ -617,10 +608,9 @@ def test_pr326_retained_update_graph_matches_independent_cold_call_path(
     analyzer = MypyAnalyzer(tmp_path, max_depth=16)
     analyzer._ensure_mypy_built()
     analyzer_app = _module(
-        SimpleNamespace(modules={
-            module: SimpleNamespace(tree=tree)
-            for module, tree in analyzer._trees.items()
-        }),
+        SimpleNamespace(
+            modules={module: SimpleNamespace(tree=tree) for module, tree in analyzer._trees.items()}
+        ),
         "app",
     )
     endpoint = Endpoint(
@@ -740,9 +730,7 @@ def test_exact_changed_coordinate_seeds_and_conditional_low_cap(tmp_path: Path) 
     )
     graph = build_typed_reverse_graph(inventory, snapshot, [binding], config_fingerprint="cfg")
     seeds = seeds_for_changed_coordinates("baseline", [(str(changed_path), 1, 4)], graph)
-    outside_symbol = seeds_for_changed_coordinates(
-        "baseline", [(str(changed_path), 2, 99)], graph
-    )
+    outside_symbol = seeds_for_changed_coordinates("baseline", [(str(changed_path), 2, 99)], graph)
     result = graph.query(seeds, side="baseline")
 
     assert [seed.symbol for seed in seeds] == [changed]
