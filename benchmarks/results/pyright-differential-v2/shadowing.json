@@ -1,0 +1,102 @@
+{
+  "comparison": {
+    "absence_is_not_equivalence": true,
+    "mypy_only_error_locations": [],
+    "overlapping_error_locations": [],
+    "policy": "error-location-overlap-only; provider rules/messages remain provider-specific",
+    "pyright_only_error_locations": [],
+    "semantic_equivalence": "unsupported"
+  },
+  "config_sha256": {
+    "mypy.ini": "3dee958bdff320545bc860ee66a68e1f511d20d34a55addd445248a76159b453",
+    "pyrightconfig.json": "0ec5e0406e59264b35045b33532c62849d312ecb77deda2d402de5de9dde921a"
+  },
+  "engines": {
+    "mypy": "mypy 2.4.0 (compiled: yes)",
+    "pyright": "pyright 1.1.411"
+  },
+  "fixture": "shadowing",
+  "observations": [
+    {
+      "column": 13,
+      "comparable": false,
+      "end_column": 40,
+      "end_line": 9,
+      "file": "case.py",
+      "kind": "diagnostic",
+      "line": 9,
+      "message": "Type of \"imported_name(Path(\"file\"))\" is \"str\"",
+      "provider": "pyright",
+      "rule": null,
+      "severity": "information"
+    },
+    {
+      "column": 13,
+      "comparable": false,
+      "end_column": null,
+      "end_line": null,
+      "file": "case.py",
+      "kind": "type_observation",
+      "line": 9,
+      "message": "Revealed type is \"str\"",
+      "provider": "mypy",
+      "rule": null,
+      "severity": "note"
+    }
+  ],
+  "provenance": {
+    "consumed_config_sha256": {
+      "mypy.ini": "3dee958bdff320545bc860ee66a68e1f511d20d34a55addd445248a76159b453",
+      "pyrightconfig.json": "0ec5e0406e59264b35045b33532c62849d312ecb77deda2d402de5de9dde921a"
+    },
+    "consumed_source_sha256": {
+      "case.py": "5710163932547480de0e624ff49cb043792cddbeef5112e9077115f32ebb764a"
+    },
+    "elapsed_seconds": 4.304,
+    "fixture_root": "shadowing",
+    "max_files": 32,
+    "max_source_bytes": 256000,
+    "mypy_command": [
+      "/root/.local/bin/mypy",
+      "--config-file",
+      "<snapshot>/mypy.ini",
+      "--no-incremental",
+      "--show-error-codes",
+      "--no-error-summary",
+      "--no-pretty",
+      "--follow-imports",
+      "silent",
+      "<snapshot>/fixture"
+    ],
+    "provider_timeout_seconds": 25,
+    "pyright_command": [
+      "/tmp/pyright-differential/node_modules/.bin/pyright",
+      "--project",
+      "<snapshot>/fixture",
+      "--outputjson"
+    ],
+    "working_directory": "<repository-root>"
+  },
+  "schema": "pyright-mypy-differential-v2",
+  "scope": "synthetic fixtures only; no corpus application execution or canonical truth",
+  "source_sha256": {
+    "case.py": "5710163932547480de0e624ff49cb043792cddbeef5112e9077115f32ebb764a"
+  },
+  "unsupported": [
+    {
+      "query": "definition_target",
+      "reason": "The pinned Pyright CLI emits diagnostics only; no definition query is issued.",
+      "status": "unsupported"
+    },
+    {
+      "query": "execution_or_reachability",
+      "reason": "Static type diagnostics and revealed types do not establish execution.",
+      "status": "unsupported"
+    },
+    {
+      "query": "cross_engine_diagnostic_semantics",
+      "reason": "Only error-location overlap is summarized; rules/messages are engine-specific.",
+      "status": "unsupported"
+    }
+  ]
+}
