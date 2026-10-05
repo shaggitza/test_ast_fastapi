@@ -114,6 +114,7 @@ def _normalize_observation_origin(origin: str) -> str:
         or not parsed.hostname
         or parsed.username is not None
         or parsed.password is not None
+        or parsed.netloc.endswith(":")
         or parsed.path not in {"", "/"}
         or "?" in origin
         or "#" in origin
@@ -145,6 +146,7 @@ class RouteObservationConfig(BaseModel):
             "**/.env",
             "**/.env.*",
             "**/Dockerfile*",
+            "**/*.Dockerfile",
             "**/*.py",
         ],
         description="Application-root-relative globs for deployment observation files.",

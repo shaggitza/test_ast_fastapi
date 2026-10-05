@@ -11,6 +11,7 @@ def test_route_observations_are_disabled_by_default() -> None:
 
     assert config.analysis.route_observations.enabled is False
     assert config.analysis.route_observations.trusted_server_origins == {}
+    assert "**/*.Dockerfile" in config.analysis.route_observations.deployment_include_patterns
 
 
 def test_trusted_origins_are_explicit_and_canonicalized() -> None:
@@ -51,6 +52,7 @@ def test_trusted_origins_are_explicit_and_canonicalized() -> None:
         {"trusted_server_origins": {"surface": "https://api.example#fragment"}},
         {"trusted_server_origins": {"surface": "https://user:pass@api.example"}},
         {"trusted_server_origins": {"surface": "https://api.example:bad"}},
+        {"trusted_server_origins": {"surface": "https://api.example:"}},
         {"trusted_server_origins": {"": "https://api.example"}},
     ],
 )
