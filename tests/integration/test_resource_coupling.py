@@ -623,7 +623,7 @@ def test_graph_tampering_is_rejected_and_all_formats_disclose_report_only(
     for output_format in ("text", "markdown", "html"):
         rendered = get_formatter(output_format).format(report)
         assert "report-only" in rendered
-        assert "does not change candidates" in rendered
+        assert "does not change candidates" in " ".join(rendered.split())
     assert json.loads(get_formatter("json").format(report))["resource_coupling_graph"]
     assert yaml.safe_load(get_formatter("yaml").format(report))["resource_coupling_graph"]
 
