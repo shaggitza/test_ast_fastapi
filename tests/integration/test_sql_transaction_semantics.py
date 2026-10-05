@@ -574,15 +574,18 @@ def test_langflow_13960_real_source_transaction_fixture_is_pinned_and_bounded(
     assert provenance["target_merge_sha"] == "a69a47ff1b5c99ce9c50edc4df45de4397151f17"
     assert provenance["license"]["spdx"] == "MIT"
     assert "Copyright (c) 2024 Langflow" in (fixture / "LICENSE.langflow.txt").read_text()
+    snapshot_sources = tuple((fixture / "source").rglob("*.py.txt"))
+    assert snapshot_sources
+    assert not tuple((fixture / "source").rglob("*.py"))
     for relative_path, expected_hash in provenance["fixture_excerpt_sha256"].items():
         content = (fixture / relative_path).read_bytes()
         assert hashlib.sha256(content).hexdigest() == expected_hash
         ast.parse(content, filename=relative_path)
 
-    route = (fixture / "source/langflow/api/v1/traces.py").read_text(encoding="utf-8")
-    wrapper = (fixture / "source/lfx/services/deps.py").read_text(encoding="utf-8")
-    flow_flush = (fixture / "source/langflow/api/v1/flows_flush.py").read_text(encoding="utf-8")
-    regression = (fixture / "source/langflow/tests/test_span_cascade_delete.py").read_text(
+    route = (fixture / "source/langflow/api/v1/traces.py.txt").read_text(encoding="utf-8")
+    wrapper = (fixture / "source/lfx/services/deps.py.txt").read_text(encoding="utf-8")
+    flow_flush = (fixture / "source/langflow/api/v1/flows_flush.py.txt").read_text(encoding="utf-8")
+    regression = (fixture / "source/langflow/tests/test_span_cascade_delete.py.txt").read_text(
         encoding="utf-8"
     )
     assert "async with session_scope() as session" in route

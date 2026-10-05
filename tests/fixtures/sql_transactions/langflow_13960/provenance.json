@@ -11,13 +11,13 @@
     "symbol": "langflow.services.deps.session_scope"
   },
   "fixture_excerpt_sha256": {
-    "source/langflow/alembic/e1705947c729_ensure_span_trace_id_foreign_key_has_.py": "b41c0aeb9935478109a7cbb3759d29c5779570bd9762d8f3d9ae6329e6d9b33b",
-    "source/langflow/api/v1/flows_flush.py": "496a6e1ab534d40105e5e2eea66aeb05a2c6e4c25cf0fc3d86e1cc3775c46fe0",
-    "source/langflow/api/v1/traces.py": "6b4636f87a904427185d0a77474f3fc2cf39087d4a051b3d5816deb922d500b6",
-    "source/langflow/services/database/models/traces/model.py": "aad2f1a9c5c3d166a341d44ce7f0afe9079d2da10a41fede0b8d2ef9e4f5c703",
-    "source/langflow/services/deps.py": "f08db4846549274eef2559fd8e291ff25fee57a0dd3e2de54bd1c640e5ce89be",
-    "source/langflow/tests/test_span_cascade_delete.py": "3d2c5c8b70ab73f7d8bd48e8bb8ead5e97cb3938f79314fade7f38ce8ed7cd7e",
-    "source/lfx/services/deps.py": "373ec1cffce68c577ba6fa7a0f0314fdf3dc1c8a84c4ead2a52a857c29494e48"
+    "source/langflow/alembic/e1705947c729_ensure_span_trace_id_foreign_key_has_.py.txt": "b41c0aeb9935478109a7cbb3759d29c5779570bd9762d8f3d9ae6329e6d9b33b",
+    "source/langflow/api/v1/flows_flush.py.txt": "496a6e1ab534d40105e5e2eea66aeb05a2c6e4c25cf0fc3d86e1cc3775c46fe0",
+    "source/langflow/api/v1/traces.py.txt": "6b4636f87a904427185d0a77474f3fc2cf39087d4a051b3d5816deb922d500b6",
+    "source/langflow/services/database/models/traces/model.py.txt": "aad2f1a9c5c3d166a341d44ce7f0afe9079d2da10a41fede0b8d2ef9e4f5c703",
+    "source/langflow/services/deps.py.txt": "f08db4846549274eef2559fd8e291ff25fee57a0dd3e2de54bd1c640e5ce89be",
+    "source/langflow/tests/test_span_cascade_delete.py.txt": "3d2c5c8b70ab73f7d8bd48e8bb8ead5e97cb3938f79314fade7f38ce8ed7cd7e",
+    "source/lfx/services/deps.py.txt": "373ec1cffce68c577ba6fa7a0f0314fdf3dc1c8a84c4ead2a52a857c29494e48"
   },
   "fixture_schema": 1,
   "license": {
