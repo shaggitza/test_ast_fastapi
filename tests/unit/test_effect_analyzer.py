@@ -108,6 +108,43 @@ def test_reassignment_kills_returned_alias_observation(tmp_path: Path) -> None:
     assert result.evidence[0].observations == [DataObservationKind.NOT_OBSERVED_AFTER_CALL]
 
 
+def test_annotation_only_assignment_preserves_returned_argument_alias(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def endpoint():\n"
+        "    payload = {'x': 0}\n"
+        "    dispatch(payload)\n"
+        "    payload: dict\n"
+        "    return payload\n"
+    )
+
+    result = EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 3)])
+
+    assert result is not None
+    assert result.confidence == ConfidenceLevel.HIGH
+    assert result.evidence[0].observations == [DataObservationKind.RETURNED]
+
+
+def test_rebinding_in_dead_literal_branch_does_not_kill_returned_alias(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def endpoint():\n"
+        "    payload = {'x': 0}\n"
+        "    dispatch(payload)\n"
+        "    if False:\n"
+        "        payload = {'x': 1}\n"
+        "    return payload\n"
+    )
+
+    result = EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 3)])
+
+    assert result is not None
+    assert result.confidence == ConfidenceLevel.HIGH
+    assert result.evidence[0].observations == [DataObservationKind.RETURNED]
+
+
 def test_branch_reassignment_does_not_join_old_alias_as_definite(tmp_path: Path) -> None:
     service = _service(tmp_path)
     main = tmp_path / "main.py"
@@ -721,8 +758,11 @@ def test_local_helper_cap_is_reported_as_unresolved(tmp_path: Path) -> None:
     service.write_text(
         "def dispatch(payload):\n"
         "    payload = {**payload}\n"
-        + "".join(f"    def unused{index}():\n        pass\n" for index in range(9))
-        + "    payload.update({'x': 1})\n"
+        + "".join(
+            f"    def mutate{index}(value):\n        value.update({{'x{index}': 1}})\n"
+            for index in range(9)
+        )
+        + "".join(f"    mutate{index}(payload)\n" for index in range(9))
     )
     main = tmp_path / "main.py"
     main.write_text("def endpoint():\n    return dispatch({'x': 0})\n")
@@ -732,6 +772,29 @@ def test_local_helper_cap_is_reported_as_unresolved(tmp_path: Path) -> None:
     assert result is not None
     assert result.evidence[0].status.value == "unresolved"
     assert "eight helper cap" in result.evidence[0].summary
+
+
+def test_unused_local_helpers_do_not_consume_invoked_helper_cap(tmp_path: Path) -> None:
+    service = tmp_path / "service.py"
+    service.write_text(
+        "def dispatch(payload):\n"
+        "    payload = {**payload}\n"
+        + "".join(f"    def unused{index}():\n        pass\n" for index in range(8))
+        + "    def mutate(value):\n"
+        "        value.update({'x': 1})\n"
+        "    mutate(payload)\n"
+        "    return payload\n"
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def endpoint():\n    payload = {}\n    dispatch(payload)\n    return payload\n"
+    )
+
+    result = EffectAnalyzer(tmp_path).analyze(str(service), {2}, [_stack(main, service, 3)])
+
+    assert result is not None
+    assert result.confidence == ConfidenceLevel.HIGH
+    assert result.evidence[0].status.value == "established"
 
 
 def test_copy_subject_reassignment_kills_mutation_proof(tmp_path: Path) -> None:

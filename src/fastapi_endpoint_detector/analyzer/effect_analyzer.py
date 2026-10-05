@@ -263,11 +263,19 @@ class EffectAnalyzer:
                     and not self._dict_is_unshadowed(tree)
                 ):
                     continue
-                local_helpers = sum(
-                    isinstance(candidate.node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                local_helper_names = {
+                    candidate.node.name
+                    for candidate in execution
+                    if isinstance(candidate.node, (ast.FunctionDef, ast.AsyncFunctionDef))
                     and candidate.node is not function
+                }
+                invoked_helper_names = {
+                    candidate.node.func.id
                     for candidate in execution[copy_index + 1 :]
-                )
+                    if isinstance(candidate.node, ast.Call)
+                    and isinstance(candidate.node.func, ast.Name)
+                    and candidate.node.func.id in local_helper_names
+                }
                 if len(execution) > self._MAX_SCOPE_NODES:
                     reason = (
                         "A candidate defensive copy is present, but the enclosing effect scan "
@@ -275,10 +283,10 @@ class EffectAnalyzer:
                     )
                     matches.append((function, subject, node.lineno, True, reason))
                     continue
-                if local_helpers > self._MAX_LOCAL_HELPERS:
+                if len(invoked_helper_names) > self._MAX_LOCAL_HELPERS:
                     reason = (
-                        "A candidate defensive copy is present, but the invoked local helper "
-                        "scan exceeded the eight helper cap."
+                        "A candidate defensive copy is present, but the directly invoked local "
+                        "helper scan exceeded the eight helper cap."
                     )
                     matches.append((function, subject, node.lineno, True, reason))
                     continue
@@ -729,13 +737,19 @@ class EffectAnalyzer:
             for child in ast.iter_child_nodes(parent)
             if child in scope_set
         }
+        invoked_helper_names = {
+            item.node.func.id
+            for item in execution[copy_index + 1 :]
+            if isinstance(item.node, ast.Call) and isinstance(item.node.func, ast.Name)
+        }
         helpers = [
             (index, item.node, item)
             for index, item in enumerate(execution)
             if isinstance(item.node, (ast.FunctionDef, ast.AsyncFunctionDef))
             and item.node is not function
+            and item.node.name in invoked_helper_names
         ]
-        if len(helpers) > self._MAX_LOCAL_HELPERS:
+        if len({helper.name for _, helper, _ in helpers}) > self._MAX_LOCAL_HELPERS:
             return None
         candidates: list[bool] = []
 
@@ -1198,7 +1212,7 @@ class EffectAnalyzer:
             CodeReference(file_path=str(path), line_number=call_line, symbol=function.name),
         )
 
-    def _post_call_observation(  # noqa: PLR0912 - explicit observation taxonomy
+    def _post_call_observation(  # noqa: PLR0912, PLR0915 - explicit observation taxonomy
         self,
         path: Path,
         function: ast.FunctionDef | ast.AsyncFunctionDef,
@@ -1213,6 +1227,7 @@ class EffectAnalyzer:
             for child in ast.iter_child_nodes(parent):
                 if child in scope_set:
                     parents[child] = parent
+        reachable_nodes = {item.node for item in self._execution_nodes(function)}
         ancestor = parents.get(call)
         while ancestor is not None:
             if isinstance(ancestor, (ast.Return, ast.Raise)):
@@ -1227,6 +1242,8 @@ class EffectAnalyzer:
         aliases = {subject}
         for node in scope_nodes:
             if getattr(node, "lineno", 0) >= call_line:
+                continue
+            if node not in reachable_nodes:
                 continue
             if (
                 isinstance(node, ast.Assign)
@@ -1247,12 +1264,18 @@ class EffectAnalyzer:
         for statement in ordered_statements:
             if getattr(statement, "lineno", 0) <= call_line:
                 continue
+            if statement not in reachable_nodes:
+                continue
             control, _ = self._control_relationship(call, statement, parents)
             value = getattr(statement, "value", None)
             targets: list[ast.expr] = []
             if isinstance(statement, ast.Assign):
                 targets.extend(statement.targets)
-            elif isinstance(statement, (ast.AnnAssign, ast.AugAssign)):
+            elif isinstance(statement, ast.AnnAssign):
+                if statement.value is None:
+                    continue
+                targets.append(statement.target)
+            elif isinstance(statement, ast.AugAssign):
                 targets.append(statement.target)
             if control:
                 # An assignment in an opposite if arm cannot define a definite
@@ -1277,6 +1300,8 @@ class EffectAnalyzer:
         observations: list[_Observation] = []
         for node in scope_nodes:
             if not isinstance(node, ast.Name) or not isinstance(node.ctx, ast.Load):
+                continue
+            if node not in reachable_nodes:
                 continue
             if (
                 node.id not in aliases
