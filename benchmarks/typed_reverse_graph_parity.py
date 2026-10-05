@@ -1,7 +1,7 @@
-"""Generated parity and phase benchmark for the opt-in typed reverse graph.
+"""Generated evidence parity and phase benchmark for the opt-in reverse graph.
 
-No external corpus is read. The oracle is the repository's current full-depth
-MypyAnalyzer output; candidate-set mismatches fail the run without filtering.
+The oracle is current full-depth MypyAnalyzer call stacks and resolved call sites.
+Candidate, physical path, and edge-coordinate mismatches fail without filtering.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from importlib.metadata import version
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -139,12 +140,153 @@ def _oracle_set(analyzer: MypyAnalyzer, endpoint: Endpoint, changed_symbol: str)
     return {endpoint.identifier} if found else set()
 
 
+def _compare_full_depth_evidence(
+    analyzer: MypyAnalyzer,
+    endpoint: Endpoint,
+    graph: Any,
+    seed: str,
+    *,
+    side: str,
+    root: Path,
+) -> dict[str, Any]:
+    """Compare route terminals and each physical call edge to full-depth stacks."""
+    dependencies = analyzer.analyze_endpoint(endpoint)
+    oracle_paths: list[tuple[tuple[str, int, str], ...]] = []
+    oracle_sites = {
+        (Path(site.file_path).resolve(), site.line, site.canonical_symbol, site.status.value)
+        for site in dependencies.get_resolved_call_sites()
+    }
+    for stacks in dependencies.call_stacks.values():
+        for stack in stacks:
+            names = [frame.function_name for frame in stack]
+            if seed not in names:
+                continue
+            terminal = names.index(seed)
+            rows: list[tuple[str, int, str]] = []
+            for caller, callee in pairwise(stack[: terminal + 1]):
+                # CallFrame stores the physical call line on the callee frame.
+                line = callee.caller_line_number
+                if line is None:
+                    raise AssertionError(
+                        f"oracle path lacks call coordinate: {caller!r} -> {callee!r}"
+                    )
+                caller_path = Path(caller.file_path).resolve()
+                target_site = next(
+                    (
+                        site
+                        for site in dependencies.get_resolved_call_sites()
+                        if Path(site.file_path).resolve() == caller_path
+                        and site.line == line
+                        and site.status.value == "exact"
+                        and site.canonical_symbol is not None
+                        and site.canonical_symbol.rsplit(".", maxsplit=1)[-1]
+                        == callee.function_name.rsplit(".", maxsplit=1)[-1]
+                    ),
+                    None,
+                )
+                if target_site is None:
+                    raise AssertionError(
+                        "full-depth stack edge lacks exact ResolvedCallSite: "
+                        f"{caller!r} -> {callee!r}"
+                    )
+                rows.append(
+                    (
+                        caller_path.relative_to(root.resolve()).as_posix(),
+                        line,
+                        target_site.canonical_symbol,
+                    )
+                )
+            oracle_paths.append(tuple(rows))
+
+    query = graph.query([ChangedSeed(side, seed)], side=side)
+    graph_paths: list[tuple[tuple[str, int, str], ...]] = []
+    for item in query.evidence:
+        rows = tuple(
+            (
+                Path(edge.span.path).resolve().relative_to(root.resolve()).as_posix(),
+                edge.span.start_line,
+                edge.callee,
+            )
+            for edge in item.witnesses
+            if edge.kind in {"call", "constructor"}
+        )
+        graph_paths.append(rows)
+    # Full-depth forward stacks may include an intermediate prefix ending at
+    # each helper. Compare the terminal-reaching complete physical paths only.
+    oracle_terminal_paths = [path for path in oracle_paths if path]
+    oracle_norm = sorted(oracle_terminal_paths)
+    graph_norm = sorted(graph_paths)
+    exact_sites = sum(1 for site in oracle_sites if site[3] == "exact")
+    result = {
+        "candidate_ids": sorted({item.occurrence.endpoint_id for item in query.evidence}),
+        "physical_route_occurrences": sorted(
+            item.occurrence.occurrence_id for item in query.evidence
+        ),
+        "terminal_count": len(query.evidence),
+        "oracle_terminal_paths": [list(path) for path in oracle_norm],
+        "graph_terminal_paths": [list(path) for path in graph_norm],
+        "resolved_call_site_count": len(oracle_sites),
+        "resolved_exact_call_site_count": exact_sites,
+        "oracle_edge_confidences": ["HIGH" if exact_sites else "LOW"],
+        "graph_confidences": sorted({item.confidence for item in query.evidence}),
+        "graph_witnesses": [
+            [
+                {
+                    "witness_id": edge.witness_id,
+                    "kind": edge.kind,
+                    "caller": edge.caller,
+                    "callee": edge.callee,
+                    "path": Path(edge.span.path).resolve().relative_to(root.resolve()).as_posix(),
+                    "line": edge.span.start_line,
+                    "column": edge.span.start_column,
+                    "confidence": edge.confidence,
+                    "execution_state": edge.execution_state,
+                    "reference_state": edge.reference_state,
+                    "relation": edge.relation,
+                    "arguments": [
+                        {
+                            "source_index": argument.source_index,
+                            "formal_name": argument.formal_name,
+                            "positional_index": argument.positional_index,
+                            "keyword": argument.keyword,
+                            "expression_fullname": argument.expression_fullname,
+                        }
+                        for argument in edge.arguments
+                    ],
+                    "receiver_fullname": edge.receiver_fullname,
+                    "environment": list(edge.environment),
+                }
+                for edge in item.witnesses
+            ]
+            for item in query.evidence
+        ],
+        "graph_execution_states": sorted({item.execution_state for item in query.evidence}),
+        "graph_reference_states": sorted({item.reference_state for item in query.evidence}),
+        "graph_incompleteness": {
+            "capped": query.incomplete.capped,
+            "reasons": list(query.incomplete.reasons),
+            "affected_seeds": list(query.incomplete.affected_seeds),
+        },
+        "limitation": (
+            "existing endpoint output has no graph-level cap/effect-summary field; effect, DI, "
+            "and conditional-route parity remain explicitly unproven"
+        ),
+    }
+    if graph_norm != oracle_norm:
+        raise AssertionError(f"full-depth physical witness parity mismatch: {result!r}")
+    if exact_sites and any(item.confidence != "HIGH" for item in query.evidence):
+        raise AssertionError(f"exact generated callstack was downgraded: {result!r}")
+    if query.incomplete.capped:
+        raise AssertionError(f"uncapped generated parity fixture unexpectedly capped: {result!r}")
+    return result
+
+
 def _p95(samples: list[float]) -> float:
     ordered = sorted(samples)
     return ordered[max(0, int(0.95 * len(ordered) + 0.999999) - 1)]
 
 
-def _measure(modules: int, samples: int) -> dict[str, Any]:
+def _measure(modules: int, samples: int) -> dict[str, Any]:  # noqa: PLR0915
     phases: dict[str, list[float]] = {
         name: []
         for name in (
@@ -156,6 +298,7 @@ def _measure(modules: int, samples: int) -> dict[str, Any]:
         )
     }
     oracle_checks = 0
+    evidence_comparisons: list[dict[str, Any]] = []
     for _sample in range(samples):
         with tempfile.TemporaryDirectory(prefix="typed_reverse_graph_") as directory:
             root = Path(directory)
@@ -171,13 +314,11 @@ def _measure(modules: int, samples: int) -> dict[str, Any]:
                 inventory, snapshot, [binding], config_fingerprint="generated-v1"
             )
             phases["graph_cold_build_seconds"].append(time.perf_counter() - start)
+            positive_evidence = _compare_full_depth_evidence(
+                analyzer, endpoint, graph, positive_seed, side="target", root=root
+            )
             expected = _oracle_set(analyzer, endpoint, positive_seed)
-            actual = {
-                item.occurrence.endpoint_id
-                for item in graph.query(
-                    [ChangedSeed("target", positive_seed)], side="target"
-                ).evidence
-            }
+            actual = set(positive_evidence["candidate_ids"])
             if actual != expected:
                 dependencies = analyzer.analyze_endpoint(endpoint)
                 frame_names = [
@@ -191,6 +332,7 @@ def _measure(modules: int, samples: int) -> dict[str, Any]:
                     f"seed={positive_seed!r}, frames={frame_names!r}"
                 )
             oracle_checks += 1
+            evidence_comparisons.append(positive_evidence)
             negative_module = _inventory_module(snapshot, "m0")
             negative_seed = _fullname(snapshot, negative_module, "unused")
             expected_negative = _oracle_set(analyzer, endpoint, negative_seed)
@@ -200,12 +342,17 @@ def _measure(modules: int, samples: int) -> dict[str, Any]:
                     [ChangedSeed("target", negative_seed)], side="target"
                 ).evidence
             }
+            negative_evidence = _compare_full_depth_evidence(
+                analyzer, endpoint, graph, negative_seed, side="target", root=root
+            )
+            actual_negative = set(negative_evidence["candidate_ids"])
             if actual_negative != expected_negative:
                 raise AssertionError(
                     "negative parity mismatch: "
                     f"graph={actual_negative!r}, oracle={expected_negative!r}"
                 )
             oracle_checks += 1
+            evidence_comparisons.append(negative_evidence)
             start = time.perf_counter()
             for _ in range(5):
                 graph.query([ChangedSeed("target", positive_seed)], side="target")
@@ -238,12 +385,15 @@ def _measure(modules: int, samples: int) -> dict[str, Any]:
                 _inventory_module(updated_snapshot, f"m{modules - 1}"),
                 f"f{modules - 1}",
             )
-            updated_actual = {
-                item.occurrence.endpoint_id
-                for item in updated_graph.query(
-                    [ChangedSeed("target", updated_seed)], side="target"
-                ).evidence
-            }
+            updated_evidence = _compare_full_depth_evidence(
+                updated_analyzer,
+                updated_endpoint,
+                updated_graph,
+                updated_seed,
+                side="target",
+                root=root,
+            )
+            updated_actual = set(updated_evidence["candidate_ids"])
             updated_expected = _oracle_set(updated_analyzer, updated_endpoint, updated_seed)
             if updated_actual != updated_expected:
                 raise AssertionError(
@@ -251,6 +401,7 @@ def _measure(modules: int, samples: int) -> dict[str, Any]:
                     f"graph={updated_actual!r}, oracle={updated_expected!r}"
                 )
             oracle_checks += 1
+            evidence_comparisons.append(updated_evidence)
 
     return {
         "schema_version": 1,
@@ -260,8 +411,12 @@ def _measure(modules: int, samples: int) -> dict[str, Any]:
         ),
         "modules": modules,
         "samples": samples,
-        "oracle": "exact changed-function frame presence in current full-depth call_stacks",
+        "oracle": (
+            "full-depth call_stacks plus resolved_call_sites physical edge paths "
+            "and terminal occurrence evidence"
+        ),
         "oracle_checks": oracle_checks,
+        "evidence_comparisons": evidence_comparisons,
         "python_version": platform.python_version(),
         "mypy_version": version("mypy"),
         "raw_samples": phases,
@@ -269,6 +424,8 @@ def _measure(modules: int, samples: int) -> dict[str, Any]:
         "notes": [
             "one-file phase is a fresh full typed rebuild here, not a fine-grained provider update",
             "fixture parity does not establish corpus, DI, dispatch, or effect parity",
+            "oracle does not expose effect summaries or route confidence caps; "
+            "those remain unproven",
         ],
     }
 

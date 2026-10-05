@@ -70,15 +70,23 @@ uv run python benchmarks/typed_reverse_graph_parity.py --modules 24 --samples 5
 ```
 
 It compares positive and negative candidate sets, plus a one-file edited
-snapshot, to exact changed-function frame membership in the current
-full-depth `MypyAnalyzer.analyze_endpoint` output. Any mismatch stops the run.
+snapshot, to terminal-reaching physical call paths from the current full-depth
+`MypyAnalyzer.analyze_endpoint` call stacks and exact `ResolvedCallSite`
+coordinates. The report includes physical occurrence IDs, per-edge witness
+identities, source locations, confidence, execution and reference state,
+argument bindings, receiver/environment, cap state, and resolved-call-site
+totals. A candidate or physical path mismatch stops the run.
 It prints raw sample timings and empirical p95 values for cold typed build,
 cold graph construction, warm graph query, one-file full typed rebuild, and
 one-file graph reconstruction. Because the retained provider is not on this
 base branch, the one-file timing is explicitly a fresh full typed rebuild; it
-must not be read as incremental update latency. The generated DAG does not
-establish production-corpus parity or cover DI, multi-target dispatch, effects,
-conditional routes, deletion mapping, or every analyzer evidence type.
+must not be read as incremental update latency. The endpoint output has no
+corresponding graph-wide cap or effect summary, so those semantics cannot be
+compared here. The generated DAG does not establish production-corpus parity
+or cover DI transfer, multi-target dispatch, effect-helper closures,
+conditional routes, baseline deletions, or every analyzer evidence type. Its
+exact physical call paths therefore do not establish no-quality-regression for
+GH107.
 
 One recorded run on Python 3.11.16 / mypy 1.19.1 (24 modules, five samples,
 15 exact oracle checks) reported p95s of 3.233 s for typed cold build, 0.094 s
@@ -86,3 +94,19 @@ for graph construction, 0.532 ms for a warm query, 3.513 s for the fresh full
 typed rebuild after one-file change, and 0.123 s for graph reconstruction.
 These are generated-fixture observations, not latency targets or corpus
 performance claims.
+
+## Retained-provider compatibility probe
+
+The main branch does not contain PR #326's provider. A temporary, uncommitted
+scratch checkout based on the provider branch composed `TypedBuild` directly
+with `build_typed_reverse_graph`; no provider-owned file was changed. The
+builder consumed the provider's `modules`, `module_paths`, `type_maps`, and
+`report.cache_fingerprint`. On a generated 24-module chain, one exploratory
+sample measured provider cold typing at 3.893 s, graph construction at 0.053 s,
+the provider's actual one-file `incremental_update` at 0.013 s, and full graph
+reconstruction from the updated snapshot at 0.080 s. A separate eight-module
+provider snapshot matched one independent cold `MypyAnalyzer` terminal path
+and all eight physical call-edge coordinates. These single-sample scratch
+measurements have no p95 and do not establish DI/effect parity or the speed of
+the proposed integrated analyzer; the normal benchmark above remains a full
+typed rebuild on this branch.
