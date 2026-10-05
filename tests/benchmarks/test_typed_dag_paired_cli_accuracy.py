@@ -72,6 +72,59 @@ def _synthetic_validation_only() -> dict[str, Any]:
     }
 
 
+@pytest.mark.parametrize("existing_report", [False, True])
+def test_interrupted_final_validation_cannot_publish_a_pass(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, existing_report: bool
+) -> None:
+    output = tmp_path / "report.json"
+    previous = '{"gate_status": "failed"}\n'
+    if existing_report:
+        output.write_text(previous, encoding="utf-8")
+    document: dict[str, Any] = {
+        "run_validity": "valid",
+        "gate_status": "passed",
+        "integrity_errors": [],
+    }
+
+    def interrupt(*args: Any) -> None:
+        if existing_report:
+            assert output.read_text(encoding="utf-8") == previous
+        else:
+            assert not output.exists()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(gate, "validate", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        gate._publish_result(document, output, tmp_path, gate._ExecutionContext.create())
+    if existing_report:
+        assert output.read_text(encoding="utf-8") == previous
+    else:
+        assert not output.exists()
+
+
+def test_failed_final_validation_publishes_invalid_report(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    output = tmp_path / "new" / "report.json"
+    document: dict[str, Any] = {
+        "run_validity": "valid",
+        "gate_status": "passed",
+        "integrity_errors": [],
+    }
+
+    def reject(*args: Any) -> None:
+        assert not output.exists()
+        raise ValueError("receipt mismatch")
+
+    monkeypatch.setattr(gate, "validate", reject)
+    gate._publish_result(document, output, tmp_path, gate._ExecutionContext.create())
+    saved = json.loads(output.read_text(encoding="utf-8"))
+    assert saved["run_validity"] == "invalid"
+    assert saved["gate_status"] == "failed"
+    assert saved["metrics"] is None
+    assert "receipt mismatch" in saved["integrity_errors"][0]
+
+
 def test_all_cases_have_exact_paired_baseline_target_inputs() -> None:
     assert len(gate.CASES) == 18
     assert len({case.case_id for case in gate.CASES}) == 18

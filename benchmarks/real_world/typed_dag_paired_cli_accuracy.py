@@ -1257,9 +1257,18 @@ def run(
         ),
         "cases": records,
     }
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    if run_validity == "valid":
+    _publish_result(document, output, analyzer_root, execution_context)
+    return document
+
+
+def _publish_result(
+    document: dict[str, Any],
+    output: Path,
+    analyzer_root: Path,
+    execution_context: _ExecutionContext,
+) -> None:
+    """Publish only after validation; interruption must not leave a passing report."""
+    if document["run_validity"] == "valid":
         try:
             validate(document, analyzer_root, execution_context)
         except Exception as exc:
@@ -1270,10 +1279,8 @@ def run(
                 *cast("list[str]", document["integrity_errors"]),
                 f"generated result validation failed: {exc}",
             ]
-            output.write_text(
-                json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-            )
-    return document
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def main() -> int:
