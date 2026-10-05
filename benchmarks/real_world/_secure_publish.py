@@ -133,7 +133,7 @@ def publish_exclusive_bytes(  # noqa: PLR0912, PLR0915
     *,
     forbidden_files: tuple[Path, ...] = (),
     forbidden_roots: tuple[Path, ...] = (),
-) -> None:
+) -> tuple[int, int]:
     """Publish bytes exclusively through one stable destination-directory FD."""
     try:
         opened = _open_parent(destination, create=True, forbidden_roots=forbidden_roots)
@@ -141,6 +141,7 @@ def publish_exclusive_bytes(  # noqa: PLR0912, PLR0915
         directory_fd, name, _absolute_path = opened
         temporary_name: str | None = None
         file_fd: int | None = None
+        created_identity: tuple[int, int] | None = None
         try:
             device, inode = _identity_from_stat(os.fstat(directory_fd))
             if (device, inode, name) in _forbidden_file_addresses(forbidden_files):
@@ -175,6 +176,8 @@ def publish_exclusive_bytes(  # noqa: PLR0912, PLR0915
                     raise OSError("short write while publishing")
                 view = view[written:]
             os.fsync(file_fd)
+            file_info = os.fstat(file_fd)
+            created_identity = _identity_from_stat(file_info)
             os.close(file_fd)
             file_fd = None
             try:
@@ -190,6 +193,7 @@ def publish_exclusive_bytes(  # noqa: PLR0912, PLR0915
             os.unlink(temporary_name, dir_fd=directory_fd)
             temporary_name = None
             os.fsync(directory_fd)
+            return created_identity
         finally:
             if file_fd is not None:
                 os.close(file_fd)
@@ -201,6 +205,59 @@ def publish_exclusive_bytes(  # noqa: PLR0912, PLR0915
         raise
     except OSError as error:
         raise SecurePathError(f"cannot publish {destination}: {error}") from error
+
+
+def remove_created_file(path: Path, identity: tuple[int, int]) -> bool:
+    """Remove a newly published file only if its inode is still the one created."""
+    try:
+        opened = _open_parent(path, create=False)
+        if opened is None:
+            return False
+        directory_fd, name, _absolute_path = opened
+        try:
+            info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode) or _identity_from_stat(info) != identity:
+                return False
+            os.unlink(name, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+            return True
+        finally:
+            os.close(directory_fd)
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise SecurePathError(f"cannot roll back created artifact {path}: {error}") from error
+
+
+def publish_exclusive_batch(
+    artifacts: list[tuple[Path, bytes]],
+    *,
+    forbidden_roots: tuple[Path, ...] = (),
+) -> None:
+    """Publish a file set with inode-checked rollback if any later write fails."""
+    for destination, _content in artifacts:
+        ensure_publishable(destination, forbidden_roots=forbidden_roots)
+    published: list[tuple[Path, tuple[int, int]]] = []
+    try:
+        for destination, content in artifacts:
+            identity = publish_exclusive_bytes(
+                destination, content, forbidden_roots=forbidden_roots
+            )
+            published.append((destination, identity))
+    except (SecurePathError, OSError, TypeError, ValueError) as error:
+        rollback_errors: list[str] = []
+        for destination, identity in reversed(published):
+            try:
+                if not remove_created_file(destination, identity):
+                    rollback_errors.append(
+                        f"created artifact changed before rollback: {destination}"
+                    )
+            except SecurePathError as rollback_error:
+                rollback_errors.append(str(rollback_error))
+        detail = f"artifact batch failed and rolled back {len(published)} file(s): {error}"
+        if rollback_errors:
+            detail += "; " + "; ".join(rollback_errors)
+        raise SecurePathError(detail) from error
 
 
 def read_secure_regular_file(
