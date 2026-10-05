@@ -177,9 +177,10 @@ would misstate the moved-from path as a producer. `os.rename`, `os.replace`,
 
 Each family has an independent identity and semantic hash. Filesystem contracts
 are version `4.0.0`; HTTP contracts are version `3.0.0`; MongoDB/Motor and
-typed S3 contracts are version `2.0.0`; message bus starts at `1.0.0`. Requests support starts at its resolver-
-typed `2.34` release. HTTP receiver-client contracts abstain from URL resource
-identity because constructor `base_url` can make the call argument incomplete;
+typed S3 contracts are version `2.0.0`; message bus starts at `1.0.0`. Requests
+support starts at its resolver-typed `2.34` release. HTTP receiver-client
+contracts abstain from URL resource identity because constructor `base_url` can
+make the call argument incomplete;
 top-level requests/httpx convenience calls retain finite URL evidence. aiohttp
 request timing is conservatively `await`. HTTP contracts preserve `GET`, `POST`,
 `PUT`, `PATCH`, `DELETE`, `HEAD`, or `OPTIONS` as structured semantics. The v1
