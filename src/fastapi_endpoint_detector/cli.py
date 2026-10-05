@@ -666,14 +666,7 @@ def audit_effect_contracts_command(
             inventory = merge_surface_inventory(inventory, custom)
         source_root = app.resolve().parent if app.is_file() else app.resolve()
         effective_depth = config.parser.max_depth if config.analysis.track_transitive else 1
-        source_module_root = source_root / "src"
-        if source_root.name == "src":
-            module_root = source_root
-        elif source_module_root.is_dir() and any(source_module_root.rglob("*.py")):
-            module_root = source_module_root
-        else:
-            module_root = source_root.parent
-        analyzer = MypyAnalyzer(source_root, max_depth=effective_depth, module_root=module_root)
+        analyzer = MypyAnalyzer(source_root, max_depth=effective_depth)
         if clear_cache:
             analyzer.clear_cache()
         analyzer.analyze_endpoints(inventory.endpoints, use_cache=not no_cache)
