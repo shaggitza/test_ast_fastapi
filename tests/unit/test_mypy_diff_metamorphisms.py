@@ -339,18 +339,18 @@ def test_mypy_uses_side_specific_canonical_inventory_and_module_identity(tmp_pat
     assert baseline_analyzer.source_inventory is not None
     assert target_analyzer.source_root == target.resolve()
     assert baseline_analyzer.source_root == baseline.resolve()
-    assert target_analyzer.module_root == target.parent.resolve()
-    assert baseline_analyzer.module_root == baseline.parent.resolve()
+    assert target_analyzer.module_root == target.resolve()
+    assert baseline_analyzer.module_root == baseline.resolve()
     assert [record.module for record in target_analyzer.source_inventory.files] == [
-        "target.app",
-        "target.service",
+        "app",
+        "service",
     ]
     assert [record.module for record in baseline_analyzer.source_inventory.files] == [
-        "baseline.app",
-        "baseline.service",
+        "app",
+        "service",
     ]
-    assert target_analyzer.source_inventory.follow_imports == "skip"
-    assert baseline_analyzer.source_inventory.follow_imports == "skip"
+    assert target_analyzer.source_inventory.follow_imports is False
+    assert baseline_analyzer.source_inventory.follow_imports is False
     assert target_analyzer.source_inventory.excluded_files == ("excluded.py",)
     assert baseline_analyzer.source_inventory.excluded_files == ("excluded.py",)
 

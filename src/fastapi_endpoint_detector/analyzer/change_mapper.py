@@ -270,9 +270,9 @@ class _MypySourceInventory:
 
     root: Path
     files: tuple[SourceFile, ...]
-    unresolved_imports: tuple[str, ...]
+    unresolved_imports: tuple[tuple[str, str], ...]
     excluded_files: tuple[str, ...]
-    follow_imports: str
+    follow_imports: bool
     max_depth: int
 
 
@@ -291,11 +291,9 @@ def _mypy_inventory(inventory: SourceInventory) -> tuple[_MypySourceInventory, P
         _MypySourceInventory(
             root=inventory.root,
             files=tuple(files),
-            unresolved_imports=tuple(
-                f"{source}\0{imported}" for source, imported in inventory.unresolved_imports
-            ),
+            unresolved_imports=inventory.unresolved_imports,
             excluded_files=inventory.excluded_files,
-            follow_imports="normal" if inventory.follow_imports else "skip",
+            follow_imports=inventory.follow_imports,
             max_depth=inventory.max_depth,
         ),
         module_root,
