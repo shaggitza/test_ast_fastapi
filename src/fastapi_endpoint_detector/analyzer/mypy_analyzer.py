@@ -1294,7 +1294,7 @@ class MypyAnalyzer:
         current_file: str,
         callee: Any,
     ) -> tuple[int, int, int | None, int | None, str] | None:
-        """Return mypy's UTF-8 byte span and the exact source spelling."""
+        """Return a UTF-8 byte span and the exact source spelling."""
         line_value = getattr(callee, "line", 0)
         column_value = getattr(callee, "column", -1)
         end_line_raw = getattr(callee, "end_line", 0)
@@ -1308,6 +1308,46 @@ class MypyAnalyzer:
         end_line = end_line_value if end_line_value >= line and end_column_value >= 0 else None
         end_column = end_column_value if end_line is not None else None
         canonical = str(Path(current_file).resolve())
+        if canonical not in self._source_bytes_cache:
+            try:
+                self._source_bytes_cache[canonical] = tuple(
+                    Path(canonical).read_bytes().splitlines(keepends=True)
+                )
+            except OSError:
+                self._source_bytes_cache[canonical] = None
+        lines = self._source_bytes_cache[canonical]
+        if lines is not None and self._mypy_needs_unicode_column_recovery():
+            try:
+                source_lines = tuple(line.decode("utf-8") for line in lines)
+            except UnicodeDecodeError:
+                return None
+
+            def byte_column(line_number: int, character_column: int) -> int | None:
+                if line_number < 1 or line_number > len(source_lines):
+                    return None
+                source_line = source_lines[line_number - 1]
+                if character_column < 0 or character_column > len(source_line):
+                    return None
+                prefix = source_line[:character_column]
+                # Mypy 2.4's semantic-node columns omit one position for each
+                # non-ASCII character before the node; restore the decoded
+                # character position before converting it to UTF-8 bytes.
+                character_column += sum(not character.isascii() for character in prefix)
+                return len(source_line[:character_column].encode("utf-8"))
+
+            converted_start = byte_column(line, column)
+            converted_end = (
+                byte_column(end_line, end_column)
+                if end_line is not None and end_column is not None
+                else None
+            )
+            if converted_start is None or (
+                end_line is not None and end_column is not None and converted_end is None
+            ):
+                return None
+            column = converted_start
+            if converted_end is not None:
+                end_column = converted_end
         if end_line is None:
             if canonical not in self._python_ast_cache:
                 try:
@@ -1337,14 +1377,6 @@ class MypyAnalyzer:
                 end_line, end_column = fallback_span
         if end_line is None or end_column is None:
             return None
-        if canonical not in self._source_bytes_cache:
-            try:
-                self._source_bytes_cache[canonical] = tuple(
-                    Path(canonical).read_bytes().splitlines(keepends=True)
-                )
-            except OSError:
-                self._source_bytes_cache[canonical] = None
-        lines = self._source_bytes_cache[canonical]
         spelling = ""
         if lines is not None and end_line is not None and end_line <= len(lines):
             if end_line == line:
@@ -1364,6 +1396,15 @@ class MypyAnalyzer:
         if not spelling.strip():
             return None
         return line, column, end_line, end_column, spelling
+
+    def _mypy_needs_unicode_column_recovery(self) -> bool:
+        """Mypy 2.4+ semantic-node columns need Unicode offset recovery."""
+        version_parts = self._resolver_version.split(".")
+        try:
+            major, minor = int(version_parts[0]), int(version_parts[1])
+        except (IndexError, ValueError):
+            return False
+        return (major, minor) >= (2, 4)
 
     @staticmethod
     def _callable_declaration(
