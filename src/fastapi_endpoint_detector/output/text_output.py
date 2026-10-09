@@ -118,6 +118,7 @@ class TextFormatter(BaseFormatter):
                     f"{limitation.reason}",
                     markup=False,
                 )
+        console.print(f"  Analysis Completeness: {report.analysis_completeness}")
         console.print(f"  Total Endpoints: {report.total_endpoints}")
         console.print(
             f"  Files Changed: {report.total_files_changed} ({report.python_files_changed} Python)"

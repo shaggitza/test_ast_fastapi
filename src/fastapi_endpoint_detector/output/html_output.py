@@ -2557,6 +2557,11 @@ class HtmlFormatter(BaseFormatter):
                     f"{limitation.source_line}</code>: {html.escape(limitation.reason)}</div>"
                 )
         content_lines.append(
+            '<div class="summary-item"><span class="summary-label">'
+            "Analysis Completeness:</span> "
+            f"{html.escape(report.analysis_completeness)}</div>"
+        )
+        content_lines.append(
             f'<div class="summary-item">'
             f'<span class="summary-label">Total Endpoints:</span> {report.total_endpoints}'
             f"</div>"

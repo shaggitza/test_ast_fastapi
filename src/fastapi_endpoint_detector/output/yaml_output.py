@@ -89,6 +89,7 @@ class YamlFormatter(BaseFormatter):
             "timestamp": report.timestamp.isoformat(),
             "app_path": report.app_path,
             "diff_source": report.diff_source,
+            "analysis_completeness": report.analysis_completeness,
             "inventory_status": (
                 report.inventory_status.value if report.inventory_status is not None else None
             ),

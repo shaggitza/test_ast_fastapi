@@ -190,6 +190,10 @@ def _literal(arg: list[_Token]) -> str | None:
     return None
 
 
+def _has_string_escape(arg: list[_Token]) -> bool:
+    return len(arg) == 1 and arg[0].kind == "string" and "\\" in arg[0].value
+
+
 def _parse_url(  # noqa: PLR0911
     value: str,
 ) -> tuple[str, str, str, str | None, str | None] | None:
@@ -562,6 +566,8 @@ def extract_client_observation_inventory(  # noqa: PLR0912, PLR0915
                 url = _literal(args[0])
                 if url is None:
                     uncertainty = "dynamic_or_nonliteral_url"
+                elif _has_string_escape(args[0]):
+                    uncertainty = "escaped_url_literal"
                 if len(args) == 2:
                     parsed_method = _method_option(args[1])
                     if parsed_method is None:
@@ -579,6 +585,8 @@ def extract_client_observation_inventory(  # noqa: PLR0912, PLR0915
                 url = _literal(args[0])
                 if url is None:
                     uncertainty = "dynamic_or_nonliteral_url"
+                elif _has_string_escape(args[0]):
+                    uncertainty = "escaped_url_literal"
             elif config_method and len(args) == 2:
                 url = _literal(args[0])
                 uncertainty = "unsupported_or_dynamic_request_options"
@@ -589,6 +597,8 @@ def extract_client_observation_inventory(  # noqa: PLR0912, PLR0915
             if parsed_config is not None:
                 url, method_value = parsed_config
                 method = method_value.upper()
+                if "\\" in url:
+                    uncertainty = "escaped_url_literal"
             else:
                 uncertainty = "unsupported_or_dynamic_axios_options"
         else:

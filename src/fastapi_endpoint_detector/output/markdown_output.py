@@ -62,6 +62,7 @@ class MarkdownFormatter(BaseFormatter):
                     f"  - **Inventory Limitation:** "
                     f"`{limitation.source_path}:{limitation.source_line}` — {limitation.reason}"
                 )
+        lines.append(f"- **Analysis Completeness:** {report.analysis_completeness}")
         lines.append(f"- **Total Endpoints:** {report.total_endpoints}")
         lines.append(
             f"- **Files Changed:** {report.total_files_changed} ({report.python_files_changed} Python)"
