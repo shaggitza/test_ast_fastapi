@@ -20,6 +20,7 @@ from fastapi_endpoint_detector.analyzer.graphify_adapter import (
     GRAPHIFY_GRAPH_SCHEMA_VERSION,
     GRAPHIFY_PACKAGE_NAME,
     GRAPHIFY_PACKAGE_VERSION,
+    GRAPHIFY_RAW_SCHEMA,
     GraphifyAdapterError,
     GraphifySourceSpan,
     import_graphify_snapshot,
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
 
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "graphify_0_9_30_graph.json"
+RAW_FIXTURE = Path(__file__).parents[1] / "fixtures" / "graphify_0_9_30_raw_synthetic.json"
 
 
 def _project(tmp_path: Path) -> Path:
@@ -110,6 +112,200 @@ def test_loads_pinned_fixture_with_exact_source_provenance_and_orientation(
     assert snapshot.edges[3].orientation == "symmetric"
     assert snapshot.edges[3].extractor_strength == "AMBIGUOUS"
     assert snapshot.edges[3].traversable is False
+
+
+@pytest.mark.parametrize(
+    ("source_location", "edge_key", "expected_span"),
+    [
+        ("L2", "second-occurrence", (2, 2)),
+        ("L1-L2", "range-occurrence", (1, 2)),
+    ],
+)
+def test_node_link_multigraph_preserves_parallel_edge_key_provenance_and_span(
+    tmp_path: Path,
+    source_location: str,
+    edge_key: str,
+    expected_span: tuple[int, int],
+) -> None:
+    project = _project(tmp_path)
+    payload = _payload()
+    second = dict(payload["links"][0])
+    second["key"] = edge_key
+    second["source_location"] = source_location
+    second["confidence"] = "INFERRED"
+    payload["links"].append(second)
+    graph = tmp_path / "parallel-node-link.json"
+    _write_payload(graph, payload)
+
+    snapshot = load_graphify_snapshot(graph, project_root=project, side="target")
+    original, parallel = snapshot.edges[0], snapshot.edges[-1]
+    assert len(snapshot.edges) == len(payload["links"])
+    assert (parallel.source_id, parallel.target_id, parallel.relation) == (
+        original.source_id,
+        original.target_id,
+        original.relation,
+    )
+    assert parallel.edge_key == edge_key
+    assert original.context_identity is None
+    assert parallel.context_identity is None
+    assert parallel.extractor_strength == "INFERRED"
+    assert parallel.span is not None
+    assert (parallel.span.start_line, parallel.span.end_line) == expected_span
+
+
+def test_node_link_multigraph_preserves_same_key_relation_at_distinct_locations(
+    tmp_path: Path,
+) -> None:
+    project = _project(tmp_path)
+    payload = _payload()
+    second = dict(payload["links"][1])
+    second["key"] = "later-call"
+    second["source_location"] = "L4"
+    payload["links"].append(second)
+    graph = tmp_path / "same-relation-two-locations.json"
+    _write_payload(graph, payload)
+
+    snapshot = load_graphify_snapshot(graph, project_root=project, side="target")
+    assert len(snapshot.edges) == len(payload["links"])
+    assert snapshot.edges[1].span is not None
+    assert snapshot.edges[-1].span is not None
+    assert snapshot.edges[1].span.start_line == 3
+    assert snapshot.edges[-1].span.start_line == 4
+    assert snapshot.edges[-1].edge_key == "later-call"
+
+
+def test_loads_explicit_raw_schema_without_promoting_line_markers_to_ranges(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    snapshot = load_graphify_snapshot(
+        RAW_FIXTURE, project_root=project, side="target", schema=GRAPHIFY_RAW_SCHEMA
+    )
+    assert snapshot.graph_schema_version == 2
+    assert snapshot.graph_sha256 == hashlib.sha256(RAW_FIXTURE.read_bytes()).hexdigest()
+    assert snapshot.directed is True
+    assert snapshot.multigraph is False
+    assert snapshot.edges[0].orientation == "caller-to-callee"
+    assert snapshot.edges[1].orientation == "importer-to-imported"
+    assert snapshot.edges[2].orientation == "subclass-to-base"
+    assert snapshot.edges[3].orientation == "referencer-to-referenced"
+    assert [edge.extractor_strength for edge in snapshot.edges] == [
+        "EXTRACTED",
+        "INFERRED",
+        "EXTRACTED",
+        "AMBIGUOUS",
+    ]
+    assert snapshot.edges[0].span == GraphifySourceSpan(
+        Path("app.py"), 4, 4, hashlib.sha256((project / "app.py").read_bytes()).hexdigest()
+    )
+
+
+def test_raw_context_only_edge_occurrences_have_stable_distinct_identities(
+    tmp_path: Path,
+) -> None:
+    project = _project(tmp_path)
+    payload = json.loads(RAW_FIXTURE.read_text(encoding="utf-8"))
+    first = dict(payload["edges"][0], context="handler body")
+    second = dict(payload["edges"][0], context="decorator expansion")
+    payload["edges"] = [first, second]
+    graph = tmp_path / "raw-context-occurrences.json"
+    _write_payload(graph, payload)
+
+    snapshot = load_graphify_snapshot(
+        graph, project_root=project, side="target", schema=GRAPHIFY_RAW_SCHEMA
+    )
+
+    identities = [edge.context_identity for edge in snapshot.edges]
+    expected = [
+        hashlib.sha256(b"graphify-raw-edge-context-v1\0" + value.encode()).hexdigest()
+        for value in ("handler body", "decorator expansion")
+    ]
+    assert identities == expected
+    assert identities[0] != identities[1]
+    assert [edge.edge_key for edge in snapshot.edges] == [None, None]
+
+
+def test_raw_schema_requires_explicit_version_and_rejects_unknown_selectors(
+    tmp_path: Path,
+) -> None:
+    project = _project(tmp_path)
+    with pytest.raises(GraphifyAdapterError, match="top-level schema"):
+        load_graphify_snapshot(RAW_FIXTURE, project_root=project, side="target")
+    with pytest.raises(GraphifyAdapterError, match="schema selector"):
+        load_graphify_snapshot(RAW_FIXTURE, project_root=project, side="target", schema="guess")
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda value: value.update({"output_tokens": -1}), "output_tokens"),
+        (lambda value: value.update({"extra": True}), "top-level schema"),
+        (lambda value: value["hyperedges"].append({"nodes": []}), "hyperedges"),
+        (lambda value: value["edges"][0].update({"source_location": "L3-L4"}), "line-only"),
+        (lambda value: value["edges"][0].update({"confidence": "HIGH"}), "confidence"),
+        (lambda value: value["edges"][0].update({"context": ["invalid"]}), "context"),
+        (lambda value: value["edges"][0].update({"source_file": "../app.py"}), "confined"),
+        (lambda value: value["edges"][0].update({"target": "not-present"}), "unknown node"),
+        (
+            lambda value: value["edges"].append(dict(value["edges"][0])),
+            "identical raw edge occurrence",
+        ),
+    ],
+    ids=[
+        "negative-token-counter",
+        "unknown-field",
+        "unsupported-hyperedge",
+        "not-a-line-marker",
+        "quality-is-not-provenance",
+        "malformed-context",
+        "path-traversal",
+        "missing-target",
+        "duplicate-edge",
+    ],
+)
+def test_raw_schema_negative_controls(tmp_path: Path, mutate: Any, message: str) -> None:
+    project = _project(tmp_path)
+    payload = json.loads(RAW_FIXTURE.read_text(encoding="utf-8"))
+    mutate(payload)
+    graph = tmp_path / "raw-mutated.json"
+    _write_payload(graph, payload)
+    with pytest.raises(GraphifyAdapterError, match=message):
+        load_graphify_snapshot(
+            graph, project_root=project, side="target", schema=GRAPHIFY_RAW_SCHEMA
+        )
+
+
+def test_raw_schema_rejects_absolute_source_paths_and_symlinks(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    for source_path in (str(project / "app.py"), "app-link.py"):
+        if source_path == "app-link.py":
+            (project / source_path).symlink_to(project / "app.py")
+        payload = json.loads(RAW_FIXTURE.read_text(encoding="utf-8"))
+        payload["nodes"][0]["source_file"] = source_path
+        graph = tmp_path / f"{Path(source_path).name}.json"
+        _write_payload(graph, payload)
+        with pytest.raises(GraphifyAdapterError, match=r"relative path|symlink"):
+            load_graphify_snapshot(
+                graph, project_root=project, side="target", schema=GRAPHIFY_RAW_SCHEMA
+            )
+
+
+def test_raw_schema_retains_same_relation_at_distinct_source_locations(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    payload = json.loads(RAW_FIXTURE.read_text(encoding="utf-8"))
+    repeated = dict(payload["edges"][0])
+    repeated["source_location"] = "L3"
+    payload["edges"].append(repeated)
+    graph = tmp_path / "raw-distinct-occurrences.json"
+    _write_payload(graph, payload)
+
+    snapshot = load_graphify_snapshot(
+        graph, project_root=project, side="target", schema=GRAPHIFY_RAW_SCHEMA
+    )
+    assert len(snapshot.edges) == len(payload["edges"])
+    assert snapshot.edges[0].source_id == snapshot.edges[-1].source_id
+    assert snapshot.edges[0].target_id == snapshot.edges[-1].target_id
+    assert snapshot.edges[0].relation == snapshot.edges[-1].relation
+    assert snapshot.edges[0].span is not None and snapshot.edges[0].span.start_line == 4
+    assert snapshot.edges[-1].span is not None and snapshot.edges[-1].span.start_line == 3
 
 
 def test_snapshot_hash_is_checked_against_the_same_byte_snapshot(tmp_path: Path) -> None:
@@ -314,7 +510,7 @@ def test_source_paths_must_remain_inside_the_analyzed_project(tmp_path: Path) ->
     graph = tmp_path / "escape.json"
     _write_payload(graph, payload)
 
-    with pytest.raises(GraphifyAdapterError, match="confined project file"):
+    with pytest.raises(GraphifyAdapterError, match="confined relative path"):
         load_graphify_snapshot(graph, project_root=project, side="target")
 
 
