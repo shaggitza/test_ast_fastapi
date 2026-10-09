@@ -1,0 +1,503 @@
+{
+  "acceptance_claim": "not asserted; GH108 does not define the unit of nine",
+  "case_spec_sha256": "8ffc998bb76403003349b611f9b5ebd4d8b8c425d4d1b1e0648ee66b76444779",
+  "cases": [
+    {
+      "atoms": [
+        {
+          "audit_client_evidence": "src/interface/obsidian/src/chat_view.ts:960-974",
+          "audit_server_evidence": "src/khoj/routers/api_chat.py:547-563",
+          "matching_observations": [],
+          "method": "POST",
+          "normalized_route_identity": "POST /api/chat/sessions",
+          "origin_attestation_missing": false,
+          "path": "/api/chat/sessions",
+          "query_evidence": "agent_slug={selectedSlug}",
+          "scanner_abstention": "no_exact_literal_method_path_observation",
+          "status": "abstained",
+          "surface_id": "khoj:api_chat:POST:/api/chat/sessions"
+        }
+      ],
+      "audit": "benchmarks/results/ranked/per-pr-audit/khoj/1216.md",
+      "audit_sha256": "b870cddb8fb45ab16a6bec009f03df95586df03e249377464de61565308b1b05",
+      "case_id": "khoj-ai/khoj#1216",
+      "explicit_established_surface_joins": [],
+      "merge_snapshot": "573c6a32e1a2b722893df6e745838976201caa56",
+      "mode": "typescript_client",
+      "pr": 1216,
+      "raw_client_observations": [
+        {
+          "end_offset": 4054,
+          "line": 110,
+          "literal_url": "https://ipapi.co/json",
+          "method": "GET",
+          "normalized_route_identity": "GET /json",
+          "origin": "https://ipapi.co",
+          "protocol": "http",
+          "query_evidence": null,
+          "raw_route_path": "/json",
+          "source_path": "src/interface/obsidian/src/chat_view.ts",
+          "start_offset": 4024
+        }
+      ],
+      "raw_deployment_observations": [],
+      "raw_subprocess_observations": [],
+      "repository": "khoj-ai/khoj"
+    },
+    {
+      "atoms": [
+        {
+          "audit_client_evidence": "src/interface/obsidian/src/api.ts:13-29; src/interface/obsidian/src/utils.ts (batch caller)",
+          "audit_server_evidence": "src/khoj/routers/api_content.py:97-116",
+          "matching_observations": [],
+          "method": "PATCH",
+          "normalized_route_identity": "PATCH /api/content",
+          "origin_attestation_missing": false,
+          "path": "/api/content",
+          "query_evidence": "client=obsidian",
+          "scanner_abstention": "no_exact_literal_method_path_observation",
+          "status": "abstained",
+          "surface_id": "khoj:api_content:PATCH:/api/content"
+        },
+        {
+          "audit_client_evidence": "src/interface/obsidian/src/api.ts:3-10; src/interface/obsidian/src/utils.ts (regenerate caller)",
+          "audit_server_evidence": "src/khoj/routers/api_content.py:379-406",
+          "matching_observations": [],
+          "method": "DELETE",
+          "normalized_route_identity": "DELETE /api/content/type/{content_type}",
+          "origin_attestation_missing": false,
+          "path": "/api/content/type/{content_type}",
+          "query_evidence": "client=obsidian",
+          "scanner_abstention": "no_exact_literal_method_path_observation",
+          "status": "abstained",
+          "surface_id": "khoj:api_content:DELETE:/api/content/type/{content_type}"
+        },
+        {
+          "audit_client_evidence": "src/interface/obsidian/src/utils.ts:300",
+          "audit_server_evidence": "src/khoj/routers/api.py:248 onward",
+          "matching_observations": [],
+          "method": "GET",
+          "normalized_route_identity": "GET /api/v1/user",
+          "origin_attestation_missing": false,
+          "path": "/api/v1/user",
+          "query_evidence": null,
+          "scanner_abstention": "no_exact_literal_method_path_observation",
+          "status": "abstained",
+          "surface_id": "khoj:api:GET:/api/v1/user"
+        }
+      ],
+      "audit": "benchmarks/results/ranked/per-pr-audit/khoj/1221.md",
+      "audit_sha256": "20440b321e33113c4535b5df590167945ea9499a9b23d4a28d65fcd61b268b45",
+      "case_id": "khoj-ai/khoj#1221",
+      "explicit_established_surface_joins": [],
+      "merge_snapshot": "1fd6e16cff416da413da9e5b469dd5ade42bd556",
+      "mode": "typescript_client",
+      "pr": 1221,
+      "raw_client_observations": [],
+      "raw_deployment_observations": [],
+      "raw_subprocess_observations": [],
+      "repository": "khoj-ai/khoj"
+    },
+    {
+      "atoms": [
+        {
+          "audit_client_evidence": "src/interface/obsidian/src/utils.ts:190-198",
+          "audit_server_evidence": "src/khoj/routers/api_content.py:97-116",
+          "matching_observations": [],
+          "method": "PATCH",
+          "normalized_route_identity": "PATCH /api/content",
+          "origin_attestation_missing": false,
+          "path": "/api/content",
+          "query_evidence": "client=obsidian",
+          "scanner_abstention": "no_exact_literal_method_path_observation",
+          "status": "abstained",
+          "surface_id": "khoj:api_content:PATCH:/api/content"
+        },
+        {
+          "audit_client_evidence": "src/interface/obsidian/src/settings.ts:327-364 -> src/interface/obsidian/src/utils.ts:190-198",
+          "audit_server_evidence": "src/khoj/routers/api_content.py:75-96",
+          "matching_observations": [],
+          "method": "PUT",
+          "normalized_route_identity": "PUT /api/content",
+          "origin_attestation_missing": false,
+          "path": "/api/content",
+          "query_evidence": "client=obsidian",
+          "scanner_abstention": "no_exact_literal_method_path_observation",
+          "status": "abstained",
+          "surface_id": "khoj:api_content:PUT:/api/content"
+        }
+      ],
+      "audit": "benchmarks/results/ranked/per-pr-audit/khoj/1235.md",
+      "audit_sha256": "57cb865d078fa9cd6dac823d667e7fda79a33e1d0bfdddc66df708fabd9e1b6f",
+      "case_id": "khoj-ai/khoj#1235",
+      "explicit_established_surface_joins": [],
+      "merge_snapshot": "f413ce7354c3981f1e22c9d784f4197ac253a41a",
+      "mode": "typescript_client",
+      "pr": 1235,
+      "raw_client_observations": [],
+      "raw_deployment_observations": [],
+      "raw_subprocess_observations": [],
+      "repository": "khoj-ai/khoj"
+    },
+    {
+      "atoms": [
+        {
+          "audit_client_evidence": "src/lib/components/chat/MessageInput.svelte:925-927 -> src/lib/apis/notes/index.ts:189-218",
+          "audit_server_evidence": "backend/open_webui/main.py:750; backend/open_webui/routers/notes.py:253-268",
+          "matching_observations": [],
+          "method": "GET",
+          "normalized_route_identity": "GET /api/v1/notes/{id}",
+          "origin_attestation_missing": false,
+          "path": "/api/v1/notes/{id}",
+          "query_evidence": null,
+          "scanner_abstention": "no_exact_literal_method_path_observation",
+          "status": "abstained",
+          "surface_id": "open-webui:notes:GET:/api/v1/notes/{id}"
+        }
+      ],
+      "audit": "benchmarks/results/ranked/per-pr-audit/open-webui/26384.md",
+      "audit_sha256": "ae73eb0b67e92dfe5cbde55b626eb2787841a254de3c096f400434294d7a7e67",
+      "case_id": "open-webui/open-webui#26384",
+      "explicit_established_surface_joins": [],
+      "merge_snapshot": "dc1bc41d2edc022dbae11db2159cedb5369c68cd",
+      "mode": "svelte_client",
+      "pr": 26384,
+      "raw_client_observations": [],
+      "raw_deployment_observations": [],
+      "raw_subprocess_observations": [],
+      "repository": "open-webui/open-webui"
+    },
+    {
+      "atoms": [
+        {
+          "audit_client_evidence": "src/lib/apis/chats/index.ts:477 onward; caller src/lib/components/chat/Chat.svelte",
+          "audit_server_evidence": "backend/open_webui/main.py:749; backend/open_webui/routers/chats.py:731-747",
+          "matching_observations": [],
+          "method": "GET",
+          "normalized_route_identity": "GET /api/v1/chats/search",
+          "origin_attestation_missing": false,
+          "path": "/api/v1/chats/search",
+          "query_evidence": "searchParams serialized into query string",
+          "scanner_abstention": "no_exact_literal_method_path_observation",
+          "status": "abstained",
+          "surface_id": "open-webui:chats:GET:/api/v1/chats/search"
+        }
+      ],
+      "audit": "benchmarks/results/ranked/per-pr-audit/open-webui/26405.md",
+      "audit_sha256": "8576355e3ed6c42ce0eaa43c3477ea3af4614dcc83dc5b047e0a6bc1f71f6c0f",
+      "case_id": "open-webui/open-webui#26405",
+      "explicit_established_surface_joins": [],
+      "merge_snapshot": "0e5540c2b295e38906be7ece4d3b104303d6c519",
+      "mode": "svelte_client",
+      "pr": 26405,
+      "raw_client_observations": [],
+      "raw_deployment_observations": [],
+      "raw_subprocess_observations": [],
+      "repository": "open-webui/open-webui"
+    },
+    {
+      "atoms": [
+        {
+          "assumptions": [
+            "image variant is deployed",
+            "/app is not shadowed by a mount",
+            "runtime UID/GID can write cache",
+            "configured stdio MCP server is invoked",
+            "route is called with action_count=true"
+          ],
+          "audit_client_evidence": "docker/*: NPM_CONFIG_CACHE=/app/.npm; writable cache setup in base/extras variants",
+          "audit_server_evidence": "src/backend/base/langflow/api/router.py (v2 MCP mount); src/backend/base/langflow/api/v2/mcp.py:229-293 (stdio MCP startup, action_count response); src/lfx/src/lfx/base/mcp/util.py:1277-1285, 1644 onward (stdio transport subprocess implementation)",
+          "method": "GET",
+          "normalized_route_identity": "GET /api/v2/mcp/servers",
+          "observation_refs": {
+            "docker": [],
+            "subprocess": []
+          },
+          "path": "/api/v2/mcp/servers",
+          "query_evidence": "action_count=true",
+          "runtime_observed": false,
+          "status": "conditional_deployment_impact",
+          "surface_id": "langflow:mcp:GET:/api/v2/mcp/servers"
+        }
+      ],
+      "audit": "benchmarks/results/ranked/per-pr-audit/langflow/13992.md",
+      "audit_sha256": "ee9f8c423aeaf44c25a6d5e93234be2c62180db2db4f705cf1646971ba82e7e6",
+      "case_id": "langflow-ai/langflow#13992",
+      "explicit_established_surface_joins": [],
+      "merge_snapshot": "1ba8b827b64ce40a135202c65dda9e887adaa021",
+      "mode": "docker_env_subprocess",
+      "pr": 13992,
+      "raw_client_observations": [],
+      "raw_deployment_observations": [],
+      "raw_subprocess_observations": [],
+      "repository": "langflow-ai/langflow"
+    }
+  ],
+  "interpretation": "Six audited PRs contain eight client route atoms plus one conditional deployment atom. These nine atoms could be the intended nine audited cases; no additional PR identities are inferred.",
+  "protocol_evidence_sha256": "87bb3a212a32ebacae66cc6cb04f50bdbd648554c2016d273cf608081e8c2b59",
+  "scanner": {
+    "client_source_path": "src/fastapi_endpoint_detector/analyzer/client_observations.py",
+    "client_source_sha256": "de9190f1f8aa748ad0078779d4ed58cd7abb7a685da143afec9a514809d8630c",
+    "deployment_source_path": "src/fastapi_endpoint_detector/analyzer/deployment_observations.py",
+    "deployment_source_sha256": null,
+    "repository_commit": "1d9242d0d1d411b529c3227918aa2d05e98e8943"
+  },
+  "schema": "nonpython-evaluation-results-v2",
+  "scope_units": {
+    "audited_pr_count": 6,
+    "client_route_atom_count": 8,
+    "conditional_deployment_atom_count": 1,
+    "total_audited_nonpython_atom_count": 9
+  },
+  "source_manifest_sha256": "b380d00df41a1880d96daa3090416e6b9d88abe78ed2448db313f47ae90d9b11",
+  "truth_status": "reviewed_historical_atoms_provisional_not_canonical_truth",
+  "verified_audit_hashes": [
+    {
+      "case_id": "khoj-ai/khoj#1216",
+      "sha256": "b870cddb8fb45ab16a6bec009f03df95586df03e249377464de61565308b1b05"
+    },
+    {
+      "case_id": "khoj-ai/khoj#1221",
+      "sha256": "20440b321e33113c4535b5df590167945ea9499a9b23d4a28d65fcd61b268b45"
+    },
+    {
+      "case_id": "khoj-ai/khoj#1235",
+      "sha256": "57cb865d078fa9cd6dac823d667e7fda79a33e1d0bfdddc66df708fabd9e1b6f"
+    },
+    {
+      "case_id": "open-webui/open-webui#26384",
+      "sha256": "ae73eb0b67e92dfe5cbde55b626eb2787841a254de3c096f400434294d7a7e67"
+    },
+    {
+      "case_id": "open-webui/open-webui#26405",
+      "sha256": "8576355e3ed6c42ce0eaa43c3477ea3af4614dcc83dc5b047e0a6bc1f71f6c0f"
+    },
+    {
+      "case_id": "langflow-ai/langflow#13992",
+      "sha256": "ee9f8c423aeaf44c25a6d5e93234be2c62180db2db4f705cf1646971ba82e7e6"
+    }
+  ],
+  "verified_diff_count": 6,
+  "verified_licenses": [
+    {
+      "case_id": "khoj-ai/khoj#1216",
+      "original_path": "LICENSE",
+      "repository": "khoj-ai/khoj",
+      "sha256": "8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef",
+      "source_commit": "573c6a32e1a2b722893df6e745838976201caa56"
+    },
+    {
+      "case_id": "khoj-ai/khoj#1221",
+      "original_path": "LICENSE",
+      "repository": "khoj-ai/khoj",
+      "sha256": "8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef",
+      "source_commit": "1fd6e16cff416da413da9e5b469dd5ade42bd556"
+    },
+    {
+      "case_id": "khoj-ai/khoj#1235",
+      "original_path": "LICENSE",
+      "repository": "khoj-ai/khoj",
+      "sha256": "8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef",
+      "source_commit": "f413ce7354c3981f1e22c9d784f4197ac253a41a"
+    },
+    {
+      "case_id": "open-webui/open-webui#26384",
+      "original_path": "LICENSE",
+      "repository": "open-webui/open-webui",
+      "sha256": "5f1bd74c48bf13ab0f82e177ad9e637313b92533d20ead2593d49347a47fc232",
+      "source_commit": "dc1bc41d2edc022dbae11db2159cedb5369c68cd"
+    },
+    {
+      "case_id": "open-webui/open-webui#26405",
+      "original_path": "LICENSE",
+      "repository": "open-webui/open-webui",
+      "sha256": "5f1bd74c48bf13ab0f82e177ad9e637313b92533d20ead2593d49347a47fc232",
+      "source_commit": "0e5540c2b295e38906be7ece4d3b104303d6c519"
+    },
+    {
+      "case_id": "langflow-ai/langflow#13992",
+      "original_path": "LICENSE",
+      "repository": "langflow-ai/langflow",
+      "sha256": "48d4a7496209a9e1f2f549384251b69319360c3a38127cf513473590be383359",
+      "source_commit": "1ba8b827b64ce40a135202c65dda9e887adaa021"
+    }
+  ],
+  "verified_source_file_count": 25,
+  "verified_source_files": [
+    {
+      "bytes": 113872,
+      "case_id": "khoj-ai/khoj#1216",
+      "original_path": "src/interface/obsidian/src/chat_view.ts",
+      "sha256": "c6c301fa13f511f7eaad1afd207e721f751c71277bce06c9a7da04091e5a2c5f",
+      "stored_path": "src/interface/obsidian/src/chat_view.ts"
+    },
+    {
+      "bytes": 69628,
+      "case_id": "khoj-ai/khoj#1216",
+      "original_path": "src/khoj/routers/api_chat.py",
+      "sha256": "80514a4c6deff270465b9474d0f945355da37b9be71b4b1cd466c94d33ff0bdd",
+      "stored_path": "src/khoj/routers/api_chat.py.txt"
+    },
+    {
+      "bytes": 1344,
+      "case_id": "khoj-ai/khoj#1221",
+      "original_path": "src/interface/obsidian/src/api.ts",
+      "sha256": "a1f043acc10fbe14cd43fd2815000b1c9c186936ab4ec0929638cde6eed218e6",
+      "stored_path": "src/interface/obsidian/src/api.ts"
+    },
+    {
+      "bytes": 30180,
+      "case_id": "khoj-ai/khoj#1221",
+      "original_path": "src/interface/obsidian/src/settings.ts",
+      "sha256": "457f97035b8633cfd621697ae0a2665cbc18005511b798306712b6526f4a840f",
+      "stored_path": "src/interface/obsidian/src/settings.ts"
+    },
+    {
+      "bytes": 28635,
+      "case_id": "khoj-ai/khoj#1221",
+      "original_path": "src/interface/obsidian/src/utils.ts",
+      "sha256": "77205c35e0fd6f6ed0a59b2f8b23399d64f3545a380fef9b5529890c834fbbb7",
+      "stored_path": "src/interface/obsidian/src/utils.ts"
+    },
+    {
+      "bytes": 20501,
+      "case_id": "khoj-ai/khoj#1221",
+      "original_path": "src/khoj/routers/api_content.py",
+      "sha256": "e2e3c83348d01ef3be9135c7a2913eaec0e35f34ad8fe572316f202e4ad86d82",
+      "stored_path": "src/khoj/routers/api_content.py.txt"
+    },
+    {
+      "bytes": 8470,
+      "case_id": "khoj-ai/khoj#1221",
+      "original_path": "src/khoj/routers/api.py",
+      "sha256": "32a85b448f425931527ff9c6c3287f4e01d56e9bd43b00564cf7527be76fc983",
+      "stored_path": "src/khoj/routers/api.py.txt"
+    },
+    {
+      "bytes": 25063,
+      "case_id": "khoj-ai/khoj#1235",
+      "original_path": "src/interface/obsidian/src/settings.ts",
+      "sha256": "c1ab69fd655ef9b4b1ad5960591e6e9fdc4d764057fb677995d815642bffc995",
+      "stored_path": "src/interface/obsidian/src/settings.ts"
+    },
+    {
+      "bytes": 28237,
+      "case_id": "khoj-ai/khoj#1235",
+      "original_path": "src/interface/obsidian/src/utils.ts",
+      "sha256": "1fce16f8dbe2e816b508ba3c934dae635af7113c8a7435a2bca00a70bd5fb7df",
+      "stored_path": "src/interface/obsidian/src/utils.ts"
+    },
+    {
+      "bytes": 20501,
+      "case_id": "khoj-ai/khoj#1235",
+      "original_path": "src/khoj/routers/api_content.py",
+      "sha256": "e2e3c83348d01ef3be9135c7a2913eaec0e35f34ad8fe572316f202e4ad86d82",
+      "stored_path": "src/khoj/routers/api_content.py.txt"
+    },
+    {
+      "bytes": 3373,
+      "case_id": "open-webui/open-webui#26384",
+      "original_path": "src/lib/components/layout/Sidebar/PinnedNoteList.svelte",
+      "sha256": "4609c52d2f446c92f4272238a44bb3d26fa6ae44fe7e19ffcf85ce1980f38e09",
+      "stored_path": "src/lib/components/layout/Sidebar/PinnedNoteList.svelte"
+    },
+    {
+      "bytes": 72526,
+      "case_id": "open-webui/open-webui#26384",
+      "original_path": "src/lib/components/chat/MessageInput.svelte",
+      "sha256": "f8cfa6d107510006d66657cfb115d757cd9912c4664d440ab446b76ee295846f",
+      "stored_path": "src/lib/components/chat/MessageInput.svelte"
+    },
+    {
+      "bytes": 7264,
+      "case_id": "open-webui/open-webui#26384",
+      "original_path": "src/lib/apis/notes/index.ts",
+      "sha256": "2933b0c4f8de0397dfe757d495579c5f03ac226f8b373a1cb884d2b14aa76e71",
+      "stored_path": "src/lib/apis/notes/index.ts"
+    },
+    {
+      "bytes": 101556,
+      "case_id": "open-webui/open-webui#26384",
+      "original_path": "backend/open_webui/main.py",
+      "sha256": "b5dcad2d95f4dfc77078e3cd0115d8864de28bec4cb25d2db8058677e1d8146b",
+      "stored_path": "backend/open_webui/main.py.txt"
+    },
+    {
+      "bytes": 15887,
+      "case_id": "open-webui/open-webui#26384",
+      "original_path": "backend/open_webui/routers/notes.py",
+      "sha256": "9b84c199a36d732c0fd913b0547edb91c7b3cc9a7e54b772f866c95e74950895",
+      "stored_path": "backend/open_webui/routers/notes.py.txt"
+    },
+    {
+      "bytes": 95876,
+      "case_id": "open-webui/open-webui#26405",
+      "original_path": "src/lib/components/chat/Chat.svelte",
+      "sha256": "961c6fe56a68a03b78aca5685d313c2a4f521a0d7a3288a5e6cfc6294291aafb",
+      "stored_path": "src/lib/components/chat/Chat.svelte"
+    },
+    {
+      "bytes": 29276,
+      "case_id": "open-webui/open-webui#26405",
+      "original_path": "src/lib/apis/chats/index.ts",
+      "sha256": "6a2ced3c88b84200a67ad35f30cb9be675bd409b66fb73bafeedfaba5e94c84b",
+      "stored_path": "src/lib/apis/chats/index.ts"
+    },
+    {
+      "bytes": 101556,
+      "case_id": "open-webui/open-webui#26405",
+      "original_path": "backend/open_webui/main.py",
+      "sha256": "b5dcad2d95f4dfc77078e3cd0115d8864de28bec4cb25d2db8058677e1d8146b",
+      "stored_path": "backend/open_webui/main.py.txt"
+    },
+    {
+      "bytes": 64816,
+      "case_id": "open-webui/open-webui#26405",
+      "original_path": "backend/open_webui/routers/chats.py",
+      "sha256": "75dbad6a86dfafb3e3aba41f5459483d4130f3217c7a7873b575622ba2a395eb",
+      "stored_path": "backend/open_webui/routers/chats.py.txt"
+    },
+    {
+      "bytes": 6697,
+      "case_id": "langflow-ai/langflow#13992",
+      "original_path": "docker/build_and_push.Dockerfile",
+      "sha256": "bc494984e9a993eeb14a7d0740f3c51ebea8938b99e2e6fd62f483339469bb67",
+      "stored_path": "docker/build_and_push.Dockerfile"
+    },
+    {
+      "bytes": 7147,
+      "case_id": "langflow-ai/langflow#13992",
+      "original_path": "docker/build_and_push_base.Dockerfile",
+      "sha256": "24993039fd02c5dddd8b6352a93bb9acb32d4e984f6ae23dda34f715226de23a",
+      "stored_path": "docker/build_and_push_base.Dockerfile"
+    },
+    {
+      "bytes": 6323,
+      "case_id": "langflow-ai/langflow#13992",
+      "original_path": "docker/build_and_push_with_extras.Dockerfile",
+      "sha256": "6e3586f217ac41d4b34d0210af1b0bc931672a16d0eadecc780c604464b2be36",
+      "stored_path": "docker/build_and_push_with_extras.Dockerfile"
+    },
+    {
+      "bytes": 5905,
+      "case_id": "langflow-ai/langflow#13992",
+      "original_path": "src/backend/base/langflow/api/router.py",
+      "sha256": "e0ca5982fd0a57f4ac4a5e1e2134f2dea1e305ad46a25fda21762d54b5f0d680",
+      "stored_path": "src/backend/base/langflow/api/router.py.txt"
+    },
+    {
+      "bytes": 23409,
+      "case_id": "langflow-ai/langflow#13992",
+      "original_path": "src/backend/base/langflow/api/v2/mcp.py",
+      "sha256": "e5d324f9551fe09d0f5492244ae6fd584c7ef5a504cc51215618d824ba34ebf9",
+      "stored_path": "src/backend/base/langflow/api/v2/mcp.py.txt"
+    },
+    {
+      "bytes": 108095,
+      "case_id": "langflow-ai/langflow#13992",
+      "original_path": "src/lfx/src/lfx/base/mcp/util.py",
+      "sha256": "31cea67860f930a0563e0b96e12101ea0a2f1ce0efc5e5bde8d2906d5c1dc82c",
+      "stored_path": "src/lfx/src/lfx/base/mcp/util.py.txt"
+    }
+  ]
+}

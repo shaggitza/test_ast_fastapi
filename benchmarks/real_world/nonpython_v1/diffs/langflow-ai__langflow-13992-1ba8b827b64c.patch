@@ -1,0 +1,115 @@
+From 1ba8b827b64ce40a135202c65dda9e887adaa021 Mon Sep 17 00:00:00 2001
+From: Eric Hare <ericrhare@gmail.com>
+Date: Thu, 9 Jul 2026 15:09:06 -0700
+Subject: [PATCH] fix(docker): give runtime user a writable npm cache so stdio
+ MCP servers start (#13992)
+
+* fix(docker): give runtime user a writable npm cache so stdio MCP servers start
+
+The ubi10 runtime base sets HOME=/opt/app-root/src, and the main image runs
+`npm install -g` as root, which seeds a root-owned npm cache at
+/opt/app-root/src/.npm. The runtime user (uid 1000) spawns stdio MCP servers
+via `npx`, which then fails with `EACCES` on ~/.npm/_cacache, so every stdio
+MCP server registers but never lists any tools (toolsCount stays null in
+GET /api/v2/mcp/servers?action_count=true).
+
+Pin npm's cache to a uid-1000-owned directory via NPM_CONFIG_CACHE=/app/.npm
+(immune to the base image's HOME) and hand ownership of the default HOME cache
+to the runtime user as a fallback. Applied to all three runtime images
+(main, with_extras, base) that ship Node so npx has a writable cache.
+
+* fix(docker): avoid incompatible npm latest
+---
+ docker/build_and_push.Dockerfile             | 17 ++++++++++++++---
+ docker/build_and_push_base.Dockerfile        | 12 ++++++++++++
+ docker/build_and_push_with_extras.Dockerfile | 12 ++++++++++++
+ 3 files changed, 38 insertions(+), 3 deletions(-)
+
+diff --git a/docker/build_and_push.Dockerfile b/docker/build_and_push.Dockerfile
+index 61561d0319cd..d95646b2df46 100644
+--- a/docker/build_and_push.Dockerfile
++++ b/docker/build_and_push.Dockerfile
+@@ -41,7 +41,6 @@ RUN microdnf install -y tar xz python3.14-devel \
+     && NODE_VERSION="22.14.0" \
+     && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \
+     | tar -xJ -C /usr/local --strip-components=1 \
+-    && npm install -g npm@latest \
+     && microdnf clean all
+ 
+ # Copy files first to avoid permission issues with bind mounts
+@@ -106,8 +105,7 @@ RUN ARCH=$(uname -m) \
+                     | head -1) \
+     && if [ -z "$NODE_VERSION" ]; then echo "ERROR: Could not determine Node.js version" && exit 1; fi \
+     && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \
+-    | tar -xJ -C /usr/local --strip-components=1 \
+-    && npm install -g npm@latest
++    | tar -xJ -C /usr/local --strip-components=1
+ RUN useradd user -u 1000 -g 0 --no-create-home --home-dir /app/data
+ 
+ COPY --from=builder --chown=1000 /app/.venv /app/.venv
+@@ -125,6 +123,19 @@ ENV BASH_ENV="" \
+ # /app/langflow/secret_key. See https://github.com/langflow-ai/langflow/issues/10437
+ RUN mkdir -p /app/langflow && chown -R 1000:0 /app/langflow && chmod -R g+rwX /app/langflow
+ 
++# Give the runtime user (uid 1000) a writable npm cache. The image ships Node so
++# users can spawn stdio MCP servers via `npx`, but on the ubi10 base
++# HOME=/opt/app-root/src is not owned by uid 1000, so npx otherwise fails with
++# `EACCES` on ~/.npm/_cacache and every stdio MCP server registers but never
++# lists any tools (toolsCount stays null). Pin npm's cache to a
++# uid-1000-owned dir (immune to the base image's HOME) and hand ownership of the
++# default HOME cache to the runtime user as a fallback.
++# See https://github.com/langflow-ai/langflow/pull/13893 (ubi10 base change).
++ENV NPM_CONFIG_CACHE=/app/.npm
++RUN mkdir -p /app/.npm /opt/app-root/src/.npm \
++    && chown -R 1000:0 /app/.npm /opt/app-root/src/.npm \
++    && chmod -R g+rwX /app/.npm /opt/app-root/src/.npm
++
+ LABEL org.opencontainers.image.title=langflow
+ LABEL org.opencontainers.image.authors=['Langflow']
+ LABEL org.opencontainers.image.licenses=MIT
+diff --git a/docker/build_and_push_base.Dockerfile b/docker/build_and_push_base.Dockerfile
+index d4b648c5fa9a..55fac0693e27 100644
+--- a/docker/build_and_push_base.Dockerfile
++++ b/docker/build_and_push_base.Dockerfile
+@@ -127,6 +127,18 @@ ENV BASH_ENV="" \
+ # /app/langflow/secret_key. See https://github.com/langflow-ai/langflow/issues/10437
+ RUN mkdir -p /app/langflow && chown -R 1000:0 /app/langflow && chmod -R g+rwX /app/langflow
+ 
++# Give the runtime user (uid 1000) a writable npm cache. The image ships Node so
++# users can spawn stdio MCP servers via `npx`, but on the ubi10 base
++# HOME=/opt/app-root/src is not owned by uid 1000, so npx otherwise fails with
++# `EACCES` on ~/.npm/_cacache and stdio MCP servers never list any tools. Pin
++# npm's cache to a uid-1000-owned dir (immune to the base image's HOME) and hand
++# ownership of the default HOME cache to the runtime user as a fallback.
++# See https://github.com/langflow-ai/langflow/pull/13893 (ubi10 base change).
++ENV NPM_CONFIG_CACHE=/app/.npm
++RUN mkdir -p /app/.npm /opt/app-root/src/.npm \
++    && chown -R 1000:0 /app/.npm /opt/app-root/src/.npm \
++    && chmod -R g+rwX /app/.npm /opt/app-root/src/.npm
++
+ LABEL org.opencontainers.image.title=langflow
+ LABEL org.opencontainers.image.authors=['Langflow']
+ LABEL org.opencontainers.image.licenses=MIT
+diff --git a/docker/build_and_push_with_extras.Dockerfile b/docker/build_and_push_with_extras.Dockerfile
+index 0ccb5b76c197..527033d46e65 100644
+--- a/docker/build_and_push_with_extras.Dockerfile
++++ b/docker/build_and_push_with_extras.Dockerfile
+@@ -115,6 +115,18 @@ ENV BASH_ENV="" \
+ # /app/langflow/secret_key. See https://github.com/langflow-ai/langflow/issues/10437
+ RUN mkdir -p /app/langflow && chown -R 1000:0 /app/langflow && chmod -R g+rwX /app/langflow
+ 
++# Give the runtime user (uid 1000) a writable npm cache. The image ships Node so
++# users can spawn stdio MCP servers via `npx`, but on the ubi10 base
++# HOME=/opt/app-root/src is not owned by uid 1000, so npx otherwise fails with
++# `EACCES` on ~/.npm/_cacache and stdio MCP servers never list any tools. Pin
++# npm's cache to a uid-1000-owned dir (immune to the base image's HOME) and hand
++# ownership of the default HOME cache to the runtime user as a fallback.
++# See https://github.com/langflow-ai/langflow/pull/13893 (ubi10 base change).
++ENV NPM_CONFIG_CACHE=/app/.npm
++RUN mkdir -p /app/.npm /opt/app-root/src/.npm \
++    && chown -R 1000:0 /app/.npm /opt/app-root/src/.npm \
++    && chmod -R g+rwX /app/.npm /opt/app-root/src/.npm
++
+ LABEL org.opencontainers.image.title=langflow
+ LABEL org.opencontainers.image.authors=['Langflow']
+ LABEL org.opencontainers.image.licenses=MIT

@@ -1,0 +1,140 @@
+From 916534226a914ee7d4130e318a9b4219c2bf9bf0 Mon Sep 17 00:00:00 2001
+From: Fh26697 <hoefer.florian@gmail.com>
+Date: Tue, 19 Aug 2025 15:49:41 +0200
+Subject: [PATCH 1/4] Chats are not using specified Agent
+
+The function createNewConversation is never called with the agentSlug specified so its always opening a new Conversation with the Base Agent
+---
+ src/interface/obsidian/src/chat_view.ts | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/src/interface/obsidian/src/chat_view.ts b/src/interface/obsidian/src/chat_view.ts
+index 6c8d27129..927f7acfe 100644
+--- a/src/interface/obsidian/src/chat_view.ts
++++ b/src/interface/obsidian/src/chat_view.ts
+@@ -962,7 +962,9 @@ export class KhojChatView extends KhojPaneView {
+             let endpoint = `${this.setting.khojUrl}/api/chat/sessions`;
+             if (agentSlug) {
+                 endpoint += `?agent_slug=${encodeURIComponent(agentSlug)}`;
+-            }
++            } else if (this.currentAgent)  {
++				endpoint += `?agent_slug=${encodeURIComponent(this.currentAgent)}`;
++			}
+ 
+             const response = await fetch(endpoint, {
+                 method: "POST",
+
+From b3015f683720290dd2fb870a45699621fe51fc89 Mon Sep 17 00:00:00 2001
+From: Fh26697 <hoefer.florian@gmail.com>
+Date: Wed, 20 Aug 2025 16:58:08 +0200
+Subject: [PATCH 2/4] Update chat_view.ts
+
+fixed Typo
+---
+ src/interface/obsidian/src/chat_view.ts | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/interface/obsidian/src/chat_view.ts b/src/interface/obsidian/src/chat_view.ts
+index 927f7acfe..152f5afd7 100644
+--- a/src/interface/obsidian/src/chat_view.ts
++++ b/src/interface/obsidian/src/chat_view.ts
+@@ -1225,7 +1225,7 @@ export class KhojChatView extends KhojPaneView {
+                     console.log("Found agent in conversation history:", responseJson.response.agent);
+                     this.currentAgent = responseJson.response.agent.slug;
+                     // Update the agent selector if it exists
+-                    const agentSelect = this.contentEl.querySelector('.khoj-agent-select') as HTMLSelectElement;
++                    const agentSelect = this.contentEl.querySelector('.khoj-header-agent-select') as HTMLSelectElement;
+                     if (agentSelect && this.currentAgent) {
+                         agentSelect.value = this.currentAgent;
+                         console.log("Updated agent selector to:", this.currentAgent);
+
+From a2a3eb8be6e3bcc4da7a6a419b6c4028753776c9 Mon Sep 17 00:00:00 2001
+From: Fh26697 <hoefer.florian@gmail.com>
+Date: Wed, 20 Aug 2025 17:01:47 +0200
+Subject: [PATCH 3/4] Update chat_view.ts
+
+fixed Typo
+---
+ src/interface/obsidian/src/chat_view.ts | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/interface/obsidian/src/chat_view.ts b/src/interface/obsidian/src/chat_view.ts
+index 152f5afd7..2c1b16c4f 100644
+--- a/src/interface/obsidian/src/chat_view.ts
++++ b/src/interface/obsidian/src/chat_view.ts
+@@ -981,7 +981,7 @@ export class KhojChatView extends KhojPaneView {
+                 this.currentAgent = agentSlug || null;
+ 
+                 // Update agent selector to reflect current agent
+-                const agentSelect = this.contentEl.querySelector('.khoj-agent-select') as HTMLSelectElement;
++                const agentSelect = this.contentEl.querySelector('.khoj-header-agent-select') as HTMLSelectElement;
+                 if (agentSelect) {
+                     agentSelect.value = this.currentAgent || '';
+                 }
+
+From 4728098cadef211684f8b8fa7d8776786336ca73 Mon Sep 17 00:00:00 2001
+From: Debanjum <debanjum@khoj.dev>
+Date: Thu, 21 Aug 2025 07:33:25 +0530
+Subject: [PATCH 4/4] Fix to set agent for new chat created from obsidian
+
+- Set the agent of the current conversation in the agent dropdown when a new conversation with a non-default agent is initialized. This was unset previously.
+- Pass the current selected agent in the dropdown when creating new chat
+- Correctly select the `khoj-header-agent-select' element
+---
+ src/interface/obsidian/src/chat_view.ts | 13 ++++++-------
+ 1 file changed, 6 insertions(+), 7 deletions(-)
+
+diff --git a/src/interface/obsidian/src/chat_view.ts b/src/interface/obsidian/src/chat_view.ts
+index 2c1b16c4f..b76d28082 100644
+--- a/src/interface/obsidian/src/chat_view.ts
++++ b/src/interface/obsidian/src/chat_view.ts
+@@ -127,7 +127,7 @@ export class KhojChatView extends KhojPaneView {
+ 
+         // Register chat view keybindings
+         this.scope = new Scope(this.app.scope);
+-        this.scope.register(["Ctrl", "Alt"], 'n', (_) => this.createNewConversation());
++        this.scope.register(["Ctrl", "Alt"], 'n', (_) => this.createNewConversation(this.currentAgent));
+         this.scope.register(["Ctrl", "Alt"], 'o', async (_) => await this.toggleChatSessions());
+         this.scope.register(["Ctrl", "Alt"], 'v', (_) => this.speechToText(new KeyboardEvent('keydown')));
+         this.scope.register(["Ctrl"], 'f', (_) => new KhojSearchModal(this.app, this.setting).open());
+@@ -220,7 +220,7 @@ export class KhojChatView extends KhojPaneView {
+         await this.fetchAgents();
+ 
+         // Populate the agent selector in the header
+-        const headerAgentSelect = this.contentEl.querySelector('#khoj-header-agent-select') as HTMLSelectElement;
++        const headerAgentSelect = this.contentEl.querySelector('.khoj-header-agent-select') as HTMLSelectElement;
+         if (headerAgentSelect && this.agents.length > 0) {
+             // Clear existing options
+             headerAgentSelect.innerHTML = '';
+@@ -943,7 +943,7 @@ export class KhojChatView extends KhojPaneView {
+         return learningMoments[Math.floor(Math.random() * learningMoments.length)];
+     }
+ 
+-    async createNewConversation(agentSlug?: string) {
++    async createNewConversation(agentSlug?: string | null) {
+         let chatBodyEl = this.contentEl.getElementsByClassName("khoj-chat-body")[0] as HTMLElement;
+         chatBodyEl.innerHTML = "";
+         chatBodyEl.dataset.conversationId = "";
+@@ -960,11 +960,10 @@ export class KhojChatView extends KhojPaneView {
+         try {
+             // Create a new conversation with or without an agent
+             let endpoint = `${this.setting.khojUrl}/api/chat/sessions`;
++			agentSlug = agentSlug || this.currentAgent;
+             if (agentSlug) {
+                 endpoint += `?agent_slug=${encodeURIComponent(agentSlug)}`;
+-            } else if (this.currentAgent)  {
+-				endpoint += `?agent_slug=${encodeURIComponent(this.currentAgent)}`;
+-			}
++            }
+ 
+             const response = await fetch(endpoint, {
+                 method: "POST",
+@@ -1011,7 +1010,7 @@ export class KhojChatView extends KhojPaneView {
+         const newConversationButtonEl = newConversationEl.createEl("button");
+         newConversationButtonEl.classList.add("new-conversation-button");
+         newConversationButtonEl.classList.add("side-panel-button");
+-        newConversationButtonEl.addEventListener('click', (_) => this.createNewConversation());
++        newConversationButtonEl.addEventListener('click', (_) => this.createNewConversation(this.currentAgent));
+         setIcon(newConversationButtonEl, "plus");
+         newConversationButtonEl.innerHTML += "New";
+         newConversationButtonEl.title = "New Conversation (Ctrl+Alt+N)";
