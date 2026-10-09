@@ -4817,6 +4817,356 @@ def test_postponed_annotations_and_deferred_bodies_remain_unvisited(tmp_path: Pa
     assert inventory.limitations == ()
 
 
+def test_imperative_route_resolves_explicit_static_class_handler(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "class Views:\n"
+        "    @staticmethod\n"
+        "    def read(): pass\n"
+        "app.add_api_route('/read', Views.read, methods=['GET'])\n",
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(tmp_path).extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /read"]
+    handler = inventory.endpoints[0].handler
+    assert handler.name == "read"
+    assert handler.module == "main"
+    assert handler.file_path == tmp_path / "main.py"
+    assert handler.line_number == 5
+    provenance = inventory.endpoints[0].native_provenance
+    assert provenance is not None
+    assert any(
+        owner.owner_kind == "decorator_signature" and owner.qualified_binding == "main.Views.read"
+        for owner in provenance.source_owners
+    )
+
+
+@pytest.mark.parametrize(
+    ("import_source", "handler_expression"),
+    [
+        ("from views import Views", "Views.read"),
+        ("import views as handlers", "handlers.Views.read"),
+    ],
+)
+def test_imperative_route_resolves_imported_static_class_handler(
+    tmp_path: Path, import_source: str, handler_expression: str
+) -> None:
+    (tmp_path / "views.py").write_text(
+        "class Views:\n    @staticmethod\n    def read(): pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "decoy.py").write_text("class Views: pass\n", encoding="utf-8")
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "from decoy import Views as Unused\n"
+        f"{import_source}\n"
+        "app = FastAPI()\n"
+        f"app.add_api_route('/read', {handler_expression}, methods=['GET'])\n",
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(tmp_path).extract_inventory()
+
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /read"]
+    assert inventory.endpoints[0].handler.module == "views"
+    assert inventory.endpoints[0].handler.file_path == tmp_path / "views.py"
+    provenance = inventory.endpoints[0].native_provenance
+    assert provenance is not None
+    assert any(
+        owner.owner_kind == "decorator_signature" and owner.qualified_binding == "views.Views.read"
+        for owner in provenance.source_owners
+    )
+    import_owners = [
+        owner for owner in provenance.source_owners if owner.owner_kind == "import_binding"
+    ]
+    assert len(import_owners) == 1
+    assert import_owners[0].qualified_binding == (
+        f"main.{handler_expression.split('.', maxsplit=1)[0]}"
+    )
+    assert import_owners[0].source_span is not None
+    assert import_owners[0].source_span.start_line == 3
+
+
+@pytest.mark.parametrize(
+    ("import_source", "mutation", "handler_expression"),
+    [
+        ("from views import Views as Alias\n", "Alias.read = replacement\n", "Alias.read"),
+        ("import views as h\n", "h.Views.read = replacement\n", "h.Views.read"),
+        ("from views import Views as Alias\n", "setattr(Alias, name, replacement)\n", "Alias.read"),
+        ("import views as h\n", "delattr(h.Views, name)\n", "h.Views.read"),
+        (
+            "from views import Views as Alias\n",
+            "if flag:\n    Alias.read = replacement\n",
+            "Alias.read",
+        ),
+    ],
+)
+def test_imperative_route_rejects_imported_class_mutations(
+    tmp_path: Path, import_source: str, mutation: str, handler_expression: str
+) -> None:
+    (tmp_path / "views.py").write_text(
+        "class Views:\n    @staticmethod\n    def read(): pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        + import_source
+        + "app = FastAPI()\n"
+        + mutation
+        + f"app.add_api_route('/read', {handler_expression}, methods=['GET'])\n",
+        encoding="utf-8",
+    )
+    assert SecureASTExtractor(tmp_path).extract_inventory().endpoints == []
+
+
+def test_static_handler_survives_later_staticmethod_rebinding(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n"
+        "class Views:\n    @staticmethod\n    def read(): pass\n"
+        "staticmethod = replacement\n"
+        "app.add_api_route('/read', Views.read, methods=['GET'])\n",
+        encoding="utf-8",
+    )
+    assert [e.identifier for e in SecureASTExtractor(tmp_path).extract_inventory().endpoints] == [
+        "GET /read"
+    ]
+
+
+@pytest.mark.parametrize(
+    "method_source",
+    [
+        "    def read(): pass",
+        "    @classmethod\n    def read(cls): pass",
+        "    @custom\n    @staticmethod\n    def read(): pass",
+    ],
+)
+def test_imperative_route_rejects_unsupported_class_descriptors(
+    tmp_path: Path, method_source: str
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "class Views:\n"
+        f"{method_source}\n"
+        "app.add_api_route('/read', Views.read, methods=['GET'])\n",
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(tmp_path).extract_inventory()
+
+    assert inventory.endpoints == []
+
+
+def test_imperative_route_rejects_rebound_static_class_name(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "class Views:\n"
+        "    @staticmethod\n"
+        "    def read(): pass\n"
+        "Views = factory()\n"
+        "app.add_api_route('/read', Views.read, methods=['GET'])\n",
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(tmp_path).extract_inventory()
+
+    assert inventory.endpoints == []
+
+
+@pytest.mark.parametrize(
+    "shadow_source",
+    [
+        "staticmethod = lambda fn: lambda *a, **k: None\n",
+        "class Views:\n    staticmethod = lambda fn: lambda *a, **k: None\n",
+    ],
+)
+def test_imperative_route_rejects_shadowed_staticmethod(tmp_path: Path, shadow_source: str) -> None:
+    class_source = "class Views:\n    @staticmethod\n    def read(): pass\n"
+    if shadow_source.startswith("class Views:"):
+        class_source = (
+            "class Views:\n"
+            "    staticmethod = lambda fn: lambda *a, **k: None\n"
+            "    @staticmethod\n"
+            "    def read(): pass\n"
+        )
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        + (shadow_source if not shadow_source.startswith("class Views:") else "")
+        + "app = FastAPI()\n"
+        + class_source
+        + "app.add_api_route('/read', Views.read, methods=['GET'])\n",
+        encoding="utf-8",
+    )
+
+    inventory = SecureASTExtractor(tmp_path).extract_inventory()
+
+    assert inventory.endpoints == []
+
+
+@pytest.mark.parametrize(
+    "binding_source",
+    [
+        "if flag:\n    staticmethod = lambda fn: lambda: None\n",
+        "from evil import *\n",
+    ],
+)
+def test_imperative_route_rejects_conditionally_shadowed_staticmethod(
+    tmp_path: Path, binding_source: str
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n" + binding_source + "app = FastAPI()\n"
+        "class Views:\n    @staticmethod\n    def read(): pass\n"
+        "app.add_api_route('/read', Views.read, methods=['GET'])\n",
+        encoding="utf-8",
+    )
+    assert SecureASTExtractor(tmp_path).extract_inventory().endpoints == []
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        "for staticmethod in [decorator]:\n    pass\n",
+        "with manager() as staticmethod:\n    pass\n",
+        "try:\n    pass\nexcept Exception as staticmethod:\n    pass\n",
+        "match value:\n    case staticmethod:\n        pass\n",
+        "del staticmethod\n",
+        "(staticmethod := decorator)\n",
+        "(lambda: None)(staticmethod := decorator)\n",
+        "if (staticmethod := decorator):\n    pass\n",
+        "values = [(staticmethod := decorator) for x in items]\n",
+        "try:\n    pass\nexcept* Exception as staticmethod:\n    pass\n",
+        "match value:\n    case {'key': staticmethod}:\n        pass\n",
+        "match value:\n    case [*staticmethod]:\n        pass\n",
+    ],
+)
+@pytest.mark.parametrize("after_class", [False, True], ids=["before-class", "after-class"])
+def test_imperative_route_rejects_all_module_staticmethod_rebindings(
+    tmp_path: Path, binding: str, after_class: bool
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n"
+        + ("" if after_class else binding)
+        + "class Views:\n    @staticmethod\n    def read(): pass\n"
+        + (binding if after_class else "")
+        + "app.add_api_route('/read', Views.read, methods=['GET'])\n",
+        encoding="utf-8",
+    )
+    endpoints = SecureASTExtractor(tmp_path).extract_inventory().endpoints
+    if after_class:
+        assert [endpoint.identifier for endpoint in endpoints] == ["GET /read"]
+    else:
+        assert endpoints == []
+
+
+def test_imperative_route_rejects_conditionally_rebound_static_class(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n"
+        "class Views:\n    @staticmethod\n    def read(): pass\n"
+        "if flag:\n    Views = factory()\n"
+        "app.add_api_route('/read', Views.read, methods=['GET'])\n",
+        encoding="utf-8",
+    )
+    assert SecureASTExtractor(tmp_path).extract_inventory().endpoints == []
+
+
+def test_imperative_route_keeps_annotation_only_staticmethod_unbound(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\nstaticmethod: object\napp = FastAPI()\n"
+        "class Views:\n    @staticmethod\n    def read(): pass\n"
+        "app.add_api_route('/read', Views.read, methods=['GET'])\n",
+        encoding="utf-8",
+    )
+    assert [e.identifier for e in SecureASTExtractor(tmp_path).extract_inventory().endpoints] == [
+        "GET /read"
+    ]
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "x=(staticmethod := lambda f: foreign)",
+        "x=mutate()",
+        "x=opaque.descriptor",
+    ],
+)
+def test_static_class_handler_rejects_eager_method_header_effects(
+    tmp_path: Path, header: str
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp=FastAPI()\ndef foreign(): pass\n"
+        "class Views:\n    @staticmethod\n"
+        f"    def first({header}): pass\n"
+        "    @staticmethod\n    def read(): pass\n"
+        "app.add_api_route('/read', Views.read, methods=['GET'])\n",
+        encoding="utf-8",
+    )
+    assert SecureASTExtractor(tmp_path).extract_inventory().endpoints == []
+
+
+@pytest.mark.parametrize(
+    ("setup", "mutation", "handler_expression"),
+    [
+        ("Alias = Views\n", "Alias.read = replacement\n", "Views.read"),
+        ("", "alter(Views)\n", "Views.read"),
+        ("", "alter(cls=Views)\n", "Views.read"),
+        ("", "box = [Views]\nbox[0].read = replacement\n", "Views.read"),
+        ("", "setattr(lookup(), 'read', replacement)\n", "Views.read"),
+        ("", "globals()['Views'].read = replacement\n", "Views.read"),
+    ],
+)
+def test_imperative_route_rejects_escaped_or_reflectively_mutated_class(
+    tmp_path: Path, setup: str, mutation: str, handler_expression: str
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n"
+        "class Views:\n    @staticmethod\n    def read(): pass\n"
+        + setup
+        + mutation
+        + f"app.add_api_route('/read', {handler_expression}, methods=['GET'])\n",
+        encoding="utf-8",
+    )
+    assert SecureASTExtractor(tmp_path).extract_inventory().endpoints == []
+
+
+@pytest.mark.parametrize(
+    ("setup", "mutation"),
+    [
+        ("from views import Views as Alias\n", "Alias.read = replacement\n"),
+        ("import views as h\n", "h.Views.read = replacement\n"),
+        ("import views as h\n", "Alias = h.Views\nAlias.read = replacement\n"),
+        ("import views as h\n", "alter(cls=h.Views)\n"),
+        (
+            "from views import Views as importedViews\n",
+            "Alias = importedViews\nAlias.read = replacement\n",
+        ),
+    ],
+)
+def test_imported_class_alias_escape_blocks_handler_resolution(
+    tmp_path: Path, setup: str, mutation: str
+) -> None:
+    (tmp_path / "views.py").write_text(
+        "class Views:\n    @staticmethod\n    def read(): pass\n", encoding="utf-8"
+    )
+    handler = "h.Views.read" if setup.startswith("import views") else "Alias.read"
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        + setup
+        + "app = FastAPI()\n"
+        + mutation
+        + f"app.add_api_route('/read', {handler}, methods=['GET'])\n",
+        encoding="utf-8",
+    )
+    assert SecureASTExtractor(tmp_path).extract_inventory().endpoints == []
+
+
 @pytest.mark.parametrize(
     ("class_definition", "evidence_line", "reason_category"),
     [
