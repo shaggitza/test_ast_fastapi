@@ -61,3 +61,17 @@ The five cache files were 11,427 bytes each. Whole-process peak RSS was
 535,314,432 bytes (one process high-water observation). The changed-snapshot
 phase is a full rebuild, so there is no measured incremental-update latency or
 incremental p95 to compare with the 30-second requirement.
+
+## Separate retained-provider observation (2026-10-09)
+
+`retained-provider-20261009.json` measures the separately shipped
+`MypyIncrementalProvider`, not the full-build `MypyAnalyzer` exercised above.
+Its receipt binds the executed runner/project revision, source hashes and result
+bytes. Five samples on a generated 96-module import DAG gave incremental-update
+p95 0.0378 seconds and cold-build p95 1.9992 seconds. Every update phase matched
+an independent cold typed snapshot and cache fingerprint. Signature changes and
+import-retarget fallback rebuilding were measured separately.
+
+This generated fixture demonstrates retained typed-state reuse. It does not
+establish endpoint impact accuracy or the documented medium-project incremental
+acceptance gate in GH283. The historical full-build measurement stays unchanged.
