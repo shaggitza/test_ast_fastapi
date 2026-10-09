@@ -16,6 +16,7 @@ from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
 from fastapi_endpoint_detector.analyzer.effect_contract_auditor import audit_effect_contracts
 from fastapi_endpoint_detector.analyzer.sql_transaction import build_sql_transaction_diagnostics
 from fastapi_endpoint_detector.analyzer.sql_transaction_paths import (
+    _receiver_reassigned,
     build_sql_transaction_path_diagnostics,
 )
 from fastapi_endpoint_detector.config import AnalysisConfig, Config
@@ -724,6 +725,61 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
         encoding="utf-8",
     )
     return contracts, diff
+
+
+@pytest.mark.parametrize(
+    "annotation", ["(session := replacement).attr: int", "holder[session := replacement]: int"]
+)
+def test_annotation_target_evaluation_preserves_receiver_reassignment(annotation: str) -> None:
+    source = "def run(session, replacement, holder):\n    " + annotation + "\n    return session\n"
+    namespace: dict[str, Any] = {}
+    exec(compile(source, "<annotation-target-control>", "exec"), namespace)
+    original, replacement = object(), object()
+    assert namespace["run"](original, replacement, {}) is replacement
+    function = ast.parse(
+        "def run():\n    session.add('value')\n    " + annotation + "\n    session.commit()\n"
+    ).body[0]
+    assert isinstance(function, ast.FunctionDef)
+    assert _receiver_reassigned(tuple(function.body), 0, 2, ("session",))
+
+
+@pytest.mark.parametrize("assign_value", [False, True])
+def test_sql_ordering_distinguishes_local_annotation_from_reassignment(
+    tmp_path: Path, assign_value: bool
+) -> None:
+    contracts, diff = _ordered_project(tmp_path)
+    source = tmp_path / "main.py"
+    text = source.read_text(encoding="utf-8")
+    original = "    session.add('ordered')\n    session.flush()\n"
+    assert text.count(original) == 1
+    annotation = "    session: Session" + (" = Session()" if assign_value else "") + "\n"
+    source.write_text(
+        text.replace(
+            original, "    session.add('ordered')\n" + annotation + "    session.flush()\n"
+        ),
+        encoding="utf-8",
+    )
+    report = ChangeMapper(
+        app_path=tmp_path,
+        config=Config(
+            analysis=AnalysisConfig(
+                effect_contracts=contracts,
+                sql_transaction_diagnostics=True,
+                sql_transaction_ordered_paths=True,
+            )
+        ),
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+    paths = report.sql_transaction_path_report
+    assert paths is not None
+    ordered = [path for path in paths.ordered_paths if path.function_name == "ordered"]
+    if assign_value:
+        assert ordered == []
+        assert any(item.reason_code == "receiver_reassigned" for item in paths.diagnostics)
+    else:
+        assert {path.boundary for path in ordered} == {"flush", "commit"}
+        assert all(path.limitations for path in ordered)
 
 
 def test_ordered_paths_require_same_scope_receiver_and_straight_line(tmp_path: Path) -> None:
