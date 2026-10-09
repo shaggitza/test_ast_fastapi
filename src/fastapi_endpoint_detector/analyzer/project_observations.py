@@ -10,6 +10,7 @@ affected endpoints.
 from __future__ import annotations
 
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -250,6 +251,44 @@ def _validate_source_patterns(patterns: Sequence[str]) -> None:
             raise ValueError("source selection pattern has an unmatched character class")
 
 
+def _read_bounded_regular_file(
+    path: Path,
+    max_file_bytes: int,
+) -> tuple[bytes | None, str | None]:
+    """Read one regular file without blocking or exceeding its byte budget."""
+    descriptor: int | None = None
+    try:
+        if not stat.S_ISREG(path.stat().st_mode):
+            return None, "source is not a regular file"
+        flags = os.O_RDONLY
+        for flag_name in ("O_BINARY", "O_NONBLOCK", "O_NOFOLLOW"):
+            flags |= getattr(os, flag_name, 0)
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            return None, "source is not a regular file"
+        if opened.st_size > max_file_bytes:
+            return None, "maximum source-file size exceeded"
+
+        contents = bytearray()
+        while len(contents) <= max_file_bytes:
+            remaining = max_file_bytes + 1 - len(contents)
+            if remaining == 0:
+                break
+            chunk = os.read(descriptor, min(remaining, 64 * 1024))
+            if not chunk:
+                break
+            contents.extend(chunk)
+        if len(contents) > max_file_bytes:
+            return None, "maximum source-file size exceeded"
+        return bytes(contents), None
+    except OSError as exc:
+        return None, f"source read failed: {type(exc).__name__}"
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
 def scan_project_observations(  # noqa: PLR0912, PLR0915
     root: Path | str,
     *,
@@ -359,13 +398,14 @@ def scan_project_observations(  # noqa: PLR0912, PLR0915
                         SourceObservationIssue(relative, "path resolves outside source root")
                     )
                     continue
-                size = resolved.stat().st_size
-                if size > max_file_bytes:
-                    issues.append(
-                        SourceObservationIssue(relative, "maximum source-file size exceeded")
-                    )
+                source_bytes, read_issue = _read_bounded_regular_file(resolved, max_file_bytes)
+                if read_issue is not None:
+                    issues.append(SourceObservationIssue(relative, read_issue))
                     continue
-                source = resolved.read_bytes().decode("utf-8")
+                if source_bytes is None:
+                    issues.append(SourceObservationIssue(relative, "source read failed: OSError"))
+                    continue
+                source = source_bytes.decode("utf-8")
             except (OSError, UnicodeDecodeError) as exc:
                 issues.append(
                     SourceObservationIssue(relative, f"source read failed: {type(exc).__name__}")
