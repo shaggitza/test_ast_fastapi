@@ -9,11 +9,13 @@ from typing import TYPE_CHECKING
 import pytest
 
 from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
+from fastapi_endpoint_detector.analyzer.endpoint_registry import EndpointRegistry
 from fastapi_endpoint_detector.models.diff import ChangeType
 
 if TYPE_CHECKING:
     from fastapi_endpoint_detector.models.report import AnalysisReport
 from fastapi_endpoint_detector.parser.diff_parser import DiffParser
+from fastapi_endpoint_detector.parser.secure_ast_extractor import SecureASTExtractor
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -90,6 +92,91 @@ def _main_source(module: str, handler: str) -> str:
         "app.add_api_route('/items', "
         f"{handler}, methods=['GET'])\n"
     )
+
+
+@pytest.mark.parametrize("app_is_directory", [False, True], ids=["app-file", "app-directory"])
+@pytest.mark.parametrize("namespace", ["", "namespace/"], ids=["flat", "namespace"])
+def test_real_git_dependency_changes_ignore_checkout_basename(
+    tmp_path: Path, app_is_directory: bool, namespace: str
+) -> None:
+    app_source = (
+        "from fastapi import FastAPI\n"
+        "from helper import changed\n"
+        "app = FastAPI()\n"
+        "@app.get('/items')\n"
+        "def get_items() -> int:\n"
+        "    return changed()\n"
+    )
+    app_name = f"{namespace}main.py"
+    helper_name = f"{namespace}helper.py"
+    baseline_files = {
+        app_name: app_source,
+        helper_name: "def changed() -> int:\n    return 1\n",
+    }
+    target_files = {
+        app_name: app_source,
+        helper_name: "def changed() -> int:\n    return 2\n",
+    }
+    target_root, baseline_root, diff = _committed_pair(tmp_path, baseline_files, target_files)
+    target_root = target_root.rename(tmp_path / "repo.with-hyphen and spaces")
+    baseline_root = baseline_root.rename(tmp_path / "baseline.with-hyphen and spaces")
+    target_app = target_root / app_name
+    baseline_app = baseline_root / app_name
+    mapper = ChangeMapper(
+        target_app.parent if app_is_directory else target_app,
+        baseline_app_path=baseline_app.parent if app_is_directory else baseline_app,
+        secure_ast=True,
+        use_cache=False,
+    )
+    target_inventory = mapper.mypy_analyzer.source_inventory
+    baseline_inventory = mapper.baseline_mypy_analyzer.source_inventory
+    assert target_inventory is not None
+    assert baseline_inventory is not None
+    assert {record.module for record in target_inventory.files} == {"helper", "main"}
+    assert {record.module for record in baseline_inventory.files} == {"helper", "main"}
+    report = mapper.analyze_diff(diff)
+    assert not report.errors
+    assert [item.endpoint.identifier for item in report.candidate_endpoints] == ["GET /items"]
+    assert not report.orphan_changes
+
+
+def test_real_git_paths_identify_duplicate_basenames_with_windows_projection(
+    tmp_path: Path,
+) -> None:
+    route_source = (
+        "from fastapi import APIRouter\n"
+        "router = APIRouter()\n"
+        "@router.get('/items')\n"
+        "def items():\n"
+        "    return 1\n"
+    )
+    baseline_files = {
+        "main.py": (
+            "from fastapi import FastAPI\n"
+            "from left.main import router as left\n"
+            "from right.main import router as right\n"
+            "app = FastAPI()\n"
+            "app.include_router(left, prefix='/left')\n"
+            "app.include_router(right, prefix='/right')\n"
+        ),
+        "left/main.py": route_source,
+        "right/main.py": route_source,
+    }
+    target_files = {**baseline_files, "left/main.py": route_source.replace("return 1", "return 2")}
+    target_root, _baseline_root, diff = _committed_pair(tmp_path, baseline_files, target_files)
+    changed = DiffParser.parse_string(diff)
+    assert len(changed) == 1
+    assert changed[0].path == Path("left/main.py")
+    registry = EndpointRegistry()
+    registry.register_many(SecureASTExtractor(target_root).extract_endpoints())
+    assert [endpoint.identifier for endpoint in registry.get_by_file(changed[0].path)] == [
+        "GET /left/items"
+    ]
+    windows_path = str(changed[0].path).replace("/", "\\")
+    assert [endpoint.identifier for endpoint in registry.get_by_file(windows_path)] == [
+        "GET /left/items"
+    ]
+    assert registry.get_by_file(changed[0].path.name) == []
 
 
 def test_real_git_deletion_uses_baseline_reachability_and_keeps_unrelated_orphans(
