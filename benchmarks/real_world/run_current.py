@@ -967,6 +967,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
+        "--performance-mode",
+        action="store_true",
+        help="Measure the trusted synthetic typed-DAG fixture; bypass the frozen corpus runner.",
+    )
+    parser.add_argument("--performance-repeats", type=int, default=5)
+    parser.add_argument("--performance-output", type=Path)
+    parser.add_argument(
         "--scip",
         action="store_true",
         help="Run the opt-in SCIP backend instead of mypy.",
@@ -985,6 +992,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.performance_mode:
+        from benchmarks.real_world.measure_incremental import main as performance_main
+
+        performance_args = ["--repeats", str(args.performance_repeats)]
+        if args.performance_output is not None:
+            performance_args.extend(["--output", str(args.performance_output)])
+        return performance_main(performance_args)
     if args.timeout <= 0:
         parser.error("--timeout must be greater than zero")
     if args.limit is not None and args.limit < 0:

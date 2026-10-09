@@ -1953,6 +1953,7 @@ class ChangeMapper:
                 "no finite dependency contract was applied"
                 for path in unsupported_changes
             )
+        warnings.extend(self._source_inventory_warnings())
         target_source_graph = source_evidence_graph(self.source_inventory)
         if self.baseline_app_path is not None:
             baseline_graph = source_evidence_graph(self.baseline_source_inventory, side="baseline")
@@ -1960,8 +1961,6 @@ class ChangeMapper:
                 nodes=(*baseline_graph.nodes, *target_source_graph.nodes),
                 edges=(*baseline_graph.edges, *target_source_graph.edges),
             )
-
-        warnings.extend(self._source_inventory_warnings())
 
         # Initialize endpoints
         report_progress(5, 100, "Extracting endpoints...")

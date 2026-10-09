@@ -128,6 +128,21 @@ def test_inventory_scope_does_not_replace_genuine_conditional_route_provenance(
     assert preserved.discovery_conditions == (route_condition,)
 
 
+def test_runtime_worker_subprocess_loads_evidence_graph_model(tmp_path: Path) -> None:
+    app_file = tmp_path / "main.py"
+    app_file.write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)\n"
+        "@app.get('/inventory')\n"
+        "def inventory(): return {}\n",
+        encoding="utf-8",
+    )
+
+    endpoints = FastAPIExtractor(app_file).extract_endpoints()
+
+    assert [endpoint.path for endpoint in endpoints] == ["/inventory"]
+
+
 def test_runtime_extractor_preserves_slashes_websocket_dependencies_and_mount_cycles(
     tmp_path: Path,
 ) -> None:

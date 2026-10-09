@@ -94,6 +94,7 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
     )
     package_init = root / "__init__.py"
     package_prefix = root.name if not package_init.is_symlink() and package_init.is_file() else ""
+    symlink_package_init = package_init.is_symlink()
     module_paths: dict[str, list[Path]] = {}
     symlink_modules: dict[str, str] = {}
     for path in root.rglob("*"):
@@ -119,6 +120,26 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
         for module, paths in sorted(module_paths.items())
         if len(paths) > 1
     )
+    # A rejected symlink can still participate in Python's import resolution.
+    # If it aliases an otherwise selected module, do not pretend the regular
+    # path is the only possible identity for that import.
+    symlink_collision_paths: dict[str, set[str]] = {}
+    for symlink_module_name, symlink_relative in symlink_modules.items():
+        if symlink_module_name in module_paths:
+            symlink_collision_paths.setdefault(symlink_module_name, set()).update(
+                [
+                    *(rel_by_path[path] for path in module_paths[symlink_module_name]),
+                    symlink_relative,
+                ]
+            )
+    collision_paths = {module: set(paths) for module, paths in module_collisions}
+    for module, paths in symlink_collision_paths.items():
+        collision_paths.setdefault(module, set()).update(paths)
+    module_collisions = tuple(
+        (module, tuple(sorted(paths)))
+        for module, paths in sorted(collision_paths.items())
+        if len(paths) > 1
+    )
     ambiguous_modules = {module for module, _paths in module_collisions}
     by_module = {
         module: paths[0]
@@ -137,9 +158,15 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
     hashes_by_path: dict[Path, str] = {}
     unresolved: set[tuple[str, str]] = set()
     limitations: set[str] = set()
-    for module, paths in module_collisions:
+    if symlink_package_init:
         limitations.add(
-            f"Module identity {module!r} collides across source files: {', '.join(paths)}"
+            "Root package initializer __init__.py is a rejected symlink; package-prefix "
+            "identity may differ from Python import resolution"
+        )
+    for colliding_module, colliding_paths in module_collisions:
+        limitations.add(
+            f"Module identity {colliding_module!r} collides across source files: "
+            f"{', '.join(colliding_paths)}"
         )
     for path in candidates:
         try:

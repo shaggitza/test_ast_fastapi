@@ -1,0 +1,82 @@
+{
+  "comparison": {
+    "absence_is_not_equivalence": true,
+    "comparable_diagnostic_policy": "error location and normalized rule/message exact match",
+    "mypy_only": [],
+    "pyright_only": [],
+    "shared": []
+  },
+  "config_sha256": {
+    "pyrightconfig.json": "0ec5e0406e59264b35045b33532c62849d312ecb77deda2d402de5de9dde921a"
+  },
+  "engines": {
+    "mypy": "mypy 2.4.0 (compiled: yes)",
+    "pyright": "pyright 1.1.411"
+  },
+  "fixture": "package_layout",
+  "observations": [
+    {
+      "column": 13,
+      "comparable": true,
+      "file": "app.py",
+      "kind": "diagnostic",
+      "line": 6,
+      "message": "Type of \"route(\"abc\")\" is \"str\"",
+      "provider": "pyright",
+      "rule": null,
+      "severity": "information"
+    },
+    {
+      "column": 13,
+      "comparable": false,
+      "file": "app.py",
+      "kind": "type_observation",
+      "line": 6,
+      "message": "Revealed type is \"str\"",
+      "provider": "mypy",
+      "rule": null,
+      "severity": "note"
+    }
+  ],
+  "provenance": {
+    "elapsed_seconds": 2.94,
+    "fixture_root": "package_layout",
+    "max_files": 32,
+    "max_source_bytes": 256000,
+    "mypy_command": [
+      "mypy",
+      "--show-error-codes",
+      "--no-error-summary",
+      "--no-pretty",
+      "--follow-imports",
+      "silent",
+      "<fixture>"
+    ],
+    "provider_timeout_seconds": 25,
+    "pyright_command": [
+      "/tmp/pyright-differential/node_modules/.bin/pyright",
+      "--project",
+      "<fixture>",
+      "--outputjson"
+    ]
+  },
+  "schema": "pyright-mypy-differential-v1",
+  "scope": "synthetic fixtures only; no corpus application execution or canonical truth",
+  "source_sha256": {
+    "app.py": "43858c613308be8e4f285b49fd57623b1eacf8ffd5baac25e5924a9e0c69374e",
+    "pkg/__init__.py": "569b7c413edf8e284372f60d258debd927cd1117021263ce1ee2aa93d86713c7",
+    "pkg/service.py": "33e85b36cb974a03c7a397da47ae5d37f911e69b1ef9f788df9e6899695de1b9"
+  },
+  "unsupported": [
+    {
+      "query": "definition_target",
+      "reason": "The pinned Pyright CLI emits diagnostics only; no definition query is issued.",
+      "status": "unsupported"
+    },
+    {
+      "query": "execution_or_reachability",
+      "reason": "Static type diagnostics and revealed types do not establish execution.",
+      "status": "unsupported"
+    }
+  ]
+}
