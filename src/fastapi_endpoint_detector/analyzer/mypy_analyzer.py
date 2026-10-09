@@ -800,6 +800,20 @@ class MypyAnalyzer:
         options = Options()
         options.ignore_missing_imports = True
         options.follow_imports = self._effective_follow_imports()
+        blocked_local_paths: set[str] | None = None
+        if self.source_inventory is not None:
+            blocked_local_paths = set()
+            for module_name, covers_children, path, is_stub in self._unselected_local_modules():
+                blocked_local_paths.add(path)
+                # Preserve normal typed imports for installed dependencies,
+                # while preventing mypy from traversing local files rejected
+                # by inventory include, exclude, or depth policy.
+                module_options: dict[str, object] = {"follow_imports": "skip"}
+                if is_stub:
+                    module_options["follow_imports_for_stubs"] = True
+                options.per_module_options[module_name] = module_options
+                if covers_children:
+                    options.per_module_options[f"{module_name}.*"] = module_options.copy()
         options.mypy_path = [str(self.module_root)]
         options.namespace_packages = True
         options.explicit_package_bases = True
@@ -829,6 +843,7 @@ class MypyAnalyzer:
                 else None
             )
             for module_name, state in self._build_result.graph.items():
+                state_path: str | None = None
                 if state.path:
                     state_path = str(Path(state.path).resolve())
                     source_hash = getattr(state, "source_hash", None)
@@ -837,7 +852,11 @@ class MypyAnalyzer:
                     if inventory_paths is None or state_path in inventory_paths:
                         self._module_to_path[module_name] = state_path
                 tree = state.tree
-                if tree is not None:
+                if tree is not None and (
+                    blocked_local_paths is None
+                    or state_path is None
+                    or state_path not in blocked_local_paths
+                ):
                     self._trees[module_name] = tree
 
             # State.source_hash is mypy's digest of the exact text it parsed.
@@ -896,6 +915,50 @@ class MypyAnalyzer:
         }:
             return value
         raise MypyAnalyzerError(f"unsupported source inventory follow_imports policy: {value!r}")
+
+    def _unselected_local_modules(self) -> tuple[tuple[str, bool, str, bool], ...]:
+        """Return safe local module identities outside the canonical inventory.
+
+        The bool marks ordinary modules whose submodule namespace should also
+        be blocked. Package initializers are exact-only so an unselected
+        ``pkg/__init__.py`` cannot suppress an inventory-selected child.
+        """
+        if self.source_inventory is None:
+            return ()
+        selected_paths = {
+            str(Path(record.path).resolve()) for record in self.source_inventory.files
+        }
+        modules: dict[str, tuple[bool, set[str], bool]] = {}
+        candidates = sorted(
+            {*self.source_root.rglob("*.py"), *self.source_root.rglob("*.pyi")}, key=str
+        )
+        for path in candidates:
+            try:
+                relative = path.relative_to(self.source_root)
+                current = self.source_root
+                for part in relative.parts:
+                    current = current / part
+                    if current.is_symlink():
+                        raise ValueError("symlink source")
+                canonical = str(path.resolve(strict=True))
+                Path(canonical).relative_to(self.source_root)
+                if canonical in selected_paths:
+                    continue
+                module = self._module_name_from_path(Path(canonical), self.module_root)
+            except (OSError, ValueError):
+                continue
+            covers_children = path.stem != "__init__"
+            previous = modules.get(module)
+            modules[module] = (
+                covers_children or (previous[0] if previous else False),
+                ({canonical} | previous[1]) if previous else {canonical},
+                path.suffix == ".pyi" or (previous[2] if previous else False),
+            )
+        return tuple(
+            (module, covers_children, path, has_stubs)
+            for module, (covers_children, paths, has_stubs) in sorted(modules.items())
+            for path in sorted(paths)
+        )
 
     def _reset_build_state(
         self,
@@ -5685,6 +5748,10 @@ class MypyAnalyzer:
                 "module_root": str(self.module_root.resolve()),
                 "effective_mypy_config": {
                     "follow_imports": follow_imports,
+                    "blocked_local_modules": [
+                        [module, covers_children, is_stub]
+                        for module, covers_children, _path, is_stub in self._unselected_local_modules()
+                    ],
                     "ignore_missing_imports": True,
                     "namespace_packages": True,
                     "explicit_package_bases": True,

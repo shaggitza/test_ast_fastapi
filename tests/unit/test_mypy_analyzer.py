@@ -10,12 +10,14 @@ These tests verify the mypy-based dependency analysis, including:
 from pathlib import Path
 
 import pytest
+from mypy.nodes import MemberExpr, NameExpr
 
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import (
     CallFrame,
     EndpointDependencies,
     MypyAnalyzer,
 )
+from fastapi_endpoint_detector.analyzer.source_inventory import build_source_inventory
 from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, HandlerInfo
 
 
@@ -125,6 +127,233 @@ class TestMypyAnalyzerBasic:
 
         analyzer.set_line_progress_callback(callback)
         assert analyzer._line_progress_callback is callback
+
+    def test_mypy_does_not_load_excluded_imported_source(self, tmp_path: Path) -> None:
+        """An import edge cannot make excluded source part of the typed project."""
+        app = tmp_path / "app.py"
+        excluded = tmp_path / "excluded.py"
+        app.write_text(
+            "from excluded import secret\ndef handler():\n    return secret()\n",
+            encoding="utf-8",
+        )
+        excluded.write_text(
+            "def secret():\n    return 'private excluded implementation'\n",
+            encoding="utf-8",
+        )
+        inventory = build_source_inventory(
+            tmp_path,
+            include_patterns=("app.py",),
+            exclude_patterns=("excluded.py",),
+            follow_imports=True,
+        )
+        analyzer = MypyAnalyzer(tmp_path, source_inventory=inventory)
+        endpoint = Endpoint(
+            path="/",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=2),
+        )
+
+        dependencies = analyzer.analyze_endpoint(endpoint)
+
+        assert "excluded.py" in inventory.excluded_files
+        assert [source.path for source in inventory.files] == [app]
+        assert str(app.resolve()) in analyzer._module_to_path.values()
+        assert str(excluded.resolve()) not in analyzer._module_to_path.values()
+        assert all(
+            not state.path or Path(state.path).resolve() != excluded.resolve()
+            for state in analyzer._build_result.graph.values()
+        )
+        assert not dependencies.references_file(str(excluded))
+
+    @pytest.mark.parametrize(
+        ("include_patterns", "follow_imports", "max_depth", "selected_files"),
+        [
+            (("app.py", "selected.py"), False, 10, {"app.py", "selected.py"}),
+            (("app.py",), True, 1, {"app.py", "selected.py"}),
+        ],
+        ids=("include-scope", "max-depth-scope"),
+    )
+    def test_mypy_blocks_local_imports_outside_inventory_scope(
+        self,
+        tmp_path: Path,
+        include_patterns: tuple[str, ...],
+        follow_imports: bool,
+        max_depth: int,
+        selected_files: set[str],
+    ) -> None:
+        """Imports beyond include and max-depth boundaries stay unresolved."""
+        (tmp_path / "app.py").write_text(
+            "from selected import run\ndef handler():\n    return run()\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "selected.py").write_text(
+            "from blocked import secret\ndef run():\n    return secret()\n",
+            encoding="utf-8",
+        )
+        blocked = tmp_path / "blocked.py"
+        blocked.write_text("def secret():\n    return 'outside scope'\n", encoding="utf-8")
+        inventory = build_source_inventory(
+            tmp_path,
+            include_patterns=include_patterns,
+            follow_imports=follow_imports,
+            max_depth=max_depth,
+        )
+        analyzer = MypyAnalyzer(tmp_path, source_inventory=inventory)
+        endpoint = Endpoint(
+            path="/",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(
+                name="handler", module="app", file_path=tmp_path / "app.py", line_number=2
+            ),
+        )
+
+        dependencies = analyzer.analyze_endpoint(endpoint)
+
+        assert {source.path.name for source in inventory.files} == selected_files
+        assert str(blocked.resolve()) not in analyzer._module_to_path.values()
+        assert all(
+            not state.path or Path(state.path).resolve() != blocked.resolve()
+            for state in analyzer._build_result.graph.values()
+        )
+        assert dependencies.references_file(str(tmp_path / "selected.py"))
+        assert not dependencies.references_file(str(blocked))
+        prior_fingerprint, _ = analyzer._cache_fingerprint()
+        (tmp_path / "later_local.py").write_text("value = 1\n", encoding="utf-8")
+        changed_fingerprint, _ = analyzer._cache_fingerprint()
+        assert changed_fingerprint != prior_fingerprint
+
+    def test_unselected_package_initializer_does_not_block_selected_child(
+        self, tmp_path: Path
+    ) -> None:
+        """Per-module skips for an initializer leave selected package children usable."""
+        package = tmp_path / "pkg"
+        package.mkdir()
+        (tmp_path / "app.py").write_text(
+            "from pkg.child import run\ndef handler():\n    return run()\n",
+            encoding="utf-8",
+        )
+        (package / "__init__.py").write_text("from .other import hidden\n", encoding="utf-8")
+        child = package / "child.py"
+        child.write_text("def run():\n    return 'selected'\n", encoding="utf-8")
+        (package / "other.py").write_text(
+            "def hidden():\n    return 'excluded'\n", encoding="utf-8"
+        )
+        inventory = build_source_inventory(
+            tmp_path,
+            include_patterns=("app.py", "pkg/child.py"),
+            follow_imports=False,
+        )
+        analyzer = MypyAnalyzer(tmp_path, source_inventory=inventory)
+        endpoint = Endpoint(
+            path="/",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(
+                name="handler", module="app", file_path=tmp_path / "app.py", line_number=2
+            ),
+        )
+
+        dependencies = analyzer.analyze_endpoint(endpoint)
+
+        assert dependencies.references_file(str(child))
+        assert str((package / "other.py").resolve()) not in analyzer._module_to_path.values()
+
+    def test_mypy_does_not_load_unselected_local_stub(self, tmp_path: Path) -> None:
+        """An imported local .pyi outside inventory is skipped by mypy itself."""
+        app = tmp_path / "app.py"
+        stub = tmp_path / "blocked.pyi"
+        app.write_text(
+            "from blocked import secret\ndef handler():\n    return secret()\n",
+            encoding="utf-8",
+        )
+        stub.write_text("def secret() -> int: ...\n", encoding="utf-8")
+        inventory = build_source_inventory(tmp_path, include_patterns=("app.py",))
+        analyzer = MypyAnalyzer(tmp_path, source_inventory=inventory)
+        endpoint = Endpoint(
+            path="/",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=2),
+        )
+
+        analyzer.analyze_endpoint(endpoint)
+
+        assert all(
+            not state.path or Path(state.path).resolve() != stub.resolve()
+            for state in analyzer._build_result.graph.values()
+        )
+        assert all(
+            Path(path).resolve() != stub.resolve() for path in analyzer._module_to_path.values()
+        )
+        assert any(
+            isinstance(node, NameExpr)
+            and node.name == "secret"
+            and node.line == 3
+            and str(value) == "Any"
+            for node, value in analyzer._types_map.items()
+        )
+
+    def test_unselected_stub_package_initializer_preserves_selected_child(
+        self, tmp_path: Path
+    ) -> None:
+        """An unselected package stub initializer cannot suppress a selected child."""
+        package = tmp_path / "pkg"
+        package.mkdir()
+        app = tmp_path / "app.py"
+        app.write_text(
+            "from pkg.child import run\ndef handler():\n    return run()\n",
+            encoding="utf-8",
+        )
+        init_stub = package / "__init__.pyi"
+        init_stub.write_text("from .other import hidden\n", encoding="utf-8")
+        child = package / "child.py"
+        child.write_text("def run():\n    return 'selected'\n", encoding="utf-8")
+        other_stub = package / "other.pyi"
+        other_stub.write_text("def hidden() -> str: ...\n", encoding="utf-8")
+        inventory = build_source_inventory(
+            tmp_path,
+            include_patterns=("app.py", "pkg/child.py"),
+            follow_imports=False,
+        )
+        analyzer = MypyAnalyzer(tmp_path, source_inventory=inventory)
+        endpoint = Endpoint(
+            path="/",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=2),
+        )
+
+        dependencies = analyzer.analyze_endpoint(endpoint)
+
+        assert dependencies.references_file(str(child))
+        assert str(child.resolve()) in analyzer._module_to_path.values()
+        assert all(
+            not state.path
+            or Path(state.path).resolve() not in {init_stub.resolve(), other_stub.resolve()}
+            for state in analyzer._build_result.graph.values()
+        )
+
+    def test_mypy_inventory_preserves_external_request_member_types(self, tmp_path: Path) -> None:
+        """Normal external typing remains available outside the local inventory."""
+        app = tmp_path / "app.py"
+        app.write_text(
+            "from fastapi import FastAPI, Request\n"
+            "app = FastAPI()\n"
+            "@app.get('/')\n"
+            "def endpoint(request: Request):\n"
+            "    return request.url.path\n",
+            encoding="utf-8",
+        )
+        inventory = build_source_inventory(tmp_path, include_patterns=("app.py",))
+        analyzer = MypyAnalyzer(tmp_path, source_inventory=inventory)
+
+        analyzer._ensure_mypy_built()
+
+        assert "starlette.requests" in analyzer._trees
+        assert any(
+            isinstance(node, MemberExpr)
+            and node.name == "path"
+            and node.line == 5
+            and str(value) == "builtins.str"
+            for node, value in analyzer._types_map.items()
+        )
 
 
 class TestMypyAnalyzerLoopPrevention:
