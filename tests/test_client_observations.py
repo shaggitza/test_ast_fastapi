@@ -178,3 +178,36 @@ def test_parenthesized_arrow_and_destructured_parameters_shadow_client_globals()
     server = EstablishedSurface("server:a", "/a", "GET", "https://api.test", True)
     assert observations == ()
     assert join_established_surfaces(observations, (server,)) == ()
+
+
+def test_malformed_absolute_authorities_remain_span_bearing_uncertainties() -> None:
+    invalid_urls = (
+        "https://:80/items",
+        "https://api.example:bad/items",
+        "https://api.example:0/items",
+        "https://api.example:65536/items",
+        "https://api.example:/items",
+        "https://api .example/items",
+        "wss://:443/events",
+    )
+    source = "\n".join(f"fetch('{url}');" for url in invalid_urls)
+    observations, issues = extract_client_observation_inventory(source, Path("client.ts"))
+    assert observations == ()
+    assert len(issues) == len(invalid_urls)
+    assert all(issue.reason == "unsupported_url" for issue in issues)
+    assert all(
+        source[issue.start_offset : issue.end_offset].startswith("fetch(") for issue in issues
+    )
+
+
+def test_exact_absolute_authorities_accept_boundary_ports_and_ipv6() -> None:
+    observations = extract_client_observations(
+        "fetch('https://api.example:1/items'); "
+        "fetch('https://api.example:65535/items'); "
+        "new WebSocket('wss://[::1]:443/events');"
+    )
+    assert [item.origin for item in observations] == [
+        "https://api.example:1",
+        "https://api.example:65535",
+        "wss://[::1]:443",
+    ]

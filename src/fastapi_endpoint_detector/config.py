@@ -106,7 +106,9 @@ def _normalize_observation_origin(origin: str) -> str:
     try:
         parsed = urlsplit(origin)
         # Accessing .port validates malformed and out-of-range ports.
-        _ = parsed.port
+        port = parsed.port
+        if port is not None and not 1 <= port <= 65535:
+            raise ValueError("port must be between 1 and 65535")
     except ValueError as exc:
         raise ValueError(f"invalid trusted server origin {origin!r}: {exc}") from exc
     if (

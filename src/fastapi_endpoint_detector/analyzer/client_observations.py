@@ -207,8 +207,15 @@ def _parse_url(  # noqa: PLR0911
             or parsed.password
         ):
             return None
-        if scheme and not parsed.netloc:
-            return None
+        if scheme:
+            port = parsed.port
+            if (
+                not parsed.hostname
+                or any(char.isspace() for char in parsed.netloc)
+                or parsed.netloc.endswith(":")
+                or (port is not None and not 1 <= port <= 65535)
+            ):
+                return None
         if not scheme and (parsed.netloc or not value.startswith(("/", "./", "../"))):
             return None
         protocol = "websocket" if scheme in {"ws", "wss"} else "http"
