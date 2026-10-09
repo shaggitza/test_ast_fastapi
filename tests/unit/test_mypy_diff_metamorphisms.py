@@ -36,6 +36,8 @@ def _fixture(
     deps.add_call_stack(str(source), [CallFrame(str(source), 3, "work")])
 
     class Analyzer:
+        source_root = tmp_path
+
         def get_endpoint_dependencies(self, _endpoint: Endpoint) -> EndpointDependencies:
             return deps
 
@@ -160,6 +162,7 @@ def test_removed_lines_use_only_the_baseline_graph_with_unrelated_control(
     class Analyzer:
         def __init__(self, by_route: dict[str, EndpointDependencies]) -> None:
             self.by_route = by_route
+            self.source_root = Path(next(iter(by_route.values())).source_root)
 
         def get_endpoint_dependencies(self, item: Endpoint) -> EndpointDependencies:
             return self.by_route[item.path]
@@ -224,6 +227,8 @@ def test_line_less_move_has_candidate_and_lifecycle_evidence(tmp_path: Path) -> 
     )
 
     class NoDependencies:
+        source_root = target_root
+
         def get_endpoint_dependencies(self, _endpoint: Endpoint) -> EndpointDependencies:
             return EndpointDependencies(
                 endpoint_id="GET /items",
