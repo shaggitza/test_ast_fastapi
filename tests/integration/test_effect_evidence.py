@@ -63,3 +63,43 @@ def test_defensive_copy_ranks_observed_and_internal_paths_without_pruning(
     assert internal.observations == [DataObservationKind.NOT_OBSERVED_AFTER_CALL]
     assert internal.disposition == EffectDisposition.NOT_OBSERVED_BY_CALLER
     assert {item.endpoint.identifier for item in report.affected_endpoints} == {"GET /observed"}
+
+
+def test_conditional_copy_mutation_caps_candidate_confidence(tmp_path: Path) -> None:
+    service = tmp_path / "service.py"
+    service.write_text(
+        "def dispatch(payload: dict[str, str], enabled: bool) -> int:\n"
+        "    payload = {**payload}\n"
+        "    if enabled:\n"
+        "        payload['model'] = 'base'\n"
+        "    return 1\n"
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from fastapi import FastAPI\n"
+        "from service import dispatch\n\n"
+        "app = FastAPI()\n\n"
+        "@app.get('/observed')\n"
+        "def observed():\n"
+        "    payload = {'model': 'preset'}\n"
+        "    dispatch(payload, True)\n"
+        "    return payload\n"
+    )
+    diff = (
+        "diff --git a/service.py b/service.py\n"
+        "--- a/service.py\n"
+        "+++ b/service.py\n"
+        "@@ -1,2 +1,3 @@\n"
+        " def dispatch(payload: dict[str, str], enabled: bool) -> int:\n"
+        "+    payload = {**payload}\n"
+        "     if enabled:\n"
+    )
+
+    report = ChangeMapper(tmp_path, secure_ast=True, use_cache=False).analyze_diff(diff)
+
+    assert len(report.candidate_endpoints) == 1
+    candidate = report.candidate_endpoints[0]
+    assert candidate.confidence == ConfidenceLevel.MEDIUM
+    evidence = candidate.effect_evidence[-1]
+    assert evidence.status.value == "conditional"
+    assert "The copy/mutation proof depends on a conditional path." in evidence.conditions
