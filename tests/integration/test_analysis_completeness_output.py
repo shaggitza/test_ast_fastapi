@@ -76,7 +76,13 @@ def test_secure_ast_cli_reports_completeness_for_unbased_diffs(
     payload = json.loads(result.output)
     assert payload["analysis_completeness"] == expected
     if replacement:
-        assert any(item["removed_lines"] for item in payload["orphan_changes"])
+        assert any(
+            item["file_path"] == "app.py"
+            and item["removed_lines"] == [5]
+            and not item["added_lines"]
+            for item in payload["orphan_changes"]
+        )
+        assert any(item["endpoint"]["path"] == "/items" for item in payload["affected_endpoints"])
         assert any(
             "baseline analysis is incomplete" in warning.lower() and "removed" in warning.lower()
             for warning in payload["warnings"]

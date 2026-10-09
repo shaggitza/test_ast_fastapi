@@ -1105,14 +1105,17 @@ class ChangeMapper:
 
         file_path = str(diff_file.path)
         snapshot_root = snapshot_analyzer.source_root.resolve()
-        snapshot_file_path: Path | None = Path(file_path)
-        if not snapshot_file_path.is_absolute():
-            snapshot_file_path = snapshot_root / snapshot_file_path
+        candidate_path = Path(file_path)
+        if not candidate_path.is_absolute():
+            candidate_path = snapshot_root / candidate_path
+        snapshot_file_path: Path | None = None
         try:
-            snapshot_file_path = snapshot_file_path.resolve()
-            snapshot_file_path.relative_to(snapshot_root)
+            resolved_path = candidate_path.resolve()
+            resolved_path.relative_to(snapshot_root)
         except (OSError, RuntimeError, ValueError):
-            snapshot_file_path = None
+            pass
+        else:
+            snapshot_file_path = resolved_path
         changed_lines = set(added_lines) | set(removed_lines)
 
         # Dependency ranges already cover complete callable definitions. Expanding
@@ -1498,7 +1501,6 @@ class ChangeMapper:
                 handler_end = handler.end_line_number or handler.line_number + 50
                 handler_lines = set(range(handler.line_number, handler_end + 1))
                 processed_added_lines.update(ln for ln in added_lines if ln in handler_lines)
-                processed_removed_lines.update(ln for ln in removed_lines if ln in handler_lines)
 
         # Use mypy for type-aware dependency analysis
         for endpoint in self.registry:
