@@ -47,6 +47,8 @@ def test_snapshot_qualified_endpoint_lifecycle_is_exposed(
     )
     report = AnalysisReport(
         app_path="target/app.py",
+        diff_source="change.diff",
+        total_endpoints=0,
         endpoint_lifecycle=[
             EndpointLifecycle(
                 identity="GET /items",
@@ -82,7 +84,12 @@ def test_snapshot_qualified_endpoint_lifecycle_is_exposed(
 @pytest.mark.parametrize("output_format", ["json", "yaml"])
 def test_unreconciled_report_keeps_empty_lifecycle_and_partial_status(output_format: str) -> None:
     rendered = get_formatter(output_format).format(
-        AnalysisReport(app_path="target/app.py", analysis_completeness="partial")
+        AnalysisReport(
+            app_path="target/app.py",
+            diff_source="change.diff",
+            total_endpoints=0,
+            analysis_completeness="partial",
+        )
     )
     payload = json.loads(rendered) if output_format == "json" else yaml.safe_load(rendered)
 
