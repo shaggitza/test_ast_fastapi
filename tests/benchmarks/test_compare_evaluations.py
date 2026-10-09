@@ -3,9 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import deepcopy
+from typing import TYPE_CHECKING
 
 import pytest
-from benchmarks.real_world.compare_evaluations import compare
+from benchmarks.real_world.compare_evaluations import _load, compare
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def reports(*, attested: bool = True, n: int = 40):
@@ -176,3 +180,32 @@ def test_changed_rows_without_changed_artifact_hash_remain_report_only():
     assert result["provenance"]["candidate_prediction_sha256"] == original_prediction_hash
     assert result["attested"] is False
     assert result["gate_decision"] == "report_only"
+
+
+@pytest.mark.parametrize("version", [True, False, 1.0, "1", None])
+def test_direct_comparison_rejects_untyped_schema_version(version):
+    baseline, candidate = reports(n=1)
+    for report in (baseline, candidate):
+        report["comparison_evidence"]["schema_version"] = version
+    with pytest.raises(ValueError, match="unsupported comparison evidence schema"):
+        compare(baseline, candidate)
+
+
+@pytest.mark.parametrize("field", ["scope", "normalization_version"])
+@pytest.mark.parametrize("value", [None, "", " ", [], {}, True, 1])
+def test_equal_invalid_provenance_does_not_make_reports_compatible(field, value):
+    baseline, candidate = reports(n=1)
+    for report in (baseline, candidate):
+        report["comparison_evidence"][field] = value
+    with pytest.raises(ValueError, match=f"invalid or missing {field} provenance"):
+        compare(baseline, candidate)
+
+
+@pytest.mark.parametrize("extra", ['"x": NaN', '"x": Infinity', '"x": -Infinity', '"x": 1, "x": 2'])
+def test_serialized_report_rejects_nonfinite_and_duplicate_fields(tmp_path: Path, extra):
+    baseline, _ = reports(n=1)
+    serialized = json.dumps(baseline)
+    path = tmp_path / "report.json"
+    path.write_text(serialized[:-1] + ", " + extra + "}", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"non-finite JSON constant|duplicate JSON key"):
+        _load(path)

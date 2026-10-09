@@ -20,13 +20,39 @@ THRESHOLD = 0.02
 CONFIDENCE = 0.95
 
 
+def _unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON constant: {value}")
+
+
+def _evidence(report: object) -> dict[str, Any]:
+    if not isinstance(report, dict) or not isinstance(report.get("comparison_evidence"), dict):
+        raise ValueError("missing comparison_evidence; regenerate with evaluate.py")
+    evidence = report["comparison_evidence"]
+    if type(evidence.get("schema_version")) is not int or evidence["schema_version"] != 1:
+        raise ValueError("unsupported comparison evidence schema")
+    for field in ("scope", "normalization_version"):
+        value = evidence.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"invalid or missing {field} provenance")
+    return evidence
+
+
 def _load(path: Path) -> dict[str, Any]:
-    value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict) or not isinstance(value.get("comparison_evidence"), dict):
-        raise ValueError(f"{path}: missing comparison_evidence; regenerate with evaluate.py")
-    evidence = value["comparison_evidence"]
-    if evidence.get("schema_version") != 1:
-        raise ValueError(f"{path}: unsupported comparison evidence schema")
+    value = json.loads(
+        path.read_text(encoding="utf-8"),
+        object_pairs_hook=_unique_pairs,
+        parse_constant=_reject_constant,
+    )
+    _evidence(value)
     return value
 
 
@@ -75,7 +101,7 @@ def _selection_keys(evidence: dict[str, Any]) -> list[tuple[str, int]]:
             not isinstance(repository, str)
             or not repository.strip()
             or type(pr) is not int
-            or pr < 0
+            or pr <= 0
         ):
             raise ValueError("malformed selected PR identity")
         keys.append((repository, pr))
@@ -93,7 +119,7 @@ def _selection_keys(evidence: dict[str, Any]) -> list[tuple[str, int]]:
 def compare(  # noqa: PLR0912, PLR0915
     baseline: dict[str, Any], candidate: dict[str, Any], *, seed: int = 283
 ) -> dict[str, Any]:
-    left, right = baseline["comparison_evidence"], candidate["comparison_evidence"]
+    left, right = _evidence(baseline), _evidence(candidate)
     left_selection = _selection_keys(left)
     right_selection = _selection_keys(right)
     compatibility_fields = ("scope", "normalization_version", "truth_sha256", "selection_sha256")
