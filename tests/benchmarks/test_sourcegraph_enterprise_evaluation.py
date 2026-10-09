@@ -163,6 +163,51 @@ def test_binding_mismatches_fail_closed(mutation: str) -> None:
         validate_response(value, request=req)
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda req: req.update(kind=[]),
+        lambda req: req.update(revision="r1\nforged"),
+        lambda req: req.update(index_fingerprint="not-a-fingerprint"),
+        lambda req: req.update(consumer_indexes=[]),
+    ],
+)
+def test_malformed_request_fails_closed_before_response_validation(mutation) -> None:
+    req = request()
+    mutation(req)
+    with pytest.raises(EvidenceError):
+        validate_response(response(), request=req)
+
+
+def test_request_builder_rejects_non_object_consumer_index_input() -> None:
+    with pytest.raises(EvidenceError, match="repository-to-identity object"):
+        build_request(
+            kind="cross_repo_consumer",
+            repository="github.com/acme/api",
+            revision="r1",
+            path="src/a.py",
+            symbol="api.f",
+            index_fingerprint=_HASH,
+            tool_fingerprint=_TOOL,
+            config_fingerprint=_CONFIG,
+            consumer_indexes=[],  # type: ignore[arg-type]
+        )
+
+
+def test_request_builder_rejects_unhashable_kind_as_evidence_error() -> None:
+    with pytest.raises(EvidenceError, match="unsupported evidence kind"):
+        build_request(
+            kind=[],  # type: ignore[arg-type]
+            repository="github.com/acme/api",
+            revision="r1",
+            path="src/a.py",
+            symbol="api.f",
+            index_fingerprint=_HASH,
+            tool_fingerprint=_TOOL,
+            config_fingerprint=_CONFIG,
+        )
+
+
 def test_changed_symbol_must_equal_requested_symbol() -> None:
     req = request("changed_symbol")
     value = response("changed_symbol", req)
@@ -294,6 +339,24 @@ def test_tco_exposes_assumptions_and_rejects_input_or_derived_overflow() -> None
     with pytest.raises(ValueError):
         three_year_tco(
             annual_license=float("nan"),
+            annual_compute=0,
+            annual_storage=0,
+            setup_hours=0,
+            hourly_rate=0,
+            annual_operations_hours=0,
+        )
+    with pytest.raises(ValueError, match="inputs"):
+        three_year_tco(
+            annual_license=10**1000,
+            annual_compute=0,
+            annual_storage=0,
+            setup_hours=0,
+            hourly_rate=0,
+            annual_operations_hours=0,
+        )
+    with pytest.raises(ValueError, match="inputs"):
+        three_year_tco(
+            annual_license=True,  # type: ignore[arg-type]
             annual_compute=0,
             annual_storage=0,
             setup_hours=0,

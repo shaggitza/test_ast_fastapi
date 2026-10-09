@@ -75,7 +75,7 @@ def build_request(
     consumer_indexes: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Build deterministic transport-neutral request metadata; never sends it."""
-    if kind not in _KINDS:
+    if not isinstance(kind, str) or kind not in _KINDS:
         raise EvidenceError("unsupported evidence kind")
     for name, value in (
         ("repository", repository),
@@ -83,22 +83,28 @@ def build_request(
         ("path", path),
         ("symbol", symbol),
     ):
-        if not isinstance(value, str) or not value or "\n" in value:
-            raise EvidenceError(f"{name} must be a non-empty single-line string")
+        _single_line(value, name)
     for name, value in zip(
         _FINGERPRINTS, (index_fingerprint, tool_fingerprint, config_fingerprint), strict=True
     ):
         _sha(value, name)
-    consumers = consumer_indexes or {}
+    consumers = {} if consumer_indexes is None else consumer_indexes
+    if not isinstance(consumers, dict):
+        raise EvidenceError("consumer indexes must be a repository-to-identity object")
     for repo, identity in consumers.items():
-        if not isinstance(repo, str) or not repo or repo == repository:
+        if (
+            not isinstance(repo, str)
+            or not repo
+            or "\n" in repo
+            or "\r" in repo
+            or repo == repository
+        ):
             raise EvidenceError("consumer indexes must name distinct repositories")
         if not isinstance(identity, dict) or set(identity) != {"revision", *_FINGERPRINTS}:
             raise EvidenceError(
                 "each consumer index must bind revision and tool/config fingerprints"
             )
-        if not isinstance(identity["revision"], str) or not identity["revision"]:
-            raise EvidenceError("consumer index revision must be explicit")
+        _single_line(identity["revision"], "consumer index revision")
         for name in _FINGERPRINTS:
             _sha(identity[name], f"consumer.{name}")
     if kind == "cross_repo_consumer" and not consumers:
@@ -122,6 +128,7 @@ def validate_response(  # noqa: PLR0912
     response: object, *, request: dict[str, Any]
 ) -> dict[str, Any]:
     """Validate hash binding and schema; result remains untrusted and non-authoritative."""
+    request = _validate_request(request)
     if not isinstance(response, dict) or set(response) != {
         "kind",
         "binding",
@@ -130,7 +137,7 @@ def validate_response(  # noqa: PLR0912
     }:
         raise EvidenceError("response must contain exactly kind, binding, evidence, receipt")
     kind = response["kind"]
-    if kind != request["kind"] or kind not in _KINDS:
+    if not isinstance(kind, str) or kind != request["kind"] or kind not in _KINDS:
         raise EvidenceError("response kind does not match request")
     binding = response["binding"]
     if not isinstance(binding, dict) or set(binding) != _BINDING:
@@ -177,6 +184,48 @@ def validate_response(  # noqa: PLR0912
         "scorable": False,
     }
     return validated
+
+
+def _single_line(value: object, field: str) -> None:
+    if not isinstance(value, str) or not value or "\n" in value or "\r" in value:
+        raise EvidenceError(f"{field} must be a non-empty single-line string")
+
+
+def _validate_request(request: object) -> dict[str, Any]:
+    """Reject malformed request metadata before it can shape response validation."""
+    fields = {
+        "kind",
+        "repository",
+        "revision",
+        "path",
+        "symbol",
+        *_FINGERPRINTS,
+        "consumer_indexes",
+    }
+    if not isinstance(request, dict) or set(request) != fields:
+        raise EvidenceError("request must contain exactly the canonical request fields")
+    kind = request["kind"]
+    if not isinstance(kind, str) or kind not in _KINDS:
+        raise EvidenceError("request kind is unsupported")
+    for name in ("repository", "revision", "path", "symbol"):
+        _single_line(request[name], name)
+    for name in _FINGERPRINTS:
+        _sha(request[name], name)
+    consumers = request["consumer_indexes"]
+    if not isinstance(consumers, dict):
+        raise EvidenceError("request consumer indexes must be an object")
+    if (kind == "cross_repo_consumer") != bool(consumers):
+        raise EvidenceError("request consumer indexes do not match evidence kind")
+    for repo, identity in consumers.items():
+        _single_line(repo, "consumer repository")
+        if repo == request["repository"]:
+            raise EvidenceError("consumer index must name a distinct repository")
+        if not isinstance(identity, dict) or set(identity) != {"revision", *_FINGERPRINTS}:
+            raise EvidenceError("consumer index identity is incomplete")
+        _single_line(identity["revision"], "consumer revision")
+        for name in _FINGERPRINTS:
+            _sha(identity[name], f"consumer.{name}")
+    return request
 
 
 def _result_payload(response: dict[str, Any]) -> dict[str, Any]:
@@ -338,14 +387,25 @@ def three_year_tco(
         hourly_rate,
         annual_operations_hours,
     )
-    if any(
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-        or value < 0
-        for value in numbers
-    ):
-        raise ValueError("all TCO inputs must be finite non-negative numbers")
+    normalized: list[float] = []
+    for value in numbers:
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            raise ValueError("all TCO inputs must be finite non-negative numbers")
+        try:
+            numeric = float(value)
+        except (OverflowError, ValueError) as error:
+            raise ValueError("all TCO inputs must be finite non-negative numbers") from error
+        if not math.isfinite(numeric):
+            raise ValueError("all TCO inputs must be finite non-negative numbers")
+        normalized.append(numeric)
+    (
+        annual_license,
+        annual_compute,
+        annual_storage,
+        setup_hours,
+        hourly_rate,
+        annual_operations_hours,
+    ) = normalized
     setup = setup_hours * hourly_rate
     operations = annual_operations_hours * hourly_rate * 3
     license_cost = annual_license * 3
