@@ -154,6 +154,54 @@ def test_module_identity_collision_is_unresolved_not_arbitrarily_selected(
     )
 
 
+def test_regular_module_and_rejected_symlink_alias_are_ambiguous(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "main.py").write_text("import dep\n", encoding="utf-8")
+    (root / "dep.py").write_text("value = 'regular'\n", encoding="utf-8")
+    external_package = tmp_path / "external-dep"
+    external_package.mkdir()
+    (external_package / "__init__.py").write_text("value = 'package'\n", encoding="utf-8")
+    (root / "dep").symlink_to(external_package, target_is_directory=True)
+
+    inventory = build_source_inventory(root, include_patterns=("**/*.py",))
+    graph = source_evidence_graph(inventory)
+
+    assert {item.relative_path for item in inventory.files} == {"main.py", "dep.py"}
+    assert inventory.module_collisions == (("dep", ("dep", "dep.py")),)
+    assert ("main.py", "dep") in inventory.unresolved_imports
+    assert any(
+        "ambiguous because module identity 'dep'" in item.lower() for item in inventory.limitations
+    )
+    assert not any(edge.target == "target:file:dep.py" for edge in graph.edges)
+    assert any(node.attributes.get("module") == "dep" for node in graph.nodes)
+
+
+def test_symlinked_root_package_initializer_records_identity_limitation(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "pkg"
+    package.mkdir()
+    external_init = tmp_path / "external_init.py"
+    external_init.write_text("from pkg.helper import value\n", encoding="utf-8")
+    (package / "__init__.py").symlink_to(external_init)
+    (package / "main.py").write_text("import helper\n", encoding="utf-8")
+    (package / "helper.py").write_text("value = 1\n", encoding="utf-8")
+
+    inventory = build_source_inventory(package, include_patterns=("**/*.py",))
+    graph = source_evidence_graph(inventory)
+
+    limitation = (
+        "Root package initializer __init__.py is a rejected symlink; package-prefix identity "
+        "may differ from Python import resolution"
+    )
+    assert limitation in inventory.limitations
+    assert limitation in graph.nodes[0].provenance.limitations
+    assert {item.module for item in inventory.files} == {"main", "helper"}
+
+
 def test_parse_failure_is_retained_as_incomplete_inventory_evidence(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text("import broken\n", encoding="utf-8")
     (tmp_path / "broken.py").write_text("def broken(:\n", encoding="utf-8")

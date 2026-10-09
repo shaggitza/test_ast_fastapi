@@ -1,0 +1,80 @@
+{
+  "comparison": {
+    "absence_is_not_equivalence": true,
+    "comparable_diagnostic_policy": "error location and normalized rule/message exact match",
+    "mypy_only": [],
+    "pyright_only": [],
+    "shared": []
+  },
+  "config_sha256": {
+    "pyrightconfig.json": "0ec5e0406e59264b35045b33532c62849d312ecb77deda2d402de5de9dde921a"
+  },
+  "engines": {
+    "mypy": "mypy 2.4.0 (compiled: yes)",
+    "pyright": "pyright 1.1.411"
+  },
+  "fixture": "shadowing",
+  "observations": [
+    {
+      "column": 13,
+      "comparable": true,
+      "file": "case.py",
+      "kind": "diagnostic",
+      "line": 9,
+      "message": "Type of \"imported_name(Path(\"file\"))\" is \"str\"",
+      "provider": "pyright",
+      "rule": null,
+      "severity": "information"
+    },
+    {
+      "column": 13,
+      "comparable": false,
+      "file": "case.py",
+      "kind": "type_observation",
+      "line": 9,
+      "message": "Revealed type is \"str\"",
+      "provider": "mypy",
+      "rule": null,
+      "severity": "note"
+    }
+  ],
+  "provenance": {
+    "elapsed_seconds": 3.34,
+    "fixture_root": "shadowing",
+    "max_files": 32,
+    "max_source_bytes": 256000,
+    "mypy_command": [
+      "mypy",
+      "--show-error-codes",
+      "--no-error-summary",
+      "--no-pretty",
+      "--follow-imports",
+      "silent",
+      "<fixture>"
+    ],
+    "provider_timeout_seconds": 25,
+    "pyright_command": [
+      "/tmp/pyright-differential/node_modules/.bin/pyright",
+      "--project",
+      "<fixture>",
+      "--outputjson"
+    ]
+  },
+  "schema": "pyright-mypy-differential-v1",
+  "scope": "synthetic fixtures only; no corpus application execution or canonical truth",
+  "source_sha256": {
+    "case.py": "5710163932547480de0e624ff49cb043792cddbeef5112e9077115f32ebb764a"
+  },
+  "unsupported": [
+    {
+      "query": "definition_target",
+      "reason": "The pinned Pyright CLI emits diagnostics only; no definition query is issued.",
+      "status": "unsupported"
+    },
+    {
+      "query": "execution_or_reachability",
+      "reason": "Static type diagnostics and revealed types do not establish execution.",
+      "status": "unsupported"
+    }
+  ]
+}

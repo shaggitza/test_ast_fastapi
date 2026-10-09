@@ -36,6 +36,29 @@ class BaseFormatter(ABC):
         """Format a strength-aware inventory; legacy formatters retain endpoint output."""
         return self.format_endpoints(inventory.endpoints)
 
+    @staticmethod
+    def summarize_source_observations(observations: dict[str, object]) -> str:
+        """Summarize the optional source-only report section for human formats."""
+        clients = observations.get("client_observations")
+        client_uncertainties = observations.get("client_uncertainties")
+        deployments = observations.get("deployment_observations")
+        matches = observations.get("surface_matches")
+        deployment_rows = deployments if isinstance(deployments, list) else []
+        exact_deployments = sum(
+            isinstance(item, dict) and item.get("certainty") == "exact" for item in deployment_rows
+        )
+        complete = observations.get("complete") is True
+        scanned_files = observations.get("scanned_files", 0)
+        return (
+            f"{'complete' if complete else 'incomplete'} scan of {scanned_files} files; "
+            f"{len(clients) if isinstance(clients, list) else 0} exact client observations, "
+            f"{len(client_uncertainties) if isinstance(client_uncertainties, list) else 0} "
+            "uncertain client calls, "
+            f"{exact_deployments} exact and "
+            f"{len(deployment_rows) - exact_deployments} uncertain deployment observations, "
+            f"{len(matches) if isinstance(matches, list) else 0} explicitly trusted route joins"
+        )
+
     @abstractmethod
     def format_endpoints(self, endpoints: list["Endpoint"]) -> str:
         """

@@ -2557,6 +2557,11 @@ class HtmlFormatter(BaseFormatter):
                     f"{limitation.source_line}</code>: {html.escape(limitation.reason)}</div>"
                 )
         content_lines.append(
+            '<div class="summary-item"><span class="summary-label">'
+            "Analysis Completeness:</span> "
+            f"{html.escape(report.analysis_completeness)}</div>"
+        )
+        content_lines.append(
             f'<div class="summary-item">'
             f'<span class="summary-label">Total Endpoints:</span> {report.total_endpoints}'
             f"</div>"
@@ -2633,6 +2638,25 @@ class HtmlFormatter(BaseFormatter):
                 f"{paths.summary.unresolved_pairs} unresolved pairs; "
                 "lexical and conditional only, persistence not established</div>"
             )
+        if report.graphify_overlay is not None:
+            evidence = report.graphify_overlay.get("evidence")
+            evidence_count = len(evidence) if isinstance(evidence, list) else 0
+            summary = (
+                f"{evidence_count} LOW diagnostic path(s); "
+                "offline lexical evidence only; does not change endpoint candidates"
+            )
+            content_lines.append(
+                '<div class="summary-item"><span class="summary-label">'
+                "Graphify Overlay:</span> "
+                f"{html.escape(summary)}</div>"
+            )
+        if report.source_observations is not None:
+            summary = self.summarize_source_observations(report.source_observations)
+            content_lines.append(
+                '<div class="summary-item"><span class="summary-label">'
+                "Source Observations:</span> "
+                f"{html.escape(summary)}</div>"
+            )
         content_lines.append("</div>")
 
         # Affected endpoints
@@ -2641,7 +2665,7 @@ class HtmlFormatter(BaseFormatter):
             content_lines.append("<h2>Affected Endpoints</h2>")
 
             # Group by confidence
-            groups = (
+            groups: list[tuple[ConfidenceLevel | None, list[AffectedEndpoint]]] = (
                 [
                     (confidence, report.get_endpoints_by_confidence(confidence))
                     for confidence in [

@@ -6,7 +6,7 @@ It describes evidence from validated offline snapshots only.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -33,6 +33,9 @@ if TYPE_CHECKING:
     from fastapi_endpoint_detector.analyzer.source_inventory import SourceInventory
     from fastapi_endpoint_detector.models.diff import DiffFile
     from fastapi_endpoint_detector.models.endpoint import Endpoint
+
+
+ReportT = TypeVar("ReportT", bound=BaseModel)
 
 
 class GraphifyOverlayHookError(RuntimeError):
@@ -171,9 +174,17 @@ def _path_record(
             _location_record(span, module_names=module_names) for span in item.node_source_spans
         ),
         relations_source_to_target=tuple(relations),
-        confidence=item.confidence,
+        # Graphify records are lexical provenance, not proof of runtime calls.
+        confidence="LOW",
         incomplete=item.incomplete,
-        limitations=item.limitations,
+        limitations=tuple(
+            dict.fromkeys(
+                (
+                    *item.limitations,
+                    "Graphify records are lexical evidence only; execution is not established",
+                )
+            )
+        ),
     )
 
 
@@ -307,14 +318,11 @@ def _assert_inventory_root(inventory: SourceInventory, project_root: Path, side:
         raise ValueError(f"{side} source inventory root must match its Graphify project root")
 
 
-def attach_graphify_overlay(report: BaseModel, overlay: GraphifyOverlayReport) -> BaseModel:
+def attach_graphify_overlay(report: ReportT, overlay: GraphifyOverlayReport) -> ReportT:
     """Return a report copy with the versioned overlay in the agreed field.
 
-    PR #312 can add
-    ``graphify_overlay: GraphifyOverlayReport | None = None`` to
-    ``AnalysisReport`` and call this only when the explicit Graphify option is
-    enabled. Reports without that hook fail clearly rather than silently
-    dropping the overlay.
+    Call this only when the explicit Graphify option is enabled. Reports without
+    the declared field fail clearly rather than silently dropping the overlay.
     """
     fields = getattr(type(report), "model_fields", {})
     if "graphify_overlay" not in fields:

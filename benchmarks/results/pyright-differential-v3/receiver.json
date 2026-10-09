@@ -1,0 +1,113 @@
+{
+  "comparison": {
+    "absence_is_not_equivalence": true,
+    "mypy_only_error_locations": [],
+    "overlapping_error_locations": [],
+    "policy": "error-location-overlap-only; provider rules/messages remain provider-specific",
+    "pyright_only_error_locations": [],
+    "semantic_equivalence": "unsupported"
+  },
+  "config_sha256": {
+    "mypy.ini": "3dee958bdff320545bc860ee66a68e1f511d20d34a55addd445248a76159b453",
+    "pyrightconfig.json": "0ec5e0406e59264b35045b33532c62849d312ecb77deda2d402de5de9dde921a"
+  },
+  "engines": {
+    "mypy": "mypy 2.4.0 (compiled: yes)",
+    "pyright": "pyright 1.1.411"
+  },
+  "fixture": "receiver",
+  "observations": [
+    {
+      "column": 13,
+      "comparable": false,
+      "end_column": 26,
+      "end_line": 20,
+      "file": "case.py",
+      "kind": "diagnostic",
+      "line": 20,
+      "message": "Type of \"call(Child())\" is \"str\"",
+      "provider": "pyright",
+      "rule": null,
+      "severity": "information"
+    },
+    {
+      "column": 13,
+      "comparable": false,
+      "end_column": null,
+      "end_line": null,
+      "file": "case.py",
+      "kind": "type_observation",
+      "line": 20,
+      "message": "Revealed type is \"str\"",
+      "provider": "mypy",
+      "rule": null,
+      "severity": "note"
+    }
+  ],
+  "provenance": {
+    "consumed_config_sha256": {
+      "mypy.ini": "3dee958bdff320545bc860ee66a68e1f511d20d34a55addd445248a76159b453",
+      "pyrightconfig.json": "0ec5e0406e59264b35045b33532c62849d312ecb77deda2d402de5de9dde921a"
+    },
+    "consumed_source_sha256": {
+      "case.py": "860e282c0a71f0d3f35d74bc8890728f95b6ba0301836e7e2f514c9960c11444"
+    },
+    "elapsed_seconds": 2.773,
+    "fixture_root": "receiver",
+    "max_files": 32,
+    "max_output_bytes": 2000000,
+    "max_source_bytes": 256000,
+    "mypy_command": [
+      "<mypy-package>/bin/mypy",
+      "--config-file",
+      "<snapshot>/mypy.ini",
+      "--no-incremental",
+      "--show-error-codes",
+      "--no-error-summary",
+      "--no-pretty",
+      "--follow-imports",
+      "silent",
+      "<snapshot>/fixture"
+    ],
+    "provider_artifacts": {
+      "mypy": {
+        "executable_sha256": "26f04277dca43afe4da722cb9f30f83fb580972eeaf2e13a3a9aff5a317b7082",
+        "package_metadata_sha256": "0dde788d2abb4252a7c5c6a11177ba591aae10102e9b84e618ff29a8f1cbcd88"
+      },
+      "pyright": {
+        "executable_sha256": "1b6744d5925694667abb3309c7e27611446aa7f1ee645cb99ecb0b9082a4c61e",
+        "package_metadata_sha256": "b9eaa878634a4b9bd71817045f3ef65b42dc312c042479801f1b8db6e0f17cdb"
+      }
+    },
+    "provider_timeout_seconds": 25,
+    "pyright_command": [
+      "<pyright-package>/index.js",
+      "--project",
+      "<snapshot>/fixture",
+      "--outputjson"
+    ],
+    "working_directory": "<repository-root>"
+  },
+  "schema": "pyright-mypy-differential-v3",
+  "scope": "synthetic fixtures only; no corpus application execution or canonical truth",
+  "source_sha256": {
+    "case.py": "860e282c0a71f0d3f35d74bc8890728f95b6ba0301836e7e2f514c9960c11444"
+  },
+  "unsupported": [
+    {
+      "query": "definition_target",
+      "reason": "The pinned Pyright CLI emits diagnostics only; no definition query is issued.",
+      "status": "unsupported"
+    },
+    {
+      "query": "execution_or_reachability",
+      "reason": "Static type diagnostics and revealed types do not establish execution.",
+      "status": "unsupported"
+    },
+    {
+      "query": "cross_engine_diagnostic_semantics",
+      "reason": "Only error-location overlap is summarized; rules/messages are engine-specific.",
+      "status": "unsupported"
+    }
+  ]
+}

@@ -5,9 +5,12 @@ These tests verify that the mypy-based dependency analysis correctly handles
 various edge cases that might be missed in the standard implementation.
 """
 
+import ast
 from pathlib import Path
 
+import mypy.build
 import pytest
+from mypy.nodes import FuncDef, LambdaExpr
 
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, HandlerInfo
@@ -627,6 +630,169 @@ def handler(flag: bool):
             cached._endpoint_key(endpoint)
         ]
         assert loaded.get_source_evidence_spans(str(service)) == spans
+
+    def test_lambda_evidence_uses_the_source_snapshot_passed_to_mypy(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        service = tmp_path / "service.py"
+        original = "def worker():\n    hidden = lambda: 12345\n    return 0\n"
+        service.write_text(original, encoding="utf-8")
+        changed = "def worker():\n    hidden = lambda: 2\n    return 0\n"
+        original_build = mypy.build.build
+
+        def mutate_after_build(*, sources, **kwargs):
+            result = original_build(sources=sources, **kwargs)
+            service.write_text(changed, encoding="utf-8")
+            return result
+
+        monkeypatch.setattr(mypy.build, "build", mutate_after_build)
+        analyzer = MypyAnalyzer(tmp_path)
+        source_fingerprint, _ = analyzer._cache_fingerprint()
+        analyzer._expected_source_fingerprint = source_fingerprint
+        analyzer._reset_build_state()
+        try:
+            analyzer._ensure_mypy_built()
+        finally:
+            analyzer._expected_source_fingerprint = None
+
+        worker = next(
+            symbol.node
+            for tree in analyzer._trees.values()
+            for symbol in tree.names.values()
+            if isinstance(symbol.node, FuncDef) and symbol.node.name == "worker"
+        )
+        lambda_node = next(
+            statement.rvalue
+            for statement in worker.body.body
+            if isinstance(getattr(statement, "rvalue", None), LambdaExpr)
+        )
+        span = analyzer._lambda_body_source_span(worker, lambda_node, str(service), "deferred")
+
+        assert analyzer._analysis_source_snapshots[str(service)] == original.encode("utf-8")
+        assert lambda_node.body.body[0].expr.value == 12345
+        assert span is not None
+        line = original.splitlines()[span.start_line - 1].encode("utf-8")
+        assert line[span.start_column : span.end_column] == b"12345"
+        assert service.read_text(encoding="utf-8") == changed
+
+    def test_lambda_evidence_abstains_when_source_changes_before_mypy_reads_it(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        service = tmp_path / "service.py"
+        original = "def worker():\n    hidden = lambda: 12345\n    return 0\n"
+        changed = "def worker():\n    hidden = lambda: 2\n    return 0\n"
+        service.write_text(original, encoding="utf-8")
+        original_build = mypy.build.build
+
+        def mutate_before_build(*, sources, **kwargs):
+            service.write_text(changed, encoding="utf-8")
+            return original_build(sources=sources, **kwargs)
+
+        monkeypatch.setattr(mypy.build, "build", mutate_before_build)
+        analyzer = MypyAnalyzer(tmp_path)
+        analyzer._ensure_mypy_built()
+        worker = next(
+            symbol.node
+            for tree in analyzer._trees.values()
+            for symbol in tree.names.values()
+            if isinstance(symbol.node, FuncDef) and symbol.node.name == "worker"
+        )
+        lambda_node = next(
+            statement.rvalue
+            for statement in worker.body.body
+            if isinstance(getattr(statement, "rvalue", None), LambdaExpr)
+        )
+
+        assert analyzer._analysis_source_snapshots[str(service)] is None
+        assert lambda_node.body.body[0].expr.value == 2
+        assert (
+            analyzer._lambda_body_source_span(worker, lambda_node, str(service), "deferred") is None
+        )
+
+    def test_lambda_source_ast_is_parsed_once_per_file(self, tmp_path: Path, monkeypatch) -> None:
+        service = tmp_path / "service.py"
+        service.write_text(
+            "def worker():\n    hidden = lambda: 12345\n    return 0\n", encoding="utf-8"
+        )
+        analyzer = MypyAnalyzer(tmp_path)
+        analyzer._ensure_mypy_built()
+        worker = next(
+            symbol.node
+            for tree in analyzer._trees.values()
+            for symbol in tree.names.values()
+            if isinstance(symbol.node, FuncDef) and symbol.node.name == "worker"
+        )
+        lambda_node = next(
+            statement.rvalue
+            for statement in worker.body.body
+            if isinstance(getattr(statement, "rvalue", None), LambdaExpr)
+        )
+        original_parse = ast.parse
+        parses = 0
+
+        def count_source_parse(source, *args, **kwargs):
+            nonlocal parses
+            if kwargs.get("filename") == str(service.resolve()):
+                parses += 1
+            return original_parse(source, *args, **kwargs)
+
+        monkeypatch.setattr(ast, "parse", count_source_parse)
+        first = analyzer._lambda_body_source_span(worker, lambda_node, str(service), "deferred")
+        second = analyzer._lambda_body_source_span(worker, lambda_node, str(service), "deferred")
+
+        assert first == second
+        assert parses == 1
+
+    def test_lambda_source_snapshot_abstains_over_per_file_and_total_bounds(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(MypyAnalyzer, "MAX_LAMBDA_SOURCE_FILE_BYTES", 64)
+        monkeypatch.setattr(MypyAnalyzer, "MAX_LAMBDA_SOURCE_SNAPSHOT_BYTES", 80)
+        large = tmp_path / "large.py"
+        large.write_text(
+            "def worker():\n    padding = '" + ("x" * 80) + "'\n"
+            "    hidden = lambda: 12345\n    return 0\n",
+            encoding="utf-8",
+        )
+        small = tmp_path / "small.py"
+        small.write_text("def other():\n    hidden = lambda: 1\n    return 0\n", encoding="utf-8")
+        middle = tmp_path / "middle.py"
+        middle.write_text("def third():\n    hidden = lambda: 2\n    return 0\n", encoding="utf-8")
+        analyzer = MypyAnalyzer(tmp_path)
+        records = analyzer._source_records()
+
+        assert len(large.read_bytes()) > MypyAnalyzer.MAX_LAMBDA_SOURCE_FILE_BYTES
+        assert len(records) == 3
+
+        analyzer._ensure_mypy_built()
+        assert analyzer._analysis_source_snapshots[str(large.resolve())] is None
+        retained = [
+            snapshot
+            for snapshot in analyzer._analysis_source_snapshots.values()
+            if snapshot is not None
+        ]
+        assert sum(map(len, retained)) <= MypyAnalyzer.MAX_LAMBDA_SOURCE_SNAPSHOT_BYTES
+        assert (
+            sum(
+                analyzer._analysis_source_snapshots[str(path.resolve())] is not None
+                for path in (small, middle)
+            )
+            == 1
+        )
+        worker = next(
+            symbol.node
+            for tree in analyzer._trees.values()
+            for symbol in tree.names.values()
+            if isinstance(symbol.node, FuncDef) and symbol.node.name == "worker"
+        )
+        lambda_node = next(
+            statement.rvalue
+            for statement in worker.body.body
+            if isinstance(getattr(statement, "rvalue", None), LambdaExpr)
+        )
+        assert (
+            analyzer._lambda_body_source_span(worker, lambda_node, str(large), "deferred") is None
+        )
 
     def test_invoked_wrappers_do_not_own_dead_deferred_or_unawaited_body_lines(
         self, tmp_path: Path

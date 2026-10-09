@@ -18,7 +18,10 @@ from fastapi_endpoint_detector.models.endpoint import (
     DependencyCallableKind,
     DependencyDeclarationKind,
     DependencyGraphStatus,
+    Endpoint,
+    EndpointDiscoveryCondition,
     EndpointDiscoveryStatus,
+    EndpointMethod,
     HandlerInfo,
 )
 from fastapi_endpoint_detector.parser.fastapi_extractor import (
@@ -77,20 +80,67 @@ def test_runtime_extractor_filters_handlers_to_canonical_inventory(tmp_path: Pat
 
     endpoints = extractor.extract_endpoints()
     assert [endpoint.identifier for endpoint in endpoints] == ["GET /inside"]
-    assert endpoints[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
-    assert any(
-        "Runtime import is not constrained" in condition.reason
-        and "follow_imports is disabled" in condition.reason
-        for condition in endpoints[0].discovery_conditions
-    )
+    assert endpoints[0].discovery_status == EndpointDiscoveryStatus.ESTABLISHED
+    assert endpoints[0].discovery_conditions == ()
     assert (
         "does not sandbox or constrain import side effects"
-        in (extractor.source_inventory_limitations[0])
+        in extractor.source_inventory_limitations[1]
     )
-    assert any(
-        "follow_imports is disabled" in limitation
-        for limitation in extractor.source_inventory_limitations
+    scope_limitations = extractor.source_inventory_limitations
+    assert "selected 1 files and excluded 0 files" in scope_limitations[0]
+    assert (
+        f"completeness: {len(inventory.limitations)} source limitation(s) recorded"
+        in scope_limitations[0]
     )
+    assert "following is disabled with maximum depth 10" in scope_limitations[0]
+    assert any("follow_imports is disabled" in limitation for limitation in scope_limitations)
+
+
+def test_inventory_scope_does_not_replace_genuine_conditional_route_provenance(
+    tmp_path: Path,
+) -> None:
+    route_condition = EndpointDiscoveryCondition(
+        source_path=tmp_path / "main.py",
+        source_line=4,
+        reason="route registration depends on a runtime feature flag",
+    )
+    endpoint = Endpoint(
+        path="/conditional",
+        methods=[EndpointMethod.GET],
+        handler=HandlerInfo(
+            name="conditional",
+            module="main",
+            file_path=tmp_path / "main.py",
+            line_number=5,
+        ),
+        discovery_status=EndpointDiscoveryStatus.CONDITIONAL,
+        discovery_conditions=(route_condition,),
+    )
+    extractor = FastAPIExtractor(
+        tmp_path / "main.py",
+        source_inventory=build_source_inventory(tmp_path, include_patterns=("*.py",)),
+    )
+
+    preserved = extractor._mark_inventory_scope(endpoint)
+
+    assert preserved is endpoint
+    assert preserved.discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+    assert preserved.discovery_conditions == (route_condition,)
+
+
+def test_runtime_worker_subprocess_loads_evidence_graph_model(tmp_path: Path) -> None:
+    app_file = tmp_path / "main.py"
+    app_file.write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)\n"
+        "@app.get('/inventory')\n"
+        "def inventory(): return {}\n",
+        encoding="utf-8",
+    )
+
+    endpoints = FastAPIExtractor(app_file).extract_endpoints()
+
+    assert [endpoint.path for endpoint in endpoints] == ["/inventory"]
 
 
 def test_runtime_extractor_preserves_slashes_websocket_dependencies_and_mount_cycles(
@@ -882,6 +932,31 @@ def payload():
         FastAPIExtractor(app_file, output_limit_bytes=128).extract_endpoints()
 
 
+def test_output_limit_stops_route_traversal_before_inventory_collection(monkeypatch) -> None:
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    for index in range(100):
+
+        async def endpoint(index: int = index) -> dict[str, int]:
+            return {"index": index}
+
+        app.add_api_route(f"/items/{index}", endpoint, methods=["GET"])
+
+    extractor = FastAPIExtractor(Path("unused.py"), output_limit_bytes=1024)
+    monkeypatch.setattr(extractor, "_load_app", lambda: app)
+    visited = 0
+    original_http_endpoint = extractor._http_endpoint
+
+    def count_http_endpoint(route, original_route, prefix):
+        nonlocal visited
+        visited += 1
+        return original_http_endpoint(route, original_route, prefix)
+
+    monkeypatch.setattr(extractor, "_http_endpoint", count_http_endpoint)
+    with pytest.raises(FastAPIExtractorError, match="output limit"):
+        extractor._extract_endpoints_in_process()
+    assert visited < 100
+
+
 def test_runtime_and_secure_extractors_agree_on_static_nested_routes(tmp_path: Path) -> None:
     app_file = tmp_path / "differential_app.py"
     app_file.write_text(
@@ -1306,6 +1381,10 @@ def test_runtime_extractor_reports_worker_hard_exit(tmp_path: Path) -> None:
         ({"timeout_seconds": float("inf")}, "timeout_seconds must be a finite positive number"),
         ({"timeout_seconds": True}, "timeout_seconds must be a finite positive number"),
         ({"output_limit_bytes": 0}, "output_limit_bytes must be a positive integer"),
+        (
+            {"output_limit_bytes": 127},
+            "output_limit_bytes must be at least 128 for a structured worker response",
+        ),
         ({"output_limit_bytes": 1.5}, "output_limit_bytes must be a positive integer"),
         ({"output_limit_bytes": True}, "output_limit_bytes must be a positive integer"),
     ],

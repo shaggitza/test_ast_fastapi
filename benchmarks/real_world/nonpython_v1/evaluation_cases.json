@@ -1,0 +1,190 @@
+{
+  "schema": "nonpython-evaluation-cases-v1",
+  "scope": "Six audited PRs, containing eight client HTTP route atoms and one conditional deployment route atom. GH108 does not define the unit of \u201cnine cases\u201d.",
+  "truth_status": "reviewed_historical_atoms_provisional_not_canonical_truth",
+  "cases": [
+    {
+      "case_id": "khoj-ai/khoj#1216",
+      "repository": "khoj-ai/khoj",
+      "pr": 1216,
+      "merge_snapshot": "573c6a32e1a2b722893df6e745838976201caa56",
+      "audit": "benchmarks/results/ranked/per-pr-audit/khoj/1216.md",
+      "mode": "typescript_client",
+      "client_files": [
+        "src/interface/obsidian/src/chat_view.ts"
+      ],
+      "atoms": [
+        {
+          "method": "POST",
+          "path": "/api/chat/sessions",
+          "query_evidence": "agent_slug={selectedSlug}",
+          "client_evidence": "src/interface/obsidian/src/chat_view.ts:960-974",
+          "server_evidence": "src/khoj/routers/api_chat.py:547-563",
+          "surface_id": "khoj:api_chat:POST:/api/chat/sessions"
+        }
+      ],
+      "audit_sha256": "b870cddb8fb45ab16a6bec009f03df95586df03e249377464de61565308b1b05"
+    },
+    {
+      "case_id": "khoj-ai/khoj#1221",
+      "repository": "khoj-ai/khoj",
+      "pr": 1221,
+      "merge_snapshot": "1fd6e16cff416da413da9e5b469dd5ade42bd556",
+      "audit": "benchmarks/results/ranked/per-pr-audit/khoj/1221.md",
+      "mode": "typescript_client",
+      "client_files": [
+        "src/interface/obsidian/src/api.ts",
+        "src/interface/obsidian/src/settings.ts",
+        "src/interface/obsidian/src/utils.ts"
+      ],
+      "atoms": [
+        {
+          "method": "PATCH",
+          "path": "/api/content",
+          "query_evidence": "client=obsidian",
+          "client_evidence": "src/interface/obsidian/src/api.ts:13-29; src/interface/obsidian/src/utils.ts (batch caller)",
+          "server_evidence": "src/khoj/routers/api_content.py:97-116",
+          "surface_id": "khoj:api_content:PATCH:/api/content"
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/content/type/{content_type}",
+          "query_evidence": "client=obsidian",
+          "client_evidence": "src/interface/obsidian/src/api.ts:3-10; src/interface/obsidian/src/utils.ts (regenerate caller)",
+          "server_evidence": "src/khoj/routers/api_content.py:379-406",
+          "surface_id": "khoj:api_content:DELETE:/api/content/type/{content_type}"
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/user",
+          "query_evidence": null,
+          "client_evidence": "src/interface/obsidian/src/utils.ts:300",
+          "server_evidence": "src/khoj/routers/api.py:248 onward",
+          "surface_id": "khoj:api:GET:/api/v1/user"
+        }
+      ],
+      "audit_sha256": "20440b321e33113c4535b5df590167945ea9499a9b23d4a28d65fcd61b268b45"
+    },
+    {
+      "case_id": "khoj-ai/khoj#1235",
+      "repository": "khoj-ai/khoj",
+      "pr": 1235,
+      "merge_snapshot": "f413ce7354c3981f1e22c9d784f4197ac253a41a",
+      "audit": "benchmarks/results/ranked/per-pr-audit/khoj/1235.md",
+      "mode": "typescript_client",
+      "client_files": [
+        "src/interface/obsidian/src/settings.ts",
+        "src/interface/obsidian/src/utils.ts"
+      ],
+      "atoms": [
+        {
+          "method": "PATCH",
+          "path": "/api/content",
+          "query_evidence": "client=obsidian",
+          "client_evidence": "src/interface/obsidian/src/utils.ts:190-198",
+          "server_evidence": "src/khoj/routers/api_content.py:97-116",
+          "surface_id": "khoj:api_content:PATCH:/api/content"
+        },
+        {
+          "method": "PUT",
+          "path": "/api/content",
+          "query_evidence": "client=obsidian",
+          "client_evidence": "src/interface/obsidian/src/settings.ts:327-364 -> src/interface/obsidian/src/utils.ts:190-198",
+          "server_evidence": "src/khoj/routers/api_content.py:75-96",
+          "surface_id": "khoj:api_content:PUT:/api/content"
+        }
+      ],
+      "audit_sha256": "57cb865d078fa9cd6dac823d667e7fda79a33e1d0bfdddc66df708fabd9e1b6f"
+    },
+    {
+      "case_id": "open-webui/open-webui#26384",
+      "repository": "open-webui/open-webui",
+      "pr": 26384,
+      "merge_snapshot": "dc1bc41d2edc022dbae11db2159cedb5369c68cd",
+      "audit": "benchmarks/results/ranked/per-pr-audit/open-webui/26384.md",
+      "mode": "svelte_client",
+      "client_files": [
+        "src/lib/components/layout/Sidebar/PinnedNoteList.svelte",
+        "src/lib/components/chat/MessageInput.svelte",
+        "src/lib/apis/notes/index.ts"
+      ],
+      "atoms": [
+        {
+          "method": "GET",
+          "path": "/api/v1/notes/{id}",
+          "query_evidence": null,
+          "client_evidence": "src/lib/components/chat/MessageInput.svelte:925-927 -> src/lib/apis/notes/index.ts:189-218",
+          "server_evidence": "backend/open_webui/main.py:750; backend/open_webui/routers/notes.py:253-268",
+          "surface_id": "open-webui:notes:GET:/api/v1/notes/{id}"
+        }
+      ],
+      "audit_sha256": "ae73eb0b67e92dfe5cbde55b626eb2787841a254de3c096f400434294d7a7e67"
+    },
+    {
+      "case_id": "open-webui/open-webui#26405",
+      "repository": "open-webui/open-webui",
+      "pr": 26405,
+      "merge_snapshot": "0e5540c2b295e38906be7ece4d3b104303d6c519",
+      "audit": "benchmarks/results/ranked/per-pr-audit/open-webui/26405.md",
+      "mode": "svelte_client",
+      "client_files": [
+        "src/lib/components/chat/Chat.svelte",
+        "src/lib/apis/chats/index.ts"
+      ],
+      "atoms": [
+        {
+          "method": "GET",
+          "path": "/api/v1/chats/search",
+          "query_evidence": "searchParams serialized into query string",
+          "client_evidence": "src/lib/apis/chats/index.ts:477 onward; caller src/lib/components/chat/Chat.svelte",
+          "server_evidence": "backend/open_webui/main.py:749; backend/open_webui/routers/chats.py:731-747",
+          "surface_id": "open-webui:chats:GET:/api/v1/chats/search"
+        }
+      ],
+      "audit_sha256": "8576355e3ed6c42ce0eaa43c3477ea3af4614dcc83dc5b047e0a6bc1f71f6c0f"
+    },
+    {
+      "case_id": "langflow-ai/langflow#13992",
+      "repository": "langflow-ai/langflow",
+      "pr": 13992,
+      "merge_snapshot": "1ba8b827b64ce40a135202c65dda9e887adaa021",
+      "audit": "benchmarks/results/ranked/per-pr-audit/langflow/13992.md",
+      "mode": "docker_env_subprocess",
+      "client_files": [],
+      "atoms": [
+        {
+          "method": "GET",
+          "path": "/api/v2/mcp/servers",
+          "query_evidence": "action_count=true",
+          "client_evidence": "docker/*: NPM_CONFIG_CACHE=/app/.npm; writable cache setup in base/extras variants",
+          "server_evidence": "src/backend/base/langflow/api/router.py (v2 MCP mount); src/backend/base/langflow/api/v2/mcp.py:229-293 (stdio MCP startup, action_count response); src/lfx/src/lfx/base/mcp/util.py:1277-1285, 1644 onward (stdio transport subprocess implementation)",
+          "surface_id": "langflow:mcp:GET:/api/v2/mcp/servers",
+          "impact": "conditional_deployment_impact",
+          "runtime_observed": false,
+          "assumptions": [
+            "image variant is deployed",
+            "/app is not shadowed by a mount",
+            "runtime UID/GID can write cache",
+            "configured stdio MCP server is invoked",
+            "route is called with action_count=true"
+          ]
+        }
+      ],
+      "audit_sha256": "ee9f8c423aeaf44c25a6d5e93234be2c62180db2db4f705cf1646971ba82e7e6",
+      "deployment_files": [
+        "docker/build_and_push.Dockerfile",
+        "docker/build_and_push_base.Dockerfile",
+        "docker/build_and_push_with_extras.Dockerfile"
+      ],
+      "subprocess_file": "src/lfx/src/lfx/base/mcp/util.py"
+    }
+  ],
+  "origin_policy": "No client origin is inferred from dynamic base URLs. Explicit reviewed route surfaces have no origin attestation, so origin-gated joins intentionally abstain.",
+  "unit_interpretation": {
+    "audited_pr_count": 6,
+    "client_route_atom_count": 8,
+    "conditional_deployment_atom_count": 1,
+    "total_audited_nonpython_atom_count": 9,
+    "note": "The issue\u2019s nine-case wording could refer to these nine source-audited atoms. The six identified PRs are the full available ranked-audit set; this does not establish whether GH108 intended another unit or whether acceptance is complete."
+  }
+}

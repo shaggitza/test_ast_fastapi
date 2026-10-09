@@ -5,7 +5,11 @@ Markdown output formatter.
 from pathlib import Path
 
 from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointInventory
-from fastapi_endpoint_detector.models.report import AnalysisReport, ConfidenceLevel
+from fastapi_endpoint_detector.models.report import (
+    AffectedEndpoint,
+    AnalysisReport,
+    ConfidenceLevel,
+)
 from fastapi_endpoint_detector.output.formatters import BaseFormatter, register_formatter
 
 
@@ -58,6 +62,7 @@ class MarkdownFormatter(BaseFormatter):
                     f"  - **Inventory Limitation:** "
                     f"`{limitation.source_path}:{limitation.source_line}` — {limitation.reason}"
                 )
+        lines.append(f"- **Analysis Completeness:** {report.analysis_completeness}")
         lines.append(f"- **Total Endpoints:** {report.total_endpoints}")
         lines.append(
             f"- **Files Changed:** {report.total_files_changed} ({report.python_files_changed} Python)"
@@ -107,6 +112,19 @@ class MarkdownFormatter(BaseFormatter):
                 f"{paths.summary.unresolved_pairs} unresolved pairs; "
                 "lexical and conditional only, persistence not established"
             )
+        if report.graphify_overlay is not None:
+            overlay = report.graphify_overlay
+            evidence = overlay.get("evidence")
+            evidence_count = len(evidence) if isinstance(evidence, list) else 0
+            lines.append(
+                f"- **Graphify Overlay:** {evidence_count} LOW diagnostic path(s); "
+                "offline lexical evidence only; does not change endpoint candidates"
+            )
+        if report.source_observations is not None:
+            lines.append(
+                f"- **Source Observations:** "
+                f"{self.summarize_source_observations(report.source_observations)}"
+            )
         lines.append("")
 
         # Affected endpoints
@@ -115,7 +133,7 @@ class MarkdownFormatter(BaseFormatter):
             lines.append("")
 
             # Group by confidence
-            groups = (
+            groups: list[tuple[ConfidenceLevel | None, list[AffectedEndpoint]]] = (
                 [
                     (confidence, report.get_endpoints_by_confidence(confidence))
                     for confidence in [

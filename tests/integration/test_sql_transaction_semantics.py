@@ -2,23 +2,41 @@
 
 from __future__ import annotations
 
+import ast
+import hashlib
 import json
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
 from pydantic import ValidationError
 
 from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
+from fastapi_endpoint_detector.analyzer.effect_contract_auditor import audit_effect_contracts
+from fastapi_endpoint_detector.analyzer.sql_transaction import build_sql_transaction_diagnostics
+from fastapi_endpoint_detector.analyzer.sql_transaction_paths import (
+    build_sql_transaction_path_diagnostics,
+)
 from fastapi_endpoint_detector.config import AnalysisConfig, Config
+from fastapi_endpoint_detector.models.effect_contract import (
+    CallResolutionStatus,
+    InvocationKind,
+    ResolvedCallSite,
+    load_effect_contracts,
+)
+from fastapi_endpoint_detector.models.endpoint import (
+    Endpoint,
+    EndpointInventory,
+    EndpointMethod,
+    HandlerInfo,
+    InventoryStatus,
+)
 from fastapi_endpoint_detector.models.report import AnalysisReport
 from fastapi_endpoint_detector.models.sql_transaction import (
     build_sql_transaction_path_report,
 )
 from fastapi_endpoint_detector.output.formatters import get_formatter
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _project(root: Path) -> tuple[Path, Path]:
@@ -62,7 +80,7 @@ def _project(root: Path) -> tuple[Path, Path]:
         contract_rows.append(
             {
                 "id": contract_id,
-                "symbol": f"{root.name}.main.{contract_id}",
+                "symbol": f"main.{contract_id}",
                 "invocation": "function",
                 "operation": operation,
                 "channel": "sql",
@@ -98,6 +116,205 @@ def _project(root: Path) -> tuple[Path, Path]:
 
 def _candidate_projection(report: AnalysisReport) -> list[dict[str, object]]:
     return [item.model_dump(mode="json") for item in report.candidate_endpoints]
+
+
+def _assert_open_receiver_flush_is_unmatched(report: AnalysisReport) -> None:
+    audit = report.effect_contract_audit
+    assert audit is not None
+    occurrence = next(item for item in audit.occurrences if item.source_spelling == "other.flush")
+    assert occurrence.audit_status == "ambiguous"
+    assert occurrence.reason_code == "open_receiver_dispatch"
+    assert occurrence.contract_id is None
+
+
+def _fixture_endpoint_calls(fixture: Path) -> tuple[Endpoint, tuple[ResolvedCallSite, ...]]:
+    """Resolve only call names proven by imports; leave untyped receiver calls unresolved."""
+    relative = Path("source/langflow/api/v1/traces.py.txt")
+    file_path = fixture / relative
+    source = file_path.read_bytes()
+    tree = ast.parse(source, filename=str(file_path))
+    handler = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "delete_traces_by_flow"
+    )
+    imported_symbols = {
+        alias.asname or alias.name: f"{node.module}.{alias.name}"
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+        for alias in node.names
+    }
+    prefix = next(
+        keyword.value.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "router" for target in node.targets)
+        and isinstance(node.value, ast.Call)
+        and ast.unparse(node.value.func) == "APIRouter"
+        for keyword in node.value.keywords
+        if keyword.arg == "prefix" and isinstance(keyword.value, ast.Constant)
+    )
+    route = next(
+        decorator
+        for decorator in handler.decorator_list
+        if isinstance(decorator, ast.Call)
+        and isinstance(decorator.func, ast.Attribute)
+        and decorator.func.attr == "delete"
+    )
+    suffix = route.args[0].value
+    endpoint_path = prefix.rstrip("/") + (suffix if suffix.startswith("/") else f"/{suffix}")
+    endpoint = Endpoint(
+        path=endpoint_path,
+        methods=[EndpointMethod.DELETE],
+        handler=HandlerInfo(
+            name=handler.name,
+            module="langflow.api.v1.traces",
+            file_path=file_path,
+            line_number=handler.lineno,
+        ),
+    )
+    sites = []
+    for node in ast.walk(handler):
+        if not isinstance(node, ast.Call):
+            continue
+        source_spelling = ast.unparse(node.func)
+        common = {
+            "file_path": str(file_path),
+            "line": node.func.lineno,
+            "column": node.func.col_offset,
+            "end_line": node.func.end_lineno,
+            "end_column": node.func.end_col_offset,
+            "source_spelling": source_spelling,
+            "resolver": "pinned_fixture_ast",
+            "resolver_version": "1",
+        }
+        imported_symbol = (
+            imported_symbols.get(node.func.id) if isinstance(node.func, ast.Name) else None
+        )
+        if imported_symbol == "langflow.services.deps.session_scope":
+            sites.append(
+                ResolvedCallSite(
+                    **common,
+                    canonical_symbol=imported_symbol,
+                    invocation=InvocationKind.FUNCTION,
+                    status=CallResolutionStatus.EXACT,
+                )
+            )
+        else:
+            sites.append(
+                ResolvedCallSite(
+                    **common,
+                    status=CallResolutionStatus.UNRESOLVED,
+                    reason_code="fixture_type_proof_unavailable",
+                )
+            )
+    return endpoint, tuple(sites)
+
+
+def _langflow_fixture_transaction_reports(fixture: Path):
+    """Run configured audit, transaction aggregation, and bounded path analysis."""
+    effects = load_effect_contracts(fixture / "effects.yaml")
+    endpoint, sites = _fixture_endpoint_calls(fixture)
+    inventory = EndpointInventory(endpoints=[endpoint], status=InventoryStatus.ESTABLISHED)
+    audit = audit_effect_contracts(
+        effects,
+        source_root=fixture,
+        inventory=inventory,
+        endpoint_call_sites=((endpoint, sites),),
+        track_transitive=False,
+        max_depth=1,
+        cache_enabled=False,
+        resolver_versions=("pinned_fixture_ast@1",),
+    )
+    transaction = build_sql_transaction_diagnostics(effects, audit)
+    paths = build_sql_transaction_path_diagnostics(
+        fixture,
+        audit,
+        transaction,
+        max_pairs=8,
+    )
+    return audit, transaction, paths
+
+
+def _assert_langflow_pinned_snapshots(fixture: Path, provenance: dict[str, Any]) -> None:
+    assert provenance["repository"] == "langflow-ai/langflow"
+    assert provenance["pull_request"] == 13960
+    assert provenance["base_sha"] == "b40e4aa02661dcc9d630e1e97a0af45d45e88ae4"
+    assert provenance["target_merge_sha"] == "a69a47ff1b5c99ce9c50edc4df45de4397151f17"
+    assert provenance["license"]["spdx"] == "MIT"
+    assert "Copyright (c) 2024 Langflow" in (fixture / "LICENSE.langflow.txt").read_text()
+    snapshots = provenance["source_snapshots"]
+    snapshot_sources = tuple((fixture / "source").rglob("*.py.txt"))
+    assert snapshot_sources
+    assert not tuple((fixture / "source").rglob("*.py"))
+    snapshot_paths = set()
+    for upstream_path, snapshot in snapshots.items():
+        relative_path = snapshot["snapshot_path"]
+        snapshot_paths.add(relative_path)
+        content = (fixture / relative_path).read_bytes()
+        start, end = snapshot["byte_start"], snapshot["byte_end"]
+        assert start == 0 and end == len(content)
+        assert content[start:end] == content
+        assert hashlib.sha256(content).hexdigest() == snapshot["sha256"]
+        assert snapshot["sha256"] == provenance["upstream_sources"][upstream_path]["sha256"]
+        assert snapshot["line_start"] == 1
+        assert snapshot["line_end"] == len(content.splitlines())
+        ast.parse(content, filename=upstream_path)
+    assert snapshot_paths == {path.relative_to(fixture).as_posix() for path in snapshot_sources}
+
+
+def _assert_langflow_context_yield_identity(fixture: Path) -> None:
+    langflow_wrapper = (fixture / "source/langflow/services/deps.py.txt").read_text(
+        encoding="utf-8"
+    )
+    wrapper = (fixture / "source/lfx/services/deps.py.txt").read_text(encoding="utf-8")
+    assert "async with lfx_session_scope() as session" in langflow_wrapper
+    assert "yield session" in langflow_wrapper
+    assert "yield session" in wrapper
+
+
+def _assert_langflow_source_transaction_evidence(
+    fixture: Path,
+    provenance: dict[str, Any],
+) -> None:
+    route = (fixture / "source/langflow/api/v1/traces.py.txt").read_text(encoding="utf-8")
+    wrapper = (fixture / "source/lfx/services/deps.py.txt").read_text(encoding="utf-8")
+    flow_source = (fixture / "source/langflow/api/v1/flows.py.txt").read_text(encoding="utf-8")
+    regression = (fixture / "source/langflow/tests/test_span_cascade_delete.py.txt").read_text(
+        encoding="utf-8"
+    )
+    assert "async with session_scope() as session" in route
+    assert "await session.execute(delete_stmt)" in route
+    _assert_langflow_context_yield_identity(fixture)
+    assert "await db.flush()" in flow_source
+    assert "await session.commit()" in wrapper
+    assert "await session.rollback()" in wrapper
+    assert "except HTTPException" in wrapper and "except Exception" in wrapper
+    assert "await session.commit()" in regression
+    assert "begin_nested" not in route and "begin_nested" not in wrapper
+    assert provenance["transaction_semantics"]["durability"].startswith("commit reachable")
+
+    contract_info = provenance["configured_wrapper_contract"]
+    contract_bytes = (fixture / contract_info["path"]).read_bytes()
+    assert hashlib.sha256(contract_bytes).hexdigest() == contract_info["sha256"]
+    contract = load_effect_contracts(fixture / contract_info["path"]).document.contracts[0]
+    assert contract.id == contract_info["contract_id"]
+    assert contract.symbol == "langflow.services.deps.session_scope"
+    assert contract.operation.value == "begin"
+    assert contract.behavior.context_exit.value == "transaction_commit_rollback"
+
+    audit, transaction, paths = _langflow_fixture_transaction_reports(fixture)
+    assert audit.summary.matched_calls == 1
+    assert audit.summary.unresolved_calls > 0
+    assert transaction.summary.endpoints_with_staging == 0
+    assert transaction.summary.pending_persistence == 0
+    assert transaction.summary.commit_reachable == 0
+    assert transaction.summary.rollback_reachable == 0
+    assert transaction.endpoint_evidence == ()
+    assert paths.effect_audit_hash == audit.provenance.audit_hash
+    assert paths.transaction_report_hash == transaction.report_hash
+    assert paths.ordered_paths == ()
+    assert paths.context_paths == ()
 
 
 def test_sql_diagnostics_separate_pending_and_reachable_boundaries(tmp_path: Path) -> None:
@@ -200,8 +417,11 @@ def test_sql_report_tampering_is_rejected_and_formats_disclose_limitations(
 
 def _ordered_project(root: Path) -> tuple[Path, Path]:
     (root / "main.py").write_text(
+        "from __future__ import annotations\n"
+        "from typing import final\n"
         "from fastapi import FastAPI\n\n"
         "app = FastAPI()\n\n"
+        "@final\n"
         "class Session:\n"
         "    def begin(self) -> None: pass\n"
         "    def begin_nested(self) -> None: pass\n"
@@ -211,6 +431,7 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
         "    def rollback(self) -> None: pass\n\n"
         "class Other:\n"
         "    def flush(self) -> None: pass\n\n"
+        "@final\n"
         "class AsyncSession:\n"
         "    def begin(self): return self\n"
         "    async def __aenter__(self): return self\n"
@@ -219,6 +440,26 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
         "class Holder:\n"
         "    def __init__(self) -> None:\n"
         "        self.session = Session()\n\n"
+        "@final\n"
+        "class UnitOfWork:\n"
+        "    def begin(self): return self\n"
+        "    def __enter__(self): return self\n"
+        "    def __exit__(self, exc_type, exc, tb): return False\n"
+        "    def add(self, value: str) -> None: pass\n\n"
+        "@final\n"
+        "class YieldedUnitOfWork:\n"
+        "    def __enter__(self) -> YieldedUnitOfWork: return self\n"
+        "    def __exit__(self, exc_type, exc, tb): return False\n"
+        "    def add(self, value: str) -> None: pass\n\n"
+        "@final\n"
+        "class UnitOfWorkFactory:\n"
+        "    def begin(self) -> YieldedUnitOfWork: return YieldedUnitOfWork()\n\n"
+        "    def untrusted_begin(self) -> YieldedUnitOfWork: return YieldedUnitOfWork()\n\n"
+        "class ReceiverlessContext:\n"
+        "    def __enter__(self) -> Session: return Session()\n"
+        "    def __exit__(self, exc_type, exc, tb): return False\n\n"
+        "def begin_context() -> ReceiverlessContext: return ReceiverlessContext()\n\n"
+        "def trusted_begin_context() -> ReceiverlessContext: return ReceiverlessContext()\n\n"
         "def stage_helper(session: Session) -> None:\n"
         "    session.add('helper')\n\n"
         "@app.post('/ordered')\n"
@@ -260,6 +501,29 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
         "    session = Session()\n"
         "    with session.begin() as transaction:\n"
         "        session.add('captured')\n\n"
+        "@app.post('/receiverless-captured-context')\n"
+        "def receiverless_captured_context() -> None:\n"
+        "    with begin_context() as transaction:\n"
+        "        transaction.add('unproven')\n\n"
+        "@app.post('/trusted-receiverless-captured-context')\n"
+        "def trusted_receiverless_captured_context() -> None:\n"
+        "    with trusted_begin_context() as transaction:\n"
+        "        transaction.add('contracted')\n\n"
+        "@app.post('/receiver-shadow-context')\n"
+        "def receiver_shadow_context() -> None:\n"
+        "    work = UnitOfWorkFactory()\n"
+        "    with work.begin() as work:\n"
+        "        work.add('shadowed')\n\n"
+        "@app.post('/trusted-method-yield-context')\n"
+        "def trusted_method_yield_context() -> None:\n"
+        "    factory = UnitOfWorkFactory()\n"
+        "    with factory.begin() as transaction:\n"
+        "        transaction.add('yielded')\n\n"
+        "@app.post('/untrusted-method-yield-context')\n"
+        "def untrusted_method_yield_context() -> None:\n"
+        "    factory = UnitOfWorkFactory()\n"
+        "    with factory.untrusted_begin() as transaction:\n"
+        "        transaction.add('unproven-yielded')\n\n"
         "@app.post('/attribute')\n"
         "def attribute_receiver() -> None:\n"
         "    holder = Holder()\n"
@@ -292,7 +556,21 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
         "def helper() -> None:\n"
         "    session = Session()\n"
         "    stage_helper(session)\n"
-        "    session.commit()\n",
+        "    session.commit()\n\n"
+        "@app.post('/wrapper-context')\n"
+        "def wrapper_context() -> None:\n"
+        "    work = UnitOfWork()\n"
+        "    with work.begin():\n"
+        "        work.add('wrapped')\n\n"
+        "@app.post('/exception-path')\n"
+        "def exception_path() -> None:\n"
+        "    session = Session()\n"
+        "    session.add('exception')\n"
+        "    try:\n"
+        "        session.flush()\n"
+        "        session.commit()\n"
+        "    except Exception:\n"
+        "        session.rollback()\n",
         encoding="utf-8",
     )
     contracts = root / "ordered-effects.yaml"
@@ -308,7 +586,7 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
                 "contracts": [
                     {
                         "id": operation,
-                        "symbol": f"{root.name}.main.Session.{operation}",
+                        "symbol": f"main.Session.{operation}",
                         "invocation": "instance_method",
                         "operation": (
                             "stage"
@@ -349,8 +627,86 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
                 ]
                 + [
                     {
+                        "id": "uow-begin",
+                        "symbol": "main.UnitOfWork.begin",
+                        "invocation": "instance_method",
+                        "operation": "begin",
+                        "channel": "sql",
+                        "behavior": {
+                            "timing": "context_enter",
+                            "transaction_scope": "transaction",
+                            "context_exit": "transaction_commit_rollback",
+                        },
+                    },
+                    {
+                        "id": "uow-add",
+                        "symbol": "main.UnitOfWork.add",
+                        "invocation": "instance_method",
+                        "operation": "stage",
+                        "channel": "sql",
+                    },
+                    {
+                        "id": "yielded-uow-add",
+                        "symbol": "main.YieldedUnitOfWork.add",
+                        "invocation": "instance_method",
+                        "operation": "stage",
+                        "channel": "sql",
+                    },
+                    {
+                        "id": "uow-factory-begin",
+                        "symbol": "main.UnitOfWorkFactory.begin",
+                        "invocation": "instance_method",
+                        "operation": "begin",
+                        "channel": "sql",
+                        "behavior": {
+                            "timing": "context_enter",
+                            "transaction_scope": "transaction",
+                            "context_exit": "transaction_commit_rollback",
+                            "stage_receiver_from_yield": True,
+                        },
+                    },
+                    {
+                        "id": "uow-factory-untrusted-begin",
+                        "symbol": "main.UnitOfWorkFactory.untrusted_begin",
+                        "invocation": "instance_method",
+                        "operation": "begin",
+                        "channel": "sql",
+                        "behavior": {
+                            "timing": "context_enter",
+                            "transaction_scope": "transaction",
+                            "context_exit": "transaction_commit_rollback",
+                        },
+                    },
+                    {
+                        "id": "receiverless-begin",
+                        "symbol": "main.begin_context",
+                        "invocation": "function",
+                        "operation": "begin",
+                        "channel": "sql",
+                        "behavior": {
+                            "timing": "context_enter",
+                            "transaction_scope": "transaction",
+                            "context_exit": "transaction_commit_rollback",
+                        },
+                    },
+                    {
+                        "id": "trusted-receiverless-begin",
+                        "symbol": "main.trusted_begin_context",
+                        "invocation": "function",
+                        "operation": "begin",
+                        "channel": "sql",
+                        "behavior": {
+                            "timing": "context_enter",
+                            "transaction_scope": "transaction",
+                            "context_exit": "transaction_commit_rollback",
+                            "stage_receiver_from_yield": True,
+                        },
+                    },
+                ]
+                + [
+                    {
                         "id": f"async-{operation}",
-                        "symbol": f"{root.name}.main.AsyncSession.{operation}",
+                        "symbol": f"main.AsyncSession.{operation}",
                         "invocation": "instance_method",
                         "operation": "stage" if operation == "add" else "begin",
                         "channel": "sql",
@@ -414,6 +770,7 @@ def test_ordered_paths_require_same_scope_receiver_and_straight_line(tmp_path: P
     assert _candidate_projection(configured) == _candidate_projection(baseline)
     assert configured.affected_endpoints == baseline.affected_endpoints
     assert configured.orphan_changes == baseline.orphan_changes
+    _assert_open_receiver_flush_is_unmatched(configured)
     paths = configured.sql_transaction_path_report
     assert paths is not None
     assert paths.schema_version == 4
@@ -422,10 +779,10 @@ def test_ordered_paths_require_same_scope_receiver_and_straight_line(tmp_path: P
         "ordered_flushes": 1,
         "ordered_commits": 3,
         "ordered_rollbacks": 0,
-        "context_manager_paths": 3,
-        "context_transactions": 2,
+        "context_manager_paths": 7,
+        "context_transactions": 6,
         "context_savepoints": 1,
-        "unresolved_pairs": 5,
+        "unresolved_pairs": 8,
     }
     ordered = next(item for item in paths.ordered_paths if item.function_name == "ordered")
     assert {item.function_name for item in paths.ordered_paths} == {
@@ -450,11 +807,31 @@ def test_ordered_paths_require_same_scope_receiver_and_straight_line(tmp_path: P
         "managed_async_context",
         "managed_context",
         "managed_savepoint",
+        "wrapper_context",
+        "captured_context",
+        "trusted_receiverless_captured_context",
+        "trusted_method_yield_context",
     }
+    assert all(
+        item.function_name
+        not in {
+            "receiverless_captured_context",
+            "receiver_shadow_context",
+            "untrusted_method_yield_context",
+        }
+        for item in paths.context_paths
+    )
     managed = next(item for item in paths.context_paths if item.function_name == "managed_context")
     assert managed.normal_exit == "commit_reachable"
     assert managed.exceptional_exit == "rollback_reachable"
     assert managed.status == "conditional_on_context_exit"
+    wrapper = next(item for item in paths.context_paths if item.function_name == "wrapper_context")
+    assert wrapper.normal_exit == "commit_reachable"
+    assert wrapper.exceptional_exit == "rollback_reachable"
+    assert all(item.persistence_status == "not_established" for item in paths.context_paths)
+    assert (
+        sum(item.reason_code == "control_flow_unavailable" for item in paths.diagnostics) >= 4
+    )  # Branch flow plus all three try/except boundaries stay unresolved.
     savepoint = next(
         item for item in paths.context_paths if item.function_name == "managed_savepoint"
     )
@@ -512,3 +889,11 @@ def test_ordered_paths_are_explicit_and_atomically_bounded(tmp_path: Path) -> No
             secure_ast=True,
             use_cache=False,
         ).analyze_diff(diff)
+
+
+def test_langflow_13960_real_source_transaction_fixture_is_pinned_and_bounded() -> None:
+    """Parse complete pinned upstream snapshots as data; never import or execute them."""
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    provenance = json.loads((fixture / "provenance.json").read_text(encoding="utf-8"))
+    _assert_langflow_pinned_snapshots(fixture, provenance)
+    _assert_langflow_source_transaction_evidence(fixture, provenance)

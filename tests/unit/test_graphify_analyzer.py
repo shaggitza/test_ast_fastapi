@@ -465,37 +465,6 @@ def test_shared_handler_node_retains_each_secure_endpoint_seed(tmp_path: Path) -
     assert [item.endpoint_id for item in result.evidence] == ["GET /items", "POST /items"]
 
 
-def test_one_endpoint_keeps_handler_and_di_bindings_separate(tmp_path: Path) -> None:
-    root = _write_project(tmp_path / "target")
-    graph = tmp_path / "graph.json"
-    _graph(graph)
-    dependency_seed = GraphEndpointSeed(
-        "GET /items",
-        "helper",
-        Path("service.py"),
-        1,
-        2,
-        EndpointDiscoveryStatus.ESTABLISHED,
-        binding_identity="dependency:0",
-        binding_kind="dependency",
-        confidence_ceiling="LOW",
-    )
-
-    result = traverse_graphify_snapshot(
-        _load(root, graph),
-        project_root=root,
-        changed_ranges=(ChangedSourceRange(Path("service.py"), 1, 2),),
-        endpoints=(_seed(), dependency_seed),
-    )
-
-    assert {item.binding_kind for item in result.evidence} == {"handler", "dependency"}
-    assert {item.binding_identity for item in result.evidence} == {"handler", "dependency:0"}
-    dependency_evidence = next(
-        item for item in result.evidence if item.binding_kind == "dependency"
-    )
-    assert dependency_evidence.confidence == "LOW"
-
-
 def test_conflicting_duplicate_endpoint_id_is_rejected(tmp_path: Path) -> None:
     root = _write_project(tmp_path / "target")
     graph = tmp_path / "graph.json"

@@ -473,6 +473,16 @@ class AnalysisReport(BaseModel):
         default=None,
         description="Bounded source-backed same-scope SQL ordering diagnostics.",
     )
+    graphify_overlay: dict[str, object] | None = Field(
+        default=None,
+        description="Optional diagnostic evidence from validated offline Graphify snapshots.",
+    )
+    source_observations: dict[str, object] | None = Field(
+        default=None,
+        description=(
+            "Optional bounded client and deployment source observations; report-only evidence."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_inventory_strength(self) -> "AnalysisReport":

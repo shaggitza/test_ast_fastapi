@@ -15,7 +15,7 @@ from fastapi_endpoint_detector.models.report import (
 from fastapi_endpoint_detector.output.formatters import get_formatter
 
 
-def make_report() -> AnalysisReport:
+def make_report(changed_files: list[str] | None = None) -> AnalysisReport:
     endpoint = Endpoint(
         path="/items",
         methods=[EndpointMethod.GET],
@@ -28,7 +28,7 @@ def make_report() -> AnalysisReport:
         confidence=ConfidenceLevel.LOW,
         reason="bounded dependency evidence",
         dependency_chain=["service.py", "items"],
-        changed_files=["service.py"],
+        changed_files=["service.py"] if changed_files is None else changed_files,
     )
     return AnalysisReport(
         app_path="/app",
@@ -66,6 +66,22 @@ def test_human_presentation_options_do_not_change_report_accounting(name: str) -
 def test_text_colorize_false_emits_no_terminal_ansi() -> None:
     output = get_formatter("text", {"colorize": False}).format(make_report())
     assert re.search(r"\x1b\[[0-?]*[ -/]*[@-~]", output) is None
+
+
+def test_text_verbose_changed_paths_are_literal_and_single_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    paths = ["src/[bold]handler.py", r"C:\service\api.py", "line\nbreak.py"]
+    output = get_formatter("text", {"verbose": True}).format(make_report(paths))
+
+    assert "src/[bold]handler.py" in output
+    assert r"C:\service\api.py" in output
+    assert r"line\nbreak.py" in output
+    assert "line\nbreak.py" not in output
+    # Other Rich-authored labels still use their intended styles.
+    assert "\x1b[1m" in output
 
 
 @pytest.mark.parametrize("name", ["json", "yaml"])

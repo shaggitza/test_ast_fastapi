@@ -1,0 +1,172 @@
+{
+  "schema_version": 1,
+  "result_id": "effect-preset-controlled-results-v1",
+  "status": "completed",
+  "package_source_audit": {
+    "manifest_path": "benchmarks/results/effect-preset-matrix-v1/package-symbols.json",
+    "manifest_sha256": "sha256:443b19dc838081e016eed66cb6fb8d10393c1303ae86af86047da4cb62326eb7",
+    "release_artifacts": [
+      {
+        "distribution": "aiohttp",
+        "version": "3.11.11",
+        "artifact": "aiohttp-3.11.11-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+        "artifact_sha256": "sha256:249cc6912405917344192b9f9ea5cd5b139d49e0d2f5c7f70bdfaf6b4dbf3a2e",
+        "metadata_sha256": "sha256:3bfd44644295797288e1cf032e3bc73c62b757b7a252ea74efae67597d3e4c9d"
+      },
+      {
+        "distribution": "boto3",
+        "version": "1.35.92",
+        "artifact": "boto3-1.35.92-py3-none-any.whl",
+        "artifact_sha256": "sha256:786930d5f1cd13d03db59ff2abbb2b7ffc173fd66646d5d8bee07f316a5f16ca",
+        "metadata_sha256": "sha256:736311a60e8ddec3b05d139f6dda0f8be290821299b7b9029aba3790d7053d3c"
+      },
+      {
+        "distribution": "botocore",
+        "version": "1.35.92",
+        "artifact": "botocore-1.35.92-py3-none-any.whl",
+        "artifact_sha256": "sha256:f94ae1e056a675bd67c8af98a6858d06e3927d974d6c712ed6e27bb1d11bee1d",
+        "metadata_sha256": "sha256:ce24e69a318215777cdf361f5952b079ac38a38e97b3e8e15ee5e62853cb0179"
+      },
+      {
+        "distribution": "httpx",
+        "version": "0.28.1",
+        "artifact": "httpx-0.28.1-py3-none-any.whl",
+        "artifact_sha256": "sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad",
+        "metadata_sha256": "sha256:febb9b0f8f3e80d57c8199c304f35c4336e8581d1d18d7983c92766b82793b25"
+      },
+      {
+        "distribution": "motor",
+        "version": "3.6.0",
+        "artifact": "motor-3.6.0-py3-none-any.whl",
+        "artifact_sha256": "sha256:9f07ed96f1754963d4386944e1b52d403a5350c687edc60da487d66f98dbf894",
+        "metadata_sha256": "sha256:dce8b401625d673eed6b2c0c66d9d196a13de0649c0788da8b3e2a72edb2965d"
+      },
+      {
+        "distribution": "mypy-boto3-s3",
+        "version": "1.35.92",
+        "artifact": "mypy_boto3_s3-1.35.92-py3-none-any.whl",
+        "artifact_sha256": "sha256:ce302a635da78e1925d8ff4809184ba55618cd7e3707156bea405cde7fdcf67a",
+        "metadata_sha256": "sha256:bfed722c70de32e8451ec26799a8b413840e39fe57f8b479999b8823d2b6c884"
+      },
+      {
+        "distribution": "mypy-boto3-sqs",
+        "version": "1.35.91",
+        "artifact": "mypy_boto3_sqs-1.35.91-py3-none-any.whl",
+        "artifact_sha256": "sha256:346a87bc0a447bb4c005b04d3efa0008bfa0ddd498cadd97e0e53a58752f84e9",
+        "metadata_sha256": "sha256:1592eec6fb80ee450bf0c68a9867b4cb638d3d23ea0d841089e5918c60206609"
+      },
+      {
+        "distribution": "pymongo",
+        "version": "4.10.1",
+        "artifact": "pymongo-4.10.1-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+        "artifact_sha256": "sha256:cec237c305fcbeef75c0bcbe9d223d1e22a6e3ba1b53b2f0b79d3d29c742b45b",
+        "metadata_sha256": "sha256:8987a5ad4a49f4c30718e18b351deb204be66a238ebfc739c642836d946ac168"
+      },
+      {
+        "distribution": "python-stdlib",
+        "version": "3.11.16",
+        "artifact": "Python-3.11.16.tgz",
+        "artifact_sha256": "sha256:6c0bd76ab0ec7d94ed400b1497f01ac6c7751c8822615ee0855a3eb2d893ea76",
+        "metadata_sha256": null
+      },
+      {
+        "distribution": "redis",
+        "version": "5.2.1",
+        "artifact": "redis-5.2.1-py3-none-any.whl",
+        "artifact_sha256": "sha256:ee7e1056b9aea0f04c6c2ed59452947f34c4940ee025f5dd83e6a6418b6989e4",
+        "metadata_sha256": "sha256:04f889874b3113305e73dd752806406747db088e20178e8d06f61b315d1779ca"
+      },
+      {
+        "distribution": "requests",
+        "version": "2.32.3",
+        "artifact": "requests-2.32.3-py3-none-any.whl",
+        "artifact_sha256": "sha256:70761cfe03c773ceb22aa2f671b4757976145175cdfca038c02654d061d6dcc6",
+        "metadata_sha256": "sha256:658ee8454c1e2e76fb8c2127116f61156b3b22941b3559c00389dca70038581a"
+      }
+    ],
+    "artifact_directory_verified": true,
+    "artifact_directory_note": "All 11 external wheel/source archive artifacts were supplied from /tmp/gh97-wheel-audit; the verifier checked exact artifact bytes, wheel Name/Version metadata, and every declared inspected source hash.",
+    "versioned_contract_sets": [
+      {
+        "preset_id": "redis-py-effects",
+        "version": "1.0.0",
+        "revision": "1",
+        "preset_sha256": "sha256:a7b6dd01808d6f9275ed9aa99c67c577c04aa2ce30a5301d3ef957fe6695fcf8"
+      },
+      {
+        "preset_id": "pymongo-effects",
+        "version": "1.0.0",
+        "revision": "1",
+        "preset_sha256": "sha256:df68200dc7df8e3176257815e1de2016bace4f9a049977fd31001d088f0f4d30"
+      },
+      {
+        "preset_id": "stdlib-filesystem-effects",
+        "version": "2.0.0",
+        "revision": "2",
+        "preset_sha256": "sha256:ece9515414a316b1fa6fec47e45699667e7d565b3c2537787dc91a203d0f88f3"
+      },
+      {
+        "preset_id": "python-http-client-effects",
+        "version": "2.0.0",
+        "revision": "2",
+        "preset_sha256": "sha256:1999bca6c27a6b92cf448e21d56b213c8334273c1d92fe3da56ceba749cd9a7f"
+      },
+      {
+        "preset_id": "typed-s3-effects",
+        "version": "2.0.0",
+        "revision": "2",
+        "preset_sha256": "sha256:7c5cf82835f371e3ec8e3d422f3f5c4f324622c7bfeb928690cb11921749b871"
+      }
+    ]
+  },
+  "controlled_evaluation": {
+    "case_id": "stdlib-pathlib-and-open-handles-v1",
+    "test_path": "tests/benchmarks/test_effect_preset_matrix.py",
+    "test_file_sha256": "sha256:af3c7954a0f3007c09afc5439eece2489bda0cde2025b007500d3679cb92e40f",
+    "test_result": "1 controlled analyzer fixture passed",
+    "analyzer": "MypyAnalyzer plus audit_effect_contracts",
+    "resolver_version": "mypy 2.4.0",
+    "source_tree_executed": false,
+    "external_client_imported_or_executed": false,
+    "fixture_contract_set": {
+      "selector": "filesystem-v1",
+      "preset_hash": "sha256:5acc35da9d989ccafda0960090efefbbaa52ca5b70894882c24c4bf1355c2b96",
+      "config_hash": "sha256:d168f95981e84b8e95dac49d0cc3072b51bbc18ec3a0c3a343f1ef02f9af0301",
+      "raw_hash": "sha256:ece9515414a316b1fa6fec47e45699667e7d565b3c2537787dc91a203d0f88f3"
+    },
+    "observed": {
+      "physical_calls": 11,
+      "matched_calls": 4,
+      "unmatched_calls": 7,
+      "ambiguous_calls": 0,
+      "unresolved_calls": 0,
+      "matched_exact_symbols": [
+        "pathlib.Path.read_text",
+        "pathlib.Path.write_text",
+        "_io._TextIOBase.read"
+      ],
+      "unrelated_same_name_negative_calls": 5,
+      "unmatched_open_calls": 2,
+      "write_text_argument_binding": {
+        "positional_0": "exact finite literal",
+        "keyword_encoding": "captured"
+      },
+      "receiver_origin": {
+        "builtins.open.read": "exact finite file argument origin",
+        "pathlib.Path.open.read": "unavailable (receiver_origin_unsupported)"
+      }
+    }
+  },
+  "environment": {
+    "python": "3.11.16",
+    "platform": "Linux-6.17.2-1-pve-x86_64-with-glibc2.39",
+    "mypy": "2.4.0",
+    "ruff": "0.16.10",
+    "execution_policy": "static analysis only; application fixture source was not executed"
+  },
+  "real_world_evaluation": {
+    "status": "not_evaluated",
+    "frozen_source_diffs": 0,
+    "canonical_truth_claims": 0
+  }
+}

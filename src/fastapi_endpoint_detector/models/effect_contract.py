@@ -14,7 +14,7 @@ from typing import Any, Literal
 if sys.version_info >= (3, 11):
     import tomllib
 else:
-    import tomli as tomllib  # type: ignore[import-not-found]
+    import tomli as tomllib
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
@@ -226,6 +226,7 @@ class EffectBehavior(_StrictModel):
     timing: EffectTiming = EffectTiming.IMMEDIATE
     transaction_scope: TransactionScope | None = None
     context_exit: ContextExitSemantics | None = None
+    stage_receiver_from_yield: bool = False
 
     @model_validator(mode="after")
     def validate_async_timing(self) -> EffectBehavior:
@@ -272,6 +273,15 @@ class EffectContract(_StrictModel):
             raise ValueError("method contracts require a class-qualified exact symbol")
         scope = self.behavior.transaction_scope
         context_exit = self.behavior.context_exit
+        if self.behavior.stage_receiver_from_yield and (
+            self.channel != EffectChannel.SQL
+            or self.operation != EffectOperation.BEGIN
+            or self.behavior.timing != EffectTiming.CONTEXT_ENTER
+            or context_exit is None
+        ):
+            raise ValueError(
+                "yielded context receivers require a SQL begin context with exit semantics"
+            )
         if scope not in {None, TransactionScope.NONE} and (
             self.channel != EffectChannel.SQL
             or self.operation != EffectOperation.BEGIN
@@ -355,7 +365,10 @@ class EffectContractDocument(_StrictModel):
     def normalized_payload(self) -> dict[str, Any]:
         """Return canonical semantic content, independent of YAML ordering."""
         payload = self.model_dump(mode="json", exclude_none=True)
-        payload["contracts"] = sorted(payload["contracts"], key=lambda item: item["id"])
+        payload["contracts"] = sorted(
+            (_contract_document_payload(contract) for contract in self.contracts),
+            key=lambda item: item["id"],
+        )
         return payload
 
     @property
@@ -599,3 +612,12 @@ def _semantic_hash(payload: object) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return f"sha256:{hashlib.sha256(canonical).hexdigest()}"
+
+
+def _contract_document_payload(contract: EffectContract) -> dict[str, Any]:
+    """Serialize a document contract without adding default-false hash fields."""
+    payload = contract.model_dump(mode="json", exclude_none=True)
+    behavior = payload.get("behavior")
+    if isinstance(behavior, dict) and behavior.get("stage_receiver_from_yield") is False:
+        behavior.pop("stage_receiver_from_yield")
+    return payload

@@ -97,6 +97,11 @@ class JsonFormatter(BaseFormatter):
             "timestamp": report.timestamp.isoformat(),
             "app_path": report.app_path,
             "diff_source": report.diff_source,
+            "analysis_completeness": report.analysis_completeness,
+            "endpoint_lifecycle": [
+                entry.model_dump(mode="json", exclude_none=True)
+                for entry in report.endpoint_lifecycle
+            ],
             "inventory_status": (
                 report.inventory_status.value if report.inventory_status is not None else None
             ),
@@ -153,6 +158,10 @@ class JsonFormatter(BaseFormatter):
                 else None
             ),
         }
+        if report.graphify_overlay is not None:
+            data["graphify_overlay"] = report.graphify_overlay
+        if report.source_observations is not None:
+            data["source_observations"] = report.source_observations
 
         return json.dumps(data, indent=self.indent, default=str)
 

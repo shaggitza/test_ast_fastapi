@@ -1,8 +1,8 @@
 # GH110 Graphify CLI and report hook
 
-This document describes the additive hook supplied by
-`analyzer.graphify_report_adapter`. The implementation in this branch does not
-change CLI, mapper, or report owner files.
+Graphify is enabled explicitly with `--graphify`. It is a read-only diagnostic
+overlay over operator-supplied snapshots and never replaces mypy/SCIP analysis
+or changes endpoint candidates.
 
 ## Entry point
 
@@ -19,37 +19,46 @@ An explicit CLI request should surface that failure as a CLI error; it should
 not silently fall back to ordinary dependency analysis or claim Graphify
 coverage. When the option is absent, current analysis and output stay unchanged.
 
-## Proposed PR #312 hook
+## CLI contract and report boundary
 
-1. Add an explicit `--graphify` option and require operator-supplied baseline
-   and target snapshot paths plus an explicit schema selector.
-2. Extend `AnalysisReport` with `graphify_overlay: GraphifyOverlayReport | None`
-   and expose it in the JSON formatter. Keep it separate from
-   `affected_endpoints` and `candidate_endpoints`.
-3. After parsing the diff and discovering the baseline/target endpoint
-   inventories, call `analyze_graphify_overlay_from_inputs`; attach the result
-   with `attach_graphify_overlay`. Prefer passing the mapper's existing
-   `DiffFile` tuple through a report-enricher seam so coordinates are not
-   reparsed or widened.
-4. Preserve route identity through the public endpoint identifier and exact
-   secure handler source range. Declared dependency occurrences use a separate
-   `binding_identity` derived from their secure dependency `index_path`.
-   Conditional inventories cap those seeds at LOW; unresolved or spanless
-   dependency identities are recorded as limitations and never guessed.
+`analyze --graphify` requires `--secure-ast`, an explicit `--baseline-app`,
+`--graphify-baseline`, `--graphify-target`, and `--graphify-schema`. Supported
+selectors are `node-link-v1` and `graphify-raw-0.9.30-v1`. Missing or malformed
+inputs are explicit CLI errors; there is no fallback. Removed source ranges and
+baseline endpoint seeds use the explicit baseline root, while additions and
+target seeds use the target root.
 
-Each path record carries snapshot side, canonical module/path/source hash,
-directed relation orientation, physical edge key and context identity,
-extractor strength, overlay confidence, per-path incompleteness, and
-limitations. The payload explicitly identifies itself as evidence from
-validated offline snapshots only. It does not assert execution or alter the
-legacy affected-endpoint score.
+The report adds a versioned `graphify_overlay` payload alongside the existing
+analysis. It retains node IDs, edge orientation and key/context identity,
+source paths, line spans, source hashes, package/version and schema metadata,
+confidence provenance, and limitations. Overlay paths stay separate from
+`affected_endpoints` and `candidate_endpoints`. All Graphify paths are LOW and
+carry the limitation that they are lexical evidence only; `references` and
+other relations do not establish execution or exact callable evidence.
+
+Secure endpoint and declared-DI seeds are derived only from the existing
+secure discovery records. Dependency occurrences retain a `binding_identity`
+derived from their secure dependency `index_path`. Conditional inventories cap
+those seeds at LOW; unresolved or spanless dependency identities are reported
+without guessed bindings.
 
 ## Evidence limits
 
-The committed Graphify fixtures are synthetic raw-schema inputs. This
-repository currently has no trusted GH101 Graphify receipts or Graphify
-baseline/target artifacts paired with the real-world corpus. Therefore this
+The committed Graphify fixtures are synthetic raw-schema inputs. The CLI accepts
+operator-supplied graphs but does not run Graphify or claim they have trusted
+GH101 receipts. This repository currently has no Graphify baseline/target
+artifacts paired with the real-world corpus. Therefore this
 branch can test the adapter contract and bounded traversal, but cannot report
 Graphify extraction quality, corpus precision/recall, confidence calibration,
 or production resource measurements. Those remain gated on trusted runtime
 snapshots and a frozen, source-bound verification corpus.
+
+The public CLI contract is also exercised with `CliRunner` against real secure
+`ChangeMapper` analysis over temporary baseline and target source trees. Its
+node-link snapshots are authenticated synthetic fixtures, not Graphify output.
+The enabled case checks graph-byte hashes, source-byte bindings on both sides,
+baseline removal and target addition routing, and that LOW lexical overlay
+evidence remains outside endpoint candidate confidence. The disabled case
+checks that ordinary JSON output omits `graphify_overlay` entirely. These tests
+verify report wiring only; they do not establish Graphify extraction truth or
+corpus precision.

@@ -44,6 +44,13 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
+        include:
+          - python-version: "3.10"
+            replay-python: "3.10.21"
+          - python-version: "3.11"
+            replay-python: "3.11.16"
+          - python-version: "3.12"
+            replay-python: "3.12.14"
 
     steps:
       - uses: actions/checkout@v4
@@ -51,12 +58,19 @@ jobs:
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ matrix.replay-python }}
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          # Historical replay verifies exact interpreter and dependency identities.
+          # Export the authenticated replay lock without changing frozen artifacts.
+          python -m pip install "uv==0.12.19"
+          uv export --frozen \
+            --project "benchmarks/results/effect-preset-matrix-v5/replay-envs/python-${{ matrix.replay-python }}-mypy-1.19.1" \
+            --format requirements-txt --no-hashes \
+            --output-file "$RUNNER_TEMP/replay-constraints.txt"
+          pip install -e ".[dev]" -c "$RUNNER_TEMP/replay-constraints.txt"
 
       - name: Run tests in resource-bounded processes
         run: |

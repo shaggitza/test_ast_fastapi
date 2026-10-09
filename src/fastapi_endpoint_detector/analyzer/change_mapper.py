@@ -10,12 +10,13 @@ Uses mypy for type-aware, precise dependency tracking.
 from __future__ import annotations
 
 import heapq
+import itertools
 import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from fastapi_endpoint_detector.analyzer.effect_analyzer import EffectAnalyzer
 from fastapi_endpoint_detector.analyzer.effect_contract_auditor import (
@@ -30,7 +31,6 @@ from fastapi_endpoint_detector.analyzer.scip_analyzer import (
     SCIPAnalyzer,
     SCIPAnalyzerError,
     SCIPDefinition,
-    SCIPReachedDefinition,
 )
 from fastapi_endpoint_detector.analyzer.sql_transaction import (
     build_sql_transaction_diagnostics,
@@ -105,8 +105,6 @@ _CONFIDENCE_SCORE = {
     ConfidenceLevel.MEDIUM: 0.7,
     ConfidenceLevel.LOW: 0.3,
 }
-
-
 EndpointResultKey = tuple[str, str, int, str, str, str]
 
 
@@ -251,21 +249,12 @@ def _merge_affected(
         existing.merge(candidate)
 
 
-def _scip_confidence(seed: SCIPDefinition, depth: int) -> ConfidenceLevel:
-    if depth == 0 and "(" in seed.short_name:
-        return ConfidenceLevel.HIGH
-    # A SCIP reverse-reference path establishes call/reference reachability, not
-    # that the changed value is returned, persisted, emitted, or otherwise
-    # observed by the endpoint. Keep every transitive route as a candidate, but
-    # require independent effect/data-flow corroboration before promotion.
-    return ConfidenceLevel.LOW
-
-
 @dataclass(frozen=True)
 class _ExpandedSCIPDefinition:
     definition: SCIPDefinition
     depth: int
     dependency_chain: tuple[str, ...]
+    limitations: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -320,110 +309,181 @@ def _expanded_scip_affected(
     max_depth: int,
     warnings: list[str] | None = None,
 ) -> tuple[_ExpandedSCIPDefinition, ...]:
-    """Close native SCIP reachability over explicit override-to-base bridges."""
-    initial = analyzer.affected(seed, max_depth=max_depth)
-    best_depth_by_symbol: dict[str, int] = {}
-    definition_by_symbol: dict[str, SCIPDefinition] = {}
-    chain_by_symbol: dict[str, tuple[str, ...]] = {}
-    worklist: list[tuple[int, str, tuple[str, ...]]] = []
+    """Walk source-bound SCIP references while preserving their limitations."""
+    reverse_edges = getattr(analyzer, "reverse_call_edges", None)
+    if not callable(reverse_edges):
+        raise SCIPAnalyzerError("SCIP analyzer lacks reference-only reverse-call evidence")
 
-    def record(definition: SCIPDefinition, depth: int, chain: tuple[str, ...]) -> None:
+    scope_limitations: tuple[str, ...] = ()
+    selected_inventory_paths: set[str] | None = None
+    source_scope = getattr(analyzer, "source_scope", None)
+    if callable(source_scope):
+        scope = source_scope()
+        index_scope = getattr(scope, "index_scope", None)
+        scope_limitations = tuple(getattr(scope, "limitations", ()))
+        selected_paths = getattr(scope, "selected_inventory_paths", None)
+        if selected_paths is not None:
+            selected_inventory_paths = {Path(item).as_posix() for item in selected_paths}
+        if index_scope == "project_root":
+            scope_limitations = (
+                *scope_limitations,
+                "SCIP indexes project_root; selected inventory paths filter returned evidence "
+                "but do not restrict the index itself.",
+            )
+        else:
+            scope_limitations = (
+                *scope_limitations,
+                f"SCIP index scope is {index_scope!r}; selected inventory scope is not proven.",
+            )
+        if warnings is not None:
+            for limitation in scope_limitations:
+                warning = f"SCIP source-scope limitation: {limitation}"
+                if warning not in warnings:
+                    warnings.append(warning)
+
+    edge_limitations = getattr(analyzer, "reverse_call_edge_limitations", None)
+    best_depth_by_symbol: dict[str, int] = {seed.symbol: 0}
+    definition_by_symbol: dict[str, SCIPDefinition] = {seed.symbol: seed}
+    chain_by_symbol: dict[str, tuple[str, ...]] = {seed.symbol: (seed.symbol,)}
+    limitations_by_symbol: dict[str, set[str]] = {seed.symbol: set(scope_limitations)}
+    queue_order = itertools.count()
+    worklist: list[tuple[int, str, tuple[str, ...], int, SCIPDefinition, tuple[str, ...]]] = [
+        (0, seed.symbol, (seed.symbol,), next(queue_order), seed, scope_limitations)
+    ]
+
+    def record(
+        definition: SCIPDefinition,
+        depth: int,
+        chain: tuple[str, ...],
+        limitations: tuple[str, ...],
+    ) -> None:
         symbol = definition.symbol
         previous_depth = best_depth_by_symbol.get(symbol)
-        previous_definition = definition_by_symbol.get(symbol)
         previous_chain = chain_by_symbol.get(symbol)
-        improves = previous_depth is None or depth < previous_depth
-        if (
-            depth == previous_depth
-            and previous_definition is not None
-            and previous_chain is not None
-        ):
-            improves = (chain, _scip_definition_key(definition)) < (
-                previous_chain,
-                _scip_definition_key(previous_definition),
-            )
-        if not improves:
-            return
+        canonical_chain = (chain, _scip_definition_key(definition))
+        old_chain = (
+            (previous_chain, _scip_definition_key(definition_by_symbol[symbol]))
+            if previous_chain is not None
+            else None
+        )
+        previous_limitations = limitations_by_symbol.setdefault(symbol, set())
+        limitation_count = len(previous_limitations)
+        previous_limitations.update(limitations)
+        if previous_depth is not None:
+            if depth > previous_depth:
+                return
+            if depth == previous_depth and old_chain is not None:
+                if canonical_chain > old_chain:
+                    return
+                if canonical_chain == old_chain and len(previous_limitations) == limitation_count:
+                    return
         best_depth_by_symbol[symbol] = depth
         definition_by_symbol[symbol] = definition
         chain_by_symbol[symbol] = chain
-        heapq.heappush(worklist, (depth, symbol, chain))
-
-    for reached in initial:
-        native_chain: tuple[str, ...] = (seed.symbol,)
-        if reached.definition.symbol != seed.symbol:
-            native_chain = (*native_chain, reached.definition.symbol)
-        record(reached.definition, reached.depth, native_chain)
-
-    base_resolver = getattr(analyzer, "base_method_definitions", None)
-    if not callable(base_resolver):
-        return tuple(
-            _ExpandedSCIPDefinition(
-                definition_by_symbol[symbol],
-                best_depth_by_symbol[symbol],
-                chain_by_symbol[symbol],
-            )
-            for symbol in sorted(
-                best_depth_by_symbol,
-                key=lambda item: (best_depth_by_symbol[item], item),
-            )
+        heapq.heappush(
+            worklist,
+            (depth, symbol, chain, next(queue_order), definition, limitations),
         )
 
-    affected_cache: dict[
-        tuple[str, int], tuple[SCIPReachedDefinition, ...] | SCIPAnalyzerError
-    ] = {}
     while worklist:
-        depth, symbol, current_chain = heapq.heappop(worklist)
+        depth, symbol, current_chain, _order, definition, current_limitations = heapq.heappop(
+            worklist
+        )
         if depth != best_depth_by_symbol[symbol] or current_chain != chain_by_symbol[symbol]:
             continue
         if depth >= max_depth:
             continue
-        definition = definition_by_symbol[symbol]
         try:
-            bases = base_resolver(definition)
+            edges = reverse_edges(definition)
+            limitations_for_seed = (
+                tuple(edge_limitations(definition)) if callable(edge_limitations) else ()
+            )
         except SCIPAnalyzerError as error:
             if warnings is not None:
                 warnings.append(
-                    f"SCIP override bridge from {definition.short_name} failed: {error}"
+                    f"SCIP reverse references for {definition.short_name} failed: {error}"
                 )
             continue
-        unique_bases: dict[str, SCIPDefinition] = {}
-        for candidate in bases:
-            existing = unique_bases.get(candidate.symbol)
-            if existing is None or _scip_definition_key(candidate) < _scip_definition_key(existing):
-                unique_bases[candidate.symbol] = candidate
-        for base in sorted(unique_bases.values(), key=_scip_definition_key):
-            remaining = max_depth - depth - 1
-            cache_key = (base.symbol, remaining)
-            base_affected = affected_cache.get(cache_key)
-            if base_affected is None:
-                try:
-                    base_affected = analyzer.affected(base, max_depth=remaining)
-                except SCIPAnalyzerError as error:
-                    base_affected = error
-                    if warnings is not None:
-                        warnings.append(
-                            f"SCIP override bridge from {definition.short_name} "
-                            f"to {base.short_name} failed: {error}"
+        if warnings is not None and limitations_for_seed:
+            warning = f"SCIP reference limitations for {definition.short_name}: " + "; ".join(
+                limitations_for_seed
+            )
+            if warning not in warnings:
+                warnings.append(warning)
+        path_limitations = tuple(
+            dict.fromkeys(
+                (*current_limitations, *limitations_by_symbol[symbol], *limitations_for_seed)
+            )
+        )
+        base_resolver = getattr(analyzer, "base_method_definitions", None)
+        if callable(base_resolver):
+            try:
+                bases = base_resolver(definition)
+            except SCIPAnalyzerError as error:
+                if warnings is not None:
+                    warnings.append(
+                        f"SCIP override bridge from {definition.short_name} failed: {error}"
+                    )
+                bases = ()
+            for base in sorted(bases, key=_scip_definition_key):
+                record(
+                    base,
+                    depth + 1,
+                    (*current_chain, base.symbol),
+                    tuple(
+                        dict.fromkeys(
+                            (
+                                *path_limitations,
+                                "SCIP followed an explicit override-to-base bridge.",
+                            )
                         )
-                affected_cache[cache_key] = base_affected
-            if isinstance(base_affected, SCIPAnalyzerError):
+                    ),
+                )
+        for edge in edges:
+            edge_status = getattr(edge, "execution_status", None)
+            confidence = getattr(edge, "confidence", None)
+            if edge_status != "reference_only" or confidence != "LOW":
+                if warnings is not None:
+                    warnings.append(
+                        f"SCIP discarded reverse edge for {definition.short_name}: "
+                        "it lacks reference_only/LOW evidence labels."
+                    )
                 continue
-            bridge_chain = (*current_chain, base.symbol)
-            for reached in base_affected:
-                adjusted_depth = depth + 1 + reached.depth
-                if adjusted_depth > max_depth:
-                    continue
-                adjusted_chain: tuple[str, ...] = bridge_chain
-                if reached.definition.symbol != base.symbol:
-                    adjusted_chain = (*adjusted_chain, reached.definition.symbol)
-                record(reached.definition, adjusted_depth, adjusted_chain)
+            caller = getattr(edge, "caller", None)
+            if not isinstance(caller, SCIPDefinition):
+                if warnings is not None:
+                    warnings.append(
+                        f"SCIP discarded malformed reverse edge for {definition.short_name}."
+                    )
+                continue
+            occurrence = getattr(edge, "occurrence", None)
+            occurrence_path = getattr(occurrence, "file_path", None)
+            edge_paths: tuple[str, ...] = (caller.file_path.as_posix(),)
+            if isinstance(occurrence_path, Path):
+                edge_paths = (*edge_paths, occurrence_path.as_posix())
+            if selected_inventory_paths is not None and not set(edge_paths).issubset(
+                selected_inventory_paths
+            ):
+                if warnings is not None:
+                    warnings.append(
+                        "SCIP discarded reverse reference outside the selected source inventory."
+                    )
+                continue
+            per_edge_limitations = tuple(getattr(edge, "limitations", ()))
+            combined = tuple(dict.fromkeys((*path_limitations, *per_edge_limitations)))
+            record(
+                caller,
+                depth + 1,
+                (*current_chain, caller.symbol),
+                combined,
+            )
 
     return tuple(
         _ExpandedSCIPDefinition(
             definition_by_symbol[symbol],
             best_depth_by_symbol[symbol],
             chain_by_symbol[symbol],
+            tuple(sorted(limitations_by_symbol[symbol])),
         )
         for symbol in sorted(
             best_depth_by_symbol,
@@ -561,6 +621,9 @@ class ChangeMapper:
         self._mypy_analyzer: MypyAnalyzer | None = None
         self._baseline_mypy_analyzer: MypyAnalyzer | None = None
         self._effect_analyzer = EffectAnalyzer(target_project_root)
+        self._baseline_effect_analyzer = (
+            EffectAnalyzer(baseline_project_root) if baseline_project_root is not None else None
+        )
         self._scip_analyzer: SCIPAnalyzer | None = None
         self._baseline_registry: EndpointRegistry | None = None
         self._baseline_scip_analyzer: SCIPAnalyzer | None = None
@@ -680,8 +743,42 @@ class ChangeMapper:
             app_path,
             self._surface_contracts,
             bootstrap_entry=self.bootstrap_entry,
+            app_variable=self.app_variable,
+            app_entry=self.app_entry,
         ).extract_inventory()
         return merge_surface_inventory(native, custom)
+
+    def _source_inventory_warnings(self) -> list[str]:
+        """Report runtime source-scope caveats without changing route identity."""
+        if self.secure_ast:
+            return []
+
+        warnings: list[str] = []
+        snapshots = [("Target", self.source_inventory)]
+        if self.baseline_app_path is not None:
+            snapshots.append(("Baseline", self.baseline_source_inventory))
+
+        for side, inventory in snapshots:
+            extractor = self.extractor if side == "Target" else self._baseline_extractor
+            scope_limitations = (
+                extractor.source_inventory_limitations
+                if isinstance(extractor, FastAPIExtractor)
+                else ()
+            )
+            if scope_limitations:
+                follow_policy = "enabled" if inventory.follow_imports else "disabled"
+                warnings.append(
+                    f"{side} runtime source scope selected {len(inventory.files)} file(s); "
+                    f"local import following is {follow_policy}. {scope_limitations[1]}"
+                )
+            for limitation in inventory.limitations:
+                warnings.append(f"{side} source inventory incomplete: {limitation}")
+            if inventory.unresolved_imports:
+                warnings.append(
+                    f"{side} source inventory has {len(inventory.unresolved_imports)} "
+                    "unresolved local import(s)."
+                )
+        return warnings
 
     def _endpoint_lifecycle(self) -> list[EndpointLifecycle]:
         """Reconcile endpoint inventories by public route identity, failing closed."""
@@ -775,7 +872,9 @@ class ChangeMapper:
         if self._scip_analyzer is None:
             package_path = self.app_path.parent if self.app_path.is_file() else self.app_path
             self._scip_analyzer = SCIPAnalyzer(
-                package_path, use_cache=self.use_cache, source_inventory=self.source_inventory
+                package_path,
+                use_cache=self.use_cache,
+                source_inventory=cast("Any", self.source_inventory),
             )
         return self._scip_analyzer
 
@@ -812,7 +911,9 @@ class ChangeMapper:
             )
             baseline_inventory = self.baseline_source_inventory
             self._baseline_scip_analyzer = SCIPAnalyzer(
-                package_path, use_cache=self.use_cache, source_inventory=baseline_inventory
+                package_path,
+                use_cache=self.use_cache,
+                source_inventory=cast("Any", baseline_inventory),
             )
         return self._baseline_scip_analyzer
 
@@ -913,12 +1014,25 @@ class ChangeMapper:
         Returns:
             AffectedEndpoint if dependencies intersect, None otherwise.
         """
-        deps = (analyzer or self.mypy_analyzer).get_endpoint_dependencies(endpoint)
+        snapshot_analyzer = analyzer or self.mypy_analyzer
+        deps = snapshot_analyzer.get_endpoint_dependencies(endpoint)
 
         if not deps:
             return None
 
         file_path = str(diff_file.path)
+        snapshot_root = snapshot_analyzer.source_root.resolve()
+        candidate_path = Path(file_path)
+        if not candidate_path.is_absolute():
+            candidate_path = snapshot_root / candidate_path
+        snapshot_file_path: Path | None = None
+        try:
+            resolved_path = candidate_path.resolve()
+            resolved_path.relative_to(snapshot_root)
+        except (OSError, RuntimeError, ValueError):
+            pass
+        else:
+            snapshot_file_path = resolved_path
         changed_lines = set(added_lines) | set(removed_lines)
 
         # Dependency ranges already cover complete callable definitions. Expanding
@@ -971,8 +1085,8 @@ class ChangeMapper:
                     # Read the file once for all lines
                     lines_list = []
                     try:
-                        file_path_obj = Path(file_path)
-                        if file_path_obj.exists():
+                        file_path_obj = snapshot_file_path
+                        if file_path_obj is not None and file_path_obj.is_file():
                             with file_path_obj.open(encoding="utf-8") as f:
                                 lines_list = f.readlines()
                     except (OSError, UnicodeDecodeError):
@@ -1048,7 +1162,9 @@ class ChangeMapper:
 
                             call_stack.append(
                                 CallStackFrame(
-                                    file_path=file_path,
+                                    file_path=str(snapshot_file_path)
+                                    if snapshot_file_path is not None
+                                    else file_path,
                                     line_number=first_line,
                                     function_name=function_name,
                                     code_context=code_context,
@@ -1058,10 +1174,19 @@ class ChangeMapper:
                 # Add this completed call stack to the list
                 all_call_stacks.append(call_stack)
 
-            effect_result = self._effect_analyzer.analyze(
-                file_path,
-                set(display_lines),
-                all_call_stacks,
+            effect_analyzer = self._effect_analyzer
+            if analyzer is not None:
+                if self._baseline_effect_analyzer is None:
+                    raise ChangeMapperError("Baseline effect analysis requires a baseline snapshot")
+                effect_analyzer = self._baseline_effect_analyzer
+            effect_result = (
+                effect_analyzer.analyze(
+                    str(snapshot_file_path),
+                    set(display_lines),
+                    all_call_stacks,
+                )
+                if snapshot_file_path is not None
+                else None
             )
             low_only_points_to = deps.references_lines_low_only(file_path, changed_lines)
             confidence = (
@@ -1293,7 +1418,6 @@ class ChangeMapper:
                 handler_end = handler.end_line_number or handler.line_number + 50
                 handler_lines = set(range(handler.line_number, handler_end + 1))
                 processed_added_lines.update(ln for ln in added_lines if ln in handler_lines)
-                processed_removed_lines.update(ln for ln in removed_lines if ln in handler_lines)
 
         # Use mypy for type-aware dependency analysis
         for endpoint in self.registry:
@@ -1470,7 +1594,7 @@ class ChangeMapper:
                         endpoint = (
                             target_equivalent(discovered) if side == "baseline" else discovered
                         )
-                        confidence = _scip_confidence(seed, reached.depth)
+                        confidence = ConfidenceLevel.LOW
                         _merge_affected(
                             affected,
                             AffectedEndpoint(
@@ -1490,18 +1614,25 @@ class ChangeMapper:
                                         channel=ImpactChannel.UNKNOWN,
                                         disposition=EffectDisposition.REACHABILITY_ONLY,
                                         summary=(
-                                            f"SCIP resolves a {side} reverse-reference path "
-                                            f"at depth {reached.depth}."
+                                            f"SCIP found a {side} reference-only path "
+                                            f"at depth {reached.depth}; it does not establish "
+                                            "execution."
                                         ),
                                         changed_location=CodeReference(
                                             file_path=str(file_path),
                                             line_number=min(seed_lines),
                                             symbol=seed.short_name,
                                         ),
-                                        limitations=[
-                                            "Reference reachability does not establish "
-                                            "runtime data observation."
-                                        ],
+                                        limitations=list(
+                                            dict.fromkeys(
+                                                (
+                                                    "SCIP reverse references are LOW-confidence "
+                                                    "reference evidence and do not establish "
+                                                    "execution.",
+                                                    *reached.limitations,
+                                                )
+                                            )
+                                        ),
                                     )
                                 ],
                             ),
@@ -1848,6 +1979,7 @@ class ChangeMapper:
                 "no finite dependency contract was applied"
                 for path in unsupported_changes
             )
+        warnings.extend(self._source_inventory_warnings())
         target_source_graph = source_evidence_graph(self.source_inventory)
         if self.baseline_app_path is not None:
             baseline_graph = source_evidence_graph(self.baseline_source_inventory, side="baseline")

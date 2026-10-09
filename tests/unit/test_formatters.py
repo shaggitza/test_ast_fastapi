@@ -108,6 +108,38 @@ def test_unavailable_report_inventory_is_visible_in_all_formats() -> None:
         assert limitation.reason in rendered
 
 
+def test_source_observations_are_optional_structured_json_and_yaml() -> None:
+    report = AnalysisReport(
+        app_path="/app/main.py",
+        diff_source="change.diff",
+        total_endpoints=0,
+    )
+    json_default = json.loads(JsonFormatter().format(report))
+    yaml_default = yaml.safe_load(YamlFormatter().format(report))
+    assert "source_observations" not in json_default
+    assert "source_observations" not in yaml_default
+    assert "Source Observations" not in TextFormatter().format(report)
+    assert "Source Observations" not in MarkdownFormatter().format(report)
+    assert "Source Observations" not in HtmlFormatter().format(report)
+
+    source_observations = {
+        "scope": "bounded_source_observations_only",
+        "client_observations": [{"route_path": "/items", "query": "q=1"}],
+        "client_uncertainties": [{"reason": "dynamic_or_nonliteral_url", "certainty": "uncertain"}],
+        "deployment_observations": [{"certainty": "uncertain"}],
+    }
+    report.source_observations = source_observations
+    json_result = json.loads(JsonFormatter().format(report))
+    yaml_result = yaml.safe_load(YamlFormatter().format(report))
+    assert json_result["source_observations"] == source_observations
+    assert yaml_result["source_observations"] == source_observations
+    summary = "1 exact client observations, 1 uncertain client calls"
+    rendered_text = re.sub(r"\x1b\[[0-9;]*m", "", TextFormatter().format(report))
+    assert summary in re.sub(r"\s+", " ", rendered_text)
+    assert summary in MarkdownFormatter().format(report)
+    assert summary in HtmlFormatter().format(report)
+
+
 def test_json_and_yaml_preserve_optional_dependency_graph() -> None:
     endpoint = Endpoint(
         path="/graph",

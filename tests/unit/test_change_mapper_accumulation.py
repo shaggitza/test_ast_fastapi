@@ -13,9 +13,8 @@ from fastapi_endpoint_detector.analyzer.change_mapper import (
     _merge_affected,
     _normalized_diff_path,
     _OrphanAccumulator,
-    _scip_confidence,
 )
-from fastapi_endpoint_detector.analyzer.scip_analyzer import SCIPDefinition
+from fastapi_endpoint_detector.config import Config, ParserConfig
 from fastapi_endpoint_detector.models.endpoint import (
     Endpoint,
     EndpointDiscoveryCondition,
@@ -216,16 +215,6 @@ def test_result_identity_keeps_same_public_route_with_distinct_handlers(tmp_path
     assert len(accumulated) == 2
 
 
-def test_transitive_scip_references_are_low_confidence_unless_direct() -> None:
-    structural = SCIPDefinition("class", "module:Config", Path("module.py"), 1, 20)
-    callable_seed = SCIPDefinition("function", "module:load_config()", Path("module.py"), 2, 5)
-
-    assert _scip_confidence(structural, 0) == ConfidenceLevel.LOW
-    assert _scip_confidence(structural, 1) == ConfidenceLevel.LOW
-    assert _scip_confidence(callable_seed, 0) == ConfidenceLevel.HIGH
-    assert _scip_confidence(callable_seed, 1) == ConfidenceLevel.LOW
-
-
 def test_orphan_evidence_deduplicates_and_subtracts_all_processed_lines() -> None:
     evidence_by_path: dict[str, _OrphanAccumulator] = {}
     for spelling, added, removed, processed in [
@@ -281,7 +270,34 @@ def test_secure_report_propagates_unavailable_target_inventory_on_both_exits(
         assert report.inventory_limitations[0].source_path == malformed.resolve()
 
 
-def test_runtime_change_mapper_report_leaves_inventory_unset(
+def test_runtime_change_mapper_reports_source_scope_without_claiming_route_uncertainty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app_file = tmp_path / "main.py"
+    app_file.write_text(
+        "from fastapi import FastAPI\nfrom outside import VALUE\napp = FastAPI()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "outside.py").write_text("VALUE = 1\n", encoding="utf-8")
+    config = Config(
+        parser=ParserConfig(include_patterns=["main.py"], follow_imports=False),
+    )
+    mapper = ChangeMapper(app_file, config=config, use_cache=False)
+    monkeypatch.setattr(mapper, "_preanalyze_mypy", lambda _callback: None)
+    mapper._mypy_analyzer = _NoopMypyAnalyzer()  # type: ignore[assignment]
+
+    report = mapper.analyze_diff("")
+
+    assert report.inventory_status is None
+    assert report.inventory_limitations == ()
+    assert report.analysis_completeness == "partial"
+    assert any("Target source inventory incomplete" in warning for warning in report.warnings)
+    assert any("unresolved local import" in warning for warning in report.warnings)
+    assert "Runtime import still executes" in report.warnings[0]
+
+
+def test_runtime_scope_caveat_alone_does_not_mark_analysis_partial(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -297,7 +313,39 @@ def test_runtime_change_mapper_report_leaves_inventory_unset(
     report = mapper.analyze_diff("")
 
     assert report.inventory_status is None
-    assert report.inventory_limitations == ()
+    assert report.analysis_completeness == "complete"
+    assert any("Runtime import still executes" in warning for warning in report.warnings)
+
+
+def test_runtime_mapper_applies_configured_inventory_to_public_routes_and_reports_limits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app_file = tmp_path / "main.py"
+    app_file.write_text(
+        "from fastapi import FastAPI\n"
+        "from outside import outside\n"
+        "app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)\n"
+        "@app.get('/inside')\n"
+        "def inside(): return {}\n"
+        "app.add_api_route('/outside', outside, methods=['GET'])\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "outside.py").write_text("def outside(): return {}\n", encoding="utf-8")
+    config = Config(parser=ParserConfig(include_patterns=["main.py"], follow_imports=False))
+    mapper = ChangeMapper(app_file, config=config, use_cache=False)
+    monkeypatch.setattr(mapper, "_preanalyze_mypy", lambda _callback: None)
+    mapper._mypy_analyzer = _NoopMypyAnalyzer()  # type: ignore[assignment]
+
+    report = mapper.analyze_diff("")
+    endpoints = mapper.registry.get_all()
+
+    assert [endpoint.path for endpoint in endpoints] == ["/inside"]
+    assert endpoints[0].discovery_status == EndpointDiscoveryStatus.ESTABLISHED
+    assert endpoints[0].discovery_conditions == ()
+    assert any("Runtime import still executes" in warning for warning in report.warnings)
+    assert any("local import following is disabled" in warning for warning in report.warnings)
+    assert any("unresolved local import" in warning for warning in report.warnings)
 
 
 def test_json_and_yaml_preserve_plural_evidence(tmp_path: Path) -> None:

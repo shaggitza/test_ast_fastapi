@@ -44,7 +44,7 @@ dependencies = [
     "pyyaml>=6.0",
     "tomli>=2.0; python_version < '3.11'",
     "unidiff>=1.0.0",
-    "mypy>=1.19.1",
+    "mypy==1.19.1",
 ]
 
 [project.optional-dependencies]
@@ -55,6 +55,8 @@ dev = [
     "ruff>=0.1.0",
     "pre-commit>=3.0.0",
     "types-PyYAML>=6.0",
+    # mypy analyzes Python 3.10 imports even when CI runs on Python 3.11+.
+    "tomli>=2.0",
 ]
 analysis = [
     "mypy>=1.0.0",
