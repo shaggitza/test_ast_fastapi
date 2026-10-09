@@ -1390,6 +1390,7 @@ class SecureASTExtractor:
                     and route.source_span is not None
                 ):
                     source_owners: list[NativeRouteSourceOwnerEvidence] = []
+                    source_owners.extend(self._handler_import_owners(route, aliases, modules))
                     handler_dependency_expressions: list[
                         NativeRouteDependencyExpressionEvidence
                     ] = []
@@ -1741,9 +1742,17 @@ class SecureASTExtractor:
                                     )
                                 )
                             exported_module = modules.get(import_binding.module)
-                            if exported_module is not None and import_binding.symbol is not None:
+                            exported_symbol = import_binding.symbol
+                            visited_exports: set[tuple[str, str]] = set()
+                            for _ in range(min(len(modules) + 1, 64)):
+                                if exported_module is None or exported_symbol is None:
+                                    break
+                                export_key = (exported_module.name, exported_symbol)
+                                if export_key in visited_exports:
+                                    break
+                                visited_exports.add(export_key)
                                 forward_binding = self._import_binding_at(
-                                    exported_module, import_binding.symbol, 2**31 - 1
+                                    exported_module, exported_symbol, 2**31 - 1
                                 )
                                 if forward_binding is not None:
                                     forward_node = next(
@@ -1753,8 +1762,7 @@ class SecureASTExtractor:
                                             if isinstance(statement, (ast.Import, ast.ImportFrom))
                                             and statement.lineno == forward_binding.line
                                             and any(
-                                                (alias.asname or alias.name)
-                                                == import_binding.symbol
+                                                (alias.asname or alias.name) == exported_symbol
                                                 for alias in statement.names
                                             )
                                         ),
@@ -1766,7 +1774,7 @@ class SecureASTExtractor:
                                                 side=self.snapshot_side,
                                                 owner_kind="reexport",
                                                 qualified_binding=(
-                                                    f"{exported_module.name}.{import_binding.symbol}"
+                                                    f"{exported_module.name}.{exported_symbol}"
                                                 ),
                                                 related_binding=(
                                                     f"{forward_binding.module}.{forward_binding.symbol}"
@@ -1780,43 +1788,33 @@ class SecureASTExtractor:
                                                 ),
                                             )
                                         )
-                                for export_statement in exported_module.tree.body:
-                                    if not isinstance(
-                                        export_statement, (ast.Assign, ast.AnnAssign)
-                                    ):
-                                        continue
-                                    if not isinstance(
-                                        export_statement.value, (ast.List, ast.Tuple)
-                                    ):
-                                        continue
-                                    if any(
-                                        isinstance(value, ast.Constant)
-                                        and value.value == import_binding.symbol
-                                        for value in export_statement.value.elts
-                                    ) and any(
-                                        "__all__" in _bound_names(target)
-                                        for target in (
-                                            [export_statement.target]
-                                            if isinstance(export_statement, ast.AnnAssign)
-                                            else export_statement.targets
+                                all_export = _effective_literal_all_export(
+                                    exported_module, exported_symbol
+                                )
+                                if all_export is not None:
+                                    source_owners.append(
+                                        NativeRouteSourceOwnerEvidence(
+                                            side=self.snapshot_side,
+                                            owner_kind="all_export",
+                                            qualified_binding=(
+                                                f"{exported_module.name}.{exported_symbol}"
+                                            ),
+                                            related_binding=(
+                                                f"{parent_module.name}.{child_argument.id}"
+                                            ),
+                                            confidence="established",
+                                            expression=ast.unparse(all_export)[:4096],
+                                            source_span=_native_span(
+                                                exported_module.path, all_export
+                                            ),
                                         )
-                                    ):
-                                        source_owners.append(
-                                            NativeRouteSourceOwnerEvidence(
-                                                side=self.snapshot_side,
-                                                owner_kind="all_export",
-                                                qualified_binding=f"{import_binding.module}.{import_binding.symbol}",
-                                                related_binding=f"{parent_module.name}.{child_argument.id}",
-                                                confidence="established",
-                                                expression=ast.unparse(export_statement.value)[
-                                                    :4096
-                                                ],
-                                                source_span=_native_span(
-                                                    exported_module.path,
-                                                    export_statement.value,
-                                                ),
-                                            )
-                                        )
+                                    )
+                                if forward_binding is None or forward_binding.symbol is None:
+                                    break
+                                exported_module = modules.get(
+                                    aliases.get(forward_binding.module, forward_binding.module)
+                                )
+                                exported_symbol = forward_binding.symbol
                     native_provenance = NativeRouteProvenance(
                         side=self.snapshot_side,
                         root=root_evidence,
@@ -5232,6 +5230,76 @@ class SecureASTExtractor:
             remaining_hops - 1,
         )
 
+    def _handler_import_owners(  # noqa: PLR0911
+        self, route: _Route, aliases: dict[str, str], modules: dict[str, _Module]
+    ) -> tuple[NativeRouteSourceOwnerEvidence, ...]:
+        """Own only the live import used by an established imperative handler."""
+        module = modules.get(route.owner[0])
+        if (
+            module is None
+            or route.registration_kind != NativeRegistrationKind.IMPERATIVE
+            or route.source_span is None
+        ):
+            return ()
+        call = next(
+            (
+                node
+                for node in ast.walk(module.tree)
+                if isinstance(node, ast.Call)
+                and _native_span(module.path, node) == route.source_span
+            ),
+            None,
+        )
+        if call is None:
+            return ()
+        endpoint_keywords = [item.value for item in call.keywords if item.arg == "endpoint"]
+        expression = (
+            endpoint_keywords[0]
+            if len(endpoint_keywords) == 1
+            else call.args[1]
+            if not endpoint_keywords and len(call.args) > 1
+            else None
+        )
+        if (
+            self._resolve_handler(expression, module, aliases, modules, call.lineno)
+            != route.handler
+        ):
+            return ()
+        name = (
+            expression.id
+            if isinstance(expression, ast.Name)
+            else expression.value.id
+            if isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name)
+            else None
+        )
+        if name is None:
+            return ()
+        binding = self._import_binding_at(module, name, call.lineno)
+        if binding is None:
+            return ()
+        import_node = next(
+            (
+                statement
+                for statement in module.tree.body
+                if isinstance(statement, (ast.Import, ast.ImportFrom))
+                and statement.lineno == binding.line
+            ),
+            None,
+        )
+        if import_node is None:
+            return ()
+        return (
+            NativeRouteSourceOwnerEvidence(
+                side=self.snapshot_side,
+                owner_kind="import_binding",
+                qualified_binding=f"{module.name}.{name}",
+                related_binding=f"{route.handler.module}.{route.handler.name}",
+                confidence="established",
+                expression=ast.unparse(import_node)[:4096],
+                source_span=_native_span(module.path, import_node),
+            ),
+        )
+
     def _resolve_handler(
         self,
         expression: ast.expr | None,
@@ -5967,6 +6035,104 @@ def _module_binds_name(tree: ast.Module, name: str) -> bool:
     return any(_statement_may_bind_name(node, name) for node in tree.body)
 
 
+def _effective_literal_all_export(  # noqa: PLR0912 - conservative binding interpreter
+    module: _Module, symbol: str
+) -> ast.expr | None:
+    """Return the live, statically literal ``__all__`` RHS when it exports symbol."""
+    effective: ast.expr | None = None
+    for statement in module.tree.body:
+        targets: list[ast.expr] = []
+        value: ast.expr | None = None
+        if isinstance(statement, ast.Assign):
+            targets = statement.targets
+            value = statement.value
+        elif isinstance(statement, ast.AnnAssign):
+            targets = [statement.target]
+            value = statement.value
+        binds_all = bool(targets) and any("__all__" in _bound_names(target) for target in targets)
+        direct_all_binding = (
+            isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+            and statement.target.id == "__all__"
+        ) or (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+            and statement.targets[0].id == "__all__"
+        )
+        if binds_all:
+            if not direct_all_binding:
+                # Destructuring and chained targets can bind aliases with mutation paths.
+                effective = None
+                continue
+            if isinstance(statement, ast.AnnAssign) and value is None:
+                # An annotation without a value does not bind or replace the name.
+                if any(
+                    isinstance(node, ast.Name)
+                    and node.id == "__all__"
+                    and isinstance(node.ctx, (ast.Load, ast.Store, ast.Del))
+                    for node in ast.walk(statement.annotation)
+                ):
+                    # Module-scope annotations execute unless postponed; do not
+                    # retain evidence across an annotation with possible effects.
+                    effective = None
+                continue
+            effective = None
+            if (
+                isinstance(value, (ast.List, ast.Tuple))
+                and all(
+                    isinstance(item, ast.Constant) and isinstance(item.value, str)
+                    for item in value.elts
+                )
+                and any(
+                    isinstance(item, ast.Constant) and item.value == symbol for item in value.elts
+                )
+            ):
+                effective = value
+            continue
+        if value is not None and any(
+            isinstance(node, ast.Name) and node.id == "__all__" for node in ast.walk(value)
+        ):
+            # A reference can escape the live list through an alias or unknown call.
+            effective = None
+            continue
+        if isinstance(statement, ast.Delete) and any(
+            "__all__" in _bound_names(target) for target in statement.targets
+        ):
+            effective = None
+            continue
+        if isinstance(statement, ast.AugAssign) and "__all__" in _bound_names(statement.target):
+            effective = None
+            continue
+        annotation_only_target_ids = {
+            id(node.target)
+            for node in ast.walk(statement)
+            if isinstance(node, ast.AnnAssign)
+            and node.value is None
+            and isinstance(node.target, ast.Name)
+        }
+        if any(
+            (
+                isinstance(node, ast.Name)
+                and node.id == "__all__"
+                and id(node) not in annotation_only_target_ids
+                and isinstance(node.ctx, (ast.Load, ast.Store, ast.Del))
+            )
+            or (isinstance(node, ast.ExceptHandler) and node.name == "__all__")
+            or (isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name == "__all__")
+            or (isinstance(node, ast.MatchMapping) and node.rest == "__all__")
+            for node in ast.walk(statement)
+        ):
+            # Reads can escape or mutate the value; writes and deletes can replace it.
+            # This includes operations and name captures nested in control flow.
+            effective = None
+            continue
+        if _statement_may_bind_name(statement, "__all__"):
+            effective = None
+            continue
+    return effective
+
+
 def _statement_may_bind_name(node: ast.stmt, name: str) -> bool:  # noqa: PLR0911
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
         return node.name == name
@@ -5977,6 +6143,8 @@ def _statement_may_bind_name(node: ast.stmt, name: str) -> bool:  # noqa: PLR091
             alias.name == "*" or (alias.asname or alias.name) == name for alias in node.names
         )
     if isinstance(node, (ast.Assign, ast.AnnAssign)):
+        if isinstance(node, ast.AnnAssign) and node.value is None:
+            return False
         targets = [node.target] if isinstance(node, ast.AnnAssign) else node.targets
         return any(name in _bound_names(target) for target in targets)
     if isinstance(node, (ast.For, ast.AsyncFor)) and name in _bound_names(node.target):

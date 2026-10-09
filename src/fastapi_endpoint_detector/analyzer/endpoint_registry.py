@@ -64,6 +64,11 @@ class EndpointRegistry:
                     (f"assembly_{item.operation}", item.source_span)
                     for item in provenance.assembly_chain
                 ),
+                *(
+                    (f"source_{item.owner_kind}", item.source_span)
+                    for item in provenance.source_owners
+                    if item.confidence == "established"
+                ),
             ]
             if provenance.root.bootstrap_span is not None:
                 occurrences.append(("bootstrap", provenance.root.bootstrap_span))
@@ -156,7 +161,7 @@ class EndpointRegistry:
         file_path: Path | str,
         changed_lines: set[int],
     ) -> list[tuple[Endpoint, tuple[str, ...], set[int]]]:
-        """Return exact native assembly occurrences intersecting target-side lines."""
+        """Return established native source ownership on this registry's snapshot."""
         if not changed_lines:
             return []
         query = Path(file_path)
