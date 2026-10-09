@@ -25,6 +25,14 @@ from fastapi_endpoint_detector.analyzer.effect_contract_auditor import (
 )
 from fastapi_endpoint_detector.analyzer.endpoint_registry import EndpointRegistry
 from fastapi_endpoint_detector.analyzer.evidence_graph import EvidenceGraph, source_evidence_graph
+from fastapi_endpoint_detector.analyzer.framework_phase_integration import (
+    collect_framework_phase_evidence,
+)
+from fastapi_endpoint_detector.analyzer.framework_phase_report import (
+    FrameworkPhaseReport,
+    phase_report_payload,
+    unavailable_phase_report,
+)
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.analyzer.resource_coupling import build_resource_coupling_graph
 from fastapi_endpoint_detector.analyzer.scip_analyzer import (
@@ -862,6 +870,81 @@ class ChangeMapper:
         if self._inventory is None:
             raise ChangeMapperError("endpoint inventory is unavailable outside secure AST mode")
         return self._inventory
+
+    def map_framework_phase_report(  # noqa: PLR0911
+        self,
+        *,
+        snapshot_side: SnapshotSide = SnapshotSide.TARGET,
+    ) -> FrameworkPhaseReport | None:
+        """Map the explicitly selected framework-v1 catalog to a report payload.
+
+        This report-only hook does not affect endpoint candidates or confidence.
+        The current mapper retains mypy's full build result rather than the
+        explicit TypedBuild receipt required for typed phase authority, so phase
+        records are deliberately unavailable until that provider is connected.
+        """
+        if self.config.analysis.surface_preset != "framework-v1":
+            return None
+        if snapshot_side == SnapshotSide.BASELINE:
+            return unavailable_phase_report(
+                snapshot_side=snapshot_side.value,
+                limitation=(
+                    "the public mapper hook has only the target source inventory; "
+                    "baseline phase evidence is unavailable"
+                ),
+            )
+        if self.use_scip:
+            return unavailable_phase_report(
+                snapshot_side=snapshot_side.value,
+                limitation=(
+                    "framework phase evidence requires the bounded mypy callback frontend; "
+                    "the selected SCIP mapper does not provide it"
+                ),
+            )
+        if self._surface_contracts is None:
+            return unavailable_phase_report(
+                snapshot_side=snapshot_side.value,
+                limitation="the selected framework-v1 contract snapshot is unavailable",
+            )
+        analyzer = self._mypy_analyzer
+        if analyzer is None:
+            return unavailable_phase_report(
+                snapshot_side=snapshot_side.value,
+                limitation="the target mypy source snapshot has not been initialized",
+            )
+        try:
+            inventory = self.inventory
+        except ChangeMapperError as exc:
+            return unavailable_phase_report(
+                snapshot_side=snapshot_side.value,
+                limitation=f"the selected framework inventory is unavailable: {exc}",
+            )
+        source_root = Path(analyzer.source_root).resolve()
+        selected_sources = {
+            path.resolve()
+            for endpoint in inventory.endpoints
+            if endpoint.surface is not None
+            for path in (endpoint.handler.file_path, endpoint.surface.registration_file)
+        }
+        if any(not path.is_relative_to(source_root) for path in selected_sources):
+            return unavailable_phase_report(
+                snapshot_side=snapshot_side.value,
+                limitation=(
+                    "selected framework inventory contains callback or registration sources "
+                    "outside the mapper's target project root"
+                ),
+            )
+        evidence = collect_framework_phase_evidence(
+            inventory,
+            self._surface_contracts,
+            analyzer,
+            None,
+            snapshot_side=snapshot_side,
+            app_variable=self.app_variable,
+            app_entry=self.app_entry,
+            bootstrap_entry=self.bootstrap_entry,
+        )
+        return phase_report_payload(evidence)
 
     @property
     def scip_analyzer(self) -> SCIPAnalyzer:
@@ -1998,6 +2081,7 @@ class ChangeMapper:
                 analysis_duration_ms=duration_ms,
                 errors=errors,
                 warnings=warnings,
+                framework_phase_report=self.map_framework_phase_report(),
                 analysis_completeness=(
                     "partial"
                     if errors
@@ -2182,6 +2266,7 @@ class ChangeMapper:
                 else "complete"
             ),
             source_evidence_graph=target_source_graph,
+            framework_phase_report=self.map_framework_phase_report(),
             effect_contract_audit=self._effect_contract_audit,
             resource_coupling_graph=self._resource_coupling_graph,
             sql_transaction_report=self._sql_transaction_report,

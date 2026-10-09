@@ -15,6 +15,9 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 from fastapi_endpoint_detector.analyzer.evidence_graph import EvidenceGraph  # noqa: TC001
+from fastapi_endpoint_detector.analyzer.framework_phase_report import (
+    FrameworkPhaseReport,
+)
 from fastapi_endpoint_detector.models.effect_contract import (
     EffectContract,
     FiniteValueStatus,
@@ -472,6 +475,12 @@ class AnalysisReport(BaseModel):
     sql_transaction_path_report: SQLTransactionPathReport | None = Field(
         default=None,
         description="Bounded source-backed same-scope SQL ordering diagnostics.",
+    )
+    framework_phase_report: FrameworkPhaseReport | None = Field(
+        default=None,
+        description=(
+            "Opt-in framework-v1 callback phase evidence; unavailable records remain explicit."
+        ),
     )
     source_observations: dict[str, object] | None = Field(
         default=None,

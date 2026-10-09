@@ -34,8 +34,16 @@ bodies can still be analyzed, but exact registration identity remains
 unavailable. BackgroundTasks use mypy's existing exact summaries; exporting
 their callback target identity and phase witness needs a small typed analyzer
 API hook. SCIP currently has no supported exact callback registration query,
-so it cannot establish phase evidence. The adapter is not yet wired into the
-CLI, report, or mapper.
+so it cannot establish phase evidence. The mapper exposes
+`map_framework_phase_report()` for the explicitly selected bundled
+`framework-v1` preset. `AnalysisReport` carries the typed payload, and JSON/YAML
+output includes it only when that preset is selected. These records do not
+alter endpoint candidates or confidence. The current `MypyAnalyzer` retains
+its full build result rather than a `TypedBuild` receipt, so the mapper reports
+selected callback rows as unavailable. The SCIP mapper reports an explicit
+unavailable limitation without constructing a mypy analyzer. The public mapper
+currently owns only the target inventory; baseline phase evidence remains
+explicitly unavailable.
 
 ## Runtime phase comparison
 
@@ -54,36 +62,28 @@ create execution receipts or establish runtime truth.
 
 ## Integration hooks still required
 
-This branch adds adapters only. To wire it without taking ownership of the
-existing mapper or CLI, the smallest integration changes are:
+The selected-preset mapper/report/output hook is wired. Remaining bounded
+integration work is:
 
-1. The baseline CLI integration owner can call
-   `collect_framework_phase_evidence` immediately after it has selected the
-   framework surface inventory and obtained the retained mypy build, then
-   attach `phase_report_payload(evidence)` to its report assembly. The source
-   side must be passed independently for target and baseline. It should omit
-   the field when the backend is SCIP until SCIP exposes exact callback-target
-   provenance; a capability name alone is not evidence.
-2. The mypy analyzer owner can expose a source-scoped exact call-site query
+1. The mypy analyzer owner can expose a source-scoped exact call-site query
    taking `(path, line, column)` plus an optional caller scope. That lets the
    bridge match constructor lifespan and imperative event registrations that
    sit outside the callback body without expanding into framework code.
-3. The mypy analyzer owner can expose its existing BackgroundTasks summary as
+2. The mypy analyzer owner can expose its existing BackgroundTasks summary as
    typed callback witnesses containing the exact argument target, wrapper
    registration occurrence, execution condition, and source span. The bridge
    can then map those witnesses to the same typed record schema.
-4. The retained provider owner can let `MypyAnalyzer` consume a `TypedBuild`
+3. The retained provider owner can let `MypyAnalyzer` consume a `TypedBuild`
    snapshot directly. The current adapter separately invokes the analyzer and
    provider, so it verifies that both snapshots agree but can duplicate a
    mypy build.
-5. The reverse-graph owner can call `adapt_framework_phases_to_graph` after
+4. The reverse-graph owner can call `adapt_framework_phases_to_graph` after
    building its graph. The adapter binds evidence to existing symbols only;
    it does not create edges or claim call reachability.
 
-These hooks are proposals, not edits to existing owner files. Until the report
-hook is integrated, the bridge is implemented and fixture-tested but not
-present in normal CLI output. GH104 remains incomplete for those unwired
-surfaces and for missing isolated runtime phase receipts.
+These hooks remain proposals, not edits to the other owners' files. GH104
+still lacks the callback witnesses described above and isolated runtime phase
+receipts.
 
 ## Tested source references
 
