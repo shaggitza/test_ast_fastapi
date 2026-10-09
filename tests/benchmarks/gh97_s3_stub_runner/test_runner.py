@@ -56,10 +56,14 @@ def test_selector_binding_distinguishes_missing_and_positional_body() -> None:
     }
     omitted = _binding_result(omitted_args)
     assert omitted["value"] == "missing_or_misbound"
-    misbound = _binding_result({
-        "keyword_bindings": [], "positional_argument_indexes": [0, 1, 2],
-        "canonical_symbol_status": "matched", "signature_resolved": True,
-    })
+    misbound = _binding_result(
+        {
+            "keyword_bindings": [],
+            "positional_argument_indexes": [0, 1, 2],
+            "canonical_symbol_status": "matched",
+            "signature_resolved": True,
+        }
+    )
     assert misbound["binding_status"] == "misbound_positional_to_keyword_only_parameters"
 
 
