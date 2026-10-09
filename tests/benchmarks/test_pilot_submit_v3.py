@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import socket
 import stat
 import struct
@@ -744,3 +745,28 @@ def test_extension_rejection_and_success_are_nonthrowing_nonterminating() -> Non
     assert "const binding = await trustedTransport(ctx.cwd);" in runtime
     assert "const response = await brokerRequest(" in runtime
     assert 'throw new Error("broker success response is invalid")' in runtime
+
+
+def test_socket_is_private_immediately_after_bind(tmp_path: Path) -> None:
+    path = tmp_path / "private.sock"
+    original_umask = os.umask(0o022)
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+            submit._bind_private_socket(server, path)
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert os.umask(0o022) == 0o022
+    finally:
+        os.umask(original_umask)
+
+
+def test_failed_private_bind_restores_process_umask(tmp_path: Path) -> None:
+    path = tmp_path / "occupied.sock"
+    path.write_text("occupied", encoding="utf-8")
+    original_umask = os.umask(0o022)
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server, pytest.raises(OSError):
+            submit._bind_private_socket(server, path)
+        assert os.umask(0o022) == 0o022
+        assert path.read_text(encoding="utf-8") == "occupied"
+    finally:
+        os.umask(original_umask)
