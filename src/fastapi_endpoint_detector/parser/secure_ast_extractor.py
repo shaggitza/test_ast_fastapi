@@ -5204,11 +5204,12 @@ class SecureASTExtractor:
         remaining_hops: int,
     ) -> _Object | None:
         """Follow exact project-local symbol re-exports to one modeled object."""
-        if remaining_hops <= 0:
-            return None
         local = self._object_at(module, symbol, line)
         if local is not None:
             return local
+        # A zero budget allows this local binding but forbids following another import.
+        if remaining_hops <= 0:
+            return None
         binding = self._import_binding_at(module, symbol, line)
         if binding is None or binding.symbol is None or binding.symbol == "*":
             return None
