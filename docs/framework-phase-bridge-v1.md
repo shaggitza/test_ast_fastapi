@@ -41,8 +41,8 @@ output includes it only when that preset is selected. These records do not
 alter endpoint candidates or confidence. The current `MypyAnalyzer` retains
 its full build result rather than a `TypedBuild` receipt, so the mapper reports
 selected callback rows as unavailable. The SCIP mapper reports an explicit
-unavailable limitation without constructing a mypy analyzer. The public mapper
-currently owns only the target inventory; baseline phase evidence remains
+unavailable limitation without constructing a mypy analyzer. The public phase hook
+currently analyzes only the target inventory; baseline phase evidence remains
 explicitly unavailable.
 
 ## Runtime phase comparison

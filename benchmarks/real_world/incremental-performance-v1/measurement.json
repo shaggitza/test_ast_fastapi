@@ -1,0 +1,237 @@
+{
+  "environment": {
+    "mypy": "mypy-analyzer/1.19.1",
+    "platform": "Linux-6.17.2-1-pve-x86_64-with-glibc2.39",
+    "python": "3.11.16 (main, Sep 24 2026, 17:56:40) [Clang 22.1.3 ]"
+  },
+  "one_file_incremental_update": {
+    "reason": "backend_incremental_build_disabled",
+    "status": "unsupported"
+  },
+  "phases": {
+    "baseline_target_preparation": {
+      "max": 0.22127545671537519,
+      "p50": 0.07926565781235695,
+      "p95": 0.22127545671537519,
+      "samples": [
+        0.22127545671537519,
+        0.07121338276192546,
+        0.18565362598747015,
+        0.07926565781235695,
+        0.04546056827530265
+      ],
+      "status": "measured"
+    },
+    "changed_snapshot_rebuild": {
+      "max": 6.342857178300619,
+      "p50": 4.388280538842082,
+      "p95": 6.342857178300619,
+      "samples": [
+        5.39063190901652,
+        6.342857178300619,
+        3.678645731881261,
+        4.388280538842082,
+        4.175773520953953
+      ],
+      "status": "measured"
+    },
+    "cold_build": {
+      "max": 6.614509777631611,
+      "p50": 5.356080760713667,
+      "p95": 6.614509777631611,
+      "samples": [
+        6.614509777631611,
+        5.877580518368632,
+        4.035859597381204,
+        4.621479063294828,
+        5.356080760713667
+      ],
+      "status": "measured"
+    },
+    "warm_no_change": {
+      "max": 0.09330286690965295,
+      "p50": 0.05127040157094598,
+      "p95": 0.09330286690965295,
+      "samples": [
+        0.04115231428295374,
+        0.09330286690965295,
+        0.03001696104183793,
+        0.07337722601369023,
+        0.05127040157094598
+      ],
+      "status": "measured"
+    }
+  },
+  "protocol": {
+    "fixture": "synthetic-typed-dag-v1",
+    "incremental_semantics": "unsupported: analyzer calls mypy with Options.incremental=False; changed source invalidates the persisted result cache and triggers a full rebuild",
+    "modules": 96,
+    "negative_controls": [
+      "disconnected dead_control.py is absent from reachable sources",
+      "value-only one-file edit preserves the expected reachable-source set"
+    ],
+    "unsupported_phase": {
+      "actual_rebuild_phase": "changed_snapshot_rebuild",
+      "reason": "backend_incremental_build_disabled",
+      "status": "unsupported"
+    }
+  },
+  "resources": {
+    "cache_size_bytes": {
+      "max": 11427.0,
+      "p50": 11427.0,
+      "p95": 11427.0,
+      "samples": [
+        11427,
+        11427,
+        11427,
+        11427,
+        11427
+      ],
+      "status": "measured"
+    },
+    "peak_rss_bytes": {
+      "max": 535314432.0,
+      "p50": 535314432.0,
+      "p95": 535314432.0,
+      "samples": [
+        535314432
+      ],
+      "scope": "entire_measurement_process",
+      "status": "measured"
+    }
+  },
+  "samples": [
+    {
+      "actual_changed_snapshot_rebuild_seconds": 5.39063190901652,
+      "attempt": 1,
+      "baseline_target_preparation_seconds": 0.22127545671537519,
+      "cache_artifact_sha256": "d177b754ac5535c78ce624988f3e4119d46884971cc8e8de61da5d68a0e99995",
+      "cache_fingerprint_verified": true,
+      "changed_file": "node_48.py",
+      "changed_files": [
+        "node_48.py"
+      ],
+      "changed_fingerprint": "62910bf033ace972a563ceeb7b44023c8ded4ad7bbfbbaaf4ffa800c511a0be1",
+      "cold_build_seconds": 6.614509777631611,
+      "config_fingerprint": "dcdfdfcf2b70817c360c5eaa22cb5697f74974f831b370d020b0dd4ec1e15d00",
+      "expected_reachable_modules": 96,
+      "fixture_transitive_reachable_modules": 96,
+      "incremental_update_supported": false,
+      "observed_reachable_sources": [
+        "node_95",
+        "routes"
+      ],
+      "source_files": 98,
+      "source_fingerprint": "22e990656bcc1f320934fdc46e90d92be5891ae37f8d610ea0d8315f65a5097c",
+      "source_hashes_sha256": "78d15597e109a5d31b1bc5fc01609f25c7d692132147191381f088dc81e7ecc8",
+      "tool": "mypy-analyzer/1.19.1",
+      "warm_no_change_seconds": 0.04115231428295374
+    },
+    {
+      "actual_changed_snapshot_rebuild_seconds": 6.342857178300619,
+      "attempt": 2,
+      "baseline_target_preparation_seconds": 0.07121338276192546,
+      "cache_artifact_sha256": "ebdf6f090f8992c0c2d01acc8cf3f83f4b5ba50afa7f0f79663b52a9a6980fa4",
+      "cache_fingerprint_verified": true,
+      "changed_file": "node_48.py",
+      "changed_files": [
+        "node_48.py"
+      ],
+      "changed_fingerprint": "585fbbc505b882b8a34e4063fe96bdf44a8736639ebe9a798d1fe5af2eb67578",
+      "cold_build_seconds": 5.877580518368632,
+      "config_fingerprint": "dcdfdfcf2b70817c360c5eaa22cb5697f74974f831b370d020b0dd4ec1e15d00",
+      "expected_reachable_modules": 96,
+      "fixture_transitive_reachable_modules": 96,
+      "incremental_update_supported": false,
+      "observed_reachable_sources": [
+        "node_95",
+        "routes"
+      ],
+      "source_files": 98,
+      "source_fingerprint": "0e30e1ce8a3dda42ef4ed0f46de05f7bfe319bc05c1fcb08bd953a3de1813417",
+      "source_hashes_sha256": "78d15597e109a5d31b1bc5fc01609f25c7d692132147191381f088dc81e7ecc8",
+      "tool": "mypy-analyzer/1.19.1",
+      "warm_no_change_seconds": 0.09330286690965295
+    },
+    {
+      "actual_changed_snapshot_rebuild_seconds": 3.678645731881261,
+      "attempt": 3,
+      "baseline_target_preparation_seconds": 0.18565362598747015,
+      "cache_artifact_sha256": "868ac31df2065ff8868db48b3a4c1d63430c4b2a10cf864a06874bf517298cf4",
+      "cache_fingerprint_verified": true,
+      "changed_file": "node_48.py",
+      "changed_files": [
+        "node_48.py"
+      ],
+      "changed_fingerprint": "953ea60587ca4a91cb0f23b58a1844ca639b27f8fe9b0ac5077489db08c78710",
+      "cold_build_seconds": 4.035859597381204,
+      "config_fingerprint": "dcdfdfcf2b70817c360c5eaa22cb5697f74974f831b370d020b0dd4ec1e15d00",
+      "expected_reachable_modules": 96,
+      "fixture_transitive_reachable_modules": 96,
+      "incremental_update_supported": false,
+      "observed_reachable_sources": [
+        "node_95",
+        "routes"
+      ],
+      "source_files": 98,
+      "source_fingerprint": "13764d269c68fed30531a7fb71ad7aaeed53eb74f97bb81bccc3698dfbe207f3",
+      "source_hashes_sha256": "78d15597e109a5d31b1bc5fc01609f25c7d692132147191381f088dc81e7ecc8",
+      "tool": "mypy-analyzer/1.19.1",
+      "warm_no_change_seconds": 0.03001696104183793
+    },
+    {
+      "actual_changed_snapshot_rebuild_seconds": 4.388280538842082,
+      "attempt": 4,
+      "baseline_target_preparation_seconds": 0.07926565781235695,
+      "cache_artifact_sha256": "56f9a9e8443ee3d1ae067bb3535b90e3764a9a5a9bac726169c3e6af589b9462",
+      "cache_fingerprint_verified": true,
+      "changed_file": "node_48.py",
+      "changed_files": [
+        "node_48.py"
+      ],
+      "changed_fingerprint": "99a87509cf8ed147c751584306a97b443ef56671a99cd73290051839b8f1ab27",
+      "cold_build_seconds": 4.621479063294828,
+      "config_fingerprint": "dcdfdfcf2b70817c360c5eaa22cb5697f74974f831b370d020b0dd4ec1e15d00",
+      "expected_reachable_modules": 96,
+      "fixture_transitive_reachable_modules": 96,
+      "incremental_update_supported": false,
+      "observed_reachable_sources": [
+        "node_95",
+        "routes"
+      ],
+      "source_files": 98,
+      "source_fingerprint": "7484700c937b90209b46e8938468af700d039ff6dab2c4c93b6ceddd52b6e172",
+      "source_hashes_sha256": "78d15597e109a5d31b1bc5fc01609f25c7d692132147191381f088dc81e7ecc8",
+      "tool": "mypy-analyzer/1.19.1",
+      "warm_no_change_seconds": 0.07337722601369023
+    },
+    {
+      "actual_changed_snapshot_rebuild_seconds": 4.175773520953953,
+      "attempt": 5,
+      "baseline_target_preparation_seconds": 0.04546056827530265,
+      "cache_artifact_sha256": "6e156f942dc0ddd66b66c221a55ac778f6bd0480f5e201bb64b1b9090e3e757f",
+      "cache_fingerprint_verified": true,
+      "changed_file": "node_48.py",
+      "changed_files": [
+        "node_48.py"
+      ],
+      "changed_fingerprint": "43c9f14690b8590da30e6b5e3999af32b55b26046959db86a7aae2d4728b94fd",
+      "cold_build_seconds": 5.356080760713667,
+      "config_fingerprint": "dcdfdfcf2b70817c360c5eaa22cb5697f74974f831b370d020b0dd4ec1e15d00",
+      "expected_reachable_modules": 96,
+      "fixture_transitive_reachable_modules": 96,
+      "incremental_update_supported": false,
+      "observed_reachable_sources": [
+        "node_95",
+        "routes"
+      ],
+      "source_files": 98,
+      "source_fingerprint": "f94235b61a3f09ab239af311ebe926dea71e3c00152b59a6e34e372a0c84417a",
+      "source_hashes_sha256": "78d15597e109a5d31b1bc5fc01609f25c7d692132147191381f088dc81e7ecc8",
+      "tool": "mypy-analyzer/1.19.1",
+      "warm_no_change_seconds": 0.05127040157094598
+    }
+  ],
+  "schema_version": "incremental-performance-v1"
+}
