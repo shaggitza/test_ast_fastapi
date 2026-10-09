@@ -1,0 +1,288 @@
+#!/usr/bin/env python3
+"""Bounded source-only Motor 3.6.0 effect binding probe."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib
+import importlib.metadata
+import json
+import platform
+import subprocess
+import tempfile
+import zipfile
+from pathlib import Path, PurePosixPath
+
+from fastapi_endpoint_detector.analyzer.effect_contract_auditor import audit_effect_contracts
+from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
+from fastapi_endpoint_detector.models.effect_contract import load_effect_preset
+from fastapi_endpoint_detector.models.endpoint import (
+    Endpoint,
+    EndpointInventory,
+    EndpointMethod,
+    HandlerInfo,
+)
+
+ARTIFACTS = {
+    "motor": ("motor-3.6.0-py3-none-any.whl", "motor", "3.6.0"),
+    "pymongo": (
+        "pymongo-4.10.1-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+        "pymongo",
+        "4.10.1",
+    ),
+}
+ARTIFACT_SHA256 = {
+    "motor": "sha256:9f07ed96f1754963d4386944e1b52d403a5350c687edc60da487d66f98dbf894",
+    "pymongo": "sha256:cec237c305fcbeef75c0bcbe9d223d1e22a6e3ba1b53b2f0b79d3d29c742b45b",
+}
+LIMIT_FILES = 2000
+LIMIT_SOURCE_BYTES = 12_000_000
+LIMIT_MEMBER_BYTES = 1_000_000
+
+
+def sha(data: bytes) -> str:
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def bounded_python_sources(wheel: Path, destination: Path) -> dict[str, str]:
+    """Extract Python source only; reject unsafe or unexpectedly large wheels."""
+    hashes: dict[str, str] = {}
+    total = 0
+    with zipfile.ZipFile(wheel) as archive:
+        members = [m for m in archive.infolist() if m.filename.endswith(".py")]
+        if len(members) > LIMIT_FILES:
+            raise ValueError(f"too many Python members in {wheel.name}")
+        for member in members:
+            relative = PurePosixPath(member.filename)
+            if (
+                relative.is_absolute()
+                or ".." in relative.parts
+                or member.file_size > LIMIT_MEMBER_BYTES
+            ):
+                raise ValueError(f"unsafe or oversized member: {member.filename}")
+            if not relative.parts or relative.parts[0] not in {"motor", "pymongo", "bson"}:
+                continue
+            data = archive.read(member)
+            total += len(data)
+            if total > LIMIT_SOURCE_BYTES:
+                raise ValueError(f"Python source extraction limit exceeded: {wheel.name}")
+            target = destination.joinpath(*relative.parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            hashes[relative.as_posix()] = sha(data)
+    return hashes
+
+
+def digest_file(path: Path) -> str:
+    return sha(path.read_bytes())
+
+
+def verify_artifact_hash(path: Path, distribution: str) -> str:
+    digest = digest_file(path)
+    if digest != ARTIFACT_SHA256[distribution]:
+        raise ValueError(f"artifact SHA-256 mismatch: {distribution}")
+    return digest
+
+
+def artifact_metadata(directory: Path) -> dict[str, dict[str, object]]:
+    result: dict[str, dict[str, object]] = {}
+    for distribution, (filename, package, version) in ARTIFACTS.items():
+        path = directory / filename
+        digest = verify_artifact_hash(path, distribution)
+        with zipfile.ZipFile(path) as archive:
+            metadata_name = next(n for n in archive.namelist() if n.endswith(".dist-info/METADATA"))
+            metadata = archive.read(metadata_name).decode("utf-8", "strict")
+            if f"Name: {package}\n" not in metadata or f"Version: {version}\n" not in metadata:
+                raise ValueError(f"artifact metadata mismatch: {filename}")
+        result[distribution] = {"filename": filename, "sha256": digest}
+    return result
+
+
+def verified_product_path(repo: Path, name: str, relative: str) -> Path:
+    module = importlib.import_module(name)
+    if module.__file__ is None:
+        raise ValueError(f"product module lacks source path: {name}")
+    actual = Path(module.__file__).resolve()
+    expected = (repo / relative).resolve()
+    if actual != expected:
+        raise ValueError(f"product module escaped candidate checkout: {name}: {actual}")
+    return actual
+
+
+def checkout_revision(repo: Path) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--artifacts", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    if platform.python_version() != "3.11.16":
+        raise SystemExit(f"requires Python 3.11.16, got {platform.python_version()}")
+    if importlib.metadata.version("mypy") != "1.19.1":
+        raise SystemExit("requires mypy 1.19.1")
+
+    artifact_meta = artifact_metadata(args.artifacts)
+
+    repo = Path(__file__).resolve().parents[2]
+    product_path = verified_product_path(
+        repo, "fastapi_endpoint_detector", "src/fastapi_endpoint_detector/__init__.py"
+    )
+    preset_path = repo / "src/fastapi_endpoint_detector/presets/effects_mongodb_v1.yaml"
+    analyzer_paths = [
+        repo / "src/fastapi_endpoint_detector/analyzer/mypy_analyzer.py",
+        repo / "src/fastapi_endpoint_detector/analyzer/effect_contract_auditor.py",
+        repo / "src/fastapi_endpoint_detector/models/effect_contract.py",
+        repo / "src/fastapi_endpoint_detector/models/endpoint.py",
+    ]
+    product_paths = {
+        ".".join(path.relative_to(repo / "src").with_suffix("").parts): verified_product_path(
+            repo,
+            ".".join(path.relative_to(repo / "src").with_suffix("").parts),
+            path.relative_to(repo).as_posix(),
+        )
+        .relative_to(repo)
+        .as_posix()
+        for path in analyzer_paths
+    }
+    fixture = """
+from motor.motor_asyncio import AsyncIOMotorClient
+
+client: AsyncIOMotorClient
+collection = client.database.collection
+
+async def handler() -> None:
+    await collection.insert_one({"x": 1})
+    await collection.update_one({"x": 1}, {"$set": {"x": 2}})
+    await collection.delete_one({"x": 2})
+    decoy.insert_one({"x": 3})
+    await wrapped.insert_one({"x": 4})
+
+class Decoy:
+    def insert_one(self, value: object) -> None: ...
+
+class Wrapper:
+    def __init__(self, inner: object) -> None: self.inner = inner
+    async def insert_one(self, value: object) -> object:
+        return await self.inner.insert_one(value)
+
+decoy: Decoy
+wrapped: Wrapper
+""".lstrip()
+
+    with tempfile.TemporaryDirectory(prefix="gh97_motor_source_") as temp:
+        root = Path(temp)
+        extracted: dict[str, dict[str, str]] = {}
+        for distribution, (filename, _package, _version) in ARTIFACTS.items():
+            extracted[distribution] = bounded_python_sources(args.artifacts / filename, root)
+        main_path = root / "main.py"
+        main_path.write_text(fixture)
+        endpoint = Endpoint(
+            path="/motor-probe",
+            methods=[EndpointMethod.POST],
+            handler=HandlerInfo(name="handler", module="main", file_path=main_path, line_number=7),
+        )
+        analyzer = MypyAnalyzer(root, max_depth=1)
+        dependencies = analyzer.analyze_endpoint(endpoint)
+        call_sites = dependencies.get_resolved_call_sites()
+        loaded = load_effect_preset("mongodb-v1")
+        audit = audit_effect_contracts(
+            loaded,
+            source_root=root,
+            inventory=EndpointInventory(endpoints=[endpoint]),
+            endpoint_call_sites=[(endpoint, call_sites)],
+            track_transitive=False,
+            max_depth=1,
+            cache_enabled=False,
+            resolver_versions=(f"mypy@{analyzer.resolver_version}",),
+        )
+        arguments_by_line = {site.line: site.arguments for site in call_sites}
+        occurrences = []
+        for row in audit.occurrences:
+            prefix = f"{root.name}.main"
+            canonical_symbol = row.canonical_symbol
+            if canonical_symbol and canonical_symbol.startswith(prefix + "."):
+                canonical_symbol = "main" + canonical_symbol[len(prefix) :]
+            receiver_candidates = [
+                "main" + item[len(prefix) :] if item.startswith(prefix + ".") else item
+                for item in row.receiver_candidates
+            ]
+            occurrences.append(
+                {
+                    "line": row.line,
+                    "source_spelling": row.source_spelling,
+                    "resolver_status": row.resolver_status.value,
+                    "canonical_symbol": canonical_symbol,
+                    "invocation": row.invocation.value if row.invocation else None,
+                    "receiver_candidates": receiver_candidates,
+                    "reason_code": row.reason_code,
+                    "audit_status": row.audit_status.value,
+                    "contract_id": row.contract_id,
+                    "arguments": [
+                        a.model_dump(mode="json") for a in arguments_by_line.get(row.line, ())
+                    ],
+                }
+            )
+        output = {
+            "schema_version": 1,
+            "probe_id": "gh97-motor-typed-binding-v1",
+            "scope": (
+                "exact artifacts only; static source and analyzer audit; "
+                "no upstream import/execution"
+            ),
+            "python": platform.python_version(),
+            "mypy": analyzer.resolver_version,
+            "analyzer_revision": checkout_revision(repo),
+            "runner_sha256": digest_file(Path(__file__)),
+            "analysis_config": {
+                "max_depth": 1,
+                "track_transitive": False,
+                "audit_cache_enabled": False,
+            },
+            "product_import": product_path.relative_to(repo).as_posix(),
+            "product_module_paths": product_paths,
+            "artifact_hashes": artifact_meta,
+            "extracted_python_source_hashes": extracted,
+            "fixture_sha256": sha(fixture.encode()),
+            "analyzer_source_hashes": {
+                str(p.relative_to(repo)): digest_file(p) for p in analyzer_paths
+            },
+            "preset": {
+                "selector": "mongodb-v1",
+                "sha256": digest_file(preset_path),
+                "contract_ids": [c.id for c in loaded.document.contracts],
+                "symbols": [c.symbol for c in loaded.document.contracts],
+            },
+            "classification": {
+                "exact_resolution_and_audit_binding": sum(
+                    r["audit_status"] == "matched" for r in occurrences
+                ),
+                "unsupported_or_ambiguous_resolution": sum(
+                    r["resolver_status"] in {"unresolved", "ambiguous"} for r in occurrences
+                ),
+                "resolved_but_unmatched": sum(
+                    r["audit_status"] == "unmatched" for r in occurrences
+                ),
+                "all_calls": len(occurrences),
+            },
+            "occurrences": occurrences,
+            "limitation": (
+                "A match requires canonical exact symbol plus contract audit; "
+                "descriptor declarations are not treated as public bindings."
+            ),
+        }
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(output, indent=2, sort_keys=True) + "\n")
+    print(json.dumps(output["classification"], sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
