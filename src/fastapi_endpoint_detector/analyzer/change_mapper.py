@@ -562,6 +562,8 @@ class ChangeMapper:
             app_path,
             self._surface_contracts,
             bootstrap_entry=self.bootstrap_entry,
+            app_variable=self.app_variable,
+            app_entry=self.app_entry,
         ).extract_inventory()
         return merge_surface_inventory(native, custom)
 

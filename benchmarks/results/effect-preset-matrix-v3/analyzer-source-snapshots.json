@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "snapshot_id": "gh97-analyzer-source-snapshot-v1",
+  "source_files": [
+    {
+      "path": "benchmarks/providers/effect_preset_matrix.py",
+      "sha256": "52152e8cff81d8f594b4413cc88d4e932053a81c4b11fa1b36befe485fe1adb4"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/analyzer/effect_contract_auditor.py",
+      "sha256": "c6ecd7210e7c4fc054010c80e9df0961b1510fd9cb9599faa49a27e751258d57"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/analyzer/mypy_analyzer.py",
+      "sha256": "2725b79f15a2d91bd95d3700b33696dff2c2888718ba78d57189cbd2a8af33be"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/models/effect_contract.py",
+      "sha256": "392c7024633ea0d309447c1991f96d0f2293d52732371797538ca2f0637f92d8"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/models/endpoint.py",
+      "sha256": "d5a01763444a26da525f3320d7adab34df281407073b80a5b1a755c737c1ffa7"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/strict_data.py",
+      "sha256": "ba4b87f249f2e54a5ce4b507a3cbd4871d00ee03f6ea2fc44ca5e1a60236ea81"
+    }
+  ]
+}

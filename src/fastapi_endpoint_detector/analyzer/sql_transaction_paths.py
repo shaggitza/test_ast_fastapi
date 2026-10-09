@@ -62,10 +62,17 @@ class _SourceCall:
 class _CallIndexer(ast.NodeVisitor):
     """Index call callee spans without treating nested control flow as straight-line."""
 
-    def __init__(self, file_path: str) -> None:
+    def __init__(
+        self,
+        file_path: str,
+        *,
+        captured_context_receivers: frozenset[tuple[int, int, int, int]] = frozenset(),
+    ) -> None:
         self.file_path = file_path
+        self.captured_context_receivers = captured_context_receivers
         self.qualname: list[str] = []
         self.calls: dict[tuple[int, int, int, int], _SourceCall] = {}
+        self._indexed_context_nodes: set[int] = set()
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         self.qualname.append(node.name)
@@ -82,6 +89,18 @@ class _CallIndexer(ast.NodeVisitor):
         if self.qualname:
             self._record(node, ".".join(self.qualname), None, None, overwrite=False)
         self.generic_visit(node)
+
+    def visit_With(self, node: ast.With) -> None:
+        self._visit_nested_context(node)
+        self.generic_visit(node)
+
+    def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
+        self._visit_nested_context(node)
+        self.generic_visit(node)
+
+    def _visit_nested_context(self, node: ast.With | ast.AsyncWith) -> None:
+        if self.qualname and id(node) not in self._indexed_context_nodes:
+            self._record_context(node, ".".join(self.qualname), None, ())
 
     def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         self.qualname.append(node.name)
@@ -108,6 +127,7 @@ class _CallIndexer(ast.NodeVisitor):
         *,
         context_id: str | None = None,
         context_body_index: int | None = None,
+        receiver_key_override: tuple[str, ...] | None = None,
         overwrite: bool = True,
     ) -> None:
         function = call.func
@@ -119,7 +139,7 @@ class _CallIndexer(ast.NodeVisitor):
             function.end_lineno,
             function.end_col_offset,
         )
-        receiver_key = (
+        receiver_key = receiver_key_override or (
             _receiver_key(function.value) if isinstance(function, ast.Attribute) else None
         )
         record = _SourceCall(
@@ -139,18 +159,60 @@ class _CallIndexer(ast.NodeVisitor):
         if overwrite or key not in self.calls:
             self.calls[key] = record
 
-    def _record_context(
+    def _record_context(  # noqa: PLR0911
         self,
         statement: ast.With | ast.AsyncWith,
         function_name: str,
-        statement_index: int,
-        function_body: tuple[ast.stmt, ...],
+        statement_index: int | None,
+        function_body: tuple[ast.stmt, ...] | None,
     ) -> None:
-        if len(statement.items) != 1 or statement.items[0].optional_vars is not None:
+        self._indexed_context_nodes.add(id(statement))
+        if len(statement.items) != 1:
             return
-        begin = _unwrap_call(statement.items[0].context_expr)
+        item = statement.items[0]
+        begin = _unwrap_call(item.context_expr)
         if begin is None:
             return
+        if item.optional_vars is not None and _target_key(item.optional_vars) is None:
+            return
+        begin_receiver = (
+            _receiver_key(begin.func.value) if isinstance(begin.func, ast.Attribute) else None
+        )
+        function = begin.func
+        if function.end_lineno is None or function.end_col_offset is None:
+            return
+        begin_key = (
+            function.lineno,
+            function.col_offset,
+            function.end_lineno,
+            function.end_col_offset,
+        )
+        captured_receiver = (
+            _target_key(item.optional_vars) if item.optional_vars is not None else None
+        )
+        receiver_is_shadowed = (
+            begin_receiver is not None
+            and captured_receiver is not None
+            and len(captured_receiver) <= len(begin_receiver)
+            and begin_receiver[: len(captured_receiver)] == captured_receiver
+        )
+        receiver_yield_is_authorized = begin_key in self.captured_context_receivers
+        if receiver_yield_is_authorized and captured_receiver is not None:
+            # The exact contract says stages use the value yielded by this
+            # context manager. Prefer that receiver even when the factory
+            # expression itself has a receiver (for example factory.begin()).
+            begin_receiver = captured_receiver
+        elif receiver_is_shadowed:
+            return
+        # `as name` captures __enter__/__aenter__'s yielded value. It can stand
+        # in for the receiver only when the exact begin contract explicitly
+        # declares that the context yields the receiver used by its scoped stage.
+        if begin_receiver is None:
+            if not receiver_yield_is_authorized or item.optional_vars is None:
+                return
+            begin_receiver = captured_receiver
+            if begin_receiver is None:
+                return
         context_id = _semantic_hash(
             {
                 "kind": "sql_context",
@@ -166,6 +228,7 @@ class _CallIndexer(ast.NodeVisitor):
             statement_index,
             function_body,
             context_id=context_id,
+            receiver_key_override=begin_receiver,
         )
         context_body = tuple(statement.body)
         for body_index, body_statement in enumerate(context_body):
@@ -306,7 +369,12 @@ def _safe_source_path(root: Path, relative_path: str) -> Path | None:
     return candidate
 
 
-def _load_call_index(root: Path, file_path: str) -> dict[tuple[int, int, int, int], _SourceCall]:
+def _load_call_index(
+    root: Path,
+    file_path: str,
+    *,
+    captured_context_receivers: frozenset[tuple[int, int, int, int]] = frozenset(),
+) -> dict[tuple[int, int, int, int], _SourceCall]:
     source = _safe_source_path(root, file_path)
     if source is None:
         return {}
@@ -320,7 +388,10 @@ def _load_call_index(root: Path, file_path: str) -> dict[tuple[int, int, int, in
         tree = ast.parse(raw, filename=str(source))
     except (SyntaxError, ValueError):
         return {}
-    indexer = _CallIndexer(file_path)
+    indexer = _CallIndexer(
+        file_path,
+        captured_context_receivers=captured_context_receivers,
+    )
     indexer.visit(tree)
     return indexer.calls
 
@@ -475,7 +546,23 @@ def build_sql_transaction_path_diagnostics(  # noqa: PLR0912, PLR0915
             *evidence.rollback_occurrence_ids,
         )
     }
-    indexes = {file_path: _load_call_index(root, file_path) for file_path in sorted(files)}
+    captured_context_receivers: dict[str, set[tuple[int, int, int, int]]] = {}
+    for evidence in transaction_report.endpoint_evidence:
+        for scope in evidence.begin_scopes:
+            if not scope.stage_receiver_from_yield:
+                continue
+            occurrence = occurrence_by_id[scope.occurrence_id]
+            key = _occurrence_key(occurrence)
+            if key is not None:
+                captured_context_receivers.setdefault(occurrence.file_path, set()).add(key)
+    indexes = {
+        file_path: _load_call_index(
+            root,
+            file_path,
+            captured_context_receivers=frozenset(captured_context_receivers.get(file_path, ())),
+        )
+        for file_path in sorted(files)
+    }
     contexts: dict[str, _SourceCall | None] = {}
     for occurrence_id, occurrence in occurrence_by_id.items():
         key = _occurrence_key(occurrence)

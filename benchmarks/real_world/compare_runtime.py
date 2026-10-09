@@ -189,7 +189,7 @@ def _validate_provenance(value: object, mode: str) -> dict[str, str]:
     return value
 
 
-def _validate(record: dict[str, Any], expected_mode: str) -> None:  # noqa: PLR0912
+def _validate(record: dict[str, Any], expected_mode: str) -> None:
     required = {
         "schema_version",
         "mode",
@@ -212,12 +212,6 @@ def _validate(record: dict[str, Any], expected_mode: str) -> None:  # noqa: PLR0
     if record["status"] not in {"success", "failure"}:
         raise ComparisonError("status must be success or failure")
     configuration = _validate_configuration(record["configuration"])
-    if expected_mode == "runtime" and any(
-        configuration[field] is not None for field in ("app_entry", "bootstrap_entry")
-    ):
-        raise ComparisonError(
-            "runtime records do not support non-null app_entry or bootstrap_entry"
-        )
     provenance = _validate_provenance(record["provenance"], expected_mode)
     if provenance["dependency_lock_sha256"] != configuration["dependency_lock_sha256"]:
         raise ComparisonError("provenance dependency lock does not match configuration")

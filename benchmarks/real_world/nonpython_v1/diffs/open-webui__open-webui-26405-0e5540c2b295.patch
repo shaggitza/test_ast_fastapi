@@ -1,0 +1,21 @@
+From 0e5540c2b295e38906be7ece4d3b104303d6c519 Mon Sep 17 00:00:00 2001
+From: Algorithm5838 <108630393+Algorithm5838@users.noreply.github.com>
+Date: Wed, 1 Jul 2026 11:05:47 +0300
+Subject: [PATCH] fix: derive content from output for search (#26405)
+
+---
+ src/lib/components/chat/Chat.svelte | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/lib/components/chat/Chat.svelte b/src/lib/components/chat/Chat.svelte
+index 8d6b4b1d219c..869ab7a880c5 100644
+--- a/src/lib/components/chat/Chat.svelte
++++ b/src/lib/components/chat/Chat.svelte
+@@ -1961,6 +1961,7 @@
+ 		// Store raw OR-aligned output items from backend
+ 		if (output) {
+ 			message.output = output;
++			message.content = getOutputText(output);
+ 			dispatchCallOverlayAudio(message);
+ 		}
+ 
