@@ -1405,7 +1405,9 @@ class ChangeMapper:
             for side_registry, changed_path, side in (
                 (self.registry, diff_file.path, "target"),
                 (
-                    self.baseline_mypy_registry if self.baseline_app_path is not None else None,
+                    self.baseline_mypy_registry
+                    if self.baseline_app_path is not None and self._baseline_failure is None
+                    else None,
                     diff_file.source_path or diff_file.path,
                     "baseline",
                 ),
@@ -1448,8 +1450,7 @@ class ChangeMapper:
                     )
 
         # Native route registrations and exact include/mount/object occurrences own
-        # their materialized descendants. Only target additions are queried here:
-        # removed coordinates require the explicit baseline path handled by SCIP.
+        # their materialized descendants. Each side uses its own coordinates.
         for endpoint, kinds, overlap in self.registry.get_structural_overlaps(
             diff_file.path, set(added_lines)
         ):
@@ -1519,9 +1520,44 @@ class ChangeMapper:
 
         # Removals are interpreted exclusively against an independently built
         # baseline graph. Without a baseline, leave them unresolved for reporting.
-        if removed_lines and self.baseline_app_path is not None:
+        if removed_lines and self.baseline_app_path is not None and self._baseline_failure is None:
             source_path = diff_file.source_path or diff_file.path
             baseline_file = diff_file.model_copy(update={"path": source_path})
+            for endpoint, kinds, overlap in self.baseline_mypy_registry.get_structural_overlaps(
+                source_path, set(removed_lines)
+            ):
+                _merge_affected(
+                    affected,
+                    AffectedEndpoint(
+                        endpoint=self._target_equivalent_endpoint(endpoint),
+                        confidence=ConfidenceLevel.HIGH,
+                        reason=(
+                            "Native baseline route assembly occurrence removed "
+                            f"({', '.join(kinds)}) in {source_path}"
+                        ),
+                        dependency_chain=[str(source_path), *kinds],
+                        changed_files=[str(source_path)],
+                        effect_evidence=[
+                            EffectEvidence(
+                                producer=EvidenceProducer.STRUCTURAL,
+                                status=EvidenceStatus.ESTABLISHED,
+                                effect=ChangeEffectKind.ROUTE_ASSEMBLY,
+                                channel=ImpactChannel.UNKNOWN,
+                                disposition=EffectDisposition.INTERNAL_EFFECT,
+                                summary=(
+                                    "Removed source overlaps exact secure-AST route assembly "
+                                    "provenance in the independent baseline snapshot."
+                                ),
+                                changed_location=CodeReference(
+                                    file_path=str(source_path),
+                                    line_number=min(overlap),
+                                    symbol=", ".join(kinds),
+                                ),
+                            )
+                        ],
+                    ),
+                )
+                processed_removed_lines.update(overlap)
             for endpoint in self.baseline_mypy_registry:
                 result = self._check_mypy_dependency(
                     endpoint, baseline_file, [], removed_lines, self.baseline_mypy_analyzer
@@ -2135,6 +2171,10 @@ class ChangeMapper:
             )
         elif has_mypy_removals and self.baseline_app_path is not None:
             try:
+                if not self.baseline_app_path.exists():
+                    raise FileNotFoundError(
+                        f"Baseline snapshot does not exist: {self.baseline_app_path}"
+                    )
                 self._preanalyze_mypy_registry(
                     self.baseline_mypy_registry, self.baseline_mypy_analyzer, progress_callback
                 )
