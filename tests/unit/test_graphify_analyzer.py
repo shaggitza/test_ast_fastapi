@@ -1,0 +1,657 @@
+"""Offline integration tests for Graphify evidence overlay traversal."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import replace
+from inspect import signature
+from pathlib import Path
+
+import pytest
+
+from fastapi_endpoint_detector.analyzer.graphify_adapter import (
+    GraphifyAdapterError,
+    GraphifyEdge,
+    GraphifySourceSpan,
+    GraphSide,
+    load_graphify_snapshot,
+)
+from fastapi_endpoint_detector.analyzer.graphify_analyzer import (
+    ChangedSourceRange,
+    GraphEndpointSeed,
+    traverse_graphify_sides,
+    traverse_graphify_snapshot,
+)
+from fastapi_endpoint_detector.models.endpoint import EndpointDiscoveryStatus
+
+
+def _write_project(root: Path, *, deleted_file: bool = False) -> Path:
+    root.mkdir()
+    (root / "routes.py").write_text("def endpoint():\n    return alias()\n", encoding="utf-8")
+    if not deleted_file:
+        (root / "legacy.py").write_text("def alias():\n    return helper()\n", encoding="utf-8")
+    (root / "service.py").write_text(
+        "def helper():\n    return 1\n\ndef helper_method():\n    return 2\n",
+        encoding="utf-8",
+    )
+    return root
+
+
+def _graph(
+    path: Path,
+    *,
+    legacy: bool = True,
+    duplicate_endpoint: bool = False,
+    edge_strength: str = "EXTRACTED",
+) -> None:
+    nodes = [
+        {
+            "id": "route_file",
+            "label": "routes.py",
+            "file_type": "code",
+            "source_file": "routes.py",
+        },
+        {
+            "id": "endpoint",
+            "label": "endpoint",
+            "file_type": "code",
+            "source_file": "routes.py",
+            "source_location": "L1-L2",
+        },
+        {
+            "id": "helper",
+            "label": "helper",
+            "file_type": "code",
+            "source_file": "service.py",
+            "source_location": "L1-L2",
+        },
+        {
+            "id": "helper_method",
+            "label": "helper_method",
+            "file_type": "code",
+            "source_file": "service.py",
+            "source_location": "L4-L5",
+        },
+    ]
+    links = [
+        {
+            "source": "endpoint",
+            "target": "alias",
+            "relation": "calls",
+            "confidence": edge_strength,
+            "source_file": "routes.py",
+            "source_location": "L2",
+        },
+        {
+            "source": "alias",
+            "target": "helper",
+            "relation": "calls",
+            "confidence": edge_strength,
+            "source_file": "legacy.py",
+            "source_location": "L2",
+        },
+    ]
+    if legacy:
+        nodes.append(
+            {
+                "id": "alias",
+                "label": "alias",
+                "file_type": "code",
+                "source_file": "legacy.py",
+                "source_location": "L1-L2",
+            }
+        )
+    if duplicate_endpoint:
+        nodes.append(
+            {
+                "id": "endpoint_duplicate",
+                "label": "endpoint",
+                "file_type": "code",
+                "source_file": "routes.py",
+                "source_location": "L1-L2",
+            }
+        )
+    payload = {
+        "directed": True,
+        "multigraph": True,
+        "graph": {},
+        "hyperedges": [],
+        "built_at_commit": "1" * 40,
+        "nodes": nodes,
+        "links": links if legacy else [],
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _load(root: Path, graph: Path, side: GraphSide = "target"):
+    return load_graphify_snapshot(graph, project_root=root, side=side)
+
+
+def _line_only_snapshot(snapshot):
+    def line_span(span: GraphifySourceSpan | None) -> GraphifySourceSpan | None:
+        if span is None:
+            return None
+        return replace(span, end_line=span.start_line)
+
+    return replace(
+        snapshot,
+        graph_schema_version=2,
+        nodes=tuple(replace(node, span=line_span(node.span)) for node in snapshot.nodes),
+        edges=tuple(replace(edge, span=line_span(edge.span)) for edge in snapshot.edges),
+    )
+
+
+def _seed() -> GraphEndpointSeed:
+    return GraphEndpointSeed(
+        "GET /items", "endpoint", Path("routes.py"), 1, 2, EndpointDiscoveryStatus.ESTABLISHED
+    )
+
+
+@pytest.mark.integration
+def test_reverse_traversal_tracks_cross_file_alias_and_exact_method_range(tmp_path: Path) -> None:
+    root = _write_project(tmp_path / "target")
+    graph = tmp_path / "graph.json"
+    _graph(graph)
+    snapshot = _load(root, graph)
+
+    result = traverse_graphify_snapshot(
+        snapshot,
+        project_root=root,
+        changed_ranges=(ChangedSourceRange(Path("service.py"), 1, 2),),
+        endpoints=(_seed(),),
+    )
+    assert len(result.evidence) == 1
+    assert result.evidence[0].node_path == ("helper", "alias", "endpoint")
+    assert result.evidence[0].relations == ("calls", "calls")
+    assert result.evidence[0].extractor_strengths == ("EXTRACTED", "EXTRACTED")
+    assert result.evidence[0].confidence == "HIGH"
+
+    method_result = traverse_graphify_snapshot(
+        snapshot,
+        project_root=root,
+        changed_ranges=(ChangedSourceRange(Path("service.py"), 4, 5),),
+        endpoints=(_seed(),),
+    )
+    assert method_result.evidence == ()
+
+
+@pytest.mark.integration
+def test_deleted_cross_file_alias_is_evaluated_in_baseline_snapshot(tmp_path: Path) -> None:
+    baseline_root = _write_project(tmp_path / "baseline")
+    target_root = _write_project(tmp_path / "target", deleted_file=True)
+    baseline_graph = tmp_path / "baseline.json"
+    target_graph = tmp_path / "target.json"
+    _graph(baseline_graph)
+    _graph(target_graph, legacy=False)
+    baseline = _load(baseline_root, baseline_graph, "baseline")
+    target = _load(target_root, target_graph, "target")
+    change = (ChangedSourceRange(Path("legacy.py"), 1, 2),)
+
+    pair = traverse_graphify_sides(
+        baseline,
+        target,
+        baseline_project_root=baseline_root,
+        target_project_root=target_root,
+        baseline_changed_ranges=change,
+        target_changed_ranges=(),
+        baseline_endpoints=(_seed(),),
+        target_endpoints=(_seed(),),
+    )
+    assert [item.endpoint_id for item in pair.baseline.evidence] == ["GET /items"]
+    assert pair.target.evidence == ()
+
+
+def test_ambiguous_binding_is_not_guessed_and_conditional_seed_is_low(tmp_path: Path) -> None:
+    root = _write_project(tmp_path / "target")
+    graph = tmp_path / "graph.json"
+    _graph(graph, duplicate_endpoint=True)
+    snapshot = _load(root, graph)
+    result = traverse_graphify_snapshot(
+        snapshot,
+        project_root=root,
+        changed_ranges=(ChangedSourceRange(Path("service.py"), 1, 2),),
+        endpoints=(_seed(),),
+    )
+    assert result.evidence == ()
+    assert any(
+        "ambiguous endpoint binding (LOW, not guessed)" in item for item in result.limitations
+    )
+
+    conditional = GraphEndpointSeed(
+        "GET /items", "endpoint", Path("routes.py"), 1, 2, EndpointDiscoveryStatus.CONDITIONAL
+    )
+    clean_graph = tmp_path / "graph-clean.json"
+    _graph(clean_graph)
+    conditional_result = traverse_graphify_snapshot(
+        _load(root, clean_graph),
+        project_root=root,
+        changed_ranges=(ChangedSourceRange(Path("service.py"), 1, 2),),
+        endpoints=(conditional,),
+    )
+    assert len(conditional_result.evidence) == 1
+    assert conditional_result.evidence[0].confidence == "LOW"
+    assert conditional_result.evidence[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+
+
+def test_raw_line_only_binding_preserves_location_and_stays_low(tmp_path: Path) -> None:
+    root = _write_project(tmp_path / "target")
+    graph = tmp_path / "graph.json"
+    _graph(graph)
+    snapshot = _line_only_snapshot(_load(root, graph))
+
+    result = traverse_graphify_snapshot(
+        snapshot,
+        project_root=root,
+        changed_ranges=(ChangedSourceRange(Path("service.py"), 1, 2),),
+        endpoints=(_seed(),),
+    )
+
+    assert len(result.evidence) == 1
+    evidence = result.evidence[0]
+    assert evidence.node_path == ("helper", "alias", "endpoint")
+    assert [
+        (span.file_path, span.start_line, span.end_line)
+        for span in evidence.node_source_spans
+        if span is not None
+    ] == [
+        (Path("service.py"), 1, 1),
+        (Path("legacy.py"), 1, 1),
+        (Path("routes.py"), 1, 1),
+    ]
+    assert all(
+        span is not None and span.start_line == span.end_line for span in evidence.edge_source_spans
+    )
+    assert evidence.confidence == "LOW"
+    assert evidence.limitations
+    assert all("without widening or confidence promotion" in item for item in evidence.limitations)
+    assert set(evidence.limitations).issubset(result.limitations)
+
+
+def test_ambiguous_raw_line_only_binding_is_not_guessed(tmp_path: Path) -> None:
+    root = _write_project(tmp_path / "target")
+    graph = tmp_path / "graph.json"
+    _graph(graph, duplicate_endpoint=True)
+    snapshot = _line_only_snapshot(_load(root, graph))
+
+    result = traverse_graphify_snapshot(
+        snapshot,
+        project_root=root,
+        changed_ranges=(ChangedSourceRange(Path("service.py"), 1, 2),),
+        endpoints=(_seed(),),
+    )
+
+    assert result.evidence == ()
+    assert any("ambiguous endpoint binding" in item for item in result.limitations)
+
+
+def test_parallel_edge_witnesses_are_preserved_and_order_independent(tmp_path: Path) -> None:
+    root = _write_project(tmp_path / "target")
+    graph = tmp_path / "graph.json"
+    _graph(graph)
+    payload = json.loads(graph.read_text(encoding="utf-8"))
+    parallel = dict(payload["links"][1])
+    parallel["confidence"] = "AMBIGUOUS"
+    parallel["key"] = "parallel-call"
+    payload["links"].append(parallel)
+    keyed_occurrence_supported = "edge_key" in GraphifyEdge.__dataclass_fields__
+    if keyed_occurrence_supported:
+        same_strength_parallel = dict(payload["links"][1])
+        same_strength_parallel["key"] = "same-strength-parallel"
+        payload["links"].append(same_strength_parallel)
+    graph.write_text(json.dumps(payload), encoding="utf-8")
+    forward = traverse_graphify_snapshot(
+        _load(root, graph),
+        project_root=root,
+        changed_ranges=(ChangedSourceRange(Path("service.py"), 1, 2),),
+        endpoints=(_seed(),),
+    )
+
+    payload["links"].reverse()
+    reversed_graph = tmp_path / "reversed.json"
+    reversed_graph.write_text(json.dumps(payload), encoding="utf-8")
+    reverse = traverse_graphify_snapshot(
+        _load(root, reversed_graph),
+        project_root=root,
+        changed_ranges=(ChangedSourceRange(Path("service.py"), 1, 2),),
+        endpoints=(_seed(),),
+    )
+
+    def signature(result):
+        return tuple(
+            (
+                item.node_path,
+                item.edge_source_spans,
+                item.extractor_strengths,
+                item.edge_keys,
+                item.confidence,
+            )
+            for item in result.evidence
+        )
+
+    assert len(forward.evidence) == (3 if keyed_occurrence_supported else 2)
+    assert signature(forward) == signature(reverse)
+    assert {item.confidence for item in forward.evidence} == {"HIGH", "LOW"}
+    assert {item.extractor_strengths[0] for item in forward.evidence} == {
+        "EXTRACTED",
+        "AMBIGUOUS",
+    }
+    preserved_edge_keys = {key for item in forward.evidence for key in item.edge_keys}
+    if any(key is not None for key in preserved_edge_keys):
+        assert {"parallel-call", "same-strength-parallel"}.issubset(preserved_edge_keys)
+
+
+@pytest.mark.integration
+def test_raw_context_identity_survives_adapter_and_analyzer(tmp_path: Path) -> None:
+    if (
+        "schema" not in signature(load_graphify_snapshot).parameters
+        or "context_identity" not in GraphifyEdge.__dataclass_fields__
+    ):
+        pytest.skip("requires PR #332 raw context-identity adapter interface")
+
+    root = _write_project(tmp_path / "target")
+    payload = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "hyperedges": [],
+        "nodes": [
+            {
+                "id": "endpoint",
+                "label": "endpoint",
+                "file_type": "code",
+                "source_file": "routes.py",
+                "source_location": "L1",
+            },
+            {
+                "id": "alias",
+                "label": "alias",
+                "file_type": "code",
+                "source_file": "legacy.py",
+                "source_location": "L1",
+            },
+            {
+                "id": "helper",
+                "label": "helper",
+                "file_type": "code",
+                "source_file": "service.py",
+                "source_location": "L1",
+            },
+        ],
+        "edges": [
+            {
+                "source": "endpoint",
+                "target": "alias",
+                "relation": "calls",
+                "confidence": "EXTRACTED",
+                "source_file": "routes.py",
+                "source_location": "L2",
+                "context": "route invocation",
+            },
+            {
+                "source": "endpoint",
+                "target": "alias",
+                "relation": "calls",
+                "confidence": "EXTRACTED",
+                "source_file": "routes.py",
+                "source_location": "L2",
+                "context": "dependency registration",
+            },
+            {
+                "source": "alias",
+                "target": "helper",
+                "relation": "calls",
+                "confidence": "EXTRACTED",
+                "source_file": "legacy.py",
+                "source_location": "L2",
+            },
+        ],
+    }
+    graph = tmp_path / "raw-context.json"
+    graph.write_text(json.dumps(payload), encoding="utf-8")
+    snapshot = load_graphify_snapshot(
+        graph,
+        project_root=root,
+        side="target",
+        schema="graphify-raw-0.9.30-v1",
+    )
+
+    result = traverse_graphify_snapshot(
+        snapshot,
+        project_root=root,
+        changed_ranges=(ChangedSourceRange(Path("service.py"), 1, 2),),
+        endpoints=(_seed(),),
+    )
+
+    assert len(result.evidence) == 2
+    assert len({item.edge_context_identities for item in result.evidence}) == 2
+    assert all(item.edge_context_identities[-1] is not None for item in result.evidence)
+    assert {item.node_path for item in result.evidence} == {("helper", "alias", "endpoint")}
+
+    duplicate_payload = dict(payload)
+    duplicate_payload["edges"] = [*payload["edges"], dict(payload["edges"][0])]
+    duplicate_graph = tmp_path / "raw-identical-context.json"
+    duplicate_graph.write_text(json.dumps(duplicate_payload), encoding="utf-8")
+    with pytest.raises(GraphifyAdapterError, match="duplicates an identical raw edge occurrence"):
+        load_graphify_snapshot(
+            duplicate_graph,
+            project_root=root,
+            side="target",
+            schema="graphify-raw-0.9.30-v1",
+        )
+
+
+def test_shared_handler_node_retains_each_secure_endpoint_seed(tmp_path: Path) -> None:
+    root = _write_project(tmp_path / "target")
+    graph = tmp_path / "graph.json"
+    _graph(graph)
+    seeds = (
+        _seed(),
+        GraphEndpointSeed(
+            "POST /items",
+            "endpoint",
+            Path("routes.py"),
+            1,
+            2,
+            EndpointDiscoveryStatus.ESTABLISHED,
+        ),
+    )
+
+    result = traverse_graphify_snapshot(
+        _load(root, graph),
+        project_root=root,
+        changed_ranges=(ChangedSourceRange(Path("service.py"), 1, 2),),
+        endpoints=seeds,
+    )
+
+    assert [item.endpoint_id for item in result.evidence] == ["GET /items", "POST /items"]
+
+
+def test_conflicting_duplicate_endpoint_id_is_rejected(tmp_path: Path) -> None:
+    root = _write_project(tmp_path / "target")
+    graph = tmp_path / "graph.json"
+    _graph(graph)
+    conditional = GraphEndpointSeed(
+        "GET /items", "endpoint", Path("routes.py"), 1, 2, EndpointDiscoveryStatus.CONDITIONAL
+    )
+
+    with pytest.raises(ValueError, match="conflicting endpoint seeds share endpoint_id"):
+        traverse_graphify_snapshot(
+            _load(root, graph),
+            project_root=root,
+            changed_ranges=(ChangedSourceRange(Path("service.py"), 1, 2),),
+            endpoints=(_seed(), conditional),
+        )
+
+
+@pytest.mark.parametrize("relation", ["imports", "inherits", "references"])
+def test_reverse_traversal_accepts_source_backed_non_call_relations(
+    tmp_path: Path, relation: str
+) -> None:
+    root = _write_project(tmp_path / "target")
+    graph = tmp_path / "graph.json"
+    _graph(graph)
+    payload = json.loads(graph.read_text(encoding="utf-8"))
+    payload["links"] = [
+        {
+            "source": "endpoint",
+            "target": "helper",
+            "relation": relation,
+            "confidence": "EXTRACTED",
+            "source_file": "routes.py",
+            "source_location": "L2",
+        }
+    ]
+    graph.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = traverse_graphify_snapshot(
+        _load(root, graph),
+        project_root=root,
+        changed_ranges=(ChangedSourceRange(Path("service.py"), 1, 2),),
+        endpoints=(_seed(),),
+    )
+
+    assert len(result.evidence) == 1
+    assert result.evidence[0].relations == (relation,)
+
+
+def test_cycle_and_depth_limits_are_reported(tmp_path: Path) -> None:
+    root = _write_project(tmp_path / "target")
+    graph = tmp_path / "graph.json"
+    _graph(graph)
+    payload = json.loads(graph.read_text(encoding="utf-8"))
+    payload["nodes"].append(
+        {
+            "id": "upstream",
+            "label": "upstream",
+            "file_type": "code",
+            "source_file": "routes.py",
+            "source_location": "L2",
+        }
+    )
+    payload["links"].append(
+        {
+            "source": "helper",
+            "target": "endpoint",
+            "relation": "calls",
+            "confidence": "EXTRACTED",
+            "source_file": "service.py",
+            "source_location": "L1",
+        }
+    )
+    payload["links"].append(
+        {
+            "source": "upstream",
+            "target": "endpoint",
+            "relation": "calls",
+            "confidence": "EXTRACTED",
+            "source_file": "routes.py",
+            "source_location": "L2",
+        }
+    )
+    graph.write_text(json.dumps(payload), encoding="utf-8")
+    snapshot = _load(root, graph)
+
+    cycle_result = traverse_graphify_snapshot(
+        snapshot,
+        project_root=root,
+        changed_ranges=(ChangedSourceRange(Path("service.py"), 1, 2),),
+        endpoints=(_seed(),),
+    )
+    depth_result = traverse_graphify_snapshot(
+        snapshot,
+        project_root=root,
+        changed_ranges=(ChangedSourceRange(Path("service.py"), 1, 2),),
+        endpoints=(_seed(),),
+        max_depth=1,
+    )
+    truncated_evidence_result = traverse_graphify_snapshot(
+        snapshot,
+        project_root=root,
+        changed_ranges=(ChangedSourceRange(Path("service.py"), 1, 2),),
+        endpoints=(_seed(),),
+        max_depth=2,
+    )
+
+    assert len(cycle_result.evidence) == 1
+    assert any("cycle edge skipped" in item for item in cycle_result.limitations)
+    assert depth_result.evidence == ()
+    assert any("maximum traversal depth reached" in item for item in depth_result.limitations)
+    assert len(truncated_evidence_result.evidence) == 1
+    assert truncated_evidence_result.evidence[0].confidence == "LOW"
+    assert truncated_evidence_result.evidence[0].incomplete is True
+    assert any(
+        "maximum traversal depth reached" in item for item in truncated_evidence_result.limitations
+    )
+
+
+def test_queue_cap_is_preallocation_bounded_and_marks_evidence_incomplete(tmp_path: Path) -> None:
+    root = _write_project(tmp_path / "target")
+    graph = tmp_path / "graph.json"
+    _graph(graph)
+    payload = json.loads(graph.read_text(encoding="utf-8"))
+    payload["links"].append(
+        {
+            "source": "endpoint",
+            "target": "helper",
+            "relation": "calls",
+            "confidence": "EXTRACTED",
+            "source_file": "routes.py",
+            "source_location": "L2",
+        }
+    )
+    graph.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = traverse_graphify_snapshot(
+        _load(root, graph),
+        project_root=root,
+        changed_ranges=(ChangedSourceRange(Path("service.py"), 1, 2),),
+        endpoints=(_seed(),),
+        max_queued_witnesses=1,
+    )
+
+    assert len(result.evidence) == 1
+    evidence = result.evidence[0]
+    assert evidence.confidence == "LOW"
+    assert evidence.incomplete is True
+    assert any("traversal incomplete" in item for item in evidence.limitations)
+    assert any("maximum queued path-witness cap reached (1)" in item for item in result.limitations)
+
+
+@pytest.mark.parametrize(
+    ("strength", "expected_confidence"),
+    [("INFERRED", "MEDIUM"), ("AMBIGUOUS", "LOW")],
+)
+def test_extractor_strength_stays_distinct_from_overlay_confidence(
+    tmp_path: Path, strength: str, expected_confidence: str
+) -> None:
+    root = _write_project(tmp_path / "target")
+    graph = tmp_path / "graph.json"
+    _graph(graph, edge_strength=strength)
+    result = traverse_graphify_snapshot(
+        _load(root, graph),
+        project_root=root,
+        changed_ranges=(ChangedSourceRange(Path("service.py"), 1, 2),),
+        endpoints=(_seed(),),
+    )
+    assert result.evidence[0].extractor_strengths == (strength, strength)
+    assert result.evidence[0].confidence == expected_confidence
+
+
+def test_capped_traversal_returns_explicit_limitation(tmp_path: Path) -> None:
+    root = _write_project(tmp_path / "target")
+    graph = tmp_path / "graph.json"
+    _graph(graph)
+    result = traverse_graphify_snapshot(
+        _load(root, graph),
+        project_root=root,
+        changed_ranges=(ChangedSourceRange(Path("service.py"), 1, 2),),
+        endpoints=(_seed(),),
+        max_visited_nodes=1,
+    )
+    assert result.evidence == ()
+    assert result.visited_nodes == 1
+    assert result.limitations == ("maximum visited-node cap reached (1)",)
+
+
+def test_rejects_invalid_ranges_and_traversal_bounds() -> None:
+    with pytest.raises(ValueError, match="positive and ordered"):
+        ChangedSourceRange(Path("x.py"), 3, 2)
