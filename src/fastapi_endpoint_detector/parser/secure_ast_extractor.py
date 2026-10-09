@@ -5999,7 +5999,7 @@ def _effective_literal_all_export(  # noqa: PLR0912 - conservative binding inter
                 if any(
                     isinstance(node, ast.Name)
                     and node.id == "__all__"
-                    and isinstance(node.ctx, ast.Load)
+                    and isinstance(node.ctx, (ast.Load, ast.Store, ast.Del))
                     for node in ast.walk(statement.annotation)
                 ):
                     # Module-scope annotations execute unless postponed; do not
@@ -6033,10 +6033,18 @@ def _effective_literal_all_export(  # noqa: PLR0912 - conservative binding inter
         if isinstance(statement, ast.AugAssign) and "__all__" in _bound_names(statement.target):
             effective = None
             continue
+        annotation_only_target_ids = {
+            id(node.target)
+            for node in ast.walk(statement)
+            if isinstance(node, ast.AnnAssign)
+            and node.value is None
+            and isinstance(node.target, ast.Name)
+        }
         if any(
             (
                 isinstance(node, ast.Name)
                 and node.id == "__all__"
+                and id(node) not in annotation_only_target_ids
                 and isinstance(node.ctx, (ast.Load, ast.Store, ast.Del))
             )
             or (isinstance(node, ast.ExceptHandler) and node.name == "__all__")
@@ -6064,6 +6072,8 @@ def _statement_may_bind_name(node: ast.stmt, name: str) -> bool:  # noqa: PLR091
             alias.name == "*" or (alias.asname or alias.name) == name for alias in node.names
         )
     if isinstance(node, (ast.Assign, ast.AnnAssign)):
+        if isinstance(node, ast.AnnAssign) and node.value is None:
+            return False
         targets = [node.target] if isinstance(node, ast.AnnAssign) else node.targets
         return any(name in _bound_names(target) for target in targets)
     if isinstance(node, (ast.For, ast.AsyncFor)) and name in _bound_names(node.target):
