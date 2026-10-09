@@ -1036,7 +1036,7 @@ def _exchange(path: Path, payload: dict[str, object]) -> dict[str, Any]:
             try:
                 client.connect(str(path))
                 break
-            except FileNotFoundError:
+            except (ConnectionRefusedError, FileNotFoundError):
                 if time.monotonic() >= deadline:
                     raise
                 time.sleep(0.01)
@@ -1053,6 +1053,30 @@ def _exchange(path: Path, payload: dict[str, object]) -> dict[str, Any]:
             chunks.extend(chunk)
     value = json.loads(bytes(chunks))
     return cast("dict[str, Any]", value)
+
+
+def test_exchange_waits_for_bound_socket_to_listen(tmp_path: Path) -> None:
+    socket_path = tmp_path / "delayed-listen.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(socket_path))
+    response = {"ok": True}
+
+    def start_listening() -> None:
+        time.sleep(0.05)
+        listener.listen(1)
+        with listener.accept()[0] as connection:
+            connection.recv(4096)
+            raw = canonical_json(response)
+            connection.sendall(struct.pack("!I", len(raw)) + raw)
+
+    thread = threading.Thread(target=start_listening)
+    thread.start()
+    try:
+        assert _exchange(socket_path, {"request": True}) == response
+    finally:
+        thread.join(timeout=5)
+        listener.close()
+    assert not thread.is_alive()
 
 
 def _serve_thread(

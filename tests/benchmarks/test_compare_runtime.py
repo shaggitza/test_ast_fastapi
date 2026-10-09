@@ -181,18 +181,26 @@ def test_failure_phase_abstains_from_quality_metrics(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("field", ["app_entry", "bootstrap_entry"])
-def test_runtime_rejects_unsupported_entry_selection(tmp_path: Path, field: str) -> None:
+def test_runtime_entry_selection_is_operational_abstention(tmp_path: Path, field: str) -> None:
     secure = tmp_path / "secure.json"
     runtime = tmp_path / "runtime.json"
     secure_record = _record("secure")
     runtime_record = _record("runtime")
     secure_record["configuration"][field] = "main:create_app"
     runtime_record["configuration"][field] = "main:create_app"
+    runtime_record.update(
+        status="failure",
+        failure={"phase": "app_resolution", "message": "runtime entry support unavailable"},
+        inventory=None,
+        impact=None,
+    )
     _write(secure, secure_record)
     _write(runtime, runtime_record)
 
-    with pytest.raises(ComparisonError, match="do not support"):
-        compare(secure, runtime)
+    result = compare(secure, runtime)
+    assert result["paired_success"] is False
+    assert result["quality_eligible"] is False
+    assert result["failure"]["runtime"]["phase"] == "app_resolution"
 
 
 @pytest.mark.parametrize("mode", ["secure", "runtime"])

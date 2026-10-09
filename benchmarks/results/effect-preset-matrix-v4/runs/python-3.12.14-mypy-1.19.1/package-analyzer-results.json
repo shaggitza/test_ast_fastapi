@@ -1,0 +1,1245 @@
+{
+  "schema_version": 4,
+  "result_id": "gh97-package-selector-binding-results-v4",
+  "status": "completed",
+  "scope": "source-derived signature surfaces, contract-selected argument binding, and same-name negatives; installed package compatibility not evaluated",
+  "manifest_sha256": "sha256:f90c11bb5eeb2e5a4d60607438f24d4070be4c84506787e73c1b06903833df1d",
+  "case_fixture_sha256": "sha256:43559a77799b08d4d8e642a91a13539944adf7413690fab2e5ffadd380d9c68e",
+  "analyzer_snapshot_sha256": "sha256:9ce7015755f9e2027f9ea1b08fdf58dbb21cd0f0b76c5dcd594070a6cc4d2a98",
+  "python_version": "3.12.14",
+  "resolver_version": "1.19.1",
+  "source_execution": false,
+  "upstream_package_code_imported_or_executed": false,
+  "cases": [
+    {
+      "fixture_sha256": "sha256:b191a5ed95e14352b97d0bf48f5a49de2a8267ef7df28caaeee98e729d99cc72",
+      "resolver_version": "1.19.1",
+      "signature_evidence": {
+        "source_report_sha256": "sha256:aabb58de11b9084caca5c39052ef625d49d681c83805914642eb345b49fe74f1",
+        "source_path": "requests/sessions.py",
+        "source_sha256": "sha256:ca44c8f145864a5b4e7c7d3b1caa25947ee44c11b0e168620556901a67244f0e",
+        "source_signature": "(self, url, **kwargs)",
+        "selector_source_path": "requests/sessions.py",
+        "selector_source_sha256": "sha256:ca44c8f145864a5b4e7c7d3b1caa25947ee44c11b0e168620556901a67244f0e",
+        "selector_kind": "callable_parameters",
+        "selector_parameters": [
+          "url"
+        ],
+        "selector_required_parameters": [
+          "url"
+        ]
+      },
+      "generated_signature": "def method(self, url, **kwargs) -> object: ...",
+      "selector_bindings": [
+        {
+          "role": "resource",
+          "component": null,
+          "kind": "argument",
+          "index": 0,
+          "name": null,
+          "path": [],
+          "binding_status": "present",
+          "argument_index": 0
+        }
+      ],
+      "selector_binding_issue": null,
+      "observations": [
+        {
+          "id": "sha256:5b0a0875868c00327854141e691773ab63cb9968554c7540ebce3382bd3cdacf",
+          "file_path": "main.py",
+          "line": 7,
+          "column": 4,
+          "end_line": 7,
+          "end_column": 14,
+          "source_spelling": "client.get",
+          "resolver_status": "exact",
+          "audit_status": "matched",
+          "canonical_symbol": "requests.sessions.Session.get",
+          "invocation": "instance_method",
+          "resolver": "mypy",
+          "resolver_version": "1.19.1",
+          "receiver_candidates": [
+            "requests.sessions.Session"
+          ],
+          "reason_code": null,
+          "receiver_origin": {
+            "schema_version": 1,
+            "status": "unavailable",
+            "value_hashes": [],
+            "reason_code": "receiver_origin_unavailable"
+          },
+          "resource_identity": {
+            "schema_version": 1,
+            "status": "exact",
+            "value_hashes": [
+              "sha256:73bf204e45bc49ec9f5f38e2ddcdf9458bc37f082285627980ed87e16f98dbf3"
+            ],
+            "reason_code": null
+          },
+          "contract_id": "requests-session-get",
+          "contract_hash": "sha256:bec5cd225a5655cb86ebff9650ed8a683a39d3ace17128bf96bb9fa16c92846a",
+          "arguments": [
+            {
+              "source_index": 0,
+              "positional_index": 0,
+              "keyword": null,
+              "status": "exact",
+              "value_hashes": [
+                "sha256:73bf204e45bc49ec9f5f38e2ddcdf9458bc37f082285627980ed87e16f98dbf3"
+              ],
+              "reason_code": null
+            }
+          ],
+          "control_class": "positive_or_neutral"
+        },
+        {
+          "id": "sha256:25d4d1be7efeafe605ba11c8622f974b7a8293c13bc8b6b4849a602fc00484d0",
+          "file_path": "main.py",
+          "line": 8,
+          "column": 4,
+          "end_line": 8,
+          "end_column": 15,
+          "source_spelling": "foreign.get",
+          "resolver_status": "exact",
+          "audit_status": "unmatched",
+          "canonical_symbol": "main.Foreign.get",
+          "invocation": "instance_method",
+          "resolver": "mypy",
+          "resolver_version": "1.19.1",
+          "receiver_candidates": [
+            "main.Foreign"
+          ],
+          "reason_code": null,
+          "receiver_origin": {
+            "schema_version": 1,
+            "status": "unavailable",
+            "value_hashes": [],
+            "reason_code": "receiver_origin_unavailable"
+          },
+          "resource_identity": null,
+          "contract_id": null,
+          "contract_hash": null,
+          "arguments": [
+            {
+              "source_index": 0,
+              "positional_index": 0,
+              "keyword": null,
+              "status": "exact",
+              "value_hashes": [
+                "sha256:73bf204e45bc49ec9f5f38e2ddcdf9458bc37f082285627980ed87e16f98dbf3"
+              ],
+              "reason_code": null
+            }
+          ],
+          "control_class": "unrelated_same_name_negative"
+        }
+      ],
+      "case_id": "requests-session-get-exact-release-symbol",
+      "distribution": "requests",
+      "version": "2.32.3",
+      "artifact_sha256": "sha256:70761cfe03c773ceb22aa2f671b4757976145175cdfca038c02654d061d6dcc6",
+      "symbol": "requests.sessions.Session.get",
+      "contract_id": "requests-session-get",
+      "preset_id": "python-http-client-effects",
+      "preset_version": "2.0.0",
+      "preset_revision": "2",
+      "preset_sha256": "sha256:1999bca6c27a6b92cf448e21d56b213c8334273c1d92fe3da56ceba749cd9a7f",
+      "preset_semantic_sha256": "sha256:ab3d88b368db24f4c6c0879c8104105b09f23997997e63dd232856886bca6e2e",
+      "config_sha256": "sha256:2e09fa80796e9f4b3ad00e223d6d1c70c1b4b467e472291011708951596e3588",
+      "binding_controls": []
+    },
+    {
+      "fixture_sha256": "sha256:f858bfa585da6e0631323d0714447579c56ffead213c298d392645b80fed324e",
+      "resolver_version": "1.19.1",
+      "signature_evidence": {
+        "source_report_sha256": "sha256:aabb58de11b9084caca5c39052ef625d49d681c83805914642eb345b49fe74f1",
+        "source_path": "aiohttp/client.py",
+        "source_sha256": "sha256:10f68efd8e15a5374801b70e7ccc011abcd27c151c61a9a963064ddc63b6566e",
+        "source_signature": "(self, url: StrOrURL, *, allow_redirects: bool=True, **kwargs: Any)",
+        "selector_source_path": "aiohttp/client.py",
+        "selector_source_sha256": "sha256:10f68efd8e15a5374801b70e7ccc011abcd27c151c61a9a963064ddc63b6566e",
+        "selector_kind": "callable_parameters",
+        "selector_parameters": [
+          "url",
+          "allow_redirects"
+        ],
+        "selector_required_parameters": [
+          "url"
+        ]
+      },
+      "generated_signature": "def method(self, url, *, allow_redirects = ..., **kwargs) -> object: ...",
+      "selector_bindings": [
+        {
+          "role": "resource",
+          "component": null,
+          "kind": "argument",
+          "index": 0,
+          "name": null,
+          "path": [],
+          "binding_status": "present",
+          "argument_index": 0
+        }
+      ],
+      "selector_binding_issue": null,
+      "observations": [
+        {
+          "id": "sha256:5b0a0875868c00327854141e691773ab63cb9968554c7540ebce3382bd3cdacf",
+          "file_path": "main.py",
+          "line": 7,
+          "column": 4,
+          "end_line": 7,
+          "end_column": 14,
+          "source_spelling": "client.get",
+          "resolver_status": "exact",
+          "audit_status": "matched",
+          "canonical_symbol": "aiohttp.client.ClientSession.get",
+          "invocation": "instance_method",
+          "resolver": "mypy",
+          "resolver_version": "1.19.1",
+          "receiver_candidates": [
+            "aiohttp.client.ClientSession"
+          ],
+          "reason_code": null,
+          "receiver_origin": {
+            "schema_version": 1,
+            "status": "unavailable",
+            "value_hashes": [],
+            "reason_code": "receiver_origin_unavailable"
+          },
+          "resource_identity": {
+            "schema_version": 1,
+            "status": "exact",
+            "value_hashes": [
+              "sha256:73bf204e45bc49ec9f5f38e2ddcdf9458bc37f082285627980ed87e16f98dbf3"
+            ],
+            "reason_code": null
+          },
+          "contract_id": "aiohttp-session-get",
+          "contract_hash": "sha256:63f1303ef4efe93c70069bafcdb17e4e70b00858b35a991fe03101b155c6cc4b",
+          "arguments": [
+            {
+              "source_index": 0,
+              "positional_index": 0,
+              "keyword": null,
+              "status": "exact",
+              "value_hashes": [
+                "sha256:73bf204e45bc49ec9f5f38e2ddcdf9458bc37f082285627980ed87e16f98dbf3"
+              ],
+              "reason_code": null
+            }
+          ],
+          "control_class": "positive_or_neutral"
+        },
+        {
+          "id": "sha256:25d4d1be7efeafe605ba11c8622f974b7a8293c13bc8b6b4849a602fc00484d0",
+          "file_path": "main.py",
+          "line": 8,
+          "column": 4,
+          "end_line": 8,
+          "end_column": 15,
+          "source_spelling": "foreign.get",
+          "resolver_status": "exact",
+          "audit_status": "unmatched",
+          "canonical_symbol": "main.Foreign.get",
+          "invocation": "instance_method",
+          "resolver": "mypy",
+          "resolver_version": "1.19.1",
+          "receiver_candidates": [
+            "main.Foreign"
+          ],
+          "reason_code": null,
+          "receiver_origin": {
+            "schema_version": 1,
+            "status": "unavailable",
+            "value_hashes": [],
+            "reason_code": "receiver_origin_unavailable"
+          },
+          "resource_identity": null,
+          "contract_id": null,
+          "contract_hash": null,
+          "arguments": [
+            {
+              "source_index": 0,
+              "positional_index": 0,
+              "keyword": null,
+              "status": "exact",
+              "value_hashes": [
+                "sha256:73bf204e45bc49ec9f5f38e2ddcdf9458bc37f082285627980ed87e16f98dbf3"
+              ],
+              "reason_code": null
+            }
+          ],
+          "control_class": "unrelated_same_name_negative"
+        }
+      ],
+      "case_id": "aiohttp-session-get-exact-release-symbol",
+      "distribution": "aiohttp",
+      "version": "3.11.11",
+      "artifact_sha256": "sha256:249cc6912405917344192b9f9ea5cd5b139d49e0d2f5c7f70bdfaf6b4dbf3a2e",
+      "symbol": "aiohttp.client.ClientSession.get",
+      "contract_id": "aiohttp-session-get",
+      "preset_id": "python-http-client-effects",
+      "preset_version": "2.0.0",
+      "preset_revision": "2",
+      "preset_sha256": "sha256:1999bca6c27a6b92cf448e21d56b213c8334273c1d92fe3da56ceba749cd9a7f",
+      "preset_semantic_sha256": "sha256:ab3d88b368db24f4c6c0879c8104105b09f23997997e63dd232856886bca6e2e",
+      "config_sha256": "sha256:2e09fa80796e9f4b3ad00e223d6d1c70c1b4b467e472291011708951596e3588",
+      "binding_controls": []
+    },
+    {
+      "fixture_sha256": "sha256:08aa48a756186029192a32368b0bb2336ef2d1322b21f121c02d16fc06a6e6f5",
+      "resolver_version": "1.19.1",
+      "signature_evidence": {
+        "source_report_sha256": "sha256:aabb58de11b9084caca5c39052ef625d49d681c83805914642eb345b49fe74f1",
+        "source_path": "redis/commands/core.py",
+        "source_sha256": "sha256:6250b30f8e18267173744288143065a0f8758af80729c14c66cc4fcda984f493",
+        "source_signature": "(self, name: KeyT)",
+        "selector_source_path": "redis/commands/core.py",
+        "selector_source_sha256": "sha256:6250b30f8e18267173744288143065a0f8758af80729c14c66cc4fcda984f493",
+        "selector_kind": "callable_parameters",
+        "selector_parameters": [
+          "name"
+        ],
+        "selector_required_parameters": [
+          "name"
+        ]
+      },
+      "generated_signature": "def method(self, name) -> object: ...",
+      "selector_bindings": [
+        {
+          "role": "resource",
+          "component": null,
+          "kind": "argument",
+          "index": 0,
+          "name": null,
+          "path": [],
+          "binding_status": "present",
+          "argument_index": 0
+        }
+      ],
+      "selector_binding_issue": null,
+      "observations": [
+        {
+          "id": "sha256:5b0a0875868c00327854141e691773ab63cb9968554c7540ebce3382bd3cdacf",
+          "file_path": "main.py",
+          "line": 7,
+          "column": 4,
+          "end_line": 7,
+          "end_column": 14,
+          "source_spelling": "client.get",
+          "resolver_status": "exact",
+          "audit_status": "matched",
+          "canonical_symbol": "redis.commands.core.BasicKeyCommands.get",
+          "invocation": "instance_method",
+          "resolver": "mypy",
+          "resolver_version": "1.19.1",
+          "receiver_candidates": [
+            "redis.commands.core.BasicKeyCommands"
+          ],
+          "reason_code": null,
+          "receiver_origin": {
+            "schema_version": 1,
+            "status": "unavailable",
+            "value_hashes": [],
+            "reason_code": "receiver_origin_unavailable"
+          },
+          "resource_identity": {
+            "schema_version": 1,
+            "status": "exact",
+            "value_hashes": [
+              "sha256:38dbcc9b3c91186a47fe584026e251871e4e5940987bf29436754c1fb177446d"
+            ],
+            "reason_code": null
+          },
+          "contract_id": "redis-get",
+          "contract_hash": "sha256:af73b3ec9b6aeef4c588073782367b30f0d3cb6e0c4cd65721e953e19845d974",
+          "arguments": [
+            {
+              "source_index": 0,
+              "positional_index": 0,
+              "keyword": null,
+              "status": "exact",
+              "value_hashes": [
+                "sha256:38dbcc9b3c91186a47fe584026e251871e4e5940987bf29436754c1fb177446d"
+              ],
+              "reason_code": null
+            }
+          ],
+          "control_class": "positive_or_neutral"
+        },
+        {
+          "id": "sha256:25d4d1be7efeafe605ba11c8622f974b7a8293c13bc8b6b4849a602fc00484d0",
+          "file_path": "main.py",
+          "line": 8,
+          "column": 4,
+          "end_line": 8,
+          "end_column": 15,
+          "source_spelling": "foreign.get",
+          "resolver_status": "exact",
+          "audit_status": "unmatched",
+          "canonical_symbol": "main.Foreign.get",
+          "invocation": "instance_method",
+          "resolver": "mypy",
+          "resolver_version": "1.19.1",
+          "receiver_candidates": [
+            "main.Foreign"
+          ],
+          "reason_code": null,
+          "receiver_origin": {
+            "schema_version": 1,
+            "status": "unavailable",
+            "value_hashes": [],
+            "reason_code": "receiver_origin_unavailable"
+          },
+          "resource_identity": null,
+          "contract_id": null,
+          "contract_hash": null,
+          "arguments": [
+            {
+              "source_index": 0,
+              "positional_index": 0,
+              "keyword": null,
+              "status": "exact",
+              "value_hashes": [
+                "sha256:38dbcc9b3c91186a47fe584026e251871e4e5940987bf29436754c1fb177446d"
+              ],
+              "reason_code": null
+            }
+          ],
+          "control_class": "unrelated_same_name_negative"
+        }
+      ],
+      "case_id": "redis-get-exact-release-symbol",
+      "distribution": "redis",
+      "version": "5.2.1",
+      "artifact_sha256": "sha256:ee7e1056b9aea0f04c6c2ed59452947f34c4940ee025f5dd83e6a6418b6989e4",
+      "symbol": "redis.commands.core.BasicKeyCommands.get",
+      "contract_id": "redis-get",
+      "preset_id": "redis-py-effects",
+      "preset_version": "1.0.0",
+      "preset_revision": "1",
+      "preset_sha256": "sha256:a7b6dd01808d6f9275ed9aa99c67c577c04aa2ce30a5301d3ef957fe6695fcf8",
+      "preset_semantic_sha256": "sha256:ce681490563300ce01dec68cd42af26c5fe8e06c7d5d45ae652dfce73c531ca2",
+      "config_sha256": "sha256:733270f1a03860adc9cae1c70d081317353f918f994b8a7112e37aa22bdb3438",
+      "binding_controls": []
+    },
+    {
+      "fixture_sha256": "sha256:95c78e5962e0ea7a85d0d4393df54241a9407d6579f18681117551fde1e06e92",
+      "resolver_version": "1.19.1",
+      "signature_evidence": {
+        "source_report_sha256": "sha256:aabb58de11b9084caca5c39052ef625d49d681c83805914642eb345b49fe74f1",
+        "source_path": "pymongo/synchronous/collection.py",
+        "source_sha256": "sha256:6615eeda9469b9c401d3441c3fd5a815fa46f16f748dab13e2aca9775fe4139d",
+        "source_signature": "(self, document: Union[_DocumentType, RawBSONDocument], bypass_document_validation: bool=False, session: Optional[ClientSession]=None, comment: Optional[Any]=None)",
+        "selector_source_path": "pymongo/synchronous/collection.py",
+        "selector_source_sha256": "sha256:6615eeda9469b9c401d3441c3fd5a815fa46f16f748dab13e2aca9775fe4139d",
+        "selector_kind": "callable_parameters",
+        "selector_parameters": [
+          "document",
+          "bypass_document_validation",
+          "session",
+          "comment"
+        ],
+        "selector_required_parameters": [
+          "document"
+        ]
+      },
+      "generated_signature": "def method(self, document, bypass_document_validation = ..., session = ..., comment = ...) -> object: ...",
+      "selector_bindings": [
+        {
+          "role": "resource",
+          "component": null,
+          "kind": "receiver",
+          "index": null,
+          "name": null,
+          "path": [],
+          "binding_status": "present",
+          "argument_index": null
+        },
+        {
+          "role": "value",
+          "component": null,
+          "kind": "argument",
+          "index": 0,
+          "name": null,
+          "path": [],
+          "binding_status": "present",
+          "argument_index": 0
+        }
+      ],
+      "selector_binding_issue": null,
+      "observations": [
+        {
+          "id": "sha256:5e72e2b234273ba6247d4e6655a23e946df89c10ce8eebd13bd3a891439069fa",
+          "file_path": "main.py",
+          "line": 7,
+          "column": 4,
+          "end_line": 7,
+          "end_column": 21,
+          "source_spelling": "client.insert_one",
+          "resolver_status": "exact",
+          "audit_status": "matched",
+          "canonical_symbol": "pymongo.synchronous.collection.Collection.insert_one",
+          "invocation": "instance_method",
+          "resolver": "mypy",
+          "resolver_version": "1.19.1",
+          "receiver_candidates": [
+            "pymongo.synchronous.collection.Collection"
+          ],
+          "reason_code": null,
+          "receiver_origin": {
+            "schema_version": 1,
+            "status": "unavailable",
+            "value_hashes": [],
+            "reason_code": "receiver_origin_unavailable"
+          },
+          "resource_identity": {
+            "schema_version": 1,
+            "status": "unavailable",
+            "value_hashes": [],
+            "reason_code": "receiver_origin_unavailable"
+          },
+          "contract_id": "pymongo-insert-one",
+          "contract_hash": "sha256:da9a1920184eed51c6afc054bfb950d1fc4799738360133f9b8d01119e3bb676",
+          "arguments": [
+            {
+              "source_index": 0,
+              "positional_index": 0,
+              "keyword": null,
+              "status": "exact",
+              "value_hashes": [
+                "sha256:e65f7fc15938d0f546cfdc88caaca87ad74ebc3fba0a623c45a3e45baf675769"
+              ],
+              "reason_code": null
+            }
+          ],
+          "control_class": "positive_or_neutral"
+        },
+        {
+          "id": "sha256:8c49d030de5ee3be5c53ad7095f3cc5892cabe550b25fe138558afe9fb67a9e0",
+          "file_path": "main.py",
+          "line": 8,
+          "column": 4,
+          "end_line": 8,
+          "end_column": 22,
+          "source_spelling": "foreign.insert_one",
+          "resolver_status": "exact",
+          "audit_status": "unmatched",
+          "canonical_symbol": "main.Foreign.insert_one",
+          "invocation": "instance_method",
+          "resolver": "mypy",
+          "resolver_version": "1.19.1",
+          "receiver_candidates": [
+            "main.Foreign"
+          ],
+          "reason_code": null,
+          "receiver_origin": {
+            "schema_version": 1,
+            "status": "unavailable",
+            "value_hashes": [],
+            "reason_code": "receiver_origin_unavailable"
+          },
+          "resource_identity": null,
+          "contract_id": null,
+          "contract_hash": null,
+          "arguments": [
+            {
+              "source_index": 0,
+              "positional_index": 0,
+              "keyword": null,
+              "status": "exact",
+              "value_hashes": [
+                "sha256:e65f7fc15938d0f546cfdc88caaca87ad74ebc3fba0a623c45a3e45baf675769"
+              ],
+              "reason_code": null
+            }
+          ],
+          "control_class": "unrelated_same_name_negative"
+        }
+      ],
+      "case_id": "pymongo-insert-one-exact-release-symbol",
+      "distribution": "pymongo",
+      "version": "4.10.1",
+      "artifact_sha256": "sha256:cec237c305fcbeef75c0bcbe9d223d1e22a6e3ba1b53b2f0b79d3d29c742b45b",
+      "symbol": "pymongo.synchronous.collection.Collection.insert_one",
+      "contract_id": "pymongo-insert-one",
+      "preset_id": "pymongo-effects",
+      "preset_version": "1.0.0",
+      "preset_revision": "1",
+      "preset_sha256": "sha256:df68200dc7df8e3176257815e1de2016bace4f9a049977fd31001d088f0f4d30",
+      "preset_semantic_sha256": "sha256:7e0f41e452ac61b7340f02215963e8aa765333988b67d441b7aece9dfa53191c",
+      "config_sha256": "sha256:40fc31d3da7d0b7f459923b7ef39cd62de26950039641d1ff5a21246fc524116",
+      "binding_controls": []
+    },
+    {
+      "fixture_sha256": "sha256:03405cb58f484cab7fbcc4875520462d02ebb666581fdd3317e2d1157bdea911",
+      "resolver_version": "1.19.1",
+      "signature_evidence": {
+        "source_report_sha256": "sha256:aabb58de11b9084caca5c39052ef625d49d681c83805914642eb345b49fe74f1",
+        "source_path": "sqlalchemy/orm/session.py",
+        "source_sha256": "sha256:09925343ec0fc08cb473700c1718099c181a7ede9e11fe09cdc08b71a6824a38",
+        "source_signature": "(self, instance: object, _warn: bool=True)",
+        "selector_source_path": "sqlalchemy/orm/session.py",
+        "selector_source_sha256": "sha256:09925343ec0fc08cb473700c1718099c181a7ede9e11fe09cdc08b71a6824a38",
+        "selector_kind": "callable_parameters",
+        "selector_parameters": [
+          "instance",
+          "_warn"
+        ],
+        "selector_required_parameters": [
+          "instance"
+        ]
+      },
+      "generated_signature": "def method(self, instance, _warn = ...) -> object: ...",
+      "selector_bindings": [
+        {
+          "role": "resource",
+          "component": null,
+          "kind": "none",
+          "index": null,
+          "name": null,
+          "path": [],
+          "binding_status": "present",
+          "argument_index": null
+        }
+      ],
+      "selector_binding_issue": null,
+      "observations": [
+        {
+          "id": "sha256:5b0a0875868c00327854141e691773ab63cb9968554c7540ebce3382bd3cdacf",
+          "file_path": "main.py",
+          "line": 7,
+          "column": 4,
+          "end_line": 7,
+          "end_column": 14,
+          "source_spelling": "client.add",
+          "resolver_status": "exact",
+          "audit_status": "matched",
+          "canonical_symbol": "sqlalchemy.orm.session.Session.add",
+          "invocation": "instance_method",
+          "resolver": "mypy",
+          "resolver_version": "1.19.1",
+          "receiver_candidates": [
+            "sqlalchemy.orm.session.Session"
+          ],
+          "reason_code": null,
+          "receiver_origin": {
+            "schema_version": 1,
+            "status": "unavailable",
+            "value_hashes": [],
+            "reason_code": "receiver_origin_unavailable"
+          },
+          "resource_identity": {
+            "schema_version": 1,
+            "status": "unavailable",
+            "value_hashes": [],
+            "reason_code": "resource_selector_absent"
+          },
+          "contract_id": "sqlalchemy-session-add",
+          "contract_hash": "sha256:612b8b975fda91e571f5d3644f84affd26e207b413bf611c578688a716a30f26",
+          "arguments": [
+            {
+              "source_index": 0,
+              "positional_index": 0,
+              "keyword": null,
+              "status": "exact",
+              "value_hashes": [
+                "sha256:3b193f128ab7b92a0535755b29f08a58a2e79e63700f7a913ef920412443530f"
+              ],
+              "reason_code": null
+            }
+          ],
+          "control_class": "positive_or_neutral"
+        },
+        {
+          "id": "sha256:25d4d1be7efeafe605ba11c8622f974b7a8293c13bc8b6b4849a602fc00484d0",
+          "file_path": "main.py",
+          "line": 8,
+          "column": 4,
+          "end_line": 8,
+          "end_column": 15,
+          "source_spelling": "foreign.add",
+          "resolver_status": "exact",
+          "audit_status": "unmatched",
+          "canonical_symbol": "main.Foreign.add",
+          "invocation": "instance_method",
+          "resolver": "mypy",
+          "resolver_version": "1.19.1",
+          "receiver_candidates": [
+            "main.Foreign"
+          ],
+          "reason_code": null,
+          "receiver_origin": {
+            "schema_version": 1,
+            "status": "unavailable",
+            "value_hashes": [],
+            "reason_code": "receiver_origin_unavailable"
+          },
+          "resource_identity": null,
+          "contract_id": null,
+          "contract_hash": null,
+          "arguments": [
+            {
+              "source_index": 0,
+              "positional_index": 0,
+              "keyword": null,
+              "status": "exact",
+              "value_hashes": [
+                "sha256:3b193f128ab7b92a0535755b29f08a58a2e79e63700f7a913ef920412443530f"
+              ],
+              "reason_code": null
+            }
+          ],
+          "control_class": "unrelated_same_name_negative"
+        }
+      ],
+      "case_id": "sqlalchemy-session-add-exact-release-symbol",
+      "distribution": "sqlalchemy",
+      "version": "2.0.36",
+      "artifact_sha256": "sha256:7f2767680b6d2398aea7082e45a774b2b0767b5c8d8ffb9c8b683088ea9b29c5",
+      "symbol": "sqlalchemy.orm.session.Session.add",
+      "contract_id": "sqlalchemy-session-add",
+      "preset_id": "sqlalchemy-transaction-effects",
+      "preset_version": "3.0.0",
+      "preset_revision": "3",
+      "preset_sha256": "sha256:907405ddeca13550c69e22245ab34162d50ee7e71e9fea50e42a3dc6e916718d",
+      "preset_semantic_sha256": "sha256:132982ba61f04626df531dc80c71ce5d21c12ec583a932d21c220486785c8d04",
+      "config_sha256": "sha256:2bf39dd60e0dfdfb381a3debb7663aba90a926323579cefdc29d6c5f4c4293e1",
+      "binding_controls": []
+    },
+    {
+      "fixture_sha256": "sha256:59c3cabcccd274a9d69a1888792bda4362b74cb12b7526cf0917802457ed9f86",
+      "resolver_version": "1.19.1",
+      "signature_evidence": {
+        "source_report_sha256": "sha256:aabb58de11b9084caca5c39052ef625d49d681c83805914642eb345b49fe74f1",
+        "source_path": "mypy_boto3_s3/client.py",
+        "source_sha256": "sha256:e41cde1bc5682e1fc40449e36ea952ee2f953df336e805073219c3d5d6565432",
+        "source_signature": "(self, **kwargs: Unpack[PutObjectRequestRequestTypeDef])",
+        "selector_source_path": "mypy_boto3_s3/type_defs.py",
+        "selector_source_sha256": "sha256:acbc5700f9cfb70aea9cf39abc4ee4e3e84b90ad7d6130dbf5378a5edb2aa617",
+        "selector_kind": "TypedDict_fields",
+        "selector_parameters": [
+          "Bucket",
+          "Key",
+          "ACL",
+          "Body",
+          "CacheControl",
+          "ContentDisposition",
+          "ContentEncoding",
+          "ContentLanguage",
+          "ContentLength",
+          "ContentMD5",
+          "ContentType",
+          "ChecksumAlgorithm",
+          "ChecksumCRC32",
+          "ChecksumCRC32C",
+          "ChecksumSHA1",
+          "ChecksumSHA256",
+          "Expires",
+          "IfMatch",
+          "IfNoneMatch",
+          "GrantFullControl",
+          "GrantRead",
+          "GrantReadACP",
+          "GrantWriteACP",
+          "WriteOffsetBytes",
+          "Metadata",
+          "ServerSideEncryption",
+          "StorageClass",
+          "WebsiteRedirectLocation",
+          "SSECustomerAlgorithm",
+          "SSECustomerKey",
+          "SSEKMSKeyId",
+          "SSEKMSEncryptionContext",
+          "BucketKeyEnabled",
+          "RequestPayer",
+          "Tagging",
+          "ObjectLockMode",
+          "ObjectLockRetainUntilDate",
+          "ObjectLockLegalHoldStatus",
+          "ExpectedBucketOwner"
+        ],
+        "selector_required_parameters": [
+          "Bucket",
+          "Key"
+        ]
+      },
+      "generated_signature": "def method(self, Bucket, Key, ACL = ..., Body = ..., CacheControl = ..., ContentDisposition = ..., ContentEncoding = ..., ContentLanguage = ..., ContentLength = ..., ContentMD5 = ..., ContentType = ..., ChecksumAlgorithm = ..., ChecksumCRC32 = ..., ChecksumCRC32C = ..., ChecksumSHA1 = ..., ChecksumSHA256 = ..., Expires = ..., IfMatch = ..., IfNoneMatch = ..., GrantFullControl = ..., GrantRead = ..., GrantReadACP = ..., GrantWriteACP = ..., WriteOffsetBytes = ..., Metadata = ..., ServerSideEncryption = ..., StorageClass = ..., WebsiteRedirectLocation = ..., SSECustomerAlgorithm = ..., SSECustomerKey = ..., SSEKMSKeyId = ..., SSEKMSEncryptionContext = ..., BucketKeyEnabled = ..., RequestPayer = ..., Tagging = ..., ObjectLockMode = ..., ObjectLockRetainUntilDate = ..., ObjectLockLegalHoldStatus = ..., ExpectedBucketOwner = ...) -> object: ...",
+      "selector_bindings": [
+        {
+          "role": "resource",
+          "component": 0,
+          "kind": "keyword",
+          "index": null,
+          "name": "Bucket",
+          "path": [],
+          "binding_status": "present",
+          "argument_index": 0
+        },
+        {
+          "role": "resource",
+          "component": 1,
+          "kind": "keyword",
+          "index": null,
+          "name": "Key",
+          "path": [],
+          "binding_status": "present",
+          "argument_index": 1
+        },
+        {
+          "role": "value",
+          "component": null,
+          "kind": "keyword",
+          "index": null,
+          "name": "Body",
+          "path": [],
+          "binding_status": "present",
+          "argument_index": 2
+        }
+      ],
+      "selector_binding_issue": null,
+      "observations": [
+        {
+          "id": "sha256:5e72e2b234273ba6247d4e6655a23e946df89c10ce8eebd13bd3a891439069fa",
+          "file_path": "main.py",
+          "line": 7,
+          "column": 4,
+          "end_line": 7,
+          "end_column": 21,
+          "source_spelling": "client.put_object",
+          "resolver_status": "exact",
+          "audit_status": "matched",
+          "canonical_symbol": "mypy_boto3_s3.client.S3Client.put_object",
+          "invocation": "instance_method",
+          "resolver": "mypy",
+          "resolver_version": "1.19.1",
+          "receiver_candidates": [
+            "mypy_boto3_s3.client.S3Client"
+          ],
+          "reason_code": null,
+          "receiver_origin": {
+            "schema_version": 1,
+            "status": "unavailable",
+            "value_hashes": [],
+            "reason_code": "receiver_origin_unavailable"
+          },
+          "resource_identity": {
+            "schema_version": 1,
+            "status": "exact",
+            "value_hashes": [
+              "sha256:3105124025e5d96d43ea902ea81c18cc17d4e285b81fc4eef4e7feb3db0eeddb"
+            ],
+            "reason_code": null
+          },
+          "contract_id": "typed-s3-put-object",
+          "contract_hash": "sha256:5fbfb5462af4cd46f48e491125e75228f807265ccf5129b5615aa6b130829320",
+          "arguments": [
+            {
+              "source_index": 0,
+              "positional_index": null,
+              "keyword": "Bucket",
+              "status": "exact",
+              "value_hashes": [
+                "sha256:fbbc3334e2325e09e43cb32dd41ba6e63d0f3ffad0bf108a1cb0db971610f8b7"
+              ],
+              "reason_code": null
+            },
+            {
+              "source_index": 1,
+              "positional_index": null,
+              "keyword": "Key",
+              "status": "exact",
+              "value_hashes": [
+                "sha256:66e7c82b49bb291dd09c8e020448311c4a7bb96aeb5c5db769f66812b13a50b5"
+              ],
+              "reason_code": null
+            },
+            {
+              "source_index": 2,
+              "positional_index": null,
+              "keyword": "Body",
+              "status": "exact",
+              "value_hashes": [
+                "sha256:9a5df3729917cba86db1a823bdedea240ac08fd1cdacb93ac8d987c09b49bb08"
+              ],
+              "reason_code": null
+            }
+          ],
+          "control_class": "positive_or_neutral"
+        },
+        {
+          "id": "sha256:8c49d030de5ee3be5c53ad7095f3cc5892cabe550b25fe138558afe9fb67a9e0",
+          "file_path": "main.py",
+          "line": 8,
+          "column": 4,
+          "end_line": 8,
+          "end_column": 22,
+          "source_spelling": "foreign.put_object",
+          "resolver_status": "exact",
+          "audit_status": "unmatched",
+          "canonical_symbol": "main.Foreign.put_object",
+          "invocation": "instance_method",
+          "resolver": "mypy",
+          "resolver_version": "1.19.1",
+          "receiver_candidates": [
+            "main.Foreign"
+          ],
+          "reason_code": null,
+          "receiver_origin": {
+            "schema_version": 1,
+            "status": "unavailable",
+            "value_hashes": [],
+            "reason_code": "receiver_origin_unavailable"
+          },
+          "resource_identity": null,
+          "contract_id": null,
+          "contract_hash": null,
+          "arguments": [
+            {
+              "source_index": 0,
+              "positional_index": null,
+              "keyword": "Bucket",
+              "status": "exact",
+              "value_hashes": [
+                "sha256:fbbc3334e2325e09e43cb32dd41ba6e63d0f3ffad0bf108a1cb0db971610f8b7"
+              ],
+              "reason_code": null
+            },
+            {
+              "source_index": 1,
+              "positional_index": null,
+              "keyword": "Key",
+              "status": "exact",
+              "value_hashes": [
+                "sha256:66e7c82b49bb291dd09c8e020448311c4a7bb96aeb5c5db769f66812b13a50b5"
+              ],
+              "reason_code": null
+            },
+            {
+              "source_index": 2,
+              "positional_index": null,
+              "keyword": "Body",
+              "status": "exact",
+              "value_hashes": [
+                "sha256:9a5df3729917cba86db1a823bdedea240ac08fd1cdacb93ac8d987c09b49bb08"
+              ],
+              "reason_code": null
+            }
+          ],
+          "control_class": "unrelated_same_name_negative"
+        }
+      ],
+      "case_id": "typed-s3-put-object-exact-release-symbol",
+      "distribution": "mypy-boto3-s3",
+      "version": "1.35.92",
+      "artifact_sha256": "sha256:ce302a635da78e1925d8ff4809184ba55618cd7e3707156bea405cde7fdcf67a",
+      "symbol": "mypy_boto3_s3.client.S3Client.put_object",
+      "contract_id": "typed-s3-put-object",
+      "preset_id": "typed-s3-effects",
+      "preset_version": "2.0.0",
+      "preset_revision": "2",
+      "preset_sha256": "sha256:7c5cf82835f371e3ec8e3d422f3f5c4f324622c7bfeb928690cb11921749b871",
+      "preset_semantic_sha256": "sha256:99707cccf212f530bd2437a3cb154d5ebea775857cc7d65c777771f9771cc6c4",
+      "config_sha256": "sha256:62e9eaec796e3ffd042e69758c6893d417ee0889fdf83145d56f544ae952f64a",
+      "binding_controls": [
+        {
+          "control_id": "missing-selected-body",
+          "fixture_sha256": "sha256:44ea8b537a9956ca47cc37d29629eef9aec8c5b6cc3ce5c36ea0f12f6d6238b1",
+          "analyzer_audit_status": "matched",
+          "analyzer_contract_id": "typed-s3-put-object",
+          "selector_binding_status": "rejected_incomplete_or_wrong_binding",
+          "selector_binding_issue": "contract-selected value argument is absent or wrongly bound: Body",
+          "observations": [
+            {
+              "id": "sha256:5e72e2b234273ba6247d4e6655a23e946df89c10ce8eebd13bd3a891439069fa",
+              "file_path": "main.py",
+              "line": 7,
+              "column": 4,
+              "end_line": 7,
+              "end_column": 21,
+              "source_spelling": "client.put_object",
+              "resolver_status": "exact",
+              "audit_status": "matched",
+              "canonical_symbol": "mypy_boto3_s3.client.S3Client.put_object",
+              "invocation": "instance_method",
+              "resolver": "mypy",
+              "resolver_version": "1.19.1",
+              "receiver_candidates": [
+                "mypy_boto3_s3.client.S3Client"
+              ],
+              "reason_code": null,
+              "receiver_origin": {
+                "schema_version": 1,
+                "status": "unavailable",
+                "value_hashes": [],
+                "reason_code": "receiver_origin_unavailable"
+              },
+              "resource_identity": {
+                "schema_version": 1,
+                "status": "exact",
+                "value_hashes": [
+                  "sha256:3105124025e5d96d43ea902ea81c18cc17d4e285b81fc4eef4e7feb3db0eeddb"
+                ],
+                "reason_code": null
+              },
+              "contract_id": "typed-s3-put-object",
+              "contract_hash": "sha256:5fbfb5462af4cd46f48e491125e75228f807265ccf5129b5615aa6b130829320",
+              "arguments": [
+                {
+                  "source_index": 0,
+                  "positional_index": null,
+                  "keyword": "Bucket",
+                  "status": "exact",
+                  "value_hashes": [
+                    "sha256:fbbc3334e2325e09e43cb32dd41ba6e63d0f3ffad0bf108a1cb0db971610f8b7"
+                  ],
+                  "reason_code": null
+                },
+                {
+                  "source_index": 1,
+                  "positional_index": null,
+                  "keyword": "Key",
+                  "status": "exact",
+                  "value_hashes": [
+                    "sha256:66e7c82b49bb291dd09c8e020448311c4a7bb96aeb5c5db769f66812b13a50b5"
+                  ],
+                  "reason_code": null
+                }
+              ],
+              "control_class": "positive_or_neutral"
+            },
+            {
+              "id": "sha256:8c49d030de5ee3be5c53ad7095f3cc5892cabe550b25fe138558afe9fb67a9e0",
+              "file_path": "main.py",
+              "line": 8,
+              "column": 4,
+              "end_line": 8,
+              "end_column": 22,
+              "source_spelling": "foreign.put_object",
+              "resolver_status": "exact",
+              "audit_status": "unmatched",
+              "canonical_symbol": "main.Foreign.put_object",
+              "invocation": "instance_method",
+              "resolver": "mypy",
+              "resolver_version": "1.19.1",
+              "receiver_candidates": [
+                "main.Foreign"
+              ],
+              "reason_code": null,
+              "receiver_origin": {
+                "schema_version": 1,
+                "status": "unavailable",
+                "value_hashes": [],
+                "reason_code": "receiver_origin_unavailable"
+              },
+              "resource_identity": null,
+              "contract_id": null,
+              "contract_hash": null,
+              "arguments": [
+                {
+                  "source_index": 0,
+                  "positional_index": null,
+                  "keyword": "Bucket",
+                  "status": "exact",
+                  "value_hashes": [
+                    "sha256:fbbc3334e2325e09e43cb32dd41ba6e63d0f3ffad0bf108a1cb0db971610f8b7"
+                  ],
+                  "reason_code": null
+                },
+                {
+                  "source_index": 1,
+                  "positional_index": null,
+                  "keyword": "Key",
+                  "status": "exact",
+                  "value_hashes": [
+                    "sha256:66e7c82b49bb291dd09c8e020448311c4a7bb96aeb5c5db769f66812b13a50b5"
+                  ],
+                  "reason_code": null
+                }
+              ],
+              "control_class": "unrelated_same_name_negative"
+            }
+          ]
+        },
+        {
+          "control_id": "body-bound-positionally",
+          "fixture_sha256": "sha256:8cde4897217d167020dd1a5162b627346996373cdf31a4fe3ba7246b6e4a1235",
+          "analyzer_audit_status": "matched",
+          "analyzer_contract_id": "typed-s3-put-object",
+          "selector_binding_status": "rejected_incomplete_or_wrong_binding",
+          "selector_binding_issue": "contract-selected value argument is absent or wrongly bound: Body",
+          "observations": [
+            {
+              "id": "sha256:5e72e2b234273ba6247d4e6655a23e946df89c10ce8eebd13bd3a891439069fa",
+              "file_path": "main.py",
+              "line": 7,
+              "column": 4,
+              "end_line": 7,
+              "end_column": 21,
+              "source_spelling": "client.put_object",
+              "resolver_status": "exact",
+              "audit_status": "matched",
+              "canonical_symbol": "mypy_boto3_s3.client.S3Client.put_object",
+              "invocation": "instance_method",
+              "resolver": "mypy",
+              "resolver_version": "1.19.1",
+              "receiver_candidates": [
+                "mypy_boto3_s3.client.S3Client"
+              ],
+              "reason_code": null,
+              "receiver_origin": {
+                "schema_version": 1,
+                "status": "unavailable",
+                "value_hashes": [],
+                "reason_code": "receiver_origin_unavailable"
+              },
+              "resource_identity": {
+                "schema_version": 1,
+                "status": "exact",
+                "value_hashes": [
+                  "sha256:3105124025e5d96d43ea902ea81c18cc17d4e285b81fc4eef4e7feb3db0eeddb"
+                ],
+                "reason_code": null
+              },
+              "contract_id": "typed-s3-put-object",
+              "contract_hash": "sha256:5fbfb5462af4cd46f48e491125e75228f807265ccf5129b5615aa6b130829320",
+              "arguments": [
+                {
+                  "source_index": 0,
+                  "positional_index": 0,
+                  "keyword": null,
+                  "status": "exact",
+                  "value_hashes": [
+                    "sha256:9a5df3729917cba86db1a823bdedea240ac08fd1cdacb93ac8d987c09b49bb08"
+                  ],
+                  "reason_code": null
+                },
+                {
+                  "source_index": 1,
+                  "positional_index": null,
+                  "keyword": "Bucket",
+                  "status": "exact",
+                  "value_hashes": [
+                    "sha256:fbbc3334e2325e09e43cb32dd41ba6e63d0f3ffad0bf108a1cb0db971610f8b7"
+                  ],
+                  "reason_code": null
+                },
+                {
+                  "source_index": 2,
+                  "positional_index": null,
+                  "keyword": "Key",
+                  "status": "exact",
+                  "value_hashes": [
+                    "sha256:66e7c82b49bb291dd09c8e020448311c4a7bb96aeb5c5db769f66812b13a50b5"
+                  ],
+                  "reason_code": null
+                }
+              ],
+              "control_class": "positive_or_neutral"
+            },
+            {
+              "id": "sha256:8c49d030de5ee3be5c53ad7095f3cc5892cabe550b25fe138558afe9fb67a9e0",
+              "file_path": "main.py",
+              "line": 8,
+              "column": 4,
+              "end_line": 8,
+              "end_column": 22,
+              "source_spelling": "foreign.put_object",
+              "resolver_status": "exact",
+              "audit_status": "unmatched",
+              "canonical_symbol": "main.Foreign.put_object",
+              "invocation": "instance_method",
+              "resolver": "mypy",
+              "resolver_version": "1.19.1",
+              "receiver_candidates": [
+                "main.Foreign"
+              ],
+              "reason_code": null,
+              "receiver_origin": {
+                "schema_version": 1,
+                "status": "unavailable",
+                "value_hashes": [],
+                "reason_code": "receiver_origin_unavailable"
+              },
+              "resource_identity": null,
+              "contract_id": null,
+              "contract_hash": null,
+              "arguments": [
+                {
+                  "source_index": 0,
+                  "positional_index": 0,
+                  "keyword": null,
+                  "status": "exact",
+                  "value_hashes": [
+                    "sha256:9a5df3729917cba86db1a823bdedea240ac08fd1cdacb93ac8d987c09b49bb08"
+                  ],
+                  "reason_code": null
+                },
+                {
+                  "source_index": 1,
+                  "positional_index": null,
+                  "keyword": "Bucket",
+                  "status": "exact",
+                  "value_hashes": [
+                    "sha256:fbbc3334e2325e09e43cb32dd41ba6e63d0f3ffad0bf108a1cb0db971610f8b7"
+                  ],
+                  "reason_code": null
+                },
+                {
+                  "source_index": 2,
+                  "positional_index": null,
+                  "keyword": "Key",
+                  "status": "exact",
+                  "value_hashes": [
+                    "sha256:66e7c82b49bb291dd09c8e020448311c4a7bb96aeb5c5db769f66812b13a50b5"
+                  ],
+                  "reason_code": null
+                }
+              ],
+              "control_class": "unrelated_same_name_negative"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "unsupported_cases": [
+    {
+      "case_id": "motor-async-descriptor-not-evaluated",
+      "distribution": "motor",
+      "version": "3.6.0",
+      "symbol": "motor.core.AgnosticCollection.insert_one",
+      "reason_code": "descriptor_signature_unavailable",
+      "artifact_sha256": "sha256:9f07ed96f1754963d4386944e1b52d403a5350c687edc60da487d66f98dbf894",
+      "source_signature": "descriptor = AsyncCommand(PyMongoCollection.insert_one); delegated signature",
+      "status": "not_evaluated"
+    },
+    {
+      "case_id": "sqs-send-message-no-exact-contract",
+      "distribution": "mypy-boto3-sqs",
+      "version": "1.35.91",
+      "symbol": "mypy_boto3_sqs.client.SQSClient.send_message",
+      "reason_code": "no_exact_preset_contract",
+      "artifact_sha256": "sha256:346a87bc0a447bb4c005b04d3efa0008bfa0ddd498cadd97e0e53a58752f84e9",
+      "source_signature": "(self, **kwargs: Unpack[SendMessageRequestRequestTypeDef])",
+      "status": "not_evaluated"
+    }
+  ],
+  "observed": {
+    "physical_calls": 12,
+    "matched_calls": 6,
+    "unmatched_calls": 6,
+    "ambiguous_calls": 0,
+    "unresolved_calls": 0,
+    "unrelated_same_name_negative_calls": 6,
+    "selector_binding_negative_controls": 2,
+    "matched_exact_symbols": [
+      "aiohttp.client.ClientSession.get",
+      "mypy_boto3_s3.client.S3Client.put_object",
+      "pymongo.synchronous.collection.Collection.insert_one",
+      "redis.commands.core.BasicKeyCommands.get",
+      "requests.sessions.Session.get",
+      "sqlalchemy.orm.session.Session.add"
+    ]
+  }
+}
