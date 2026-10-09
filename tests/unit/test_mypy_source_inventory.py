@@ -1,10 +1,14 @@
 """Explicit package roots and immutable source inventory integration."""
 
+import json
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 
-from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
+import pytest
+
+from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer, MypyAnalyzerError
+from fastapi_endpoint_detector.analyzer.source_inventory import build_source_inventory
 from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, HandlerInfo
 
 
@@ -214,3 +218,122 @@ def test_followed_import_outside_inventory_is_not_project_evidence(tmp_path: Pat
     assert not analyzer._exact_project_identity("pkg.helper.changed")
     assert deps.unresolved_imports == (("pkg/main.py", "pkg.missing"),)
     assert deps.analysis_incomplete
+
+
+def test_failed_build_is_not_cached_and_next_analysis_rebuilds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    main = tmp_path / "main.py"
+    main.write_text("def handler():\n    return 1\n", encoding="utf-8")
+    endpoint = Endpoint(
+        path="/test",
+        methods=[EndpointMethod.GET],
+        handler=HandlerInfo(name="handler", module="main", file_path=main, line_number=1),
+    )
+    analyzer = MypyAnalyzer(tmp_path)
+    cache = tmp_path / "analysis-cache.json"
+    analyzer.set_cache_path(cache)
+
+    def failed_build() -> None:
+        raise MypyAnalyzerError("ambiguous local module identities")
+
+    monkeypatch.setattr(analyzer, "_ensure_mypy_built", failed_build)
+    results = analyzer.analyze_endpoints([endpoint], use_cache=True)
+    failed = results[analyzer._endpoint_key(endpoint)]
+
+    assert failed.analysis_incomplete
+    assert not cache.exists()
+
+    monkeypatch.undo()
+    results = analyzer.analyze_endpoints([endpoint], use_cache=True)
+    rebuilt = results[analyzer._endpoint_key(endpoint)]
+
+    assert not rebuilt.analysis_incomplete
+    assert cache.exists()
+
+
+def test_schema_23_cache_without_completion_metadata_is_rebuilt(tmp_path: Path) -> None:
+    main = tmp_path / "main.py"
+    main.write_text("def handler():\n    return 1\n", encoding="utf-8")
+    endpoint = Endpoint(
+        path="/test",
+        methods=[EndpointMethod.GET],
+        handler=HandlerInfo(name="handler", module="main", file_path=main, line_number=1),
+    )
+    cache = tmp_path / "analysis-cache.json"
+    first = MypyAnalyzer(tmp_path)
+    first.set_cache_path(cache)
+    first.analyze_endpoints([endpoint], use_cache=True)
+
+    old_cache = json.loads(cache.read_text(encoding="utf-8"))
+    old_cache["schema_version"] = 23
+    for dependencies in old_cache["endpoints"].values():
+        dependencies.pop("analysis_incomplete")
+        dependencies.pop("unresolved_imports")
+    cache.write_text(json.dumps(old_cache), encoding="utf-8")
+
+    second = MypyAnalyzer(tmp_path)
+    second.set_cache_path(cache)
+    assert not second._load_cache()
+    results = second.analyze_endpoints([endpoint], use_cache=True)
+    assert not results[second._endpoint_key(endpoint)].analysis_incomplete
+    assert json.loads(cache.read_text(encoding="utf-8"))["schema_version"] == 24
+
+
+def test_single_endpoint_recovers_after_failed_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    main = tmp_path / "main.py"
+    main.write_text("def handler():\n    return 1\n", encoding="utf-8")
+    endpoint = Endpoint(
+        path="/test",
+        methods=[EndpointMethod.GET],
+        handler=HandlerInfo(name="handler", module="main", file_path=main, line_number=1),
+    )
+    analyzer = MypyAnalyzer(tmp_path)
+
+    def failed_build() -> None:
+        raise MypyAnalyzerError("first build failed")
+
+    monkeypatch.setattr(analyzer, "_ensure_mypy_built", failed_build)
+    assert analyzer.analyze_endpoint(endpoint).analysis_incomplete
+    monkeypatch.undo()
+    assert not analyzer.analyze_endpoint(endpoint).analysis_incomplete
+
+
+def test_public_inventory_ambiguous_module_fails_closed_then_recovers(tmp_path: Path) -> None:
+    main = tmp_path / "main.py"
+    main.write_text("import vendor\n\ndef handler():\n    return vendor.value\n", encoding="utf-8")
+    (tmp_path / "vendor").mkdir()
+    (tmp_path / "vendor.py").write_text("value = 1\n", encoding="utf-8")
+    symlink_target = tmp_path / "outside-vendor-init.py"
+    symlink_target.write_text("value = 2\n", encoding="utf-8")
+    (tmp_path / "vendor" / "__init__.py").symlink_to(symlink_target)
+    endpoint = Endpoint(
+        path="/test",
+        methods=[EndpointMethod.GET],
+        handler=HandlerInfo(name="handler", module="main", file_path=main, line_number=3),
+    )
+    cache = tmp_path / "analysis-cache.json"
+
+    inventory = build_source_inventory(tmp_path)
+    assert any(name == "vendor" for name, _paths in inventory.module_collisions)
+    failed_analyzer = MypyAnalyzer(main, source_inventory=inventory)
+    failed_analyzer.set_cache_path(cache)
+    failed = failed_analyzer.analyze_endpoints([endpoint], use_cache=True)[
+        failed_analyzer._endpoint_key(endpoint)
+    ]
+    assert failed.analysis_incomplete
+    assert not cache.exists()
+
+    (tmp_path / "vendor.py").unlink()
+    (tmp_path / "vendor" / "__init__.py").unlink()
+    (tmp_path / "vendor" / "__init__.py").write_text("value = 2\n", encoding="utf-8")
+    repaired_inventory = build_source_inventory(tmp_path)
+    repaired_analyzer = MypyAnalyzer(main, source_inventory=repaired_inventory)
+    repaired_analyzer.set_cache_path(cache)
+    repaired = repaired_analyzer.analyze_endpoints([endpoint], use_cache=True)[
+        repaired_analyzer._endpoint_key(endpoint)
+    ]
+    assert not repaired.analysis_incomplete
+    assert cache.exists()

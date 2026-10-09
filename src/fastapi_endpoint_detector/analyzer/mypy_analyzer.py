@@ -517,7 +517,10 @@ class MypyAnalyzer:
     and extract precise file/line information for all references.
     """
 
-    CACHE_SCHEMA_VERSION = 23
+    # Schema 24 requires completion metadata. Schema 23 caches may have been
+    # written after a failed build and omitted that metadata, which older
+    # readers interpreted as a complete analysis.
+    CACHE_SCHEMA_VERSION = 24
     MAX_CALL_SPAN_SOURCE_BYTES = 2_000_000
     MAX_CALL_SPAN_SOURCE_NODES = 100_000
     MAX_CALL_SPAN_SOURCE_ITEMS = 200_000
@@ -577,6 +580,7 @@ class MypyAnalyzer:
         self.source_inventory = source_inventory
         self.max_depth = effective_depth
         self._endpoint_deps: dict[str, EndpointDependencies] = {}
+        self._analysis_build_failed = False
         self._mypy_available = self._check_mypy_available()
         self._cache_file: Path | None = None
         self._line_progress_callback: LineProgressCallback | None = None
@@ -937,6 +941,7 @@ class MypyAnalyzer:
         """Discover local exclusions once before a bulk-analysis snapshot."""
         if self._local_module_census_depth == 0:
             self._local_module_census = self._discover_unselected_local_modules()
+            self._analysis_build_failed = False
         self._local_module_census_depth += 1
 
     def _end_analysis_cycle(self) -> None:
@@ -1831,10 +1836,12 @@ class MypyAnalyzer:
 
     def analyze_endpoint(self, endpoint: Endpoint) -> EndpointDependencies:
         """Analyze a single endpoint using mypy's typed AST."""
+        if self._local_module_census_depth == 0:
+            self._analysis_build_failed = False
         try:
             self._ensure_mypy_built()
         except MypyAnalyzerError:
-            pass
+            self._analysis_build_failed = True
         path_index = self._project_path_index()
         deps = EndpointDependencies(
             endpoint_id=endpoint.identifier,
@@ -1843,8 +1850,11 @@ class MypyAnalyzer:
             source_root=str(self.source_root),
             project_files=path_index.project_files,
             analysis_incomplete=bool(
-                self.source_inventory is not None
-                and getattr(self.source_inventory, "unresolved_imports", ())
+                self._analysis_build_failed
+                or (
+                    self.source_inventory is not None
+                    and getattr(self.source_inventory, "unresolved_imports", ())
+                )
             ),
             unresolved_imports=tuple(
                 tuple(item)
@@ -1859,6 +1869,7 @@ class MypyAnalyzer:
 
         handler = endpoint.handler
         if not handler.file_path or not self._trees:
+            self._endpoint_deps[self._endpoint_key(endpoint)] = deps
             return deps
 
         # Find the module containing the handler through the build-time reverse index.
@@ -5759,10 +5770,11 @@ class MypyAnalyzer:
 
         # Build mypy once for all endpoints
         self._expected_source_fingerprint = analysis_fingerprint
+        self._analysis_build_failed = False
         try:
             self._ensure_mypy_built()
         except MypyAnalyzerError:
-            pass
+            self._analysis_build_failed = True
         finally:
             self._expected_source_fingerprint = None
 
@@ -5774,7 +5786,7 @@ class MypyAnalyzer:
         # Refresh exclusions before saving: a local alias added during the
         # build must invalidate the pre-build fingerprint. Saving itself can
         # reuse this second census without another directory walk.
-        if use_cache:
+        if use_cache and not self._analysis_build_failed:
             self._local_module_census = self._discover_unselected_local_modules()
             current_fingerprint, _sources = self._cache_fingerprint()
             if current_fingerprint == analysis_fingerprint:
@@ -5911,6 +5923,8 @@ class MypyAnalyzer:
                 "endpoint_id": deps.endpoint_id,
                 "methods": deps.methods,
                 "path": deps.path,
+                "analysis_incomplete": deps.analysis_incomplete,
+                "unresolved_imports": [list(item) for item in deps.unresolved_imports],
                 "referenced_files": {f: list(lines) for f, lines in deps.referenced_files.items()},
                 "referenced_symbols": [
                     {
@@ -6086,6 +6100,10 @@ class MypyAnalyzer:
                     source_evidence_spans=source_evidence_spans,
                     source_root=str(self.source_root),
                     project_files=path_index.project_files,
+                    analysis_incomplete=deps_data.get("analysis_incomplete", False),
+                    unresolved_imports=tuple(
+                        tuple(item) for item in deps_data.get("unresolved_imports", ())
+                    ),
                     _path_index=path_index,
                 )
             return True
