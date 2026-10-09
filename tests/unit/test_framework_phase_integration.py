@@ -1,5 +1,7 @@
 """Synthetic mypy-to-contract integration checks for framework phases."""
 
+import hashlib
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -7,6 +9,7 @@ from fastapi_endpoint_detector.analyzer.framework_phase_graph import (
     adapt_framework_phases_to_graph,
 )
 from fastapi_endpoint_detector.analyzer.framework_phase_integration import (
+    FrameworkPhaseIntegration,
     collect_framework_phase_evidence,
 )
 from fastapi_endpoint_detector.analyzer.framework_phase_report import phase_report_payload
@@ -15,6 +18,10 @@ from fastapi_endpoint_detector.analyzer.mypy_incremental import (
     BuildConfig,
     MypyIncrementalProvider,
     TypedBuild,
+)
+from fastapi_endpoint_detector.analyzer.typed_reverse_graph import (
+    TypedReverseGraph,
+    build_typed_reverse_graph,
 )
 from fastapi_endpoint_detector.models.endpoint import EndpointInventory
 from fastapi_endpoint_detector.models.surface_contract import (
@@ -32,6 +39,53 @@ def _inventory(source: Path) -> tuple[EndpointInventory, LoadedSurfaceContracts]
 def _typed_build(root: Path) -> TypedBuild:
     inventory = {path.stem: str(path) for path in root.glob("*.py")}
     return MypyIncrementalProvider(BuildConfig(root)).build(inventory)
+
+
+def _typed_graph(source: Path, typed_build: TypedBuild) -> TypedReverseGraph:
+    return build_typed_reverse_graph(
+        SimpleNamespace(
+            root=source.parent,
+            files=(
+                SimpleNamespace(
+                    module=source.stem,
+                    path=source,
+                    relative_path=source.name,
+                    sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+                ),
+            ),
+        ),
+        typed_build,
+        (),
+        config_fingerprint="private-fixture-config",
+    )
+
+
+def _assert_graph_rejects_altered_callback_span(
+    source: Path,
+    typed_build: TypedBuild,
+    report: FrameworkPhaseIntegration,
+    callback_module: str,
+    callback_symbol: str,
+) -> None:
+    graph = _typed_graph(source, typed_build)
+    callback_symbol_node = next(
+        symbol
+        for symbol in graph.symbols
+        if symbol.module == callback_module and symbol.fullname == callback_symbol
+    )
+    assert callback_symbol_node.span is not None
+    altered_span = replace(
+        callback_symbol_node.span,
+        end_column=callback_symbol_node.span.end_column + 1,
+    )
+    altered_symbol = replace(callback_symbol_node, span=altered_span)
+    altered_graph = replace(
+        graph,
+        symbols=tuple(
+            altered_symbol if symbol is callback_symbol_node else symbol for symbol in graph.symbols
+        ),
+    )
+    assert adapt_framework_phases_to_graph(report, altered_graph).bindings == ()
 
 
 def test_typed_on_event_surfaces_join_physical_exact_registration_sites(tmp_path: Path) -> None:
@@ -92,35 +146,15 @@ def test_typed_on_event_surfaces_join_physical_exact_registration_sites(tmp_path
     )
     assert activation_report.lifecycle_conditional_surfaces == ()
     assert any(
-        "lifecycle activation is not present" in item
-        for item in activation_report.limitations
+        "lifecycle activation is not present" in item for item in activation_report.limitations
     )
     payload = phase_report_payload(report)
     assert payload.conditional_count == 2
     first = startup
     callback = first.callback
-    graph = SimpleNamespace(
-        root=str(tmp_path),
-        inventory_fingerprint="private-fixture-inventory",
-        config_fingerprint="private-fixture-config",
-        symbols=(
-            SimpleNamespace(
-                module=callback.module,
-                fullname=f"{callback.module}.{callback.symbol}",
-                span=SimpleNamespace(
-                    path=callback.file,
-                    source_sha256=first.callback_file_sha256,
-                    start_line=callback.line,
-                    start_column=callback.column,
-                    end_line=callback.end_line,
-                    end_column=callback.end_column,
-                ),
-            ),
-        ),
-    )
+    graph = _typed_graph(source, typed_build)
     adapted = adapt_framework_phases_to_graph(report, graph)
-    assert len(adapted.bindings) == 1
-    assert adapted.bindings[0].phase.value == "startup"
+    assert {item.phase.value for item in adapted.bindings} == {"startup", "shutdown"}
 
     original = inventory.endpoints[0]
     assert original.surface is not None
@@ -136,22 +170,14 @@ def test_typed_on_event_surfaces_join_physical_exact_registration_sites(tmp_path
     assert forged_report.records[0].phase.value != altered_surface.resource
     assert any("fresh canonical source extraction" in item for item in forged_report.limitations)
 
-    bad_span = SimpleNamespace(
-        path=callback.file,
-        source_sha256=first.callback_file_sha256,
-        start_line=callback.line,
-        start_column=callback.column,
-        end_line=callback.end_line,
-        end_column=(callback.end_column or 0) + 1,
+    startup_report = report.model_copy(update={"records": (startup,)})
+    _assert_graph_rejects_altered_callback_span(
+        source,
+        typed_build,
+        startup_report,
+        callback.module,
+        f"{callback.module}.{callback.symbol}",
     )
-    graph.symbols = (
-        SimpleNamespace(
-            module=callback.module,
-            fullname=f"{callback.module}.{callback.symbol}",
-            span=bad_span,
-        ),
-    )
-    assert adapt_framework_phases_to_graph(report, graph).bindings == ()
 
 
 def test_lifespan_phase_slices_stay_separate_when_constructor_registration_unbound(
