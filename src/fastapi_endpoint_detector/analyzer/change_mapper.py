@@ -629,6 +629,9 @@ class ChangeMapper:
         self._mypy_analyzer: MypyAnalyzer | None = None
         self._baseline_mypy_analyzer: MypyAnalyzer | None = None
         self._effect_analyzer = EffectAnalyzer(target_project_root)
+        self._baseline_effect_analyzer = (
+            EffectAnalyzer(baseline_project_root) if baseline_project_root is not None else None
+        )
         self._scip_analyzer: SCIPAnalyzer | None = None
         self._baseline_registry: EndpointRegistry | None = None
         self._baseline_scip_analyzer: SCIPAnalyzer | None = None
@@ -1094,12 +1097,22 @@ class ChangeMapper:
         Returns:
             AffectedEndpoint if dependencies intersect, None otherwise.
         """
-        deps = (analyzer or self.mypy_analyzer).get_endpoint_dependencies(endpoint)
+        snapshot_analyzer = analyzer or self.mypy_analyzer
+        deps = snapshot_analyzer.get_endpoint_dependencies(endpoint)
 
         if not deps:
             return None
 
         file_path = str(diff_file.path)
+        snapshot_root = snapshot_analyzer.source_root.resolve()
+        snapshot_file_path: Path | None = Path(file_path)
+        if not snapshot_file_path.is_absolute():
+            snapshot_file_path = snapshot_root / snapshot_file_path
+        try:
+            snapshot_file_path = snapshot_file_path.resolve()
+            snapshot_file_path.relative_to(snapshot_root)
+        except (OSError, RuntimeError, ValueError):
+            snapshot_file_path = None
         changed_lines = set(added_lines) | set(removed_lines)
 
         # Dependency ranges already cover complete callable definitions. Expanding
@@ -1152,8 +1165,8 @@ class ChangeMapper:
                     # Read the file once for all lines
                     lines_list = []
                     try:
-                        file_path_obj = Path(file_path)
-                        if file_path_obj.exists():
+                        file_path_obj = snapshot_file_path
+                        if file_path_obj is not None and file_path_obj.is_file():
                             with file_path_obj.open(encoding="utf-8") as f:
                                 lines_list = f.readlines()
                     except (OSError, UnicodeDecodeError):
@@ -1229,7 +1242,9 @@ class ChangeMapper:
 
                             call_stack.append(
                                 CallStackFrame(
-                                    file_path=file_path,
+                                    file_path=str(snapshot_file_path)
+                                    if snapshot_file_path is not None
+                                    else file_path,
                                     line_number=first_line,
                                     function_name=function_name,
                                     code_context=code_context,
@@ -1239,10 +1254,19 @@ class ChangeMapper:
                 # Add this completed call stack to the list
                 all_call_stacks.append(call_stack)
 
-            effect_result = self._effect_analyzer.analyze(
-                file_path,
-                set(display_lines),
-                all_call_stacks,
+            effect_analyzer = self._effect_analyzer
+            if analyzer is not None:
+                if self._baseline_effect_analyzer is None:
+                    raise ChangeMapperError("Baseline effect analysis requires a baseline snapshot")
+                effect_analyzer = self._baseline_effect_analyzer
+            effect_result = (
+                effect_analyzer.analyze(
+                    str(snapshot_file_path),
+                    set(display_lines),
+                    all_call_stacks,
+                )
+                if snapshot_file_path is not None
+                else None
             )
             low_only_points_to = deps.references_lines_low_only(file_path, changed_lines)
             confidence = (
