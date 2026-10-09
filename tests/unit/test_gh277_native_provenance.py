@@ -420,6 +420,17 @@ def test_nested_all_escape_and_mutation_invalidate_stale_ownership(
         "while_delete": "while condition:\n    del __all__\n",
         "with_delete": "with manager:\n    del __all__\n",
         "match_delete": "match value:\n    case _:\n        del __all__\n",
+        "if_augassign": "if condition:\n    __all__ *= 0\n",
+        "try_augassign": "try:\n    __all__ *= 0\nexcept Exception:\n    pass\n",
+        "for_augassign": "for unused in [0]:\n    __all__ *= 0\n",
+        "while_augassign": "while condition:\n    __all__ *= 0\n",
+        "with_augassign": "with manager:\n    __all__ *= 0\n",
+        "match_augassign": "match value:\n    case _:\n        __all__ *= 0\n",
+        "if_namedexpr": "if (__all__ := []):\n    pass\n",
+        "except_alias": "try:\n    pass\nexcept Exception as __all__:\n    pass\n",
+        "match_capture": "match value:\n    case __all__:\n        pass\n",
+        "match_star_capture": "match value:\n    case [*__all__]:\n        pass\n",
+        "match_rest_capture": "match value:\n    case {**__all__}:\n        pass\n",
     }
     (tmp_path / "implementation.py").write_text(
         "from fastapi import APIRouter\n"
