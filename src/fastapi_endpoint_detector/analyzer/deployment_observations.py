@@ -326,6 +326,12 @@ class _ScopeBindings(ast.NodeVisitor):
         if node.returns is not None:
             self.visit(node.returns)
 
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        # Defaults are evaluated here; parameters and body belong to the lambda.
+        for expression in (*node.args.defaults, *node.args.kw_defaults):
+            if expression is not None:
+                self.visit(expression)
+
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         self.local_names.add(node.name)
         self.writes.add(node.name)
@@ -406,6 +412,13 @@ def _scope_for(
     return collector.scope(kind, parent)
 
 
+def _lexical_parent(scope: _PythonScope | None) -> _PythonScope | None:
+    """Class namespaces are not closure scopes for nested bodies."""
+    while scope is not None and scope.kind == "class":
+        scope = scope.parent
+    return scope
+
+
 def _scope_import(scope: _PythonScope, name: str, line: int) -> tuple[str, str] | None:
     """Resolve an imported client only when it is active and unambiguous."""
     current: _PythonScope | None = scope
@@ -448,7 +461,7 @@ class _SubprocessObserver(ast.NodeVisitor):
                 self.visit(expression)
         if node.returns is not None:
             self.visit(node.returns)
-        parent = self.scope.parent if self.scope.kind == "class" else self.scope
+        parent = _lexical_parent(self.scope)
         previous = self.scope
         self.scope = _scope_for("function", parent, node.body, node.args)
         for statement in node.body:
@@ -459,7 +472,7 @@ class _SubprocessObserver(ast.NodeVisitor):
         for expression in (*node.decorator_list, *node.bases, *node.keywords):
             self.visit(expression)
         previous = self.scope
-        self.scope = _scope_for("class", previous, node.body)
+        self.scope = _scope_for("class", _lexical_parent(previous), node.body)
         for statement in node.body:
             self.visit(statement)
         self.scope = previous
@@ -469,7 +482,16 @@ class _SubprocessObserver(ast.NodeVisitor):
             if expression is not None:
                 self.visit(expression)
         previous = self.scope
-        self.scope = _scope_for("function", previous, [], node.args)
+        collector = _ScopeBindings()
+        for argument in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
+            collector.visit(argument)
+        if node.args.vararg is not None:
+            collector.visit(node.args.vararg)
+        if node.args.kwarg is not None:
+            collector.visit(node.args.kwarg)
+        collector.visit(node.body)
+        parent = _lexical_parent(previous)
+        self.scope = collector.scope("function", parent)
         self.visit(node.body)
         self.scope = previous
 
@@ -484,7 +506,7 @@ class _SubprocessObserver(ast.NodeVisitor):
         for generator in generators:
             collector.visit(generator.target)
         previous = self.scope
-        self.scope = collector.scope("comprehension", previous)
+        self.scope = collector.scope("comprehension", _lexical_parent(previous))
         for index, generator in enumerate(generators):
             if index:
                 self.visit(generator.iter)
