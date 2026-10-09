@@ -14,14 +14,18 @@ class IncrementalMeasurementProtocolTests(unittest.TestCase):
         )
 
     def test_fixture_hashes_are_deterministic_and_single_file_controlled(self) -> None:
-
         with tempfile.TemporaryDirectory() as tmp:
+            root_a = Path(tmp) / "a" / "app"
             first, hashes_a, expected_a = measure_incremental.write_fixture(Path(tmp) / "a")
             second, hashes_b, expected_b = measure_incremental.write_fixture(Path(tmp) / "b")
+            self.assertEqual(
+                set(hashes_a),
+                {path.relative_to(root_a).as_posix() for path in root_a.rglob("*.py")},
+            )
         self.assertEqual(hashes_a, hashes_b)
         self.assertEqual(expected_a, expected_b)
         self.assertEqual(first.handler.name, second.handler.name)
-        self.assertEqual(len(hashes_a), measure_incremental.MODULES + 2)
+        self.assertEqual(len(hashes_a), measure_incremental.MODULES + 3)
 
     def test_protocol_never_claims_incremental_for_full_rebuild_backend(self) -> None:
         # Capability contract can be asserted without launching an expensive mypy build.

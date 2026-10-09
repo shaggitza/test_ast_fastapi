@@ -8,10 +8,13 @@ shortcut `uv run --frozen python benchmarks/real_world/run_current.py
 temporary directory and does not open or execute the frozen third-party corpus.
 
 The fixture has 96 typed modules in a deterministic DAG, a typed endpoint, and
-an unrelated dead-code control. Each source file has a SHA-256 inventory. The
-protocol verifies that the endpoint reaches the expected DAG and not the dead
-control; changes exactly one typed source file between target snapshots. It
-records baseline/target preparation, cold analysis build, cache-fingerprint
+an unrelated dead-code control. Each fixture Python file, including the empty
+package initializer, has a SHA-256 inventory. The generated DAG defines an
+expected fixture reachability set; the analyzer observation is limited to the
+endpoint's direct typed references (`routes` and `node_95`). The report labels
+these separately and does not claim analyzer-observed transitive traversal.
+The protocol changes exactly one typed source file between target snapshots.
+It records baseline/target preparation, cold analysis build, cache-fingerprint
 verified warm no-change query, changed-snapshot execution, process peak RSS,
 and endpoint-cache byte size separately. Timings report
 raw samples and nearest-rank p50/p95/max; no performance threshold is inferred
@@ -37,9 +40,15 @@ results and not a user-project performance guarantee.
 
 ## Recorded run
 
-The checked-in [`measurement.json`](measurement.json) contains five actual
-Python 3.11.16 / mypy 1.19.1 samples over 98 inventoried Python source files
-(96 DAG modules, one route module, one dead control). Measured p50 / p95 / max:
+The checked-in [`measurement.json`](measurement.json) is the historical run
+produced before the package initializer was added to the source inventory. It
+contains five actual Python 3.11.16 / mypy 1.19.1 samples over 98 inventoried
+files (96 DAG modules, one route module, one dead control); its legacy
+`fixture_transitive_reachable_modules` and `expected_reachable_modules` values
+are constructed fixture expectations, not analyzer-observed traversal. New
+runs inventory all 99 Python files and label the expectation
+`expected_fixture_reachable_modules`, with analyzer references explicitly
+scoped as `direct_endpoint_references`. Measured p50 / p95 / max:
 
 | Phase | p50 | p95 | max |
 | --- | ---: | ---: | ---: |

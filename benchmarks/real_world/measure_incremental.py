@@ -30,9 +30,10 @@ def write_fixture(root: Path, revision: int = 0) -> tuple[Endpoint, dict[str, st
     """Create a deterministic typed DAG and route, returning hashes and reachability."""
     app = root / "app"
     app.mkdir(parents=True, exist_ok=True)
-    (app / "__init__.py").write_text("", encoding="utf-8")
+    initializer = app / "__init__.py"
+    initializer.write_text("", encoding="utf-8")
     expected: set[str] = set()
-    inventory: dict[str, str] = {}
+    inventory: dict[str, str] = {"__init__.py": hashlib.sha256(initializer.read_bytes()).hexdigest()}
     # Each node calls up to two prior nodes, producing shared paths and a DAG.
     for i in range(MODULES):
         calls = [j for j in (i - 1, i - 3) if j >= 0]
@@ -160,15 +161,20 @@ def run(repeats: int = 5) -> dict[str, Any]:
             samples.append({"attempt": attempt + 1, "source_fingerprint": source_fp, "changed_fingerprint": changed_fp,
                             "config_fingerprint": hashlib.sha256(b"mypy:incremental=false;max_depth=1000").hexdigest(),
                             "tool": f"mypy-analyzer/{analyzer.resolver_version}", "source_files": len(target_hashes),
+                            "source_inventory_scope": "all_fixture_python_files_including_init",
                             "source_hashes_sha256": tree_fingerprint(target_hashes), "cache_artifact_sha256": file_sha256(cache), "changed_file": "node_48.py",
                             "changed_files": ["node_48.py"], "cache_fingerprint_verified": warm_hit,
-                            "observed_reachable_sources": sorted(reachable), "fixture_transitive_reachable_modules": len(expected),
+                            "observation_scope": "direct_endpoint_references",
+                            "observed_reachable_sources": sorted(reachable), "expected_fixture_reachable_modules": len(expected),
                             "incremental_update_supported": False, "actual_changed_snapshot_rebuild_seconds": rebuild,
                             "cold_build_seconds": cold, "warm_no_change_seconds": warm_seconds,
-                            "baseline_target_preparation_seconds": prep, "expected_reachable_modules": len(expected)})
+                            "baseline_target_preparation_seconds": prep})
     process_peak_rss = rss_bytes()
     return {"schema_version": SCHEMA, "protocol": {"fixture": "synthetic-typed-dag-v1", "modules": MODULES,
-            "negative_controls": ["disconnected dead_control.py is absent from reachable sources", "value-only one-file edit preserves the expected reachable-source set"],
+            "negative_controls": ["disconnected dead_control.py is absent from direct endpoint references", "value-only one-file edit preserves the direct endpoint-reference set"],
+            "observation_scope": "direct_endpoint_references",
+            "reachability_oracle": "expected_fixture_reachable_modules comes from the generated DAG, not analyzer traversal",
+            "source_inventory_scope": "all_fixture_python_files_including_init",
             "incremental_semantics": "unsupported: analyzer calls mypy with Options.incremental=False; changed source invalidates the persisted result cache and triggers a full rebuild",
             "unsupported_phase": {"status": "unsupported", "reason": "backend_incremental_build_disabled", "actual_rebuild_phase": "changed_snapshot_rebuild"}},
             "environment": {"python": sys.version, "platform": platform.platform(), "mypy": samples[0]["tool"] if samples else None},
