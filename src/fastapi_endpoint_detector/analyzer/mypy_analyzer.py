@@ -215,6 +215,7 @@ class EndpointDependencies:
     source_root: str = ""
     project_files: set[str] | frozenset[str] = field(default_factory=set)
     analysis_incomplete: bool = False
+    build_failed: bool = False
     unresolved_imports: tuple[tuple[str, str], ...] = ()
     _path_index: _ProjectPathIndex | None = field(default=None, repr=False, compare=False)
     _canonical_key_indexes: dict[str, dict[str, frozenset[str]]] = field(
@@ -517,10 +518,9 @@ class MypyAnalyzer:
     and extract precise file/line information for all references.
     """
 
-    # Schema 24 requires completion metadata. Schema 23 caches may have been
-    # written after a failed build and omitted that metadata, which older
-    # readers interpreted as a complete analysis.
-    CACHE_SCHEMA_VERSION = 24
+    # Schema 25 records failed builds explicitly so they cannot be mistaken
+    # for reusable incomplete analyses caused by bounded capability limits.
+    CACHE_SCHEMA_VERSION = 25
     MAX_CALL_SPAN_SOURCE_BYTES = 2_000_000
     MAX_CALL_SPAN_SOURCE_NODES = 100_000
     MAX_CALL_SPAN_SOURCE_ITEMS = 200_000
@@ -1856,6 +1856,7 @@ class MypyAnalyzer:
                     and getattr(self.source_inventory, "unresolved_imports", ())
                 )
             ),
+            build_failed=self._analysis_build_failed,
             unresolved_imports=tuple(
                 tuple(item)
                 for item in (
@@ -5917,6 +5918,12 @@ class MypyAnalyzer:
 
     def _save_cache(self) -> None:
         """Atomically save versioned analysis data to the cache file."""
+        # Failed builds create placeholder dependencies that must never become
+        # reusable cache entries, even when callers bypass analyze_endpoints.
+        if self._analysis_build_failed or any(
+            deps.build_failed for deps in self._endpoint_deps.values()
+        ):
+            return
         endpoints_data: dict[str, Any] = {}
         for analysis_key, deps in self._endpoint_deps.items():
             endpoints_data[analysis_key] = {
@@ -5924,6 +5931,7 @@ class MypyAnalyzer:
                 "methods": deps.methods,
                 "path": deps.path,
                 "analysis_incomplete": deps.analysis_incomplete,
+                "build_failed": deps.build_failed,
                 "unresolved_imports": [list(item) for item in deps.unresolved_imports],
                 "referenced_files": {f: list(lines) for f, lines in deps.referenced_files.items()},
                 "referenced_symbols": [
@@ -6025,6 +6033,12 @@ class MypyAnalyzer:
                 if not isinstance(analysis_key, str) or not isinstance(deps_data, dict):
                     self._endpoint_deps.clear()
                     return False
+                # Schema changes invalidate older caches, so explicit failure
+                # metadata is sufficient here. Incomplete entries can also
+                # represent legitimate bounded capability limitations.
+                if deps_data.get("build_failed", False):
+                    self._endpoint_deps.clear()
+                    return False
                 call_stacks: dict[str, list[list[CallFrame]]] = {}
                 for f, stacks_data in deps_data.get("call_stacks", {}).items():
                     call_stacks[f] = [
@@ -6101,6 +6115,7 @@ class MypyAnalyzer:
                     source_root=str(self.source_root),
                     project_files=path_index.project_files,
                     analysis_incomplete=deps_data.get("analysis_incomplete", False),
+                    build_failed=deps_data.get("build_failed", False),
                     unresolved_imports=tuple(
                         tuple(item) for item in deps_data.get("unresolved_imports", ())
                     ),

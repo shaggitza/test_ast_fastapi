@@ -123,7 +123,7 @@ def _docker_logical_lines(source: str) -> list[tuple[int, str]]:
     return logical
 
 
-def extract_dockerfile_observations(  # noqa: PLR0912
+def extract_dockerfile_observations(  # noqa: PLR0912, PLR0915
     source: str, source_path: Path | str = "Dockerfile"
 ) -> tuple[DeploymentObservation, ...]:
     """Observe route-relevant ENV, exposed ports, and exec-form startup argv."""
@@ -133,7 +133,14 @@ def extract_dockerfile_observations(  # noqa: PLR0912
         text = raw.strip()
         if not text or text.startswith("#"):
             continue
-        instruction, _, argument = text.partition(" ")
+        instruction, separator, argument = text.partition(" ")
+        if not separator:
+            instruction, separator, argument = text.partition("\t")
+        if not separator:
+            match = re.match(r"(\S+)(\s+)(.*)", text)
+            if match is None:
+                continue
+            instruction, _separator, argument = match.groups()
         instruction = instruction.upper()
         if instruction not in _INSTRUCTIONS:
             continue

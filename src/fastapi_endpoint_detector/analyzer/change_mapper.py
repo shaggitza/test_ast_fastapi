@@ -2039,6 +2039,9 @@ class ChangeMapper:
         # Pre-analyze endpoints with mypy
         report_progress(10, 100, f"Analyzing {total_endpoints} endpoints (mypy)...")
         self._preanalyze_mypy(progress_callback)
+        self._append_dependency_completeness_warnings(
+            "target", self.registry, self.mypy_analyzer, warnings
+        )
         has_mypy_removals = any(
             DiffParser.get_changed_line_numbers(item)[1]
             or (item.source_path is not None and item.source_path != item.path)
@@ -2053,6 +2056,9 @@ class ChangeMapper:
             try:
                 self._preanalyze_mypy_registry(
                     self.baseline_mypy_registry, self.baseline_mypy_analyzer, progress_callback
+                )
+                self._append_dependency_completeness_warnings(
+                    "baseline", self.baseline_mypy_registry, self.baseline_mypy_analyzer, warnings
                 )
             except Exception as exc:
                 self._baseline_failure = str(exc)
@@ -2223,38 +2229,31 @@ class ChangeMapper:
         endpoints = self.registry.get_all()
         total = len(endpoints)
 
-        # Try to load from cache first
-        if self.use_cache and self.mypy_analyzer.cache_path.exists():
-            if progress_callback:
-                progress_callback(10, 100, "Loading cached analysis...")
-            try:
-                self.mypy_analyzer._load_cache()
-                # Check if all endpoints are cached
-                all_cached = all(
-                    self.mypy_analyzer.get_endpoint_dependencies(endpoint) is not None
-                    for endpoint in endpoints
-                )
-                if all_cached:
-                    if progress_callback:
-                        progress_callback(65, 100, f"Loaded {total} endpoints from cache")
-                    return
-            except Exception:
-                pass
+        if progress_callback:
+            progress_callback(10, 100, f"Analyzing {total} endpoints (mypy)...")
+        # The public bulk API owns cache validation, build failure tracking,
+        # and guarded cache persistence. Calling analyze_endpoint in a loop
+        # loses that snapshot-level failure state.
+        self.mypy_analyzer.analyze_endpoints(endpoints, use_cache=self.use_cache)
 
-        # Analyze uncached endpoints
-        for i, endpoint in enumerate(endpoints):
-            if progress_callback:
-                progress_callback(
-                    10 + int(55 * (i + 1) / max(total, 1)),
-                    100,
-                    f"Analyzing endpoint {i + 1}/{total}: {endpoint.path}",
-                )
-            if self.mypy_analyzer.get_endpoint_dependencies(endpoint) is None:
-                self.mypy_analyzer.analyze_endpoint(endpoint)
-
-        # Save cache after analysis
-        if self.use_cache:
-            self.mypy_analyzer._save_cache()
+    @staticmethod
+    def _append_dependency_completeness_warnings(
+        side: str,
+        registry: EndpointRegistry,
+        analyzer: MypyAnalyzer,
+        warnings: list[str],
+    ) -> None:
+        """Keep incomplete dependency builds visible and tied to their source."""
+        for endpoint in registry.get_all():
+            dependencies = analyzer.get_endpoint_dependencies(endpoint)
+            if dependencies is None or not dependencies.analysis_incomplete:
+                continue
+            source = endpoint.handler.file_path or endpoint.handler.name
+            methods = ",".join(method.value for method in endpoint.methods)
+            warnings.append(
+                f"Mypy {side} analysis is incomplete for {methods} {endpoint.path} "
+                f"({source}): dependency analysis did not resolve the full endpoint graph."
+            )
 
     def _preanalyze_mypy_registry(
         self,
@@ -2264,15 +2263,11 @@ class ChangeMapper:
     ) -> None:
         """Build typed dependencies for every endpoint in one source snapshot."""
         endpoints = registry.get_all()
-        for index, endpoint in enumerate(endpoints, 1):
-            if progress_callback:
-                progress_callback(
-                    10 + int(55 * index / max(len(endpoints), 1)),
-                    100,
-                    f"Analyzing baseline endpoint {index}/{len(endpoints)}: {endpoint.path}",
-                )
-            if analyzer.get_endpoint_dependencies(endpoint) is None:
-                analyzer.analyze_endpoint(endpoint)
+        if progress_callback:
+            progress_callback(10, 100, f"Analyzing {len(endpoints)} baseline endpoints (mypy)...")
+        # Use the snapshot API so failed builds remain marked as failed and
+        # cannot be reused from memory or persisted as complete cache entries.
+        analyzer.analyze_endpoints(endpoints, use_cache=self.use_cache)
 
     def get_endpoints(self) -> list[Endpoint]:
         """Get all endpoints in the application."""

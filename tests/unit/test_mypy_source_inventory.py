@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer, MypyAnalyzerError
 from fastapi_endpoint_detector.analyzer.source_inventory import build_source_inventory
 from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, HandlerInfo
@@ -277,7 +278,7 @@ def test_schema_23_cache_without_completion_metadata_is_rebuilt(tmp_path: Path) 
     assert not second._load_cache()
     results = second.analyze_endpoints([endpoint], use_cache=True)
     assert not results[second._endpoint_key(endpoint)].analysis_incomplete
-    assert json.loads(cache.read_text(encoding="utf-8"))["schema_version"] == 24
+    assert json.loads(cache.read_text(encoding="utf-8"))["schema_version"] == 25
 
 
 def test_single_endpoint_recovers_after_failed_build(
@@ -337,3 +338,132 @@ def test_public_inventory_ambiguous_module_fails_closed_then_recovers(tmp_path: 
     ]
     assert not repaired.analysis_incomplete
     assert cache.exists()
+
+
+def test_public_mapper_retries_failed_mypy_build_with_unchanged_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = tmp_path / "app.py"
+    app.write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n"
+        "@app.get('/items')\ndef items():\n    return 1\n",
+        encoding="utf-8",
+    )
+    mapper = ChangeMapper(app, secure_ast=True, use_cache=True)
+    analyzer = mapper.mypy_analyzer
+    cache = tmp_path / "mapper-cache.json"
+    analyzer.set_cache_path(cache)
+    original_build = analyzer._ensure_mypy_built
+    attempts = 0
+
+    def fail_once() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise MypyAnalyzerError("temporary build failure")
+        original_build()
+
+    monkeypatch.setattr(analyzer, "_ensure_mypy_built", fail_once)
+    diff = (
+        "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n"
+        "@@ -4,0 +5 @@ def items():\n+    marker = 1\n"
+    )
+
+    first = mapper.analyze_diff(diff)
+    assert first.analysis_completeness == "partial"
+    assert any("Mypy target analysis is incomplete" in warning for warning in first.warnings)
+    assert not cache.exists()
+
+    second = mapper.analyze_diff(diff)
+    assert second.analysis_completeness == "complete"
+    assert attempts >= 2
+    assert cache.exists()
+
+
+@pytest.mark.parametrize("incomplete_side", ["target", "baseline"])
+def test_public_mapper_reports_incomplete_target_or_baseline_dependencies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, incomplete_side: str
+) -> None:
+    target = tmp_path / "target"
+    baseline = tmp_path / "baseline"
+    target.mkdir()
+    baseline.mkdir()
+    old = (
+        "from fastapi import FastAPI\napp = FastAPI()\n"
+        "@app.get('/items')\ndef items():\n    return 1\n"
+    )
+    new = old.replace("return 1", "return 2")
+    (target / "app.py").write_text(new, encoding="utf-8")
+    (baseline / "app.py").write_text(old, encoding="utf-8")
+    mapper = ChangeMapper(
+        target / "app.py", baseline_app_path=baseline, secure_ast=True, use_cache=False
+    )
+    analyzer = (
+        mapper.mypy_analyzer if incomplete_side == "target" else mapper.baseline_mypy_analyzer
+    )
+
+    def fail_build() -> None:
+        raise MypyAnalyzerError("temporary build failure")
+
+    monkeypatch.setattr(analyzer, "_ensure_mypy_built", fail_build)
+    diff = (
+        "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n"
+        "@@ -5 +5 @@ def items():\n-    return 1\n+    return 2\n"
+    )
+
+    report = mapper.analyze_diff(diff)
+
+    assert report.analysis_completeness == "partial"
+    side_prefix = f"Mypy {incomplete_side} analysis is incomplete"
+    assert any(side_prefix in warning and "app.py" in warning for warning in report.warnings)
+
+
+def test_public_mapper_retries_failed_baseline_build_without_source_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    baseline = tmp_path / "baseline"
+    target.mkdir()
+    baseline.mkdir()
+    old = (
+        "from fastapi import FastAPI\napp = FastAPI()\n"
+        "@app.get('/items')\ndef items():\n    return 1\n"
+    )
+    new = old.replace("return 1", "return 2")
+    (target / "app.py").write_text(new, encoding="utf-8")
+    (baseline / "app.py").write_text(old, encoding="utf-8")
+    mapper = ChangeMapper(
+        target / "app.py", baseline_app_path=baseline, secure_ast=True, use_cache=True
+    )
+    analyzer = mapper.baseline_mypy_analyzer
+    analyzer.set_cache_path(tmp_path / "baseline-cache.json")
+    original_build = analyzer._ensure_mypy_built
+    attempts = 0
+
+    def fail_once() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise MypyAnalyzerError("temporary baseline build failure")
+        original_build()
+
+    monkeypatch.setattr(analyzer, "_ensure_mypy_built", fail_once)
+    diff = (
+        "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n"
+        "@@ -5 +5 @@ def items():\n-    return 1\n+    return 2\n"
+    )
+
+    first = mapper.analyze_diff(diff)
+    assert first.analysis_completeness == "partial"
+    assert any("Mypy baseline analysis is incomplete" in warning for warning in first.warnings)
+    assert [item.endpoint.identifier for item in first.candidate_endpoints] == ["GET /items"]
+    failed = analyzer.get_endpoint_dependencies(mapper.baseline_mypy_registry.get_all()[0])
+    assert failed is not None and failed.build_failed
+    assert not analyzer.cache_path.exists()
+
+    second = mapper.analyze_diff(diff)
+    assert second.analysis_completeness == "complete"
+    assert attempts >= 2
+    assert [item.endpoint.identifier for item in second.candidate_endpoints] == ["GET /items"]
+    repaired = analyzer.get_endpoint_dependencies(mapper.baseline_mypy_registry.get_all()[0])
+    assert repaired is not None and not repaired.analysis_incomplete and not repaired.build_failed
