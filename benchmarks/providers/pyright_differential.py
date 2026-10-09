@@ -204,11 +204,15 @@ def _read_pyright(
             type(summary[key]) is not int or summary[key] < 0
             for key in ("filesAnalyzed", "errorCount", "warningCount", "informationCount")
         )
+        or summary["filesAnalyzed"] == 0
         or type(summary["timeInSec"]) not in {int, float}
         or summary["timeInSec"] < 0
     ):
         raise EvaluationError("malformed Pyright output: diagnostics must be a list")
+    if source_names is not None and summary["filesAnalyzed"] != len(source_names):
+        raise EvaluationError("Pyright summary does not cover the expected source inventory")
     result: list[Observation] = []
+    severity_counts = {"error": 0, "warning": 0, "information": 0}
     for item in diagnostics:
         if not isinstance(item, dict) or set(item) not in (
             {"file", "severity", "message", "range"},
@@ -243,6 +247,7 @@ def _read_pyright(
             or end_line < line
             or type(end_character) is not int
             or end_character < 0
+            or (end_line, end_character) < (line, character)
         ):
             raise EvaluationError("malformed Pyright diagnostic range")
         try:
@@ -251,6 +256,7 @@ def _read_pyright(
             raise EvaluationError("Pyright diagnostic path escapes input snapshot") from exc
         if source_names is not None and file not in source_names:
             raise EvaluationError("Pyright diagnostic references a non-source input")
+        severity_counts[severity] += 1
         result.append(
             Observation(
                 "pyright",
@@ -266,6 +272,11 @@ def _read_pyright(
                 end_character + 1,
             )
         )
+    for severity, observed_count in severity_counts.items():
+        if summary[f"{severity}Count"] != observed_count:
+            raise EvaluationError(
+                f"Pyright summary {severity}Count does not match parsed diagnostics"
+            )
     return data["version"], result
 
 

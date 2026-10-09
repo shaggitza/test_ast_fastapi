@@ -127,6 +127,83 @@ def test_pyright_parser_rejects_malformed_output() -> None:
         harness._read_pyright("not-json", Path("/tmp/fixture"))
 
 
+def _pyright_receipt(
+    fixture: Path, summary: dict[str, Any], diagnostics: list[dict[str, Any]]
+) -> str:
+    return json.dumps(
+        {
+            "version": harness.PYRIGHT_VERSION,
+            "time": "0 sec",
+            "generalDiagnostics": diagnostics,
+            "summary": summary,
+        }
+    )
+
+
+def _pyright_summary(
+    *, files: int = 1, errors: int = 0, warnings: int = 0, information: int = 0
+) -> dict[str, Any]:
+    return {
+        "filesAnalyzed": files,
+        "errorCount": errors,
+        "warningCount": warnings,
+        "informationCount": information,
+        "timeInSec": 0,
+    }
+
+
+def _pyright_diagnostic(fixture: Path, severity: str = "error") -> dict[str, Any]:
+    return {
+        "file": str(fixture / "case.py"),
+        "severity": severity,
+        "message": "controlled diagnostic",
+        "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
+    }
+
+
+@pytest.mark.parametrize(
+    ("summary", "severities", "message"),
+    [
+        (_pyright_summary(errors=1), [], "errorCount does not match"),
+        (_pyright_summary(information=0), ["information"], "informationCount does not match"),
+        (_pyright_summary(warnings=1), ["error"], "errorCount does not match"),
+    ],
+)
+def test_pyright_summary_counts_must_reconcile_with_diagnostics(
+    tmp_path: Path,
+    summary: dict[str, Any],
+    severities: list[str],
+    message: str,
+) -> None:
+    source = tmp_path / "case.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    diagnostics = [_pyright_diagnostic(tmp_path, severity) for severity in severities]
+    payload = _pyright_receipt(tmp_path, summary, diagnostics)
+    with pytest.raises(harness.EvaluationError, match=message):
+        harness._read_pyright(payload, tmp_path, {"case.py"})
+
+
+def test_pyright_summary_must_cover_expected_source_inventory(tmp_path: Path) -> None:
+    source = tmp_path / "case.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    payload = _pyright_receipt(tmp_path, _pyright_summary(files=2), [])
+    with pytest.raises(harness.EvaluationError, match="expected source inventory"):
+        harness._read_pyright(payload, tmp_path, {"case.py"})
+
+
+def test_pyright_range_rejects_end_before_start(tmp_path: Path) -> None:
+    source = tmp_path / "case.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    diagnostic = _pyright_diagnostic(tmp_path)
+    diagnostic["range"] = {
+        "start": {"line": 0, "character": 2},
+        "end": {"line": 0, "character": 1},
+    }
+    payload = _pyright_receipt(tmp_path, _pyright_summary(errors=1), [diagnostic])
+    with pytest.raises(harness.EvaluationError, match="malformed Pyright diagnostic range"):
+        harness._read_pyright(payload, tmp_path, {"case.py"})
+
+
 @pytest.mark.skipif(os.name != "posix", reason="provider process groups require POSIX")
 def test_timeout_is_explicit(tmp_path: Path) -> None:
     with pytest.raises(harness.EvaluationError, match="timed out"):
