@@ -422,10 +422,16 @@ def _lexical_parent(scope: _PythonScope | None) -> _PythonScope | None:
 def _scope_import(scope: _PythonScope, name: str, line: int) -> tuple[str, str] | None:
     """Resolve an imported client only when it is active and unambiguous."""
     current: _PythonScope | None = scope
+    # Line ordering remains relevant until a deferred function body is crossed.
+    deferred = False
     while current is not None:
         if name in current.globals:
+            if current.kind == "function":
+                deferred = True
             current = current.parent
             while current is not None and current.kind != "module":
+                if current.kind == "function":
+                    deferred = True
                 current = current.parent
             continue
         if name in current.nonlocals:
@@ -434,10 +440,12 @@ def _scope_import(scope: _PythonScope, name: str, line: int) -> tuple[str, str] 
             if name in current.writes:
                 return None
             candidates = current.imports.get(name, [])
-            active = [item for item in candidates if item[0] <= line]
+            active = [item for item in candidates if deferred or item[0] <= line]
             if not active or any(conditional for _, _, conditional in active):
                 return None
             return active[-1][1]
+        if current.kind == "function":
+            deferred = True
         current = current.parent
     return None
 

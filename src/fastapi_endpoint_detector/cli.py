@@ -44,6 +44,14 @@ if TYPE_CHECKING:
 console = Console()
 
 
+def _reject_unsupported_vm_output_options(config: Config) -> None:
+    """Reject configured formatter options the isolated runtime cannot receive."""
+    defaults = type(config.output)()
+    for name, value in config.output.model_dump().items():
+        if value != getattr(defaults, name):
+            raise click.ClickException(f"Output option '{name}' cannot be applied with --vm")
+
+
 def _format_runtime_endpoint_list(
     formatter: BaseFormatter,
     output_format: str,
@@ -248,6 +256,8 @@ def analyze(
         formatter = get_formatter(output_format, output_config=config.output)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
+    if vm:
+        _reject_unsupported_vm_output_options(config)
 
     # Validate mutually exclusive options
     has_surface_contracts = any((config.analysis.surface_contracts, config.analysis.surface_preset))
@@ -810,6 +820,8 @@ def list_endpoints(
         formatter = get_formatter(output_format, output_config=config.output)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
+    if vm:
+        _reject_unsupported_vm_output_options(config)
 
     # Validate mutually exclusive options
     if config.analysis.surface_contracts is not None and not secure_ast:
