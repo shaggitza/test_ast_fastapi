@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -15,7 +17,7 @@ from fastapi_endpoint_detector.parser.secure_ast_extractor import (
 
 
 def _write_reverse_ordered_export_chain(
-    tmp_path: Path, import_hops: int
+    tmp_path: Path, import_hops: int, *, module_qualified: bool = False
 ) -> tuple[Path, list[Path]]:
     """Write a route reached through imports that run opposite lexical file order."""
     assert import_hops >= 2
@@ -40,14 +42,20 @@ def _write_reverse_ordered_export_chain(
         )
 
     main = tmp_path / "main.py"
+    if module_qualified:
+        target_import = f"import {wrappers[0]} as surface\n"
+        target_reference = "surface.router"
+    else:
+        target_import = f"from {wrappers[0]} import router as deep_router\n"
+        target_reference = "deep_router"
     main.write_text(
         "from fastapi import APIRouter, FastAPI\n"
-        f"from {wrappers[0]} import router as deep_router\n"
+        f"{target_import}"
         "local = APIRouter()\n"
         "@local.get('/local')\n"
         "def local_route(): pass\n"
         "app = FastAPI()\n"
-        "app.include_router(deep_router)\n"
+        f"app.include_router({target_reference})\n"
         "app.include_router(local)\n",
         encoding="utf-8",
     )
@@ -105,6 +113,32 @@ def test_export_chain_past_64_import_hops_is_limited_without_hiding_local_route(
         and limitation.reason == "included router could not be resolved"
         for limitation in inventory.limitations
     )
+
+
+@pytest.mark.parametrize("import_hops", [64, 65], ids=["64-hops", "65-hops"])
+def test_module_qualified_router_import_obeys_transition_budget(
+    tmp_path: Path, import_hops: int
+) -> None:
+    main, _wrapper_paths = _write_reverse_ordered_export_chain(
+        tmp_path, import_hops=import_hops, module_qualified=True
+    )
+    inventory = SecureASTExtractor(main).extract_inventory()
+
+    if import_hops == 64:
+        assert inventory.status is InventoryStatus.ESTABLISHED
+        assert {endpoint.identifier for endpoint in inventory.endpoints} == {
+            "GET /deep",
+            "GET /local",
+        }
+        assert all(not endpoint.discovery_conditions for endpoint in inventory.endpoints)
+    else:
+        assert inventory.status is InventoryStatus.CONDITIONAL
+        assert [endpoint.identifier for endpoint in inventory.endpoints] == ["GET /local"]
+        assert any(
+            limitation.source_path == main
+            and limitation.reason == "included router could not be resolved"
+            for limitation in inventory.limitations
+        )
 
 
 def test_reexport_cycle_is_limited_and_all_export_ownership_stays_descendant_only(

@@ -5182,6 +5182,7 @@ class SecureASTExtractor:
             target = modules.get(target_name)
             if target is None:
                 return None
+            # Resolving the imported module consumed the first transition.
             return self._resolve_exported_object(
                 target,
                 expression.attr,
@@ -5189,7 +5190,7 @@ class SecureASTExtractor:
                 aliases,
                 modules,
                 frozenset(),
-                hop_budget,
+                hop_budget - 1,
             )
         return None
 
