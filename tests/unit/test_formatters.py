@@ -134,7 +134,8 @@ def test_source_observations_are_optional_structured_json_and_yaml() -> None:
     assert json_result["source_observations"] == source_observations
     assert yaml_result["source_observations"] == source_observations
     summary = "1 exact client observations, 1 uncertain client calls"
-    assert summary in re.sub(r"\s+", " ", TextFormatter().format(report))
+    rendered_text = re.sub(r"\x1b\[[0-9;]*m", "", TextFormatter().format(report))
+    assert summary in re.sub(r"\s+", " ", rendered_text)
     assert summary in MarkdownFormatter().format(report)
     assert summary in HtmlFormatter().format(report)
 
