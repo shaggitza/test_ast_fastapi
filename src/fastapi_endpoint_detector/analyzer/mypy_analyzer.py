@@ -407,13 +407,18 @@ class MypyAnalyzer:
         "starlette.concurrency.run_in_threadpool": _ExecutorSummary(0, True, True),
     }
 
-    def __init__(self, app_path: Path, *, max_depth: int = 10) -> None:
+    def __init__(
+        self, app_path: Path, *, max_depth: int = 10, no_site_packages: bool = False
+    ) -> None:
         """Initialize the mypy analyzer."""
         if max_depth < 1:
             raise ValueError("max_depth must be at least 1")
         self.app_path = app_path.resolve()
         self.source_root = self.app_path.parent if self.app_path.is_file() else self.app_path
         self.max_depth = max_depth
+        # Hermetic source probes can opt out of all interpreter site packages.
+        # Ordinary analysis keeps mypy's historical environment discovery.
+        self.no_site_packages = no_site_packages
         self._endpoint_deps: dict[str, EndpointDependencies] = {}
         self._mypy_available = self._check_mypy_available()
         self._cache_file: Path | None = None
@@ -520,6 +525,7 @@ class MypyAnalyzer:
         # Configure mypy for full analysis with AST retention
         options = Options()
         options.ignore_missing_imports = True
+        options.no_site_packages = self.no_site_packages
         options.follow_imports = "normal"
         options.mypy_path = [str(source_root.parent)]
         options.namespace_packages = True
@@ -530,6 +536,7 @@ class MypyAnalyzer:
         options.export_types = True  # Critical for type information!
 
         original_path = sys.path.copy()
+        original_mypypath = os.environ.pop("MYPYPATH", None) if self.no_site_packages else None
         if str(source_root.parent) not in sys.path:
             sys.path.insert(0, str(source_root.parent))
 
@@ -566,6 +573,8 @@ class MypyAnalyzer:
 
         finally:
             sys.path = original_path
+            if self.no_site_packages and original_mypypath is not None:
+                os.environ["MYPYPATH"] = original_mypypath
 
     def _reset_build_state(self, *, clear_endpoint_dependencies: bool = True) -> None:
         """Discard one stale typed snapshot before an explicit bulk rebuild."""
@@ -4068,6 +4077,7 @@ class MypyAnalyzer:
             {
                 "schema": self.CACHE_SCHEMA_VERSION,
                 "max_depth": self.max_depth,
+                "no_site_packages": self.no_site_packages,
                 "finite_points_to": {
                     "max_targets": self.MAX_POINTS_TO_TARGETS,
                     "max_factory_returns": self.MAX_FACTORY_RETURNS,

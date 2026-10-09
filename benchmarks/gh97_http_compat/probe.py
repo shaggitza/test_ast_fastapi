@@ -258,7 +258,7 @@ def run(wheels: dict[str, Path] = WHEELS) -> dict[str, Any]:
         # MypyAnalyzer prepends source_root.parent to MYPYPATH. Point its standard
         # source-root parent at extracted packages while keeping the app separate.
         # Symlink/copy-free package lookup is provided with a temporary package root.
-        analyzer = MypyAnalyzer(app, max_depth=2)
+        analyzer = MypyAnalyzer(app, max_depth=2, no_site_packages=True)
         # Analyzer's supported mypy_path is app.parent; place packages there.
         for child in package_root.iterdir():
             child.rename(root / child.name)
@@ -375,7 +375,13 @@ def run(wheels: dict[str, Path] = WHEELS) -> dict[str, Any]:
             "product_imports": product_imports,
             "runner_sha256": runner_hash,
             **provenance,
-            "analysis_config": {"preset": PRESET, "track_transitive": True, "max_depth": 2},
+            "analysis_config": {
+                "preset": PRESET,
+                "track_transitive": True,
+                "max_depth": 2,
+                "no_site_packages": True,
+                "ambient_mypypath": "excluded",
+            },
             "preset": PRESET,
             "preset_hash": preset.preset_hash,
             "preset_config_hash": preset.config_hash,

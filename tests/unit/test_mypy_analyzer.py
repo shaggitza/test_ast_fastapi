@@ -101,6 +101,38 @@ class TestMypyAnalyzerBasic:
         assert analyzer.app_path == tmp_path
         assert analyzer._endpoint_deps == {}
 
+    def test_site_package_mode_is_part_of_cache_identity(self, tmp_path: Path) -> None:
+        """Hermetic and ordinary analyzer caches cannot share a fingerprint."""
+        ordinary = MypyAnalyzer(tmp_path)
+        hermetic = MypyAnalyzer(tmp_path, no_site_packages=True)
+
+        assert ordinary._cache_fingerprint()[0] != hermetic._cache_fingerprint()[0]
+
+    def test_hermetic_analysis_ignores_ambient_mypypath_decoy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Explicit source search paths and no-site-packages exclude MYPYPATH stubs."""
+        app = tmp_path / "app"
+        app.mkdir()
+        (app / "main.py").write_text(
+            "from optional_decoy import decoy_call\n\n"
+            "def handler() -> None:\n"
+            "    decoy_call()\n",
+            encoding="utf-8",
+        )
+        ambient = tmp_path / "ambient"
+        ambient.mkdir()
+        (ambient / "optional_decoy.pyi").write_text(
+            "def decoy_call() -> None: ...\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("MYPYPATH", str(ambient))
+
+        analyzer = MypyAnalyzer(app, no_site_packages=True)
+        analyzer._ensure_mypy_built()
+
+        assert "optional_decoy" not in analyzer._trees
+        assert str(ambient) not in analyzer._module_to_path.values()
+
     def test_cache_path_default(self, tmp_path: Path) -> None:
         """Test default cache path location."""
         analyzer = MypyAnalyzer(tmp_path)
