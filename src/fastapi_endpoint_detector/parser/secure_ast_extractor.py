@@ -5182,6 +5182,7 @@ class SecureASTExtractor:
             target = modules.get(target_name)
             if target is None:
                 return None
+            # Resolving the imported module consumed the first transition.
             return self._resolve_exported_object(
                 target,
                 expression.attr,
@@ -5189,7 +5190,7 @@ class SecureASTExtractor:
                 aliases,
                 modules,
                 frozenset(),
-                hop_budget,
+                hop_budget - 1,
             )
         return None
 
@@ -5204,11 +5205,12 @@ class SecureASTExtractor:
         remaining_hops: int,
     ) -> _Object | None:
         """Follow exact project-local symbol re-exports to one modeled object."""
-        if remaining_hops <= 0:
-            return None
         local = self._object_at(module, symbol, line)
         if local is not None:
             return local
+        # A zero budget allows this local binding but forbids following another import.
+        if remaining_hops <= 0:
+            return None
         binding = self._import_binding_at(module, symbol, line)
         if binding is None or binding.symbol is None or binding.symbol == "*":
             return None
