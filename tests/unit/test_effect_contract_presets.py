@@ -238,3 +238,16 @@ def test_config_loads_effect_preset_once() -> None:
     assert first is config.load_effect_contract_snapshot()
     assert first is not None
     assert first.document.preset.id == "stdlib-filesystem-effects"
+
+
+def test_config_selects_typed_sqs_preset() -> None:
+    config = Config(analysis=AnalysisConfig(effect_preset="message-bus-v1"))
+
+    loaded = config.load_effect_contract_snapshot()
+
+    assert loaded is not None
+    assert loaded.document.preset.id == "typed-sqs-effects"
+    assert {contract.id for contract in loaded.document.contracts} == {
+        "typed-sqs-send-message",
+        "typed-sqs-send-message-batch",
+    }
