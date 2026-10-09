@@ -435,6 +435,30 @@ def test_request_log_rejects_success_followed_by_retry():
         sm.validate(forged)
 
 
+@pytest.mark.parametrize(
+    ("status", "body_limit"),
+    [("http_404", 4096), ("http_503", 4096), ("network_unavailable", 0)],
+)
+def test_error_response_bytes_match_the_collectors_read_bound(status, body_limit):
+    payload = sample_payload()
+    project = payload["projects"][0]
+    request = {
+        "url": (
+            f"https://api.github.com/repos/{project['repository']}/commits/"
+            f"{project['survey_commit']}"
+        ),
+        "attempt": 1,
+        "status": status,
+        "bytes": body_limit,
+    }
+    payload["collection"].update(requests=1, response_bytes=body_limit, request_log=[request])
+    sm.validate(payload)
+    request["bytes"] += 1
+    payload["collection"]["response_bytes"] += 1
+    with pytest.raises(sm.EvidenceError, match="response_limit_exceeded"):
+        sm.validate(payload)
+
+
 def test_source_paths_are_canonical_and_no_clobber(tmp_path):
     for bad in ("../x", "/x", "a\\b", "a//b", "./a"):
         assert not sm._safe_tree_path(bad)

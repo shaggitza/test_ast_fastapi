@@ -837,7 +837,11 @@ def validate(payload: dict[str, Any], raw_payload: bytes | None = None) -> None:
             raise EvidenceError("request_log_status_invalid")
         if type(request["bytes"]) is not int or request["bytes"] < 0:
             raise EvidenceError("request_log_bytes_invalid")
-        if "/git/trees/" in parsed_url.path:
+        if request["status"].startswith("http_"):
+            response_limit = 4096
+        elif request["status"] == "network_unavailable":
+            response_limit = 0
+        elif "/git/trees/" in parsed_url.path:
             response_limit = 8 * 1024 * 1024
         elif "/git/blobs/" in parsed_url.path:
             response_limit = MAX_BLOB_RESPONSE
