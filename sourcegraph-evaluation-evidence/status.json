@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "candidate": "Sourcegraph Enterprise + SCIP",
+  "as_of": "2026-10-05",
+  "status": "not_evaluable",
+  "reasons": [
+    "missing_credentials",
+    "missing_index",
+    "incomplete_coverage",
+    "missing_provenance"
+  ],
+  "measured": false,
+  "provider_authenticated": false,
+  "scoreable": false,
+  "claims": [],
+  "note": "No enterprise calls were made. Fixture evidence is synthetic, schema validation cannot authenticate a provider, and readiness is not runtime authorization."
+}
