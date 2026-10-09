@@ -54,6 +54,8 @@ def test_adjacent_new_definition_does_not_inherit_previous_function_evidence(
     deps.add_symbol_reference(str(source), "events.previous", 1, 2)
 
     class FakeAnalyzer:
+        source_root = tmp_path
+
         def get_endpoint_dependencies(self, _endpoint: Endpoint) -> EndpointDependencies:
             return deps
 
