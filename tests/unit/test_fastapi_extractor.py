@@ -85,8 +85,7 @@ def test_runtime_extractor_filters_handlers_to_canonical_inventory(tmp_path: Pat
     )
     assert "selected 1 files" in extractor.source_inventory_limitations[0]
     assert (
-        "following is disabled with maximum depth 10"
-        in extractor.source_inventory_limitations[0]
+        "following is disabled with maximum depth 10" in extractor.source_inventory_limitations[0]
     )
     assert any(
         "follow_imports is disabled" in limitation
