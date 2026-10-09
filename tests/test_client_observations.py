@@ -211,3 +211,95 @@ def test_exact_absolute_authorities_accept_boundary_ports_and_ipv6() -> None:
         "https://api.example:65535",
         "wss://[::1]:443",
     ]
+
+
+def test_nonassignment_operators_do_not_shadow_supported_client_calls() -> None:
+    for operator in (
+        "==",
+        "===",
+        "!=",
+        "!==",
+        "||",
+        "&&",
+        "??",
+        "+",
+        "-",
+        "*",
+        "/",
+        "%",
+        "|",
+        "&",
+        "^",
+        "<",
+        ">",
+        "<<",
+        ">>",
+    ):
+        observations = extract_client_observations(
+            f"fetch {operator} fallback; axios {operator} client; WebSocket {operator} socket; "
+            "fetch('/fetch'); axios.get('/axios'); new WebSocket('wss://api.test/events');"
+        )
+        assert [item.route_path for item in observations] == ["/fetch", "/axios", "/events"], (
+            operator
+        )
+
+
+def test_complete_assignment_and_mutation_operators_shadow_client_globals() -> None:
+    for operator in (
+        "=",
+        "+=",
+        "-=",
+        "*=",
+        "/=",
+        "%=",
+        "**=",
+        "&=",
+        "|=",
+        "^=",
+        "&&=",
+        "||=",
+        "??=",
+        "<<=",
+        ">>=",
+        ">>>=",
+        "++",
+        "--",
+    ):
+        if operator in {"++", "--"}:
+            mutation = f"fetch{operator}; axios{operator}; WebSocket{operator}; "
+        else:
+            mutation = f"fetch {operator} fallback; axios {operator} client; "
+            mutation += f"WebSocket {operator} socket; "
+        observations = extract_client_observations(
+            mutation
+            + "fetch('/fetch'); axios.get('/axios'); new WebSocket('wss://api.test/events');"
+        )
+        assert observations == (), operator
+
+
+def test_fetch_constructor_cannot_join_a_trusted_http_surface() -> None:
+    observations = extract_client_observations(
+        "new fetch('https://api.test/items'); fetch('https://api.test/items');"
+    )
+    assert len(observations) == 1
+    assert observations[0].start_offset == 37
+    surfaces = (EstablishedSurface("items", "/items", "GET", "https://api.test", True),)
+    assert len(join_established_surfaces(observations, surfaces)) == 1
+
+
+def test_prefix_mutation_invalidates_client_globals() -> None:
+    for operator in ("++", "--"):
+        for space in ("", " "):
+            observations = extract_client_observations(
+                f"{operator}{space}fetch; {operator}{space}axios; {operator}{space}WebSocket; "
+                "fetch('/fetch'); axios.get('/axios'); new WebSocket('wss://api.test/events');"
+            )
+            assert observations == (), (operator, space)
+
+
+def test_separate_unary_operators_do_not_count_as_prefix_mutation() -> None:
+    observations = extract_client_observations(
+        "+ +fetch; - -axios; + +WebSocket; "
+        "fetch('/fetch'); axios.get('/axios'); new WebSocket('wss://api.test/events');"
+    )
+    assert [item.route_path for item in observations] == ["/fetch", "/axios", "/events"]

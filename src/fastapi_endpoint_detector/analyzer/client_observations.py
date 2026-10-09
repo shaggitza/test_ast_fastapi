@@ -298,6 +298,49 @@ def _is_global_axios(tokens: list[_Token], index: int) -> bool:
     return previous.value not in {".", "["}
 
 
+def _has_assignment_operator(tokens: list[_Token], index: int) -> bool:
+    """Read complete contiguous JS operators, excluding equality and arrows."""
+    if index >= 2:
+        previous, first = tokens[index - 1], tokens[index - 2]
+        if (
+            first.kind == previous.kind == "punct"
+            and first.value == previous.value
+            and first.value in {"+", "-"}
+            and first.end == previous.start
+        ):
+            return True
+    operator = ""
+    cursor = index + 1
+    while cursor < len(tokens) and len(operator) < 4 and tokens[cursor].kind == "punct":
+        if cursor > index + 1 and tokens[cursor - 1].end != tokens[cursor].start:
+            break
+        operator += tokens[cursor].value
+        cursor += 1
+    if operator.startswith("="):
+        return not operator.startswith(("==", "=>"))
+    return operator.startswith(
+        (
+            "+=",
+            "-=",
+            "*=",
+            "/=",
+            "%=",
+            "**=",
+            "&=",
+            "|=",
+            "^=",
+            "&&=",
+            "||=",
+            "??=",
+            "<<=",
+            ">>=",
+            ">>>=",
+            "++",
+            "--",
+        )
+    )
+
+
 def _shadowed_client_names(tokens: list[_Token]) -> tuple[set[str], set[str]]:  # noqa: PLR0912, PLR0915
     """Fail closed file-wide when a client global has any local binding.
 
@@ -399,18 +442,7 @@ def _shadowed_client_names(tokens: list[_Token]) -> tuple[set[str], set[str]]:  
         if (
             token.value in names
             and index + 1 < len(tokens)
-            and tokens[index + 1].value
-            in {
-                "=",
-                "+",
-                "-",
-                "*",
-                "/",
-                "%",
-                "&",
-                "|",
-                "?",
-            }
+            and _has_assignment_operator(tokens, index)
         ):
             bind(token)
         # Imported axios default/namespace bindings are accepted only from the
@@ -522,7 +554,7 @@ def extract_client_observation_inventory(  # noqa: PLR0912, PLR0915
             ts[i].kind == "id"
             and ts[i].value == "fetch"
             and "fetch" not in shadowed
-            and (i == 0 or ts[i - 1].value != ".")
+            and (i == 0 or ts[i - 1].value not in {".", "new"})
             and i + 1 < len(ts)
             and ts[i + 1].value == "("
         ):
