@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
 
 _EXPECTED_PRESET_HASHES = {
+    "message-bus-v1": "sha256:875790c0d08b0f6cb2e8681bf56a9066d67bee39225dd7160cb51a447d18ebc3",
     "filesystem-v1": "sha256:5acc35da9d989ccafda0960090efefbbaa52ca5b70894882c24c4bf1355c2b96",
     "http-clients-v1": "sha256:ab3d88b368db24f4c6c0879c8104105b09f23997997e63dd232856886bca6e2e",
     "mongodb-v1": "sha256:7e0f41e452ac61b7340f02215963e8aa765333988b67d441b7aece9dfa53191c",
@@ -28,6 +29,7 @@ _EXPECTED_PRESET_HASHES = {
 }
 
 _EXPECTED_CONTRACT_IDS = {
+    "message-bus-v1": {"typed-sqs-send-message", "typed-sqs-send-message-batch"},
     "filesystem-v1": {
         "io-buffered-read",
         "io-buffered-write",
