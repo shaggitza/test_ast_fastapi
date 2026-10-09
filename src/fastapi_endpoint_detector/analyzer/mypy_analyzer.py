@@ -604,6 +604,8 @@ class MypyAnalyzer:
         self._source_record_snapshots: dict[str, bytes | None] = {}
         self._source_record_snapshot_bytes = 0
         self._last_source_records: list[tuple[Path, str, str]] = []
+        self._local_module_census_depth = 0
+        self._local_module_census: tuple[tuple[str, bool, str, bool], ...] | None = None
         self._analysis_source_snapshots: dict[str, bytes | None] = {}
         self._lambda_source_ast_cache: dict[str, ast.Module | None] = {}
         self._lambda_source_index_cache: dict[
@@ -785,9 +787,10 @@ class MypyAnalyzer:
         from mypy.modulefinder import BuildSource
         from mypy.options import Options
 
+        blocked_local_modules = self._unselected_local_modules()
         if self.source_inventory is not None:
             selected_modules = {record.module for record in self.source_inventory.files}
-            policy_modules = {blocked[0] for blocked in self._unselected_local_modules()}
+            policy_modules = {blocked[0] for blocked in blocked_local_modules}
             inventory_collisions = {
                 module_name
                 for module_name, _paths in getattr(self.source_inventory, "module_collisions", ())
@@ -817,7 +820,7 @@ class MypyAnalyzer:
         blocked_local_paths: set[str] | None = None
         if self.source_inventory is not None:
             blocked_local_paths = set()
-            for module_name, covers_children, path, is_stub in self._unselected_local_modules():
+            for module_name, covers_children, path, is_stub in blocked_local_modules:
                 blocked_local_paths.add(path)
                 # Preserve normal typed imports for installed dependencies,
                 # while preventing mypy from traversing local files rejected
@@ -930,7 +933,26 @@ class MypyAnalyzer:
             return value
         raise MypyAnalyzerError(f"unsupported source inventory follow_imports policy: {value!r}")
 
+    def _begin_analysis_cycle(self) -> None:
+        """Discover local exclusions once before a bulk-analysis snapshot."""
+        if self._local_module_census_depth == 0:
+            self._local_module_census = self._discover_unselected_local_modules()
+        self._local_module_census_depth += 1
+
+    def _end_analysis_cycle(self) -> None:
+        """Release the census so the next independent analysis sees new files."""
+        self._local_module_census_depth -= 1
+        if self._local_module_census_depth == 0:
+            self._local_module_census = None
+
     def _unselected_local_modules(self) -> tuple[tuple[str, bool, str, bool], ...]:
+        """Share a census within a bulk snapshot; otherwise discover afresh."""
+        if self._local_module_census_depth:
+            assert self._local_module_census is not None
+            return self._local_module_census
+        return self._discover_unselected_local_modules()
+
+    def _discover_unselected_local_modules(self) -> tuple[tuple[str, bool, str, bool], ...]:
         """Return local module identities outside the canonical inventory.
 
         Ordinary modules block their submodule namespace. Package
@@ -944,10 +966,17 @@ class MypyAnalyzer:
             str(Path(record.path).resolve()) for record in self.source_inventory.files
         }
         modules: dict[str, tuple[bool, set[str], bool]] = {}
-        candidates = sorted(
-            {*self.source_root.rglob("*.py"), *self.source_root.rglob("*.pyi")}, key=str
+        paths = sorted(
+            (
+                item
+                for item in self.source_root.rglob("*")
+                if item.is_symlink() or item.suffix in {".py", ".pyi"}
+            ),
+            key=str,
         )
-        for path in candidates:
+        for path in paths:
+            if path.suffix not in {".py", ".pyi"}:
+                continue
             try:
                 relative = path.relative_to(self.source_root)
                 current = self.source_root
@@ -972,9 +1001,9 @@ class MypyAnalyzer:
 
         # pathlib does not recurse through directory symlinks here; enumerate
         # the links themselves and derive module IDs from their in-root names.
-        for path in sorted(
-            (item for item in self.source_root.rglob("*") if item.is_symlink()), key=str
-        ):
+        for path in paths:
+            if not path.is_symlink():
+                continue
             try:
                 if path.is_dir():
                     covers_children = True
@@ -5700,7 +5729,19 @@ class MypyAnalyzer:
         endpoints: list[Endpoint],
         use_cache: bool = True,
     ) -> dict[str, EndpointDependencies]:
-        """Analyze multiple endpoints."""
+        """Analyze multiple endpoints using one bounded exclusion census."""
+        self._begin_analysis_cycle()
+        try:
+            return self._analyze_endpoints_in_cycle(endpoints, use_cache)
+        finally:
+            self._end_analysis_cycle()
+
+    def _analyze_endpoints_in_cycle(
+        self,
+        endpoints: list[Endpoint],
+        use_cache: bool,
+    ) -> dict[str, EndpointDependencies]:
+        """Analyze one snapshot while sharing its local-module policy."""
         # Try to load from cache
         if use_cache and self.cache_path.exists() and self._load_cache():
             all_cached = all(self._endpoint_key(ep) in self._endpoint_deps for ep in endpoints)
@@ -5730,8 +5771,11 @@ class MypyAnalyzer:
             if self._endpoint_key(endpoint) not in self._endpoint_deps:
                 self.analyze_endpoint(endpoint)
 
-        # Save cache
+        # Refresh exclusions before saving: a local alias added during the
+        # build must invalidate the pre-build fingerprint. Saving itself can
+        # reuse this second census without another directory walk.
         if use_cache:
+            self._local_module_census = self._discover_unselected_local_modules()
             current_fingerprint, _sources = self._cache_fingerprint()
             if current_fingerprint == analysis_fingerprint:
                 self._save_cache()
