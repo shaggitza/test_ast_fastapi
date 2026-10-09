@@ -5,9 +5,12 @@ These tests verify that the mypy-based dependency analysis correctly handles
 various edge cases that might be missed in the standard implementation.
 """
 
+import ast
 from pathlib import Path
 
+import mypy.build
 import pytest
+from mypy.nodes import FuncDef, LambdaExpr
 
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, HandlerInfo
@@ -514,3 +517,323 @@ def handler():
         assert deps.references_file(builders_file), (
             "Functions used to build unpacked arguments should be traced"
         )
+
+
+class TestExecutionReachability:
+    def test_dead_and_deferred_bodies_are_not_reported(self, tmp_path: Path) -> None:
+        (tmp_path / "effects.py").write_text("def changed():\n    return 1\n")
+        main = tmp_path / "main.py"
+        main.write_text("""from effects import changed
+
+def handler():
+    if False:
+        changed()
+    return None
+    changed()
+    def unused():
+        changed()
+    callback = lambda: changed()
+""")
+        analyzer = MypyAnalyzer(tmp_path)
+        endpoint = Endpoint(
+            path="/test",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="main", file_path=main, line_number=3),
+        )
+
+        assert not analyzer.analyze_endpoint(endpoint).references_file(str(tmp_path / "effects.py"))
+
+    def test_live_branch_and_invoked_lambda_are_traced(self, tmp_path: Path) -> None:
+        (tmp_path / "effects.py").write_text("def changed():\n    return 1\n")
+        main = tmp_path / "main.py"
+        main.write_text("""from effects import changed
+
+def handler(flag: bool):
+    if flag:
+        changed()
+    (lambda: changed())()
+""")
+        analyzer = MypyAnalyzer(tmp_path)
+        endpoint = Endpoint(
+            path="/test",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="main", file_path=main, line_number=3),
+        )
+
+        assert analyzer.analyze_endpoint(endpoint).references_file(str(tmp_path / "effects.py"))
+
+    @pytest.mark.parametrize(
+        ("function_name", "expected_state", "executes_effect"),
+        [
+            ("deferred_lambda_dead", "deferred", False),
+            ("invoked_lambda_live", "executed", True),
+            ("ambiguous_lambda_dead", None, False),
+        ],
+    )
+    def test_same_line_lambda_bodies_keep_precise_execution_state(
+        self,
+        tmp_path: Path,
+        function_name: str,
+        expected_state: str | None,
+        executes_effect: bool,
+    ) -> None:
+        effects = tmp_path / "effects.py"
+        effects.write_text("def leaf_alias() -> int:\n    return 1\n", encoding="utf-8")
+        service = tmp_path / "service.py"
+        service.write_text(
+            "from effects import leaf_alias\n\n"
+            "def deferred_lambda_dead() -> int: label = 'é😀'; "
+            "hidden = lambda: leaf_alias(); return 0\n"
+            "def invoked_lambda_live() -> int: label = 'é😀'; "
+            "hidden = lambda: leaf_alias(); return hidden()\n"
+            "def ambiguous_lambda_dead() -> int: label = 'é😀'; "
+            "first = lambda: leaf_alias(); "
+            "second = lambda: leaf_alias(); return 0\n",
+            encoding="utf-8",
+        )
+        main = tmp_path / "main.py"
+        main.write_text(
+            f"from service import {function_name}\n\n"
+            f"def handler() -> int:\n    return {function_name}()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/test",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(
+                name="handler",
+                module="main",
+                file_path=main,
+                line_number=3,
+            ),
+        )
+        analyzer = MypyAnalyzer(tmp_path)
+        deps = analyzer.analyze_endpoint(endpoint)
+
+        spans = deps.get_source_evidence_spans(str(service))
+        if expected_state is None:
+            assert spans == []
+        else:
+            assert len(spans) == 1
+            assert spans[0].execution_state == expected_state
+            lambda_line = service.read_text(encoding="utf-8").splitlines()[spans[0].start_line - 1]
+            lambda_bytes = lambda_line.encode("utf-8")
+            assert lambda_bytes[spans[0].start_column : spans[0].end_column] == b"leaf_alias()"
+        assert deps.references_file(str(effects)) is executes_effect
+
+        cache = tmp_path / "analysis-cache.json"
+        analyzer.set_cache_path(cache)
+        analyzer.analyze_endpoints([endpoint], use_cache=True)
+        cached = MypyAnalyzer(tmp_path)
+        cached.set_cache_path(cache)
+        loaded = cached.analyze_endpoints([endpoint], use_cache=True)[
+            cached._endpoint_key(endpoint)
+        ]
+        assert loaded.get_source_evidence_spans(str(service)) == spans
+
+    def test_lambda_evidence_uses_the_source_snapshot_passed_to_mypy(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        service = tmp_path / "service.py"
+        original = "def worker():\n    hidden = lambda: 12345\n    return 0\n"
+        service.write_text(original, encoding="utf-8")
+        changed = "def worker():\n    hidden = lambda: 2\n    return 0\n"
+        original_build = mypy.build.build
+
+        def mutate_after_build(*, sources, **kwargs):
+            result = original_build(sources=sources, **kwargs)
+            service.write_text(changed, encoding="utf-8")
+            return result
+
+        monkeypatch.setattr(mypy.build, "build", mutate_after_build)
+        analyzer = MypyAnalyzer(tmp_path)
+        source_fingerprint, _ = analyzer._cache_fingerprint()
+        analyzer._expected_source_fingerprint = source_fingerprint
+        analyzer._reset_build_state()
+        try:
+            analyzer._ensure_mypy_built()
+        finally:
+            analyzer._expected_source_fingerprint = None
+
+        worker = next(
+            symbol.node
+            for tree in analyzer._trees.values()
+            for symbol in tree.names.values()
+            if isinstance(symbol.node, FuncDef) and symbol.node.name == "worker"
+        )
+        lambda_node = next(
+            statement.rvalue
+            for statement in worker.body.body
+            if isinstance(getattr(statement, "rvalue", None), LambdaExpr)
+        )
+        span = analyzer._lambda_body_source_span(worker, lambda_node, str(service), "deferred")
+
+        assert analyzer._analysis_source_snapshots[str(service)] == original.encode("utf-8")
+        assert lambda_node.body.body[0].expr.value == 12345
+        assert span is not None
+        line = original.splitlines()[span.start_line - 1].encode("utf-8")
+        assert line[span.start_column : span.end_column] == b"12345"
+        assert service.read_text(encoding="utf-8") == changed
+
+    def test_lambda_evidence_abstains_when_source_changes_before_mypy_reads_it(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        service = tmp_path / "service.py"
+        original = "def worker():\n    hidden = lambda: 12345\n    return 0\n"
+        changed = "def worker():\n    hidden = lambda: 2\n    return 0\n"
+        service.write_text(original, encoding="utf-8")
+        original_build = mypy.build.build
+
+        def mutate_before_build(*, sources, **kwargs):
+            service.write_text(changed, encoding="utf-8")
+            return original_build(sources=sources, **kwargs)
+
+        monkeypatch.setattr(mypy.build, "build", mutate_before_build)
+        analyzer = MypyAnalyzer(tmp_path)
+        analyzer._ensure_mypy_built()
+        worker = next(
+            symbol.node
+            for tree in analyzer._trees.values()
+            for symbol in tree.names.values()
+            if isinstance(symbol.node, FuncDef) and symbol.node.name == "worker"
+        )
+        lambda_node = next(
+            statement.rvalue
+            for statement in worker.body.body
+            if isinstance(getattr(statement, "rvalue", None), LambdaExpr)
+        )
+
+        assert analyzer._analysis_source_snapshots[str(service)] is None
+        assert lambda_node.body.body[0].expr.value == 2
+        assert (
+            analyzer._lambda_body_source_span(worker, lambda_node, str(service), "deferred") is None
+        )
+
+    def test_lambda_source_ast_is_parsed_once_per_file(self, tmp_path: Path, monkeypatch) -> None:
+        service = tmp_path / "service.py"
+        service.write_text(
+            "def worker():\n    hidden = lambda: 12345\n    return 0\n", encoding="utf-8"
+        )
+        analyzer = MypyAnalyzer(tmp_path)
+        analyzer._ensure_mypy_built()
+        worker = next(
+            symbol.node
+            for tree in analyzer._trees.values()
+            for symbol in tree.names.values()
+            if isinstance(symbol.node, FuncDef) and symbol.node.name == "worker"
+        )
+        lambda_node = next(
+            statement.rvalue
+            for statement in worker.body.body
+            if isinstance(getattr(statement, "rvalue", None), LambdaExpr)
+        )
+        original_parse = ast.parse
+        parses = 0
+
+        def count_source_parse(source, *args, **kwargs):
+            nonlocal parses
+            if kwargs.get("filename") == str(service.resolve()):
+                parses += 1
+            return original_parse(source, *args, **kwargs)
+
+        monkeypatch.setattr(ast, "parse", count_source_parse)
+        first = analyzer._lambda_body_source_span(worker, lambda_node, str(service), "deferred")
+        second = analyzer._lambda_body_source_span(worker, lambda_node, str(service), "deferred")
+
+        assert first == second
+        assert parses == 1
+
+    def test_lambda_source_snapshot_abstains_over_per_file_and_total_bounds(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(MypyAnalyzer, "MAX_LAMBDA_SOURCE_FILE_BYTES", 64)
+        monkeypatch.setattr(MypyAnalyzer, "MAX_LAMBDA_SOURCE_SNAPSHOT_BYTES", 80)
+        large = tmp_path / "large.py"
+        large.write_text(
+            "def worker():\n    padding = '" + ("x" * 80) + "'\n"
+            "    hidden = lambda: 12345\n    return 0\n",
+            encoding="utf-8",
+        )
+        small = tmp_path / "small.py"
+        small.write_text("def other():\n    hidden = lambda: 1\n    return 0\n", encoding="utf-8")
+        middle = tmp_path / "middle.py"
+        middle.write_text("def third():\n    hidden = lambda: 2\n    return 0\n", encoding="utf-8")
+        analyzer = MypyAnalyzer(tmp_path)
+        records = analyzer._source_records()
+
+        assert len(large.read_bytes()) > MypyAnalyzer.MAX_LAMBDA_SOURCE_FILE_BYTES
+        assert len(records) == 3
+
+        analyzer._ensure_mypy_built()
+        assert analyzer._analysis_source_snapshots[str(large.resolve())] is None
+        retained = [
+            snapshot
+            for snapshot in analyzer._analysis_source_snapshots.values()
+            if snapshot is not None
+        ]
+        assert sum(map(len, retained)) <= MypyAnalyzer.MAX_LAMBDA_SOURCE_SNAPSHOT_BYTES
+        assert (
+            sum(
+                analyzer._analysis_source_snapshots[str(path.resolve())] is not None
+                for path in (small, middle)
+            )
+            == 1
+        )
+        worker = next(
+            symbol.node
+            for tree in analyzer._trees.values()
+            for symbol in tree.names.values()
+            if isinstance(symbol.node, FuncDef) and symbol.node.name == "worker"
+        )
+        lambda_node = next(
+            statement.rvalue
+            for statement in worker.body.body
+            if isinstance(getattr(statement, "rvalue", None), LambdaExpr)
+        )
+        assert (
+            analyzer._lambda_body_source_span(worker, lambda_node, str(large), "deferred") is None
+        )
+
+    def test_invoked_wrappers_do_not_own_dead_deferred_or_unawaited_body_lines(
+        self, tmp_path: Path
+    ) -> None:
+        effects = tmp_path / "effects.py"
+        effects.write_text("def changed():\n    return 1\n", encoding="utf-8")
+        main = tmp_path / "main.py"
+        main.write_text(
+            "from effects import changed\n\n"
+            "def literal_false_dead():\n"
+            "    if False:\n"
+            "        changed()\n\n"
+            "def post_return_dead():\n"
+            "    return\n"
+            "    changed()\n\n"
+            "def deferred_closure_dead():\n"
+            "    def inner():\n"
+            "        changed()\n"
+            "    return None\n\n"
+            "def deferred_lambda_dead():\n"
+            "    callback = (\n"
+            "        lambda: changed()\n"
+            "    )\n"
+            "    return None\n\n"
+            "async def unawaited_coroutine_dead():\n"
+            "    changed()\n\n"
+            "def handler():\n"
+            "    literal_false_dead()\n"
+            "    post_return_dead()\n"
+            "    deferred_closure_dead()\n"
+            "    deferred_lambda_dead()\n"
+            "    unawaited_coroutine_dead()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/test",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="main", file_path=main, line_number=25),
+        )
+
+        deps = MypyAnalyzer(tmp_path).analyze_endpoint(endpoint)
+
+        assert deps.references_lines(str(main), {5, 9, 13, 18, 23}) == set()
+        assert not deps.references_file(str(effects))

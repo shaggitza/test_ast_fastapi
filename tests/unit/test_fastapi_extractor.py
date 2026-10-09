@@ -18,7 +18,10 @@ from fastapi_endpoint_detector.models.endpoint import (
     DependencyCallableKind,
     DependencyDeclarationKind,
     DependencyGraphStatus,
+    Endpoint,
+    EndpointDiscoveryCondition,
     EndpointDiscoveryStatus,
+    EndpointMethod,
     HandlerInfo,
 )
 from fastapi_endpoint_detector.parser.fastapi_extractor import (
@@ -83,14 +86,46 @@ def test_runtime_extractor_filters_handlers_to_canonical_inventory(tmp_path: Pat
         "does not sandbox or constrain import side effects"
         in extractor.source_inventory_limitations[1]
     )
-    assert "selected 1 files" in extractor.source_inventory_limitations[0]
+    scope_limitations = extractor.source_inventory_limitations
+    assert "selected 1 files and excluded 0 files" in scope_limitations[0]
     assert (
-        "following is disabled with maximum depth 10" in extractor.source_inventory_limitations[0]
+        f"completeness: {len(inventory.limitations)} source limitation(s) recorded"
+        in scope_limitations[0]
     )
-    assert any(
-        "follow_imports is disabled" in limitation
-        for limitation in extractor.source_inventory_limitations
+    assert "following is disabled with maximum depth 10" in scope_limitations[0]
+    assert any("follow_imports is disabled" in limitation for limitation in scope_limitations)
+
+
+def test_inventory_scope_does_not_replace_genuine_conditional_route_provenance(
+    tmp_path: Path,
+) -> None:
+    route_condition = EndpointDiscoveryCondition(
+        source_path=tmp_path / "main.py",
+        source_line=4,
+        reason="route registration depends on a runtime feature flag",
     )
+    endpoint = Endpoint(
+        path="/conditional",
+        methods=[EndpointMethod.GET],
+        handler=HandlerInfo(
+            name="conditional",
+            module="main",
+            file_path=tmp_path / "main.py",
+            line_number=5,
+        ),
+        discovery_status=EndpointDiscoveryStatus.CONDITIONAL,
+        discovery_conditions=(route_condition,),
+    )
+    extractor = FastAPIExtractor(
+        tmp_path / "main.py",
+        source_inventory=build_source_inventory(tmp_path, include_patterns=("*.py",)),
+    )
+
+    preserved = extractor._mark_inventory_scope(endpoint)
+
+    assert preserved is endpoint
+    assert preserved.discovery_status == EndpointDiscoveryStatus.CONDITIONAL
+    assert preserved.discovery_conditions == (route_condition,)
 
 
 def test_runtime_worker_subprocess_loads_evidence_graph_model(tmp_path: Path) -> None:
