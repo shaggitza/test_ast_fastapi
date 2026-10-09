@@ -1,0 +1,39 @@
+schema_version: 1
+preset:
+  id: redis-py-effects
+  version: 1.0.0
+  provenance:
+    kind: preset
+    source: fastapi-endpoint-detector/effects_redis_v1.yaml
+    revision: "1"
+contracts:
+  - id: redis-get
+    symbol: redis.commands.core.BasicKeyCommands.get
+    invocation: instance_method
+    operation: read
+    channel: redis
+    resource: {kind: argument, index: 0}
+    package: {distribution: redis, version: ">=5,<7"}
+  - id: redis-set
+    symbol: redis.commands.core.BasicKeyCommands.set
+    invocation: instance_method
+    operation: write
+    channel: redis
+    resource: {kind: argument, index: 0}
+    value: {kind: argument, index: 1}
+    package: {distribution: redis, version: ">=5,<7"}
+  - id: redis-delete
+    symbol: redis.commands.core.BasicKeyCommands.delete
+    invocation: instance_method
+    operation: delete
+    channel: redis
+    resource: {kind: argument, index: 0}
+    package: {distribution: redis, version: ">=5,<7"}
+  - id: redis-publish
+    symbol: redis.commands.core.PubSubCommands.publish
+    invocation: instance_method
+    operation: publish
+    channel: message_bus
+    resource: {kind: argument, index: 0}
+    value: {kind: argument, index: 1}
+    package: {distribution: redis, version: ">=5,<7"}

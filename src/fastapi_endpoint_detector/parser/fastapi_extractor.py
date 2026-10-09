@@ -42,6 +42,11 @@ from fastapi_endpoint_detector.models.endpoint import (
     EndpointMethod,
     HandlerInfo,
 )
+from fastapi_endpoint_detector.parser.bounded_output import (
+    MIN_PROTOCOL_OUTPUT_BYTES,
+    bounded_json_bytes,
+)
+from fastapi_endpoint_detector.parser.runtime_entry import select_runtime_app
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -69,6 +74,8 @@ class FastAPIExtractor:
         app_variable: str = "app",
         module_name: str | None = None,
         *,
+        app_entry: str | None = None,
+        bootstrap_entry: str | None = None,
         timeout_seconds: float = 60.0,
         output_limit_bytes: int = 4 * 1024 * 1024,
         dependency_max_depth: int = 32,
@@ -108,9 +115,16 @@ class FastAPIExtractor:
             or output_limit_bytes > 64 * 1024 * 1024
         ):
             raise ValueError("output_limit_bytes must be a positive integer not exceeding 67108864")
+        if output_limit_bytes < MIN_PROTOCOL_OUTPUT_BYTES:
+            raise ValueError(
+                "output_limit_bytes must be at least "
+                f"{MIN_PROTOCOL_OUTPUT_BYTES} for a structured worker response"
+            )
         self.app_path = app_path.resolve()
         self.app_variable = app_variable
         self.module_name = module_name
+        self.app_entry = app_entry
+        self.bootstrap_entry = bootstrap_entry
         self.source_inventory = source_inventory
         self.timeout_seconds = normalized_timeout
         for name, value in (
@@ -132,6 +146,47 @@ class FastAPIExtractor:
         self.dependency_max_work = dependency_max_work
         self._app: Any = None
         self._original_sys_path: list[str] = []
+        self._endpoint_output_bytes = 0
+
+    def _record_bounded_endpoint(self, endpoint: Endpoint) -> Endpoint:
+        """Reject oversized inventories as routes are visited, before collecting them."""
+        separator_bytes = 1 if self._endpoint_output_bytes else 0
+        # Reserve room for worker status, phase, telemetry, and response punctuation.
+        available = self.output_limit_bytes - 256 - self._endpoint_output_bytes - separator_bytes
+        if available <= 0:
+            raise FastAPIExtractorError("Runtime worker response exceeded the output limit")
+        try:
+            encoded = bounded_json_bytes(
+                endpoint,
+                max_bytes=available,
+                field="runtime worker endpoint",
+            )
+        except (TypeError, ValueError) as exc:
+            raise FastAPIExtractorError(str(exc)) from exc
+        self._endpoint_output_bytes += len(encoded) + separator_bytes
+        return endpoint
+
+    def _bounded_route_tags(self, route: Any) -> list[str]:
+        """Copy route tags only while they fit within the configured response budget."""
+        source_tags = getattr(route, "tags", None) or ()
+        bounded_tags: list[str] = []
+        used_bytes = 2
+        for tag in source_tags:
+            separator_bytes = 1 if bounded_tags else 0
+            available = self.output_limit_bytes - 256 - used_bytes - separator_bytes
+            if not isinstance(tag, str) or available <= 0:
+                raise FastAPIExtractorError("Runtime worker response exceeded the output limit")
+            try:
+                encoded = bounded_json_bytes(
+                    tag,
+                    max_bytes=available,
+                    field="runtime worker route tags",
+                )
+            except (TypeError, ValueError) as exc:
+                raise FastAPIExtractorError(str(exc)) from exc
+            bounded_tags.append(tag)
+            used_bytes += len(encoded) + separator_bytes
+        return bounded_tags
 
     def _import_context(self) -> tuple[str, Path]:
         """Return the qualified entry module and the import root that contains it."""
@@ -191,6 +246,19 @@ class FastAPIExtractor:
             FastAPIExtractorError: If the app cannot be loaded.
         """
         if self._app is not None:
+            return self._app
+
+        if self.app_entry is not None or self.bootstrap_entry is not None:
+            _module_name, import_root = self._import_context()
+            if self.app_path.is_dir():
+                import_root = self.app_path
+            self._app = select_runtime_app(
+                import_root,
+                app_path=self.app_path,
+                app_variable=self.app_variable,
+                app_entry=self.app_entry,
+                bootstrap_entry=self.bootstrap_entry,
+            )
             return self._app
 
         module_name, import_root = self._import_context()
@@ -847,27 +915,31 @@ class FastAPIExtractor:
         path = self._require_route_path(route, original_route)
         endpoint = self._require_route_endpoint(route, original_route)
         handler = self._get_handler_info(endpoint)
-        return Endpoint(
-            path=self._join_paths(prefix, path),
-            methods=self._http_methods(route, original_route),
-            handler=handler,
-            name=getattr(route, "name", None),
-            tags=list(getattr(route, "tags", None) or []),
-            dependencies=self._extract_dependencies(route),
-            dependency_graph=self._extract_dependency_graph(route, handler),
+        return self._record_bounded_endpoint(
+            Endpoint(
+                path=self._join_paths(prefix, path),
+                methods=self._http_methods(route, original_route),
+                handler=handler,
+                name=getattr(route, "name", None),
+                tags=self._bounded_route_tags(route),
+                dependencies=self._extract_dependencies(route),
+                dependency_graph=self._extract_dependency_graph(route, handler),
+            )
         )
 
     def _websocket_endpoint(self, route: Any, original_route: Any, prefix: str) -> Endpoint:
         metadata = self._effective_route_metadata(route)
         endpoint = self._require_route_endpoint(metadata, original_route)
         handler = self._get_handler_info(endpoint)
-        return Endpoint(
-            path=self._join_paths(prefix, self._require_route_path(metadata, original_route)),
-            methods=[EndpointMethod.WEBSOCKET],
-            handler=handler,
-            name=getattr(metadata, "name", None),
-            dependencies=self._extract_dependencies(metadata),
-            dependency_graph=self._extract_dependency_graph(route, handler),
+        return self._record_bounded_endpoint(
+            Endpoint(
+                path=self._join_paths(prefix, self._require_route_path(metadata, original_route)),
+                methods=[EndpointMethod.WEBSOCKET],
+                handler=handler,
+                name=getattr(metadata, "name", None),
+                dependencies=self._extract_dependencies(metadata),
+                dependency_graph=self._extract_dependency_graph(route, handler),
+            )
         )
 
     def _endpoints_from_route(
@@ -930,6 +1002,7 @@ class FastAPIExtractor:
 
     def _extract_endpoints_in_process(self) -> list[Endpoint]:
         """Extract endpoints inside the disposable runtime worker process."""
+        self._endpoint_output_bytes = 0
         app = self._load_app()
         if not hasattr(app, "routes"):
             raise FastAPIExtractorError(
@@ -959,6 +1032,9 @@ class FastAPIExtractor:
             process.wait()
 
     def _read_runtime_result(self, result_path: Path, returncode: int) -> list[Endpoint]:
+        if returncode == 2:
+            # Status 2 is a no-output protocol rejection; never consume a stale file.
+            raise FastAPIExtractorError("Runtime worker exited with status 2")
         if not result_path.is_file():
             raise FastAPIExtractorError(f"Runtime worker exited with status {returncode}")
         if result_path.stat().st_size > self.output_limit_bytes:
@@ -999,6 +1075,8 @@ class FastAPIExtractor:
             "app_path": str(self.app_path),
             "app_variable": self.app_variable,
             "module_name": self.module_name,
+            "app_entry": self.app_entry,
+            "bootstrap_entry": self.bootstrap_entry,
             "output_limit_bytes": self.output_limit_bytes,
             "dependency_max_depth": self.dependency_max_depth,
             "dependency_max_nodes": self.dependency_max_nodes,

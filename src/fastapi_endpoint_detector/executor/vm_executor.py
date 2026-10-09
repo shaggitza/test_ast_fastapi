@@ -9,7 +9,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import selectors
+import stat
 import subprocess
 import tempfile
 import time
@@ -29,6 +31,10 @@ class VMExecutorError(Exception):
 class SandboxPolicy:
     """Versioned fail-closed runtime policy and bounded resource limits."""
 
+    SAFE_RUNTIMES: ClassVar[frozenset[str]] = frozenset(
+        {"runsc", "io.containerd.runsc.v1", "kata-runtime", "io.containerd.kata.v2"}
+    )
+
     version: int = 1
     runtime: str = "runsc"
     user: str = "65532:65532"
@@ -46,8 +52,15 @@ class SandboxPolicy:
     def __post_init__(self) -> None:
         if self.version != 1:
             raise ValueError("unsupported sandbox policy version")
-        if self.runtime in {"", "runc", "io.containerd.runc.v2"}:
-            raise ValueError("runtime sandbox requires gVisor/Kata, not the default OCI runtime")
+        if self.runtime not in self.SAFE_RUNTIMES:
+            raise ValueError("runtime sandbox requires an explicitly supported gVisor/Kata runtime")
+        if re.fullmatch(r"[1-9][0-9]*[bkmg]?", self.memory_limit) is None:
+            raise ValueError("memory limit must be a positive Docker byte value")
+        if self.memory_swap != self.memory_limit:
+            raise ValueError("memory and swap limits must be identical")
+        user_match = re.fullmatch(r"([0-9]+):([0-9]+)", self.user)
+        if user_match is None or any(int(value) == 0 for value in user_match.groups()):
+            raise ValueError("sandbox user must be a numeric non-root uid:gid")
         positive = (
             self.cpu_quota,
             self.cpu_period,
@@ -65,6 +78,13 @@ class VMExecutor:
     """Execute an explicit runtime comparator under a hardened container policy."""
 
     DOCKER_IMAGE = "fastapi-endpoint-detector:vm"
+    PACKAGED_SECCOMP_SHA256 = (
+        "sha256:96dbac26aac6041de88eaf99f653d606933469dd104157b877190d998ab68d4a"
+    )
+    _IMAGE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*(?:@sha256:[0-9a-f]{64})?")
+    _CONTAINER_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+    _CID_PATTERN = re.compile(r"[0-9a-f]{12,64}")
+    _MOUNT_SCAN_LIMIT = 100_000
     CLEAN_ENV: ClassVar[dict[str, str]] = {
         "HOME": "/tmp/home",
         "LANG": "C.UTF-8",
@@ -88,7 +108,10 @@ class VMExecutor:
         seccomp_profile: Path | None = None,
         output_limit_bytes: int = 4 * 1024 * 1024,
         dependency_lock_hash: str | None = None,
+        snapshot_lock_hash: str | None = None,
         sbom_hash: str | None = None,
+        seccomp_hash: str | None = None,
+        expected_policy_sha256: str | None = None,
     ) -> None:
         if not network_disabled:
             raise ValueError("runtime comparator network access cannot be enabled")
@@ -99,10 +122,20 @@ class VMExecutor:
         self.image = (
             image or os.environ.get("FASTAPI_ENDPOINT_DETECTOR_VM_IMAGE") or self.DOCKER_IMAGE
         )
-        self.seccomp_profile = (
-            seccomp_profile
-            or Path(__file__).resolve().parent / "policies" / "runtime-seccomp-v1.json"
+        self._validate_image_reference(self.image)
+        packaged_seccomp = (
+            Path(__file__).resolve().parent / "policies" / "runtime-seccomp-v1.json"
         ).resolve()
+        self.seccomp_profile = self._validated_mount_source(
+            seccomp_profile or packaged_seccomp,
+            "seccomp profile",
+            allow_directory=False,
+        )
+        self.seccomp_hash = seccomp_hash or os.environ.get(
+            "FASTAPI_ENDPOINT_DETECTOR_VM_SECCOMP_SHA256"
+        )
+        if self.seccomp_hash is None and self.seccomp_profile == packaged_seccomp:
+            self.seccomp_hash = self.PACKAGED_SECCOMP_SHA256
         self.policy = SandboxPolicy(
             runtime=runtime,
             memory_limit=memory_limit,
@@ -115,8 +148,25 @@ class VMExecutor:
         self.dependency_lock_hash = dependency_lock_hash or os.environ.get(
             "FASTAPI_ENDPOINT_DETECTOR_VM_LOCK_SHA256"
         )
+        self.snapshot_lock_hash = snapshot_lock_hash or os.environ.get(
+            "FASTAPI_ENDPOINT_DETECTOR_VM_SNAPSHOT_SHA256"
+        )
         self.sbom_hash = sbom_hash or os.environ.get("FASTAPI_ENDPOINT_DETECTOR_VM_SBOM_SHA256")
+        self.expected_policy_sha256 = expected_policy_sha256
         self._resolved_image: str | None = None
+
+    @classmethod
+    def _validate_image_reference(cls, value: str, *, immutable: bool = False) -> str:
+        if (
+            len(value) > 512
+            or cls._IMAGE_PATTERN.fullmatch(value) is None
+            or value.startswith("-")
+            or ".." in value
+        ):
+            raise VMExecutorError("runtime image has an invalid Docker reference")
+        if immutable and "@sha256:" not in value:
+            raise VMExecutorError("runtime image must use an immutable sha256 digest")
+        return value
 
     @staticmethod
     def _validated_hash(value: str | None, label: str) -> str:
@@ -150,12 +200,31 @@ class VMExecutor:
             raise VMExecutorError("Docker image build timed out") from exc
         self._resolved_image = None
 
+    @staticmethod
+    def _validated_image_inspection(stdout: str) -> dict[str, Any]:
+        try:
+            payload = json.loads(stdout)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise VMExecutorError("image inspect did not return image configuration") from exc
+        if not isinstance(payload, list) or len(payload) != 1 or not isinstance(payload[0], dict):
+            raise VMExecutorError("image inspect did not return exactly one image configuration")
+        inspected = payload[0]
+        config = inspected.get("Config")
+        if not isinstance(config, dict) or "Volumes" not in config:
+            raise VMExecutorError("image inspect did not return Config.Volumes")
+        volumes = config["Volumes"]
+        if volumes is not None and not isinstance(volumes, dict):
+            raise VMExecutorError("image inspect returned malformed Config.Volumes")
+        if volumes:
+            raise VMExecutorError("runtime image must not declare writable volumes")
+        return inspected
+
     def _resolve_image(self) -> str:
         if self._resolved_image is not None:
             return self._resolved_image
         try:
             result = subprocess.run(
-                ["docker", "image", "inspect", "--format", "{{json .RepoDigests}}", self.image],
+                ["docker", "image", "inspect", self.image],
                 capture_output=True,
                 check=False,
                 text=True,
@@ -165,19 +234,20 @@ class VMExecutor:
             raise VMExecutorError("Docker or the configured image is unavailable") from exc
         if result.returncode != 0:
             raise VMExecutorError(f"Docker image {self.image!r} is unavailable")
+        inspected = self._validated_image_inspection(result.stdout)
         if "@sha256:" in self.image:
             resolved = self.image
         else:
-            try:
-                digests = json.loads(result.stdout)
-            except (json.JSONDecodeError, TypeError) as exc:
-                raise VMExecutorError("image inspect did not return repository digests") from exc
+            digests = inspected.get("RepoDigests")
+            if not isinstance(digests, list):
+                raise VMExecutorError("image inspect did not return repository digests")
             candidates = sorted(
-                item for item in digests or [] if isinstance(item, str) and "@sha256:" in item
+                item for item in digests if isinstance(item, str) and "@sha256:" in item
             )
             if len(candidates) != 1:
                 raise VMExecutorError("runtime image must resolve to exactly one repository digest")
             resolved = candidates[0]
+        self._validate_image_reference(resolved, immutable=True)
         digest = resolved.rsplit("@sha256:", maxsplit=1)[-1]
         if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
             raise VMExecutorError("runtime image has an invalid sha256 digest")
@@ -192,27 +262,133 @@ class VMExecutor:
             return False
         return True
 
+    def _verified_seccomp_hash(self) -> str:
+        expected = self._validated_hash(self.seccomp_hash, "seccomp profile")
+        try:
+            mode = self.seccomp_profile.stat(follow_symlinks=False).st_mode
+            if not stat.S_ISREG(mode):
+                raise VMExecutorError("seccomp profile must be a regular file")
+            content = self.seccomp_profile.read_bytes()
+        except OSError as exc:
+            raise VMExecutorError(
+                f"seccomp profile is unavailable: {self.seccomp_profile}"
+            ) from exc
+        actual = f"sha256:{hashlib.sha256(content).hexdigest()}"
+        if actual != expected:
+            raise VMExecutorError("seccomp profile does not match its immutable attestation")
+        try:
+            payload = json.loads(content)
+        except (json.JSONDecodeError, UnicodeError) as exc:
+            raise VMExecutorError("seccomp profile is not valid JSON") from exc
+        if not isinstance(payload, dict) or payload.get("defaultAction") != "SCMP_ACT_ERRNO":
+            raise VMExecutorError("seccomp profile must be deny-by-default")
+        return actual
+
     def policy_provenance(self) -> dict[str, Any]:
         """Return deterministic policy/image provenance suitable for benchmark manifests."""
-        if not self.seccomp_profile.is_file():
-            raise VMExecutorError(f"seccomp profile not found: {self.seccomp_profile}")
-        seccomp_hash = hashlib.sha256(self.seccomp_profile.read_bytes()).hexdigest()
+        seccomp_hash = self._verified_seccomp_hash()
         payload = {
             "policy": asdict(self.policy),
             "image": self._resolve_image(),
-            "seccomp_sha256": f"sha256:{seccomp_hash}",
+            "seccomp_sha256": seccomp_hash,
             "environment": dict(sorted(self.CLEAN_ENV.items())),
             "dependency_lock_hash": self._validated_hash(
                 self.dependency_lock_hash,
                 "dependency lock",
+            ),
+            "snapshot_lock_hash": self._validated_hash(
+                self.snapshot_lock_hash,
+                "snapshot lock",
             ),
             "sbom_hash": self._validated_hash(self.sbom_hash, "SBOM"),
         }
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return {**payload, "policy_sha256": f"sha256:{hashlib.sha256(canonical).hexdigest()}"}
 
+    @classmethod
+    def _validate_directory_entries(cls, root: Path, label: str) -> None:
+        inspected = 0
+
+        def raise_walk_error(exc: OSError) -> None:
+            raise VMExecutorError(f"cannot inspect {label} directory {root}: {exc}") from exc
+
+        try:
+            for directory, names, files in os.walk(
+                root,
+                followlinks=False,
+                onerror=raise_walk_error,
+            ):
+                parent = Path(directory)
+                for name in (*names, *files):
+                    inspected += 1
+                    if inspected > cls._MOUNT_SCAN_LIMIT:
+                        raise VMExecutorError(f"{label} exceeds the bounded mount scan limit")
+                    mode = (parent / name).lstat().st_mode
+                    if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode) or stat.S_ISLNK(mode)):
+                        raise VMExecutorError(
+                            f"{label} contains a socket, device, fifo, or other special file"
+                        )
+        except OSError as exc:
+            raise VMExecutorError(f"cannot inspect {label} directory {root}: {exc}") from exc
+
+    @staticmethod
+    def _validated_mount_field(value: str, label: str) -> str:
+        if any(character in value for character in ",\r\n"):
+            raise VMExecutorError(f"{label} contains a Docker mount grammar metacharacter")
+        return value
+
+    @classmethod
+    def _validated_mount_source(
+        cls,
+        path: Path,
+        label: str,
+        *,
+        allow_directory: bool,
+    ) -> Path:
+        # Resolving here would follow the symlink components rejected below.
+        absolute = Path(os.path.abspath(path.expanduser()))  # noqa: PTH100
+        cls._validated_mount_field(str(absolute), f"{label} path")
+        current = Path(absolute.anchor)
+        try:
+            for component in absolute.parts[1:]:
+                current /= component
+                if stat.S_ISLNK(os.lstat(current).st_mode):
+                    raise VMExecutorError(f"{label} path cannot contain symlinks")
+            resolved = absolute.resolve(strict=True)
+            mode = resolved.stat(follow_symlinks=False).st_mode
+        except FileNotFoundError as exc:
+            raise VMExecutorError(f"{label} path does not exist: {path}") from exc
+        except OSError as exc:
+            raise VMExecutorError(f"cannot inspect {label} path {path}: {exc}") from exc
+        if stat.S_ISDIR(mode):
+            broad_roots = {
+                Path(resolved.anchor),
+                Path.home().resolve(),
+                Path(tempfile.gettempdir()).resolve(),
+                Path("/dev"),
+                Path("/etc"),
+                Path("/home"),
+                Path("/proc"),
+                Path("/run"),
+                Path("/sys"),
+                Path("/usr"),
+                Path("/var"),
+            }
+            if not allow_directory:
+                raise VMExecutorError(f"{label} must be a regular file")
+            if resolved in broad_roots:
+                raise VMExecutorError(f"refusing broad {label} directory mount: {resolved}")
+            cls._validate_directory_entries(resolved, label)
+        elif not stat.S_ISREG(mode):
+            raise VMExecutorError(f"{label} must be a regular file or directory")
+        return resolved
+
     def _mount(self, source: Path, target: str) -> str:
-        return f"type=bind,src={source},dst={target},readonly,bind-nonrecursive"
+        source_field = self._validated_mount_field(str(source), "mount source")
+        target_field = self._validated_mount_field(target, "mount target")
+        # Policy v1 requires Docker 29 / API 1.52, where bind-nonrecursive was
+        # removed in favor of this bind-recursive=disabled spelling.
+        return f"type=bind,src={source_field},dst={target_field},readonly,bind-recursive=disabled"
 
     def _container_command(
         self,
@@ -222,16 +398,20 @@ class VMExecutor:
         output_format: str,
         cidfile: Path,
         name: str,
+        app_entry: str | None = None,
+        bootstrap_entry: str | None = None,
     ) -> list[str]:
-        if not self.seccomp_profile.is_file():
-            raise VMExecutorError(f"seccomp profile not found: {self.seccomp_profile}")
-        self._validated_hash(self.dependency_lock_hash, "dependency lock")
-        self._validated_hash(self.sbom_hash, "SBOM")
-        app = app_path.resolve(strict=True)
+        seccomp_hash = self._verified_seccomp_hash()
+        dependency_lock_hash = self._validated_hash(self.dependency_lock_hash, "dependency lock")
+        snapshot_lock_hash = self._validated_hash(self.snapshot_lock_hash, "snapshot lock")
+        sbom_hash = self._validated_hash(self.sbom_hash, "SBOM")
+        app = self._validated_mount_source(app_path, "application", allow_directory=True)
         app_target = "/workspace/app" if app.is_dir() else f"/workspace/{app.name}"
         command = [
             "docker",
             "run",
+            "--pull",
+            "never",
             "--name",
             name,
             "--cidfile",
@@ -239,6 +419,12 @@ class VMExecutor:
             "--runtime",
             self.policy.runtime,
             "--network",
+            "none",
+            "--ipc",
+            "none",
+            "--pid",
+            "private",
+            "--log-driver",
             "none",
             "--read-only",
             "--user",
@@ -274,39 +460,133 @@ class VMExecutor:
             "--entrypoint",
             "/usr/bin/env",
         ]
-        cli = ["list", "--app", app_target, "--format", output_format, "--app-var", app_variable]
+        diff_target: str | None = None
         if diff_path is not None:
-            diff = diff_path.resolve(strict=True)
-            command.extend(["--mount", self._mount(diff, "/workspace/change.diff")])
+            diff = self._validated_mount_source(diff_path, "diff", allow_directory=False)
+            diff_target = "/workspace/change.diff"
+            command.extend(["--mount", self._mount(diff, diff_target)])
+
+        if output_format == "json":
+            if app_entry is not None or bootstrap_entry is not None:
+                if not app.is_dir():
+                    raise VMExecutorError(
+                        "selected runtime entries require mounting the complete project root"
+                    )
+                app_target = "/workspace/app"
+            policy = self.policy_provenance()
+            if (
+                self.expected_policy_sha256 is not None
+                and policy["policy_sha256"] != self.expected_policy_sha256
+            ):
+                raise VMExecutorError("runtime policy does not match the producer's immutable pin")
+            worker_request = {
+                "schema_version": 3,
+                "phase": "analyze" if diff_target is not None else "list",
+                "app_path": app_target,
+                "app_variable": app_variable,
+                "app_entry": app_entry,
+                "bootstrap_entry": bootstrap_entry,
+                "diff_path": diff_target,
+                "output_limit_bytes": self.policy.output_limit_bytes,
+                "dependency_max_depth": 10,
+                "dependency_max_nodes": 4096,
+                "dependency_max_work": 65536,
+                "runtime_pins": {
+                    "runtime_image": self._resolve_image(),
+                    "runtime_image_digest": self._resolve_image().split("@", maxsplit=1)[-1],
+                    "dependency_lock_sha256": dependency_lock_hash,
+                    "snapshot_lock_sha256": snapshot_lock_hash,
+                    "sbom_sha256": sbom_hash,
+                    "seccomp_sha256": seccomp_hash,
+                    "runtime_policy_sha256": policy["policy_sha256"],
+                },
+            }
             cli = [
-                "analyze",
+                "python",
+                "-m",
+                "fastapi_endpoint_detector.parser.runtime_worker",
+                "--request-json",
+                json.dumps(worker_request, separators=(",", ":"), allow_nan=False),
+            ]
+        else:
+            if app_entry is not None or bootstrap_entry is not None:
+                raise VMExecutorError("selected runtime entries require JSON worker output")
+            cli = [
+                "fastapi-endpoint-detector",
+                "list",
                 "--app",
                 app_target,
-                "--diff",
-                "/workspace/change.diff",
                 "--format",
                 output_format,
                 "--app-var",
                 app_variable,
             ]
+            if diff_target is not None:
+                cli = [
+                    "fastapi-endpoint-detector",
+                    "analyze",
+                    "--app",
+                    app_target,
+                    "--diff",
+                    diff_target,
+                    "--format",
+                    output_format,
+                    "--app-var",
+                    app_variable,
+                ]
         command.append(self._resolve_image())
         command.append("-i")
         command.extend(f"{key}={value}" for key, value in sorted(self.CLEAN_ENV.items()))
-        command.append("fastapi-endpoint-detector")
         command.extend(cli)
         return command
 
     @staticmethod
-    def _cleanup_container(cidfile: Path, name: str) -> None:
+    def _absence_query_failure(container_filter: str, label: str) -> str | None:
+        command = [
+            "docker",
+            "container",
+            "ls",
+            "--all",
+            "--no-trunc",
+            "--quiet",
+            "--filter",
+            container_filter,
+        ]
+        try:
+            remaining = subprocess.run(
+                command,
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
+            return f"cleanup verification query for {label}: {exc}"
+        if remaining.returncode != 0:
+            detail = remaining.stderr.strip() or f"exit status {remaining.returncode}"
+            return f"cleanup verification query for {label} failed: {detail}"
+        if remaining.stdout.strip():
+            return f"container still exists after forced removal ({label})"
+        return None
+
+    @classmethod
+    def _cleanup_container(cls, cidfile: Path, name: str) -> None:
+        if cls._CONTAINER_NAME_PATTERN.fullmatch(name) is None or name.startswith("-"):
+            raise VMExecutorError("sandbox container name is invalid")
         target = name
+        cid: str | None = None
+        failures: list[str] = []
         try:
             if cidfile.is_file():
                 candidate = cidfile.read_text(encoding="utf-8").strip()
                 if candidate:
-                    target = candidate
-        except OSError:
-            pass
-        failures: list[str] = []
+                    if cls._CID_PATTERN.fullmatch(candidate) is None:
+                        failures.append("CID file contained an invalid container identifier")
+                    else:
+                        target = candidate
+                        cid = candidate
+        except (OSError, UnicodeError) as exc:
+            failures.append(f"cannot read CID file: {exc}")
         for command in (
             ["docker", "kill", target],
             ["docker", "rm", "--force", target],
@@ -320,18 +600,14 @@ class VMExecutor:
                 )
             except (OSError, subprocess.TimeoutExpired) as exc:
                 failures.append(f"{' '.join(command[:2])}: {exc}")
-        try:
-            remaining = subprocess.run(
-                ["docker", "container", "inspect", target],
-                capture_output=True,
-                check=False,
-                timeout=10,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            failures.append(f"cleanup verification: {exc}")
-        else:
-            if remaining.returncode == 0:
-                failures.append("container still exists after forced removal")
+        exact_name_filter = name.replace(".", "[.]")
+        verification_filters = [("generated name", f"name=^/{exact_name_filter}$")]
+        if cid is not None:
+            verification_filters.append(("CID", f"id={cid}"))
+        for label, container_filter in verification_filters:
+            query_failure = cls._absence_query_failure(container_filter, label)
+            if query_failure is not None:
+                failures.append(query_failure)
         if failures:
             raise VMExecutorError("sandbox cleanup failed: " + "; ".join(failures))
 
@@ -392,8 +668,11 @@ class VMExecutor:
         finally:
             streams.close()
             self._cleanup_container(cidfile, name)
-        stdout = buffers["stdout"].decode("utf-8", errors="replace")
-        stderr = buffers["stderr"].decode("utf-8", errors="replace")
+        try:
+            stdout = buffers["stdout"].decode("utf-8", errors="strict")
+            stderr = buffers["stderr"].decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise VMExecutorError("Container output is not valid UTF-8") from exc
         if failure is not None:
             raise VMExecutorError(failure)
         if return_code != 0:
@@ -406,6 +685,8 @@ class VMExecutor:
         diff_path: Path | None = None,
         app_variable: str = "app",
         output_format: str = "json",
+        app_entry: str | None = None,
+        bootstrap_entry: str | None = None,
     ) -> Any:
         """Run list/analyze with no host import and return bounded output."""
         with tempfile.TemporaryDirectory(prefix="endpoint-detector-cid-") as directory:
@@ -418,6 +699,8 @@ class VMExecutor:
                 output_format,
                 cidfile,
                 name,
+                app_entry,
+                bootstrap_entry,
             )
             stdout, _stderr = self._execute_bounded(command, cidfile, name)
         if output_format != "json":
@@ -431,9 +714,17 @@ class VMExecutor:
         self,
         app_path: Path,
         app_variable: str = "app",
+        app_entry: str | None = None,
+        bootstrap_entry: str | None = None,
     ) -> list[Endpoint]:
         """Deserialize runtime-list output into endpoint models when available."""
-        result = self.analyze_in_vm(app_path, app_variable=app_variable, output_format="json")
+        result = self.analyze_in_vm(
+            app_path,
+            app_variable=app_variable,
+            output_format="json",
+            app_entry=app_entry,
+            bootstrap_entry=bootstrap_entry,
+        )
         if not isinstance(result, dict) or not isinstance(result.get("endpoints"), list):
             raise VMExecutorError("runtime list output does not contain an endpoints array")
         try:

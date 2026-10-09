@@ -1,0 +1,18 @@
+{
+  "edges": [
+    {"confidence": "EXTRACTED", "relation": "calls", "source": "handler", "source_file": "app.py", "source_location": "L4", "target": "helper", "weight": 1.0},
+    {"confidence": "INFERRED", "relation": "imports_from", "source": "app_module", "source_file": "app.py", "source_location": "L1", "target": "helper", "weight": 1.0},
+    {"confidence": "EXTRACTED", "relation": "inherits", "source": "child", "source_file": "app.py", "source_location": "L4", "target": "base", "weight": 1.0},
+    {"confidence": "AMBIGUOUS", "relation": "references", "source": "helper", "source_file": "helpers.py", "source_location": "L2", "target": "handler", "weight": 1.0}
+  ],
+  "hyperedges": [],
+  "input_tokens": 0,
+  "nodes": [
+    {"file_type": "code", "id": "app_module", "label": "app.py", "source_file": "app.py", "source_location": "L1"},
+    {"file_type": "code", "id": "handler", "label": "handler", "source_file": "app.py", "source_location": "L3"},
+    {"file_type": "code", "id": "helper", "label": "helper", "source_file": "helpers.py", "source_location": "L1"},
+    {"file_type": "code", "id": "child", "label": "Child", "source_file": "app.py", "source_location": "L4"},
+    {"file_type": "code", "id": "base", "label": "Base", "source_file": "app.py", "source_location": "L3"}
+  ],
+  "output_tokens": 0
+}
