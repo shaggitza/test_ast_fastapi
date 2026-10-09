@@ -98,6 +98,10 @@ class JsonFormatter(BaseFormatter):
             "app_path": report.app_path,
             "diff_source": report.diff_source,
             "analysis_completeness": report.analysis_completeness,
+            "endpoint_lifecycle": [
+                entry.model_dump(mode="json", exclude_none=True)
+                for entry in report.endpoint_lifecycle
+            ],
             "inventory_status": (
                 report.inventory_status.value if report.inventory_status is not None else None
             ),
