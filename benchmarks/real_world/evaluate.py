@@ -1018,6 +1018,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
         or (verification_selection == "include" and key(item) in verification_keys)
         or (verification_selection == "exclude" and key(item) not in verification_keys)
     }
+    truth_source_by_key = {key(item): item for item in truth_records}
     prediction_artifact = read_primary_artifact(args.predictions, "prediction")
     prediction_records = prediction_artifact.records
     prediction_integrity = (
@@ -1082,6 +1083,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
     normalized_stage_repositories: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     exact_stage_prs: dict[tuple[str, int], dict[str, int]] = {}
     normalized_stage_prs: dict[tuple[str, int], dict[str, int]] = {}
+    per_pr_evidence: dict[tuple[str, int], dict[str, Any]] = {}
 
     for record_key, expected_record in truth.items():
         if expected_record.get("status", "adjudicated") != "adjudicated":
@@ -1157,6 +1159,20 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
         expected_claims = claims(expected_record)
         selected_claims, low_claims = split_ranked_claims(record_key[0], predicted_record)
         normalized = match_claims(record_key[0], expected_claims, selected_claims)
+        per_pr_evidence[record_key] = {
+            "repository": record_key[0],
+            "pr": record_key[1],
+            "truth_status": expected_record.get("status", "adjudicated"),
+            "truth_sha256": hashlib.sha256(
+                json.dumps(
+                    truth_source_by_key[record_key], sort_keys=True, separators=(",", ":")
+                ).encode()
+            ).hexdigest(),
+            "prediction_status": predicted_record.get("status", "completed"),
+            "unresolved_count": len(unresolved),
+            "raw": {"tp": tp, "fp": fp, "fn": fn},
+            "normalized": {"tp": normalized["tp"], "fp": normalized["fp"], "fn": normalized["fn"]},
+        }
         residual_expected = [
             claim
             for index, claim in enumerate(normalized["expected_claims"])
@@ -1360,6 +1376,33 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
                 "candidate source inventory is not yet bound into the runner manifest",
                 "incremental backend reuse is not measured or attested",
             ],
+        },
+        "comparison_evidence": {
+            "schema_version": 1,
+            "scope": scope_id,
+            "normalization_version": ALIAS_VERSION,
+            "truth_sha256": truth_artifact.sha256,
+            "prediction_sha256": prediction_artifact.sha256,
+            "prediction_manifest_sha256": (
+                hashlib.sha256(
+                    json.dumps(prediction_integrity, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest()
+                if prediction_integrity is not None
+                else None
+            ),
+            "selection_sha256": hashlib.sha256(
+                json.dumps(
+                    [{"repository": repository, "pr": pr} for repository, pr in sorted(truth)],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest(),
+            "selection_keys": [
+                {"repository": repository, "pr": pr} for repository, pr in sorted(truth)
+            ],
+            "per_pr": [per_pr_evidence[item] for item in sorted(per_pr_evidence)],
+            "attested": False,
+            "attestation_reason": "truth selection and source inventory are not fully attested",
         },
         "verification_set": (
             {
