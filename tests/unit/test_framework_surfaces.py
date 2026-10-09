@@ -114,6 +114,70 @@ def test_module_qualified_lifespan_selected_and_literal_none_is_absent(tmp_path:
     assert inventory.status == InventoryStatus.ESTABLISHED
 
 
+@pytest.mark.parametrize(
+    "registration",
+    [
+        "register = app.add_event_handler\nregister('startup', initialize)",
+        "getattr(app, 'add_event_handler')('startup', initialize)",
+    ],
+)
+def test_unresolved_or_aliased_selected_lifecycle_registration_is_limited(
+    tmp_path: Path, registration: str
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "unused = FastAPI()\n"
+        f"{registration.replace('initialize)', 'missing_callback)')}\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert not inventory.endpoints
+    assert any("callback identity is unresolved" in item.reason for item in inventory.limitations)
+
+
+def test_dynamic_lifecycle_constructor_expansion_limits_selected_app_only(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "def config(): return {'lifespan': initialize}\n"
+        "def initialize(app):\n"
+        "    yield\n"
+        "unused = FastAPI(**config())\n"
+        "app = FastAPI(**config())\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any("dynamic keyword expansion" in item.reason for item in inventory.limitations)
+    assert {item.source_line for item in inventory.limitations} == {6}
+
+
+def test_unselected_lifecycle_alias_and_custom_same_spelling_do_not_limit(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "class Custom:\n"
+        "    def add_event_handler(self, event, callback): pass\n"
+        "app = FastAPI()\n"
+        "unused = FastAPI()\n"
+        "register = unused.add_event_handler\n"
+        "custom = Custom()\n"
+        "custom.add_event_handler('startup', missing)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert inventory.limitations == ()
+
+
 def test_constructor_lifecycle_lists_keep_all_selected_app_callbacks(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text(
         "from fastapi import APIRouter, FastAPI\n\n"

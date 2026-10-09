@@ -49,9 +49,10 @@ from fastapi_endpoint_detector.parser.framework_ownership import (
 
 @dataclass(frozen=True)
 class _Binding:
-    kind: Literal["module", "symbol", "receiver", "function"]
+    kind: Literal["module", "symbol", "receiver", "function", "method"]
     identity: str
     instance_token: tuple[str, int, int] | None = None
+    receiver_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -110,11 +111,18 @@ class _FrameworkRouteEvent:
     condition: EndpointDiscoveryCondition | None
 
 
+@dataclass(frozen=True)
+class _FrameworkConditionEvent:
+    token: _FrameworkToken
+    condition: EndpointDiscoveryCondition
+
+
 _FrameworkEvent = (
     _FrameworkRegistrationEvent
     | _FrameworkUnknownOverrideEvent
     | _FrameworkIncludeEvent
     | _FrameworkRouteEvent
+    | _FrameworkConditionEvent
 )
 
 
@@ -1200,6 +1208,11 @@ class CustomSurfaceExtractor:
                     for parent in self._framework_mount_ancestors(event.token, mounted_by):
                         conditions.setdefault(parent, []).append(event.condition)
                 continue
+            if isinstance(event, _FrameworkConditionEvent):
+                conditions.setdefault(event.token, []).append(event.condition)
+                for ancestor in self._framework_include_ancestors(event.token, included_by):
+                    conditions.setdefault(ancestor, []).append(event.condition)
+                continue
             if event.child is None:
                 if event.condition is not None:
                     conditions.setdefault(event.parent, []).append(event.condition)
@@ -1719,6 +1732,37 @@ class CustomSurfaceExtractor:
                 if value is not None:
                     self._inspect_expression(module, value, state, current_conditions)
                 binding = self._binding_from_expression(value, state, module.name)
+                constructor_resolution = (
+                    self._resolve_call(value.func, state) if isinstance(value, ast.Call) else None
+                )
+                if (
+                    self._scope_framework_surfaces
+                    and isinstance(value, ast.Call)
+                    and any(keyword.arg is None for keyword in value.keywords)
+                    and constructor_resolution is not None
+                    and constructor_resolution[1] == InvocationKind.CONSTRUCTOR
+                    and constructor_resolution[0] in self._declared_receiver_types
+                    and any(
+                        contract.registration.symbol == constructor_resolution[0]
+                        and contract.registration.invocation == InvocationKind.CONSTRUCTOR
+                        and contract.handler.kind == HandlerSelectorKind.KEYWORD
+                        for contract in self.contracts.document.contracts
+                    )
+                ):
+                    token = (module.name, value.lineno, value.col_offset)
+                    self._framework_events.append(
+                        _FrameworkConditionEvent(
+                            token,
+                            EndpointDiscoveryCondition(
+                                source_path=module.path,
+                                source_line=value.lineno,
+                                reason=(
+                                    "selected framework constructor lifecycle callback may "
+                                    "be hidden in dynamic keyword expansion"
+                                ),
+                            ),
+                        )
+                    )
                 targets = (
                     statement.targets if isinstance(statement, ast.Assign) else [statement.target]
                 )
@@ -2967,6 +3011,33 @@ class CustomSurfaceExtractor:
             else self._resolve_call(call.func, state)
         )
         if resolved is None:
+            if self._scope_framework_surfaces:
+                method_binding = self._binding_from_expression(call.func, state, module.name)
+                if (
+                    method_binding is not None
+                    and method_binding.kind == "method"
+                    and method_binding.receiver_type is not None
+                    and method_binding.instance_token is not None
+                    and any(
+                        contract.registration.symbol == method_binding.identity
+                        and contract.registration.receiver_type == method_binding.receiver_type
+                        and contract.surface.kind == "framework.lifecycle"
+                        for contract in self.contracts.document.contracts
+                    )
+                ):
+                    self._framework_events.append(
+                        _FrameworkConditionEvent(
+                            method_binding.instance_token,
+                            EndpointDiscoveryCondition(
+                                source_path=module.path,
+                                source_line=call.lineno,
+                                reason=(
+                                    "selected framework lifecycle callback identity is unresolved; "
+                                    "framework surface inventory is incomplete"
+                                ),
+                            ),
+                        )
+                    )
             callable_name = (
                 call.func.id
                 if isinstance(call.func, ast.Name)
@@ -2974,7 +3045,7 @@ class CustomSurfaceExtractor:
                 if isinstance(call.func, ast.Attribute)
                 else ""
             )
-            if callable_name in {
+            if not self._scope_framework_surfaces and callable_name in {
                 item.registration.symbol.rsplit(".", maxsplit=1)[-1]
                 for item in self.contracts.document.contracts
             }:
@@ -2990,6 +3061,31 @@ class CustomSurfaceExtractor:
                 )
             return
         symbol, invocation, receiver_type = resolved
+        if (
+            self._scope_framework_surfaces
+            and invocation == InvocationKind.CONSTRUCTOR
+            and any(keyword.arg is None for keyword in call.keywords)
+            and any(
+                contract.registration.symbol == symbol
+                and contract.registration.invocation == InvocationKind.CONSTRUCTOR
+                and contract.handler.kind == HandlerSelectorKind.KEYWORD
+                for contract in self.contracts.document.contracts
+            )
+        ):
+            token = (module.name, call.lineno, call.col_offset)
+            self._framework_events.append(
+                _FrameworkConditionEvent(
+                    token,
+                    EndpointDiscoveryCondition(
+                        source_path=module.path,
+                        source_line=call.lineno,
+                        reason=(
+                            "selected framework constructor lifecycle callback may be hidden "
+                            "in dynamic keyword expansion"
+                        ),
+                    ),
+                )
+            )
         self._record_framework_include(module, call, state, evaluation)
         self._record_framework_route(module, call, state, evaluation, resolved, decorated_handler)
         endpoint_count_before = len(self._endpoints)
@@ -3142,6 +3238,37 @@ class CustomSurfaceExtractor:
                     contract,
                     "handler callback identity was unresolved",
                 )
+                if (
+                    not scoped_override
+                    and self._scope_framework_surfaces
+                    and contract.surface.kind == "framework.lifecycle"
+                ):
+                    receiver_token = (
+                        self._framework_call_token(call, evaluation, state)
+                        if isinstance(call.func, ast.Attribute)
+                        else None
+                    )
+                    if receiver_token is None and evaluation is not None:
+                        callable_binding = self._binding_from_expression(
+                            call.func, evaluation.callable_state, module.name
+                        )
+                        if callable_binding is not None and callable_binding.kind == "method":
+                            receiver_token = callable_binding.instance_token
+                    if receiver_token is not None:
+                        self._framework_events.append(
+                            _FrameworkConditionEvent(
+                                receiver_token,
+                                EndpointDiscoveryCondition(
+                                    source_path=module.path,
+                                    source_line=call.lineno,
+                                    reason=(
+                                        "selected framework lifecycle callback identity is "
+                                        "unresolved; framework surface inventory is incomplete"
+                                    ),
+                                ),
+                            )
+                        )
+                        continue
                 if not scoped_override:
                     self._limitations.append(
                         EndpointDiscoveryCondition(
@@ -4747,13 +4874,15 @@ class CustomSurfaceExtractor:
             expected in ("*", found) for expected, found in zip(pattern, actual, strict=True)
         )
 
-    def _resolve_call(  # noqa: PLR0911
+    def _resolve_call(  # noqa: PLR0911, PLR0912
         self, expression: ast.expr, state: dict[str, _Binding | None]
     ) -> tuple[str, InvocationKind, str | None] | None:
         if isinstance(expression, ast.Name):
             binding = state.get(expression.id)
             if binding is None or binding.kind == "module":
                 return None
+            if binding.kind == "method":
+                return binding.identity, InvocationKind.INSTANCE_METHOD, binding.receiver_type
             constructor_symbols = {
                 contract.registration.symbol
                 for contract in self.contracts.document.contracts
@@ -4766,6 +4895,27 @@ class CustomSurfaceExtractor:
             )
             return binding.identity, invocation, None
         if not isinstance(expression, ast.Attribute):
+            if (
+                isinstance(expression, ast.Call)
+                and isinstance(expression.func, ast.Name)
+                and expression.func.id == "getattr"
+                and state.get("getattr") is None
+                and len(expression.args) >= 2
+            ):
+                # Preserve exact receiver identity for getattr(app, "method")(...).
+                owner = self._binding_from_expression(expression.args[0], state, "")
+                name = expression.args[1]
+                if (
+                    owner is not None
+                    and owner.kind == "receiver"
+                    and isinstance(name, ast.Constant)
+                    and isinstance(name.value, str)
+                ):
+                    return (
+                        f"{owner.identity}.{name.value}",
+                        InvocationKind.INSTANCE_METHOD,
+                        owner.identity,
+                    )
             return None
         binding = self._expression_binding(expression.value, state)
         if binding is None:
@@ -4871,9 +5021,32 @@ class CustomSurfaceExtractor:
             )
         if isinstance(expression, ast.Attribute):
             owner = self._expression_binding(expression.value, state)
+            if owner is not None and owner.kind == "receiver":
+                return _Binding(
+                    "method",
+                    f"{owner.identity}.{expression.attr}",
+                    owner.instance_token,
+                    owner.identity,
+                )
             if owner is not None and owner.kind in {"module", "symbol"}:
                 return _Binding("symbol", f"{owner.identity}.{expression.attr}")
         if isinstance(expression, ast.Call):
+            if (
+                isinstance(expression.func, ast.Name)
+                and expression.func.id == "getattr"
+                and state.get("getattr") is None
+                and len(expression.args) >= 2
+                and isinstance(expression.args[1], ast.Constant)
+                and isinstance(expression.args[1].value, str)
+            ):
+                owner = self._binding_from_expression(expression.args[0], state, module_name)
+                if owner is not None and owner.kind == "receiver":
+                    return _Binding(
+                        "method",
+                        f"{owner.identity}.{expression.args[1].value}",
+                        owner.instance_token,
+                        owner.identity,
+                    )
             resolved = self._resolve_call(expression.func, state)
             if (
                 resolved is not None
