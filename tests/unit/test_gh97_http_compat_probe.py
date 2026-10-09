@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import platform
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -125,3 +126,48 @@ def test_stale_product_module_is_rejected(tmp_path: Path, monkeypatch: pytest.Mo
     monkeypatch.setattr(probe, "_module_source", lambda _module: tmp_path / "stale.py")
     with pytest.raises(RuntimeError, match="did not load from candidate src tree"):
         run()
+
+
+def test_diagnostic_paths_are_portable_without_losing_typeshed_locations() -> None:
+    item = (
+        "/workspace/project/.venv/lib/python3.11/site-packages/mypy/typeshed/stdlib/builtins.pyi: "
+        "note: /workspace/project/helper.py /workspace/project/.venv/lib/dependency.py "
+        "/tmp/gh97_http_wheels_random/app/fixture.py:12: error"
+    )
+    normalized = probe._normalize_diagnostic(
+        item, Path("/workspace/project"), Path("/workspace/project/.venv")
+    )
+    assert normalized == (
+        "<typeshed>/stdlib/builtins.pyi: note: <analyzer-project>/helper.py "
+        "<python-environment>/lib/dependency.py /tmp/<private-probe>/app/fixture.py:12: error"
+    )
+    assert probe._diagnostic_line(normalized) == 12
+
+
+def test_source_provenance_survives_result_commits_and_rejects_dirty_sources(
+    tmp_path: Path,
+) -> None:
+    def git(*args: str) -> None:
+        subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True)
+
+    git("init")
+    git("config", "user.name", "Probe test")
+    git("config", "user.email", "probe-test@example.invalid")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "analyzer.py").write_text("VALUE = 1\n", encoding="utf-8")
+    runner = tmp_path / "probe.py"
+    runner.write_text("# runner\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-m", "Source snapshot")
+    original = probe._source_provenance(tmp_path, runner)
+    (tmp_path / "result.json").write_text("{}\n", encoding="utf-8")
+    git("add", "result.json")
+    git("commit", "-m", "Evidence snapshot")
+    assert probe._source_provenance(tmp_path, runner) == original
+    runner.write_text("# modified runner\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="runner must match its committed revision"):
+        probe._source_provenance(tmp_path, runner)
+    runner.write_text("# runner\n", encoding="utf-8")
+    (tmp_path / "src" / "untracked.py").write_text("# new code\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="source tree must match committed source bytes"):
+        probe._source_provenance(tmp_path, runner)

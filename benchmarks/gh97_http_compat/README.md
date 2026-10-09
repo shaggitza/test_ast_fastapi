@@ -31,3 +31,12 @@ selectors remain unavailable even when the URL call matches a contract. This
 is source-level evidence for these exact three artifacts and this environment;
 it does not establish version ranges, runtime behavior, or broad GH97
 compatibility.
+
+Evidence generation requires the runner and complete analyzer `src` tree to
+match committed bytes. `runner_revision` identifies the last commit changing
+the runner, and `git_revision` identifies the analyzer source revision; the
+report also binds the complete analyzer source tree SHA. A later result-only
+commit does not change these source identities. Commit runner changes before
+regenerating the result. Diagnostics normalize temporary fixture, typeshed,
+virtual environment, and checkout paths while preserving relative file names
+and line numbers.

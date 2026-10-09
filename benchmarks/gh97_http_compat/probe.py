@@ -75,6 +75,51 @@ def _diagnostic_line(item: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _normalize_diagnostic(item: str, checkout: Path, environment: Path) -> str:
+    normalized = re.sub(r"/tmp/gh97_http_wheels_[^/]+", "/tmp/<private-probe>", item)
+    normalized = re.sub(r"/[^\s\"']*/mypy/typeshed/", "<typeshed>/", normalized)
+    for path, label in sorted(
+        ((checkout, "<analyzer-project>"), (environment, "<python-environment>")),
+        key=lambda pair: len(str(pair[0])),
+        reverse=True,
+    ):
+        normalized = normalized.replace(str(path) + "/", label + "/")
+    return normalized
+
+
+def _source_provenance(checkout: Path, runner: Path) -> dict[str, str]:
+    """Bind the complete analyzer tree and runner to stable committed sources."""
+
+    def git_text(*args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=checkout, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    if git_text("status", "--porcelain", "--untracked-files=all", "--", "src"):
+        raise RuntimeError("analyzer source tree must match committed source bytes")
+    revision = git_text("log", "-1", "--format=%H", "--", "src")
+    tree = git_text("rev-parse", "HEAD:src")
+    if git_text("rev-parse", f"{revision}:src") != tree:
+        raise RuntimeError("analyzer source revision does not contain the current source tree")
+    runner_path = runner.relative_to(checkout).as_posix()
+    runner_revision = git_text("log", "-1", "--format=%H", "--", runner_path)
+    if not runner_revision:
+        raise RuntimeError("probe runner must be committed before generating evidence")
+    committed_runner = subprocess.run(
+        ["git", "show", f"{runner_revision}:{runner_path}"],
+        cwd=checkout,
+        check=True,
+        capture_output=True,
+    ).stdout
+    if committed_runner != runner.read_bytes():
+        raise RuntimeError("probe runner must match its committed revision")
+    return {
+        "git_revision": revision,
+        "analyzer_source_tree_sha": tree,
+        "runner_revision": runner_revision,
+    }
+
+
 def extract_python_sources(
     wheel: Path, destination: Path, expected_distribution: str
 ) -> dict[str, Any]:
@@ -197,6 +242,7 @@ def run(wheels: dict[str, Path] = WHEELS) -> dict[str, Any]:
             )
     if mypy.version.__version__ != EXPECTED_MYPY:
         raise RuntimeError(f"expected mypy {EXPECTED_MYPY}, found {mypy.version.__version__}")
+    provenance = _source_provenance(source_root, Path(__file__).resolve())
     source = fixture_source()
     with tempfile.TemporaryDirectory(prefix="gh97_http_wheels_") as temp:
         root = Path(temp)
@@ -286,7 +332,7 @@ def run(wheels: dict[str, Path] = WHEELS) -> dict[str, Any]:
         ]
         raw_diagnostics = (
             [
-                re.sub(r"/tmp/gh97_http_wheels_[^/]+", "/tmp/<private-probe>", str(item))
+                _normalize_diagnostic(str(item), source_root, Path(sys.prefix))
                 for item in analyzer._build_result.errors
             ]
             if analyzer._build_result
@@ -321,13 +367,6 @@ def run(wheels: dict[str, Path] = WHEELS) -> dict[str, Any]:
             for module, path in product_paths.items()
         }
         runner_hash = sha256(Path(__file__).read_bytes())
-        git_revision = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=source_root,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
         return {
             "schema_version": 1,
             "probe": "gh97-http-installed-artifact-source-compatibility-v1",
@@ -335,7 +374,7 @@ def run(wheels: dict[str, Path] = WHEELS) -> dict[str, Any]:
             "mypy_version": analyzer.resolver_version,
             "product_imports": product_imports,
             "runner_sha256": runner_hash,
-            "git_revision": git_revision,
+            **provenance,
             "analysis_config": {"preset": PRESET, "track_transitive": True, "max_depth": 2},
             "preset": PRESET,
             "preset_hash": preset.preset_hash,
