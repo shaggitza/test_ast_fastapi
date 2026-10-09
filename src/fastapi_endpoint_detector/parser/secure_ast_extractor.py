@@ -6034,13 +6034,18 @@ def _effective_literal_all_export(  # noqa: PLR0912 - conservative binding inter
             effective = None
             continue
         if any(
-            isinstance(node, ast.Name)
-            and node.id == "__all__"
-            and isinstance(node.ctx, (ast.Load, ast.Del))
+            (
+                isinstance(node, ast.Name)
+                and node.id == "__all__"
+                and isinstance(node.ctx, (ast.Load, ast.Store, ast.Del))
+            )
+            or (isinstance(node, ast.ExceptHandler) and node.name == "__all__")
+            or (isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name == "__all__")
+            or (isinstance(node, ast.MatchMapping) and node.rest == "__all__")
             for node in ast.walk(statement)
         ):
-            # Any read may escape or mutate the live value; any delete may remove it.
-            # This includes operations nested in control flow.
+            # Reads can escape or mutate the value; writes and deletes can replace it.
+            # This includes operations and name captures nested in control flow.
             effective = None
             continue
         if _statement_may_bind_name(statement, "__all__"):
