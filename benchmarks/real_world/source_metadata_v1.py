@@ -121,7 +121,10 @@ def parse_metadata(path: str, raw: bytes) -> dict[str, Any]:
         result.update(status="malformed", reason="not_utf8"); return result
     if path.endswith(".toml"):
         try:
-            import tomllib
+            try:
+                import tomllib
+            except ModuleNotFoundError:
+                import tomli as tomllib  # noqa: F401
             doc = tomllib.loads(text)
             project = doc.get("project", {})
             result.update(status="parsed", requires_python=project.get("requires-python", "not_declared"), dependencies=project.get("dependencies", "not_declared"), optional_dependencies=project.get("optional-dependencies", "not_declared"))
