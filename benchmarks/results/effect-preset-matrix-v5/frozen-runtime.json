@@ -1,0 +1,398 @@
+{
+  "schema_version": 1,
+  "runtime_id": "gh97-effect-analyzer-frozen-runtime-v1",
+  "source_commit": "88ec7c33b45ec45435aaf7ffb72494c02f2328e4",
+  "v4_snapshot_sha256": "9ce7015755f9e2027f9ea1b08fdf58dbb21cd0f0b76c5dcd594070a6cc4d2a98",
+  "v4_artifact_files": [
+    {
+      "path": "analyzer-source-snapshots.json",
+      "sha256": "9ce7015755f9e2027f9ea1b08fdf58dbb21cd0f0b76c5dcd594070a6cc4d2a98"
+    },
+    {
+      "path": "fixtures/pathlib_open_handles.py",
+      "sha256": "daf0971e1851bbcc8ad6437794ef9a6bc0c37ddbb2fc45f0efa7714cab833155"
+    },
+    {
+      "path": "package-analyzer-cases.json",
+      "sha256": "43559a77799b08d4d8e642a91a13539944adf7413690fab2e5ffadd380d9c68e"
+    },
+    {
+      "path": "package-symbols.json",
+      "sha256": "f90c11bb5eeb2e5a4d60607438f24d4070be4c84506787e73c1b06903833df1d"
+    },
+    {
+      "path": "runs/python-3.10.21-mypy-1.19.1/controlled-results.json",
+      "sha256": "e828e5d681797d5cee22d6b7c5190ab625a9d87084a7e0190c3a25c4217a48ae"
+    },
+    {
+      "path": "runs/python-3.10.21-mypy-1.19.1/package-analyzer-results.json",
+      "sha256": "0de93da5d154b35e910ffb5c865422c5ceab7df0fb1bf09325ad2abf35efacb0"
+    },
+    {
+      "path": "runs/python-3.11.16-mypy-1.19.1/controlled-results.json",
+      "sha256": "a681b57ed655b2395493537720f312b67a52ed1f6db4287047b1376b8078747b"
+    },
+    {
+      "path": "runs/python-3.11.16-mypy-1.19.1/package-analyzer-results.json",
+      "sha256": "e2daec115f7b809da12fe47b9f040e205aa7ae54ff34f2e7ba2711b01e21e4e5"
+    },
+    {
+      "path": "runs/python-3.11.16-mypy-2.4.0/controlled-results.json",
+      "sha256": "6fb105aa37daab035d8e7e827e3ab998009b8015e55344357c6a3b91bb1e1915"
+    },
+    {
+      "path": "runs/python-3.11.16-mypy-2.4.0/package-analyzer-results.json",
+      "sha256": "7f7e7c4530d995ffdba38a0d733ffb3496606bcfa6a1e270c5c6f6a480f6e60b"
+    },
+    {
+      "path": "runs/python-3.12.14-mypy-1.19.1/controlled-results.json",
+      "sha256": "f6b67413f94bf55a90a422b0fae6980d04b5d6ae94d3995bec450403cb53cf4f"
+    },
+    {
+      "path": "runs/python-3.12.14-mypy-1.19.1/package-analyzer-results.json",
+      "sha256": "076e918edf1679a01c6a8b2853cfebfa3a8f0c0e43f276190cbcc8ed1c2914b7"
+    },
+    {
+      "path": "source-signature-observations.json",
+      "sha256": "aabb58de11b9084caca5c39052ef625d49d681c83805914642eb345b49fe74f1"
+    }
+  ],
+  "replay_environment_files": [
+    {
+      "path": "replay-envs/python-3.10.21-mypy-1.19.1/pyproject.toml",
+      "sha256": "26801287ed20b16edc9d3208d5f24a3cc771620827dc1afc5babe226ca30a8d4"
+    },
+    {
+      "path": "replay-envs/python-3.10.21-mypy-1.19.1/uv.lock",
+      "sha256": "cd9571e02db769ea61d103faaa39a835ada610f4c75cc55fb40a969e8d759bff"
+    },
+    {
+      "path": "replay-envs/python-3.11.16-mypy-1.19.1/pyproject.toml",
+      "sha256": "a22bda3d967fc72f055d41c927001a9f8267c0fc8253119ad6658dde470f97a4"
+    },
+    {
+      "path": "replay-envs/python-3.11.16-mypy-1.19.1/uv.lock",
+      "sha256": "db50d592b0b13ae20c9fd1875b3032957f3c72a3f5e2e31ffe9cb1c04957fc74"
+    },
+    {
+      "path": "replay-envs/python-3.11.16-mypy-2.4.0/pyproject.toml",
+      "sha256": "2a2b99eb11ae6347ea7be984c16d9581068ef3981a5a8f8e1c69518d9a7a690e"
+    },
+    {
+      "path": "replay-envs/python-3.11.16-mypy-2.4.0/uv.lock",
+      "sha256": "0a1100eb256aec4e22a6554c02873ff754c48acbdc39be01757d88182da2e37c"
+    },
+    {
+      "path": "replay-envs/python-3.12.14-mypy-1.19.1/pyproject.toml",
+      "sha256": "2960199bd0853e184dc31c8ee878cd3a6bad9473747463c1d67dcaaa457d8d3e"
+    },
+    {
+      "path": "replay-envs/python-3.12.14-mypy-1.19.1/uv.lock",
+      "sha256": "9eeba5e668425ae48ab9e640d370449b8622305a463d7f380f94dc73416f1f2a"
+    }
+  ],
+  "replay_lock_tool": {
+    "name": "uv",
+    "version": "0.12.19"
+  },
+  "runner_sha256": "f76c118ea6c38d6c4a2c192663909e605309efade9976d9a3d1c692e91c5b7d5",
+  "runtime_distributions": {
+    "librt": "0.16.0",
+    "mypy-extensions": "1.1.0",
+    "pathspec": "1.1.1",
+    "pydantic": "2.13.5",
+    "pydantic-core": "2.46.5",
+    "PyYAML": "6.0.3",
+    "typing-extensions": "4.16.0"
+  },
+  "files": [
+    {
+      "path": "benchmarks/providers/effect_preset_matrix.py",
+      "sha256": "18c4e70b78f841afd790b66e57994436161a93a2c77207a8a7abcd24991f6de9"
+    },
+    {
+      "path": "benchmarks/results/effect-preset-matrix-v4/analyzer-source-snapshots.json",
+      "sha256": "9ce7015755f9e2027f9ea1b08fdf58dbb21cd0f0b76c5dcd594070a6cc4d2a98"
+    },
+    {
+      "path": "benchmarks/results/effect-preset-matrix-v4/fixtures/pathlib_open_handles.py",
+      "sha256": "daf0971e1851bbcc8ad6437794ef9a6bc0c37ddbb2fc45f0efa7714cab833155"
+    },
+    {
+      "path": "benchmarks/results/effect-preset-matrix-v4/package-analyzer-cases.json",
+      "sha256": "43559a77799b08d4d8e642a91a13539944adf7413690fab2e5ffadd380d9c68e"
+    },
+    {
+      "path": "benchmarks/results/effect-preset-matrix-v4/package-symbols.json",
+      "sha256": "f90c11bb5eeb2e5a4d60607438f24d4070be4c84506787e73c1b06903833df1d"
+    },
+    {
+      "path": "benchmarks/results/effect-preset-matrix-v4/runs/python-3.10.21-mypy-1.19.1/controlled-results.json",
+      "sha256": "e828e5d681797d5cee22d6b7c5190ab625a9d87084a7e0190c3a25c4217a48ae"
+    },
+    {
+      "path": "benchmarks/results/effect-preset-matrix-v4/runs/python-3.10.21-mypy-1.19.1/package-analyzer-results.json",
+      "sha256": "0de93da5d154b35e910ffb5c865422c5ceab7df0fb1bf09325ad2abf35efacb0"
+    },
+    {
+      "path": "benchmarks/results/effect-preset-matrix-v4/runs/python-3.11.16-mypy-1.19.1/controlled-results.json",
+      "sha256": "a681b57ed655b2395493537720f312b67a52ed1f6db4287047b1376b8078747b"
+    },
+    {
+      "path": "benchmarks/results/effect-preset-matrix-v4/runs/python-3.11.16-mypy-1.19.1/package-analyzer-results.json",
+      "sha256": "e2daec115f7b809da12fe47b9f040e205aa7ae54ff34f2e7ba2711b01e21e4e5"
+    },
+    {
+      "path": "benchmarks/results/effect-preset-matrix-v4/runs/python-3.11.16-mypy-2.4.0/controlled-results.json",
+      "sha256": "6fb105aa37daab035d8e7e827e3ab998009b8015e55344357c6a3b91bb1e1915"
+    },
+    {
+      "path": "benchmarks/results/effect-preset-matrix-v4/runs/python-3.11.16-mypy-2.4.0/package-analyzer-results.json",
+      "sha256": "7f7e7c4530d995ffdba38a0d733ffb3496606bcfa6a1e270c5c6f6a480f6e60b"
+    },
+    {
+      "path": "benchmarks/results/effect-preset-matrix-v4/runs/python-3.12.14-mypy-1.19.1/controlled-results.json",
+      "sha256": "f6b67413f94bf55a90a422b0fae6980d04b5d6ae94d3995bec450403cb53cf4f"
+    },
+    {
+      "path": "benchmarks/results/effect-preset-matrix-v4/runs/python-3.12.14-mypy-1.19.1/package-analyzer-results.json",
+      "sha256": "076e918edf1679a01c6a8b2853cfebfa3a8f0c0e43f276190cbcc8ed1c2914b7"
+    },
+    {
+      "path": "benchmarks/results/effect-preset-matrix-v4/source-signature-observations.json",
+      "sha256": "aabb58de11b9084caca5c39052ef625d49d681c83805914642eb345b49fe74f1"
+    },
+    {
+      "path": "pyproject.toml",
+      "sha256": "076311778b91044566f8d70d9ff3ecf8d2a3fe67a32e6e17f2aed5e369731ec9"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/__init__.py",
+      "sha256": "2fa65a87996c7f686dd8a3f906611b314f34905e6f37018f3526ad61a0ebabee"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/__main__.py",
+      "sha256": "90b018299e8dd88a58304c1baccfad85454ae26ffb3d7e225da89323690e9b25"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/analyzer/__init__.py",
+      "sha256": "2e2e9fa241406be87ec14fafd4bd85dd4cba45db43306841be8e7c8f315dc6a8"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/analyzer/change_mapper.py",
+      "sha256": "ac3a255810794bc730be8dbe9f09fac674d08b0ea0d9658573a6ed87039d597f"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/analyzer/effect_analyzer.py",
+      "sha256": "6aed9a83eb9d209fa4fd712216ddcb96253244c1f6f0bbe908c253e4d53e245d"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/analyzer/effect_contract_auditor.py",
+      "sha256": "c6ecd7210e7c4fc054010c80e9df0961b1510fd9cb9599faa49a27e751258d57"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/analyzer/endpoint_registry.py",
+      "sha256": "7aa5a5767e74ea3e33f528e68cb4ca6d65daaf9da9c323484adce70d2de184d5"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/analyzer/graphify_adapter.py",
+      "sha256": "518e70bc3ed9bb1fe4340146ace5552ea10576c6c9b8b07d72481a0ad44d12d6"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/analyzer/mypy_analyzer.py",
+      "sha256": "6f0d36417dc13c258a52da28d47d9a7c56b28662e55f55503dc42c26a4383fba"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/analyzer/mypy_incremental.py",
+      "sha256": "04c1f34a0e2ace82d84986a344d3460487e05336498c59e08aaab72d613a7893"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/analyzer/resource_coupling.py",
+      "sha256": "998a83d812f5455b7cec6ea41c1e54fab87fad9822bd06f06cea6b3052556121"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/analyzer/scip_analyzer.py",
+      "sha256": "fe12778dcb1013dec41fed85e9641a4dc67cfd35149a637be16aab3eaeea45d4"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/analyzer/sql_transaction.py",
+      "sha256": "1507346eb3aa0e157794167b1bb004e1fe187b7ebee7eb8c50752da6e4fb4927"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/analyzer/sql_transaction_paths.py",
+      "sha256": "80360bd048c58eee8e88f5387ee9ae4737443053aec09c5ba12390ccdd4b00d0"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/cli.py",
+      "sha256": "ef19b25cc4a6856374f1b864ad6e0c5af0afa678d777450a7126ef94814063ef"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/config.py",
+      "sha256": "57892cdb03d33d5407dd75b578a0c8e1d8fbeedcde85702ba2d6e93e0e4dcf1c"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/executor/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/executor/policies/runtime-seccomp-v1.json",
+      "sha256": "96dbac26aac6041de88eaf99f653d606933469dd104157b877190d998ab68d4a"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/executor/vm_executor.py",
+      "sha256": "a0dff2652a2b6ea708dfa99855dacea3268225eb655c40b1f6f69fd2781cc511"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/models/__init__.py",
+      "sha256": "995b74794c49f98fd310a31e02cecced67a0b9c7e7cb6a0cda92ec1c5b075c0a"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/models/dependency.py",
+      "sha256": "6fbbfc030d70e7f0ec6fae071af70596597ffc9adfb2c63d6ab04f8e20b207de"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/models/diff.py",
+      "sha256": "f262af1095ce97d405641b29b43a02cc940e9efdf03a968040bf561050cf81cb"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/models/effect_contract.py",
+      "sha256": "392c7024633ea0d309447c1991f96d0f2293d52732371797538ca2f0637f92d8"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/models/effect_contract_audit.py",
+      "sha256": "4d4771903cb153350710e81e59e2c880a489ff4c1b40a387b8242c8132a0bcb8"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/models/endpoint.py",
+      "sha256": "d5a01763444a26da525f3320d7adab34df281407073b80a5b1a755c737c1ffa7"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/models/report.py",
+      "sha256": "f5a02f8abf6ef7578b0d9cb8d49a04d3dfbb8f135ccae59bf3b02adb4ce1995b"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/models/resource_coupling.py",
+      "sha256": "caa190af65f6d127d22c6c22b910ae68a40c5aad6973d73b226f4023aaa61a35"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/models/sql_transaction.py",
+      "sha256": "7b3ac9adbcb447e3543ba99a8df9e11a7f6e97fa4721397f1ed2a4437f0f25ca"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/models/surface_contract.py",
+      "sha256": "d144db57d83cab93ef633b6d77ae448c7dcf2ec29a6dfbcb31924443035d9a44"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/output/__init__.py",
+      "sha256": "ec1fc116f38e5fb548c36baf44c44c92c189abe44d7e92a5c3b43fa93d85838d"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/output/formatters.py",
+      "sha256": "dd9c23f0355dbbae4946ac755b58950ec07d7b37a1eae667acb66c7d5c255871"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/output/html_output.py",
+      "sha256": "1e3d9ea70ea2374d0982abf6b8037254bd169512f68e3a7eb2717e66bbe79bb8"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/output/json_output.py",
+      "sha256": "1cc66a0fbd688aeed6440ba1759b2da9420da03b188faf5f7d551d59180f36e1"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/output/markdown_output.py",
+      "sha256": "da2ea5abb8ef0c8ff62b9ba2014dc161dc0a9671d191a6e31719156bc8be63fe"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/output/text_output.py",
+      "sha256": "66c2d4463f32c496fc3e02c6652e3290d6b5a924823d083653b1ea6745ae9cc6"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/output/yaml_output.py",
+      "sha256": "898cbd111df582a40798ca23c551ae6bc7c430f3279532819b7c26f7abcc16c2"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/parser/__init__.py",
+      "sha256": "dce19a4bf32727dd48348904ed6289f69aecba86a867c8cfaf826dcedd39da3b"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/parser/_static_evaluation.py",
+      "sha256": "68baa6d358c1e98f4adee1114e6da6d74b94220bdd42e6ef97610fb7d0d3c01a"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/parser/custom_surface_extractor.py",
+      "sha256": "ce7b7cf3272f2ec24a32fc3692bd27f48bddc6415cdb92e50bf08470cd3e2b93"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/parser/diff_parser.py",
+      "sha256": "e6458ac2fd28c3eff9da58ff55afd9fa117355d2acb878ec9e5b23d7b64cb166"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/parser/fastapi_extractor.py",
+      "sha256": "f61cfd67dff59f557b0f373d68d70f10d919a20aa6fd1255502ed2b8d3dceabf"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/parser/runtime_worker.py",
+      "sha256": "0b39b873526ea6e9031cd564c7126663b05095ae3c9d082e14a6e05ca0e7a302"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/parser/secure_ast_extractor.py",
+      "sha256": "71913c62d6606c0572bf86a28523b1a62ea61f8ddf0ababc9b55b7ef933eba82"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/presets/effects_filesystem_v1.yaml",
+      "sha256": "ece9515414a316b1fa6fec47e45699667e7d565b3c2537787dc91a203d0f88f3"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/presets/effects_http_clients_v1.yaml",
+      "sha256": "1999bca6c27a6b92cf448e21d56b213c8334273c1d92fe3da56ceba749cd9a7f"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/presets/effects_mongodb_v1.yaml",
+      "sha256": "df68200dc7df8e3176257815e1de2016bace4f9a049977fd31001d088f0f4d30"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/presets/effects_object_storage_v1.yaml",
+      "sha256": "7c5cf82835f371e3ec8e3d422f3f5c4f324622c7bfeb928690cb11921749b871"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/presets/effects_redis_v1.yaml",
+      "sha256": "a7b6dd01808d6f9275ed9aa99c67c577c04aa2ce30a5301d3ef957fe6695fcf8"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/presets/effects_sqlalchemy_v1.yaml",
+      "sha256": "907405ddeca13550c69e22245ab34162d50ee7e71e9fea50e42a3dc6e916718d"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/presets/event_listeners_v1.yaml",
+      "sha256": "7847bff7ce58524f78c6d92c66a69cb3b32b16d1bf8db0197d0a4f66fd7ebd53"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/presets/framework_v1.yaml",
+      "sha256": "5db127570e9d137f65a34610f93778935c32d597e0dbf812ff6c2428ba5b386b"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/presets/mcp_v1.yaml",
+      "sha256": "fd33e8eb0ba958186aa3951194b05c968c8d248642ce4ca7c60e0fd1aa4b4ed3"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/presets/workers_v1.yaml",
+      "sha256": "b384b46030c7ffe5e7151b0f8cda68891dee0ce210ce13b3c0077ee9fe6b3174"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/py.typed",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "src/fastapi_endpoint_detector/strict_data.py",
+      "sha256": "ba4b87f249f2e54a5ce4b507a3cbd4871d00ee03f6ea2fc44ca5e1a60236ea81"
+    },
+    {
+      "path": "tests/benchmarks/test_effect_preset_matrix.py",
+      "sha256": "2661e9e1723c392c824722d951b68ed1a7ce806810c7bfaab1a635b661835427"
+    },
+    {
+      "path": "uv.lock",
+      "sha256": "ac5f51b005b29fc4f7257372d2d0236273fff360653745da512f39c24b6b950a"
+    }
+  ]
+}

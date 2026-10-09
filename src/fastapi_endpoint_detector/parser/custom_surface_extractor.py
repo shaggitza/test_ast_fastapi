@@ -26,6 +26,7 @@ from fastapi_endpoint_detector.models.endpoint import (
 from fastapi_endpoint_detector.models.surface_contract import (
     CallbackMode,
     CallbackRangeMode,
+    ContractMultiplicity,
     HandlerNameNormalization,
     HandlerSelectorKind,
     LoadedSurfaceContracts,
@@ -37,6 +38,12 @@ from fastapi_endpoint_detector.parser._static_evaluation import (
     MAX_CUSTOM_RESOURCE_CHARS,
     StaticEvaluationResult,
     StaticStringEvaluator,
+)
+from fastapi_endpoint_detector.parser.framework_ownership import (
+    background_task_calls,
+    direct_route_callback,
+    eager_calls,
+    route_callback_selector,
 )
 
 
@@ -70,6 +77,45 @@ class _CallEvaluation:
 class _ResolvedResources:
     values: tuple[str, ...] | None
     reason: str
+
+
+_FrameworkToken = tuple[str, int, int]
+
+
+@dataclass(frozen=True)
+class _FrameworkRegistrationEvent:
+    token: _FrameworkToken
+    endpoint: Endpoint
+
+
+@dataclass(frozen=True)
+class _FrameworkUnknownOverrideEvent:
+    token: _FrameworkToken
+    surface_kind: str
+    condition: EndpointDiscoveryCondition
+
+
+@dataclass(frozen=True)
+class _FrameworkIncludeEvent:
+    parent: _FrameworkToken
+    child: _FrameworkToken | None
+    condition: EndpointDiscoveryCondition | None
+    routes_only: bool = False
+
+
+@dataclass(frozen=True)
+class _FrameworkRouteEvent:
+    token: _FrameworkToken
+    callback: tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef] | None
+    condition: EndpointDiscoveryCondition | None
+
+
+_FrameworkEvent = (
+    _FrameworkRegistrationEvent
+    | _FrameworkUnknownOverrideEvent
+    | _FrameworkIncludeEvent
+    | _FrameworkRouteEvent
+)
 
 
 @dataclass(frozen=True)
@@ -688,10 +734,15 @@ class CustomSurfaceExtractor:
         app_path: Path,
         contracts: LoadedSurfaceContracts,
         bootstrap_entry: str | None = None,
+        *,
+        app_variable: str = "app",
+        app_entry: str | None = None,
     ) -> None:
         self.app_path = app_path.resolve()
         self.contracts = contracts
         self.bootstrap_entry = bootstrap_entry
+        self.app_variable = app_variable
+        self.app_entry = app_entry
         if self.app_path.is_dir():
             self.root = self.app_path
         elif self.app_path.is_file():
@@ -707,20 +758,30 @@ class CustomSurfaceExtractor:
         self._endpoints: list[Endpoint] = []
         self._limitations: list[EndpointDiscoveryCondition] = []
         self._route_conditions: list[EndpointDiscoveryCondition] = []
-        self._seen: set[tuple[str, int, int, str, str, str]] = set()
+        self._seen: set[tuple[str, int, int, str, str, str, str]] = set()
         self._startup_route_seen: set[tuple[str, int, str, tuple[EndpointMethod, ...], str]] = set()
         self._module_states: dict[str, dict[str, _Binding | None]] = {}
         self._class_scope_frames: list[_ClassScopeFrame] = []
         self._function_scope_states: list[_FunctionScopeFrame] = []
         self._building_states = False
         self._inventory_unavailable = False
+        self._framework_events: list[_FrameworkEvent] = []
+        self._framework_owned_routes: list[
+            tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef]
+        ] = []
+        self._framework_selected_tokens: set[_FrameworkToken] = set()
+        self._framework_root_condition: EndpointDiscoveryCondition | None = None
+        self._framework_factory: tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef] | None = (
+            None
+        )
+        self._scope_framework_surfaces = contracts.document.preset.id == "framework-callbacks"
         self._declared_receiver_types = {
             contract.registration.receiver_type
             for contract in contracts.document.contracts
             if contract.registration.receiver_type is not None
         }
 
-    def extract_inventory(self) -> EndpointInventory:
+    def extract_inventory(self) -> EndpointInventory:  # noqa: PLR0912
         """Return all finite registrations and inventory-strength evidence."""
         self._load_modules()
         if self._inventory_unavailable:
@@ -749,6 +810,7 @@ class CustomSurfaceExtractor:
                 self._module_states[module.name] = state
         finally:
             self._building_states = False
+        self._resolve_framework_root()
         for module in self._modules.values():
             self._process_statements(
                 module,
@@ -757,13 +819,28 @@ class CustomSurfaceExtractor:
                 (),
                 evaluate_variable_annotations=not module.postponed_annotations,
             )
+        self._process_app_factory()
         self._process_bootstrap()
-        collapsed: dict[tuple[str, str, int], Endpoint] = {}
+        self._filter_framework_surfaces()
+        collapsed: dict[tuple[str, str, int, int], Endpoint] = {}
         for endpoint in self._endpoints:
+            declared = next(
+                (
+                    contract
+                    for contract in self.contracts.document.contracts
+                    if endpoint.surface is not None and contract.id == endpoint.surface.contract_id
+                ),
+                None,
+            )
             key = (
                 endpoint.identifier,
                 str(endpoint.handler.file_path),
                 endpoint.handler.line_number,
+                endpoint.surface.registration_line
+                if declared is not None
+                and declared.multiplicity == ContractMultiplicity.ALL_EXECUTE
+                and endpoint.surface is not None
+                else 0,
             )
             previous = collapsed.get(key)
             if previous is None or (
@@ -779,6 +856,21 @@ class CustomSurfaceExtractor:
         normalized: list[Endpoint] = []
         for identifier, matches in by_identifier.items():
             if len(matches) == 1:
+                normalized.extend(matches)
+                continue
+            if all(
+                endpoint.surface is not None
+                and next(
+                    (
+                        contract.multiplicity
+                        for contract in self.contracts.document.contracts
+                        if contract.id == endpoint.surface.contract_id
+                    ),
+                    None,
+                )
+                == ContractMultiplicity.ALL_EXECUTE
+                for endpoint in matches
+            ):
                 normalized.extend(matches)
                 continue
             for endpoint in matches:
@@ -843,6 +935,581 @@ class CustomSurfaceExtractor:
             status=InventoryStatus.CONDITIONAL if limitations else InventoryStatus.ESTABLISHED,
             limitations=limitations,
             route_conditions=route_conditions,
+        )
+
+    @staticmethod
+    def _framework_receiver_token(binding: _Binding | None) -> _FrameworkToken | None:
+        if binding is None or binding.kind != "receiver" or binding.instance_token is None:
+            return None
+        if binding.identity not in {
+            "fastapi.FastAPI",
+            "starlette.applications.Starlette",
+            "fastapi.APIRouter",
+        }:
+            return None
+        return binding.instance_token
+
+    def _framework_condition(self, module: _Module, line: int, reason: str) -> None:
+        condition = EndpointDiscoveryCondition(
+            source_path=module.path,
+            source_line=line,
+            reason=reason,
+        )
+        self._framework_root_condition = condition
+
+    def _resolve_framework_root(self) -> None:  # noqa: PLR0912
+        """Resolve the exact selected application after source-ordered module binding."""
+        if not self._scope_framework_surfaces:
+            return
+        candidates: list[tuple[_Module, str]] = []
+        if self.app_entry is not None:
+            parts = self.app_entry.split(":")
+            if (
+                len(parts) != 2
+                or not parts[0]
+                or not parts[1]
+                or any(not item.isidentifier() for item in parts[0].split("."))
+                or not parts[1].isidentifier()
+            ):
+                raise CustomSurfaceExtractorError(
+                    "app_entry must use an exact project-local MODULE:SYMBOL"
+                )
+            module = self._modules.get(parts[0])
+            if module is None:
+                raise CustomSurfaceExtractorError(
+                    f"custom surface app entry {self.app_entry!r} has no project module"
+                )
+            candidates.append((module, parts[1]))
+        elif self.app_path.is_file():
+            module = next(
+                (item for item in self._modules.values() if item.path == self.app_path),
+                None,
+            )
+            if module is not None:
+                candidates.append((module, self.app_variable))
+        else:
+            candidates.extend((module, self.app_variable) for module in self._modules.values())
+
+        selected: set[_FrameworkToken] = set()
+        unresolved: list[tuple[_Module, str]] = []
+        for module, symbol in candidates:
+            binding = self._module_states.get(module.name, {}).get(symbol)
+            if binding is not None:
+                binding = self._follow_project_binding(binding)
+            token = self._framework_receiver_token(binding)
+            if (
+                token is not None
+                and binding is not None
+                and binding.identity != "fastapi.APIRouter"
+            ):
+                selected.add(token)
+                continue
+            function_candidates = self._functions.get(f"{module.name}.{symbol}", [])
+            if self.app_entry is not None and len(function_candidates) == 1:
+                self._framework_factory = function_candidates[0]
+                continue
+            if self.app_entry is not None or binding is not None:
+                unresolved.append((module, symbol))
+
+        if len(selected) == 1:
+            self._framework_selected_tokens = selected
+            return
+        if len(selected) > 1:
+            module, _symbol = candidates[0]
+            self._framework_condition(
+                module,
+                1,
+                "selected framework application binding is ambiguous across project modules",
+            )
+            return
+        if self._framework_factory is not None:
+            return
+        module, symbol = (
+            unresolved or candidates or [(next(iter(self._modules.values())), self.app_variable)]
+        )[0]
+        rebound_lines: list[int] = []
+        for statement in module.tree.body:
+            visitor = _EagerStateMutationVisitor()
+            visitor.visit(statement)
+            if symbol in visitor.rebound_names:
+                rebound_lines.append(statement.lineno)
+        line = max(rebound_lines, default=1)
+        self._framework_condition(
+            module,
+            line,
+            "selected framework application binding is unresolved or was rebound",
+        )
+
+    def _process_app_factory(self) -> None:
+        """Interpret one explicitly selected zero-argument factory and retain its return token."""
+        if self._framework_factory is None:
+            return
+        module, function = self._framework_factory
+        if isinstance(function, ast.AsyncFunctionDef) or function.decorator_list:
+            raise CustomSurfaceExtractorError(
+                "custom surface app factory must be synchronous and undecorated"
+            )
+        positional = [*function.args.posonlyargs, *function.args.args]
+        if (
+            len(positional) - len(function.args.defaults)
+            or any(default is None for default in function.args.kw_defaults)
+            or function.args.vararg is not None
+            or function.args.kwarg is not None
+        ):
+            raise CustomSurfaceExtractorError(
+                "custom surface app factory must be callable with zero arguments and not variadic"
+            )
+        returns = [item for item in function.body if isinstance(item, ast.Return)]
+        if len(returns) != 1 or function.body[-1] is not returns[0] or returns[0].value is None:
+            self._framework_condition(
+                module,
+                function.lineno,
+                "selected framework app factory has unsupported return control flow",
+            )
+            return
+
+        state = dict(self._module_states[module.name])
+        scope = _FunctionScopeBindingVisitor(function)
+        scope.visit(function)
+        local_names = scope.rebound_names - scope.globals - scope.nonlocals
+        for name in local_names:
+            state[name] = None
+        frame = _FunctionScopeFrame(
+            local_state=state,
+            global_state=self._module_states[module.name],
+            local_names=frozenset(local_names),
+        )
+        self._function_scope_states.append(frame)
+        try:
+            self._process_statements(
+                module,
+                function.body,
+                state,
+                (),
+                evaluate_variable_annotations=False,
+            )
+        finally:
+            self._function_scope_states.pop()
+        token = self._framework_receiver_token(
+            self._binding_from_expression(returns[0].value, state, module.name)
+        )
+        if token is None:
+            self._framework_condition(
+                module,
+                returns[0].lineno,
+                "selected framework app factory return is unresolved or not an application",
+            )
+            return
+        self._framework_selected_tokens = {token}
+
+    @staticmethod
+    def _is_framework_endpoint(endpoint: Endpoint) -> bool:
+        return endpoint.surface is not None and endpoint.surface.surface_kind.startswith(
+            "framework."
+        )
+
+    @staticmethod
+    def _framework_include_ancestors(
+        token: _FrameworkToken,
+        included_by: dict[_FrameworkToken, set[_FrameworkToken]],
+    ) -> tuple[_FrameworkToken, ...]:
+        """Return prior include ancestors in deterministic, graph-bounded order."""
+        ancestors: list[_FrameworkToken] = []
+        seen = {token}
+        pending = sorted(included_by.get(token, ()), reverse=True)
+        while pending:
+            ancestor = pending.pop()
+            if ancestor in seen:
+                continue
+            seen.add(ancestor)
+            ancestors.append(ancestor)
+            pending.extend(sorted(included_by.get(ancestor, ()), reverse=True))
+        return tuple(ancestors)
+
+    @staticmethod
+    def _framework_copied_lifecycle_conditions(
+        endpoints: tuple[Endpoint, ...],
+    ) -> tuple[EndpointDiscoveryCondition, ...]:
+        """Describe lifecycle copies whose ancestor execution varies by runtime."""
+        conditions: list[EndpointDiscoveryCondition] = []
+        for endpoint in endpoints:
+            surface = endpoint.surface
+            if surface is None or surface.surface_kind != "framework.lifecycle":
+                continue
+            conditions.append(
+                EndpointDiscoveryCondition(
+                    source_path=surface.registration_file,
+                    source_line=surface.registration_line,
+                    reason=(
+                        "router lifecycle copied into an already-included router has "
+                        "runtime-version-dependent execution"
+                    ),
+                )
+            )
+        return tuple(conditions)
+
+    def _filter_framework_surfaces(self) -> None:  # noqa: PLR0912, PLR0915
+        """Apply selected-app identity and APIRouter copy-at-include semantics."""
+        if not self._scope_framework_surfaces:
+            return
+        live: dict[_FrameworkToken, list[Endpoint]] = {}
+        routes: dict[
+            _FrameworkToken,
+            list[tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef]],
+        ] = {}
+        conditions: dict[_FrameworkToken, list[EndpointDiscoveryCondition]] = {}
+        included_by: dict[_FrameworkToken, set[_FrameworkToken]] = {}
+        mounted_by: dict[_FrameworkToken, set[_FrameworkToken]] = {}
+        for event in self._framework_events:
+            if isinstance(event, _FrameworkRegistrationEvent):
+                live.setdefault(event.token, []).append(event.endpoint)
+                surface = event.endpoint.surface
+                if surface is not None:
+                    condition = EndpointDiscoveryCondition(
+                        source_path=surface.registration_file,
+                        source_line=surface.registration_line,
+                        reason=(
+                            "router lifecycle registered after include_router has "
+                            "runtime-version-dependent execution"
+                        ),
+                    )
+                    for ancestor in self._framework_include_ancestors(event.token, included_by):
+                        conditions.setdefault(ancestor, []).append(condition)
+                continue
+            if isinstance(event, _FrameworkUnknownOverrideEvent):
+                live[event.token] = [
+                    endpoint
+                    for endpoint in live.get(event.token, ())
+                    if endpoint.surface is None
+                    or endpoint.surface.surface_kind != event.surface_kind
+                    or not self._contract_has_multiplicity(
+                        endpoint.surface.contract_id, ContractMultiplicity.LAST_WINS
+                    )
+                ]
+                conditions.setdefault(event.token, []).append(event.condition)
+                for ancestor in self._framework_include_ancestors(event.token, included_by):
+                    conditions.setdefault(ancestor, []).append(event.condition)
+                continue
+            if isinstance(event, _FrameworkRouteEvent):
+                if event.callback is not None:
+                    routes.setdefault(event.token, []).append(event.callback)
+                    for parent in self._framework_mount_ancestors(event.token, mounted_by):
+                        routes.setdefault(parent, []).append(event.callback)
+                if event.condition is not None:
+                    conditions.setdefault(event.token, []).append(event.condition)
+                    for parent in self._framework_mount_ancestors(event.token, mounted_by):
+                        conditions.setdefault(parent, []).append(event.condition)
+                continue
+            if event.child is None:
+                if event.condition is not None:
+                    conditions.setdefault(event.parent, []).append(event.condition)
+                    for ancestor in self._framework_include_ancestors(event.parent, included_by):
+                        conditions.setdefault(ancestor, []).append(event.condition)
+                continue
+            copied_endpoints = () if event.routes_only else tuple(live.get(event.child, ()))
+            copied_routes = tuple(routes.get(event.child, ()))
+            routes.setdefault(event.parent, []).extend(copied_routes)
+            copied_conditions = tuple(conditions.get(event.child, ()))
+            live.setdefault(event.parent, []).extend(copied_endpoints)
+            conditions.setdefault(event.parent, []).extend(copied_conditions)
+            copied_lifecycle_conditions = self._framework_copied_lifecycle_conditions(
+                copied_endpoints
+            )
+            for ancestor in self._framework_include_ancestors(event.parent, included_by):
+                conditions.setdefault(ancestor, []).extend(copied_conditions)
+                conditions[ancestor].extend(copied_lifecycle_conditions)
+            if event.routes_only:
+                mounted_by.setdefault(event.child, set()).add(event.parent)
+            else:
+                included_by.setdefault(event.child, set()).add(event.parent)
+
+        for token, endpoints in tuple(live.items()):
+            latest: dict[tuple[str, str], Endpoint] = {}
+            retained: list[Endpoint] = []
+            for endpoint in endpoints:
+                surface = endpoint.surface
+                contract = next(
+                    (
+                        item
+                        for item in self.contracts.document.contracts
+                        if surface is not None and item.id == surface.contract_id
+                    ),
+                    None,
+                )
+                if (
+                    surface is not None
+                    and contract is not None
+                    and contract.multiplicity == ContractMultiplicity.LAST_WINS
+                ):
+                    latest[(surface.surface_kind, surface.resource)] = endpoint
+                else:
+                    retained.append(endpoint)
+            live[token] = retained + list(latest.values())
+        accepted = {
+            id(endpoint)
+            for token in self._framework_selected_tokens
+            for endpoint in live.get(token, ())
+        }
+        owned_routes: dict[
+            tuple[str, int], tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef]
+        ] = {}
+        for token in self._framework_selected_tokens:
+            for route in routes.get(token, ()):
+                owned_routes[(route[0].name, id(route[1]))] = route
+        self._framework_owned_routes = list(owned_routes.values())
+        self._endpoints = [
+            endpoint
+            for endpoint in self._endpoints
+            if not self._is_framework_endpoint(endpoint) or id(endpoint) in accepted
+        ]
+        for token in self._framework_selected_tokens:
+            self._limitations.extend(conditions.get(token, ()))
+        if self._framework_root_condition is not None:
+            self._limitations.append(self._framework_root_condition)
+        self._emit_background_task_surfaces()
+
+    @staticmethod
+    def _framework_mount_ancestors(
+        token: _FrameworkToken,
+        mounted_by: dict[_FrameworkToken, set[_FrameworkToken]],
+    ) -> tuple[_FrameworkToken, ...]:
+        ancestors: list[_FrameworkToken] = []
+        pending = list(mounted_by.get(token, ()))
+        seen = {token}
+        while pending:
+            parent = pending.pop()
+            if parent in seen:
+                continue
+            seen.add(parent)
+            ancestors.append(parent)
+            pending.extend(mounted_by.get(parent, ()))
+        return tuple(ancestors)
+
+    def _contract_has_multiplicity(
+        self, contract_id: str, multiplicity: ContractMultiplicity
+    ) -> bool:
+        return any(
+            item.id == contract_id and item.multiplicity == multiplicity
+            for item in self.contracts.document.contracts
+        )
+
+    def _emit_background_task_surfaces(self) -> None:  # noqa: PLR0912
+        """Attribute annotated BackgroundTasks.add_task calls to selected route handlers."""
+        task_contracts = {
+            contract.id: contract
+            for contract in self.contracts.document.contracts
+            if contract.surface.kind == "framework.background_task"
+        }
+        if not task_contracts:
+            return
+        for route_module, route in self._framework_owned_routes:
+            route_state = self._module_states.get(route_module.name, {})
+            task_parameters: dict[str, str] = {}
+            for argument in (*route.args.posonlyargs, *route.args.args, *route.args.kwonlyargs):
+                annotation = argument.annotation
+                if annotation is None:
+                    continue
+                identity = self._symbol_identity(annotation, route_state)
+                if identity in {
+                    "fastapi.BackgroundTasks",
+                    "fastapi.datastructures.BackgroundTasks",
+                    "starlette.background.BackgroundTasks",
+                }:
+                    task_parameters[argument.arg] = (
+                        "fastapi-backgroundtasks-add-task"
+                        if identity.startswith("fastapi.")
+                        else "starlette-backgroundtasks-add-task"
+                    )
+            for call in eager_calls(route):
+                response_identity = self._symbol_identity(call.func, route_state)
+                if response_identity in {
+                    "starlette.responses.Response",
+                    "starlette.responses.JSONResponse",
+                    "starlette.responses.PlainTextResponse",
+                    "starlette.responses.StreamingResponse",
+                    "fastapi.responses.JSONResponse",
+                    "fastapi.responses.PlainTextResponse",
+                }:
+                    background = next(
+                        (item.value for item in call.keywords if item.arg == "background"),
+                        call.args[4] if len(call.args) > 4 else None,
+                    )
+                    if background is not None:
+                        matched_background_task = False
+                        for nested in ast.walk(background):
+                            if not isinstance(nested, ast.Call):
+                                continue
+                            resolved_identity = self._symbol_identity(nested.func, route_state)
+                            if (
+                                resolved_identity is None
+                                or resolved_identity != "starlette.background.BackgroundTask"
+                            ):
+                                continue
+                            matched_background_task = True
+                            contract = task_contracts.get("starlette-background-task-response")
+                            callback_expression = (
+                                nested.args[0]
+                                if nested.args
+                                else next(
+                                    (
+                                        item.value
+                                        for item in nested.keywords
+                                        if item.arg in {"func", "callback"}
+                                    ),
+                                    None,
+                                )
+                            )
+                            self._emit_background_task(
+                                contract,
+                                callback_expression,
+                                nested,
+                                route_module,
+                                route,
+                                route_state,
+                            )
+                        if not matched_background_task:
+                            self._limitations.append(
+                                EndpointDiscoveryCondition(
+                                    source_path=route_module.path,
+                                    source_line=call.lineno,
+                                    reason=(
+                                        "selected route response has a dynamic or unsupported "
+                                        "background callback; task inventory is incomplete"
+                                    ),
+                                )
+                            )
+            for task_call in background_task_calls(route, task_parameters):
+                contract = task_contracts.get(task_call.contract_id or "")
+                if contract is None:
+                    self._limitations.append(
+                        EndpointDiscoveryCondition(
+                            source_path=route_module.path,
+                            source_line=task_call.call.lineno,
+                            reason=(
+                                "selected route add_task receiver is untrusted, dynamic, or "
+                                "rebound; task inventory is incomplete"
+                            ),
+                        )
+                    )
+                    continue
+                call = task_call.call
+                callback_expression = (
+                    call.args[0]
+                    if call.args
+                    else next(
+                        (item.value for item in call.keywords if item.arg in {"func", "callback"}),
+                        None,
+                    )
+                )
+                self._emit_background_task(
+                    contract,
+                    callback_expression,
+                    call,
+                    route_module,
+                    route,
+                    route_state,
+                )
+
+    def _emit_background_task(
+        self,
+        contract: SurfaceContract | None,
+        callback_expression: ast.expr | None,
+        call: ast.Call,
+        route_module: _Module,
+        route: ast.FunctionDef | ast.AsyncFunctionDef,
+        route_state: dict[str, _Binding | None],
+    ) -> None:
+        if contract is None:
+            return
+        callback = (
+            self._resolve_handler(callback_expression, route_state)
+            if callback_expression is not None
+            else None
+        )
+        if callback is None or not (
+            self._callback_matches(CallbackMode.SYNC, callback[1])
+            or self._callback_matches(CallbackMode.ASYNC, callback[1])
+        ):
+            self._limitations.append(
+                EndpointDiscoveryCondition(
+                    source_path=route_module.path,
+                    source_line=call.lineno,
+                    reason=(
+                        "selected route background callback is unresolved or not an "
+                        "executable sync/async function; "
+                        "task inventory is incomplete"
+                    ),
+                )
+            )
+            return
+        handler_module, function = callback
+        resource_result = self._resources(
+            contract,
+            call,
+            function,
+            route_state,
+            handler_module.name,
+        )
+        if resource_result.values is None:
+            self._limitations.append(
+                EndpointDiscoveryCondition(
+                    source_path=route_module.path,
+                    source_line=call.lineno,
+                    reason=(
+                        "selected route background callback identity could not be represented "
+                        "by its contract"
+                    ),
+                )
+            )
+            return
+        resource = resource_result.values[0]
+        surface_id = contract.surface.id_template.replace("{resource}", resource)
+        evidence = SurfaceRegistrationEvidence(
+            schema_version=self.contracts.document.schema_version,
+            surface_kind=contract.surface.kind,
+            surface_id=surface_id,
+            resource=resource,
+            callback_mode=contract.callback_mode,
+            callback_range=contract.callback_range,
+            execution_mode=contract.execution_mode,
+            activates_routes=False,
+            contract_id=contract.id,
+            match_kind=contract.registration.match_kind,
+            registration_symbol=contract.registration.symbol,
+            registration_file=route_module.path,
+            registration_line=call.lineno,
+            registration_column=call.col_offset,
+            registration_source_hash=self._source_hash(route_module, call),
+            handler_source_hash=self._source_hash(handler_module, function),
+            contract_source_path=str(self.contracts.source_path),
+            raw_hash=self.contracts.raw_hash,
+            config_hash=self.contracts.config_hash,
+            preset_hash=self.contracts.preset_hash,
+            contract_hash=self.contracts.contract_hashes[contract.id],
+            conditions=contract.conditions,
+        )
+        condition = EndpointDiscoveryCondition(
+            source_path=route_module.path,
+            source_line=route.lineno,
+            reason=(
+                "background task runs only if this selected route executes and sends its response"
+            ),
+        )
+        self._endpoints.append(
+            Endpoint(
+                path=surface_id,
+                methods=[EndpointMethod.CUSTOM],
+                handler=HandlerInfo(
+                    name=function.name,
+                    module=handler_module.name,
+                    file_path=handler_module.path,
+                    line_number=function.lineno,
+                    end_line_number=getattr(function, "end_lineno", function.lineno),
+                ),
+                discovery_status=EndpointDiscoveryStatus.CONDITIONAL,
+                discovery_conditions=(condition,),
+                surface=evidence,
+            )
         )
 
     def _process_bootstrap(self) -> None:
@@ -2103,6 +2770,185 @@ class CustomSurfaceExtractor:
             required_base,
         )
 
+    def _framework_call_token(
+        self,
+        call: ast.Call,
+        evaluation: _CallEvaluation | None,
+        state: dict[str, _Binding | None],
+    ) -> _FrameworkToken | None:
+        if not isinstance(call.func, ast.Attribute):
+            return None
+        lookup = evaluation.callable_state if evaluation is not None else state
+        return self._framework_receiver_token(self._expression_binding(call.func.value, lookup))
+
+    def _record_framework_include(
+        self,
+        module: _Module,
+        call: ast.Call,
+        state: dict[str, _Binding | None],
+        evaluation: _CallEvaluation | None,
+    ) -> None:
+        if not self._scope_framework_surfaces or not isinstance(call.func, ast.Attribute):
+            return
+        if call.func.attr not in {"include_router", "mount"}:
+            return
+        parent = self._framework_call_token(call, evaluation, state)
+        if parent is None:
+            return
+        child_index = 1 if call.func.attr == "mount" else 0
+        capture = (
+            evaluation.positional[child_index]
+            if evaluation is not None and len(evaluation.positional) > child_index
+            else None
+        )
+        if capture is None and evaluation is not None:
+            capture = next(
+                (
+                    item
+                    for keyword, item in zip(call.keywords, evaluation.keywords, strict=True)
+                    if keyword.arg == ("app" if call.func.attr == "mount" else "router")
+                ),
+                None,
+            )
+        child = self._framework_receiver_token(capture.binding if capture is not None else None)
+        condition = None
+        if child is None:
+            condition = EndpointDiscoveryCondition(
+                source_path=module.path,
+                source_line=call.lineno,
+                reason=(
+                    "selected application include_router target is dynamic or unresolved, or "
+                    "mount target is unresolved; "
+                    "framework surface inventory is incomplete"
+                ),
+            )
+        self._framework_events.append(
+            _FrameworkIncludeEvent(
+                parent=parent,
+                child=child,
+                condition=condition,
+                routes_only=call.func.attr == "mount",
+            )
+        )
+
+    def _record_framework_route(  # noqa: PLR0912
+        self,
+        module: _Module,
+        call: ast.Call,
+        state: dict[str, _Binding | None],
+        evaluation: _CallEvaluation | None,
+        resolved: tuple[str, InvocationKind, str | None],
+        decorated_handler: ast.FunctionDef | ast.AsyncFunctionDef | None,
+    ) -> None:
+        if not self._scope_framework_surfaces:
+            return
+        symbol, _invocation, _receiver_type = resolved
+        selector = route_callback_selector(symbol)
+        if selector is None:
+            return
+        token = self._framework_call_token(call, evaluation, state)
+        if token is None:
+            return
+        callback = (
+            (module, decorated_handler)
+            if selector == "decorator"
+            and decorated_handler
+            and len(decorated_handler.decorator_list) == 1
+            else None
+        )
+        if selector != "decorator":
+            capture = None
+            expression = direct_route_callback(call, selector)
+            if expression is not None and evaluation is not None:
+                for index, argument in enumerate(call.args):
+                    if argument is expression and index < len(evaluation.positional):
+                        capture = evaluation.positional[index]
+                        break
+                if capture is None:
+                    for index, keyword in enumerate(call.keywords):
+                        if keyword.value is expression and index < len(evaluation.keywords):
+                            capture = evaluation.keywords[index]
+                            break
+            if capture is not None:
+                callback = self._resolve_captured_handler(capture)
+                if callback is not None and callback[1].decorator_list:
+                    callback = None
+        condition = None
+        if callback is None:
+            condition = EndpointDiscoveryCondition(
+                source_path=module.path,
+                source_line=call.lineno,
+                reason=(
+                    "selected route callback is dynamic, unresolved, or has untrusted "
+                    "decorators; background task inventory is incomplete"
+                ),
+            )
+        self._framework_events.append(_FrameworkRouteEvent(token, callback, condition))
+
+    def _record_framework_registration(
+        self,
+        module: _Module,
+        call: ast.Call,
+        state: dict[str, _Binding | None],
+        evaluation: _CallEvaluation | None,
+        endpoint: Endpoint,
+    ) -> None:
+        if not self._scope_framework_surfaces or not self._is_framework_endpoint(endpoint):
+            return
+        token = (
+            self._framework_call_token(call, evaluation, state)
+            if isinstance(call.func, ast.Attribute)
+            else None
+        )
+        if (
+            token is None
+            and endpoint.surface is not None
+            and endpoint.surface.registration_symbol
+            in {
+                "fastapi.FastAPI",
+                "starlette.applications.Starlette",
+                "fastapi.APIRouter",
+            }
+        ):
+            token = (module.name, call.lineno, call.col_offset)
+        if token is not None:
+            self._framework_events.append(_FrameworkRegistrationEvent(token, endpoint))
+
+    def _record_unknown_framework_override(
+        self,
+        module: _Module,
+        call: ast.Call,
+        state: dict[str, _Binding | None],
+        evaluation: _CallEvaluation | None,
+        contract: SurfaceContract,
+        reason: str,
+    ) -> bool:
+        if (
+            not self._scope_framework_surfaces
+            or contract.surface.kind != "framework.exception_handler"
+            or contract.multiplicity != ContractMultiplicity.LAST_WINS
+        ):
+            return False
+        token = (
+            self._framework_call_token(call, evaluation, state)
+            if isinstance(call.func, ast.Attribute)
+            else None
+        )
+        if token is None:
+            return False
+        condition = EndpointDiscoveryCondition(
+            source_path=module.path,
+            source_line=call.lineno,
+            reason=(
+                "selected app exception handler may override an earlier key, but its "
+                f"registration is unresolved: {reason}"
+            ),
+        )
+        self._framework_events.append(
+            _FrameworkUnknownOverrideEvent(token, contract.surface.kind, condition)
+        )
+        return True
+
     def _inspect_registration(  # noqa: PLR0912, PLR0915
         self,
         module: _Module,
@@ -2144,9 +2990,77 @@ class CustomSurfaceExtractor:
                 )
             return
         symbol, invocation, receiver_type = resolved
+        self._record_framework_include(module, call, state, evaluation)
+        self._record_framework_route(module, call, state, evaluation, resolved, decorated_handler)
+        endpoint_count_before = len(self._endpoints)
         for contract in self.contracts.document.contracts:
             if not self._matches(contract, symbol, invocation, receiver_type):
                 continue
+            if (
+                contract.id.endswith(("-on-startup-list", "-on-shutdown-list"))
+                and contract.handler.kind == HandlerSelectorKind.KEYWORD
+            ):
+                keyword_index = next(
+                    (
+                        i
+                        for i, item in enumerate(call.keywords)
+                        if item.arg == contract.handler.name
+                    ),
+                    None,
+                )
+                if keyword_index is not None and isinstance(
+                    call.keywords[keyword_index].value, (ast.List, ast.Tuple)
+                ):
+                    sequence = call.keywords[keyword_index].value
+                    assert isinstance(sequence, (ast.List, ast.Tuple))
+                    captures = list(evaluation.keywords) if evaluation is not None else []
+                    original = captures[keyword_index] if keyword_index < len(captures) else None
+                    for item in sequence.elts:
+                        if original is None:
+                            list_capture = _EvaluatedArgument(
+                                item,
+                                dict(state),
+                                self._binding_from_expression(item, state, module.name),
+                            )
+                        else:
+                            list_capture = _EvaluatedArgument(
+                                item,
+                                original.state,
+                                self._binding_from_expression(item, original.state, module.name),
+                            )
+                        narrowed = ast.copy_location(
+                            ast.Call(
+                                func=call.func,
+                                args=list(call.args),
+                                keywords=[
+                                    ast.keyword(
+                                        arg=keyword.arg,
+                                        value=(item if i == keyword_index else keyword.value),
+                                    )
+                                    for i, keyword in enumerate(call.keywords)
+                                ],
+                            ),
+                            call,
+                        )
+                        narrowed_evaluation = evaluation
+                        if evaluation is not None:
+                            narrowed_keywords = list(evaluation.keywords)
+                            narrowed_keywords[keyword_index] = list_capture
+                            narrowed_evaluation = _CallEvaluation(
+                                evaluation.callable_state,
+                                evaluation.callable_resolution,
+                                evaluation.positional,
+                                tuple(narrowed_keywords),
+                            )
+                        self._inspect_registration(
+                            module,
+                            narrowed,
+                            state,
+                            inherited_conditions,
+                            decorated_handler=None,
+                            evaluation=narrowed_evaluation,
+                        )
+                    continue
             handler_expression: ast.expr | None = None
             if contract.handler.kind == HandlerSelectorKind.DECORATED_FUNCTION:
                 handler_result = (
@@ -2164,6 +3078,28 @@ class CustomSurfaceExtractor:
                         handler_expression = call.args[index]
                         if evaluation is not None and index < len(evaluation.positional):
                             capture = evaluation.positional[index]
+                    elif (
+                        index == 1
+                        and isinstance(call.func, ast.Attribute)
+                        and call.func.attr in {"add_event_handler", "add_exception_handler"}
+                    ):
+                        accepted_names = (
+                            {"handler", "func"}
+                            if call.func.attr == "add_event_handler"
+                            else {"handler"}
+                        )
+                        keyword_index = next(
+                            (
+                                i
+                                for i, item in enumerate(call.keywords)
+                                if item.arg in accepted_names
+                            ),
+                            None,
+                        )
+                        if keyword_index is not None:
+                            handler_expression = call.keywords[keyword_index].value
+                            if evaluation is not None and keyword_index < len(evaluation.keywords):
+                                capture = evaluation.keywords[keyword_index]
                 else:
                     keyword_index = next(
                         (
@@ -2177,6 +3113,12 @@ class CustomSurfaceExtractor:
                         handler_expression = call.keywords[keyword_index].value
                         if evaluation is not None and keyword_index < len(evaluation.keywords):
                             capture = evaluation.keywords[keyword_index]
+                if (
+                    contract.handler_optional
+                    and isinstance(handler_expression, ast.Constant)
+                    and handler_expression.value is None
+                ):
+                    continue
                 if handler_expression is not None and capture is not None:
                     if contract.handler.kind == HandlerSelectorKind.ARGUMENT_CLASS_METHOD:
                         handler_result = self._resolve_captured_class_method(
@@ -2192,18 +3134,57 @@ class CustomSurfaceExtractor:
             if handler_result is None or not self._callback_matches(
                 contract.callback_mode, handler_result[1]
             ):
+                scoped_override = self._record_unknown_framework_override(
+                    module,
+                    call,
+                    state,
+                    evaluation,
+                    contract,
+                    "handler callback identity was unresolved",
+                )
+                if not scoped_override:
+                    self._limitations.append(
+                        EndpointDiscoveryCondition(
+                            source_path=module.path,
+                            source_line=call.lineno,
+                            reason=(
+                                f"custom surface contract {contract.id!r} matched but "
+                                "handler was unresolved"
+                            ),
+                        )
+                    )
+                continue
+            handler_module, function = handler_result
+            if contract.callback_range != CallbackRangeMode.FULL and not self._trusted_lifespan(
+                handler_module, function
+            ):
                 self._limitations.append(
                     EndpointDiscoveryCondition(
-                        source_path=module.path,
-                        source_line=call.lineno,
+                        source_path=handler_module.path,
+                        source_line=function.lineno,
                         reason=(
-                            f"custom surface contract {contract.id!r} matched but "
-                            "handler was unresolved"
+                            f"custom surface contract {contract.id!r} requires a trusted "
+                            "contextlib.asynccontextmanager callback"
                         ),
                     )
                 )
                 continue
-            handler_module, function = handler_result
+            if (
+                decorated_handler is not None
+                and contract.handler.kind == HandlerSelectorKind.DECORATED_FUNCTION
+                and len(function.decorator_list) != 1
+            ):
+                self._limitations.append(
+                    EndpointDiscoveryCondition(
+                        source_path=handler_module.path,
+                        source_line=function.lineno,
+                        reason=(
+                            f"custom surface contract {contract.id!r} callback has "
+                            "additional decorators with unknown replacement behavior"
+                        ),
+                    )
+                )
+                continue
             handler_range = self._handler_range(contract.callback_range, function)
             if handler_range is None:
                 self._limitations.append(
@@ -2217,19 +3198,34 @@ class CustomSurfaceExtractor:
                     )
                 )
                 continue
-            resource_result = self._resources(contract, call, function)
+            resource_result = self._resources(
+                contract,
+                call,
+                function,
+                evaluation.callable_state if evaluation is not None else state,
+                handler_module.name,
+            )
             resources = resource_result.values
             if resources is None:
-                self._limitations.append(
-                    EndpointDiscoveryCondition(
-                        source_path=module.path,
-                        source_line=call.lineno,
-                        reason=(
-                            f"custom surface contract {contract.id!r} matched but "
-                            f"{resource_result.reason}"
-                        ),
-                    )
+                scoped_override = self._record_unknown_framework_override(
+                    module,
+                    call,
+                    state,
+                    evaluation,
+                    contract,
+                    resource_result.reason,
                 )
+                if not scoped_override:
+                    self._limitations.append(
+                        EndpointDiscoveryCondition(
+                            source_path=module.path,
+                            source_line=call.lineno,
+                            reason=(
+                                f"custom surface contract {contract.id!r} matched but "
+                                f"{resource_result.reason}"
+                            ),
+                        )
+                    )
                 continue
             conditions = list(inherited_conditions)
             for declared in contract.conditions:
@@ -2257,6 +3253,7 @@ class CustomSurfaceExtractor:
                     call.col_offset,
                     contract.id,
                     handler_module.name,
+                    function.name,
                     resource,
                 )
                 if key in self._seen:
@@ -2286,26 +3283,26 @@ class CustomSurfaceExtractor:
                     contract_hash=self.contracts.contract_hashes[contract.id],
                     conditions=contract.conditions,
                 )
-                self._endpoints.append(
-                    Endpoint(
-                        path=surface_id,
-                        methods=[EndpointMethod.CUSTOM],
-                        handler=HandlerInfo(
-                            name=function.name,
-                            module=handler_module.name,
-                            file_path=handler_module.path,
-                            line_number=handler_range[0],
-                            end_line_number=handler_range[1],
-                        ),
-                        discovery_status=(
-                            EndpointDiscoveryStatus.CONDITIONAL
-                            if merged
-                            else EndpointDiscoveryStatus.ESTABLISHED
-                        ),
-                        discovery_conditions=merged,
-                        surface=evidence,
-                    )
+                endpoint = Endpoint(
+                    path=surface_id,
+                    methods=[EndpointMethod.CUSTOM],
+                    handler=HandlerInfo(
+                        name=function.name,
+                        module=handler_module.name,
+                        file_path=handler_module.path,
+                        line_number=handler_range[0],
+                        end_line_number=handler_range[1],
+                    ),
+                    discovery_status=(
+                        EndpointDiscoveryStatus.CONDITIONAL
+                        if merged
+                        else EndpointDiscoveryStatus.ESTABLISHED
+                    ),
+                    discovery_conditions=merged,
+                    surface=evidence,
                 )
+                self._endpoints.append(endpoint)
+                self._record_framework_registration(module, call, state, evaluation, endpoint)
                 if contract.activates_routes and resources == ("startup",):
                     self._emit_startup_routes(
                         contract,
@@ -2317,6 +3314,33 @@ class CustomSurfaceExtractor:
                         evidence,
                         evaluation.callable_state if evaluation is not None else None,
                     )
+        if (
+            len(self._endpoints) > endpoint_count_before
+            and symbol.rsplit(".", maxsplit=1)[-1] == "add_middleware"
+        ):
+            self._limitations = [
+                item
+                for item in self._limitations
+                if not (
+                    item.source_path == module.path
+                    and item.source_line == call.lineno
+                    and "matched but handler was unresolved" in item.reason
+                )
+            ]
+
+    def _trusted_lifespan(
+        self,
+        module: _Module,
+        function: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> bool:
+        """Require the exact stdlib asynccontextmanager decorator before splitting phases."""
+        if len(function.decorator_list) != 1:
+            return False
+        decorator = function.decorator_list[0]
+        if isinstance(decorator, ast.Call):
+            return False
+        state = self._module_states.get(module.name, {})
+        return self._symbol_identity(decorator, state) == "contextlib.asynccontextmanager"
 
     def _emit_startup_routes(  # noqa: PLR0912, PLR0915
         self,
@@ -3874,37 +4898,100 @@ class CustomSurfaceExtractor:
         identity = self._symbol_identity(expression, state)
         return self._resolve_class_method_identity(identity, method_name, required_base)
 
-    def _resolve_class_method_identity(
+    def _resolve_class_method_identity(  # noqa: PLR0911, PLR0912
         self,
         identity: str | None,
         method_name: str,
         required_base: str,
     ) -> tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef] | None:
-        """Resolve a method from an already captured exact class identity."""
-        candidates = self._classes.get(identity or "", [])
-        if len(candidates) != 1 or self._class_bases.get(identity or "") != (required_base,):
+        """Resolve a method through a bounded, exact local class MRO."""
+        if required_base == "starlette.types.ASGIApp":
+            candidates = self._classes.get(identity or "", [])
+            if len(candidates) != 1:
+                return None
+            module, class_node = candidates[0]
+            if class_node.decorator_list or class_node.keywords:
+                return None
+            pure_methods = [
+                item
+                for item in class_node.body
+                if isinstance(item, ast.AsyncFunctionDef)
+                and item.name == method_name
+                and not item.decorator_list
+            ]
+            mutation = _ClassAttributeMutationVisitor(method_name)
+            for item in class_node.body:
+                if item not in pure_methods:
+                    mutation.visit(item)
+            if mutation.found or len(pure_methods) != 1:
+                return None
+            pure_method = pure_methods[0]
+            positional = [*pure_method.args.posonlyargs, *pure_method.args.args]
+            if (
+                len(positional) != 4
+                or positional[0].arg != "self"
+                or tuple(item.arg for item in positional[1:]) != ("scope", "receive", "send")
+                or pure_method.args.vararg is not None
+                or pure_method.args.kwarg is not None
+                or pure_method.args.kwonlyargs
+            ):
+                return None
+            header_risk = _ClassAttributeMutationVisitor("__surface_dynamic_header__")
+            header_risk._visit_function_header(pure_method)
+            return None if header_risk.found else (module, pure_method)
+        pending = [identity] if identity is not None else []
+        seen: set[str] = set()
+        method_definitions: list[tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef]] = []
+        matched_base = False
+        for _depth in range(16):
+            if not pending:
+                break
+            current = pending.pop(0)
+            if current in seen:
+                return None
+            seen.add(current)
+            candidates = self._classes.get(current, [])
+            if len(candidates) != 1:
+                return None
+            module, class_node = candidates[0]
+            if class_node.decorator_list or class_node.keywords:
+                return None
+            methods = [
+                item
+                for item in class_node.body
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and item.name == method_name
+                and not item.decorator_list
+            ]
+            mutation = _ClassAttributeMutationVisitor(method_name)
+            for item in class_node.body:
+                if item not in methods:
+                    mutation.visit(item)
+            if mutation.found or len(methods) > 1:
+                return None
+            if methods and not method_definitions:
+                method_definitions.extend((module, item) for item in methods)
+            bases = self._class_bases.get(current)
+            if bases is None or len(bases) != 1:
+                return None
+            if required_base in bases:
+                matched_base = True
+            for base in bases:
+                if base in self._classes:
+                    pending.append(base)
+                elif base == required_base:
+                    matched_base = True
+        else:
+            if pending:
+                return None
+        if not matched_base or len(method_definitions) != 1:
             return None
-        module, class_node = candidates[0]
-        if class_node.decorator_list or class_node.keywords:
-            return None
-        methods = [
-            item
-            for item in class_node.body
-            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and item.name == method_name
-            and not item.decorator_list
-        ]
-        mutation = _ClassAttributeMutationVisitor(method_name)
-        for item in class_node.body:
-            if item not in methods:
-                mutation.visit(item)
-        if len(methods) != 1 or mutation.found:
-            return None
+        module, method = method_definitions[0]
         header_risk = _ClassAttributeMutationVisitor("__surface_dynamic_header__")
-        header_risk._visit_function_header(methods[0])
+        header_risk._visit_function_header(method)
         if header_risk.found:
             return None
-        return module, methods[0]
+        return module, method
 
     def _direct_symbol_identity(
         self, expression: ast.expr, state: dict[str, _Binding | None]
@@ -4004,18 +5091,62 @@ class CustomSurfaceExtractor:
         return boundary.lineno, function.end_lineno or boundary.lineno
 
     @classmethod
-    def _resources(  # noqa: PLR0911, PLR0912 - selector forms stay explicit
+    def _resources(  # noqa: PLR0911, PLR0912, PLR0915 - selector forms stay explicit
         cls,
         contract: SurfaceContract,
         call: ast.Call,
         handler: ast.FunctionDef | ast.AsyncFunctionDef,
+        state: dict[str, _Binding | None],
+        handler_module_name: str | None = None,
     ) -> _ResolvedResources:
         """Resolve one bounded literal resource set without widening dynamic values."""
         selector = contract.surface.resource
         values: tuple[str, ...]
         failure = "resource set was not finite literal data"
-        if selector.kind == ResourceSelectorKind.HANDLER_NAME:
+        if contract.surface.kind == "framework.exception_handler":
+            expression = call.args[0] if call.args else None
+            if expression is None and isinstance(call.func, ast.Attribute):
+                expression = next(
+                    (
+                        item.value
+                        for item in call.keywords
+                        if item.arg
+                        in {
+                            "exc_class_or_status_code",
+                            "exc_class",
+                            "exc",
+                            "exception_class",
+                        }
+                    ),
+                    None,
+                )
+            identity = cls._symbol_identity_from_state(expression, state)
+            if (
+                identity is None
+                and isinstance(expression, ast.Name)
+                and expression.id
+                in {
+                    "Exception",
+                    "BaseException",
+                    "RuntimeError",
+                    "ValueError",
+                    "TypeError",
+                    "LookupError",
+                    "KeyError",
+                    "AssertionError",
+                    "OSError",
+                }
+            ):
+                identity = f"builtins.{expression.id}"
+            if identity is None:
+                return _ResolvedResources(None, "exception class identity was unresolved")
+            values = (identity,)
+        elif selector.kind == ResourceSelectorKind.HANDLER_NAME:
             values = (cls._handler_resource(handler.name, selector.handler_name_normalization),)
+        elif selector.kind == ResourceSelectorKind.HANDLER_IDENTITY:
+            if handler_module_name is None:
+                return _ResolvedResources(None, "handler module identity was unavailable")
+            values = (f"{handler_module_name}.{handler.name}",)
         elif selector.kind == ResourceSelectorKind.LITERAL:
             if selector.value is None:
                 return _ResolvedResources(None, failure)
@@ -4058,6 +5189,16 @@ class CustomSurfaceExtractor:
             if selector.kind == ResourceSelectorKind.ARGUMENT:
                 index = selector.index or 0
                 selected_expression = call.args[index] if index < len(call.args) else None
+                if (
+                    selected_expression is None
+                    and index == 0
+                    and isinstance(call.func, ast.Attribute)
+                    and call.func.attr == "add_event_handler"
+                ):
+                    selected_expression = next(
+                        (item.value for item in call.keywords if item.arg == "event_type"),
+                        None,
+                    )
             elif selector.kind == ResourceSelectorKind.ARGUMENT_OR_KEYWORD:
                 index = selector.index or 0
                 selected_expression = (
@@ -4085,6 +5226,24 @@ class CustomSurfaceExtractor:
         ):
             return _ResolvedResources(None, failure)
         return _ResolvedResources(normalized, "")
+
+    @classmethod
+    def _symbol_identity_from_state(
+        cls, expression: ast.expr | None, state: dict[str, _Binding | None]
+    ) -> str | None:
+        """Return a stable project/import identity for an exception class expression."""
+        if isinstance(expression, ast.Name):
+            binding = state.get(expression.id)
+            return binding.identity if binding is not None and binding.kind == "symbol" else None
+        if isinstance(expression, ast.Attribute):
+            parent = cls._symbol_identity_from_state(expression.value, state)
+            if parent is not None:
+                return f"{parent}.{expression.attr}"
+            if isinstance(expression.value, ast.Name):
+                binding = state.get(expression.value.id)
+                if binding is not None and binding.kind == "module":
+                    return f"{binding.identity}.{expression.attr}"
+        return None
 
     @staticmethod
     def _handler_resource(name: str, normalization: HandlerNameNormalization) -> str:
