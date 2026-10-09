@@ -451,6 +451,46 @@ def test_selected_factory_local_constructor_assignments_are_structural_owners(
     )
 
 
+def test_factory_router_snapshot_preserves_scoped_dependency_provenance(
+    tmp_path: Path,
+) -> None:
+    app_file = tmp_path / "main.py"
+    app_file.write_text(
+        "from fastapi import APIRouter, Depends, FastAPI\n"
+        "def load_identity(): pass\n"
+        "def create_app():\n"
+        "    router = APIRouter(dependencies=[Depends(load_identity)])\n"
+        "    @router.get('/item')\n"
+        "    def item(): pass\n"
+        "    app = FastAPI()\n"
+        "    app.include_router(router)\n"
+        "    return app\n",
+        encoding="utf-8",
+    )
+
+    endpoint = SecureASTExtractor(app_file, app_entry="main:create_app").extract_endpoints()[0]
+    provenance = endpoint.native_provenance
+    assert provenance is not None
+    assert len(provenance.assembly_chain) == 1
+    assert provenance.assembly_chain[0].operation == "include_router"
+    assert provenance.assembly_chain[0].source_span.start_line == 8
+
+    router = provenance.object_chain[-1]
+    assert router.object_kind == "router"
+    assert len(router.dependency_expressions) == 1
+    dependency = router.dependency_expressions[0]
+    assert dependency.scope == "router"
+    assert dependency.kind == "depends"
+    assert dependency.confidence == "established"
+    assert dependency.callable_expressions == ("main.load_identity",)
+    assert dependency.source_span.start_line == 4
+
+    owners = native_route_structural_owners(endpoint, app_file, {4})
+    dependency_owners = [item for item in owners if item.role == "dependency"]
+    assert len(dependency_owners) == 1
+    assert dependency_owners[0].source_span == dependency.source_span
+
+
 def test_same_line_route_registrations_have_distinct_physical_occurrence_order(
     tmp_path: Path,
 ) -> None:

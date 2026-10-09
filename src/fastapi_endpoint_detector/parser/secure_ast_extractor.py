@@ -2614,6 +2614,7 @@ class SecureASTExtractor:
                 call_line,
                 item.discovery_conditions,
                 _native_span(module.path, operation),
+                item.dependency_expressions,
             )
             emitted_objects.append(snapshot)
             routes.extend(
