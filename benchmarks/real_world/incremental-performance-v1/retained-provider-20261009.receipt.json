@@ -18,7 +18,7 @@
   "result_sha256": "aeaff3db3010dd419e4af78358fc8c3914e4f04980e842ebaa913a972e1587a5",
   "runner_project_revision": "0b9cdd6754f8d00c99071bd174f8e2869d124766",
   "schema_version": 1,
-  "scope": "generated 96-module fixture only; independent cold-equivalence of typed state, not endpoint propagation accuracy or medium-project acceptance",
+  "scope": "generated 96-module fixture only; the three mutating phases compare serialized ASTs, call-expression types and cache fingerprints with independent cold builds; excludes no-change cold equivalence, full type-map equivalence, endpoint accuracy and medium-project acceptance",
   "source_sha256": {
     "benchmarks/incremental_mypy_dag.py": "236095c28a6d819ee2e5111b7e1ae5c9dcfa9c51cecd62f3521bfe5f19b77af9",
     "src/fastapi_endpoint_detector/analyzer/mypy_incremental.py": "04c1f34a0e2ace82d84986a344d3460487e05336498c59e08aaab72d613a7893"

@@ -68,9 +68,10 @@ incremental p95 to compare with the 30-second requirement.
 `MypyIncrementalProvider`, not the full-build `MypyAnalyzer` exercised above.
 Its receipt binds the executed runner/project revision, source hashes and result
 bytes. Five samples on a generated 96-module import DAG gave incremental-update
-p95 0.0378 seconds and cold-build p95 1.9992 seconds. Every update phase matched
-an independent cold typed snapshot and cache fingerprint. Signature changes and
-import-retarget fallback rebuilding were measured separately.
+p95 0.0378 seconds and cold-build p95 1.9992 seconds. The three mutating phases (same-interface update, signature change, and
+import-retarget fallback) matched independent cold serialized-AST and
+call-expression-type snapshots and cache fingerprints. This does not compare
+the complete mypy type map. No-change reuse has no independent cold comparison.
 
 This generated fixture demonstrates retained typed-state reuse. It does not
 establish endpoint impact accuracy or the documented medium-project incremental
