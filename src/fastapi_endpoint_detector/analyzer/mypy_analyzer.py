@@ -785,6 +785,20 @@ class MypyAnalyzer:
         from mypy.modulefinder import BuildSource
         from mypy.options import Options
 
+        if self.source_inventory is not None:
+            selected_modules = {record.module for record in self.source_inventory.files}
+            policy_modules = {blocked[0] for blocked in self._unselected_local_modules()}
+            inventory_collisions = {
+                module_name
+                for module_name, _paths in getattr(self.source_inventory, "module_collisions", ())
+            }
+            ambiguous_modules = sorted(inventory_collisions | (selected_modules & policy_modules))
+            if ambiguous_modules:
+                raise MypyAnalyzerError(
+                    "ambiguous local module identities in source inventory: "
+                    + ", ".join(ambiguous_modules)
+                )
+
         # Collect all Python files using a repository-independent import root.
         sources: list[BuildSource] = []
         source_records = (
@@ -917,11 +931,12 @@ class MypyAnalyzer:
         raise MypyAnalyzerError(f"unsupported source inventory follow_imports policy: {value!r}")
 
     def _unselected_local_modules(self) -> tuple[tuple[str, bool, str, bool], ...]:
-        """Return safe local module identities outside the canonical inventory.
+        """Return local module identities outside the canonical inventory.
 
-        The bool marks ordinary modules whose submodule namespace should also
-        be blocked. Package initializers are exact-only so an unselected
-        ``pkg/__init__.py`` cannot suppress an inventory-selected child.
+        Ordinary modules block their submodule namespace. Package
+        initializers are exact-only so an unselected initializer cannot
+        suppress an inventory-selected child. Rejected symlinks are mapped
+        from their lexical paths without reading their targets.
         """
         if self.source_inventory is None:
             return ()
@@ -953,6 +968,32 @@ class MypyAnalyzer:
                 covers_children or (previous[0] if previous else False),
                 ({canonical} | previous[1]) if previous else {canonical},
                 path.suffix == ".pyi" or (previous[2] if previous else False),
+            )
+
+        # pathlib does not recurse through directory symlinks here; enumerate
+        # the links themselves and derive module IDs from their in-root names.
+        for path in sorted(
+            (item for item in self.source_root.rglob("*") if item.is_symlink()), key=str
+        ):
+            try:
+                if path.is_dir():
+                    covers_children = True
+                    has_stubs = True
+                elif path.suffix in {".py", ".pyi"}:
+                    covers_children = path.stem != "__init__"
+                    has_stubs = path.suffix == ".pyi"
+                else:
+                    continue
+                module = self._module_name_from_path(path, self.module_root)
+            except (OSError, ValueError):
+                continue
+            previous = modules.get(module)
+            # Keep the link path lexical: resolving it here could mark a
+            # selected target file as blocked through a second import name.
+            modules[module] = (
+                covers_children or (previous[0] if previous else False),
+                ({str(path)} | previous[1]) if previous else {str(path)},
+                has_stubs or (previous[2] if previous else False),
             )
         return tuple(
             (module, covers_children, path, has_stubs)
@@ -5749,8 +5790,15 @@ class MypyAnalyzer:
                 "effective_mypy_config": {
                     "follow_imports": follow_imports,
                     "blocked_local_modules": [
-                        [module, covers_children, is_stub]
-                        for module, covers_children, _path, is_stub in self._unselected_local_modules()
+                        [
+                            module,
+                            covers_children,
+                            is_stub,
+                            Path(path).relative_to(self.source_root).as_posix(),
+                        ]
+                        for module, covers_children, path, is_stub in (
+                            self._unselected_local_modules()
+                        )
                     ],
                     "ignore_missing_imports": True,
                     "namespace_packages": True,

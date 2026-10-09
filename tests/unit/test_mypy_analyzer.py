@@ -16,6 +16,7 @@ from fastapi_endpoint_detector.analyzer.mypy_analyzer import (
     CallFrame,
     EndpointDependencies,
     MypyAnalyzer,
+    MypyAnalyzerError,
 )
 from fastapi_endpoint_detector.analyzer.source_inventory import build_source_inventory
 from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, HandlerInfo
@@ -329,6 +330,222 @@ class TestMypyAnalyzerBasic:
             or Path(state.path).resolve() not in {init_stub.resolve(), other_stub.resolve()}
             for state in analyzer._build_result.graph.values()
         )
+
+    @pytest.mark.parametrize("stub_suffix", [".py", ".pyi"])
+    def test_mypy_blocks_rejected_directory_symlink_imports(
+        self, tmp_path: Path, stub_suffix: str
+    ) -> None:
+        """Rejected directory links cannot add outside implementations to the typed graph."""
+        project = tmp_path / "project"
+        project.mkdir()
+        outside = tmp_path / "outside_package"
+        outside.mkdir()
+        (outside / "__init__.py").write_text("", encoding="utf-8")
+        outside_module = outside / f"secret{stub_suffix}"
+        outside_module.write_text(
+            "def outside_call() -> str: ...\n"
+            if stub_suffix == ".pyi"
+            else "def outside_call():\n    return 'outside'\n",
+            encoding="utf-8",
+        )
+        app = project / "app.py"
+        app.write_text(
+            "from vendor.secret import outside_call\ndef handler():\n    return outside_call()\n",
+            encoding="utf-8",
+        )
+        vendor = project / "vendor"
+        vendor.symlink_to(outside, target_is_directory=True)
+        inventory = build_source_inventory(project, include_patterns=("app.py",))
+        analyzer = MypyAnalyzer(project, source_inventory=inventory)
+        before_fingerprint, before_sources = analyzer._cache_fingerprint()
+
+        # A newly rejected local link changes the mypy policy fingerprint,
+        # while the canonical selected-source digest map stays unchanged.
+        extra_link = project / "other_vendor"
+        extra_link.symlink_to(outside, target_is_directory=True)
+        after_fingerprint, after_sources = analyzer._cache_fingerprint()
+        assert after_fingerprint != before_fingerprint
+        assert after_sources == before_sources
+        assert ("app.py", "vendor.secret.outside_call") in inventory.unresolved_imports
+
+        endpoint = Endpoint(
+            path="/",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=2),
+        )
+        dependencies = analyzer.analyze_endpoint(endpoint)
+
+        assert str(app.resolve()) in analyzer._module_to_path.values()
+        assert all(
+            not state.path or not Path(state.path).resolve().is_relative_to(outside)
+            for state in analyzer._build_result.graph.values()
+        )
+        assert not dependencies.references_file(str(outside_module))
+        assert all(
+            not (site.canonical_symbol or "").endswith(".outside_call")
+            for site in dependencies.resolved_call_sites
+        )
+
+    @pytest.mark.parametrize("stub_suffix", [".py", ".pyi"])
+    def test_mypy_blocks_rejected_file_symlink_imports(
+        self, tmp_path: Path, stub_suffix: str
+    ) -> None:
+        """A rejected file link cannot add its outside target to the typed graph."""
+        project = tmp_path / "project"
+        project.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        target = outside / f"implementation{stub_suffix}"
+        target.write_text(
+            "def outside_call() -> str: ...\n"
+            if stub_suffix == ".pyi"
+            else "def outside_call():\n    return 'outside'\n",
+            encoding="utf-8",
+        )
+        linked_module = project / f"linked{stub_suffix}"
+        linked_module.symlink_to(target)
+        app = project / "app.py"
+        app.write_text(
+            "from linked import outside_call\ndef handler():\n    return outside_call()\n",
+            encoding="utf-8",
+        )
+        inventory = build_source_inventory(project, include_patterns=("app.py",))
+        analyzer = MypyAnalyzer(project, source_inventory=inventory)
+        endpoint = Endpoint(
+            path="/",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=2),
+        )
+
+        dependencies = analyzer.analyze_endpoint(endpoint)
+
+        assert ("app.py", "linked.outside_call") in inventory.unresolved_imports
+        assert str(app.resolve()) in analyzer._module_to_path.values()
+        assert all(
+            not state.path or not Path(state.path).resolve().is_relative_to(outside)
+            for state in analyzer._build_result.graph.values()
+        )
+        assert all(
+            not Path(path).resolve().is_relative_to(outside)
+            for path in analyzer._module_to_path.values()
+        )
+        assert not dependencies.references_file(str(target))
+        assert all(
+            not (site.canonical_symbol or "").endswith(".outside_call")
+            for site in dependencies.resolved_call_sites
+        )
+
+    def test_mypy_skips_symlinked_package_stub_initializer_without_blocking_child(
+        self, tmp_path: Path
+    ) -> None:
+        """An exact package-stub skip still permits an inventory-selected child."""
+        project = tmp_path / "project"
+        package = project / "pkg"
+        package.mkdir(parents=True)
+        outside_init = tmp_path / "outside_init.pyi"
+        outside_init.write_text("from .child import hidden\n", encoding="utf-8")
+        (package / "__init__.pyi").symlink_to(outside_init)
+        child = package / "child.py"
+        child.write_text("def run():\n    return 'selected'\n", encoding="utf-8")
+        app = project / "app.py"
+        app.write_text(
+            "from pkg.child import run\ndef handler():\n    return run()\n",
+            encoding="utf-8",
+        )
+        inventory = build_source_inventory(
+            project,
+            include_patterns=("app.py", "pkg/child.py"),
+            follow_imports=False,
+        )
+        analyzer = MypyAnalyzer(project, source_inventory=inventory)
+        endpoint = Endpoint(
+            path="/",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=2),
+        )
+
+        dependencies = analyzer.analyze_endpoint(endpoint)
+
+        assert dependencies.references_file(str(child))
+        assert str(child.resolve()) in analyzer._module_to_path.values()
+        assert all(
+            not state.path or Path(state.path).resolve() != outside_init.resolve()
+            for state in analyzer._build_result.graph.values()
+        )
+
+    def test_new_symlinked_selected_identity_invalidates_typed_state(self, tmp_path: Path) -> None:
+        """A newly discovered module collision discards the prior typed graph."""
+        project = tmp_path / "project"
+        project.mkdir()
+        app = project / "app.py"
+        app.write_text(
+            "def handler():\n    return 'selected'\n",
+            encoding="utf-8",
+        )
+        inventory = build_source_inventory(project, include_patterns=("app.py",))
+        analyzer = MypyAnalyzer(project, source_inventory=inventory)
+        endpoint = Endpoint(
+            path="/",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=1),
+        )
+        analyzer.analyze_endpoint(endpoint)
+        assert analyzer._trees
+
+        before_fingerprint, _ = analyzer._cache_fingerprint()
+        outside = tmp_path / "outside_package"
+        outside.mkdir()
+        outside_init = outside / "__init__.py"
+        outside_init.write_text("def hidden():\n    return 'outside'\n", encoding="utf-8")
+        package = project / "app"
+        package.mkdir()
+        (package / "__init__.py").symlink_to(outside_init)
+        after_fingerprint, _ = analyzer._cache_fingerprint()
+        assert after_fingerprint != before_fingerprint
+
+        analyzer.analyze_endpoints([endpoint], use_cache=False)
+
+        assert not analyzer._trees
+        assert not analyzer._module_to_path
+        dependencies = analyzer.get_endpoint_dependencies(endpoint)
+        assert dependencies is not None
+        assert not dependencies.references_file(str(outside_init))
+
+    @pytest.mark.parametrize("symlink_initializer", [False, True], ids=["regular", "symlink"])
+    def test_mypy_abstains_on_ambiguous_selected_module_identity(
+        self, tmp_path: Path, symlink_initializer: bool
+    ) -> None:
+        """Conflicting module paths fail closed before any typed tree is retained."""
+        project = tmp_path / "project"
+        package = project / "vendor"
+        package.mkdir(parents=True)
+        outside = tmp_path / "outside_package"
+        outside.mkdir()
+        outside_init = outside / "__init__.py"
+        outside_init.write_text("def hidden():\n    return 'outside'\n", encoding="utf-8")
+        package_init = package / "__init__.py"
+        if symlink_initializer:
+            package_init.symlink_to(outside_init)
+        else:
+            package_init.write_text("def hidden():\n    return 'local'\n", encoding="utf-8")
+        selected = project / "vendor.py"
+        selected.write_text("def run():\n    return 'selected'\n", encoding="utf-8")
+        app = project / "app.py"
+        app.write_text(
+            "from vendor import run\ndef handler():\n    return run()\n",
+            encoding="utf-8",
+        )
+        inventory = build_source_inventory(project, include_patterns=("app.py", "vendor.py"))
+        if not symlink_initializer:
+            assert any(module == "vendor" for module, _paths in inventory.module_collisions)
+            assert ("app.py", "vendor.run") in inventory.unresolved_imports
+        analyzer = MypyAnalyzer(project, source_inventory=inventory)
+
+        with pytest.raises(MypyAnalyzerError, match="ambiguous local module identities"):
+            analyzer._ensure_mypy_built()
+
+        assert not analyzer._trees
+        assert not analyzer._module_to_path
 
     def test_mypy_inventory_preserves_external_request_member_types(self, tmp_path: Path) -> None:
         """Normal external typing remains available outside the local inventory."""

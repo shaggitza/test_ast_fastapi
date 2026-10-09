@@ -637,3 +637,51 @@ def test_scip_mapper_reaches_direct_and_depends_endpoints(tmp_path: Path) -> Non
     }
     assert not report.orphan_changes
     assert all(item.confidence.value == "low" for item in report.candidate_endpoints)
+
+
+def test_scip_mapper_keeps_depth_zero_endpoint_seed_low(tmp_path: Path) -> None:
+    app_path = tmp_path / "main.py"
+    app_path.write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n\n"
+        "@app.get('/direct')\n"
+        "def handler():\n"
+        "    pass\n"
+        "    return 2\n",
+        encoding="utf-8",
+    )
+    diff = tmp_path / "change.diff"
+    diff.write_text(
+        "diff --git a/main.py b/main.py\n"
+        "--- a/main.py\n"
+        "+++ b/main.py\n"
+        "@@ -6,0 +7 @@\n"
+        "+    return 2\n",
+        encoding="utf-8",
+    )
+
+    class DirectHandlerAnalyzer(ReferenceAnalyzerMixin):
+        def ensure_index(self, *, force: bool = False) -> None:
+            assert force
+
+        def definitions_at(self, file_path: Path, lines: set[int]):
+            assert file_path == Path("main.py")
+            assert lines == {7}
+            return (SCIPDefinition("handler", "main:handler()", Path("main.py"), 5, 7),)
+
+        def reverse_call_edges(self, _seed: SCIPDefinition):
+            return ()
+
+    mapper = ChangeMapper(tmp_path, use_cache=False, secure_ast=True, use_scip=True)
+    mapper._scip_analyzer = DirectHandlerAnalyzer()  # type: ignore[assignment]
+
+    report = mapper.analyze_diff(diff)
+
+    assert report.affected_endpoints == []
+    assert [item.endpoint.identifier for item in report.candidate_endpoints] == ["GET /direct"]
+    assert report.candidate_endpoints[0].confidence is ConfidenceLevel.LOW
+    assert (
+        report.candidate_endpoints[0].effect_evidence[0].status is EvidenceStatus.REACHABILITY_ONLY
+    )
+    assert report.candidate_endpoints[0].effect_evidence[0].effect.value == "unknown"
+    assert not report.orphan_changes
