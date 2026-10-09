@@ -22,7 +22,8 @@ if TYPE_CHECKING:
 class _SourceInventory(Protocol):
     """Structural subset of the shared inventory consumed by SCIP."""
 
-    paths: Sequence[Path]
+    @property
+    def paths(self) -> Sequence[Path]: ...
 
 
 class SCIPAnalyzerError(RuntimeError):

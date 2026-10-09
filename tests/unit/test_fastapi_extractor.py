@@ -77,15 +77,16 @@ def test_runtime_extractor_filters_handlers_to_canonical_inventory(tmp_path: Pat
 
     endpoints = extractor.extract_endpoints()
     assert [endpoint.identifier for endpoint in endpoints] == ["GET /inside"]
-    assert endpoints[0].discovery_status == EndpointDiscoveryStatus.CONDITIONAL
-    assert any(
-        "Runtime import is not constrained" in condition.reason
-        and "follow_imports is disabled" in condition.reason
-        for condition in endpoints[0].discovery_conditions
-    )
+    assert endpoints[0].discovery_status == EndpointDiscoveryStatus.ESTABLISHED
+    assert endpoints[0].discovery_conditions == ()
     assert (
         "does not sandbox or constrain import side effects"
-        in (extractor.source_inventory_limitations[0])
+        in extractor.source_inventory_limitations[1]
+    )
+    assert "selected 1 files" in extractor.source_inventory_limitations[0]
+    assert (
+        "following is disabled with maximum depth 10"
+        in extractor.source_inventory_limitations[0]
     )
     assert any(
         "follow_imports is disabled" in limitation

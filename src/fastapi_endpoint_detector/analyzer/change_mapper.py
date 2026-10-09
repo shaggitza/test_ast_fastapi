@@ -540,6 +540,7 @@ class ChangeMapper:
                 self._extractor = FastAPIExtractor(
                     app_path=self.app_path,
                     app_variable=self.app_variable,
+                    source_inventory=self.source_inventory,
                 )
         return self._extractor
 
@@ -573,6 +574,30 @@ class ChangeMapper:
             app_entry=self.app_entry,
         ).extract_inventory()
         return merge_surface_inventory(native, custom)
+
+    def _source_inventory_warnings(self) -> list[str]:
+        """Report runtime source-scope limits without changing observed route identity."""
+        if self.secure_ast:
+            return []
+
+        inventory = self.source_inventory
+        extractor = self.extractor
+        warnings: list[str] = []
+        if isinstance(extractor, FastAPIExtractor) and extractor.source_inventory_limitations:
+            follow_policy = "enabled" if inventory.follow_imports else "disabled"
+            warnings.append(
+                f"Target runtime source scope selected {len(inventory.files)} file(s); "
+                f"local import following is {follow_policy}. "
+                f"{extractor.source_inventory_limitations[1]}"
+            )
+        for limitation in inventory.limitations:
+            warnings.append(f"Target source inventory incomplete: {limitation}")
+        if inventory.unresolved_imports:
+            warnings.append(
+                f"Target source inventory has {len(inventory.unresolved_imports)} "
+                "unresolved local import(s)."
+            )
+        return warnings
 
     @property
     def inventory(self) -> EndpointInventory:
@@ -1514,6 +1539,7 @@ class ChangeMapper:
                 "no finite dependency contract was applied"
                 for path in unsupported_changes
             )
+        warnings.extend(self._source_inventory_warnings())
         target_source_graph = source_evidence_graph(self.source_inventory)
         if self.baseline_app_path is not None:
             baseline_graph = source_evidence_graph(
