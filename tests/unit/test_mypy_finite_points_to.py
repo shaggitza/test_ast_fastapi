@@ -91,7 +91,10 @@ def test_local_constructor_and_alias_reach_only_exact_receiver_at_low(
     mapper._mypy_analyzer = type(
         "FakeAnalyzer",
         (),
-        {"get_endpoint_dependencies": lambda _self, _endpoint: deps},
+        {
+            "source_root": tmp_path,
+            "get_endpoint_dependencies": lambda _self, _endpoint: deps,
+        },
     )()
     affected = mapper._check_mypy_dependency(
         endpoint,
