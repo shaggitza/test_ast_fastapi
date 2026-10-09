@@ -80,6 +80,20 @@ def test_surface_contract_loader_hashes_yaml_json_and_toml(tmp_path: Path) -> No
     assert yaml_loaded.raw_hash != json_loaded.raw_hash
 
 
+def test_legacy_contract_multiplicity_defaults_to_explicit_unknown() -> None:
+    payload = _document()
+    loaded_legacy = SurfaceContractDocument.model_validate(payload)
+    assert loaded_legacy.contracts[0].multiplicity.value == "unknown"
+
+    payload["contracts"][0]["multiplicity"] = "all_execute"
+    loaded_versioned = SurfaceContractDocument.model_validate(payload)
+    assert loaded_versioned.contracts[0].multiplicity.value == "all_execute"
+
+    payload["contracts"][0]["multiplicity"] = None
+    loaded_null_legacy = SurfaceContractDocument.model_validate(payload)
+    assert loaded_null_legacy.contracts[0].multiplicity is None
+
+
 def test_surface_contract_hash_is_order_independent() -> None:
     first = SurfaceContractDocument.model_validate(_document())
     payload = _document()

@@ -1,0 +1,205 @@
+schema_version: 2
+preset:
+  id: workers-and-cli
+  version: "1"
+  provenance:
+    kind: preset
+    source: fastapi-endpoint-detector
+    revision: "1"
+contracts:
+  - id: celery-app-task
+    registration:
+      symbol: celery.Celery.task
+      invocation: instance_method
+      receiver_type: celery.Celery
+    handler: {kind: decorated_function}
+    surface:
+      kind: task.celery
+      id_template: "task:{resource}"
+      resource: {kind: keyword, name: name}
+    callback_mode: sync
+    execution_mode: process_worker
+
+  - id: celery-shared-task
+    registration:
+      symbol: celery.shared_task
+      invocation: function
+    handler: {kind: decorated_function}
+    surface:
+      kind: task.celery
+      id_template: "task:{resource}"
+      resource: {kind: keyword, name: name}
+    callback_mode: sync
+    execution_mode: process_worker
+
+  - id: rq-job
+    registration:
+      symbol: rq.decorators.job
+      invocation: function
+    handler: {kind: decorated_function}
+    surface:
+      kind: task.rq
+      id_template: "queue:{resource}"
+      resource: {kind: argument_or_keyword, index: 0, name: queue}
+    callback_mode: sync
+    execution_mode: process_worker
+
+  - id: rq-public-job
+    registration:
+      symbol: rq.job
+      invocation: function
+    handler: {kind: decorated_function}
+    surface:
+      kind: task.rq
+      id_template: "queue:{resource}"
+      resource: {kind: argument_or_keyword, index: 0, name: queue}
+    callback_mode: sync
+    execution_mode: process_worker
+
+  - id: arq-worker-func
+    registration:
+      symbol: arq.worker.func
+      invocation: function
+    handler: {kind: argument, index: 0}
+    surface:
+      kind: task.arq
+      id_template: "function:{resource}"
+      resource: {kind: handler_name}
+    callback_mode: async
+    execution_mode: event_loop
+
+  - id: apscheduler-background-add-job
+    registration:
+      symbol: apscheduler.schedulers.background.BackgroundScheduler.add_job
+      invocation: instance_method
+      receiver_type: apscheduler.schedulers.background.BackgroundScheduler
+    handler: {kind: argument, index: 0}
+    surface:
+      kind: scheduler.apscheduler
+      id_template: "job:{resource}"
+      resource: {kind: keyword, name: id}
+    callback_mode: sync
+    execution_mode: scheduler
+
+  - id: apscheduler-background-decorator
+    registration:
+      symbol: apscheduler.schedulers.background.BackgroundScheduler.scheduled_job
+      invocation: instance_method
+      receiver_type: apscheduler.schedulers.background.BackgroundScheduler
+    handler: {kind: decorated_function}
+    surface:
+      kind: scheduler.apscheduler
+      id_template: "job:{resource}"
+      resource: {kind: keyword, name: id}
+    callback_mode: sync
+    execution_mode: scheduler
+
+  - id: apscheduler-asyncio-add-job
+    registration:
+      symbol: apscheduler.schedulers.asyncio.AsyncIOScheduler.add_job
+      invocation: instance_method
+      receiver_type: apscheduler.schedulers.asyncio.AsyncIOScheduler
+    handler: {kind: argument, index: 0}
+    surface:
+      kind: scheduler.apscheduler
+      id_template: "job:{resource}"
+      resource: {kind: keyword, name: id}
+    callback_mode: either
+    execution_mode: scheduler
+
+  - id: apscheduler-asyncio-decorator
+    registration:
+      symbol: apscheduler.schedulers.asyncio.AsyncIOScheduler.scheduled_job
+      invocation: instance_method
+      receiver_type: apscheduler.schedulers.asyncio.AsyncIOScheduler
+    handler: {kind: decorated_function}
+    surface:
+      kind: scheduler.apscheduler
+      id_template: "job:{resource}"
+      resource: {kind: keyword, name: id}
+    callback_mode: either
+    execution_mode: scheduler
+
+  - id: click-command
+    registration:
+      symbol: click.command
+      invocation: function
+    handler: {kind: decorated_function}
+    surface:
+      kind: cli.click
+      id_template: "command:{resource}"
+      resource:
+        kind: keyword_or_handler_name
+        name: name
+        handler_name_normalization: kebab_case
+    callback_mode: sync
+    execution_mode: cli_dispatch
+
+  - id: typer-command
+    registration:
+      symbol: typer.Typer.command
+      invocation: instance_method
+      receiver_type: typer.Typer
+    handler: {kind: decorated_function}
+    surface:
+      kind: cli.typer
+      id_template: "command:{resource}"
+      resource:
+        kind: keyword_or_handler_name
+        name: name
+        handler_name_normalization: kebab_case
+    callback_mode: sync
+    execution_mode: cli_dispatch
+
+  - id: typer-callback
+    registration:
+      symbol: typer.Typer.callback
+      invocation: instance_method
+      receiver_type: typer.Typer
+    handler: {kind: decorated_function}
+    surface:
+      kind: cli.typer
+      id_template: "callback:{resource}"
+      resource: {kind: handler_name}
+    callback_mode: sync
+    execution_mode: cli_dispatch
+
+  - id: argparse-default-handler
+    registration:
+      symbol: argparse.ArgumentParser.set_defaults
+      invocation: instance_method
+      receiver_type: argparse.ArgumentParser
+    handler: {kind: keyword, name: func}
+    surface:
+      kind: cli.argparse
+      id_template: "handler:{resource}"
+      resource: {kind: handler_name}
+    callback_mode: sync
+    execution_mode: cli_dispatch
+    conditions:
+      - public subcommand identity is parser-bound and unavailable to schema v1
+
+  - id: dramatiq-actor
+    registration:
+      symbol: dramatiq.actor
+      invocation: function
+    handler: {kind: decorated_function}
+    surface:
+      kind: task.dramatiq
+      id_template: "actor:{resource}"
+      resource: {kind: keyword_or_handler_name, name: actor_name}
+    callback_mode: sync
+    execution_mode: process_worker
+
+  - id: celery-worker-ready
+    registration:
+      symbol: celery.signals.worker_ready.connect
+      invocation: class_method
+      receiver_type: celery.signals.worker_ready
+    handler: {kind: decorated_function}
+    surface:
+      kind: worker.lifecycle
+      id_template: "worker-ready:{resource}"
+      resource: {kind: handler_name}
+    callback_mode: sync
+    execution_mode: process_worker

@@ -843,6 +843,31 @@ def payload():
         FastAPIExtractor(app_file, output_limit_bytes=128).extract_endpoints()
 
 
+def test_output_limit_stops_route_traversal_before_inventory_collection(monkeypatch) -> None:
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    for index in range(100):
+
+        async def endpoint(index: int = index) -> dict[str, int]:
+            return {"index": index}
+
+        app.add_api_route(f"/items/{index}", endpoint, methods=["GET"])
+
+    extractor = FastAPIExtractor(Path("unused.py"), output_limit_bytes=1024)
+    monkeypatch.setattr(extractor, "_load_app", lambda: app)
+    visited = 0
+    original_http_endpoint = extractor._http_endpoint
+
+    def count_http_endpoint(route, original_route, prefix):
+        nonlocal visited
+        visited += 1
+        return original_http_endpoint(route, original_route, prefix)
+
+    monkeypatch.setattr(extractor, "_http_endpoint", count_http_endpoint)
+    with pytest.raises(FastAPIExtractorError, match="output limit"):
+        extractor._extract_endpoints_in_process()
+    assert visited < 100
+
+
 def test_runtime_and_secure_extractors_agree_on_static_nested_routes(tmp_path: Path) -> None:
     app_file = tmp_path / "differential_app.py"
     app_file.write_text(
@@ -1267,6 +1292,10 @@ def test_runtime_extractor_reports_worker_hard_exit(tmp_path: Path) -> None:
         ({"timeout_seconds": float("inf")}, "timeout_seconds must be a finite positive number"),
         ({"timeout_seconds": True}, "timeout_seconds must be a finite positive number"),
         ({"output_limit_bytes": 0}, "output_limit_bytes must be a positive integer"),
+        (
+            {"output_limit_bytes": 127},
+            "output_limit_bytes must be at least 128 for a structured worker response",
+        ),
         ({"output_limit_bytes": 1.5}, "output_limit_bytes must be a positive integer"),
         ({"output_limit_bytes": True}, "output_limit_bytes must be a positive integer"),
     ],
