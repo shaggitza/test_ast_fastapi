@@ -39,10 +39,12 @@ def _evidence(report: object) -> dict[str, Any]:
     evidence = report["comparison_evidence"]
     if type(evidence.get("schema_version")) is not int or evidence["schema_version"] != 1:
         raise ValueError("unsupported comparison evidence schema")
-    for field in ("scope", "normalization_version"):
-        value = evidence.get(field)
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError(f"invalid or missing {field} provenance")
+    scope = evidence.get("scope")
+    if not isinstance(scope, str) or not scope.strip():
+        raise ValueError("invalid or missing scope provenance")
+    normalization_version = evidence.get("normalization_version")
+    if type(normalization_version) is not int or normalization_version < 1:
+        raise ValueError("invalid or missing normalization_version provenance")
     return evidence
 
 

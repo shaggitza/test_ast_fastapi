@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from benchmarks.real_world.compare_evaluations import _load, compare
+from benchmarks.real_world.semantic_normalization import ALIAS_VERSION
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -41,7 +42,7 @@ def reports(*, attested: bool = True, n: int = 40):
             "comparison_evidence": {
                 "schema_version": 1,
                 "scope": "fastapi-adapter-v1",
-                "normalization_version": "aliases-v1",
+                "normalization_version": ALIAS_VERSION,
                 "truth_sha256": "a" * 64,
                 "selection_sha256": hashlib.sha256(
                     json.dumps(keys, sort_keys=True, separators=(",", ":")).encode()
@@ -191,7 +192,7 @@ def test_direct_comparison_rejects_untyped_schema_version(version):
         compare(baseline, candidate)
 
 
-@pytest.mark.parametrize("field", ["scope", "normalization_version"])
+@pytest.mark.parametrize("field", ["scope"])
 @pytest.mark.parametrize("value", [None, "", " ", [], {}, True, 1])
 def test_equal_invalid_provenance_does_not_make_reports_compatible(field, value):
     baseline, candidate = reports(n=1)
@@ -209,3 +210,23 @@ def test_serialized_report_rejects_nonfinite_and_duplicate_fields(tmp_path: Path
     path.write_text(serialized[:-1] + ", " + extra + "}", encoding="utf-8")
     with pytest.raises(ValueError, match=r"non-finite JSON constant|duplicate JSON key"):
         _load(path)
+
+
+@pytest.mark.parametrize("value", [None, "aliases-v1", [], {}, True, False, 0, -1, 1.0])
+def test_normalization_version_uses_the_evaluators_positive_integer_contract(value):
+    baseline, candidate = reports(n=1)
+    for report in (baseline, candidate):
+        report["comparison_evidence"]["normalization_version"] = value
+    with pytest.raises(ValueError, match="invalid or missing normalization_version provenance"):
+        compare(baseline, candidate)
+
+
+def test_serialized_evaluator_version_can_be_loaded_and_compared(tmp_path: Path):
+    baseline, candidate = reports(n=1)
+    paths = [tmp_path / "baseline.json", tmp_path / "candidate.json"]
+    for path, report in zip(paths, (baseline, candidate), strict=True):
+        path.write_text(json.dumps(report), encoding="utf-8")
+    result = compare(_load(paths[0]), _load(paths[1]))
+    assert result["metrics"]["raw"]["baseline_precision"] == 1.0
+    assert result["metrics"]["raw"]["candidate_precision"] == 0.8
+    assert result["gate_decision"] == "report_only"
