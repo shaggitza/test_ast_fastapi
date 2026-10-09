@@ -1,10 +1,11 @@
-"""
-FastAPI endpoint extractor using runtime introspection.
+"""FastAPI endpoint extractor using runtime introspection.
 
 This module dynamically imports a FastAPI application and extracts
 endpoint information using app.routes, which is more reliable than
 AST parsing as it handles all FastAPI patterns automatically.
 """
+
+from __future__ import annotations
 
 import functools
 import importlib.util
@@ -16,10 +17,9 @@ import signal
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import fastapi.routing as fastapi_routing
 from fastapi.routing import APIRoute, APIWebSocketRoute
@@ -45,6 +45,11 @@ from fastapi_endpoint_detector.parser.bounded_output import (
     bounded_json_bytes,
 )
 from fastapi_endpoint_detector.parser.runtime_entry import select_runtime_app
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from fastapi_endpoint_detector.analyzer.source_inventory import SourceInventory
 
 
 class FastAPIExtractorError(Exception):
@@ -74,6 +79,7 @@ class FastAPIExtractor:
         dependency_max_depth: int = 32,
         dependency_max_nodes: int = 2048,
         dependency_max_work: int = 8192,
+        source_inventory: SourceInventory | None = None,
     ) -> None:
         """
         Initialize the extractor.
@@ -117,6 +123,7 @@ class FastAPIExtractor:
         self.module_name = module_name
         self.app_entry = app_entry
         self.bootstrap_entry = bootstrap_entry
+        self.source_inventory = source_inventory
         self.timeout_seconds = normalized_timeout
         for name, value in (
             ("dependency_max_depth", dependency_max_depth),
@@ -1107,7 +1114,52 @@ class FastAPIExtractor:
             returncode = process.returncode
             if returncode is None:
                 raise FastAPIExtractorError("Runtime worker did not terminate")
-            return self._read_runtime_result(result_path, returncode)
+            endpoints = self._read_runtime_result(result_path, returncode)
+            if self.source_inventory is not None:
+                allowed = {path.resolve() for path in self.source_inventory.paths}
+                endpoints = [
+                    endpoint
+                    for endpoint in endpoints
+                    if endpoint.handler.file_path.resolve() in allowed
+                ]
+                endpoints = [self._mark_inventory_scope(endpoint) for endpoint in endpoints]
+            return endpoints
+
+    def _mark_inventory_scope(self, endpoint: Endpoint) -> Endpoint:
+        """Keep source scope separate from the identity of a runtime-observed route.
+
+        Inventory gaps limit negative claims about absent endpoints, so those caveats belong in
+        source inventory provenance. They do not make a route with an observed registration
+        conditional.
+        """
+        return endpoint
+
+    @property
+    def source_inventory_limitations(self) -> tuple[str, ...]:
+        """Scope, completeness, and import limits for inventory-filtered runtime results."""
+        if self.source_inventory is None:
+            return ()
+        inventory = self.source_inventory
+        completeness = (
+            f"{len(inventory.limitations)} source limitation(s) recorded"
+            if inventory.limitations
+            else "no source limitations recorded"
+        )
+        scope = (
+            f"Canonical source scope rooted at {inventory.root} selected {len(inventory.files)} "
+            f"files and excluded {len(inventory.excluded_files)} files; source inventory "
+            f"completeness: {completeness}. Local import following is "
+            f"{'enabled' if inventory.follow_imports else 'disabled'} with maximum depth "
+            f"{inventory.max_depth}; {len(inventory.unresolved_imports)} local imports were "
+            "unresolved or outside the selected scope."
+        )
+        return (
+            scope,
+            "Runtime import still executes Python imports outside the inventory; the inventory "
+            "filters returned endpoint handlers but does not sandbox or constrain import side "
+            "effects.",
+            *inventory.limitations,
+        )
 
     def get_endpoint_handler_files(self) -> dict[Path, list[Endpoint]]:
         """

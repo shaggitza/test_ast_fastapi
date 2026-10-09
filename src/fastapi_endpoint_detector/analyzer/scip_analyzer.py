@@ -22,7 +22,8 @@ if TYPE_CHECKING:
 class _SourceInventory(Protocol):
     """Structural subset of the shared inventory consumed by SCIP."""
 
-    paths: Sequence[Path]
+    @property
+    def paths(self) -> Sequence[Path]: ...
 
 
 class SCIPAnalyzerError(RuntimeError):
@@ -120,6 +121,7 @@ class SCIPAnalyzer:
             raise SCIPAnalyzerError(
                 "SCIP source inventory contains a missing or escaping path"
             ) from error
+
         self._outline_cache: dict[Path, tuple[SCIPDefinition, ...]] = {}
         self._base_method_cache: dict[str, tuple[SCIPDefinition, ...]] = {}
         self._reverse_call_edge_cache: dict[
