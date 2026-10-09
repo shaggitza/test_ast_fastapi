@@ -431,6 +431,15 @@ def test_nested_all_escape_and_mutation_invalidate_stale_ownership(
         "match_capture": "match value:\n    case __all__:\n        pass\n",
         "match_star_capture": "match value:\n    case [*__all__]:\n        pass\n",
         "match_rest_capture": "match value:\n    case {**__all__}:\n        pass\n",
+        "if_annotation_only": "if condition:\n    __all__: list[str]\n",
+        "try_annotation_only": "try:\n    __all__: list[str]\nexcept Exception:\n    pass\n",
+        "for_annotation_only": "for unused in [0]:\n    __all__: list[str]\n",
+        "while_annotation_only": "while condition:\n    __all__: list[str]\n",
+        "with_annotation_only": "with manager:\n    __all__: list[str]\n",
+        "match_annotation_only": "match value:\n    case _:\n        __all__: list[str]\n",
+        "if_annotation_effect": "if condition:\n    __all__: (__all__.clear() or list[str])\n",
+        "annotation_namedexpr_effect": "__all__: (__all__ := [])\n",
+        "if_annotation_namedexpr_effect": "if condition:\n    __all__: (__all__ := [])\n",
     }
     (tmp_path / "implementation.py").write_text(
         "from fastapi import APIRouter\n"
@@ -454,11 +463,26 @@ def test_nested_all_escape_and_mutation_invalidate_stale_ownership(
         endpoint = SecureASTExtractor(app_file).extract_endpoints()[0]
         provenance = endpoint.native_provenance
         assert provenance is not None
-        assert not any(owner.owner_kind == "all_export" for owner in provenance.source_owners)
-        assert not any(
-            owner.role == "object"
-            for owner in native_route_structural_owners(endpoint, public, {2, *range(3, 8)})
-        )
+        if name.endswith("_annotation_only"):
+            all_owners = [
+                owner for owner in provenance.source_owners if owner.owner_kind == "all_export"
+            ]
+            assert len(all_owners) == 1
+            assert all_owners[0].source_span.start_line == 2
+            assert any(
+                owner.owner_kind == "all_export"
+                for owner in native_route_structural_owners(endpoint, public, {2})
+            )
+            assert not any(
+                owner.role == "object"
+                for owner in native_route_structural_owners(endpoint, public, set(range(3, 8)))
+            )
+        else:
+            assert not any(owner.owner_kind == "all_export" for owner in provenance.source_owners)
+            assert not any(
+                owner.role == "object"
+                for owner in native_route_structural_owners(endpoint, public, {2, *range(3, 8)})
+            )
 
 
 def test_later_literal_all_assignment_restores_deleted_export_ownership(tmp_path: Path) -> None:
