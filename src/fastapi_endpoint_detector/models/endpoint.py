@@ -340,6 +340,7 @@ class NativeRouteRegistrationEvidence(BaseModel):
     owner_symbol: str = Field(min_length=1, max_length=2048)
     occurrence_order: int = Field(ge=0)
     source_span: NativeSourceSpan
+    dependency_expressions: tuple["NativeRouteDependencyExpressionEvidence", ...] = ()
 
     class Config:
         frozen = True
@@ -358,6 +359,7 @@ class NativeRouteAssemblyEdgeEvidence(BaseModel):
     occurrence_order: int = Field(ge=0)
     resolved_prefix: str = Field(max_length=4096)
     source_span: NativeSourceSpan
+    dependency_expressions: tuple["NativeRouteDependencyExpressionEvidence", ...] = ()
 
     class Config:
         frozen = True
@@ -372,6 +374,7 @@ class NativeRouteObjectEvidence(BaseModel):
     symbol: str = Field(min_length=1, max_length=2048)
     resolved_prefix: str | None = Field(default=None, max_length=4096)
     source_span: NativeSourceSpan
+    dependency_expressions: tuple["NativeRouteDependencyExpressionEvidence", ...] = ()
 
     class Config:
         frozen = True
@@ -391,6 +394,80 @@ class NativeRouteRootEvidence(BaseModel):
         frozen = True
 
 
+class NativeRouteDependencyExpressionEvidence(BaseModel):
+    """Source-only dependency declaration retained at its FastAPI assembly scope."""
+
+    side: SnapshotSide
+    scope: Literal["app", "router", "include", "route"]
+    expression: str = Field(min_length=1, max_length=4096)
+    callable_expressions: tuple[str, ...] = Field(default=(), max_length=128)
+    kind: Literal["depends", "security", "ambiguous"]
+    confidence: Literal["established", "conditional"]
+    source_span: NativeSourceSpan
+
+    class Config:
+        frozen = True
+
+
+class NativeRouteStructuralOwnerEvidence(BaseModel):
+    """One exact route occurrence structurally owned by a changed source span."""
+
+    endpoint_identifier: str = Field(min_length=1, max_length=4096)
+    role: Literal["registration", "assembly", "object", "root", "dependency"]
+    source_span: NativeSourceSpan
+    side: SnapshotSide
+    owner_kind: (
+        Literal[
+            "registration",
+            "assembly",
+            "object",
+            "root",
+            "dependency",
+            "decorator_signature",
+            "assignment_rhs",
+            "import_binding",
+            "reexport",
+            "all_export",
+            "class_base",
+            "class_decorator",
+            "factory_return",
+            "bootstrap_registration",
+        ]
+        | None
+    ) = None
+    qualified_binding: str | None = Field(default=None, min_length=1, max_length=2048)
+    related_binding: str | None = Field(default=None, min_length=1, max_length=2048)
+    confidence: Literal["established", "conditional"] = "established"
+
+    class Config:
+        frozen = True
+
+
+class NativeRouteSourceOwnerEvidence(BaseModel):
+    """Immutable source occurrence owned by one qualified native route binding."""
+
+    side: SnapshotSide
+    owner_kind: Literal[
+        "decorator_signature",
+        "assignment_rhs",
+        "import_binding",
+        "reexport",
+        "all_export",
+        "class_base",
+        "class_decorator",
+        "factory_return",
+        "bootstrap_registration",
+    ]
+    qualified_binding: str = Field(min_length=1, max_length=2048)
+    related_binding: str | None = Field(default=None, min_length=1, max_length=2048)
+    confidence: Literal["established", "conditional"]
+    expression: str | None = Field(default=None, max_length=4096)
+    source_span: NativeSourceSpan
+
+    class Config:
+        frozen = True
+
+
 class NativeRouteProvenance(BaseModel):
     """Immutable route-registration and assembly chain decided by secure AST."""
 
@@ -400,6 +477,7 @@ class NativeRouteProvenance(BaseModel):
     registration: NativeRouteRegistrationEvidence
     object_chain: tuple[NativeRouteObjectEvidence, ...] = Field(min_length=1, max_length=256)
     assembly_chain: tuple[NativeRouteAssemblyEdgeEvidence, ...] = Field(default=(), max_length=256)
+    source_owners: tuple[NativeRouteSourceOwnerEvidence, ...] = Field(default=(), max_length=2048)
 
     @model_validator(mode="after")
     def validate_chain(self) -> "NativeRouteProvenance":
@@ -408,9 +486,19 @@ class NativeRouteProvenance(BaseModel):
             self.registration.side,
             *(item.side for item in self.object_chain),
             *(item.side for item in self.assembly_chain),
+            *(item.side for item in self.source_owners),
         ]
         if any(side != self.side for side in evidence):
             raise ValueError("native route provenance cannot mix snapshot sides")
+        dependency_evidence = [
+            dependency for item in self.object_chain for dependency in item.dependency_expressions
+        ]
+        dependency_evidence.extend(
+            dependency for item in self.assembly_chain for dependency in item.dependency_expressions
+        )
+        dependency_evidence.extend(self.registration.dependency_expressions)
+        if any(dependency.side != self.side for dependency in dependency_evidence):
+            raise ValueError("native dependency provenance cannot mix snapshot sides")
         if len(self.object_chain) != len(self.assembly_chain) + 1:
             raise ValueError("native object chain must contain one object per assembly hop")
         root_object = self.object_chain[0]
