@@ -805,8 +805,8 @@ def test_package_applicability_is_reported_but_not_used_for_matching(tmp_path: P
     assert audit.scope.package_applicability == "not_evaluated"
 
 
-@pytest.mark.parametrize("mutation", ["stable", "changed", "removed", "unreadable"])
-def test_cold_audit_uses_final_metadata_snapshot(
+@pytest.mark.parametrize("mutation", ["stable", "changed", "removed", "unreadable", "added"])
+def test_cold_audit_uses_final_metadata_snapshot(  # noqa: PLR0915 - one cold evidence fixture
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
 ) -> None:
     package = tmp_path / "race_pkg"
@@ -879,6 +879,31 @@ def test_cold_audit_uses_final_metadata_snapshot(
         return raw
 
     monkeypatch.setattr(Path, "read_bytes", raced_read)
+    if mutation == "added":
+        original_fingerprint = MypyAnalyzer._fingerprint_typed_environment
+
+        def add_before_final_snapshot(
+            self: MypyAnalyzer,
+            *,
+            authenticated_metadata_hashes: dict[str, str] | None = None,
+            authenticated_metadata_roots: set[Path] | None = None,
+        ) -> str:
+            if authenticated_metadata_hashes is not None:
+                assert str(metadata.resolve()) in authenticated_metadata_hashes
+                added = dist.parent / "race-pkg-2.0.dist-info"
+                added.mkdir()
+                added_metadata = added / "METADATA"
+                assert str(added_metadata.resolve()) not in authenticated_metadata_hashes
+                added_metadata.write_text("Name: race-pkg\nVersion: 2.0\n", encoding="utf-8")
+            return original_fingerprint(
+                self,
+                authenticated_metadata_hashes=authenticated_metadata_hashes,
+                authenticated_metadata_roots=authenticated_metadata_roots,
+            )
+
+        monkeypatch.setattr(
+            MypyAnalyzer, "_fingerprint_typed_environment", add_before_final_snapshot
+        )
     analyzer = MypyAnalyzer(tmp_path)
     dependencies = analyzer.analyze_endpoint(endpoint)
     sites = [site for site in dependencies.resolved_call_sites if site.line == 3]

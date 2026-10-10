@@ -1197,7 +1197,8 @@ class MypyAnalyzer:
             }
             self._shared_path_index = None
             self._typed_environment_fingerprint = self._fingerprint_typed_environment(
-                authenticated_metadata_hashes=authenticated_metadata_hashes
+                authenticated_metadata_hashes=authenticated_metadata_hashes,
+                authenticated_metadata_roots=scanned_metadata_roots,
             )
             self._built_source_fingerprint = self._expected_source_fingerprint
 
@@ -6747,7 +6748,10 @@ class MypyAnalyzer:
         return self._endpoint_deps
 
     def _fingerprint_typed_environment(
-        self, *, authenticated_metadata_hashes: dict[str, str] | None = None
+        self,
+        *,
+        authenticated_metadata_hashes: dict[str, str] | None = None,
+        authenticated_metadata_roots: set[Path] | None = None,
     ) -> str:
         """Hash parsed dependency source and adjacent distribution metadata."""
         if self._build_result is None:
@@ -6778,6 +6782,8 @@ class MypyAnalyzer:
             except OSError as exc:
                 inputs[str(path.resolve())] = f"unreadable:{type(exc).__name__}"
         metadata_snapshot_hashes: dict[str, str] = {}
+        if authenticated_metadata_roots is not None:
+            package_roots.update(authenticated_metadata_roots)
         for root in package_roots:
             try:
                 for metadata_path in root.glob("*.dist-info/METADATA"):
@@ -6789,12 +6795,18 @@ class MypyAnalyzer:
                 inputs[str(root.resolve()) + "/<metadata-scan>"] = (
                     f"unreadable:{type(exc).__name__}"
                 )
-        if authenticated_metadata_hashes is not None and any(
-            metadata_snapshot_hashes.get(path) != digest
-            for path, digest in authenticated_metadata_hashes.items()
+        if (
+            authenticated_metadata_hashes is not None
+            and {
+                path: digest
+                for path, digest in metadata_snapshot_hashes.items()
+                if authenticated_metadata_roots is not None
+                and Path(path).parent.parent in authenticated_metadata_roots
+            }
+            != authenticated_metadata_hashes
         ):
             # Authenticate evidence against the same final byte reads that
-            # seal the cache. Changed, removed or unreadable metadata cannot
+            # seal the cache. Added, changed, removed or unreadable metadata cannot
             # retain an earlier version/source pin under a new fingerprint.
             self._verified_package_source_hashes.clear()
             self._verified_package_versions.clear()
