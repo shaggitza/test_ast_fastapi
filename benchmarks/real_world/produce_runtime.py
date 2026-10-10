@@ -393,7 +393,12 @@ class CommandRunner:
                 manifest_value = manifest.model_dump(mode="json")
                 if phase_report.get("backend") == "unavailable" or phase_report.get(
                     "lifecycle_conditional_surfaces"
-                ):
+                ) or any(
+                    phase_report.get(name, 0) > 0
+                    for name in ("conditional_count", "unavailable_count")
+                    if isinstance(phase_report.get(name, 0), int)
+                    and not isinstance(phase_report.get(name, 0), bool)
+                ) or phase_report.get("limitations"):
                     request.phase_manifest_state.clear()
                     request.phase_manifest_state.update({"conditional": True})
                     return InvocationResult(
