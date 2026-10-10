@@ -1094,8 +1094,8 @@ def _success(receipt: SubmissionReceipt) -> dict[str, object]:
 
 
 def _bind_private_socket(server: socket.socket, socket_path: Path) -> None:
-    """Publish the socket with its required permissions from the first instant."""
-    previous_umask = os.umask(0o177)
+    """Bind privately without publishing the ready mode before listening."""
+    previous_umask = os.umask(0o777)
     try:
         server.bind(str(socket_path))
     finally:
@@ -1143,8 +1143,8 @@ def serve(  # noqa: PLR0912,PLR0915
     transport_failures = 0
     try:
         _bind_private_socket(server, socket_path)
-        socket_path.chmod(0o600)
         server.listen(1)
+        socket_path.chmod(0o600)
         while rejected < record.max_validation_attempts:
             server.settimeout(remaining_timeout())
             try:
