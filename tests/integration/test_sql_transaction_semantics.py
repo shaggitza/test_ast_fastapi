@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -316,6 +317,30 @@ def _assert_langflow_source_transaction_evidence(
     assert paths.transaction_report_hash == transaction.report_hash
     assert paths.ordered_paths == ()
     assert paths.context_paths == ()
+    assert paths.summary.ordered_paths == 0
+    assert paths.summary.context_manager_paths == 0
+    assert len(paths.source_projections) == 1
+    projection = paths.source_projections[0]
+    assert projection.endpoint_id in {
+        endpoint.id
+        for occurrence in audit.occurrences
+        if occurrence.id == projection.unresolved_stage_occurrence_id
+        for endpoint in occurrence.endpoints
+    }
+    assert projection.method_identity == "unresolved"
+    assert projection.status == "conditional_source_association"
+    assert projection.persistence_status == "not_established"
+    assert projection.receiver_expression == "session"
+    for path_field, hash_field in (
+        (projection.endpoint_file_path, projection.endpoint_source_hash),
+        (projection.wrapper_file_path, projection.wrapper_source_hash),
+        (
+            projection.delegated_wrapper_file_path,
+            projection.delegated_wrapper_source_hash,
+        ),
+    ):
+        digest = hashlib.sha256((fixture / path_field).read_bytes()).hexdigest()
+        assert hash_field == f"sha256:{digest}"
 
 
 def test_sql_diagnostics_separate_pending_and_reachable_boundaries(tmp_path: Path) -> None:
@@ -829,7 +854,7 @@ def test_ordered_paths_require_same_scope_receiver_and_straight_line(tmp_path: P
     _assert_open_receiver_flush_is_unmatched(configured)
     paths = configured.sql_transaction_path_report
     assert paths is not None
-    assert paths.schema_version == 4
+    assert paths.schema_version == 5
     assert paths.summary.model_dump() == {
         "ordered_paths": 4,
         "ordered_flushes": 1,
@@ -953,3 +978,221 @@ def test_langflow_13960_real_source_transaction_fixture_is_pinned_and_bounded() 
     provenance = json.loads((fixture / "provenance.json").read_text(encoding="utf-8"))
     _assert_langflow_pinned_snapshots(fixture, provenance)
     _assert_langflow_source_transaction_evidence(fixture, provenance)
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "old", "new"),
+    [
+        (
+            "source/langflow/api/v1/traces.py.txt",
+            "from langflow.services.deps import session_scope\n",
+            "from langflow.services.deps import session_scope as foreign_scope\n",
+        ),
+        (
+            "source/langflow/api/v1/traces.py.txt",
+            "from langflow.services.deps import session_scope\n",
+            "from langflow.services.deps import session_scope\nsession_scope = unrelated_scope\n",
+        ),
+        (
+            "source/langflow/api/v1/traces.py.txt",
+            "from langflow.services.deps import session_scope\n",
+            "from langflow.services.deps import session_scope\nsession_scope += unrelated_scope\n",
+        ),
+        (
+            "source/langflow/api/v1/traces.py.txt",
+            "from langflow.services.deps import session_scope\n",
+            "from langflow.services.deps import session_scope\ndel session_scope\n",
+        ),
+        (
+            "source/langflow/api/v1/traces.py.txt",
+            "from langflow.services.deps import session_scope\n",
+            "from langflow.services.deps import session_scope\n"
+            "from other.module import session_scope\n",
+        ),
+        (
+            "source/langflow/api/v1/traces.py.txt",
+            "from langflow.services.deps import session_scope\n",
+            "from langflow.services.deps import session_scope\n"
+            "if condition:\n    session_scope = unrelated_scope\n",
+        ),
+        (
+            "source/langflow/api/v1/traces.py.txt",
+            "from langflow.services.deps import session_scope\n",
+            "from langflow.services.deps import session_scope\n"
+            'exec("session_scope = unrelated_scope")\n',
+        ),
+        (
+            "source/langflow/api/v1/traces.py.txt",
+            "from langflow.services.deps import session_scope\n",
+            "from langflow.services.deps import session_scope\n"
+            'globals()["session_scope"] = unrelated_scope\n',
+        ),
+        (
+            "source/langflow/api/v1/traces.py.txt",
+            "from langflow.services.deps import session_scope\n",
+            "from langflow.services.deps import session_scope\n"
+            "globals().update(session_scope=unrelated_scope)\n",
+        ),
+        (
+            "source/langflow/api/v1/traces.py.txt",
+            "    try:\n        async with session_scope() as session:\n            flow_stmt",
+            "    try:\n        def session_scope(): pass\n"
+            "        async with session_scope() as session:\n            flow_stmt",
+        ),
+        (
+            "source/langflow/api/v1/traces.py.txt",
+            "async def delete_traces_by_flow(\n",
+            "async def delete_traces_by_flow(session_scope,\n",
+        ),
+        (
+            "source/langflow/api/v1/traces.py.txt",
+            '    """\n    try:\n'
+            "        async with session_scope() as session:\n            flow_stmt",
+            '    """\n    session_scope = shadowed_scope\n'
+            "    try:\n        async with session_scope() as session:\n            flow_stmt",
+        ),
+        (
+            "source/langflow/api/v1/traces.py.txt",
+            "            await session.execute(delete_stmt)",
+            "            await session.execute(delete_stmt)\n"
+            "        session_scope = shadowed_scope",
+        ),
+        (
+            "source/langflow/services/deps.py.txt",
+            "    async with lfx_session_scope() as session:\n        yield session",
+            "    lfx_session_scope = shadowed_scope\n"
+            "    async with lfx_session_scope() as session:\n        yield session",
+        ),
+        (
+            "source/langflow/api/v1/traces.py.txt",
+            "await session.execute(delete_stmt)",
+            "await other.execute(delete_stmt)",
+        ),
+        (
+            "source/langflow/api/v1/traces.py.txt",
+            "            await session.execute(delete_stmt)",
+            "            session = other\n            await session.execute(delete_stmt)",
+        ),
+        (
+            "source/langflow/services/deps.py.txt",
+            "        yield session\n",
+            "        yield other_session\n",
+        ),
+        (
+            "source/langflow/services/deps.py.txt",
+            "        yield session\n",
+            "        async def deferred():\n            yield session\n"
+            "        yield other_session\n",
+        ),
+        (
+            "source/langflow/services/deps.py.txt",
+            "import session_scope as lfx_session_scope",
+            "import session_scope as unrelated_delegate",
+        ),
+        (
+            "source/lfx/services/deps.py.txt",
+            "await session.commit()",
+            "await other_session.commit()",
+        ),
+        (
+            "source/langflow/api/v1/traces.py.txt",
+            "            await session.execute(delete_stmt)",
+            "        await session.execute(delete_stmt)",
+        ),
+        (
+            "source/langflow/api/v1/traces.py.txt",
+            "            await session.execute(delete_stmt)",
+            "            pass  # no staged SQL call in the owning context\n",
+        ),
+        (
+            "source/langflow/api/v1/traces.py.txt",
+            "from langflow.services.deps import session_scope\n",
+            "from langflow.services.deps import session_scope\n"
+            "def unused(seed=exec('session_scope = unrelated_scope')):\n    pass\n",
+        ),
+        (
+            "source/langflow/api/v1/traces.py.txt",
+            "from langflow.services.deps import session_scope\n",
+            "from langflow.services.deps import session_scope\n"
+            '@eval("globals().update(session_scope=unrelated_scope) or (lambda f: f)")\n'
+            "def unused():\n    pass\n",
+        ),
+        (
+            "source/langflow/api/v1/traces.py.txt",
+            "from langflow.services.deps import session_scope\n",
+            "from langflow.services.deps import session_scope\n"
+            "rebind = exec\nrebind('session_scope = unrelated_scope')\n",
+        ),
+        (
+            "source/langflow/api/v1/traces.py.txt",
+            "from langflow.services.deps import session_scope\n",
+            "from langflow.services.deps import session_scope\n"
+            "import builtins\nbuiltins.exec('session_scope = unrelated_scope')\n",
+        ),
+        (
+            "source/langflow/api/v1/traces.py.txt",
+            "from langflow.services.deps import session_scope\n",
+            "from langflow.services.deps import session_scope\n"
+            "getattr(__builtins__, 'exec')('session_scope = unrelated_scope')\n",
+        ),
+    ],
+    ids=(
+        "imported-name-alias",
+        "module-rebound-after-import",
+        "module-augmented-after-import",
+        "module-deleted-after-import",
+        "module-duplicate-import",
+        "module-control-flow-rebind",
+        "module-exec-rebind",
+        "module-globals-item-rebind",
+        "module-globals-update-rebind",
+        "same-name-local-wrapper",
+        "wrapper-parameter-shadow",
+        "wrapper-local-before-call",
+        "wrapper-local-after-call",
+        "delegated-alias-local-shadow",
+        "different-receiver",
+        "receiver-reassigned",
+        "yield-unknown",
+        "deferred-yield-is-not-outer-receiver",
+        "delegated-unknown-alias",
+        "delegated-boundary-other-receiver",
+        "stage-outside-context",
+        "context-unrelated",
+        "eager-default-exec",
+        "eager-decorator-eval",
+        "aliased-exec",
+        "builtins-exec",
+        "getattr-builtins-exec",
+    ),
+)
+def test_langflow_source_projection_fails_closed_for_unproven_ownership(
+    tmp_path: Path, relative_path: str, old: str, new: str
+) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    source_path = copied / relative_path
+    source = source_path.read_text(encoding="utf-8")
+    assert old in source
+    source_path.write_text(source.replace(old, new, 1), encoding="utf-8")
+
+    _audit, _transaction, paths = _langflow_fixture_transaction_reports(copied)
+    assert paths.source_projections == ()
+
+
+def test_deferred_dynamic_exec_does_not_rebind_module_wrapper(
+    tmp_path: Path,
+) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    endpoint = copied / "source/langflow/api/v1/traces.py.txt"
+    endpoint.write_text(
+        endpoint.read_text(encoding="utf-8")
+        + "\ndef unused():\n    exec('session_scope = unrelated_scope')\n",
+        encoding="utf-8",
+    )
+
+    _audit, _transaction, paths = _langflow_fixture_transaction_reports(copied)
+    assert len(paths.source_projections) == 1

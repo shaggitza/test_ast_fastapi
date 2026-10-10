@@ -342,6 +342,42 @@ class SQLTransactionPathDiagnostic(_StrictModel):
     ]
 
 
+class SQLTransactionSourceProjection(_StrictModel):
+    """Source-only stage association whose SQL method identity is unresolved."""
+
+    schema_version: Literal[1] = 1
+    id: Digest
+    endpoint_id: Digest
+    begin_occurrence_id: Digest
+    unresolved_stage_occurrence_id: Digest
+    endpoint_file_path: str = Field(min_length=1)
+    endpoint_source_hash: Digest
+    wrapper_file_path: str = Field(min_length=1)
+    wrapper_source_hash: Digest
+    delegated_wrapper_file_path: str = Field(min_length=1)
+    delegated_wrapper_source_hash: Digest
+    function_name: str = Field(min_length=1)
+    receiver_hash: Digest
+    receiver_expression: str = Field(min_length=1)
+    status: Literal["conditional_source_association"] = "conditional_source_association"
+    method_identity: Literal["unresolved"] = "unresolved"
+    persistence_status: Literal["not_established"] = "not_established"
+    uncertainty: tuple[str, ...] = Field(min_length=1)
+
+    def identity_payload(self) -> dict[str, Any]:
+        return self.model_dump(mode="json", exclude={"id", "uncertainty"})
+
+    @model_validator(mode="after")
+    def validate_projection(self) -> SQLTransactionSourceProjection:
+        if self.begin_occurrence_id == self.unresolved_stage_occurrence_id:
+            raise ValueError("source projection roles must be disjoint")
+        if any(not item.strip() for item in self.uncertainty):
+            raise ValueError("source projection uncertainty must not be blank")
+        if self.id != _semantic_hash(self.identity_payload()):
+            raise ValueError("source projection id does not match its identity")
+        return self
+
+
 class SQLTransactionPathSummary(_StrictModel):
     ordered_paths: int = Field(ge=0)
     ordered_flushes: int = Field(ge=0)
@@ -367,13 +403,14 @@ class SQLTransactionPathSummary(_StrictModel):
 class SQLTransactionPathReport(_StrictModel):
     """Content-addressed bounded straight-line and context-exit evidence."""
 
-    schema_version: Literal[4] = 4
+    schema_version: Literal[5] = 5
     status: Literal["diagnostic_only"] = "diagnostic_only"
     effect_audit_hash: Digest
     transaction_report_hash: Digest
     max_pairs: int = Field(ge=1, le=10_000)
     ordered_paths: tuple[SQLTransactionOrderedPath, ...]
     context_paths: tuple[SQLTransactionContextPath, ...]
+    source_projections: tuple[SQLTransactionSourceProjection, ...] = ()
     diagnostics: tuple[SQLTransactionPathDiagnostic, ...]
     summary: SQLTransactionPathSummary
     report_hash: Digest
@@ -393,6 +430,9 @@ class SQLTransactionPathReport(_StrictModel):
         ]
         if context_ids != sorted(set(context_ids)) or len(context_keys) != len(set(context_keys)):
             raise ValueError("context-managed SQL paths must be sorted and unique")
+        projection_ids = [item.id for item in self.source_projections]
+        if projection_ids != sorted(set(projection_ids)):
+            raise ValueError("SQL source projections must be sorted and unique")
         diagnostic_keys = [
             (
                 item.endpoint_id,
@@ -420,7 +460,10 @@ class SQLTransactionPathReport(_StrictModel):
         if self.summary != expected:
             raise ValueError("SQL path summary does not match report contents")
         if (
-            len(self.ordered_paths) + len(self.context_paths) + len(self.diagnostics)
+            len(self.ordered_paths)
+            + len(self.context_paths)
+            + len(self.source_projections)
+            + len(self.diagnostics)
             > self.max_pairs
         ):
             raise ValueError("SQL path report exceeds its atomic pair limit")
@@ -524,11 +567,13 @@ def build_sql_transaction_path_report(
     diagnostics: tuple[SQLTransactionPathDiagnostic, ...],
     *,
     context_paths: tuple[SQLTransactionContextPath, ...] = (),
+    source_projections: tuple[SQLTransactionSourceProjection, ...] = (),
     max_pairs: int,
 ) -> SQLTransactionPathReport:
     """Construct one validated deterministic path report."""
     sorted_paths = tuple(sorted(ordered_paths, key=lambda item: item.id))
     sorted_context_paths = tuple(sorted(context_paths, key=lambda item: item.id))
+    sorted_source_projections = tuple(sorted(source_projections, key=lambda item: item.id))
     sorted_diagnostics = tuple(
         sorted(
             diagnostics,
@@ -559,6 +604,7 @@ def build_sql_transaction_path_report(
         max_pairs=max_pairs,
         ordered_paths=sorted_paths,
         context_paths=sorted_context_paths,
+        source_projections=sorted_source_projections,
         diagnostics=sorted_diagnostics,
         summary=summary,
         report_hash=f"sha256:{'0' * 64}",
@@ -569,6 +615,7 @@ def build_sql_transaction_path_report(
         max_pairs=max_pairs,
         ordered_paths=sorted_paths,
         context_paths=sorted_context_paths,
+        source_projections=sorted_source_projections,
         diagnostics=sorted_diagnostics,
         summary=summary,
         report_hash=_semantic_hash(provisional.report_payload()),
