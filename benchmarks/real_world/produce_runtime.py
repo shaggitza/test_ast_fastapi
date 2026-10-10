@@ -611,7 +611,14 @@ def _frozen_lane_request(
             yield staged_request
         finally:
             manifest_state = staged_request.phase_manifest_state
-            if isinstance(manifest_state, dict) and manifest_state:
+            if (
+                isinstance(manifest_state, dict)
+                and manifest_state
+                and (
+                    set(manifest_state) != {"conditional"}
+                    or manifest_state["conditional"] is not True
+                )
+            ):
                 PhaseManifest.model_validate(manifest_state)
             if _source_digest(staged_root) != source_hash:
                 raise ProducerError("read-only staged source changed during lane execution")
@@ -874,7 +881,7 @@ def _record(  # noqa: PLR0911, PLR0912
         "impact": None,
         "provenance": provenance,
     }
-    if request.phase_manifest_state and request.phase_manifest_state.get("entries"):
+    if isinstance(request.phase_manifest_state, dict) and "entries" in request.phase_manifest_state:
         record["framework_phase_manifest"] = request.phase_manifest_state
     if mode == "runtime":
         try:

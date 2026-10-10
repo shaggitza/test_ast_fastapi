@@ -29,8 +29,11 @@ from fastapi_endpoint_detector.analyzer.framework_phase_runtime import (
 )
 from fastapi_endpoint_detector.analyzer.runtime_custody import (
     CustodyBinding,
+    RuntimeCustodyError,
     custody_digest,
+    runtime_custody_authority_from_environment,
     runtime_record_request_digest,
+    verify_runtime_record_custody,
 )
 from fastapi_endpoint_detector.models.surface_contract import load_surface_preset
 
@@ -358,6 +361,51 @@ def test_failed_lifespan_cannot_claim_positive_phase_observations(tmp_path: Path
         compare(secure, runtime)
 
 
+def test_archival_comparison_retains_custody_after_launch_receipt_expiry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secure = tmp_path / "secure.json"
+    runtime = tmp_path / "runtime.json"
+    _write(secure, _record("secure"))
+    record = _record("runtime")
+    _write(runtime, record)
+    later = record["runtime_custody"]["list"]["receipt"]["issued_at"] + 3600
+    # Receipt freshness still protects production admission; reading an archive
+    # authenticates the retained execution rather than claiming a new launch.
+    with pytest.raises(RuntimeCustodyError, match="validity window"):
+        verify_runtime_record_custody(
+            record, authority=runtime_custody_authority_from_environment(), now=later
+        )
+    monkeypatch.setattr(
+        "fastapi_endpoint_detector.analyzer.runtime_artifact_comparison.time.time", lambda: later
+    )
+    assert compare(secure, runtime)["quality_eligible"] is True
+    record["runtime_custody"]["impact"]["receipt"]["signature"] = "0" * 64
+    runtime.write_text(json.dumps(record), encoding="utf-8")
+    with pytest.raises(ComparisonError, match="signature"):
+        compare(secure, runtime)
+
+
+@pytest.mark.parametrize("phase_value", [{}, {"observations": []}, "invalid", None])
+def test_failed_runtime_forbids_unsigned_phase_metadata(
+    tmp_path: Path, phase_value: object
+) -> None:
+    secure = tmp_path / "secure.json"
+    runtime = tmp_path / "runtime.json"
+    _write(secure, _record("secure"))
+    record = _record("runtime")
+    record.update(
+        status="failure",
+        failure={"phase": "unavailable", "message": "abstain"},
+        inventory=None,
+        impact=None,
+        framework_phase=phase_value,
+    )
+    _write(runtime, record)
+    with pytest.raises(ComparisonError, match="failed records forbid runtime phase"):
+        compare(secure, runtime)
+
+
 def _compare_matrix(paths: dict[tuple[str, str], Path]) -> dict[str, Any]:
     return compare_target_baseline(
         secure_target_path=paths[("target", "secure")],
@@ -419,6 +467,7 @@ def test_failure_phase_abstains_from_quality_metrics(tmp_path: Path) -> None:
         inventory=None,
         impact=None,
     )
+    failed.pop("framework_phase")
     _write(runtime, failed)
 
     result = compare(secure, runtime)
@@ -443,6 +492,7 @@ def test_runtime_entry_selection_is_operational_abstention(tmp_path: Path, field
         inventory=None,
         impact=None,
     )
+    runtime_record.pop("framework_phase")
     _write(secure, secure_record)
     _write(runtime, runtime_record)
 
@@ -563,6 +613,7 @@ def test_all_failure_phases_are_versioned(tmp_path: Path, phase: str) -> None:
             inventory=None,
             impact=None,
         )
+    second.pop("framework_phase")
     _write(secure, first)
     _write(runtime, second)
 
@@ -637,6 +688,7 @@ def test_matrix_keeps_failures_operational_and_excludes_them_from_quality(
         inventory=None,
         impact=None,
     )
+    failed.pop("framework_phase")
     _write(paths[("baseline", "runtime")], failed)
 
     result = _compare_matrix(paths)
@@ -658,6 +710,7 @@ def test_matrix_rejects_malformed_success_with_failed_counterpart(tmp_path: Path
         inventory=None,
         impact=None,
     )
+    failed.pop("framework_phase")
     _write(paths[("target", "runtime")], malformed)
     _write(paths[("baseline", "runtime")], failed)
 

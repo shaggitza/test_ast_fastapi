@@ -24,7 +24,7 @@ from fastapi_endpoint_detector.analyzer.framework_phase_runtime import (
 from fastapi_endpoint_detector.analyzer.runtime_custody import (
     RuntimeCustodyError,
     runtime_custody_authority_from_environment,
-    verify_runtime_record_custody,
+    verify_archived_runtime_record_custody,
 )
 
 _FAILURE_PHASES = {
@@ -190,7 +190,7 @@ def _validate_result_custody(record: dict[str, Any], expected_mode: str) -> None
             raise ComparisonError("secure records forbid runtime custody metadata")
         return
     try:
-        verify_runtime_record_custody(
+        verify_archived_runtime_record_custody(
             record,
             authority=runtime_custody_authority_from_environment(),
             now=int(time.time()),
@@ -296,6 +296,13 @@ def _validate(record: dict[str, Any], expected_mode: str) -> None:  # noqa: PLR0
                 raise ComparisonError(f"framework phase manifest rejected: {error}") from error
     else:
         _validate_failure(record.get("failure"))
+        if "framework_phase" in record:
+            raise ComparisonError("failed records forbid runtime phase observations")
+        if "framework_phase_manifest" in record:
+            try:
+                PhaseManifest.model_validate(record["framework_phase_manifest"])
+            except (TypeError, ValueError) as error:
+                raise ComparisonError(f"framework phase manifest rejected: {error}") from error
         if record.get("inventory") is not None or record.get("impact") is not None:
             raise ComparisonError("failed records forbid partial inventory/impact claims")
 

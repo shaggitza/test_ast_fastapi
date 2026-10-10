@@ -96,6 +96,20 @@ def verify_runtime_custody(
     The caller creates a new unpredictable nonce before launching each invocation;
     a worker cannot select its own expected binding or signing authority.
     """
+    return _verify_runtime_custody(
+        receipt, expected=expected, result=result, authority=authority, now=now, fresh=True
+    )
+
+
+def _verify_runtime_custody(
+    receipt: object,
+    *,
+    expected: CustodyBinding,
+    result: object,
+    authority: RuntimeCustodyAuthority,
+    now: int,
+    fresh: bool,
+) -> RuntimeCustodyReceipt:
     try:
         parsed = RuntimeCustodyReceipt.model_validate(receipt)
     except ValueError as error:
@@ -110,7 +124,7 @@ def verify_runtime_custody(
         raise RuntimeCustodyError("custody result differs from the broker-signed result")
     if (
         parsed.issued_at > now
-        or parsed.expires_at <= now
+        or (fresh and parsed.expires_at <= now)
         or parsed.expires_at <= parsed.issued_at
         or parsed.expires_at - parsed.issued_at > authority.max_validity_seconds
     ):
@@ -154,6 +168,24 @@ def verify_runtime_record_custody(
     record: dict[str, object], *, authority: RuntimeCustodyAuthority, now: int
 ) -> None:
     """Authenticate both runtime phases and their retained payload/telemetry."""
+    _verify_runtime_record_custody(record, authority=authority, now=now, fresh=True)
+
+
+def verify_archived_runtime_record_custody(
+    record: dict[str, object], *, authority: RuntimeCustodyAuthority, now: int
+) -> None:
+    """Authenticate retained results without imposing a new launch freshness window.
+
+    Production still requires fresh receipts before publication. Archival reads
+    retain all signature, challenge, result and validity-duration checks, including
+    rejection of receipts issued in the future.
+    """
+    _verify_runtime_record_custody(record, authority=authority, now=now, fresh=False)
+
+
+def _verify_runtime_record_custody(
+    record: dict[str, object], *, authority: RuntimeCustodyAuthority, now: int, fresh: bool
+) -> None:
     envelopes = record.get("runtime_custody")
     if not isinstance(envelopes, dict) or set(envelopes) != {"list", "impact"}:
         raise RuntimeCustodyError("successful runtime record requires both result receipts")
@@ -211,8 +243,13 @@ def verify_runtime_record_custody(
         if rss is not None and (type(rss) is not int or rss < 0):
             raise RuntimeCustodyError("runtime custody RSS is invalid")
         rss_values.append(rss)
-        verify_runtime_custody(
-            envelope["receipt"], expected=expected, result=result, authority=authority, now=now
+        _verify_runtime_custody(
+            envelope["receipt"],
+            expected=expected,
+            result=result,
+            authority=authority,
+            now=now,
+            fresh=fresh,
         )
     _verify_runtime_resource_summary(record["resources"], rss_values)
 

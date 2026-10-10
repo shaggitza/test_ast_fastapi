@@ -281,6 +281,45 @@ def test_default_runtime_gate_abstains_without_calling_runtime(tmp_path: Path) -
     assert comparison["quality_eligible"] is False
 
 
+@pytest.mark.parametrize("conditional", [False, True])
+def test_empty_or_conditional_phase_manifest_preserves_operational_pair(
+    tmp_path: Path, conditional: bool
+) -> None:
+    class PhaseRunner(FakeRunner):
+        def __call__(self, mode: str, phase: str, request: Any) -> InvocationResult:
+            result = super().__call__(mode, phase, request)
+            if mode == "secure" and phase == "impact":
+                request.phase_manifest_state.clear()
+                request.phase_manifest_state.update(
+                    {"conditional": True}
+                    if conditional
+                    else PhaseManifest(entries=()).model_dump(mode="json")
+                )
+            return result
+
+    runner = PhaseRunner()
+    outputs = produce_snapshot_pair(
+        _inputs(tmp_path),
+        EntryConfiguration(None, None, "app", "mypy"),
+        tmp_path / "out",
+        runner=runner,
+    )
+    secure = json.loads(outputs["secure"].read_text())
+    runtime = json.loads(outputs["runtime"].read_text())
+    assert secure["status"] == "success"
+    assert secure["inventory"]["endpoints"]
+    assert secure["impact"]["candidate_endpoints"]
+    assert runtime["status"] == "failure"
+    assert runner.calls == [("secure", "list"), ("secure", "impact")]
+    if conditional:
+        assert "framework_phase_manifest" not in secure
+        assert "framework_phase_manifest" not in runtime
+    else:
+        assert secure["framework_phase_manifest"]["entries"] == []
+        assert runtime["framework_phase_manifest"] == secure["framework_phase_manifest"]
+    assert compare(outputs["secure"], outputs["runtime"])["quality_eligible"] is False
+
+
 @pytest.mark.parametrize(
     ("phase", "failure_phase"),
     [
