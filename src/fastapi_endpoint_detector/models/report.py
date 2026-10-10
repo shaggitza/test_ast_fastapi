@@ -476,6 +476,10 @@ class AnalysisReport(BaseModel):
         default=None,
         description="Bounded source-backed same-scope SQL ordering diagnostics.",
     )
+    graphify_overlay: dict[str, object] | None = Field(
+        default=None,
+        description="Optional diagnostic evidence from validated offline Graphify snapshots.",
+    )
     framework_phase_report: FrameworkPhaseReport | None = Field(
         default=None,
         description=(

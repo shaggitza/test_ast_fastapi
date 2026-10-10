@@ -48,8 +48,37 @@ class TestCLI:
         assert "--secure-ast" in result.output
         assert "--scip" in result.output
         assert "--baseline-app" in result.output
+        assert "--graphify" in result.output
+        assert "--graphify-baseline" in result.output
+        assert "--graphify-target" in result.output
+        assert "--graphify-schema" in result.output
         assert "--app-entry" in result.output
         assert "--bootstrap-entry" in result.output
+
+    def test_graphify_requires_explicit_secure_baseline_and_inputs(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        app = tmp_path / "app.py"
+        app.write_text("value = 1\n", encoding="utf-8")
+        diff = tmp_path / "change.diff"
+        diff.write_text("dummy\n", encoding="utf-8")
+
+        result = runner.invoke(
+            cli,
+            ["analyze", "--app", str(app), "--diff", str(diff), "--graphify"],
+        )
+        assert result.exit_code != 0
+        assert "--graphify requires --secure-ast" in result.output
+
+        result = runner.invoke(
+            cli,
+            [
+                "analyze", "--app", str(app), "--diff", str(diff), "--graphify",
+                "--secure-ast",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "--graphify requires an explicit --baseline-app snapshot" in result.output
 
     def test_validate_effect_contracts_help(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["validate-effect-contracts", "--help"])

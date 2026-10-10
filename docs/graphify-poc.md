@@ -1,8 +1,9 @@
 # Graphify code-graph POC boundary
 
-Issue #110 evaluates Graphify as an optional generic code-graph provider. This
-foundation is deliberately **not** connected to the default CLI or analyzer.
-Mypy remains the only default semantic backend. Importing this project never
+Issue #110 evaluates Graphify as an optional generic code-graph provider. The
+offline overlay is opt-in through `analyze --graphify`; it remains separate
+from the default endpoint analyzer and candidate selection. Mypy remains the
+default semantic backend. Importing this project never
 imports, installs, or executes Graphify, and missing Graphify tooling never
 causes fallback or changes ordinary analysis.
 

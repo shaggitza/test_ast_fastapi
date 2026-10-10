@@ -181,6 +181,14 @@ class TextFormatter(BaseFormatter):
                 f"{paths.summary.unresolved_pairs} unresolved pairs "
                 "(lexical and conditional only; persistence not established)"
             )
+        if report.graphify_overlay is not None:
+            evidence = report.graphify_overlay.get("evidence")
+            evidence_count = len(evidence) if isinstance(evidence, list) else 0
+            console.print(
+                "  Graphify Overlay: "
+                f"{evidence_count} LOW diagnostic path(s); "
+                "offline lexical evidence only"
+            )
         if report.source_observations is not None:
             console.print(
                 "  Source Observations: "

@@ -158,6 +158,8 @@ class JsonFormatter(BaseFormatter):
                 else None
             ),
         }
+        if report.graphify_overlay is not None:
+            data["graphify_overlay"] = report.graphify_overlay
         if report.source_observations is not None:
             data["source_observations"] = report.source_observations
         if report.framework_phase_report is not None:

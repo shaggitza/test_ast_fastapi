@@ -226,6 +226,22 @@ def cli(ctx: click.Context, config: Path | None) -> None:
     is_flag=True,
     help="Use SCIP dependency analysis (requires scip-query and scip-python 0.6.6).",
 )
+@click.option("--graphify", is_flag=True, help="Add an offline Graphify diagnostic overlay.")
+@click.option(
+    "--graphify-baseline",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Validated Graphify graph.json for the explicit --baseline-app snapshot.",
+)
+@click.option(
+    "--graphify-target",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Validated Graphify graph.json for --app.",
+)
+@click.option(
+    "--graphify-schema",
+    type=click.Choice(["node-link-v1", "graphify-raw-0.9.30-v1"]),
+    help="Explicit pinned graph schema selector (required with --graphify).",
+)
 @click.pass_context
 def analyze(
     ctx: click.Context,
@@ -243,6 +259,10 @@ def analyze(
     vm: bool,
     secure_ast: bool,
     scip: bool,
+    graphify: bool,
+    graphify_baseline: Path | None,
+    graphify_target: Path | None,
+    graphify_schema: str | None,
 ) -> None:
     """Analyze code changes and identify affected FastAPI endpoints."""
     from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
@@ -292,6 +312,17 @@ def analyze(
     if vm and config.analysis.route_observations.enabled:
         console.print("[red]Error:[/red] analysis.route_observations is unavailable with --vm")
         raise click.Abort()
+    if graphify:
+        if not secure_ast:
+            raise click.ClickException("--graphify requires --secure-ast")
+        if baseline_app is None:
+            raise click.ClickException("--graphify requires an explicit --baseline-app snapshot")
+        if graphify_baseline is None or graphify_target is None or graphify_schema is None:
+            raise click.ClickException(
+                "--graphify requires --graphify-baseline, --graphify-target, and --graphify-schema"
+            )
+    elif any(value is not None for value in (graphify_baseline, graphify_target, graphify_schema)):
+        raise click.ClickException("Graphify snapshot options require --graphify")
     if (
         config.analysis.route_observations.enabled
         and config.analysis.route_observations.trusted_server_origins
@@ -426,6 +457,33 @@ def analyze(
                 trusted_server_origins=route_observations.trusted_server_origins,
             )
             report.source_observations = snapshot.to_dict()
+
+        if graphify:
+            from fastapi_endpoint_detector.analyzer.graphify_report_adapter import (
+                analyze_graphify_overlay_from_inputs,
+            )
+            from fastapi_endpoint_detector.parser.diff_parser import DiffParser
+
+            assert baseline_app is not None
+            assert graphify_baseline is not None and graphify_target is not None
+            assert graphify_schema is not None
+            baseline_root = (
+                baseline_app.parent if baseline_app.is_file() else baseline_app
+            ).resolve()
+            diff_files = DiffParser.parse_file(diff)
+            overlay = analyze_graphify_overlay_from_inputs(
+                baseline_graph_path=graphify_baseline,
+                target_graph_path=graphify_target,
+                baseline_project_root=baseline_root,
+                target_project_root=mapper.target_project_root,
+                schema=graphify_schema,
+                diff_files=diff_files,
+                baseline_endpoints=list(mapper.baseline_registry),
+                target_endpoints=mapper.get_endpoints(),
+                baseline_inventory=mapper.baseline_source_inventory,
+                target_inventory=mapper.source_inventory,
+            )
+            report.graphify_overlay = overlay.model_dump(mode="json", exclude_none=True)
 
         # Format and output results
         formatted_output = formatter.format(report)

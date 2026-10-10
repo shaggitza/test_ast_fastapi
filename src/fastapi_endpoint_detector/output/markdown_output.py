@@ -132,6 +132,14 @@ class MarkdownFormatter(BaseFormatter):
                 f"{paths.summary.unresolved_pairs} unresolved pairs; "
                 "lexical and conditional only, persistence not established"
             )
+        if report.graphify_overlay is not None:
+            overlay = report.graphify_overlay
+            evidence = overlay.get("evidence")
+            evidence_count = len(evidence) if isinstance(evidence, list) else 0
+            lines.append(
+                f"- **Graphify Overlay:** {evidence_count} LOW diagnostic path(s); "
+                "offline lexical evidence only; does not change endpoint candidates"
+            )
         if report.source_observations is not None:
             lines.append(
                 f"- **Source Observations:** "
