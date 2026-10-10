@@ -451,11 +451,11 @@ def _resolve_imported_module(root: Path, current_module: str, node: ast.ImportFr
         return node.module
     module_path = Path("source", *current_module.split(".")).with_suffix(".py.txt")
     current_source = _safe_source_path(root, module_path.as_posix())
-    if current_source is None or not current_source.is_file():
-        return None
     init_path = Path("source", *current_module.split("."), "__init__.py.txt")
     init_source = _safe_source_path(root, init_path.as_posix())
     is_package = init_source is not None and init_source.is_file()
+    if not is_package and (current_source is None or not current_source.is_file()):
+        return None
     package_parts = current_module.split(".") if is_package else current_module.split(".")[:-1]
     remove = node.level - 1
     if remove >= len(package_parts):
@@ -989,12 +989,22 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
         )
         if handler is None:
             continue
+        endpoint_module_path = Path(stage.file_path)
+        if endpoint_module_path.parts[0] != "source" or not endpoint_module_path.name.endswith(
+            ".py.txt"
+        ):
+            continue
+        endpoint_parts = [*endpoint_module_path.parts[1:-1], endpoint_module_path.name[:-7]]
+        if endpoint_parts[-1] == "__init__":
+            endpoint_parts.pop()
+        endpoint_module = ".".join(endpoint_parts)
         imported_wrapper_bindings = [
             (node, alias.asname or alias.name)
             for node in endpoint_tree.body
-            if isinstance(node, ast.ImportFrom) and node.module == wrapper_module
+            if isinstance(node, ast.ImportFrom)
+            and _resolve_imported_module(root, endpoint_module, node) == wrapper_module
             for alias in node.names
-            if f"{node.module}.{alias.name}" == begin.canonical_symbol
+            if f"{wrapper_module}.{alias.name}" == begin.canonical_symbol
         ]
         if len(imported_wrapper_bindings) != 1:
             continue

@@ -6,6 +6,7 @@ import ast
 import hashlib
 import json
 import shutil
+from importlib.util import resolve_name
 from pathlib import Path
 from typing import Any
 
@@ -141,7 +142,11 @@ def _fixture_endpoint_calls(fixture: Path) -> tuple[Endpoint, tuple[ResolvedCall
         if isinstance(node, ast.AsyncFunctionDef) and node.name == "delete_traces_by_flow"
     )
     imported_symbols = {
-        alias.asname or alias.name: f"{node.module}.{alias.name}"
+        alias.asname or alias.name: (
+            f"{resolve_name('.' * node.level + node.module, 'langflow.api.v1')}.{alias.name}"
+            if node.level
+            else f"{node.module}.{alias.name}"
+        )
         for node in tree.body
         if isinstance(node, ast.ImportFrom) and node.module is not None
         for alias in node.names
@@ -1281,6 +1286,47 @@ def test_source_projection_resolves_relative_wrapper_delegate_import(tmp_path: P
     relative_delegate = copied / "source/langflow/services/transaction.py.txt"
     relative_delegate.write_bytes(delegate.read_bytes())
     assert len(_langflow_fixture_transaction_reports(copied)[2].source_projections) == 1
+
+
+@pytest.mark.parametrize(
+    "relative_module, expected", [("...services.deps", 1), (".services.deps", 0)]
+)
+def test_source_projection_resolves_endpoint_relative_imports_against_its_package(
+    tmp_path: Path, relative_module: str, expected: int
+) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    source = copied / "source/langflow/api/v1/traces.py.txt"
+    source.write_text(
+        source.read_text().replace(
+            "from langflow.services.deps import session_scope",
+            f"from {relative_module} import session_scope",
+            1,
+        )
+    )
+    assert len(_langflow_fixture_transaction_reports(copied)[2].source_projections) == expected
+
+
+def test_source_projection_report_accepts_a_file_application_root(tmp_path: Path) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    app_file = copied / "main.py"
+    app_file.write_text("# source-only application entry identity\n", encoding="utf-8")
+    audit, transaction, paths = _langflow_fixture_transaction_reports(copied)
+    assert paths.source_projections
+    report = AnalysisReport.model_validate(
+        {
+            "app_path": str(app_file),
+            "diff_source": "fixture",
+            "total_endpoints": 1,
+            "effect_contract_audit": audit,
+            "sql_transaction_report": transaction,
+            "sql_transaction_path_report": paths,
+        }
+    )
+    assert report.sql_transaction_path_report == paths
 
 
 @pytest.mark.parametrize(

@@ -36,6 +36,11 @@ from fastapi_endpoint_detector.models.sql_transaction import (
 )
 
 
+def _source_project_root(app_path: str) -> Path:
+    path = Path(app_path).resolve()
+    return path.parent if path.is_file() else path
+
+
 def _contract_hash(contract: EffectContract) -> str:
     payload = json.dumps(
         contract.model_dump(mode="json", exclude_none=True),
@@ -569,7 +574,7 @@ class AnalysisReport(BaseModel):
 
         expected_projections = {
             item.id: item.identity_payload()
-            for item in _fixture_source_projections(Path(self.app_path).resolve(), audit)
+            for item in _fixture_source_projections(_source_project_root(self.app_path), audit)
         }
         supplied_projections = {
             item.id: item.identity_payload() for item in path_report.source_projections
