@@ -1198,6 +1198,74 @@ def test_deferred_dynamic_exec_does_not_rebind_module_wrapper(
     assert len(paths.source_projections) == 1
 
 
+@pytest.mark.parametrize("branched", [False, True])
+def test_source_projection_rejects_multiple_delegated_contexts(
+    tmp_path: Path, branched: bool
+) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    source = copied / "source/langflow/services/deps.py.txt"
+    old = "    async with lfx_session_scope() as session:\n        yield session"
+    replacement = (
+        "    if flag:\n"
+        "        async with foreign_scope() as session:\n            yield session\n"
+        "    else:\n"
+        "        async with lfx_session_scope() as session:\n            yield session"
+        if branched
+        else "    async with foreign_scope() as session:\n        yield session\n" + old
+    )
+    text = source.read_text()
+    assert old in text
+    source.write_text(text.replace(old, replacement, 1))
+    assert _langflow_fixture_transaction_reports(copied)[2].source_projections == ()
+
+
+def test_source_projection_uses_imported_delegate_name(tmp_path: Path) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    wrapper = copied / "source/langflow/services/deps.py.txt"
+    wrapper.write_text(
+        wrapper.read_text().replace(
+            "from lfx.services.deps import session_scope as lfx_session_scope",
+            "from lfx.services.deps import transaction_scope as lfx_session_scope",
+            1,
+        )
+    )
+    delegate = copied / "source/lfx/services/deps.py.txt"
+    text = delegate.read_text()
+    assert "async def session_scope(" in text
+    delegate.write_text(text.replace("async def session_scope(", "async def transaction_scope(", 1))
+    assert len(_langflow_fixture_transaction_reports(copied)[2].source_projections) == 1
+
+
+def test_source_projection_covers_each_shared_handler_route() -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    effects = load_effect_contracts(fixture / "effects.yaml")
+    endpoint, sites = _fixture_endpoint_calls(fixture)
+    sibling = endpoint.model_copy(update={"path": endpoint.path + "/alias"})
+    audit = audit_effect_contracts(
+        effects,
+        source_root=fixture,
+        inventory=EndpointInventory(
+            endpoints=[endpoint, sibling], status=InventoryStatus.ESTABLISHED
+        ),
+        endpoint_call_sites=((endpoint, sites), (sibling, sites)),
+        track_transitive=False,
+        max_depth=1,
+        cache_enabled=False,
+        resolver_versions=("pinned_fixture_ast@1",),
+    )
+    transaction = build_sql_transaction_diagnostics(effects, audit)
+    paths = build_sql_transaction_path_diagnostics(fixture, audit, transaction, max_pairs=8)
+    expected_ids = {ref.id for occurrence in audit.occurrences for ref in occurrence.endpoints}
+    assert len(expected_ids) == 2
+    assert {item.endpoint_id for item in paths.source_projections} == expected_ids
+    assert len(paths.source_projections) == 2
+    assert len({item.id for item in paths.source_projections}) == 2
+
+
 @pytest.mark.parametrize(
     ("relative_path", "suffix"),
     [

@@ -783,15 +783,11 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
         if wrapper is None or len(endpoint_candidates) != 1:
             continue
         stage = endpoint_candidates[0]
-        endpoint_id = next(
-            (
-                endpoint.id
-                for endpoint in begin.endpoints
-                if any(candidate.id == endpoint.id for candidate in stage.endpoints)
-            ),
-            None,
+        endpoint_ids = sorted(
+            {endpoint.id for endpoint in begin.endpoints}
+            & {endpoint.id for endpoint in stage.endpoints}
         )
-        if endpoint_id is None:
+        if not endpoint_ids:
             continue
         endpoint_path = _safe_source_path(root, stage.file_path)
         if endpoint_path is None:
@@ -817,8 +813,15 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
             or _has_dynamic_module_binding_mutation(wrapper_tree)
         ):
             continue
-        delegated_module = None
+        delegated_symbol = None
         wrapper_yields_receiver = False
+        wrapper_contexts = [
+            node for node in _owned_nodes(wrapper_fn) if isinstance(node, ast.AsyncWith)
+        ]
+        # A projection proves only one captured delegation. Multiple contexts
+        # or branch alternatives need path reconciliation rather than last-wins.
+        if len(wrapper_contexts) != 1 or len(wrapper_contexts[0].items) != 1:
+            continue
         wrapper_scope_calls: dict[str, str] = {}
         wrapper_import_nodes: dict[str, ast.ImportFrom] = {}
         for node in _owned_nodes(wrapper_fn):
@@ -844,7 +847,7 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
                             wrapper_fn, target.func.id, allowed_import=import_node
                         ):
                             continue
-                        delegated_module = canonical.rsplit(".", 1)[0]
+                        delegated_symbol = canonical
                         target = item.context_expr
                         wrapper_yields_receiver = any(
                             isinstance(child, ast.Expr)
@@ -855,8 +858,9 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
                         ) and not _receiver_reassigned(
                             tuple(node.body), -1, len(node.body), captured
                         )
-        if not delegated_module or not wrapper_yields_receiver:
+        if not delegated_symbol or not wrapper_yields_receiver:
             continue
+        delegated_module, delegate_name = delegated_symbol.rsplit(".", 1)
         delegated = _module_snapshot(root, delegated_module)
         if delegated is None:
             continue
@@ -864,7 +868,6 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
             delegated_tree = ast.parse(delegated[1], filename=delegated[0])
         except SyntaxError:
             continue
-        delegate_name = begin.canonical_symbol.rsplit(".", 1)[-1]
         delegate_fn = next(
             (
                 node
@@ -1050,30 +1053,31 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
             "Normal or exceptional exit is conditional; runtime outcome and persistence are not "
             "established.",
         )
-        provisional = SQLTransactionSourceProjection.model_construct(
-            id="sha256:" + "0" * 64,
-            endpoint_id=endpoint_id,
-            begin_occurrence_id=begin.id,
-            unresolved_stage_occurrence_id=stage.id,
-            endpoint_file_path=stage.file_path,
-            endpoint_source_hash=endpoint_hash,
-            wrapper_file_path=wrapper[0],
-            wrapper_source_hash=wrapper_hash,
-            delegated_wrapper_file_path=delegated[0],
-            delegated_wrapper_source_hash=delegated_hash,
-            function_name=handler.name,
-            receiver_hash=receiver_hash,
-            receiver_expression=receiver,
-            uncertainty=uncertainty,
-        )
-        result.append(
-            SQLTransactionSourceProjection.model_validate(
-                {
-                    **provisional.model_dump(mode="python"),
-                    "id": _semantic_hash(provisional.identity_payload()),
-                }
+        for endpoint_id in endpoint_ids:
+            provisional = SQLTransactionSourceProjection.model_construct(
+                id="sha256:" + "0" * 64,
+                endpoint_id=endpoint_id,
+                begin_occurrence_id=begin.id,
+                unresolved_stage_occurrence_id=stage.id,
+                endpoint_file_path=stage.file_path,
+                endpoint_source_hash=endpoint_hash,
+                wrapper_file_path=wrapper[0],
+                wrapper_source_hash=wrapper_hash,
+                delegated_wrapper_file_path=delegated[0],
+                delegated_wrapper_source_hash=delegated_hash,
+                function_name=handler.name,
+                receiver_hash=receiver_hash,
+                receiver_expression=receiver,
+                uncertainty=uncertainty,
             )
-        )
+            result.append(
+                SQLTransactionSourceProjection.model_validate(
+                    {
+                        **provisional.model_dump(mode="python"),
+                        "id": _semantic_hash(provisional.identity_payload()),
+                    }
+                )
+            )
     return result
 
 
