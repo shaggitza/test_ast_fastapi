@@ -207,3 +207,66 @@ def test_module_del_getattr_restores_builtin_but_function_del_is_local(
 
     assert inventory.status == InventoryStatus.CONDITIONAL
     assert {item.handler.name for item in inventory.endpoints} == {"local_case", "selected"}
+
+
+@pytest.mark.parametrize("entry", ["bootstrap", "factory"])
+def test_selected_function_global_delete_restores_builtin_getattr(
+    tmp_path: Path, entry: str
+) -> None:
+    header = (
+        "from fastapi import FastAPI\n"
+        "def custom_getattr(*args): pass\n"
+        "getattr = custom_getattr\n"
+        "async def callback(): pass\n"
+    )
+    if entry == "bootstrap":
+        body = (
+            "app = FastAPI()\n"
+            "def initialize():\n"
+            "    global getattr\n"
+            "    del getattr\n"
+            "    getattr(app, 'add_event_handler')('startup', callback)\n"
+        )
+        options = {"bootstrap_entry": "main:initialize"}
+    else:
+        body = (
+            "def create_app():\n"
+            "    global getattr\n"
+            "    del getattr\n"
+            "    app = FastAPI()\n"
+            "    getattr(app, 'add_event_handler')('startup', callback)\n"
+            "    return app\n"
+        )
+        options = {"app_entry": "main:create_app"}
+    (tmp_path / "main.py").write_text(header + body, encoding="utf-8")
+    inventory = CustomSurfaceExtractor(
+        tmp_path, load_surface_preset("framework-v1"), **options
+    ).extract_inventory()
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert [endpoint.handler.name for endpoint in inventory.endpoints] == ["callback"]
+    assert inventory.limitations == ()
+
+
+@pytest.mark.parametrize("receiver", ["app", "unused"])
+def test_unknown_exception_override_through_alias_invalidates_only_receiver(
+    tmp_path: Path, receiver: str
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\nunused = FastAPI()\n"
+        "async def original(request, exc): pass\n"
+        "def choose(): pass\n"
+        "app.add_exception_handler(ValueError, original)\n"
+        f"register = {receiver}.add_exception_handler\n"
+        "register(ValueError, choose())\n",
+        encoding="utf-8",
+    )
+    inventory = _extract(tmp_path)
+    if receiver == "app":
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert inventory.endpoints == []
+        assert any("may override" in item.reason for item in inventory.limitations)
+    else:
+        assert inventory.status == InventoryStatus.ESTABLISHED
+        assert [endpoint.handler.name for endpoint in inventory.endpoints] == ["original"]
+        assert inventory.limitations == ()

@@ -543,6 +543,7 @@ class _FunctionScopeFrame:
     local_state: dict[str, _Binding | None]
     global_state: dict[str, _Binding | None]
     local_names: frozenset[str]
+    global_names: frozenset[str]
 
 
 @dataclass
@@ -1136,6 +1137,7 @@ class CustomSurfaceExtractor:
             local_state=state,
             global_state=self._module_states[module.name],
             local_names=frozenset(local_names),
+            global_names=frozenset(scope.globals),
         )
         self._function_scope_states.append(frame)
         try:
@@ -1655,6 +1657,7 @@ class CustomSurfaceExtractor:
                 local_state=state,
                 global_state=self._module_states[module_name],
                 local_names=frozenset(local_names),
+                global_names=frozenset(scope.globals),
             )
         )
         try:
@@ -1870,7 +1873,16 @@ class CustomSurfaceExtractor:
                         # At module scope ``del`` removes the global, so a later
                         # lookup may fall through to builtins. Function locals
                         # remain lexically local after deletion and are unbound.
-                        if self._function_scope_states:
+                        frame = (
+                            self._function_scope_states[-1] if self._function_scope_states else None
+                        )
+                        if frame is not None and name in frame.global_names:
+                            state.pop(name, None)
+                            if current_conditions:
+                                frame.global_state[name] = None
+                            else:
+                                frame.global_state.pop(name, None)
+                        elif frame is not None:
                             state[name] = None
                         else:
                             state.pop(name, None)
@@ -3274,11 +3286,7 @@ class CustomSurfaceExtractor:
             or contract.multiplicity != ContractMultiplicity.LAST_WINS
         ):
             return False
-        token = (
-            self._framework_call_token(call, evaluation, state)
-            if isinstance(call.func, ast.Attribute)
-            else None
-        )
+        token = self._framework_method_token(call, evaluation, state, module.name)
         if token is None:
             return False
         condition = EndpointDiscoveryCondition(
