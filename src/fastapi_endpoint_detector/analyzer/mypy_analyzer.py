@@ -23,11 +23,15 @@ import tempfile
 import tokenize
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from email.parser import BytesParser
+from email.policy import compat32
 from importlib.metadata import PackageNotFoundError, version
 from importlib.util import find_spec
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
-from typing import Any, ClassVar, Protocol
+from typing import Any, ClassVar, Literal, Protocol, cast
+
+from packaging.utils import canonicalize_name
 
 from fastapi_endpoint_detector.models.effect_contract import (
     CallArgumentEvidence,
@@ -116,6 +120,7 @@ class CallFrame:
     code_context: str = ""
     caller_file_path: str | None = None
     caller_line_number: int | None = None
+    caller_column_number: int | None = None
 
 
 @dataclass(frozen=True)
@@ -133,6 +138,11 @@ class SymbolReference:
         return self.start_line <= line <= self.end_line
 
 
+SourceExecutionState = Literal[
+    "lexical_reference", "possible_execution", "established_execution", "deferred_execution"
+]
+
+
 @dataclass(frozen=True)
 class SourceEvidenceSpan:
     """Exact CPython source span; columns use UTF-8 byte offsets."""
@@ -142,11 +152,17 @@ class SourceEvidenceSpan:
     start_column: int
     end_line: int
     end_column: int
-    execution_state: str
+    execution_state: SourceExecutionState
     evidence_kind: str = "lambda_body"
+    provenance: str = "mypy callable traversal"
 
     def __post_init__(self) -> None:
-        if self.execution_state not in {"executed", "deferred"}:
+        if self.execution_state not in {
+            "lexical_reference",
+            "possible_execution",
+            "established_execution",
+            "deferred_execution",
+        }:
             raise ValueError("unsupported source evidence execution state")
         if self.evidence_kind != "lambda_body":
             raise ValueError("unsupported source evidence kind")
@@ -154,6 +170,24 @@ class SourceEvidenceSpan:
             raise ValueError("source evidence span lines are invalid")
         if self.start_column < 0 or self.end_column < 0:
             raise ValueError("source evidence span columns are invalid")
+
+
+@dataclass(frozen=True)
+class AnalysisLimitation:
+    """A source-located bounded analysis path that could not be resolved."""
+
+    file_path: str
+    call_line: int
+    cap: str
+    target_count: int | None = None
+    limit: int | None = None
+    call_column: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.call_line < 1 or not self.cap:
+            raise ValueError("analysis limitation requires a source line and cap name")
+        if self.call_column is not None and self.call_column < 0:
+            raise ValueError("analysis limitation call column cannot be negative")
 
 
 @dataclass
@@ -226,6 +260,8 @@ class EndpointDependencies:
     source_root: str = ""
     project_files: set[str] | frozenset[str] = field(default_factory=set)
     analysis_incomplete: bool = False
+    build_failed: bool = False
+    analysis_limitations: list[AnalysisLimitation] = field(default_factory=list)
     unresolved_imports: tuple[tuple[str, str], ...] = ()
     _path_index: _ProjectPathIndex | None = field(default=None, repr=False, compare=False)
     _canonical_key_indexes: dict[str, dict[str, frozenset[str]]] = field(
@@ -237,6 +273,14 @@ class EndpointDependencies:
 
     def __post_init__(self) -> None:
         self._resolved_call_site_set.update(self.resolved_call_sites)
+
+    def add_analysis_limitation(self, limitation: AnalysisLimitation) -> None:
+        if limitation not in self.analysis_limitations:
+            self.analysis_limitations.append(limitation)
+            self.analysis_limitations.sort(
+                key=lambda item: (item.file_path, item.call_line, item.cap)
+            )
+        self.analysis_incomplete = True
 
     def add_reference(self, file_path: str, line: int, symbol_name: str = "") -> None:
         """Add a line reference to dependencies."""
@@ -288,31 +332,7 @@ class EndpointDependencies:
         self._canonical_key_indexes.pop("resolved_call_sites", None)
 
     def add_source_evidence_span(self, span: SourceEvidenceSpan) -> None:
-        """Record one precise source-body state, preferring invocation over deferral."""
-        if span.execution_state == "executed":
-            self.source_evidence_spans = [
-                existing
-                for existing in self.source_evidence_spans
-                if not (
-                    existing.file_path == span.file_path
-                    and existing.start_line == span.start_line
-                    and existing.start_column == span.start_column
-                    and existing.end_line == span.end_line
-                    and existing.end_column == span.end_column
-                    and existing.evidence_kind == span.evidence_kind
-                )
-            ]
-        elif any(
-            existing.file_path == span.file_path
-            and existing.start_line == span.start_line
-            and existing.start_column == span.start_column
-            and existing.end_line == span.end_line
-            and existing.end_column == span.end_column
-            and existing.evidence_kind == span.evidence_kind
-            and existing.execution_state == "executed"
-            for existing in self.source_evidence_spans
-        ):
-            return
+        """Retain distinct proof states for one precise source-body span."""
         if span not in self.source_evidence_spans:
             self.source_evidence_spans.append(span)
             self.source_evidence_spans.sort(
@@ -511,6 +531,31 @@ class _DeferredGenerator:
 
 
 @dataclass(frozen=True)
+class _PartialCallable:
+    """Exact finite functools.partial target and its bound source arguments."""
+
+    declaration: tuple[str, InvocationKind]
+    receiver: _FinitePointsTo | None
+    args: tuple[Any, ...]
+    arg_kinds: tuple[Any, ...]
+    arg_names: tuple[str | None, ...]
+    # Callable actuals are captured when functools.partial is constructed.  The
+    # AST expressions above are retained for Python's positional/keyword merge,
+    # but must never be re-evaluated in the later invocation environment.
+    bound_callables: tuple[
+        tuple[str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]], ...
+    ] = ()
+    bound_strings: tuple[tuple[str, tuple[str, ...]], ...] = ()
+
+
+@dataclass(frozen=True)
+class _CallableUnion:
+    """Bounded set of source-proven callable targets at a control-flow join."""
+
+    targets: tuple[tuple[tuple[str, InvocationKind], _FinitePointsTo | None], ...]
+
+
+@dataclass(frozen=True)
 class _ExecutorSummary:
     """Exact callback and forwarding semantics for one executor wrapper."""
 
@@ -528,7 +573,9 @@ class MypyAnalyzer:
     and extract precise file/line information for all references.
     """
 
-    CACHE_SCHEMA_VERSION = 23
+    # Schema 27 distinguishes typed execution evidence and creation-time partial
+    # callable snapshots from the incompatible schema-26 cache formats.
+    CACHE_SCHEMA_VERSION = 27
     MAX_CALL_SPAN_SOURCE_BYTES = 2_000_000
     MAX_CALL_SPAN_SOURCE_NODES = 100_000
     MAX_CALL_SPAN_SOURCE_ITEMS = 200_000
@@ -543,7 +590,7 @@ class MypyAnalyzer:
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
     MAX_POINTS_TO_EDGES = 4096
-    EXECUTION_SUMMARY_VERSION = 4
+    EXECUTION_SUMMARY_VERSION = 7
     GENERATOR_CONSUMERS: ClassVar[dict[str, tuple[int, str, bool | None]]] = {
         "starlette.responses.StreamingResponse": (0, "content", None),
     }
@@ -594,6 +641,11 @@ class MypyAnalyzer:
         self.no_site_packages = no_site_packages
         self.target_platform = target_platform
         self._endpoint_deps: dict[str, EndpointDependencies] = {}
+        self._active_endpoint_dependencies: EndpointDependencies | None = None
+        self._active_source_file = str(self.source_root)
+        self._active_source_line = 0
+        self._active_source_column: int | None = None
+        self._analysis_build_failed = False
         self._mypy_available = self._check_mypy_available()
         self._cache_file: Path | None = None
         self._line_progress_callback: LineProgressCallback | None = None
@@ -621,6 +673,11 @@ class MypyAnalyzer:
         self._source_record_snapshots: dict[str, bytes | None] = {}
         self._source_record_snapshot_bytes = 0
         self._last_source_records: list[tuple[Path, str, str]] = []
+        self._verified_mypy_source_hashes: dict[str, str] = {}
+        self._verified_package_source_hashes: dict[str, str] = {}
+        self._verified_package_versions: dict[str, str] = {}
+        self._local_module_census_depth = 0
+        self._local_module_census: tuple[tuple[str, bool, str, bool], ...] | None = None
         self._analysis_source_snapshots: dict[str, bytes | None] = {}
         self._lambda_source_ast_cache: dict[str, ast.Module | None] = {}
         self._lambda_source_index_cache: dict[
@@ -631,12 +688,30 @@ class MypyAnalyzer:
         self._finite_global_in_progress: set[str] = set()
         self._exact_project_identity_cache: dict[str, tuple[str, str] | None] = {}
         self._built_source_fingerprint: str | None = None
+        self._typed_environment_fingerprint: str | None = None
+        self._cached_typed_environment_fingerprint: str | None = None
         self._expected_source_fingerprint: str | None = None
         self._fullname_resolution_cache: dict[str, tuple[str, str] | None] = {}
         self._canonical_project_fullname_cache: dict[str, str | None] = {}
         self._function_lookup_cache: dict[
             tuple[int, str, str | None, int | None], tuple[Any, str] | None
         ] = {}
+
+    def _record_analysis_limitation(
+        self, cap: str, *, target_count: int | None = None, limit: int | None = None
+    ) -> None:
+        deps = self._active_endpoint_dependencies
+        if deps is not None and self._active_source_line > 0:
+            deps.add_analysis_limitation(
+                AnalysisLimitation(
+                    self._active_source_file,
+                    self._active_source_line,
+                    cap,
+                    target_count,
+                    limit,
+                    self._active_source_column,
+                )
+            )
 
     @property
     def cache_path(self) -> Path:
@@ -649,6 +724,21 @@ class MypyAnalyzer:
     def resolver_version(self) -> str:
         """Version of the typed resolver used for call-site provenance."""
         return self._resolver_version
+
+    @property
+    def verified_mypy_source_hashes(self) -> dict[str, str]:
+        """Hashes of source bytes that matched mypy's parsed source digests."""
+        return dict(self._verified_mypy_source_hashes)
+
+    @property
+    def verified_package_versions(self) -> dict[str, str]:
+        """Versions from distribution metadata adjacent to parsed typed modules."""
+        return dict(self._verified_package_versions)
+
+    @property
+    def verified_package_source_hashes(self) -> dict[str, str]:
+        """Hashes of adjacent distribution metadata bytes read by the analyzer."""
+        return dict(self._verified_package_source_hashes)
 
     def set_cache_path(self, path: Path) -> None:
         """Set a custom cache file path."""
@@ -803,6 +893,21 @@ class MypyAnalyzer:
         from mypy.modulefinder import BuildSource
         from mypy.options import Options
 
+        blocked_local_modules = self._unselected_local_modules()
+        if self.source_inventory is not None:
+            selected_modules = {record.module for record in self.source_inventory.files}
+            policy_modules = {blocked[0] for blocked in blocked_local_modules}
+            inventory_collisions = {
+                module_name
+                for module_name, _paths in getattr(self.source_inventory, "module_collisions", ())
+            }
+            ambiguous_modules = sorted(inventory_collisions | (selected_modules & policy_modules))
+            if ambiguous_modules:
+                raise MypyAnalyzerError(
+                    "ambiguous local module identities in source inventory: "
+                    + ", ".join(ambiguous_modules)
+                )
+
         # Collect all Python files using a repository-independent import root.
         sources: list[BuildSource] = []
         source_records = (
@@ -825,6 +930,20 @@ class MypyAnalyzer:
             # mypy add that interpreter's site-packages despite the flag.
             options.python_executable = None
         options.follow_imports = self._effective_follow_imports()
+        blocked_local_paths: set[str] | None = None
+        if self.source_inventory is not None:
+            blocked_local_paths = set()
+            for module_name, covers_children, path, is_stub in blocked_local_modules:
+                blocked_local_paths.add(path)
+                # Preserve normal typed imports for installed dependencies,
+                # while preventing mypy from traversing local files rejected
+                # by inventory include, exclude, or depth policy.
+                module_options: dict[str, object] = {"follow_imports": "skip"}
+                if is_stub:
+                    module_options["follow_imports_for_stubs"] = True
+                options.per_module_options[module_name] = module_options
+                if covers_children:
+                    options.per_module_options[f"{module_name}.*"] = module_options.copy()
         options.mypy_path = [str(self.module_root)]
         options.namespace_packages = True
         options.explicit_package_bases = True
@@ -899,7 +1018,37 @@ class MypyAnalyzer:
                 # mypy otherwise adds the process cwd even with no-site-packages.
                 alt_lib_path=str(self.module_root) if self.no_site_packages else None,
             )
+            self._verified_mypy_source_hashes = {}
+            self._verified_package_source_hashes = {}
+            self._verified_package_versions = {}
+            conflicting_package_versions: set[str] = set()
+            package_metadata_roots: dict[str, Path] = {}
+            conflicting_package_metadata_roots: set[str] = set()
+            conflicting_mypy_source_paths: set[str] = set()
+            conflicting_package_source_paths: set[str] = set()
             analyzed_source_hashes: dict[str, str] = {}
+            scanned_metadata_roots: set[Path] = set()
+            authenticated_metadata_hashes: dict[str, str] = {}
+            parsed_top_levels_by_root: dict[Path, set[str]] = {}
+            parsed_roots_by_top_level: dict[str, set[Path]] = {}
+
+            # Metadata can authenticate a parsed package only when its
+            # installation root also supplied that package's declarations.
+            # Collect roots before scanning metadata because module traversal
+            # order is not an installation boundary.
+            for module_name, state in self._build_result.graph.items():
+                if not state.path:
+                    continue
+                source_path = Path(state.path).resolve()
+                if source_path.suffix not in {".py", ".pyi"}:
+                    continue
+                package_root = source_path.parent
+                parts = module_name.split(".")
+                while package_root.name in parts:
+                    package_root = package_root.parent
+                top_level = parts[0]
+                parsed_top_levels_by_root.setdefault(package_root, set()).add(top_level)
+                parsed_roots_by_top_level.setdefault(top_level, set()).add(package_root)
 
             # Store the types map
             self._types_map = self._build_result.types
@@ -913,15 +1062,206 @@ class MypyAnalyzer:
                 else None
             )
             for module_name, state in self._build_result.graph.items():
+                state_path: str | None = None
                 if state.path:
                     state_path = str(Path(state.path).resolve())
                     source_hash = getattr(state, "source_hash", None)
                     if isinstance(source_hash, str):
                         analyzed_source_hashes[state_path] = source_hash
+                        source_file = Path(state_path)
+                        try:
+                            if source_file.is_file() and source_file.suffix in {".py", ".pyi"}:
+                                vendor_bytes: bytes | None = source_file.read_bytes()
+                            else:
+                                vendor_bytes = None
+                        except OSError:
+                            # The module remains useful for type resolution, but
+                            # unreadable bytes cannot authenticate package evidence.
+                            vendor_bytes = None
+                        if vendor_bytes is not None:
+                            parts = module_name.split(".")
+                            package_root = source_file.parent
+                            while package_root.name in parts:
+                                package_root = package_root.parent
+                            try:
+                                relative_source = source_file.relative_to(package_root).as_posix()
+                            except ValueError:
+                                relative_source = ""
+                            if (
+                                relative_source
+                                and hashlib.sha1(vendor_bytes).hexdigest() == source_hash
+                            ):
+                                digest = "sha256:" + hashlib.sha256(vendor_bytes).hexdigest()
+                                previous_digest = self._verified_mypy_source_hashes.get(
+                                    relative_source
+                                )
+                                if previous_digest is not None and previous_digest != digest:
+                                    conflicting_mypy_source_paths.add(relative_source)
+                                    self._verified_mypy_source_hashes.pop(relative_source, None)
+                                elif relative_source not in conflicting_mypy_source_paths:
+                                    self._verified_mypy_source_hashes[relative_source] = digest
+                            if relative_source and package_root not in scanned_metadata_roots:
+                                scanned_metadata_roots.add(package_root)
+                                metadata_candidates = sorted(
+                                    package_root.glob("*.dist-info/METADATA")
+                                )
+                                for metadata_path in metadata_candidates:
+                                    try:
+                                        metadata_bytes = metadata_path.read_bytes()
+                                    except OSError:
+                                        # Missing evidence is deliberately absent
+                                        # from the verified maps, so package pins
+                                        # fail closed in the contract auditor.
+                                        continue
+                                    authenticated_metadata_hashes[str(metadata_path.resolve())] = (
+                                        hashlib.sha256(metadata_bytes).hexdigest()
+                                    )
+                                    metadata = BytesParser(policy=compat32).parsebytes(
+                                        metadata_bytes
+                                    )
+                                    metadata_distribution = canonicalize_name(
+                                        str(metadata.get("Name", ""))
+                                    )
+                                    parsed_top_levels = parsed_top_levels_by_root.get(
+                                        package_root, set()
+                                    )
+                                    # top_level.txt is the distribution's
+                                    # installation-level declaration for import
+                                    # names that differ from the distribution
+                                    # name (for example bs4/beautifulsoup4).
+                                    top_level_path = metadata_path.parent / "top_level.txt"
+                                    try:
+                                        top_level_bytes = top_level_path.read_bytes()
+                                        authenticated_metadata_hashes[
+                                            str(top_level_path.resolve())
+                                        ] = hashlib.sha256(top_level_bytes).hexdigest()
+                                        declared_top_levels = {
+                                            line.strip().partition(".")[0]
+                                            for line in top_level_bytes.decode("utf-8").splitlines()
+                                            if line.strip()
+                                        }
+                                    except OSError:
+                                        declared_top_levels = set()
+                                    belongs_to_parsed_root = bool(
+                                        parsed_top_levels
+                                        & (
+                                            declared_top_levels
+                                            | {metadata_distribution.replace("-", "_")}
+                                        )
+                                    )
+                                    conventional_import = metadata_distribution.replace("-", "_")
+                                    conventional_roots = parsed_roots_by_top_level.get(
+                                        conventional_import, set()
+                                    )
+                                    # A distribution's conventional import name
+                                    # takes precedence over a conflicting alias
+                                    # hint. For example, another package's
+                                    # top_level.txt cannot bind Motor metadata
+                                    # to a root where pymongo was parsed when
+                                    # Motor's declarations resolved elsewhere.
+                                    if conventional_roots and (
+                                        len(conventional_roots) != 1
+                                        or package_root not in conventional_roots
+                                    ):
+                                        belongs_to_parsed_root = False
+                                    # Aliases are usable only when every parsed
+                                    # declaration carrying that import name came
+                                    # from this same installation.
+                                    if any(
+                                        len(parsed_roots_by_top_level.get(alias, set())) != 1
+                                        or package_root
+                                        not in parsed_roots_by_top_level.get(alias, set())
+                                        for alias in declared_top_levels
+                                    ):
+                                        belongs_to_parsed_root = False
+                                    # Distribution and import names are not
+                                    # interchangeable. Record adjacent metadata
+                                    # under its own authenticated path/name;
+                                    # contracts bind the exact metadata bytes.
+                                    if metadata_distribution and belongs_to_parsed_root:
+                                        metadata_relative = metadata_path.relative_to(
+                                            package_root
+                                        ).as_posix()
+                                        previous_root = package_metadata_roots.get(
+                                            metadata_distribution
+                                        )
+                                        if (
+                                            previous_root is not None
+                                            and previous_root != package_root
+                                        ):
+                                            conflicting_package_metadata_roots.add(
+                                                metadata_distribution
+                                            )
+                                            conflicting_package_versions.add(metadata_distribution)
+                                            self._verified_package_versions.pop(
+                                                metadata_distribution, None
+                                            )
+                                            package_metadata_roots.pop(metadata_distribution, None)
+                                            conflicting_package_source_paths.add(metadata_relative)
+                                            self._verified_package_source_hashes.pop(
+                                                metadata_relative, None
+                                            )
+                                            continue_metadata = False
+                                        else:
+                                            package_metadata_roots[metadata_distribution] = (
+                                                package_root
+                                            )
+                                            continue_metadata = metadata_distribution not in (
+                                                conflicting_package_metadata_roots
+                                            )
+                                        if not continue_metadata:
+                                            continue
+                                        metadata_digest = (
+                                            "sha256:" + hashlib.sha256(metadata_bytes).hexdigest()
+                                        )
+                                        previous_metadata_digest = (
+                                            self._verified_package_source_hashes.get(
+                                                metadata_relative
+                                            )
+                                        )
+                                        if (
+                                            previous_metadata_digest is not None
+                                            and previous_metadata_digest != metadata_digest
+                                        ):
+                                            conflicting_package_source_paths.add(metadata_relative)
+                                            self._verified_package_source_hashes.pop(
+                                                metadata_relative, None
+                                            )
+                                        elif (
+                                            metadata_relative
+                                            not in conflicting_package_source_paths
+                                        ):
+                                            self._verified_package_source_hashes[
+                                                metadata_relative
+                                            ] = metadata_digest
+                                        version_text = metadata.get("Version")
+                                        if (
+                                            isinstance(version_text, str)
+                                            and metadata_distribution
+                                            not in conflicting_package_versions
+                                        ):
+                                            previous = self._verified_package_versions.get(
+                                                metadata_distribution
+                                            )
+                                            if previous is not None and previous != version_text:
+                                                conflicting_package_versions.add(
+                                                    metadata_distribution
+                                                )
+                                                self._verified_package_versions.pop(
+                                                    metadata_distribution, None
+                                                )
+                                            else:
+                                                self._verified_package_versions[
+                                                    metadata_distribution
+                                                ] = version_text
                     if inventory_paths is None or state_path in inventory_paths:
                         self._module_to_path[module_name] = state_path
                 tree = state.tree
-                if tree is not None:
+                if tree is not None and (
+                    blocked_local_paths is None
+                    or state_path is None
+                    or state_path not in blocked_local_paths
+                ):
                     self._trees[module_name] = tree
 
             # State.source_hash is mypy's digest of the exact text it parsed.
@@ -959,6 +1299,10 @@ class MypyAnalyzer:
                 path: tuple(sorted(module_names)) for path, module_names in modules_by_path.items()
             }
             self._shared_path_index = None
+            self._typed_environment_fingerprint = self._fingerprint_typed_environment(
+                authenticated_metadata_hashes=authenticated_metadata_hashes,
+                authenticated_metadata_roots=scanned_metadata_roots,
+            )
             self._built_source_fingerprint = self._expected_source_fingerprint
 
         finally:
@@ -982,6 +1326,104 @@ class MypyAnalyzer:
         }:
             return value
         raise MypyAnalyzerError(f"unsupported source inventory follow_imports policy: {value!r}")
+
+    def _begin_analysis_cycle(self) -> None:
+        """Discover local exclusions once before a bulk-analysis snapshot."""
+        if self._local_module_census_depth == 0:
+            self._local_module_census = self._discover_unselected_local_modules()
+            self._analysis_build_failed = False
+        self._local_module_census_depth += 1
+
+    def _end_analysis_cycle(self) -> None:
+        """Release the census so the next independent analysis sees new files."""
+        self._local_module_census_depth -= 1
+        if self._local_module_census_depth == 0:
+            self._local_module_census = None
+
+    def _unselected_local_modules(self) -> tuple[tuple[str, bool, str, bool], ...]:
+        """Share a census within a bulk snapshot; otherwise discover afresh."""
+        if self._local_module_census_depth:
+            assert self._local_module_census is not None
+            return self._local_module_census
+        return self._discover_unselected_local_modules()
+
+    def _discover_unselected_local_modules(self) -> tuple[tuple[str, bool, str, bool], ...]:
+        """Return local module identities outside the canonical inventory.
+
+        Ordinary modules block their submodule namespace. Package
+        initializers are exact-only so an unselected initializer cannot
+        suppress an inventory-selected child. Rejected symlinks are mapped
+        from their lexical paths without reading their targets.
+        """
+        if self.source_inventory is None:
+            return ()
+        selected_paths = {
+            str(Path(record.path).resolve()) for record in self.source_inventory.files
+        }
+        modules: dict[str, tuple[bool, set[str], bool]] = {}
+        paths = sorted(
+            (
+                item
+                for item in self.source_root.rglob("*")
+                if item.is_symlink() or item.suffix in {".py", ".pyi"}
+            ),
+            key=str,
+        )
+        for path in paths:
+            if path.suffix not in {".py", ".pyi"}:
+                continue
+            try:
+                relative = path.relative_to(self.source_root)
+                current = self.source_root
+                for part in relative.parts:
+                    current = current / part
+                    if current.is_symlink():
+                        raise ValueError("symlink source")
+                canonical = str(path.resolve(strict=True))
+                Path(canonical).relative_to(self.source_root)
+                if canonical in selected_paths:
+                    continue
+                module = self._module_name_from_path(Path(canonical), self.module_root)
+            except (OSError, ValueError):
+                continue
+            covers_children = path.stem != "__init__"
+            previous = modules.get(module)
+            modules[module] = (
+                covers_children or (previous[0] if previous else False),
+                ({canonical} | previous[1]) if previous else {canonical},
+                path.suffix == ".pyi" or (previous[2] if previous else False),
+            )
+
+        # pathlib does not recurse through directory symlinks here; enumerate
+        # the links themselves and derive module IDs from their in-root names.
+        for path in paths:
+            if not path.is_symlink():
+                continue
+            try:
+                if path.is_dir():
+                    covers_children = True
+                    has_stubs = True
+                elif path.suffix in {".py", ".pyi"}:
+                    covers_children = path.stem != "__init__"
+                    has_stubs = path.suffix == ".pyi"
+                else:
+                    continue
+                module = self._module_name_from_path(path, self.module_root)
+            except (OSError, ValueError):
+                continue
+            previous = modules.get(module)
+            # Keep the link path lexical: resolving it here could mark a
+            # selected target file as blocked through a second import name.
+            modules[module] = (
+                covers_children or (previous[0] if previous else False),
+                ({str(path)} | previous[1]) if previous else {str(path)},
+                has_stubs or (previous[2] if previous else False),
+            )
+        return tuple(
+            (module, covers_children, path, has_stubs)
+            for module, (covers_children, paths, has_stubs) in sorted(modules.items())
+            for path in sorted(paths)
+        )
 
     def _reset_build_state(
         self,
@@ -1264,13 +1706,31 @@ class MypyAnalyzer:
         if len(lambdas) != 1:
             return None
         body = lambdas[0].body
+        public_state = cast(
+            "SourceExecutionState",
+            {
+                "executed": "established_execution",
+                "deferred": "deferred_execution",
+                "possible": "possible_execution",
+                "lexical": "lexical_reference",
+            }.get(execution_state, "possible_execution"),
+        )
         return SourceEvidenceSpan(
             file_path=canonical,
             start_line=body.lineno,
             start_column=body.col_offset,
             end_line=body.end_lineno or body.lineno,
             end_column=body.end_col_offset or body.col_offset,
-            execution_state=execution_state,
+            execution_state=public_state,
+            provenance=(
+                "exact lambda body mapped from retained source; "
+                + {
+                    "lexical_reference": "lambda reference observed without body execution proof",
+                    "possible_execution": "invocation occurs on a bounded conditional or loop path",
+                    "established_execution": "invocation recorded by bounded callable traversal",
+                    "deferred_execution": "callable body is deferred pending invocation",
+                }[public_state]
+            ),
         )
 
     def _lambda_source_index(
@@ -1895,10 +2355,12 @@ class MypyAnalyzer:
 
     def analyze_endpoint(self, endpoint: Endpoint) -> EndpointDependencies:
         """Analyze a single endpoint using mypy's typed AST."""
+        if self._local_module_census_depth == 0:
+            self._analysis_build_failed = False
         try:
             self._ensure_mypy_built()
         except MypyAnalyzerError:
-            pass
+            self._analysis_build_failed = True
         path_index = self._project_path_index()
         deps = EndpointDependencies(
             endpoint_id=endpoint.identifier,
@@ -1907,9 +2369,13 @@ class MypyAnalyzer:
             source_root=str(self.source_root),
             project_files=path_index.project_files,
             analysis_incomplete=bool(
-                self.source_inventory is not None
-                and getattr(self.source_inventory, "unresolved_imports", ())
+                self._analysis_build_failed
+                or (
+                    self.source_inventory is not None
+                    and getattr(self.source_inventory, "unresolved_imports", ())
+                )
             ),
+            build_failed=self._analysis_build_failed,
             unresolved_imports=tuple(
                 tuple(item)
                 for item in (
@@ -1920,9 +2386,11 @@ class MypyAnalyzer:
             ),
             _path_index=path_index,
         )
+        self._active_endpoint_dependencies = deps
 
         handler = endpoint.handler
         if not handler.file_path or not self._trees:
+            self._endpoint_deps[self._endpoint_key(endpoint)] = deps
             return deps
 
         # Find the module containing the handler through the build-time reverse index.
@@ -2052,6 +2520,22 @@ class MypyAnalyzer:
                     self._import_map_for_tree(dependency_tree, dependency_module),
                     depth=dependency_depth,
                 )
+            elif dependency_module in self._project_modules:
+                call_site = next(
+                    (
+                        site
+                        for site in deps.resolved_call_sites
+                        if site.canonical_symbol == dependency_fullname
+                        and site.file_path == handler_path
+                    ),
+                    None,
+                )
+                self._active_source_file = handler_path
+                self._active_source_line = (
+                    call_site.line if call_site is not None else handler.line_number
+                )
+                self._active_source_column = call_site.column if call_site is not None else None
+                self._record_analysis_limitation("MAX_DEPTH", limit=self.max_depth)
 
         trace_roots: list[Any]
         if callback_range == CallbackRangeMode.FULL:
@@ -2666,28 +3150,31 @@ class MypyAnalyzer:
         member = info.get(member_name) if info is not None else None
         return self._callable_declaration(member.node) if member is not None else None
 
-    @classmethod
     def _join_finite_values(
-        cls, left: _FinitePointsTo | None, right: _FinitePointsTo | None
+        self, left: _FinitePointsTo | None, right: _FinitePointsTo | None
     ) -> _FinitePointsTo | None:
         """Join only complete finite values; unknown on either path fails closed."""
         if left is None or right is None:
             return None
         types = tuple(sorted(set(left.types) | set(right.types)))
-        if not types or len(types) > cls.MAX_POINTS_TO_TARGETS:
+        if len(types) > self.MAX_POINTS_TO_TARGETS:
+            self._record_analysis_limitation(
+                "MAX_POINTS_TO_TARGETS", target_count=len(types), limit=self.MAX_POINTS_TO_TARGETS
+            )
+            return None
+        if not types:
             return None
         left_fields = dict(left.fields)
         right_fields = dict(right.fields)
         fields: list[tuple[str, _FinitePointsTo]] = []
         for name in sorted(left_fields.keys() & right_fields.keys()):
-            value = cls._join_finite_values(left_fields[name], right_fields[name])
+            value = self._join_finite_values(left_fields[name], right_fields[name])
             if value is not None:
                 fields.append((name, value))
         return _FinitePointsTo(types, tuple(fields))
 
-    @classmethod
     def _join_finite_environments(
-        cls,
+        self,
         environments: list[dict[str, _FinitePointsTo]],
     ) -> dict[str, _FinitePointsTo]:
         if not environments:
@@ -2699,10 +3186,38 @@ class MypyAnalyzer:
         for name in sorted(common):
             value: _FinitePointsTo | None = environments[0][name]
             for environment in environments[1:]:
-                value = cls._join_finite_values(value, environment[name])
+                value = self._join_finite_values(value, environment[name])
             if value is not None:
                 result[name] = value
         return result
+
+    def _join_callable_environments(self, environments: list[dict[str, Any]]) -> dict[str, Any]:
+        """Keep callable targets assigned on every path as a bounded finite union."""
+        if not environments:
+            return {}
+        common = set(environments[0])
+        for environment in environments[1:]:
+            common &= environment.keys()
+        joined: dict[str, Any] = {}
+        for name in sorted(common):
+            targets: list[Any] = []
+            for environment in environments:
+                value = environment[name]
+                candidates = value.targets if isinstance(value, _CallableUnion) else (value,)
+                for candidate in candidates:
+                    if candidate not in targets:
+                        targets.append(candidate)
+            if len(targets) == 1:
+                joined[name] = targets[0]
+            elif targets and len(targets) <= self.MAX_POINTS_TO_TARGETS:
+                joined[name] = _CallableUnion(tuple(targets))
+            elif len(targets) > self.MAX_POINTS_TO_TARGETS:
+                self._record_analysis_limitation(
+                    "MAX_POINTS_TO_TARGETS",
+                    target_count=len(targets),
+                    limit=self.MAX_POINTS_TO_TARGETS,
+                )
+        return joined
 
     def _exact_project_identity(self, fullname: str) -> tuple[str, str] | None:
         """Split a canonical fullname at the longest exact built module prefix."""
@@ -3195,6 +3710,29 @@ class MypyAnalyzer:
         return None
 
     @staticmethod
+    def _finite_string_condition(
+        expression: Any,
+        environment: dict[str, tuple[str, ...]],
+    ) -> bool | None:
+        """Resolve exact equality tests over bounded string arguments."""
+        from mypy.nodes import ComparisonExpr
+
+        if not isinstance(expression, ComparisonExpr) or len(expression.operators) != 1:
+            return None
+        operator = expression.operators[0]
+        if operator not in {"==", "!="}:
+            return None
+        left = MypyAnalyzer._finite_string_values(expression.operands[0], environment)
+        right = MypyAnalyzer._finite_string_values(expression.operands[1], environment)
+        if left is None or right is None:
+            return None
+        outcomes = {a == b for a in left for b in right}
+        if len(outcomes) != 1:
+            return None
+        equal = next(iter(outcomes))
+        return equal if operator == "==" else not equal
+
+    @staticmethod
     def _returned_nested_function(parent: Any, nested: Any) -> bool:
         """Recognize closures returned by any branch of their defining callable."""
         from mypy.nodes import (
@@ -3555,6 +4093,12 @@ class MypyAnalyzer:
     ) -> tuple[str, InvocationKind] | None:
         """Dispatch only when every finite concrete class selects one declaration."""
         if not receiver.types or len(receiver.types) > self.MAX_POINTS_TO_TARGETS:
+            if len(receiver.types) > self.MAX_POINTS_TO_TARGETS:
+                self._record_analysis_limitation(
+                    "MAX_POINTS_TO_TARGETS",
+                    target_count=len(receiver.types),
+                    limit=self.MAX_POINTS_TO_TARGETS,
+                )
             return None
         declarations: set[tuple[str, InvocationKind]] = set()
         for fullname in receiver.types:
@@ -3597,9 +4141,46 @@ class MypyAnalyzer:
 
     @staticmethod
     def _valid_builtin_generator_consumer(call: Any, fullname: str) -> bool:
-        """Accept only eager builtin iterator consumers with exact call shapes."""
+        """Recognize exact eager consumer shapes from Python's documented signatures."""
         from mypy.nodes import ARG_NAMED, ARG_POS
 
+        arguments = list(zip(call.arg_kinds, call.arg_names, strict=True))
+        if any(
+            kind not in {ARG_POS, ARG_NAMED}
+            or (kind == ARG_POS and name is not None)
+            or (kind == ARG_NAMED and name is None)
+            for kind, name in arguments
+        ):
+            return False
+        named = [name for kind, name in arguments if kind == ARG_NAMED]
+        if len(named) != len(set(named)):
+            return False
+        positional = len([kind for kind, _name in arguments if kind == ARG_POS])
+        first_is_positional = bool(arguments) and arguments[0] == (ARG_POS, None)
+        if fullname == "collections.deque":
+            return (
+                positional <= 2
+                and set(named) <= {"iterable", "maxlen"}
+                and not (positional >= 1 and "iterable" in named)
+                and not (positional >= 2 and "maxlen" in named)
+                and (first_is_positional or "iterable" in named)
+            )
+        if not first_is_positional:
+            return False
+        if fullname == "builtins.dict":
+            # Dictionary keywords are entries, never the iterable argument.
+            return positional == 1
+        if fullname == "builtins.sum":
+            return (
+                positional in {1, 2}
+                and set(named) <= {"start"}
+                and not (positional == 2 and "start" in named)
+            )
+        if fullname in {"builtins.min", "builtins.max"}:
+            # The multi-argument form compares arguments without consuming them.
+            return positional == 1 and set(named) <= {"key", "default"}
+        if fullname == "builtins.sorted":
+            return positional == 1 and set(named) <= {"key", "reverse"}
         counts = {
             "builtins.all": {1},
             "builtins.any": {1},
@@ -3607,26 +4188,10 @@ class MypyAnalyzer:
             "builtins.set": {1},
             "builtins.frozenset": {1},
             "builtins.tuple": {1},
-            "builtins.sum": {1, 2},
-            "builtins.min": {1},
-            "builtins.max": {1},
             "builtins.next": {1, 2},
             "builtins.anext": {1, 2},
         }
-        if fullname == "builtins.sorted":
-            if not call.args or call.arg_kinds[0] != ARG_POS or call.arg_names[0] is not None:
-                return False
-            if sum(kind == ARG_POS for kind in call.arg_kinds) != 1:
-                return False
-            return all(
-                (kind == ARG_POS and name is None)
-                or (kind == ARG_NAMED and name in {"key", "reverse"})
-                for kind, name in zip(call.arg_kinds[1:], call.arg_names[1:], strict=True)
-            )
-        return len(call.args) in counts.get(fullname, set()) and all(
-            kind == ARG_POS and name is None
-            for kind, name in zip(call.arg_kinds, call.arg_names, strict=True)
-        )
+        return positional in counts.get(fullname, set()) and not named
 
     def _callback_binding(
         self,
@@ -4411,7 +4976,25 @@ class MypyAnalyzer:
                 arguments=self._call_argument_evidence(call),
             )
 
-    def _trace_references(
+    def _trace_references(self, *args: Any, **kwargs: Any) -> None:
+        """Keep source and endpoint context scoped across recursive traces."""
+        saved = (
+            self._active_endpoint_dependencies,
+            self._active_source_file,
+            self._active_source_line,
+            self._active_source_column,
+        )
+        try:
+            self._trace_references_impl(*args, **kwargs)
+        finally:
+            (
+                self._active_endpoint_dependencies,
+                self._active_source_file,
+                self._active_source_line,
+                self._active_source_column,
+            ) = saved
+
+    def _trace_references_impl(
         self,
         node: Any,
         deps: EndpointDependencies,
@@ -4462,12 +5045,16 @@ class MypyAnalyzer:
             finite_edge_budget = [0]
 
         from mypy.nodes import (
+            ARG_NAMED,
+            ARG_OPT,
+            ARG_POS,
             ARG_STAR,
             ARG_STAR2,
             AssertStmt,
             AssignmentStmt,
             AwaitExpr,
             Block,
+            BreakStmt,
             CallExpr,
             ClassDef,
             ComparisonExpr,
@@ -4523,13 +5110,17 @@ class MypyAnalyzer:
         callable_environment: dict[
             str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]
         ] = dict(initial_callable_environment or {})
+        partial_environment: dict[str, _PartialCallable] = {}
         lambda_environment: dict[str, Any] = {}
         lambda_execution_states: dict[int, str] = {}
+        possible_execution_depth = [0]
 
         def record_lambda_execution(expression: Any, state: str) -> None:
             """Attach exact source-body state when its AST identity is unique."""
             if not isinstance(expression, LambdaExpr):
                 return
+            if state == "executed" and possible_execution_depth[0]:
+                state = "possible"
             lambda_execution_states[id(expression)] = state
             span = self._lambda_body_source_span(
                 function_node,
@@ -4539,11 +5130,18 @@ class MypyAnalyzer:
             )
             if span is not None:
                 deps.add_source_evidence_span(span)
+                if state in {"deferred", "possible"}:
+                    lexical = self._lambda_body_source_span(
+                        function_node, expression, current_file, "lexical"
+                    )
+                    if lexical is not None:
+                        deps.add_source_evidence_span(lexical)
 
         def resolve_and_trace(
             fullname: str,
             call_line: int,
             *,
+            call_column: int | None = None,
             low_confidence_edge: bool = False,
             target_receiver: _FinitePointsTo | None = None,
             target_environment: dict[str, _FinitePointsTo] | None = None,
@@ -4555,11 +5153,21 @@ class MypyAnalyzer:
             edge_kind: str | None = None,
         ) -> None:
             """Resolve a fullname and preserve LOW provenance through descendants."""
+            self._active_source_file = current_file
+            self._active_source_line = call_line
+            self._active_source_column = call_column
             target_depth = depth + 1
-            if target_depth > self.max_depth:
+            # External and unresolved symbols do not consume project traversal depth.
+            result = self._resolve_fullname_to_file(fullname)
+            if result is None or result[1] not in self._project_modules:
                 return
+            if target_depth >= self.max_depth:
+                self._record_analysis_limitation("MAX_DEPTH", limit=self.max_depth)
             if low_confidence_edge:
                 if finite_edge_budget[0] >= self.MAX_POINTS_TO_EDGES:
+                    self._record_analysis_limitation(
+                        "MAX_POINTS_TO_EDGES", limit=self.MAX_POINTS_TO_EDGES
+                    )
                     return
                 finite_edge_budget[0] += 1
             target_low_confidence = low_confidence_path or low_confidence_edge
@@ -4637,6 +5245,7 @@ class MypyAnalyzer:
                     code_context=f"Execution summary: {edge_kind}" if edge_kind else "",
                     caller_file_path=current_file,
                     caller_line_number=call_line,
+                    caller_column_number=call_column,
                 )
                 new_stack = [*call_stack, new_frame]
                 deps.add_call_stack(target_path, new_stack)
@@ -4682,6 +5291,7 @@ class MypyAnalyzer:
                             fullname,
                             caller_file_path=current_file,
                             caller_line_number=call_line,
+                            caller_column_number=call_column,
                         ),
                     ]
                     deps.add_call_stack(target_path, class_stack)
@@ -4803,6 +5413,7 @@ class MypyAnalyzer:
                                 lambda_name,
                                 caller_file_path=current_file,
                                 caller_line_number=call.line,
+                                caller_column_number=call.column,
                             ),
                         ]
                         deps.add_symbol_reference(
@@ -4834,84 +5445,214 @@ class MypyAnalyzer:
                     string_environment = original_strings
                     traced = True
 
-                callable_alias = callable_environment.get(callee.name)
-                if callable_alias is not None:
-                    declaration, bound_receiver = callable_alias
-                    alias_fullname, alias_invocation = declaration
-                    if (
-                        call_site is not None
-                        and call_site.status != CallResolutionStatus.EXACT
-                        and alias_invocation == InvocationKind.FUNCTION
-                    ):
-                        deps.add_resolved_call_site(
-                            call_site.model_copy(
-                                update={
-                                    "canonical_symbol": alias_fullname,
-                                    "invocation": alias_invocation,
-                                    "status": CallResolutionStatus.EXACT,
-                                    "reason_code": None,
-                                }
-                            )
-                        )
-                    target_strings = None
-                    resolved_function = self._function_node_for_fullname(alias_fullname)
-                    if resolved_function is not None:
-                        target_strings = self._bind_finite_string_arguments(
-                            resolved_function[0],
-                            call,
-                            string_environment,
-                            skip_implicit_receiver=(
-                                alias_invocation == InvocationKind.INSTANCE_METHOD
-                            ),
-                        )
-                    target_callables = (
-                        self._bind_callable_arguments(
-                            resolved_function[0],
-                            call,
-                            callable_environment,
-                            flow_environment,
-                            import_map,
-                            (),
-                            finite_budget,
-                            skip_implicit_receiver=(
-                                alias_invocation == InvocationKind.INSTANCE_METHOD
-                            ),
-                        )
-                        if resolved_function is not None
+                partial_alias = partial_environment.get(callee.name)
+                callable_alias_value: Any = (
+                    (partial_alias.declaration, partial_alias.receiver)
+                    if partial_alias is not None
+                    else callable_environment.get(callee.name)
+                )
+                callable_alias_is_possible = isinstance(callable_alias_value, _CallableUnion)
+                callable_aliases = (
+                    callable_alias_value.targets
+                    if callable_alias_is_possible
+                    else (callable_alias_value,)
+                    if callable_alias_value is not None
+                    else ()
+                )
+                if callable_aliases:
+                    binding_call: Any = call
+                    invocation_keywords = {
+                        name
+                        for kind, name in zip(call.arg_kinds, call.arg_names, strict=True)
+                        if kind == ARG_NAMED and name is not None
+                    }
+                    partial_function = (
+                        self._function_node_for_fullname(partial_alias.declaration[0])
+                        if partial_alias is not None
                         else None
                     )
-                    deps.add_reference(current_file, call.line, alias_fullname)
-                    alias_is_unawaited_coroutine = bool(
-                        resolved_function is not None
-                        and getattr(
-                            self._actual_function(resolved_function[0]), "is_coroutine", False
+                    positional_formals = []
+                    if partial_function is not None:
+                        partial_arguments = list(
+                            getattr(self._actual_function(partial_function[0]), "arguments", ())
                         )
-                        and id(call) not in awaited_call_ids
+                        if (
+                            partial_alias is not None
+                            and partial_alias.declaration[1] == InvocationKind.INSTANCE_METHOD
+                        ):
+                            partial_arguments = partial_arguments[1:]
+                        positional_formals = [
+                            item for item in partial_arguments if item.kind in (ARG_POS, ARG_OPT)
+                        ]
+                    positional_partial_parameters = (
+                        {
+                            positional_formals[index].variable.name
+                            for index, kind in enumerate(partial_alias.arg_kinds)
+                            if kind == ARG_POS and index < len(positional_formals)
+                        }
+                        if partial_alias is not None and partial_function is not None
+                        else set()
                     )
-                    if not alias_is_unawaited_coroutine:
-                        resolve_and_trace(
-                            alias_fullname,
-                            call.line,
-                            target_receiver=(
-                                bound_receiver
-                                if alias_invocation == InvocationKind.INSTANCE_METHOD
-                                else None
-                            ),
-                            target_string_environment=target_strings,
-                            target_callable_environment=target_callables,
-                            edge_kind="callable_alias_invocation",
+                    invocation_positional_parameters: set[str] = set()
+                    invocation_parameters = set(invocation_keywords)
+                    if partial_function is not None:
+                        partial_positional_count = (
+                            sum(kind == ARG_POS for kind in partial_alias.arg_kinds)
+                            if partial_alias is not None
+                            else 0
                         )
-                    elif resolved_function is not None:
-                        header_start, header_end = self._callable_header_lines(
-                            resolved_function[0], resolved_function[1]
+                        positional_formals = positional_formals[partial_positional_count:]
+                        invocation_positional_count = 0
+                        for kind, name in zip(call.arg_kinds, call.arg_names, strict=True):
+                            if kind == ARG_POS and name is None:
+                                if invocation_positional_count < len(positional_formals):
+                                    parameter_name = positional_formals[
+                                        invocation_positional_count
+                                    ].variable.name
+                                    invocation_parameters.add(parameter_name)
+                                    invocation_positional_parameters.add(parameter_name)
+                                invocation_positional_count += 1
+                    stored_keyword_parameters: set[str] = set()
+                    if partial_alias is not None and partial_function is not None:
+                        for kind, name in zip(
+                            partial_alias.arg_kinds,
+                            partial_alias.arg_names,
+                            strict=True,
+                        ):
+                            if kind == ARG_NAMED and name is not None:
+                                stored_keyword_parameters.add(name)
+                    invalid_partial_duplicate = bool(
+                        partial_alias is not None
+                        and (
+                            any(
+                                parameter in invocation_keywords
+                                and parameter in positional_partial_parameters
+                                for parameter, _captured in partial_alias.bound_callables
+                            )
+                            or bool(stored_keyword_parameters & invocation_positional_parameters)
                         )
-                        deps.add_symbol_reference(
-                            resolved_function[1],
-                            alias_fullname,
-                            header_start,
-                            header_end,
+                    )
+                    if partial_alias is not None:
+                        from types import SimpleNamespace as _CallShape
+
+                        kept_bound = [
+                            (expression, kind, name)
+                            for expression, kind, name in zip(
+                                partial_alias.args,
+                                partial_alias.arg_kinds,
+                                partial_alias.arg_names,
+                                strict=True,
+                            )
+                            if name is None or name not in invocation_keywords
+                        ]
+                        binding_call = _CallShape(
+                            args=[*(item[0] for item in kept_bound), *call.args],
+                            arg_kinds=[*(item[1] for item in kept_bound), *call.arg_kinds],
+                            arg_names=[*(item[2] for item in kept_bound), *call.arg_names],
                         )
-                    traced = True
+                    for declaration, bound_receiver in callable_aliases:
+                        alias_fullname, alias_invocation = declaration
+                        if (
+                            call_site is not None
+                            and call_site.status != CallResolutionStatus.EXACT
+                            and alias_invocation == InvocationKind.FUNCTION
+                            and not callable_alias_is_possible
+                            and not invalid_partial_duplicate
+                        ):
+                            deps.add_resolved_call_site(
+                                call_site.model_copy(
+                                    update={
+                                        "canonical_symbol": alias_fullname,
+                                        "invocation": alias_invocation,
+                                        "status": CallResolutionStatus.EXACT,
+                                        "reason_code": None,
+                                    }
+                                )
+                            )
+                        target_strings = None
+                        resolved_function = self._function_node_for_fullname(alias_fullname)
+                        if resolved_function is not None:
+                            target_strings = self._bind_finite_string_arguments(
+                                resolved_function[0],
+                                binding_call,
+                                string_environment,
+                                skip_implicit_receiver=(
+                                    alias_invocation == InvocationKind.INSTANCE_METHOD
+                                ),
+                            )
+                        target_callables = (
+                            self._bind_callable_arguments(
+                                resolved_function[0],
+                                binding_call,
+                                callable_environment,
+                                flow_environment,
+                                import_map,
+                                (),
+                                finite_budget,
+                                skip_implicit_receiver=(
+                                    alias_invocation == InvocationKind.INSTANCE_METHOD
+                                ),
+                            )
+                            if resolved_function is not None
+                            else None
+                        )
+                        if partial_alias is not None:
+                            # Creation-time callable values win over later rebinding
+                            # of the source variable used to construct the partial.
+                            if target_callables is None:
+                                target_callables = {}
+                            for parameter, captured_value in partial_alias.bound_callables:
+                                if parameter not in invocation_parameters:
+                                    target_callables[parameter] = captured_value
+                        if partial_alias is not None:
+                            if target_strings is None:
+                                target_strings = {}
+                            for parameter, captured_values in partial_alias.bound_strings:
+                                if parameter not in invocation_parameters:
+                                    target_strings[parameter] = captured_values
+                        deps.add_reference(current_file, call.line, alias_fullname)
+                        alias_is_unawaited_coroutine = bool(
+                            resolved_function is not None
+                            and getattr(
+                                self._actual_function(resolved_function[0]), "is_coroutine", False
+                            )
+                            and id(call) not in awaited_call_ids
+                        )
+                        if invalid_partial_duplicate:
+                            deps.add_analysis_limitation(
+                                AnalysisLimitation(
+                                    file_path=current_file,
+                                    call_line=call.line,
+                                    cap="INVALID_PARTIAL_ARGUMENTS",
+                                    call_column=call.column,
+                                )
+                            )
+                        elif not alias_is_unawaited_coroutine:
+                            resolve_and_trace(
+                                alias_fullname,
+                                call.line,
+                                call_column=call.column,
+                                low_confidence_edge=callable_alias_is_possible,
+                                target_receiver=(
+                                    bound_receiver
+                                    if alias_invocation == InvocationKind.INSTANCE_METHOD
+                                    else None
+                                ),
+                                target_string_environment=target_strings,
+                                target_callable_environment=target_callables,
+                                edge_kind="callable_alias_invocation",
+                            )
+                        elif resolved_function is not None:
+                            header_start, header_end = self._callable_header_lines(
+                                resolved_function[0], resolved_function[1]
+                            )
+                            deps.add_symbol_reference(
+                                resolved_function[1],
+                                alias_fullname,
+                                header_start,
+                                header_end,
+                            )
+                        traced = True
 
             canonical_symbol = (call_site.canonical_symbol if call_site is not None else None) or ""
             generator_consumer = self.GENERATOR_CONSUMERS.get(canonical_symbol)
@@ -4942,16 +5683,34 @@ class MypyAnalyzer:
                 "builtins.min": False,
                 "builtins.max": False,
                 "builtins.sorted": False,
+                "builtins.dict": False,
+                "collections.deque": False,
             }.get(canonical_symbol)
             if builtin_consumer is not None and self._valid_builtin_generator_consumer(
                 call,
                 canonical_symbol,
             ):
-                consume_generator_expression(
-                    call.args[0],
-                    call.line,
-                    require_async=builtin_consumer,
+                consumed = (
+                    self._exact_call_argument(call, 0, "iterable")
+                    if canonical_symbol == "collections.deque"
+                    else call.args[0]
                 )
+                if consumed is not None:
+                    consume_generator_expression(
+                        consumed,
+                        call.line,
+                        require_async=builtin_consumer,
+                    )
+            elif builtin_consumer is not None:
+                if any(kind in {ARG_STAR, ARG_STAR2} for kind in call.arg_kinds):
+                    deps.add_analysis_limitation(
+                        AnalysisLimitation(
+                            current_file,
+                            call.line,
+                            "UNRESOLVED_GENERATOR_CONSUMER_ARGUMENTS",
+                            call_column=call.column,
+                        )
+                    )
 
             generator_kind = self._generator_function_kind(call_site)
             if generator_kind is not None:
@@ -5030,6 +5789,7 @@ class MypyAnalyzer:
                         resolve_and_trace(
                             callback_fullname,
                             call.line,
+                            call_column=call.column,
                             low_confidence_edge=True,
                             target_receiver=callback_receiver,
                             target_environment=callback_environment,
@@ -5057,6 +5817,7 @@ class MypyAnalyzer:
                     resolve_and_trace(
                         finite_fullname,
                         call.line,
+                        call_column=call.column,
                         low_confidence_edge=True,
                         target_receiver=finite_receiver,
                     )
@@ -5094,6 +5855,7 @@ class MypyAnalyzer:
                     resolve_and_trace(
                         call_site.canonical_symbol,
                         call.line,
+                        call_column=call.column,
                         target_string_environment=target_strings,
                         target_callable_environment=target_callables,
                         low_confidence_edge=eager_generator_expression_depth[0] > 0,
@@ -5132,7 +5894,7 @@ class MypyAnalyzer:
                 )
                 if exact_fullname is not None and self._function_node_for_fullname(exact_fullname):
                     deps.add_reference(current_file, call.line, exact_fullname)
-                    resolve_and_trace(exact_fullname, call.line)
+                    resolve_and_trace(exact_fullname, call.line, call_column=call.column)
                     traced = True
 
             # FastAPI dependency injection passes callables as values rather
@@ -5154,6 +5916,7 @@ class MypyAnalyzer:
                     resolve_and_trace(
                         dependency_fullname,
                         argument.line,
+                        call_column=argument.column,
                         edge_kind=f"fastapi_dependency:{wrapper_symbol}",
                     )
 
@@ -5192,12 +5955,18 @@ class MypyAnalyzer:
             """Recursively walk a mypy AST node with a bounded local environment."""
             nonlocal \
                 callable_environment, \
+                partial_environment, \
                 deferred_environment, \
                 flow_environment, \
                 lambda_environment, \
                 string_environment
             if n is None:
                 return
+            node_line = getattr(n, "line", 0)
+            if isinstance(node_line, int) and node_line > 0:
+                self._active_source_file = current_file
+                self._active_source_line = node_line
+                self._active_source_column = None
 
             source_line = int(getattr(n, "line", 0) or 0)
             if source_line > 0 and not isinstance(n, LambdaExpr):
@@ -5213,6 +5982,9 @@ class MypyAnalyzer:
                 )
 
             if isinstance(n, CallExpr):
+                self._active_source_file = current_file
+                self._active_source_line = n.line
+                self._active_source_column = n.column
                 handle_call_expr(n)
 
             elif isinstance(n, MemberExpr):
@@ -5305,6 +6077,11 @@ class MypyAnalyzer:
                 callable_value: tuple[tuple[str, InvocationKind], _FinitePointsTo | None] | None = (
                     None
                 )
+                partial_value: _PartialCallable | None = (
+                    partial_environment.get(n.rvalue.name)
+                    if isinstance(n.rvalue, NameExpr)
+                    else None
+                )
                 lambda_value = (
                     n.rvalue
                     if isinstance(n.rvalue, LambdaExpr)
@@ -5353,9 +6130,12 @@ class MypyAnalyzer:
                     ):
                         if returned_call.canonical_symbol == "functools.partial" and n.rvalue.args:
                             partial_target = n.rvalue.args[0]
+                            target_value: (
+                                tuple[tuple[str, InvocationKind], _FinitePointsTo | None] | None
+                            ) = None
                             if isinstance(partial_target, NameExpr):
-                                callable_value = callable_environment.get(partial_target.name)
-                                if callable_value is None:
+                                target_value = callable_environment.get(partial_target.name)
+                                if target_value is None:
                                     declaration = self._callable_declaration(
                                         getattr(partial_target, "node", None)
                                     )
@@ -5371,7 +6151,7 @@ class MypyAnalyzer:
                                     if declaration is not None and self._exact_project_identity(
                                         declaration[0]
                                     ):
-                                        callable_value = (declaration, None)
+                                        target_value = (declaration, None)
                             elif isinstance(partial_target, MemberExpr):
                                 declaration = self._callable_declaration(
                                     getattr(partial_target, "node", None)
@@ -5386,7 +6166,117 @@ class MypyAnalyzer:
                                 if declaration is not None and self._exact_project_identity(
                                     declaration[0]
                                 ):
-                                    callable_value = (declaration, receiver)
+                                    target_value = (declaration, receiver)
+                            if isinstance(target_value, _CallableUnion):
+                                # A partial over a branch-joined callable must not
+                                # assume the union has tuple indexing semantics.
+                                # Abstain until each alternative can be bound
+                                # independently, and surface the lost precision.
+                                self._record_analysis_limitation(
+                                    "CALLABLE_UNION_PARTIAL", limit=len(target_value.targets)
+                                )
+                                target_value = None
+                            if target_value is not None:
+                                bound_callables: list[
+                                    tuple[
+                                        str,
+                                        tuple[tuple[str, InvocationKind], _FinitePointsTo | None],
+                                    ]
+                                ] = []
+                                bound_strings: list[tuple[str, tuple[str, ...]]] = []
+                                target_node = self._function_node_for_fullname(target_value[0][0])
+                                if target_node is not None:
+                                    actual = self._actual_function(target_node[0])
+                                    parameters = list(getattr(actual, "arguments", ()))
+                                    if target_value[0][1] == InvocationKind.INSTANCE_METHOD:
+                                        parameters = parameters[1:]
+                                    positional_parameters = [
+                                        item
+                                        for item in parameters
+                                        if item.kind in (ARG_POS, ARG_OPT)
+                                    ]
+                                    keyword_parameters = {
+                                        item.variable.name: item
+                                        for item in parameters
+                                        if not item.pos_only
+                                    }
+                                    for expression, kind, name in zip(
+                                        n.rvalue.args[1:],
+                                        n.rvalue.arg_kinds[1:],
+                                        n.rvalue.arg_names[1:],
+                                        strict=True,
+                                    ):
+                                        parameter = None
+                                        if (
+                                            kind == ARG_POS
+                                            and name is None
+                                            and positional_parameters
+                                        ):
+                                            parameter = positional_parameters.pop(0)
+                                        elif kind == ARG_NAMED and name in keyword_parameters:
+                                            parameter = keyword_parameters[name]
+                                        callable_actual: (
+                                            tuple[
+                                                tuple[str, InvocationKind],
+                                                _FinitePointsTo | None,
+                                            ]
+                                            | None
+                                        ) = None
+                                        if isinstance(expression, NameExpr):
+                                            callable_actual = callable_environment.get(
+                                                expression.name
+                                            )
+                                            if callable_actual is None:
+                                                declaration = self._callable_declaration(
+                                                    getattr(expression, "node", None)
+                                                )
+                                                if (
+                                                    declaration is not None
+                                                    and self._exact_project_identity(declaration[0])
+                                                ):
+                                                    callable_actual = (declaration, None)
+                                        elif isinstance(expression, MemberExpr):
+                                            declaration = self._callable_declaration(
+                                                getattr(expression, "node", None)
+                                            )
+                                            if (
+                                                declaration is not None
+                                                and self._exact_project_identity(declaration[0])
+                                            ):
+                                                receiver_value = self._finite_expression_value(
+                                                    expression.expr,
+                                                    flow_environment,
+                                                    import_map,
+                                                    (),
+                                                    finite_budget,
+                                                )
+                                                if (
+                                                    declaration[1] != InvocationKind.INSTANCE_METHOD
+                                                    or receiver_value is not None
+                                                ):
+                                                    callable_actual = (declaration, receiver_value)
+                                        if parameter is not None and callable_actual is not None:
+                                            bound_callables.append(
+                                                (parameter.variable.name, callable_actual)
+                                            )
+                                        if parameter is not None:
+                                            string_actual = self._finite_string_values(
+                                                expression, string_environment
+                                            )
+                                            if string_actual is not None:
+                                                bound_strings.append(
+                                                    (parameter.variable.name, string_actual)
+                                                )
+                                partial_value = _PartialCallable(
+                                    declaration=target_value[0],
+                                    receiver=target_value[1],
+                                    args=tuple(n.rvalue.args[1:]),
+                                    arg_kinds=tuple(n.rvalue.arg_kinds[1:]),
+                                    arg_names=tuple(n.rvalue.arg_names[1:]),
+                                    bound_callables=tuple(bound_callables),
+                                    bound_strings=tuple(bound_strings),
+                                )
+                            callable_value = None
                         returned_declaration = self._returned_project_callable(
                             returned_call.canonical_symbol
                         )
@@ -5413,6 +6303,10 @@ class MypyAnalyzer:
                             callable_environment.pop(lv.name, None)
                         else:
                             callable_environment[lv.name] = callable_value
+                        if partial_value is None:
+                            partial_environment.pop(lv.name, None)
+                        else:
+                            partial_environment[lv.name] = partial_value
                         if lambda_value is None:
                             lambda_environment.pop(lv.name, None)
                         else:
@@ -5435,6 +6329,7 @@ class MypyAnalyzer:
                 base_strings = dict(string_environment)
                 base_deferred = dict(deferred_environment)
                 base_callables = dict(callable_environment)
+                base_partials = dict(partial_environment)
                 base_lambdas = dict(lambda_environment)
                 branch_environments: list[dict[str, _FinitePointsTo]] = []
                 branch_strings: list[dict[str, tuple[str, ...]]] = []
@@ -5442,11 +6337,14 @@ class MypyAnalyzer:
                 branch_callables: list[
                     dict[str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]]
                 ] = []
+                branch_partials: list[dict[str, _PartialCallable]] = []
                 branch_lambdas: list[dict[str, Any]] = []
                 selected: int | None = None
                 unknown_before_selection = False
                 for expr, body in zip(n.expr, n.body, strict=True):
                     literal = self._literal_boolean(expr)
+                    if literal is None:
+                        literal = self._finite_string_condition(expr, base_strings)
                     if literal is False:
                         # Evaluating the condition is harmless; the body is
                         # statically unreachable.
@@ -5458,13 +6356,31 @@ class MypyAnalyzer:
                     string_environment = dict(base_strings)
                     deferred_environment = dict(base_deferred)
                     callable_environment = dict(base_callables)
+                    partial_environment = dict(base_partials)
                     lambda_environment = dict(base_lambdas)
-                    walk_node(expr)
-                    walk_node(body)
+                    # An elif predicate is reached only if every preceding
+                    # branch declined. Preserve that uncertainty for the
+                    # predicate itself, and for even a literal-true body.
+                    if unknown_before_selection:
+                        possible_execution_depth[0] += 1
+                    try:
+                        walk_node(expr)
+                    finally:
+                        if unknown_before_selection:
+                            possible_execution_depth[0] -= 1
+                    branch_possible = literal is None or unknown_before_selection
+                    if branch_possible:
+                        possible_execution_depth[0] += 1
+                    try:
+                        walk_node(body)
+                    finally:
+                        if branch_possible:
+                            possible_execution_depth[0] -= 1
                     branch_environments.append(dict(flow_environment))
                     branch_strings.append(dict(string_environment))
                     branch_deferred.append(dict(deferred_environment))
                     branch_callables.append(dict(callable_environment))
+                    branch_partials.append(dict(partial_environment))
                     branch_lambdas.append(dict(lambda_environment))
                     if literal is True:
                         selected = len(branch_environments) - 1
@@ -5474,25 +6390,35 @@ class MypyAnalyzer:
                 string_environment = dict(base_strings)
                 deferred_environment = dict(base_deferred)
                 callable_environment = dict(base_callables)
+                partial_environment = dict(base_partials)
                 lambda_environment = dict(base_lambdas)
                 if n.else_body and selected is None:
-                    walk_node(n.else_body)
+                    if unknown_before_selection:
+                        possible_execution_depth[0] += 1
+                    try:
+                        walk_node(n.else_body)
+                    finally:
+                        if unknown_before_selection:
+                            possible_execution_depth[0] -= 1
                     branch_environments.append(dict(flow_environment))
                     branch_strings.append(dict(string_environment))
                     branch_deferred.append(dict(deferred_environment))
                     branch_callables.append(dict(callable_environment))
+                    branch_partials.append(dict(partial_environment))
                     branch_lambdas.append(dict(lambda_environment))
                 elif not n.else_body and selected is None:
                     branch_environments.append(base_environment)
                     branch_strings.append(base_strings)
                     branch_deferred.append(base_deferred)
                     branch_callables.append(base_callables)
+                    branch_partials.append(base_partials)
                     branch_lambdas.append(base_lambdas)
                 if selected is not None and not unknown_before_selection:
                     flow_environment = branch_environments[selected]
                     string_environment = branch_strings[selected]
                     deferred_environment = branch_deferred[selected]
                     callable_environment = branch_callables[selected]
+                    partial_environment = branch_partials[selected]
                     lambda_environment = branch_lambdas[selected]
                 else:
                     flow_environment = self._join_finite_environments(branch_environments)
@@ -5502,11 +6428,10 @@ class MypyAnalyzer:
                         else set()
                     )
                     string_environment = {
-                        name: values
+                        name: branch_strings[0][name]
                         for name in common_string_names
                         if all(
-                            (values := branch_strings[0][name]) == branch[name]
-                            for branch in branch_strings[1:]
+                            branch_strings[0][name] == branch[name] for branch in branch_strings[1:]
                         )
                     }
                     if branch_deferred:
@@ -5521,17 +6446,18 @@ class MypyAnalyzer:
                                 for branch in branch_deferred[1:]
                             )
                         }
-                    common_callables = (
-                        set.intersection(*(set(branch) for branch in branch_callables))
-                        if branch_callables
+                    callable_environment = self._join_callable_environments(branch_callables)
+                    common_partials = (
+                        set.intersection(*(set(branch) for branch in branch_partials))
+                        if branch_partials
                         else set()
                     )
-                    callable_environment = {
-                        name: branch_callables[0][name]
-                        for name in common_callables
+                    partial_environment = {
+                        name: branch_partials[0][name]
+                        for name in common_partials
                         if all(
-                            branch[name] == branch_callables[0][name]
-                            for branch in branch_callables[1:]
+                            branch[name] == branch_partials[0][name]
+                            for branch in branch_partials[1:]
                         )
                     }
                     common_lambdas = (
@@ -5549,10 +6475,52 @@ class MypyAnalyzer:
 
             elif isinstance(n, WhileStmt):
                 walk_node(n.expr)
-                flow_environment.clear()
-                string_environment.clear()
-                deferred_environment.clear()
-                walk_node(n.body)
+                if self._literal_boolean(n.expr) is False:
+                    # The loop body is unreachable; only its else suite executes.
+                    if n.else_body is not None:
+                        walk_node(n.else_body)
+                    return
+                mandatory_single_pass = (
+                    self._literal_boolean(n.expr) is True
+                    and bool(n.body.body)
+                    and isinstance(n.body.body[-1], BreakStmt)
+                    and all(
+                        not isinstance(item, (IfStmt, WhileStmt, ForStmt, TryStmt, BreakStmt))
+                        for item in n.body.body[:-1]
+                    )
+                )
+                before_callables = dict(callable_environment)
+                before_partials = dict(partial_environment)
+                before_lambdas = dict(lambda_environment)
+                if not mandatory_single_pass:
+                    possible_execution_depth[0] += 1
+                try:
+                    walk_node(n.body)
+                finally:
+                    if not mandatory_single_pass:
+                        possible_execution_depth[0] -= 1
+                after_callables = dict(callable_environment)
+                after_partials = dict(partial_environment)
+                after_lambdas = dict(lambda_environment)
+                callable_environment = (
+                    after_callables
+                    if mandatory_single_pass
+                    else self._join_callable_environments([before_callables, after_callables])
+                )
+                partial_environment = {
+                    name: value
+                    for name, value in (
+                        after_partials.items() if mandatory_single_pass else before_partials.items()
+                    )
+                    if mandatory_single_pass or after_partials.get(name) == value
+                }
+                lambda_environment = {
+                    name: value
+                    for name, value in (
+                        after_lambdas.items() if mandatory_single_pass else before_lambdas.items()
+                    )
+                    if mandatory_single_pass or after_lambdas.get(name) is value
+                }
                 flow_environment.clear()
                 string_environment.clear()
                 deferred_environment.clear()
@@ -5564,10 +6532,30 @@ class MypyAnalyzer:
                     require_async=bool(n.is_async),
                 )
                 walk_node(n.expr)
-                flow_environment.clear()
-                string_environment.clear()
-                deferred_environment.clear()
-                walk_node(n.body)
+                before_callables = dict(callable_environment)
+                before_partials = dict(partial_environment)
+                before_lambdas = dict(lambda_environment)
+                possible_execution_depth[0] += 1
+                try:
+                    walk_node(n.body)
+                finally:
+                    possible_execution_depth[0] -= 1
+                after_callables = dict(callable_environment)
+                after_partials = dict(partial_environment)
+                after_lambdas = dict(lambda_environment)
+                callable_environment = self._join_callable_environments(
+                    [before_callables, after_callables]
+                )
+                partial_environment = {
+                    name: value
+                    for name, value in before_partials.items()
+                    if after_partials.get(name) == value
+                }
+                lambda_environment = {
+                    name: value
+                    for name, value in before_lambdas.items()
+                    if after_lambdas.get(name) is value
+                }
                 flow_environment.clear()
                 string_environment.clear()
                 deferred_environment.clear()
@@ -5584,28 +6572,112 @@ class MypyAnalyzer:
                 deferred_environment.clear()
 
             elif isinstance(n, TryStmt):
-                flow_environment.clear()
-                string_environment.clear()
-                deferred_environment.clear()
+                # An exception may be raised before or after any assignment in the
+                # protected body. Handler entry therefore joins the pre-try and
+                # post-body callable state instead of inheriting one linear walk.
+                before_callables = dict(callable_environment)
+                before_partials = dict(partial_environment)
+                before_lambdas = dict(lambda_environment)
+                try_assigned_names: set[str] = set()
+                try_assignment_lines: dict[str, int] = {}
+                potentially_raising_lines: list[int] = []
+                assignment_stack: list[Any] = [n.body]
+                assignment_seen: set[int] = set()
+                while assignment_stack:
+                    assignment_item = assignment_stack.pop()
+                    if assignment_item is None or id(assignment_item) in assignment_seen:
+                        continue
+                    assignment_seen.add(id(assignment_item))
+                    if isinstance(assignment_item, AssignmentStmt):
+                        for target in assignment_item.lvalues:
+                            if isinstance(target, NameExpr):
+                                try_assigned_names.add(target.name)
+                                try_assignment_lines[target.name] = assignment_item.line
+                    if isinstance(assignment_item, CallExpr):
+                        potentially_raising_lines.append(assignment_item.line)
+                    children = getattr(assignment_item, "children", None)
+                    if callable(children):
+                        assignment_stack.extend(child for child in children() if child is not None)
                 walk_node(n.body)
+                body_callables = dict(callable_environment)
+                body_partials = dict(partial_environment)
+                body_lambdas = dict(lambda_environment)
+                normal_callables = dict(body_callables)
+                normal_partials = dict(body_partials)
+                normal_lambdas = dict(body_lambdas)
+                handler_callables: list[
+                    dict[str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]]
+                ] = []
+                handler_partials: list[dict[str, _PartialCallable]] = []
+                handler_lambdas: list[dict[str, Any]] = []
                 for handler in n.handlers:
-                    flow_environment.clear()
-                    string_environment.clear()
-                    deferred_environment.clear()
-                    walk_node(handler)
+                    exception_callables = dict(before_callables)
+                    for name, assignment_line in try_assignment_lines.items():
+                        if (
+                            any(line > assignment_line for line in potentially_raising_lines)
+                            and name in body_callables
+                        ):
+                            exception_callables[name] = body_callables[name]
+                    callable_environment = self._join_callable_environments(
+                        [before_callables, exception_callables]
+                    )
+                    partial_environment = {
+                        key: value
+                        for key, value in before_partials.items()
+                        if key not in try_assigned_names and body_partials.get(key) == value
+                    }
+                    lambda_environment = {
+                        key: value
+                        for key, value in before_lambdas.items()
+                        if key not in try_assigned_names and body_lambdas.get(key) is value
+                    }
+                    possible_execution_depth[0] += 1
+                    try:
+                        walk_node(handler)
+                    finally:
+                        possible_execution_depth[0] -= 1
+                    handler_callables.append(dict(callable_environment))
+                    handler_partials.append(dict(partial_environment))
+                    handler_lambdas.append(dict(lambda_environment))
                 if hasattr(n, "types") and n.types:
                     for exc_type in n.types:
                         if exc_type:
                             walk_node(exc_type)
                 if n.else_body:
-                    flow_environment.clear()
-                    string_environment.clear()
-                    deferred_environment.clear()
-                    walk_node(n.else_body)
+                    callable_environment = dict(body_callables)
+                    partial_environment = dict(body_partials)
+                    lambda_environment = dict(body_lambdas)
+                    possible_execution_depth[0] += 1
+                    try:
+                        walk_node(n.else_body)
+                    finally:
+                        possible_execution_depth[0] -= 1
+                    normal_callables = dict(callable_environment)
+                    normal_partials = dict(partial_environment)
+                    normal_lambdas = dict(lambda_environment)
+                callable_paths = [normal_callables, *handler_callables]
+                partial_paths = [normal_partials, *handler_partials]
+                lambda_paths = [normal_lambdas, *handler_lambdas]
+                if callable_paths:
+                    callable_environment = self._join_callable_environments(callable_paths)
+                if partial_paths:
+                    common_partial = set.intersection(*(set(path) for path in partial_paths))
+                    partial_environment = {
+                        key: partial_paths[0][key]
+                        for key in common_partial
+                        if all(path[key] == partial_paths[0][key] for path in partial_paths[1:])
+                    }
+                if lambda_paths:
+                    common_lambda = set.intersection(*(set(path) for path in lambda_paths))
+                    lambda_environment = {
+                        key: lambda_paths[0][key]
+                        for key in common_lambda
+                        if all(path[key] is lambda_paths[0][key] for path in lambda_paths[1:])
+                    }
                 if n.finally_body:
-                    flow_environment.clear()
-                    string_environment.clear()
-                    deferred_environment.clear()
+                    # Finally runs on every exit from an entered try. Retain
+                    # enclosing uncertainty, without adding uncertainty just
+                    # because control exits normally, raises, or returns.
                     walk_node(n.finally_body)
                 flow_environment.clear()
                 string_environment.clear()
@@ -5625,7 +6697,22 @@ class MypyAnalyzer:
 
             elif isinstance(n, OpExpr):
                 walk_node(n.left)
-                walk_node(n.right)
+                if n.op in {"and", "or"}:
+                    left_truth = self._literal_boolean(n.left)
+                    if (n.op == "and" and left_truth is False) or (
+                        n.op == "or" and left_truth is True
+                    ):
+                        return
+                    if left_truth is None:
+                        possible_execution_depth[0] += 1
+                        try:
+                            walk_node(n.right)
+                        finally:
+                            possible_execution_depth[0] -= 1
+                    else:
+                        walk_node(n.right)
+                else:
+                    walk_node(n.right)
 
             elif isinstance(n, ComparisonExpr):
                 for op in n.operands:
@@ -5635,17 +6722,17 @@ class MypyAnalyzer:
                 walk_node(n.expr)
 
             elif isinstance(n, ConditionalExpr):
-                # mypy uses cond/if_true/if_false but some versions use different names
-                if hasattr(n, "cond"):
-                    walk_node(n.cond)
-                if hasattr(n, "if_true"):
-                    walk_node(n.if_true)
-                elif hasattr(n, "then"):
-                    walk_node(n.then)
-                if hasattr(n, "if_false"):
-                    walk_node(n.if_false)
-                elif hasattr(n, "else_"):
-                    walk_node(n.else_)
+                walk_node(n.cond)
+                condition_truth = self._literal_boolean(n.cond)
+                if condition_truth is not None:
+                    walk_node(n.if_expr if condition_truth else n.else_expr)
+                else:
+                    possible_execution_depth[0] += 1
+                    try:
+                        walk_node(n.if_expr)
+                        walk_node(n.else_expr)
+                    finally:
+                        possible_execution_depth[0] -= 1
 
             elif isinstance(n, (ListExpr, TupleExpr, SetExpr)):
                 for item in n.items:
@@ -5758,7 +6845,7 @@ class MypyAnalyzer:
                         actual_fullname = import_map[decorator.name]
                     deps.add_reference(current_file, decorator.line, actual_fullname)
                     # Trace into the decorator function to find its dependencies
-                    resolve_and_trace(actual_fullname, decorator.line)
+                    resolve_and_trace(actual_fullname, decorator.line, call_column=decorator.column)
                     # Applying an exact project decorator installs its
                     # returned callable as the endpoint implementation. The
                     # decorator factory body runs at definition time, while
@@ -5768,6 +6855,7 @@ class MypyAnalyzer:
                         resolve_and_trace(
                             returned_wrapper[0],
                             decorator.line,
+                            call_column=decorator.column,
                             edge_kind="decorator_wrapper_invocation",
                         )
                 else:
@@ -5793,11 +6881,49 @@ class MypyAnalyzer:
         endpoints: list[Endpoint],
         use_cache: bool = True,
     ) -> dict[str, EndpointDependencies]:
-        """Analyze multiple endpoints."""
+        """Analyze multiple endpoints using one bounded exclusion census."""
+        self._begin_analysis_cycle()
+        try:
+            return self._analyze_endpoints_in_cycle(endpoints, use_cache)
+        finally:
+            self._end_analysis_cycle()
+
+    def _analyze_endpoints_in_cycle(
+        self,
+        endpoints: list[Endpoint],
+        use_cache: bool,
+    ) -> dict[str, EndpointDependencies]:
+        """Analyze one snapshot while sharing its local-module policy."""
         # Try to load from cache
         if use_cache and self.cache_path.exists() and self._load_cache():
+            if self._endpoint_deps:
+                # Validate imported typing inputs before retaining even a
+                # partial set of endpoint rows. Otherwise a request that adds
+                # an endpoint can combine rows analyzed against old stubs with
+                # rows analyzed against the current environment.
+                try:
+                    self._ensure_mypy_built()
+                except MypyAnalyzerError:
+                    self._verified_mypy_source_hashes = {}
+                    self._verified_package_source_hashes = {}
+                    self._verified_package_versions = {}
+                    self._endpoint_deps.clear()
+                else:
+                    if (
+                        not self._cached_typed_environment_fingerprint
+                        or self._cached_typed_environment_fingerprint
+                        != self._typed_environment_fingerprint
+                    ):
+                        # Call-site resolution depends on imported declarations.
+                        self._endpoint_deps.clear()
             all_cached = all(self._endpoint_key(ep) in self._endpoint_deps for ep in endpoints)
             if all_cached:
+                # Endpoint call sites can be reused, but package applicability
+                # evidence must be derived from the current typed source tree
+                # and adjacent distribution metadata. It is intentionally not
+                # restored from cache JSON: those hashes and version labels
+                # would be caller-editable claims unless revalidated against
+                # the bytes mypy actually analyzed.
                 return self._endpoint_deps
         else:
             self._endpoint_deps.clear()
@@ -5811,10 +6937,11 @@ class MypyAnalyzer:
 
         # Build mypy once for all endpoints
         self._expected_source_fingerprint = analysis_fingerprint
+        self._analysis_build_failed = False
         try:
             self._ensure_mypy_built()
         except MypyAnalyzerError:
-            pass
+            self._analysis_build_failed = True
         finally:
             self._expected_source_fingerprint = None
 
@@ -5823,13 +6950,102 @@ class MypyAnalyzer:
             if self._endpoint_key(endpoint) not in self._endpoint_deps:
                 self.analyze_endpoint(endpoint)
 
-        # Save cache
-        if use_cache:
+        # Refresh exclusions before saving: a local alias added during the
+        # build must invalidate the pre-build fingerprint. Saving itself can
+        # reuse this second census without another directory walk.
+        if use_cache and not self._analysis_build_failed:
+            self._local_module_census = self._discover_unselected_local_modules()
             current_fingerprint, _sources = self._cache_fingerprint()
             if current_fingerprint == analysis_fingerprint:
                 self._save_cache()
 
         return self._endpoint_deps
+
+    def _fingerprint_typed_environment(
+        self,
+        *,
+        authenticated_metadata_hashes: dict[str, str] | None = None,
+        authenticated_metadata_roots: set[Path] | None = None,
+    ) -> str:
+        """Hash parsed dependency source and adjacent distribution metadata."""
+        if self._build_result is None:
+            return ""
+        inputs: dict[str, str] = {}
+        source_snapshot_changed = False
+        package_roots: set[Path] = set()
+        for state in self._build_result.graph.values():
+            state_path = getattr(state, "path", None)
+            if not state_path:
+                continue
+            path = Path(state_path)
+            try:
+                if path.suffix in {".py", ".pyi"}:
+                    content = path.read_bytes()
+                    current_digest = hashlib.sha256(content).hexdigest()
+                    parsed_digest = getattr(state, "source_hash", None)
+                    if (
+                        isinstance(parsed_digest, str)
+                        and hashlib.sha1(content).hexdigest() != parsed_digest
+                    ):
+                        source_snapshot_changed = True
+                    inputs[str(path.resolve())] = (
+                        f"{current_digest}:{parsed_digest}"
+                        if isinstance(parsed_digest, str)
+                        else f"{current_digest}:unavailable"
+                    )
+                    for root in path.parents:
+                        if root.name in {"site-packages", "dist-packages"} or any(
+                            root.glob("*.dist-info/METADATA")
+                        ):
+                            package_roots.add(root)
+                            break
+            except OSError as exc:
+                inputs[str(path.resolve())] = f"unreadable:{type(exc).__name__}"
+                if isinstance(getattr(state, "source_hash", None), str):
+                    source_snapshot_changed = True
+        if source_snapshot_changed:
+            # Final cache inputs must still match the bytes mypy parsed.
+            # A stale authenticated pin cannot survive source drift or a lost read.
+            self._verified_mypy_source_hashes.clear()
+            self._verified_package_source_hashes.clear()
+            self._verified_package_versions.clear()
+        metadata_snapshot_hashes: dict[str, str] = {}
+        if authenticated_metadata_roots is not None:
+            package_roots.update(authenticated_metadata_roots)
+        for root in package_roots:
+            try:
+                for metadata_path in root.glob("*.dist-info/METADATA"):
+                    metadata_key = str(metadata_path.resolve())
+                    metadata_digest = hashlib.sha256(metadata_path.read_bytes()).hexdigest()
+                    inputs[metadata_key] = metadata_digest
+                    metadata_snapshot_hashes[metadata_key] = metadata_digest
+                    top_level_path = metadata_path.parent / "top_level.txt"
+                    if top_level_path.exists():
+                        top_level_key = str(top_level_path.resolve())
+                        top_level_digest = hashlib.sha256(top_level_path.read_bytes()).hexdigest()
+                        inputs[top_level_key] = top_level_digest
+                        metadata_snapshot_hashes[top_level_key] = top_level_digest
+            except OSError as exc:
+                inputs[str(root.resolve()) + "/<metadata-scan>"] = (
+                    f"unreadable:{type(exc).__name__}"
+                )
+        if (
+            authenticated_metadata_hashes is not None
+            and {
+                path: digest
+                for path, digest in metadata_snapshot_hashes.items()
+                if authenticated_metadata_roots is not None
+                and Path(path).parent.parent in authenticated_metadata_roots
+            }
+            != authenticated_metadata_hashes
+        ):
+            # Authenticate evidence against the same final byte reads that
+            # seal the cache. Added, changed, removed or unreadable metadata cannot
+            # retain an earlier version/source pin under a new fingerprint.
+            self._verified_package_source_hashes.clear()
+            self._verified_package_versions.clear()
+        payload = json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()
+        return hashlib.sha256(payload).hexdigest()
 
     def _cache_fingerprint(self) -> tuple[str, dict[str, str]]:
         """Fingerprint all Python inputs and analysis semantics."""
@@ -5878,6 +7094,7 @@ class MypyAnalyzer:
                 "schema": self.CACHE_SCHEMA_VERSION,
                 "engine": "fastapi-endpoint-detector:mypy-analyzer-v2",
                 "source_span_normalization": "source-call-order-verified-ast-spans-v2",
+                "execution_state_policy": "conditional-elif-try-else-guaranteed-finally-v3",
                 "max_depth": self.max_depth,
                 "no_site_packages": self.no_site_packages,
                 "hermetic_search_path_policy": (
@@ -5889,6 +7106,17 @@ class MypyAnalyzer:
                 "module_root": str(self.module_root.resolve()),
                 "effective_mypy_config": {
                     "follow_imports": follow_imports,
+                    "blocked_local_modules": [
+                        [
+                            module,
+                            covers_children,
+                            is_stub,
+                            Path(path).relative_to(self.source_root).as_posix(),
+                        ]
+                        for module, covers_children, path, is_stub in (
+                            self._unselected_local_modules()
+                        )
+                    ],
                     "ignore_missing_imports": True,
                     "namespace_packages": True,
                     "explicit_package_bases": True,
@@ -5950,12 +7178,32 @@ class MypyAnalyzer:
 
     def _save_cache(self) -> None:
         """Atomically save versioned analysis data to the cache file."""
+        # Failed builds create placeholder dependencies that must never become
+        # reusable cache entries, even when callers bypass analyze_endpoints.
+        if self._analysis_build_failed or any(
+            deps.build_failed for deps in self._endpoint_deps.values()
+        ):
+            return
         endpoints_data: dict[str, Any] = {}
         for analysis_key, deps in self._endpoint_deps.items():
             endpoints_data[analysis_key] = {
                 "endpoint_id": deps.endpoint_id,
                 "methods": deps.methods,
                 "path": deps.path,
+                "analysis_incomplete": deps.analysis_incomplete,
+                "analysis_limitations": [
+                    {
+                        "file_path": item.file_path,
+                        "call_line": item.call_line,
+                        "call_column": item.call_column,
+                        "cap": item.cap,
+                        "target_count": item.target_count,
+                        "limit": item.limit,
+                    }
+                    for item in deps.analysis_limitations
+                ],
+                "build_failed": deps.build_failed,
+                "unresolved_imports": [list(item) for item in deps.unresolved_imports],
                 "referenced_files": {f: list(lines) for f, lines in deps.referenced_files.items()},
                 "referenced_symbols": [
                     {
@@ -5980,6 +7228,7 @@ class MypyAnalyzer:
                         "end_column": span.end_column,
                         "execution_state": span.execution_state,
                         "evidence_kind": span.evidence_kind,
+                        "provenance": span.provenance,
                     }
                     for span in deps.get_source_evidence_spans()
                 ],
@@ -5993,6 +7242,7 @@ class MypyAnalyzer:
                                 "code_context": frame.code_context,
                                 "caller_file_path": frame.caller_file_path,
                                 "caller_line_number": frame.caller_line_number,
+                                "caller_column_number": frame.caller_column_number,
                             }
                             for frame in stack
                         ]
@@ -6010,6 +7260,7 @@ class MypyAnalyzer:
                 "source_root": str(self.source_root),
                 "max_depth": self.max_depth,
                 "sources": sources,
+                "typed_environment_fingerprint": self._typed_environment_fingerprint,
             },
             "endpoints": endpoints_data,
         }
@@ -6042,6 +7293,13 @@ class MypyAnalyzer:
                 return False
             if data.get("fingerprint") != fingerprint:
                 return False
+            metadata = data.get("metadata")
+            self._cached_typed_environment_fingerprint = (
+                metadata.get("typed_environment_fingerprint")
+                if isinstance(metadata, dict)
+                and isinstance(metadata.get("typed_environment_fingerprint"), str)
+                else None
+            )
             endpoints_data = data.get("endpoints")
             if not isinstance(endpoints_data, dict):
                 return False
@@ -6056,6 +7314,12 @@ class MypyAnalyzer:
                 if not isinstance(analysis_key, str) or not isinstance(deps_data, dict):
                     self._endpoint_deps.clear()
                     return False
+                # Schema changes invalidate older caches, so explicit failure
+                # metadata is sufficient here. Incomplete entries can also
+                # represent legitimate bounded capability limitations.
+                if deps_data.get("build_failed", False):
+                    self._endpoint_deps.clear()
+                    return False
                 call_stacks: dict[str, list[list[CallFrame]]] = {}
                 for f, stacks_data in deps_data.get("call_stacks", {}).items():
                     call_stacks[f] = [
@@ -6067,6 +7331,7 @@ class MypyAnalyzer:
                                 code_context=frame.get("code_context", ""),
                                 caller_file_path=frame.get("caller_file_path"),
                                 caller_line_number=frame.get("caller_line_number"),
+                                caller_column_number=frame.get("caller_column_number"),
                             )
                             for frame in stack_data
                         ]
@@ -6093,6 +7358,7 @@ class MypyAnalyzer:
                         end_column=item["end_column"],
                         execution_state=item["execution_state"],
                         evidence_kind=item.get("evidence_kind", "lambda_body"),
+                        provenance=item.get("provenance", "mypy callable traversal"),
                     )
                     for item in source_span_data
                     if isinstance(item, dict)
@@ -6131,6 +7397,16 @@ class MypyAnalyzer:
                     source_evidence_spans=source_evidence_spans,
                     source_root=str(self.source_root),
                     project_files=path_index.project_files,
+                    analysis_incomplete=deps_data.get("analysis_incomplete", False),
+                    build_failed=deps_data.get("build_failed", False),
+                    analysis_limitations=[
+                        AnalysisLimitation(**item)
+                        for item in deps_data.get("analysis_limitations", ())
+                        if isinstance(item, dict)
+                    ],
+                    unresolved_imports=tuple(
+                        tuple(item) for item in deps_data.get("unresolved_imports", ())
+                    ),
                     _path_index=path_index,
                 )
             return True

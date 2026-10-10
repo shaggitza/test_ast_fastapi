@@ -1468,3 +1468,45 @@ def test_runtime_extractor_rejects_invalid_worker_limits(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         FastAPIExtractor(tmp_path / "main.py", **kwargs)
+
+
+def test_relative_imported_class_mutation_is_seen_before_registration(tmp_path: Path) -> None:
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "handlers.py").write_text(
+        "class Views:\n    @staticmethod\n    def endpoint(): return {'ok': True}\n",
+        encoding="utf-8",
+    )
+    app_file = package / "app.py"
+    app_file.write_text(
+        "from fastapi import FastAPI\nfrom .handlers import Views\n"
+        "def replacement(): return {'replaced': True}\n"
+        "Views.endpoint = replacement\napp = FastAPI()\n"
+        "app.add_api_route('/view', Views.endpoint)\n",
+        encoding="utf-8",
+    )
+    assert SecureASTExtractor(app_file, app_entry="pkg.app:app").extract_endpoints() == []
+
+
+def test_relative_import_mutation_of_wrong_class_does_not_hide_route(tmp_path: Path) -> None:
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "handlers.py").write_text(
+        "class Views:\n    @staticmethod\n    def endpoint(): return {'ok': True}\n",
+        encoding="utf-8",
+    )
+    (package / "other.py").write_text(
+        "class Views: pass\ndef replacement(): pass\nViews.endpoint = replacement\n",
+        encoding="utf-8",
+    )
+    app_file = package / "app.py"
+    app_file.write_text(
+        "from fastapi import FastAPI\nfrom .handlers import Views\n"
+        "from .other import Views as OtherViews\n"
+        "app = FastAPI()\napp.add_api_route('/view', Views.endpoint)\n",
+        encoding="utf-8",
+    )
+    endpoints = SecureASTExtractor(app_file, app_entry="pkg.app:app").extract_endpoints()
+    assert [item.identifier for item in endpoints] == ["GET /view"]

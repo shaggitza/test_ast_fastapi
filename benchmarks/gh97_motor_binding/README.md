@@ -1,14 +1,29 @@
 # GH97 Motor binding probe
 
+`historical-source-only-v1.json` preserves the original unbound result byte for
+byte from commit `c376830`: 21,649 bytes, SHA-256
+`cabcfb198491c16788146f4983d650de5189238a99514e4d23194662fd0113e8`.
+It records producer `dd615f5c3fd298f5aa854a8e2c42b26a5bd0f404` and the
+original five calls with zero matches. Historical regressions use this fixed
+snapshot. `result.json` contains the separately replayed production-binding
+result from committed producer `c610ed795bc05cc5fe3ad9db13e4d50f8052dd19`;
+its raw SHA-256 is
+`fe43637e364c318129f3a0ec4deb9fd9c07ea42d6ca2f07e82fbe6147ab6543d`.
+An independent replay reproduced these bytes exactly. Its own revision and
+source hashes identify the producer it validates.
+
 This probe asks whether the current exact-symbol MongoDB preset binds typed
 Motor collection writes using Motor 3.6.0 and PyMongo 4.10.1 source. It does
 not claim installed-package or runtime behavior. It never imports either
-upstream package. It inspects only bounded Python source members from the two
-supplied wheels, then passes a typed fixture to the repository's real
+upstream package. It inspects only bounded `.py`, `.pyi`, `py.typed`, and
+wheel `METADATA` members from the two supplied wheels, after hashing each wheel
+byte snapshot once. It then passes a typed fixture to the repository's real
 `MypyAnalyzer` and `audit_effect_contracts`.
 
 Wheel bytes must match the two hardcoded SHA-256 digests before source
-extraction. Each loaded product module must resolve to this checkout's exact
+extraction. The runner checks its source, preset, and product module bytes against the
+committed Git revision before and after replay. Each loaded product module
+must resolve to this checkout's exact
 source file. Reported product paths are relative to the checkout so the stored
 result can be checked after cloning it elsewhere.
 
@@ -19,15 +34,70 @@ cd /path/to/checked-out/repository
 PYTHONPATH="$PWD/src" /path/to/python \
   benchmarks/gh97_motor_binding/run.py \
   --artifacts /tmp/gh97-wheel-audit \
-  --output benchmarks/gh97_motor_binding/result.json
+  --output /tmp/gh97-motor-current-replay.json
 ```
 
 The output pins interpreter, mypy, artifact hashes, extracted source hashes,
-analyzer source hashes, preset hashes, typed source fixture hash, call
-resolution and audit classification. Results are limited to the exact
+the package versions read from extracted wheel metadata, the exact source bytes
+whose digest matches mypy's parsed digest, analyzer source hashes, preset hashes,
+typed source fixture hash, call resolution, and audit classification. The audit
+requires both the expected Motor version and the exact pinned Motor declaration
+hashes before matching a Motor contract; absent or mismatched evidence leaves
+the call unmatched with `package_applicability_unverified`. The probe runs a
+cold build and a fresh-analyzer warm cache replay, and requires identical audit
+occurrences and applicability evidence. On a cache hit, the analyzer rebuilds
+typed source state to revalidate declaration and metadata bytes rather than
+restoring editable hash claims from the cache. Results are limited to the exact
 artifacts named in the output. `unsupported_or_ambiguous` is a valid finding;
 the runner does not invent canonical symbols to manufacture matches.
 
 Cases include typed insert/update/delete calls, unrelated same-name receivers,
-and a wrapper method. No API/network/service calls are made. The probe uses
-temporary source extraction and deletes it on exit.
+an imported type alias, an unsupported `Any` factory, missing and unexpected
+arguments, and a wrapper method. The pinned run resolves and binds the three
+valid Motor calls, leaves the two unrelated receivers unmatched, and leaves the
+`Any` receiver unresolved. Mypy reports the invalid argument cases separately.
+The effect auditor currently matches contracts by exact symbol and invocation;
+its `matched` label does not certify argument validity. No API/network/service
+calls are made. The probe uses temporary source extraction and deletes it on
+exit.
+
+A separate composed replay is retained in
+`results/composed-production-binding-v2.json`, from committed analyzer
+`b0dc2c6849de69d43a8fb9931ddd8eed3bf9724a`. Its raw SHA-256 is
+`d5eb24506368db4e824d13b9373f67883eeda20de2c5d1ac6e2ea03959d22a70`.
+It includes the reviewed partial-cache invalidation and callable-analysis
+changes. The eight physical calls again yield five exact static audit bindings,
+two resolved nonmatches and one ambiguous receiver; the two invalid-arity
+bindings remain declarations, not valid invocation claims. This is a new replay,
+not a relabeling of either historical report. Installed-package behavior,
+version ranges and real-world GH97 evaluation remain open.
+
+A current source replay is retained separately in
+`results/current-production-binding-v3.json`, produced at
+`92d55a50be4e06251ea52b7c1bff7a2ec1f33643`. The report has 58,090 bytes
+and SHA-256
+`2945c224968732a0c0eee9f14417cc372a04ae0973ee794e17471671c5f42f74`.
+An independent locked-environment run reproduced these exact bytes. This
+source revision includes metadata membership and final parsed-source race
+guards. Its eight physical calls yield five exact static audit bindings, two
+resolved nonmatches and one unsupported or ambiguous receiver. The two
+invalid-arity bindings do not certify valid invocations. Cold and warm analyzer
+results agree. Historical reports above remain unchanged. This source-only
+evidence does not certify installed-package compatibility, version ranges,
+service behavior or real-world GH97 acceptance.
+
+The coherent-installation replay is retained in
+`results/coherent-installation-binding-v4.json`, from committed source
+`58ff001105d3a914ab9c20d586785458df0718cb`. Its SHA-256 is
+`2599e4da39e6499dcad7abe5d25bcc117b614586aa76ab8efd49010f50615942`.
+An independent replay reproduced its bytes exactly. This source requires one
+coherent installation root for all parsed declarations of the package;
+metadata from an unrelated or split installation cannot authenticate it.
+The producer rejects every dirty tracked file before analysis and immediately
+before publishing the report. The full analyzer and Motor benchmark suites,
+including the genuine clean-checkout probe, completed with exit 0.
+The eight physical calls retain five exact bindings, two resolved nonmatches
+and one unsupported receiver; the two wrong-arity bindings remain invalid
+invocations. All earlier raw reports remain unchanged. This is source-only
+static evidence; installed compatibility, version ranges, wrappers and
+real-world GH97 acceptance remain open.

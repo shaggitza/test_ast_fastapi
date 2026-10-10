@@ -15,19 +15,687 @@ from typing import Any
 import mypy.build
 import pytest
 from mypy import modulefinder
+from mypy.nodes import MemberExpr, NameExpr
 
 from fastapi_endpoint_detector.analyzer import mypy_analyzer
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import (
     CallFrame,
     EndpointDependencies,
     MypyAnalyzer,
+    MypyAnalyzerError,
     _is_path_within,
 )
+from fastapi_endpoint_detector.analyzer.source_inventory import build_source_inventory
 from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, HandlerInfo
 
 
 class TestMypyAnalyzerBasic:
     """Basic tests for MypyAnalyzer."""
+
+    def test_adjacent_metadata_is_scanned_once_per_package_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        package = tmp_path / "multi_pkg"
+        package.mkdir()
+        (package / "__init__.pyi").write_text("from . import api\n", encoding="utf-8")
+        (package / "api.pyi").write_text("def call() -> None: ...\n", encoding="utf-8")
+        dist_info = tmp_path / "multi-pkg-1.0.dist-info"
+        dist_info.mkdir()
+        (dist_info / "METADATA").write_text("Name: multi-pkg\nVersion: 1.0\n", encoding="utf-8")
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "from multi_pkg import api\ndef handler() -> None:\n    api.call()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/single-metadata-scan",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=2),
+        )
+        original_read_bytes = Path.read_bytes
+        metadata_reads = 0
+
+        def counted_read_bytes(path: Path) -> bytes:
+            nonlocal metadata_reads
+            if path.name == "METADATA" and path.parent == dist_info:
+                metadata_reads += 1
+            return original_read_bytes(path)
+
+        monkeypatch.setattr(Path, "read_bytes", counted_read_bytes)
+        analyzer = MypyAnalyzer(tmp_path)
+        analyzer.analyze_endpoints([endpoint], use_cache=False)
+
+        # One read authenticates the package during the build and one fingerprints
+        # the typed environment; per-module rescans would multiply this count.
+        assert metadata_reads == 2
+        assert analyzer.verified_package_versions["multi-pkg"] == "1.0"
+
+    @pytest.mark.parametrize("remote_root_name", ["site-packages", "typed-vendor"])
+    def test_metadata_in_unrelated_parsed_root_cannot_authenticate_local_package(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        remote_root_name: str,
+    ) -> None:
+        local = tmp_path / "local"
+        motor = local / "motor"
+        motor.mkdir(parents=True)
+        (motor / "__init__.pyi").write_text("from .motor_asyncio import Client\n")
+        (motor / "motor_asyncio.pyi").write_text("class Client: ...\n")
+        remote = tmp_path / remote_root_name
+        pymongo = remote / "pymongo"
+        pymongo.mkdir(parents=True)
+        (pymongo / "__init__.pyi").write_text("class MongoClient: ...\n")
+        metadata = remote / "motor-3.6.0.dist-info"
+        metadata.mkdir()
+        (metadata / "METADATA").write_text("Name: motor\nVersion: 3.6.0\n")
+        # Even a contradictory alias hint from the unrelated distribution
+        # cannot overrule the conventional Motor import resolved locally.
+        (metadata / "top_level.txt").write_text("pymongo\n")
+        app = local / "app.py"
+        app.write_text(
+            "from motor.motor_asyncio import Client\n"
+            "from pymongo import MongoClient\n"
+            "mongo: MongoClient\n"
+            "def handler() -> Client:\n    return Client()\n"
+        )
+        monkeypatch.setenv("MYPYPATH", str(remote))
+        endpoint = Endpoint(
+            path="/unbound-motor",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=4),
+        )
+        cache = tmp_path / "cache.json"
+        cold = MypyAnalyzer(local, module_root=local)
+        cold.set_cache_path(cache)
+        cold.analyze_endpoints([endpoint])
+        assert (
+            Path(cold._build_result.graph["pymongo"].path)
+            .resolve()
+            .is_relative_to(remote.resolve())
+        )
+        assert "motor/__init__.pyi" in cold.verified_mypy_source_hashes
+        assert "motor/motor_asyncio.pyi" in cold.verified_mypy_source_hashes
+        assert "motor" not in cold.verified_package_versions
+        assert "motor-3.6.0.dist-info/METADATA" not in cold.verified_package_source_hashes
+
+        warm = MypyAnalyzer(local, module_root=local)
+        warm.set_cache_path(cache)
+        warm.analyze_endpoints([endpoint])
+        assert "motor" not in warm.verified_package_versions
+        assert "motor-3.6.0.dist-info/METADATA" not in warm.verified_package_source_hashes
+
+    def test_split_package_declarations_cannot_be_bound_to_one_root_metadata(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        local = tmp_path / "local"
+        motor = local / "motor"
+        motor.mkdir(parents=True)
+        (motor / "__init__.pyi").write_text("from .core import AgnosticCollection\n")
+        (motor / "core.pyi").write_text("class AgnosticCollection: ...\n")
+        remote = tmp_path / "typed-vendor"
+        remote_motor = remote / "motor"
+        remote_motor.mkdir(parents=True)
+        (remote_motor / "motor_asyncio.pyi").write_text("class AsyncIOMotorClient: ...\n")
+        metadata = remote / "motor-3.6.0.dist-info"
+        metadata.mkdir()
+        (metadata / "METADATA").write_text("Name: motor\nVersion: 3.6.0\n")
+        app = local / "app.py"
+        app.write_text(
+            "from motor.core import AgnosticCollection\n"
+            "from motor.motor_asyncio import AsyncIOMotorClient\n"
+            "def handler() -> AgnosticCollection:\n    return AgnosticCollection()\n"
+        )
+        monkeypatch.setenv("MYPYPATH", str(remote))
+        endpoint = Endpoint(
+            path="/split-motor",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=3),
+        )
+        cache = tmp_path / "split-motor-cache.json"
+
+        cold = MypyAnalyzer(local, module_root=local)
+        cold.set_cache_path(cache)
+        cold.analyze_endpoints([endpoint])
+        graph = cold._build_result.graph
+        assert Path(graph["motor.core"].path).resolve().is_relative_to(local.resolve())
+        assert Path(graph["motor.motor_asyncio"].path).resolve().is_relative_to(remote.resolve())
+        assert "motor" not in cold.verified_package_versions
+        assert "motor-3.6.0.dist-info/METADATA" not in cold.verified_package_source_hashes
+
+        warm = MypyAnalyzer(local, module_root=local)
+        warm.set_cache_path(cache)
+        warm.analyze_endpoints([endpoint])
+        assert "motor" not in warm.verified_package_versions
+        assert "motor-3.6.0.dist-info/METADATA" not in warm.verified_package_source_hashes
+
+    def test_unreadable_package_source_leaves_source_pin_unverified(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        package = tmp_path / "unreadable_pkg"
+        package.mkdir()
+        typed_source = package / "__init__.pyi"
+        typed_source.write_text("def call() -> None: ...\n", encoding="utf-8")
+        dist_info = tmp_path / "unreadable-pkg-1.0.dist-info"
+        dist_info.mkdir()
+        (dist_info / "METADATA").write_text(
+            "Name: unreadable-pkg\nVersion: 1.0\n", encoding="utf-8"
+        )
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "from unreadable_pkg import call\ndef handler() -> None:\n    call()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/unreadable-source",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=2),
+        )
+        original_read_bytes = Path.read_bytes
+
+        def denied(path: Path) -> bytes:
+            if path == typed_source:
+                raise PermissionError("synthetic read denial")
+            return original_read_bytes(path)
+
+        monkeypatch.setattr(Path, "read_bytes", denied)
+        analyzer = MypyAnalyzer(tmp_path)
+        analyzer.analyze_endpoints([endpoint], use_cache=False)
+
+        assert "unreadable_pkg/__init__.pyi" not in analyzer.verified_mypy_source_hashes
+        # Mypy parsed this file, but we could not bind those parsed bytes to
+        # the disk snapshot; package metadata cannot stand in for that proof.
+        assert "unreadable-pkg" not in analyzer.verified_package_versions
+        assert "unreadable-pkg-1.0.dist-info/METADATA" not in (
+            analyzer.verified_package_source_hashes
+        )
+
+    def test_source_changed_after_mypy_parse_cannot_authenticate_source_pin(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        package = tmp_path / "racing_pkg"
+        package.mkdir()
+        typed_source = package / "__init__.pyi"
+        original = b"def call() -> None: ...\n"
+        typed_source.write_bytes(original)
+        dist_info = tmp_path / "racing-pkg-1.0.dist-info"
+        dist_info.mkdir()
+        (dist_info / "METADATA").write_text("Name: racing-pkg\nVersion: 1.0\n", encoding="utf-8")
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "from racing_pkg import call\ndef handler() -> None:\n    call()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/changed-source",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=2),
+        )
+        original_build = mypy.build.build
+
+        def mutate_after_parse(*args: Any, **kwargs: Any) -> Any:
+            result = original_build(*args, **kwargs)
+            typed_source.write_bytes(b"def call() -> int: ...\n")
+            return result
+
+        monkeypatch.setattr(mypy.build, "build", mutate_after_parse)
+        analyzer = MypyAnalyzer(tmp_path)
+        analyzer.analyze_endpoints([endpoint], use_cache=False)
+
+        assert "racing_pkg/__init__.pyi" not in analyzer.verified_mypy_source_hashes
+        # The final source snapshot detected a parse/read race, so all package
+        # pins from that build are cleared together with the stale source pin.
+        assert "racing-pkg" not in analyzer.verified_package_versions
+        assert "racing-pkg-1.0.dist-info/METADATA" not in (analyzer.verified_package_source_hashes)
+
+    def test_cached_call_sites_are_recomputed_when_dependency_typing_changes(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "typing_dep.pyi").write_text(
+            "class Store:\n    def put(self, value: str) -> None: ...\n", encoding="utf-8"
+        )
+        dist_info = tmp_path / "typing-dep-1.0.dist-info"
+        dist_info.mkdir()
+        metadata = dist_info / "METADATA"
+        metadata.write_text(
+            "Metadata-Version: 2.1\nName: typing-dep\nVersion: 1.0\n", encoding="utf-8"
+        )
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "from typing_dep import Store\ndef handler() -> None:\n    Store().put('value')\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/cache-typing",
+            methods=[EndpointMethod.POST],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=2),
+        )
+        cache_path = tmp_path / "typed-cache.json"
+
+        cold = MypyAnalyzer(tmp_path)
+        cold.set_cache_path(cache_path)
+        first = next(iter(cold.analyze_endpoints([endpoint]).values()))
+        first_site = next(site for site in first.resolved_call_sites if site.line == 3)
+        assert first_site.status.value == "exact"
+        assert first_site.canonical_symbol == "typing_dep.Store.put"
+
+        (tmp_path / "typing_dep.pyi").write_text("class Store:\n    pass\n", encoding="utf-8")
+        metadata.write_text(
+            "Metadata-Version: 2.1\nName: typing-dep\nVersion: 1.1\n", encoding="utf-8"
+        )
+        warm = MypyAnalyzer(tmp_path)
+        warm.set_cache_path(cache_path)
+        second = next(iter(warm.analyze_endpoints([endpoint]).values()))
+        second_site = next(site for site in second.resolved_call_sites if site.line == 3)
+        assert second_site.status.value != "exact"
+        assert warm.verified_package_versions["typing-dep"] == "1.1"
+
+    @pytest.mark.parametrize("change", ["stub", "removed-stub", "metadata"])
+    def test_partial_cache_is_invalidated_when_typed_environment_changes(
+        self, tmp_path: Path, change: str
+    ) -> None:
+        stub = tmp_path / "typing_dep.pyi"
+        stub.write_text(
+            "class Store:\n    def put(self, value: str) -> None: ...\n", encoding="utf-8"
+        )
+        dist_info = tmp_path / "typing-dep-1.0.dist-info"
+        dist_info.mkdir()
+        metadata = dist_info / "METADATA"
+        metadata.write_text(
+            "Metadata-Version: 2.1\nName: typing-dep\nVersion: 1.0\n", encoding="utf-8"
+        )
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "from typing_dep import Store\n"
+            "def handler_a() -> None:\n    Store().put('value')\n"
+            "def handler_b() -> None:\n    Store().put('other')\n",
+            encoding="utf-8",
+        )
+        endpoint_a = Endpoint(
+            path="/cache-partial-a",
+            methods=[EndpointMethod.POST],
+            handler=HandlerInfo(name="handler_a", module="app", file_path=app_path, line_number=2),
+        )
+        endpoint_b = Endpoint(
+            path="/cache-partial-b",
+            methods=[EndpointMethod.POST],
+            handler=HandlerInfo(name="handler_b", module="app", file_path=app_path, line_number=4),
+        )
+        cache_path = tmp_path / "partial-typed-cache.json"
+        cold = MypyAnalyzer(tmp_path)
+        cold.set_cache_path(cache_path)
+        first = next(iter(cold.analyze_endpoints([endpoint_a]).values()))
+        assert any(
+            site.canonical_symbol == "typing_dep.Store.put" for site in first.resolved_call_sites
+        )
+
+        if change == "stub":
+            stub.write_text("class Store:\n    pass\n", encoding="utf-8")
+        elif change == "removed-stub":
+            stub.unlink()
+            metadata.write_text(
+                "Metadata-Version: 2.1\nName: typing-dep\nVersion: 1.1\n", encoding="utf-8"
+            )
+        else:
+            metadata.write_text(
+                "Metadata-Version: 2.1\nName: typing-dep\nVersion: 1.1\n", encoding="utf-8"
+            )
+
+        warm = MypyAnalyzer(tmp_path)
+        warm.set_cache_path(cache_path)
+        analyzed: list[str] = []
+        original_analyze = warm.analyze_endpoint
+
+        def record_analyze(endpoint: Endpoint) -> EndpointDependencies:
+            analyzed.append(endpoint.path)
+            return original_analyze(endpoint)
+
+        warm.analyze_endpoint = record_analyze  # type: ignore[method-assign]
+        results = warm.analyze_endpoints([endpoint_a, endpoint_b])
+
+        assert analyzed == [endpoint_a.path, endpoint_b.path]
+        if change == "stub":
+            assert all(
+                site.canonical_symbol != "typing_dep.Store.put"
+                for site in results[warm._endpoint_key(endpoint_a)].resolved_call_sites
+            )
+        elif change == "removed-stub":
+            assert warm.verified_mypy_source_hashes.get("typing_dep.pyi") is None
+        else:
+            assert warm.verified_package_versions["typing-dep"] == "1.1"
+
+    @pytest.mark.parametrize(
+        "declared_name", ["beautifulsoup4", "ZoPe.Interface", "zope__..interface"]
+    )
+    def test_distribution_metadata_uses_declared_name_not_import_name(
+        self, tmp_path: Path, declared_name: str
+    ) -> None:
+        package = tmp_path / "bs4"
+        package.mkdir()
+        (package / "__init__.pyi").write_text("class Soup: ...\n", encoding="utf-8")
+        metadata = tmp_path / "beautifulsoup4-1.2.3.dist-info"
+        metadata.mkdir()
+        (metadata / "METADATA").write_text(
+            f"Metadata-Version: 2.1\nName: {declared_name}\nVersion: 1.2.3\n",
+            encoding="utf-8",
+        )
+        (metadata / "top_level.txt").write_text("bs4\n", encoding="utf-8")
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "from bs4 import Soup\ndef handler() -> Soup:\n    return Soup()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/distribution-name",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=2),
+        )
+
+        analyzer = MypyAnalyzer(tmp_path)
+        analyzer.analyze_endpoints([endpoint], use_cache=False)
+
+        expected_name = "beautifulsoup4" if declared_name == "beautifulsoup4" else "zope-interface"
+        assert analyzer.verified_package_versions[expected_name] == "1.2.3"
+        assert analyzer.verified_package_source_hashes[
+            "beautifulsoup4-1.2.3.dist-info/METADATA"
+        ].startswith("sha256:")
+
+    def test_empty_package_initializer_retains_verified_source_hash(self, tmp_path: Path) -> None:
+        package = tmp_path / "empty_pkg"
+        package.mkdir()
+        (package / "__init__.pyi").write_bytes(b"")
+        (package / "api.pyi").write_text("def emit() -> None: ...\n", encoding="utf-8")
+        metadata = tmp_path / "empty_pkg-1.0.dist-info"
+        metadata.mkdir()
+        (metadata / "METADATA").write_text("Name: empty-pkg\nVersion: 1.0\n", encoding="utf-8")
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "from empty_pkg.api import emit\ndef handler() -> None:\n    emit()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/empty-source",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=2),
+        )
+        analyzer = MypyAnalyzer(tmp_path)
+        analyzer.analyze_endpoints([endpoint], use_cache=False)
+        assert analyzer.verified_mypy_source_hashes["empty_pkg/__init__.pyi"] == (
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        )
+        assert "empty_pkg.py" not in analyzer.verified_mypy_source_hashes
+        assert analyzer.verified_package_versions["empty-pkg"] == "1.0"
+
+    def test_expression_branches_preserve_possible_and_dead_lambda_execution(
+        self, tmp_path: Path
+    ) -> None:
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "def handler(flag: bool) -> None:\n"
+            "    maybe_and = lambda: 1\n"
+            "    flag and maybe_and()\n"
+            "    maybe_or = lambda: 2\n"
+            "    flag or maybe_or()\n"
+            "    dead_and = lambda: 3\n"
+            "    False and dead_and()\n"
+            "    dead_or = lambda: 4\n"
+            "    True or dead_or()\n"
+            "    maybe_true = lambda: 5\n"
+            "    maybe_false = lambda: 6\n"
+            "    maybe_true() if flag else maybe_false()\n"
+            "    selected = lambda: 7\n"
+            "    dead_arm = lambda: 8\n"
+            "    selected() if True else dead_arm()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/expressions",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=1),
+        )
+        dependencies = MypyAnalyzer(tmp_path).analyze_endpoint(endpoint)
+        states = {
+            line: {
+                span.execution_state
+                for span in dependencies.source_evidence_spans
+                if span.start_line == line
+            }
+            for line in (2, 4, 6, 8, 10, 11, 13, 14)
+        }
+        for line in (2, 4, 10, 11):
+            assert "possible_execution" in states[line], states
+            assert "established_execution" not in states[line], states
+        for line in (6, 8, 14):
+            assert "deferred_execution" in states[line], states
+            assert not states[line] & {"possible_execution", "established_execution"}, states
+        assert "established_execution" in states[13], states
+
+    @pytest.mark.parametrize("first_predicate", ["flag", "False"])
+    def test_elif_predicate_and_literal_true_body_preserve_path_execution(
+        self, tmp_path: Path, first_predicate: str
+    ) -> None:
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "def handler(flag: bool) -> None:\n"
+            "    predicate = lambda: False\n"
+            "    selected = lambda: 1\n"
+            f"    if {first_predicate}:\n        pass\n"
+            "    elif predicate():\n        pass\n"
+            "    elif True:\n        selected()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/elif",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=1),
+        )
+        dependencies = MypyAnalyzer(tmp_path).analyze_endpoint(endpoint)
+        predicate_states = {
+            span.execution_state
+            for span in dependencies.source_evidence_spans
+            if span.start_line == 2
+        }
+        if first_predicate == "flag":
+            assert "possible_execution" in predicate_states
+            assert "established_execution" not in predicate_states
+        else:
+            assert "established_execution" in predicate_states
+        selected_states = {
+            span.execution_state
+            for span in dependencies.source_evidence_spans
+            if span.start_line == 3
+        }
+        assert "possible_execution" in selected_states
+        assert "established_execution" not in selected_states
+
+    @pytest.mark.parametrize("exit_statement", ["pass", "return", "raise RuntimeError"])
+    @pytest.mark.parametrize("conditional", [False, True])
+    def test_finally_callback_inherits_only_enclosing_execution_uncertainty(
+        self, tmp_path: Path, exit_statement: str, conditional: bool
+    ) -> None:
+        app_path = tmp_path / "app.py"
+        suite = f"try:\n    {exit_statement}\nfinally:\n    callback()\n"
+        if conditional:
+            suite = "if flag:\n" + "".join("    " + line for line in suite.splitlines(True))
+        app_path.write_text(
+            "def handler(flag: bool) -> None:\n    callback = lambda: 1\n"
+            + "".join("    " + line for line in suite.splitlines(True)),
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/finally",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=1),
+        )
+        dependencies = MypyAnalyzer(tmp_path).analyze_endpoint(endpoint)
+        states = {
+            span.execution_state
+            for span in dependencies.source_evidence_spans
+            if span.start_line == 2
+        }
+        expected = "possible_execution" if conditional else "established_execution"
+        assert expected in states
+        assert ("established_execution" if conditional else "possible_execution") not in states
+
+    def test_try_else_lambda_invocation_is_possible_execution(self, tmp_path: Path) -> None:
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "def may_raise() -> None: pass\n"
+            "def handler() -> None:\n"
+            "    callback = lambda: 1\n"
+            "    try:\n        may_raise()\n"
+            "    except RuntimeError:\n        pass\n"
+            "    else:\n        callback()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/try-else",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=2),
+        )
+        dependencies = MypyAnalyzer(tmp_path).analyze_endpoint(endpoint)
+        states = {
+            span.execution_state
+            for span in dependencies.source_evidence_spans
+            if span.start_line == 3
+        }
+        assert "possible_execution" in states
+        assert "established_execution" not in states
+
+    def test_branch_joined_callable_partial_abstains_with_limitation(self, tmp_path: Path) -> None:
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "from functools import partial\n"
+            "def first() -> int: return 1\n"
+            "def second() -> int: return 2\n"
+            "def handler(flag: bool) -> int:\n"
+            "    if flag:\n"
+            "        target = first\n"
+            "    else:\n"
+            "        target = second\n"
+            "    thunk = partial(target)\n"
+            "    return thunk()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/partial-union",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=4),
+        )
+
+        dependencies = MypyAnalyzer(tmp_path).analyze_endpoint(endpoint)
+
+        assert any(
+            item.cap == "CALLABLE_UNION_PARTIAL" for item in dependencies.analysis_limitations
+        )
+        assert not dependencies.references_symbol_at_line(str(app_path), 2)
+        assert not dependencies.references_symbol_at_line(str(app_path), 3)
+
+    def test_uninvoked_and_dynamic_partials_do_not_trace_callable_bodies(
+        self, tmp_path: Path
+    ) -> None:
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "from functools import partial\n"
+            "def hidden() -> int: return 1\n"
+            "def handler(target):\n"
+            "    quiet = partial(hidden)\n"
+            "    dynamic = partial(target)\n"
+            "    return dynamic()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/partial-controls",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=3),
+        )
+
+        dependencies = MypyAnalyzer(tmp_path).analyze_endpoint(endpoint)
+
+        assert not dependencies.references_symbol_at_line(str(app_path), 2)
+
+    def test_lambda_in_unknown_if_else_is_possible_and_false_if_else_is_established(
+        self, tmp_path: Path
+    ) -> None:
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "def handler(flag: bool) -> None:\n"
+            "    if flag:\n"
+            "        pass\n"
+            "    else:\n"
+            "        conditional = lambda: 1\n"
+            "        conditional()\n"
+            "    if False:\n"
+            "        pass\n"
+            "    else:\n"
+            "        established = lambda: 2\n"
+            "        established()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/if-else",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=1),
+        )
+
+        dependencies = MypyAnalyzer(tmp_path).analyze_endpoint(endpoint)
+        states = {
+            (span.start_column, span.execution_state)
+            for span in dependencies.source_evidence_spans
+            if span.start_line in {5, 10}
+        }
+
+        assert any(state == "possible_execution" for _, state in states)
+        assert any(state == "established_execution" for _, state in states), states
+
+    def test_depth_cap_keeps_direct_callee_source_reference(self, tmp_path: Path) -> None:
+        app_path = tmp_path / "app.py"
+        selected_path = tmp_path / "selected.py"
+        blocked_path = tmp_path / "blocked.py"
+        app_path.write_text(
+            "from selected import run\n\ndef handler() -> int:\n    return run()\n",
+            encoding="utf-8",
+        )
+        selected_path.write_text(
+            "from blocked import secret\n\ndef run() -> int:\n    return secret()\n",
+            encoding="utf-8",
+        )
+        blocked_path.write_text(
+            "def secret() -> int:\n    return 1\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/depth",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=3),
+        )
+
+        inventory = build_source_inventory(app_path, include_patterns=("app.py",), max_depth=1)
+        assert {item.path for item in inventory.files} == {app_path, selected_path}
+        analyzer = MypyAnalyzer(tmp_path, max_depth=1, source_inventory=inventory)
+        dependencies = analyzer.analyze_endpoint(endpoint)
+
+        assert dependencies.references_file(str(selected_path))
+        assert not dependencies.references_file(str(blocked_path))
+        assert dependencies.references_symbol_at_line(str(selected_path), 3) is not None
+        assert dependencies.references_symbol_at_line(str(blocked_path), 1) is None
+        assert {"app", "selected"} <= analyzer._project_modules
+        assert "blocked" not in analyzer._project_modules
+        assert any(item.cap == "MAX_DEPTH" for item in dependencies.analysis_limitations)
+        assert all(
+            frame.file_path != str(blocked_path)
+            for stacks in dependencies.call_stacks.values()
+            for stack in stacks
+            for frame in stack
+        )
+        cached = analyzer.analyze_endpoint(endpoint)
+        assert cached is not dependencies
+        assert cached.referenced_files == dependencies.referenced_files
+        other_endpoint = endpoint.model_copy(update={"path": "/other"})
+        isolated = analyzer.analyze_endpoint(other_endpoint)
+        assert isolated.endpoint_id == "GET /other"
+        assert isolated is not cached
+        assert analyzer.analyze_endpoint(endpoint).endpoint_id == "GET /depth"
 
     def test_resolves_top_level_import_from_application_directory(self, tmp_path: Path) -> None:
         """Resolve imports whose mypy fullname omits the directory name."""
@@ -350,6 +1018,449 @@ class TestMypyAnalyzerBasic:
 
         analyzer.set_line_progress_callback(callback)
         assert analyzer._line_progress_callback is callback
+
+    def test_mypy_does_not_load_excluded_imported_source(self, tmp_path: Path) -> None:
+        """An import edge cannot make excluded source part of the typed project."""
+        app = tmp_path / "app.py"
+        excluded = tmp_path / "excluded.py"
+        app.write_text(
+            "from excluded import secret\ndef handler():\n    return secret()\n",
+            encoding="utf-8",
+        )
+        excluded.write_text(
+            "def secret():\n    return 'private excluded implementation'\n",
+            encoding="utf-8",
+        )
+        inventory = build_source_inventory(
+            tmp_path,
+            include_patterns=("app.py",),
+            exclude_patterns=("excluded.py",),
+            follow_imports=True,
+        )
+        analyzer = MypyAnalyzer(tmp_path, source_inventory=inventory)
+        endpoint = Endpoint(
+            path="/",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=2),
+        )
+
+        dependencies = analyzer.analyze_endpoint(endpoint)
+
+        assert "excluded.py" in inventory.excluded_files
+        assert [source.path for source in inventory.files] == [app]
+        assert str(app.resolve()) in analyzer._module_to_path.values()
+        assert str(excluded.resolve()) not in analyzer._module_to_path.values()
+        assert all(
+            not state.path or Path(state.path).resolve() != excluded.resolve()
+            for state in analyzer._build_result.graph.values()
+        )
+        assert not dependencies.references_file(str(excluded))
+
+    @pytest.mark.parametrize(
+        ("include_patterns", "follow_imports", "max_depth", "selected_files"),
+        [
+            (("app.py", "selected.py"), False, 10, {"app.py", "selected.py"}),
+            (("app.py",), True, 1, {"app.py", "selected.py"}),
+        ],
+        ids=("include-scope", "max-depth-scope"),
+    )
+    def test_mypy_blocks_local_imports_outside_inventory_scope(
+        self,
+        tmp_path: Path,
+        include_patterns: tuple[str, ...],
+        follow_imports: bool,
+        max_depth: int,
+        selected_files: set[str],
+    ) -> None:
+        """Imports beyond include and max-depth boundaries stay unresolved."""
+        (tmp_path / "app.py").write_text(
+            "from selected import run\ndef handler():\n    return run()\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "selected.py").write_text(
+            "from blocked import secret\ndef run():\n    return secret()\n",
+            encoding="utf-8",
+        )
+        blocked = tmp_path / "blocked.py"
+        blocked.write_text("def secret():\n    return 'outside scope'\n", encoding="utf-8")
+        inventory = build_source_inventory(
+            tmp_path,
+            include_patterns=include_patterns,
+            follow_imports=follow_imports,
+            max_depth=max_depth,
+        )
+        analyzer = MypyAnalyzer(tmp_path, source_inventory=inventory)
+        endpoint = Endpoint(
+            path="/",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(
+                name="handler", module="app", file_path=tmp_path / "app.py", line_number=2
+            ),
+        )
+
+        dependencies = analyzer.analyze_endpoint(endpoint)
+
+        assert {source.path.name for source in inventory.files} == selected_files
+        assert str(blocked.resolve()) not in analyzer._module_to_path.values()
+        assert all(
+            not state.path or Path(state.path).resolve() != blocked.resolve()
+            for state in analyzer._build_result.graph.values()
+        )
+        assert dependencies.references_file(str(tmp_path / "selected.py"))
+        assert not dependencies.references_file(str(blocked))
+        prior_fingerprint, _ = analyzer._cache_fingerprint()
+        (tmp_path / "later_local.py").write_text("value = 1\n", encoding="utf-8")
+        changed_fingerprint, _ = analyzer._cache_fingerprint()
+        assert changed_fingerprint != prior_fingerprint
+
+    def test_unselected_package_initializer_does_not_block_selected_child(
+        self, tmp_path: Path
+    ) -> None:
+        """Per-module skips for an initializer leave selected package children usable."""
+        package = tmp_path / "pkg"
+        package.mkdir()
+        (tmp_path / "app.py").write_text(
+            "from pkg.child import run\ndef handler():\n    return run()\n",
+            encoding="utf-8",
+        )
+        (package / "__init__.py").write_text("from .other import hidden\n", encoding="utf-8")
+        child = package / "child.py"
+        child.write_text("def run():\n    return 'selected'\n", encoding="utf-8")
+        (package / "other.py").write_text(
+            "def hidden():\n    return 'excluded'\n", encoding="utf-8"
+        )
+        inventory = build_source_inventory(
+            tmp_path,
+            include_patterns=("app.py", "pkg/child.py"),
+            follow_imports=False,
+        )
+        analyzer = MypyAnalyzer(tmp_path, source_inventory=inventory)
+        endpoint = Endpoint(
+            path="/",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(
+                name="handler", module="app", file_path=tmp_path / "app.py", line_number=2
+            ),
+        )
+
+        dependencies = analyzer.analyze_endpoint(endpoint)
+
+        assert dependencies.references_file(str(child))
+        assert str((package / "other.py").resolve()) not in analyzer._module_to_path.values()
+
+    def test_mypy_does_not_load_unselected_local_stub(self, tmp_path: Path) -> None:
+        """An imported local .pyi outside inventory is skipped by mypy itself."""
+        app = tmp_path / "app.py"
+        stub = tmp_path / "blocked.pyi"
+        app.write_text(
+            "from blocked import secret\ndef handler():\n    return secret()\n",
+            encoding="utf-8",
+        )
+        stub.write_text("def secret() -> int: ...\n", encoding="utf-8")
+        inventory = build_source_inventory(tmp_path, include_patterns=("app.py",))
+        analyzer = MypyAnalyzer(tmp_path, source_inventory=inventory)
+        endpoint = Endpoint(
+            path="/",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=2),
+        )
+
+        analyzer.analyze_endpoint(endpoint)
+
+        assert all(
+            not state.path or Path(state.path).resolve() != stub.resolve()
+            for state in analyzer._build_result.graph.values()
+        )
+        assert all(
+            Path(path).resolve() != stub.resolve() for path in analyzer._module_to_path.values()
+        )
+        assert any(
+            isinstance(node, NameExpr)
+            and node.name == "secret"
+            and node.line == 3
+            and str(value) == "Any"
+            for node, value in analyzer._types_map.items()
+        )
+
+    def test_unselected_stub_package_initializer_preserves_selected_child(
+        self, tmp_path: Path
+    ) -> None:
+        """An unselected package stub initializer cannot suppress a selected child."""
+        package = tmp_path / "pkg"
+        package.mkdir()
+        app = tmp_path / "app.py"
+        app.write_text(
+            "from pkg.child import run\ndef handler():\n    return run()\n",
+            encoding="utf-8",
+        )
+        init_stub = package / "__init__.pyi"
+        init_stub.write_text("from .other import hidden\n", encoding="utf-8")
+        child = package / "child.py"
+        child.write_text("def run():\n    return 'selected'\n", encoding="utf-8")
+        other_stub = package / "other.pyi"
+        other_stub.write_text("def hidden() -> str: ...\n", encoding="utf-8")
+        inventory = build_source_inventory(
+            tmp_path,
+            include_patterns=("app.py", "pkg/child.py"),
+            follow_imports=False,
+        )
+        analyzer = MypyAnalyzer(tmp_path, source_inventory=inventory)
+        endpoint = Endpoint(
+            path="/",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=2),
+        )
+
+        dependencies = analyzer.analyze_endpoint(endpoint)
+
+        assert dependencies.references_file(str(child))
+        assert str(child.resolve()) in analyzer._module_to_path.values()
+        assert all(
+            not state.path
+            or Path(state.path).resolve() not in {init_stub.resolve(), other_stub.resolve()}
+            for state in analyzer._build_result.graph.values()
+        )
+
+    @pytest.mark.parametrize("stub_suffix", [".py", ".pyi"])
+    def test_mypy_blocks_rejected_directory_symlink_imports(
+        self, tmp_path: Path, stub_suffix: str
+    ) -> None:
+        """Rejected directory links cannot add outside implementations to the typed graph."""
+        project = tmp_path / "project"
+        project.mkdir()
+        outside = tmp_path / "outside_package"
+        outside.mkdir()
+        (outside / "__init__.py").write_text("", encoding="utf-8")
+        outside_module = outside / f"secret{stub_suffix}"
+        outside_module.write_text(
+            "def outside_call() -> str: ...\n"
+            if stub_suffix == ".pyi"
+            else "def outside_call():\n    return 'outside'\n",
+            encoding="utf-8",
+        )
+        app = project / "app.py"
+        app.write_text(
+            "from vendor.secret import outside_call\ndef handler():\n    return outside_call()\n",
+            encoding="utf-8",
+        )
+        vendor = project / "vendor"
+        vendor.symlink_to(outside, target_is_directory=True)
+        inventory = build_source_inventory(project, include_patterns=("app.py",))
+        analyzer = MypyAnalyzer(project, source_inventory=inventory)
+        before_fingerprint, before_sources = analyzer._cache_fingerprint()
+
+        # A newly rejected local link changes the mypy policy fingerprint,
+        # while the canonical selected-source digest map stays unchanged.
+        extra_link = project / "other_vendor"
+        extra_link.symlink_to(outside, target_is_directory=True)
+        after_fingerprint, after_sources = analyzer._cache_fingerprint()
+        assert after_fingerprint != before_fingerprint
+        assert after_sources == before_sources
+        assert ("app.py", "vendor.secret.outside_call") in inventory.unresolved_imports
+
+        endpoint = Endpoint(
+            path="/",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=2),
+        )
+        dependencies = analyzer.analyze_endpoint(endpoint)
+
+        assert str(app.resolve()) in analyzer._module_to_path.values()
+        assert all(
+            not state.path or not Path(state.path).resolve().is_relative_to(outside)
+            for state in analyzer._build_result.graph.values()
+        )
+        assert not dependencies.references_file(str(outside_module))
+        assert all(
+            not (site.canonical_symbol or "").endswith(".outside_call")
+            for site in dependencies.resolved_call_sites
+        )
+
+    @pytest.mark.parametrize("stub_suffix", [".py", ".pyi"])
+    def test_mypy_blocks_rejected_file_symlink_imports(
+        self, tmp_path: Path, stub_suffix: str
+    ) -> None:
+        """A rejected file link cannot add its outside target to the typed graph."""
+        project = tmp_path / "project"
+        project.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        target = outside / f"implementation{stub_suffix}"
+        target.write_text(
+            "def outside_call() -> str: ...\n"
+            if stub_suffix == ".pyi"
+            else "def outside_call():\n    return 'outside'\n",
+            encoding="utf-8",
+        )
+        linked_module = project / f"linked{stub_suffix}"
+        linked_module.symlink_to(target)
+        app = project / "app.py"
+        app.write_text(
+            "from linked import outside_call\ndef handler():\n    return outside_call()\n",
+            encoding="utf-8",
+        )
+        inventory = build_source_inventory(project, include_patterns=("app.py",))
+        analyzer = MypyAnalyzer(project, source_inventory=inventory)
+        endpoint = Endpoint(
+            path="/",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=2),
+        )
+
+        dependencies = analyzer.analyze_endpoint(endpoint)
+
+        assert ("app.py", "linked.outside_call") in inventory.unresolved_imports
+        assert str(app.resolve()) in analyzer._module_to_path.values()
+        assert all(
+            not state.path or not Path(state.path).resolve().is_relative_to(outside)
+            for state in analyzer._build_result.graph.values()
+        )
+        assert all(
+            not Path(path).resolve().is_relative_to(outside)
+            for path in analyzer._module_to_path.values()
+        )
+        assert not dependencies.references_file(str(target))
+        assert all(
+            not (site.canonical_symbol or "").endswith(".outside_call")
+            for site in dependencies.resolved_call_sites
+        )
+
+    def test_mypy_skips_symlinked_package_stub_initializer_without_blocking_child(
+        self, tmp_path: Path
+    ) -> None:
+        """An exact package-stub skip still permits an inventory-selected child."""
+        project = tmp_path / "project"
+        package = project / "pkg"
+        package.mkdir(parents=True)
+        outside_init = tmp_path / "outside_init.pyi"
+        outside_init.write_text("from .child import hidden\n", encoding="utf-8")
+        (package / "__init__.pyi").symlink_to(outside_init)
+        child = package / "child.py"
+        child.write_text("def run():\n    return 'selected'\n", encoding="utf-8")
+        app = project / "app.py"
+        app.write_text(
+            "from pkg.child import run\ndef handler():\n    return run()\n",
+            encoding="utf-8",
+        )
+        inventory = build_source_inventory(
+            project,
+            include_patterns=("app.py", "pkg/child.py"),
+            follow_imports=False,
+        )
+        analyzer = MypyAnalyzer(project, source_inventory=inventory)
+        endpoint = Endpoint(
+            path="/",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=2),
+        )
+
+        dependencies = analyzer.analyze_endpoint(endpoint)
+
+        assert dependencies.references_file(str(child))
+        assert str(child.resolve()) in analyzer._module_to_path.values()
+        assert all(
+            not state.path or Path(state.path).resolve() != outside_init.resolve()
+            for state in analyzer._build_result.graph.values()
+        )
+
+    def test_new_symlinked_selected_identity_invalidates_typed_state(self, tmp_path: Path) -> None:
+        """A newly discovered module collision discards the prior typed graph."""
+        project = tmp_path / "project"
+        project.mkdir()
+        app = project / "app.py"
+        app.write_text(
+            "def handler():\n    return 'selected'\n",
+            encoding="utf-8",
+        )
+        inventory = build_source_inventory(project, include_patterns=("app.py",))
+        analyzer = MypyAnalyzer(project, source_inventory=inventory)
+        endpoint = Endpoint(
+            path="/",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=1),
+        )
+        analyzer.analyze_endpoint(endpoint)
+        assert analyzer._trees
+
+        before_fingerprint, _ = analyzer._cache_fingerprint()
+        outside = tmp_path / "outside_package"
+        outside.mkdir()
+        outside_init = outside / "__init__.py"
+        outside_init.write_text("def hidden():\n    return 'outside'\n", encoding="utf-8")
+        package = project / "app"
+        package.mkdir()
+        (package / "__init__.py").symlink_to(outside_init)
+        after_fingerprint, _ = analyzer._cache_fingerprint()
+        assert after_fingerprint != before_fingerprint
+
+        analyzer.analyze_endpoints([endpoint], use_cache=False)
+
+        assert not analyzer._trees
+        assert not analyzer._module_to_path
+        dependencies = analyzer.get_endpoint_dependencies(endpoint)
+        assert dependencies is not None
+        assert not dependencies.references_file(str(outside_init))
+
+    @pytest.mark.parametrize("symlink_initializer", [False, True], ids=["regular", "symlink"])
+    def test_mypy_abstains_on_ambiguous_selected_module_identity(
+        self, tmp_path: Path, symlink_initializer: bool
+    ) -> None:
+        """Conflicting module paths fail closed before any typed tree is retained."""
+        project = tmp_path / "project"
+        package = project / "vendor"
+        package.mkdir(parents=True)
+        outside = tmp_path / "outside_package"
+        outside.mkdir()
+        outside_init = outside / "__init__.py"
+        outside_init.write_text("def hidden():\n    return 'outside'\n", encoding="utf-8")
+        package_init = package / "__init__.py"
+        if symlink_initializer:
+            package_init.symlink_to(outside_init)
+        else:
+            package_init.write_text("def hidden():\n    return 'local'\n", encoding="utf-8")
+        selected = project / "vendor.py"
+        selected.write_text("def run():\n    return 'selected'\n", encoding="utf-8")
+        app = project / "app.py"
+        app.write_text(
+            "from vendor import run\ndef handler():\n    return run()\n",
+            encoding="utf-8",
+        )
+        inventory = build_source_inventory(project, include_patterns=("app.py", "vendor.py"))
+        if not symlink_initializer:
+            assert any(module == "vendor" for module, _paths in inventory.module_collisions)
+            assert ("app.py", "vendor.run") in inventory.unresolved_imports
+        analyzer = MypyAnalyzer(project, source_inventory=inventory)
+
+        with pytest.raises(MypyAnalyzerError, match="ambiguous local module identities"):
+            analyzer._ensure_mypy_built()
+
+        assert not analyzer._trees
+        assert not analyzer._module_to_path
+
+    def test_mypy_inventory_preserves_external_request_member_types(self, tmp_path: Path) -> None:
+        """Normal external typing remains available outside the local inventory."""
+        app = tmp_path / "app.py"
+        app.write_text(
+            "from fastapi import FastAPI, Request\n"
+            "app = FastAPI()\n"
+            "@app.get('/')\n"
+            "def endpoint(request: Request):\n"
+            "    return request.url.path\n",
+            encoding="utf-8",
+        )
+        inventory = build_source_inventory(tmp_path, include_patterns=("app.py",))
+        analyzer = MypyAnalyzer(tmp_path, source_inventory=inventory)
+
+        analyzer._ensure_mypy_built()
+
+        assert "starlette.requests" in analyzer._trees
+        assert any(
+            isinstance(node, MemberExpr)
+            and node.name == "path"
+            and node.line == 5
+            and str(value) == "builtins.str"
+            for node, value in analyzer._types_map.items()
+        )
 
 
 class TestMypyAnalyzerLoopPrevention:

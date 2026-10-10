@@ -12,6 +12,7 @@ from __future__ import annotations
 import heapq
 import itertools
 import os
+import platform
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -55,6 +56,7 @@ from fastapi_endpoint_detector.models.endpoint import (
 )
 from fastapi_endpoint_detector.models.report import (
     AffectedEndpoint,
+    AnalysisLimitationReport,
     AnalysisReport,
     CallStackFrame,
     ChangeEffectKind,
@@ -67,6 +69,7 @@ from fastapi_endpoint_detector.models.report import (
     EndpointLifecycleKind,
     EvidenceProducer,
     EvidenceStatus,
+    ExecutionEvidence,
     ImpactChannel,
     OrphanChange,
 )
@@ -169,6 +172,7 @@ class _AffectedAccumulator:
     dependency_chains: list[list[str]] = field(default_factory=list)
     call_stacks: list[list[CallStackFrame]] = field(default_factory=list)
     effect_evidence: list[EffectEvidence] = field(default_factory=list)
+    execution_evidence: list[ExecutionEvidence] = field(default_factory=list)
 
     @classmethod
     def from_candidate(cls, candidate: AffectedEndpoint) -> _AffectedAccumulator:
@@ -226,6 +230,9 @@ class _AffectedAccumulator:
         for evidence in candidate.effect_evidence:
             if evidence not in self.effect_evidence:
                 self.effect_evidence.append(evidence)
+        for execution_evidence in candidate.execution_evidence:
+            if execution_evidence not in self.execution_evidence:
+                self.execution_evidence.append(execution_evidence)
 
     def materialize(self) -> AffectedEndpoint:
         return AffectedEndpoint(
@@ -237,6 +244,7 @@ class _AffectedAccumulator:
             changed_files=self.changed_files,
             call_stacks=self.call_stacks,
             effect_evidence=self.effect_evidence,
+            execution_evidence=tuple(self.execution_evidence),
         )
 
 
@@ -1278,9 +1286,25 @@ class ChangeMapper:
                 else None
             )
             low_only_points_to = deps.references_lines_low_only(file_path, changed_lines)
+            limited_call_locations = {
+                (str(Path(item.file_path).resolve()), item.call_line, item.call_column)
+                for item in deps.analysis_limitations
+                if item.call_column is not None
+            }
+            limited_path_relevant = any(
+                (
+                    str(Path(frame.caller_file_path).resolve()),
+                    frame.caller_line_number,
+                    frame.caller_column_number,
+                )
+                in limited_call_locations
+                for stack in raw_stacks
+                for frame in stack
+                if frame.caller_file_path is not None and frame.caller_line_number is not None
+            )
             confidence = (
                 ConfidenceLevel.LOW
-                if low_only_points_to
+                if low_only_points_to or limited_path_relevant
                 else effect_result.confidence
                 if effect_result
                 else ConfidenceLevel.MEDIUM
@@ -1288,6 +1312,7 @@ class ChangeMapper:
             effect_summary = (
                 f"; effect analysis: {effect_result.evidence[0].summary}" if effect_result else ""
             )
+            changed_byte_spans = DiffParser.get_changed_byte_spans(diff_file, side=side)
             return AffectedEndpoint(
                 endpoint=endpoint,
                 confidence=confidence,
@@ -1322,9 +1347,41 @@ class ChangeMapper:
                     ),
                     *(list(effect_result.evidence) if effect_result else []),
                 ],
+                execution_evidence=tuple(
+                    ExecutionEvidence(
+                        file_path=span.file_path,
+                        start_line=span.start_line,
+                        start_column=span.start_column,
+                        end_line=span.end_line,
+                        end_column=span.end_column,
+                        execution_state=span.execution_state,
+                        provenance=span.provenance,
+                    )
+                    for span in deps.get_source_evidence_spans(file_path)
+                    if any(
+                        self._source_span_overlaps_change(span, change)
+                        for change in changed_byte_spans
+                        if change.line_number in display_lines
+                    )
+                ),
             )
 
         return None
+
+    @staticmethod
+    def _source_span_overlaps_change(span: SourceEvidenceSpan, change: ChangedByteSpan) -> bool:
+        """Match side-qualified UTF-8 edits to the actual execution span."""
+        if not span.start_line <= change.line_number <= span.end_line:
+            return False
+        if not change.exact:
+            return True
+        span_start = (span.start_line, span.start_column)
+        span_end = (span.end_line, span.end_column)
+        change_start = (change.line_number, change.start_column)
+        change_end = (change.line_number, change.end_column)
+        if change_start == change_end:
+            return span_start <= change_start < span_end
+        return change_start < span_end and span_start < change_end
 
     @staticmethod
     def _change_is_deferred_lambda_only(
@@ -1355,12 +1412,17 @@ class ChangeMapper:
         if any(not change.exact for change in relevant_changes):
             return False
         deferred_spans = deps.get_source_evidence_spans(
-            str(diff_file.path), execution_state="deferred"
+            str(diff_file.path), execution_state="deferred_execution"
         )
         if not deferred_spans:
             return False
         executed_spans = deps.get_source_evidence_spans(
-            str(diff_file.path), execution_state="executed"
+            str(diff_file.path), execution_state="established_execution"
+        )
+        executed_spans.extend(
+            deps.get_source_evidence_spans(
+                str(diff_file.path), execution_state="possible_execution"
+            )
         )
         if not relevant_changes:
             # This side has no changed bytes (for example, a suffix deletion
@@ -1857,6 +1919,10 @@ class ChangeMapper:
             max_depth=effective_depth,
             cache_enabled=self.use_cache,
             resolver_versions=(f"mypy@{self.mypy_analyzer.resolver_version}",),
+            verified_mypy_source_hashes=self.mypy_analyzer.verified_mypy_source_hashes,
+            verified_package_source_hashes=self.mypy_analyzer.verified_package_source_hashes,
+            verified_package_versions=self.mypy_analyzer.verified_package_versions,
+            target_python_version=platform.python_version(),
         )
 
     def _attach_contract_evidence(
@@ -1910,6 +1976,7 @@ class ChangeMapper:
                         resolver=occurrence.resolver,
                         resolver_version=occurrence.resolver_version,
                         matcher=audit.provenance.matcher,
+                        package_applicability=audit.scope.package_applicability,
                         resource_identity_status=resource_identity.status,
                         resource_identity=resource_identity,
                         limitations=(
@@ -2164,6 +2231,30 @@ class ChangeMapper:
         # Pre-analyze endpoints with mypy
         report_progress(10, 100, f"Analyzing {total_endpoints} endpoints (mypy)...")
         self._preanalyze_mypy(progress_callback)
+        self._append_dependency_completeness_warnings(
+            "target", self.registry, self.mypy_analyzer, warnings
+        )
+        analysis_limitations: list[AnalysisLimitationReport] = []
+        for endpoint in self.registry.get_all():
+            dependencies = self.mypy_analyzer.get_endpoint_dependencies(endpoint)
+            if dependencies is None or not dependencies.analysis_limitations:
+                continue
+            analysis_limitations.extend(
+                AnalysisLimitationReport(
+                    file_path=item.file_path,
+                    call_line=item.call_line,
+                    cap=item.cap,
+                    target_count=item.target_count,
+                    limit=item.limit,
+                )
+                for item in dependencies.analysis_limitations
+            )
+        for item in analysis_limitations:
+            warnings.append(
+                f"Mypy bounded analysis at {item.file_path}:{item.call_line} exceeded "
+                f"{item.cap} (targets={item.target_count}, limit={item.limit}); "
+                "analysis is partial."
+            )
         has_mypy_removals = any(
             DiffParser.get_changed_line_numbers(item)[1]
             or (item.source_path is not None and item.source_path != item.path)
@@ -2183,12 +2274,51 @@ class ChangeMapper:
                 self._preanalyze_mypy_registry(
                     self.baseline_mypy_registry, self.baseline_mypy_analyzer, progress_callback
                 )
+                self._append_dependency_completeness_warnings(
+                    "baseline", self.baseline_mypy_registry, self.baseline_mypy_analyzer, warnings
+                )
             except Exception as exc:
                 self._baseline_failure = str(exc)
                 warnings.append(
                     "Mypy baseline analysis is incomplete: "
                     f"baseline snapshot could not be analyzed ({exc}); removed lines remain "
                     "unresolved."
+                )
+        if self._baseline_failure is None and self.baseline_app_path is not None:
+            # Baseline bounds are reported alongside target bounds. Confidence
+            # is bounded on each typed dependency candidate before accumulation,
+            # preserving independent direct-handler and structural evidence.
+            for endpoint in self.baseline_mypy_registry.get_all():
+                dependencies = self.baseline_mypy_analyzer.get_endpoint_dependencies(endpoint)
+                if dependencies is None or not dependencies.analysis_limitations:
+                    continue
+                analysis_limitations.extend(
+                    AnalysisLimitationReport(
+                        file_path=item.file_path,
+                        call_line=item.call_line,
+                        cap=item.cap,
+                        target_count=item.target_count,
+                        limit=item.limit,
+                    )
+                    for item in dependencies.analysis_limitations
+                )
+            # Keep structured limitations deterministic and avoid duplicate
+            # source records when both snapshots hit the same bound.
+            analysis_limitations = list(
+                {
+                    (item.file_path, item.call_line, item.cap, item.target_count, item.limit): item
+                    for item in analysis_limitations
+                }.values()
+            )
+            if analysis_limitations:
+                warnings = [
+                    warning for warning in warnings if "Mypy bounded analysis at " not in warning
+                ]
+                warnings.extend(
+                    f"Mypy bounded analysis at {item.file_path}:{item.call_line} exceeded "
+                    f"{item.cap} (targets={item.target_count}, limit={item.limit}); "
+                    "analysis is partial."
+                    for item in analysis_limitations
                 )
         self._effect_contract_audit = self._build_effect_contract_audit()
         if self.config.analysis.sql_transaction_diagnostics:
@@ -2328,6 +2458,7 @@ class ChangeMapper:
             analysis_completeness=(
                 "partial"
                 if errors
+                or analysis_limitations
                 or any(
                     marker in warning.lower()
                     for warning in warnings
@@ -2335,6 +2466,7 @@ class ChangeMapper:
                 )
                 else "complete"
             ),
+            analysis_limitations=analysis_limitations,
             source_evidence_graph=target_source_graph,
             framework_phase_report=self.map_framework_phase_report(),
             effect_contract_audit=self._effect_contract_audit,
@@ -2355,38 +2487,31 @@ class ChangeMapper:
         endpoints = self.registry.get_all()
         total = len(endpoints)
 
-        # Try to load from cache first
-        if self.use_cache and self.mypy_analyzer.cache_path.exists():
-            if progress_callback:
-                progress_callback(10, 100, "Loading cached analysis...")
-            try:
-                self.mypy_analyzer._load_cache()
-                # Check if all endpoints are cached
-                all_cached = all(
-                    self.mypy_analyzer.get_endpoint_dependencies(endpoint) is not None
-                    for endpoint in endpoints
-                )
-                if all_cached:
-                    if progress_callback:
-                        progress_callback(65, 100, f"Loaded {total} endpoints from cache")
-                    return
-            except Exception:
-                pass
+        if progress_callback:
+            progress_callback(10, 100, f"Analyzing {total} endpoints (mypy)...")
+        # The public bulk API owns cache validation, build failure tracking,
+        # and guarded cache persistence. Calling analyze_endpoint in a loop
+        # loses that snapshot-level failure state.
+        self.mypy_analyzer.analyze_endpoints(endpoints, use_cache=self.use_cache)
 
-        # Analyze uncached endpoints
-        for i, endpoint in enumerate(endpoints):
-            if progress_callback:
-                progress_callback(
-                    10 + int(55 * (i + 1) / max(total, 1)),
-                    100,
-                    f"Analyzing endpoint {i + 1}/{total}: {endpoint.path}",
-                )
-            if self.mypy_analyzer.get_endpoint_dependencies(endpoint) is None:
-                self.mypy_analyzer.analyze_endpoint(endpoint)
-
-        # Save cache after analysis
-        if self.use_cache:
-            self.mypy_analyzer._save_cache()
+    @staticmethod
+    def _append_dependency_completeness_warnings(
+        side: str,
+        registry: EndpointRegistry,
+        analyzer: MypyAnalyzer,
+        warnings: list[str],
+    ) -> None:
+        """Keep incomplete dependency builds visible and tied to their source."""
+        for endpoint in registry.get_all():
+            dependencies = analyzer.get_endpoint_dependencies(endpoint)
+            if dependencies is None or not dependencies.analysis_incomplete:
+                continue
+            source = endpoint.handler.file_path or endpoint.handler.name
+            methods = ",".join(method.value for method in endpoint.methods)
+            warnings.append(
+                f"Mypy {side} analysis is incomplete for {methods} {endpoint.path} "
+                f"({source}): dependency analysis did not resolve the full endpoint graph."
+            )
 
     def _preanalyze_mypy_registry(
         self,
@@ -2396,15 +2521,11 @@ class ChangeMapper:
     ) -> None:
         """Build typed dependencies for every endpoint in one source snapshot."""
         endpoints = registry.get_all()
-        for index, endpoint in enumerate(endpoints, 1):
-            if progress_callback:
-                progress_callback(
-                    10 + int(55 * index / max(len(endpoints), 1)),
-                    100,
-                    f"Analyzing baseline endpoint {index}/{len(endpoints)}: {endpoint.path}",
-                )
-            if analyzer.get_endpoint_dependencies(endpoint) is None:
-                analyzer.analyze_endpoint(endpoint)
+        if progress_callback:
+            progress_callback(10, 100, f"Analyzing {len(endpoints)} baseline endpoints (mypy)...")
+        # Use the snapshot API so failed builds remain marked as failed and
+        # cannot be reused from memory or persisted as complete cache entries.
+        analyzer.analyze_endpoints(endpoints, use_cache=self.use_cache)
 
     def get_endpoints(self) -> list[Endpoint]:
         """Get all endpoints in the application."""
