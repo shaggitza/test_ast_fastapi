@@ -27,7 +27,7 @@ from importlib.metadata import PackageNotFoundError, version
 from importlib.util import find_spec
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
-from typing import Any, ClassVar, Protocol
+from typing import Any, ClassVar, Literal, Protocol, cast
 
 from fastapi_endpoint_detector.models.effect_contract import (
     CallArgumentEvidence,
@@ -122,6 +122,11 @@ class SymbolReference:
         return self.start_line <= line <= self.end_line
 
 
+SourceExecutionState = Literal[
+    "lexical_reference", "possible_execution", "established_execution", "deferred_execution"
+]
+
+
 @dataclass(frozen=True)
 class SourceEvidenceSpan:
     """Exact CPython source span; columns use UTF-8 byte offsets."""
@@ -131,11 +136,17 @@ class SourceEvidenceSpan:
     start_column: int
     end_line: int
     end_column: int
-    execution_state: str
+    execution_state: SourceExecutionState
     evidence_kind: str = "lambda_body"
+    provenance: str = "mypy callable traversal"
 
     def __post_init__(self) -> None:
-        if self.execution_state not in {"executed", "deferred"}:
+        if self.execution_state not in {
+            "lexical_reference",
+            "possible_execution",
+            "established_execution",
+            "deferred_execution",
+        }:
             raise ValueError("unsupported source evidence execution state")
         if self.evidence_kind != "lambda_body":
             raise ValueError("unsupported source evidence kind")
@@ -143,6 +154,21 @@ class SourceEvidenceSpan:
             raise ValueError("source evidence span lines are invalid")
         if self.start_column < 0 or self.end_column < 0:
             raise ValueError("source evidence span columns are invalid")
+
+
+@dataclass(frozen=True)
+class AnalysisLimitation:
+    """A source-located bounded analysis path that could not be resolved."""
+
+    file_path: str
+    call_line: int
+    cap: str
+    target_count: int | None = None
+    limit: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.call_line < 1 or not self.cap:
+            raise ValueError("analysis limitation requires a source line and cap name")
 
 
 @dataclass
@@ -216,6 +242,7 @@ class EndpointDependencies:
     project_files: set[str] | frozenset[str] = field(default_factory=set)
     analysis_incomplete: bool = False
     build_failed: bool = False
+    analysis_limitations: list[AnalysisLimitation] = field(default_factory=list)
     unresolved_imports: tuple[tuple[str, str], ...] = ()
     _path_index: _ProjectPathIndex | None = field(default=None, repr=False, compare=False)
     _canonical_key_indexes: dict[str, dict[str, frozenset[str]]] = field(
@@ -227,6 +254,14 @@ class EndpointDependencies:
 
     def __post_init__(self) -> None:
         self._resolved_call_site_set.update(self.resolved_call_sites)
+
+    def add_analysis_limitation(self, limitation: AnalysisLimitation) -> None:
+        if limitation not in self.analysis_limitations:
+            self.analysis_limitations.append(limitation)
+            self.analysis_limitations.sort(
+                key=lambda item: (item.file_path, item.call_line, item.cap)
+            )
+        self.analysis_incomplete = True
 
     def add_reference(self, file_path: str, line: int, symbol_name: str = "") -> None:
         """Add a line reference to dependencies."""
@@ -278,31 +313,7 @@ class EndpointDependencies:
         self._canonical_key_indexes.pop("resolved_call_sites", None)
 
     def add_source_evidence_span(self, span: SourceEvidenceSpan) -> None:
-        """Record one precise source-body state, preferring invocation over deferral."""
-        if span.execution_state == "executed":
-            self.source_evidence_spans = [
-                existing
-                for existing in self.source_evidence_spans
-                if not (
-                    existing.file_path == span.file_path
-                    and existing.start_line == span.start_line
-                    and existing.start_column == span.start_column
-                    and existing.end_line == span.end_line
-                    and existing.end_column == span.end_column
-                    and existing.evidence_kind == span.evidence_kind
-                )
-            ]
-        elif any(
-            existing.file_path == span.file_path
-            and existing.start_line == span.start_line
-            and existing.start_column == span.start_column
-            and existing.end_line == span.end_line
-            and existing.end_column == span.end_column
-            and existing.evidence_kind == span.evidence_kind
-            and existing.execution_state == "executed"
-            for existing in self.source_evidence_spans
-        ):
-            return
+        """Retain distinct proof states for one precise source-body span."""
         if span not in self.source_evidence_spans:
             self.source_evidence_spans.append(span)
             self.source_evidence_spans.sort(
@@ -501,6 +512,30 @@ class _DeferredGenerator:
 
 
 @dataclass(frozen=True)
+class _PartialCallable:
+    """Exact finite functools.partial target and its bound source arguments."""
+
+    declaration: tuple[str, InvocationKind]
+    receiver: _FinitePointsTo | None
+    args: tuple[Any, ...]
+    arg_kinds: tuple[Any, ...]
+    arg_names: tuple[str | None, ...]
+    # Callable actuals are captured when functools.partial is constructed.  The
+    # AST expressions above are retained for Python's positional/keyword merge,
+    # but must never be re-evaluated in the later invocation environment.
+    bound_callables: tuple[
+        tuple[str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]], ...
+    ] = ()
+
+
+@dataclass(frozen=True)
+class _CallableUnion:
+    """Bounded set of source-proven callable targets at a control-flow join."""
+
+    targets: tuple[tuple[tuple[str, InvocationKind], _FinitePointsTo | None], ...]
+
+
+@dataclass(frozen=True)
 class _ExecutorSummary:
     """Exact callback and forwarding semantics for one executor wrapper."""
 
@@ -518,9 +553,9 @@ class MypyAnalyzer:
     and extract precise file/line information for all references.
     """
 
-    # Schema 25 records failed builds explicitly so they cannot be mistaken
-    # for reusable incomplete analyses caused by bounded capability limits.
-    CACHE_SCHEMA_VERSION = 25
+    # Schema 27 distinguishes typed execution evidence and creation-time partial
+    # callable snapshots from the incompatible schema-26 cache formats.
+    CACHE_SCHEMA_VERSION = 27
     MAX_CALL_SPAN_SOURCE_BYTES = 2_000_000
     MAX_CALL_SPAN_SOURCE_NODES = 100_000
     MAX_CALL_SPAN_SOURCE_ITEMS = 200_000
@@ -580,6 +615,9 @@ class MypyAnalyzer:
         self.source_inventory = source_inventory
         self.max_depth = effective_depth
         self._endpoint_deps: dict[str, EndpointDependencies] = {}
+        self._active_endpoint_dependencies: EndpointDependencies | None = None
+        self._active_source_file = str(self.source_root)
+        self._active_source_line = 0
         self._analysis_build_failed = False
         self._mypy_available = self._check_mypy_available()
         self._cache_file: Path | None = None
@@ -626,6 +664,17 @@ class MypyAnalyzer:
         self._function_lookup_cache: dict[
             tuple[int, str, str | None, int | None], tuple[Any, str] | None
         ] = {}
+
+    def _record_analysis_limitation(
+        self, cap: str, *, target_count: int | None = None, limit: int | None = None
+    ) -> None:
+        deps = self._active_endpoint_dependencies
+        if deps is not None and self._active_source_line > 0:
+            deps.add_analysis_limitation(
+                AnalysisLimitation(
+                    self._active_source_file, self._active_source_line, cap, target_count, limit
+                )
+            )
 
     @property
     def cache_path(self) -> Path:
@@ -1316,13 +1365,31 @@ class MypyAnalyzer:
         if len(lambdas) != 1:
             return None
         body = lambdas[0].body
+        public_state = cast(
+            "SourceExecutionState",
+            {
+                "executed": "established_execution",
+                "deferred": "deferred_execution",
+                "possible": "possible_execution",
+                "lexical": "lexical_reference",
+            }.get(execution_state, "possible_execution"),
+        )
         return SourceEvidenceSpan(
             file_path=canonical,
             start_line=body.lineno,
             start_column=body.col_offset,
             end_line=body.end_lineno or body.lineno,
             end_column=body.end_col_offset or body.col_offset,
-            execution_state=execution_state,
+            execution_state=public_state,
+            provenance=(
+                "exact lambda body mapped from retained source; "
+                + {
+                    "lexical_reference": "lambda reference observed without body execution proof",
+                    "possible_execution": "invocation occurs on a bounded conditional or loop path",
+                    "established_execution": "invocation recorded by bounded callable traversal",
+                    "deferred_execution": "callable body is deferred pending invocation",
+                }[public_state]
+            ),
         )
 
     def _lambda_source_index(
@@ -1867,6 +1934,7 @@ class MypyAnalyzer:
             ),
             _path_index=path_index,
         )
+        self._active_endpoint_dependencies = deps
 
         handler = endpoint.handler
         if not handler.file_path or not self._trees:
@@ -2000,6 +2068,21 @@ class MypyAnalyzer:
                     self._import_map_for_tree(dependency_tree, dependency_module),
                     depth=dependency_depth,
                 )
+            elif dependency_module in self._project_modules:
+                call_site = next(
+                    (
+                        site
+                        for site in deps.resolved_call_sites
+                        if site.canonical_symbol == dependency_fullname
+                        and site.file_path == handler_path
+                    ),
+                    None,
+                )
+                self._active_source_file = handler_path
+                self._active_source_line = (
+                    call_site.line if call_site is not None else handler.line_number
+                )
+                self._record_analysis_limitation("MAX_DEPTH", limit=self.max_depth)
 
         trace_roots: list[Any]
         if callback_range == CallbackRangeMode.FULL:
@@ -2614,28 +2697,31 @@ class MypyAnalyzer:
         member = info.get(member_name) if info is not None else None
         return self._callable_declaration(member.node) if member is not None else None
 
-    @classmethod
     def _join_finite_values(
-        cls, left: _FinitePointsTo | None, right: _FinitePointsTo | None
+        self, left: _FinitePointsTo | None, right: _FinitePointsTo | None
     ) -> _FinitePointsTo | None:
         """Join only complete finite values; unknown on either path fails closed."""
         if left is None or right is None:
             return None
         types = tuple(sorted(set(left.types) | set(right.types)))
-        if not types or len(types) > cls.MAX_POINTS_TO_TARGETS:
+        if len(types) > self.MAX_POINTS_TO_TARGETS:
+            self._record_analysis_limitation(
+                "MAX_POINTS_TO_TARGETS", target_count=len(types), limit=self.MAX_POINTS_TO_TARGETS
+            )
+            return None
+        if not types:
             return None
         left_fields = dict(left.fields)
         right_fields = dict(right.fields)
         fields: list[tuple[str, _FinitePointsTo]] = []
         for name in sorted(left_fields.keys() & right_fields.keys()):
-            value = cls._join_finite_values(left_fields[name], right_fields[name])
+            value = self._join_finite_values(left_fields[name], right_fields[name])
             if value is not None:
                 fields.append((name, value))
         return _FinitePointsTo(types, tuple(fields))
 
-    @classmethod
     def _join_finite_environments(
-        cls,
+        self,
         environments: list[dict[str, _FinitePointsTo]],
     ) -> dict[str, _FinitePointsTo]:
         if not environments:
@@ -2647,10 +2733,38 @@ class MypyAnalyzer:
         for name in sorted(common):
             value: _FinitePointsTo | None = environments[0][name]
             for environment in environments[1:]:
-                value = cls._join_finite_values(value, environment[name])
+                value = self._join_finite_values(value, environment[name])
             if value is not None:
                 result[name] = value
         return result
+
+    def _join_callable_environments(self, environments: list[dict[str, Any]]) -> dict[str, Any]:
+        """Keep callable targets assigned on every path as a bounded finite union."""
+        if not environments:
+            return {}
+        common = set(environments[0])
+        for environment in environments[1:]:
+            common &= environment.keys()
+        joined: dict[str, Any] = {}
+        for name in sorted(common):
+            targets: list[Any] = []
+            for environment in environments:
+                value = environment[name]
+                candidates = value.targets if isinstance(value, _CallableUnion) else (value,)
+                for candidate in candidates:
+                    if candidate not in targets:
+                        targets.append(candidate)
+            if len(targets) == 1:
+                joined[name] = targets[0]
+            elif targets and len(targets) <= self.MAX_POINTS_TO_TARGETS:
+                joined[name] = _CallableUnion(tuple(targets))
+            elif len(targets) > self.MAX_POINTS_TO_TARGETS:
+                self._record_analysis_limitation(
+                    "MAX_POINTS_TO_TARGETS",
+                    target_count=len(targets),
+                    limit=self.MAX_POINTS_TO_TARGETS,
+                )
+        return joined
 
     def _exact_project_identity(self, fullname: str) -> tuple[str, str] | None:
         """Split a canonical fullname at the longest exact built module prefix."""
@@ -3503,6 +3617,12 @@ class MypyAnalyzer:
     ) -> tuple[str, InvocationKind] | None:
         """Dispatch only when every finite concrete class selects one declaration."""
         if not receiver.types or len(receiver.types) > self.MAX_POINTS_TO_TARGETS:
+            if len(receiver.types) > self.MAX_POINTS_TO_TARGETS:
+                self._record_analysis_limitation(
+                    "MAX_POINTS_TO_TARGETS",
+                    target_count=len(receiver.types),
+                    limit=self.MAX_POINTS_TO_TARGETS,
+                )
             return None
         declarations: set[tuple[str, InvocationKind]] = set()
         for fullname in receiver.types:
@@ -4359,7 +4479,23 @@ class MypyAnalyzer:
                 arguments=self._call_argument_evidence(call),
             )
 
-    def _trace_references(
+    def _trace_references(self, *args: Any, **kwargs: Any) -> None:
+        """Keep source and endpoint context scoped across recursive traces."""
+        saved = (
+            self._active_endpoint_dependencies,
+            self._active_source_file,
+            self._active_source_line,
+        )
+        try:
+            self._trace_references_impl(*args, **kwargs)
+        finally:
+            (
+                self._active_endpoint_dependencies,
+                self._active_source_file,
+                self._active_source_line,
+            ) = saved
+
+    def _trace_references_impl(
         self,
         node: Any,
         deps: EndpointDependencies,
@@ -4410,6 +4546,9 @@ class MypyAnalyzer:
             finite_edge_budget = [0]
 
         from mypy.nodes import (
+            ARG_NAMED,
+            ARG_OPT,
+            ARG_POS,
             ARG_STAR,
             ARG_STAR2,
             AssertStmt,
@@ -4471,13 +4610,17 @@ class MypyAnalyzer:
         callable_environment: dict[
             str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]
         ] = dict(initial_callable_environment or {})
+        partial_environment: dict[str, _PartialCallable] = {}
         lambda_environment: dict[str, Any] = {}
         lambda_execution_states: dict[int, str] = {}
+        possible_execution_depth = [0]
 
         def record_lambda_execution(expression: Any, state: str) -> None:
             """Attach exact source-body state when its AST identity is unique."""
             if not isinstance(expression, LambdaExpr):
                 return
+            if state == "executed" and possible_execution_depth[0]:
+                state = "possible"
             lambda_execution_states[id(expression)] = state
             span = self._lambda_body_source_span(
                 function_node,
@@ -4487,6 +4630,12 @@ class MypyAnalyzer:
             )
             if span is not None:
                 deps.add_source_evidence_span(span)
+                if state in {"deferred", "possible"}:
+                    lexical = self._lambda_body_source_span(
+                        function_node, expression, current_file, "lexical"
+                    )
+                    if lexical is not None:
+                        deps.add_source_evidence_span(lexical)
 
         def resolve_and_trace(
             fullname: str,
@@ -4503,11 +4652,21 @@ class MypyAnalyzer:
             edge_kind: str | None = None,
         ) -> None:
             """Resolve a fullname and preserve LOW provenance through descendants."""
+            self._active_source_file = current_file
+            self._active_source_line = call_line
             target_depth = depth + 1
-            if target_depth > self.max_depth:
+            # External and unresolved symbols do not consume project traversal depth.
+            result = self._resolve_fullname_to_file(fullname)
+            if result is None or result[1] not in self._project_modules:
+                return
+            if target_depth >= self.max_depth:
+                self._record_analysis_limitation("MAX_DEPTH", limit=self.max_depth)
                 return
             if low_confidence_edge:
                 if finite_edge_budget[0] >= self.MAX_POINTS_TO_EDGES:
+                    self._record_analysis_limitation(
+                        "MAX_POINTS_TO_EDGES", limit=self.MAX_POINTS_TO_EDGES
+                    )
                     return
                 finite_edge_budget[0] += 1
             target_low_confidence = low_confidence_path or low_confidence_edge
@@ -4782,84 +4941,127 @@ class MypyAnalyzer:
                     string_environment = original_strings
                     traced = True
 
-                callable_alias = callable_environment.get(callee.name)
-                if callable_alias is not None:
-                    declaration, bound_receiver = callable_alias
-                    alias_fullname, alias_invocation = declaration
-                    if (
-                        call_site is not None
-                        and call_site.status != CallResolutionStatus.EXACT
-                        and alias_invocation == InvocationKind.FUNCTION
-                    ):
-                        deps.add_resolved_call_site(
-                            call_site.model_copy(
-                                update={
-                                    "canonical_symbol": alias_fullname,
-                                    "invocation": alias_invocation,
-                                    "status": CallResolutionStatus.EXACT,
-                                    "reason_code": None,
-                                }
+                partial_alias = partial_environment.get(callee.name)
+                callable_alias_value: Any = (
+                    (partial_alias.declaration, partial_alias.receiver)
+                    if partial_alias is not None
+                    else callable_environment.get(callee.name)
+                )
+                callable_alias_is_possible = isinstance(callable_alias_value, _CallableUnion)
+                callable_aliases = (
+                    callable_alias_value.targets
+                    if callable_alias_is_possible
+                    else (callable_alias_value,)
+                    if callable_alias_value is not None
+                    else ()
+                )
+                if callable_aliases:
+                    binding_call: Any = call
+                    if partial_alias is not None:
+                        from types import SimpleNamespace as _CallShape
+
+                        invocation_keywords = {
+                            name
+                            for kind, name in zip(call.arg_kinds, call.arg_names, strict=True)
+                            if kind == ARG_NAMED and name is not None
+                        }
+                        kept_bound = [
+                            (expression, kind, name)
+                            for expression, kind, name in zip(
+                                partial_alias.args,
+                                partial_alias.arg_kinds,
+                                partial_alias.arg_names,
+                                strict=True,
                             )
+                            if name is None or name not in invocation_keywords
+                        ]
+                        binding_call = _CallShape(
+                            args=[*(item[0] for item in kept_bound), *call.args],
+                            arg_kinds=[*(item[1] for item in kept_bound), *call.arg_kinds],
+                            arg_names=[*(item[2] for item in kept_bound), *call.arg_names],
                         )
-                    target_strings = None
-                    resolved_function = self._function_node_for_fullname(alias_fullname)
-                    if resolved_function is not None:
-                        target_strings = self._bind_finite_string_arguments(
-                            resolved_function[0],
-                            call,
-                            string_environment,
-                            skip_implicit_receiver=(
-                                alias_invocation == InvocationKind.INSTANCE_METHOD
-                            ),
+                    for declaration, bound_receiver in callable_aliases:
+                        alias_fullname, alias_invocation = declaration
+                        if (
+                            call_site is not None
+                            and call_site.status != CallResolutionStatus.EXACT
+                            and alias_invocation == InvocationKind.FUNCTION
+                            and not callable_alias_is_possible
+                        ):
+                            deps.add_resolved_call_site(
+                                call_site.model_copy(
+                                    update={
+                                        "canonical_symbol": alias_fullname,
+                                        "invocation": alias_invocation,
+                                        "status": CallResolutionStatus.EXACT,
+                                        "reason_code": None,
+                                    }
+                                )
+                            )
+                        target_strings = None
+                        resolved_function = self._function_node_for_fullname(alias_fullname)
+                        if resolved_function is not None:
+                            target_strings = self._bind_finite_string_arguments(
+                                resolved_function[0],
+                                binding_call,
+                                string_environment,
+                                skip_implicit_receiver=(
+                                    alias_invocation == InvocationKind.INSTANCE_METHOD
+                                ),
+                            )
+                        target_callables = (
+                            self._bind_callable_arguments(
+                                resolved_function[0],
+                                binding_call,
+                                callable_environment,
+                                flow_environment,
+                                import_map,
+                                (),
+                                finite_budget,
+                                skip_implicit_receiver=(
+                                    alias_invocation == InvocationKind.INSTANCE_METHOD
+                                ),
+                            )
+                            if resolved_function is not None
+                            else None
                         )
-                    target_callables = (
-                        self._bind_callable_arguments(
-                            resolved_function[0],
-                            call,
-                            callable_environment,
-                            flow_environment,
-                            import_map,
-                            (),
-                            finite_budget,
-                            skip_implicit_receiver=(
-                                alias_invocation == InvocationKind.INSTANCE_METHOD
-                            ),
+                        if target_callables is not None and partial_alias is not None:
+                            # Creation-time callable values win over later rebinding
+                            # of the source variable used to construct the partial.
+                            target_callables.update(dict(partial_alias.bound_callables))
+                        deps.add_reference(current_file, call.line, alias_fullname)
+                        alias_is_unawaited_coroutine = bool(
+                            resolved_function is not None
+                            and getattr(
+                                self._actual_function(resolved_function[0]), "is_coroutine", False
+                            )
+                            and id(call) not in awaited_call_ids
                         )
-                        if resolved_function is not None
-                        else None
-                    )
-                    deps.add_reference(current_file, call.line, alias_fullname)
-                    alias_is_unawaited_coroutine = bool(
-                        resolved_function is not None
-                        and getattr(
-                            self._actual_function(resolved_function[0]), "is_coroutine", False
-                        )
-                        and id(call) not in awaited_call_ids
-                    )
-                    if not alias_is_unawaited_coroutine:
-                        resolve_and_trace(
-                            alias_fullname,
-                            call.line,
-                            target_receiver=(
-                                bound_receiver
-                                if alias_invocation == InvocationKind.INSTANCE_METHOD
-                                else None
-                            ),
-                            target_string_environment=target_strings,
-                            target_callable_environment=target_callables,
-                            edge_kind="callable_alias_invocation",
-                        )
-                    elif resolved_function is not None:
-                        header_start, header_end = self._callable_header_lines(
-                            resolved_function[0], resolved_function[1]
-                        )
-                        deps.add_symbol_reference(
-                            resolved_function[1],
-                            alias_fullname,
-                            header_start,
-                            header_end,
-                        )
-                    traced = True
+                        if not alias_is_unawaited_coroutine:
+                            resolve_and_trace(
+                                alias_fullname,
+                                call.line,
+                                low_confidence_edge=callable_alias_is_possible,
+                                target_receiver=(
+                                    bound_receiver
+                                    if alias_invocation == InvocationKind.INSTANCE_METHOD
+                                    else None
+                                ),
+                                target_string_environment=target_strings,
+                                target_callable_environment=target_callables,
+                                edge_kind="callable_alias_invocation",
+                            )
+                        elif resolved_function is not None:
+                            header_start, header_end = self._callable_header_lines(
+                                resolved_function[0], resolved_function[1]
+                            )
+                            deps.add_symbol_reference(
+                                resolved_function[1],
+                                alias_fullname,
+                                header_start,
+                                header_end,
+                            )
+                        traced = True
 
             canonical_symbol = (call_site.canonical_symbol if call_site is not None else None) or ""
             generator_consumer = self.GENERATOR_CONSUMERS.get(canonical_symbol)
@@ -5140,12 +5342,17 @@ class MypyAnalyzer:
             """Recursively walk a mypy AST node with a bounded local environment."""
             nonlocal \
                 callable_environment, \
+                partial_environment, \
                 deferred_environment, \
                 flow_environment, \
                 lambda_environment, \
                 string_environment
             if n is None:
                 return
+            node_line = getattr(n, "line", 0)
+            if isinstance(node_line, int) and node_line > 0:
+                self._active_source_file = current_file
+                self._active_source_line = node_line
 
             source_line = int(getattr(n, "line", 0) or 0)
             if source_line > 0 and not isinstance(n, LambdaExpr):
@@ -5253,6 +5460,11 @@ class MypyAnalyzer:
                 callable_value: tuple[tuple[str, InvocationKind], _FinitePointsTo | None] | None = (
                     None
                 )
+                partial_value: _PartialCallable | None = (
+                    partial_environment.get(n.rvalue.name)
+                    if isinstance(n.rvalue, NameExpr)
+                    else None
+                )
                 lambda_value = (
                     n.rvalue
                     if isinstance(n.rvalue, LambdaExpr)
@@ -5301,9 +5513,12 @@ class MypyAnalyzer:
                     ):
                         if returned_call.canonical_symbol == "functools.partial" and n.rvalue.args:
                             partial_target = n.rvalue.args[0]
+                            target_value: (
+                                tuple[tuple[str, InvocationKind], _FinitePointsTo | None] | None
+                            ) = None
                             if isinstance(partial_target, NameExpr):
-                                callable_value = callable_environment.get(partial_target.name)
-                                if callable_value is None:
+                                target_value = callable_environment.get(partial_target.name)
+                                if target_value is None:
                                     declaration = self._callable_declaration(
                                         getattr(partial_target, "node", None)
                                     )
@@ -5319,7 +5534,7 @@ class MypyAnalyzer:
                                     if declaration is not None and self._exact_project_identity(
                                         declaration[0]
                                     ):
-                                        callable_value = (declaration, None)
+                                        target_value = (declaration, None)
                             elif isinstance(partial_target, MemberExpr):
                                 declaration = self._callable_declaration(
                                     getattr(partial_target, "node", None)
@@ -5334,7 +5549,98 @@ class MypyAnalyzer:
                                 if declaration is not None and self._exact_project_identity(
                                     declaration[0]
                                 ):
-                                    callable_value = (declaration, receiver)
+                                    target_value = (declaration, receiver)
+                            if target_value is not None:
+                                bound_callables: list[
+                                    tuple[
+                                        str,
+                                        tuple[tuple[str, InvocationKind], _FinitePointsTo | None],
+                                    ]
+                                ] = []
+                                target_node = self._function_node_for_fullname(target_value[0][0])
+                                if target_node is not None:
+                                    actual = self._actual_function(target_node[0])
+                                    parameters = list(getattr(actual, "arguments", ()))
+                                    if target_value[0][1] == InvocationKind.INSTANCE_METHOD:
+                                        parameters = parameters[1:]
+                                    positional_parameters = [
+                                        item
+                                        for item in parameters
+                                        if item.kind in (ARG_POS, ARG_OPT)
+                                    ]
+                                    keyword_parameters = {
+                                        item.variable.name: item
+                                        for item in parameters
+                                        if not item.pos_only
+                                    }
+                                    for expression, kind, name in zip(
+                                        n.rvalue.args[1:],
+                                        n.rvalue.arg_kinds[1:],
+                                        n.rvalue.arg_names[1:],
+                                        strict=True,
+                                    ):
+                                        parameter = None
+                                        if (
+                                            kind == ARG_POS
+                                            and name is None
+                                            and positional_parameters
+                                        ):
+                                            parameter = positional_parameters.pop(0)
+                                        elif kind == ARG_NAMED and name in keyword_parameters:
+                                            parameter = keyword_parameters[name]
+                                        callable_actual: (
+                                            tuple[
+                                                tuple[str, InvocationKind],
+                                                _FinitePointsTo | None,
+                                            ]
+                                            | None
+                                        ) = None
+                                        if isinstance(expression, NameExpr):
+                                            callable_actual = callable_environment.get(
+                                                expression.name
+                                            )
+                                            if callable_actual is None:
+                                                declaration = self._callable_declaration(
+                                                    getattr(expression, "node", None)
+                                                )
+                                                if (
+                                                    declaration is not None
+                                                    and self._exact_project_identity(declaration[0])
+                                                ):
+                                                    callable_actual = (declaration, None)
+                                        elif isinstance(expression, MemberExpr):
+                                            declaration = self._callable_declaration(
+                                                getattr(expression, "node", None)
+                                            )
+                                            if (
+                                                declaration is not None
+                                                and self._exact_project_identity(declaration[0])
+                                            ):
+                                                receiver_value = self._finite_expression_value(
+                                                    expression.expr,
+                                                    flow_environment,
+                                                    import_map,
+                                                    (),
+                                                    finite_budget,
+                                                )
+                                                if (
+                                                    declaration[1] != InvocationKind.INSTANCE_METHOD
+                                                    or receiver_value is not None
+                                                ):
+                                                    callable_actual = (declaration, receiver_value)
+                                        if parameter is not None and callable_actual is not None:
+                                            bound_callables.append(
+                                                (parameter.variable.name, callable_actual)
+                                            )
+                                partial_value = _PartialCallable(
+                                    declaration=target_value[0],
+                                    receiver=target_value[1],
+                                    args=tuple(n.rvalue.args[1:]),
+                                    arg_kinds=tuple(n.rvalue.arg_kinds[1:]),
+                                    arg_names=tuple(n.rvalue.arg_names[1:]),
+                                    bound_callables=tuple(bound_callables),
+                                )
+                            callable_value = None
                         returned_declaration = self._returned_project_callable(
                             returned_call.canonical_symbol
                         )
@@ -5361,6 +5667,10 @@ class MypyAnalyzer:
                             callable_environment.pop(lv.name, None)
                         else:
                             callable_environment[lv.name] = callable_value
+                        if partial_value is None:
+                            partial_environment.pop(lv.name, None)
+                        else:
+                            partial_environment[lv.name] = partial_value
                         if lambda_value is None:
                             lambda_environment.pop(lv.name, None)
                         else:
@@ -5383,6 +5693,7 @@ class MypyAnalyzer:
                 base_strings = dict(string_environment)
                 base_deferred = dict(deferred_environment)
                 base_callables = dict(callable_environment)
+                base_partials = dict(partial_environment)
                 base_lambdas = dict(lambda_environment)
                 branch_environments: list[dict[str, _FinitePointsTo]] = []
                 branch_strings: list[dict[str, tuple[str, ...]]] = []
@@ -5390,6 +5701,7 @@ class MypyAnalyzer:
                 branch_callables: list[
                     dict[str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]]
                 ] = []
+                branch_partials: list[dict[str, _PartialCallable]] = []
                 branch_lambdas: list[dict[str, Any]] = []
                 selected: int | None = None
                 unknown_before_selection = False
@@ -5406,13 +5718,21 @@ class MypyAnalyzer:
                     string_environment = dict(base_strings)
                     deferred_environment = dict(base_deferred)
                     callable_environment = dict(base_callables)
+                    partial_environment = dict(base_partials)
                     lambda_environment = dict(base_lambdas)
                     walk_node(expr)
-                    walk_node(body)
+                    if literal is None:
+                        possible_execution_depth[0] += 1
+                    try:
+                        walk_node(body)
+                    finally:
+                        if literal is None:
+                            possible_execution_depth[0] -= 1
                     branch_environments.append(dict(flow_environment))
                     branch_strings.append(dict(string_environment))
                     branch_deferred.append(dict(deferred_environment))
                     branch_callables.append(dict(callable_environment))
+                    branch_partials.append(dict(partial_environment))
                     branch_lambdas.append(dict(lambda_environment))
                     if literal is True:
                         selected = len(branch_environments) - 1
@@ -5422,25 +5742,35 @@ class MypyAnalyzer:
                 string_environment = dict(base_strings)
                 deferred_environment = dict(base_deferred)
                 callable_environment = dict(base_callables)
+                partial_environment = dict(base_partials)
                 lambda_environment = dict(base_lambdas)
                 if n.else_body and selected is None:
-                    walk_node(n.else_body)
+                    if not unknown_before_selection:
+                        possible_execution_depth[0] += 1
+                    try:
+                        walk_node(n.else_body)
+                    finally:
+                        if not unknown_before_selection:
+                            possible_execution_depth[0] -= 1
                     branch_environments.append(dict(flow_environment))
                     branch_strings.append(dict(string_environment))
                     branch_deferred.append(dict(deferred_environment))
                     branch_callables.append(dict(callable_environment))
+                    branch_partials.append(dict(partial_environment))
                     branch_lambdas.append(dict(lambda_environment))
                 elif not n.else_body and selected is None:
                     branch_environments.append(base_environment)
                     branch_strings.append(base_strings)
                     branch_deferred.append(base_deferred)
                     branch_callables.append(base_callables)
+                    branch_partials.append(base_partials)
                     branch_lambdas.append(base_lambdas)
                 if selected is not None and not unknown_before_selection:
                     flow_environment = branch_environments[selected]
                     string_environment = branch_strings[selected]
                     deferred_environment = branch_deferred[selected]
                     callable_environment = branch_callables[selected]
+                    partial_environment = branch_partials[selected]
                     lambda_environment = branch_lambdas[selected]
                 else:
                     flow_environment = self._join_finite_environments(branch_environments)
@@ -5469,17 +5799,18 @@ class MypyAnalyzer:
                                 for branch in branch_deferred[1:]
                             )
                         }
-                    common_callables = (
-                        set.intersection(*(set(branch) for branch in branch_callables))
-                        if branch_callables
+                    callable_environment = self._join_callable_environments(branch_callables)
+                    common_partials = (
+                        set.intersection(*(set(branch) for branch in branch_partials))
+                        if branch_partials
                         else set()
                     )
-                    callable_environment = {
-                        name: branch_callables[0][name]
-                        for name in common_callables
+                    partial_environment = {
+                        name: branch_partials[0][name]
+                        for name in common_partials
                         if all(
-                            branch[name] == branch_callables[0][name]
-                            for branch in branch_callables[1:]
+                            branch[name] == branch_partials[0][name]
+                            for branch in branch_partials[1:]
                         )
                     }
                     common_lambdas = (
@@ -5497,10 +5828,35 @@ class MypyAnalyzer:
 
             elif isinstance(n, WhileStmt):
                 walk_node(n.expr)
-                flow_environment.clear()
-                string_environment.clear()
-                deferred_environment.clear()
-                walk_node(n.body)
+                if self._literal_boolean(n.expr) is False:
+                    # The loop body is unreachable; only its else suite executes.
+                    if n.else_body is not None:
+                        walk_node(n.else_body)
+                    return
+                before_callables = dict(callable_environment)
+                before_partials = dict(partial_environment)
+                before_lambdas = dict(lambda_environment)
+                possible_execution_depth[0] += 1
+                try:
+                    walk_node(n.body)
+                finally:
+                    possible_execution_depth[0] -= 1
+                after_callables = dict(callable_environment)
+                after_partials = dict(partial_environment)
+                after_lambdas = dict(lambda_environment)
+                callable_environment = self._join_callable_environments(
+                    [before_callables, after_callables]
+                )
+                partial_environment = {
+                    name: value
+                    for name, value in before_partials.items()
+                    if after_partials.get(name) == value
+                }
+                lambda_environment = {
+                    name: value
+                    for name, value in before_lambdas.items()
+                    if after_lambdas.get(name) is value
+                }
                 flow_environment.clear()
                 string_environment.clear()
                 deferred_environment.clear()
@@ -5512,10 +5868,30 @@ class MypyAnalyzer:
                     require_async=bool(n.is_async),
                 )
                 walk_node(n.expr)
-                flow_environment.clear()
-                string_environment.clear()
-                deferred_environment.clear()
-                walk_node(n.body)
+                before_callables = dict(callable_environment)
+                before_partials = dict(partial_environment)
+                before_lambdas = dict(lambda_environment)
+                possible_execution_depth[0] += 1
+                try:
+                    walk_node(n.body)
+                finally:
+                    possible_execution_depth[0] -= 1
+                after_callables = dict(callable_environment)
+                after_partials = dict(partial_environment)
+                after_lambdas = dict(lambda_environment)
+                callable_environment = self._join_callable_environments(
+                    [before_callables, after_callables]
+                )
+                partial_environment = {
+                    name: value
+                    for name, value in before_partials.items()
+                    if after_partials.get(name) == value
+                }
+                lambda_environment = {
+                    name: value
+                    for name, value in before_lambdas.items()
+                    if after_lambdas.get(name) is value
+                }
                 flow_environment.clear()
                 string_environment.clear()
                 deferred_environment.clear()
@@ -5532,29 +5908,116 @@ class MypyAnalyzer:
                 deferred_environment.clear()
 
             elif isinstance(n, TryStmt):
-                flow_environment.clear()
-                string_environment.clear()
-                deferred_environment.clear()
+                # An exception may be raised before or after any assignment in the
+                # protected body. Handler entry therefore joins the pre-try and
+                # post-body callable state instead of inheriting one linear walk.
+                before_callables = dict(callable_environment)
+                before_partials = dict(partial_environment)
+                before_lambdas = dict(lambda_environment)
+                try_assigned_names: set[str] = set()
+                assignment_stack: list[Any] = [n.body]
+                assignment_seen: set[int] = set()
+                while assignment_stack:
+                    assignment_item = assignment_stack.pop()
+                    if assignment_item is None or id(assignment_item) in assignment_seen:
+                        continue
+                    assignment_seen.add(id(assignment_item))
+                    if isinstance(assignment_item, Block):
+                        assignment_stack.extend(assignment_item.body)
+                    elif isinstance(assignment_item, AssignmentStmt):
+                        try_assigned_names.update(
+                            target.name
+                            for target in assignment_item.lvalues
+                            if isinstance(target, NameExpr)
+                        )
+                    elif isinstance(assignment_item, IfStmt):
+                        assignment_stack.extend(assignment_item.body)
+                        if assignment_item.else_body is not None:
+                            assignment_stack.append(assignment_item.else_body)
+                    elif isinstance(assignment_item, (ForStmt, WhileStmt)):
+                        assignment_stack.append(assignment_item.body)
+                        if assignment_item.else_body is not None:
+                            assignment_stack.append(assignment_item.else_body)
+                    elif isinstance(assignment_item, TryStmt):
+                        assignment_stack.append(assignment_item.body)
+                        assignment_stack.extend(assignment_item.handlers)
+                        assignment_stack.append(assignment_item.else_body)
+                        assignment_stack.append(assignment_item.finally_body)
+                    elif isinstance(assignment_item, WithStmt):
+                        assignment_stack.append(assignment_item.body)
                 walk_node(n.body)
+                body_callables = dict(callable_environment)
+                body_partials = dict(partial_environment)
+                body_lambdas = dict(lambda_environment)
+                normal_callables = dict(body_callables)
+                normal_partials = dict(body_partials)
+                normal_lambdas = dict(body_lambdas)
+                handler_callables: list[
+                    dict[str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]]
+                ] = []
+                handler_partials: list[dict[str, _PartialCallable]] = []
+                handler_lambdas: list[dict[str, Any]] = []
                 for handler in n.handlers:
-                    flow_environment.clear()
-                    string_environment.clear()
-                    deferred_environment.clear()
-                    walk_node(handler)
+                    callable_environment = {
+                        key: value
+                        for key, value in before_callables.items()
+                        if key not in try_assigned_names and body_callables.get(key) == value
+                    }
+                    partial_environment = {
+                        key: value
+                        for key, value in before_partials.items()
+                        if key not in try_assigned_names and body_partials.get(key) == value
+                    }
+                    lambda_environment = {
+                        key: value
+                        for key, value in before_lambdas.items()
+                        if key not in try_assigned_names and body_lambdas.get(key) is value
+                    }
+                    possible_execution_depth[0] += 1
+                    try:
+                        walk_node(handler)
+                    finally:
+                        possible_execution_depth[0] -= 1
+                    handler_callables.append(dict(callable_environment))
+                    handler_partials.append(dict(partial_environment))
+                    handler_lambdas.append(dict(lambda_environment))
                 if hasattr(n, "types") and n.types:
                     for exc_type in n.types:
                         if exc_type:
                             walk_node(exc_type)
                 if n.else_body:
-                    flow_environment.clear()
-                    string_environment.clear()
-                    deferred_environment.clear()
+                    callable_environment = dict(body_callables)
+                    partial_environment = dict(body_partials)
+                    lambda_environment = dict(body_lambdas)
                     walk_node(n.else_body)
+                    normal_callables = dict(callable_environment)
+                    normal_partials = dict(partial_environment)
+                    normal_lambdas = dict(lambda_environment)
+                callable_paths = [normal_callables, *handler_callables]
+                partial_paths = [normal_partials, *handler_partials]
+                lambda_paths = [normal_lambdas, *handler_lambdas]
+                if callable_paths:
+                    callable_environment = self._join_callable_environments(callable_paths)
+                if partial_paths:
+                    common_partial = set.intersection(*(set(path) for path in partial_paths))
+                    partial_environment = {
+                        key: partial_paths[0][key]
+                        for key in common_partial
+                        if all(path[key] == partial_paths[0][key] for path in partial_paths[1:])
+                    }
+                if lambda_paths:
+                    common_lambda = set.intersection(*(set(path) for path in lambda_paths))
+                    lambda_environment = {
+                        key: lambda_paths[0][key]
+                        for key in common_lambda
+                        if all(path[key] is lambda_paths[0][key] for path in lambda_paths[1:])
+                    }
                 if n.finally_body:
-                    flow_environment.clear()
-                    string_environment.clear()
-                    deferred_environment.clear()
-                    walk_node(n.finally_body)
+                    possible_execution_depth[0] += 1
+                    try:
+                        walk_node(n.finally_body)
+                    finally:
+                        possible_execution_depth[0] -= 1
                 flow_environment.clear()
                 string_environment.clear()
                 deferred_environment.clear()
@@ -5931,6 +6394,16 @@ class MypyAnalyzer:
                 "methods": deps.methods,
                 "path": deps.path,
                 "analysis_incomplete": deps.analysis_incomplete,
+                "analysis_limitations": [
+                    {
+                        "file_path": item.file_path,
+                        "call_line": item.call_line,
+                        "cap": item.cap,
+                        "target_count": item.target_count,
+                        "limit": item.limit,
+                    }
+                    for item in deps.analysis_limitations
+                ],
                 "build_failed": deps.build_failed,
                 "unresolved_imports": [list(item) for item in deps.unresolved_imports],
                 "referenced_files": {f: list(lines) for f, lines in deps.referenced_files.items()},
@@ -5957,6 +6430,7 @@ class MypyAnalyzer:
                         "end_column": span.end_column,
                         "execution_state": span.execution_state,
                         "evidence_kind": span.evidence_kind,
+                        "provenance": span.provenance,
                     }
                     for span in deps.get_source_evidence_spans()
                 ],
@@ -6076,6 +6550,7 @@ class MypyAnalyzer:
                         end_column=item["end_column"],
                         execution_state=item["execution_state"],
                         evidence_kind=item.get("evidence_kind", "lambda_body"),
+                        provenance=item.get("provenance", "mypy callable traversal"),
                     )
                     for item in source_span_data
                     if isinstance(item, dict)
@@ -6116,6 +6591,11 @@ class MypyAnalyzer:
                     project_files=path_index.project_files,
                     analysis_incomplete=deps_data.get("analysis_incomplete", False),
                     build_failed=deps_data.get("build_failed", False),
+                    analysis_limitations=[
+                        AnalysisLimitation(**item)
+                        for item in deps_data.get("analysis_limitations", ())
+                        if isinstance(item, dict)
+                    ],
                     unresolved_imports=tuple(
                         tuple(item) for item in deps_data.get("unresolved_imports", ())
                     ),

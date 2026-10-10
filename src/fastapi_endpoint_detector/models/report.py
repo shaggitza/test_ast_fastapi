@@ -96,6 +96,21 @@ class EvidenceStatus(str, Enum):
     UNRESOLVED = "unresolved"
 
 
+class ExecutionEvidence(BaseModel):
+    """Source backed distinction between a lexical edge and its execution proof."""
+
+    model_config = {"frozen": True, "extra": "forbid"}
+    file_path: str
+    start_line: int
+    start_column: int
+    end_line: int
+    end_column: int
+    execution_state: Literal[
+        "lexical_reference", "possible_execution", "established_execution", "deferred_execution"
+    ]
+    provenance: str
+
+
 class ChangeEffectKind(str, Enum):
     """Semantic shape of a source change."""
 
@@ -300,6 +315,10 @@ class AffectedEndpoint(BaseModel):
         default_factory=list,
         description="Structured reachability, effect, and data-observation evidence.",
     )
+    execution_evidence: tuple[ExecutionEvidence, ...] = Field(
+        default_factory=tuple,
+        description="Precise callable-body evidence with execution state and provenance.",
+    )
     contract_evidence: tuple[ContractEffectEvidence, ...] = Field(
         default_factory=tuple,
         description=(
@@ -394,6 +413,16 @@ class OrphanChange(BaseModel):
         return "; ".join(parts) if parts else "No lines"
 
 
+class AnalysisLimitationReport(BaseModel):
+    """Structured evidence for a source-correlated analyzer capability limit."""
+
+    file_path: str
+    call_line: int
+    cap: str
+    target_count: int | None = None
+    limit: int | None = None
+
+
 class AnalysisReport(BaseModel):
     """Complete analysis report."""
 
@@ -457,6 +486,7 @@ class AnalysisReport(BaseModel):
         default="complete",
         description="Whether every changed side was analyzed with its required snapshot.",
     )
+    analysis_limitations: list[AnalysisLimitationReport] = Field(default_factory=list)
     effect_contract_audit: EffectContractAudit | None = Field(
         default=None,
         description="Complete exact contract audit when configured.",

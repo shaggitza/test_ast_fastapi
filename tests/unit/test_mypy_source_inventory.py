@@ -278,7 +278,9 @@ def test_schema_23_cache_without_completion_metadata_is_rebuilt(tmp_path: Path) 
     assert not second._load_cache()
     results = second.analyze_endpoints([endpoint], use_cache=True)
     assert not results[second._endpoint_key(endpoint)].analysis_incomplete
-    assert json.loads(cache.read_text(encoding="utf-8"))["schema_version"] == 25
+    assert json.loads(cache.read_text(encoding="utf-8"))["schema_version"] == (
+        MypyAnalyzer.CACHE_SCHEMA_VERSION
+    )
 
 
 def test_single_endpoint_recovers_after_failed_build(

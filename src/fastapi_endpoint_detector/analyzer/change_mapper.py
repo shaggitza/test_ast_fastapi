@@ -47,6 +47,7 @@ from fastapi_endpoint_detector.models.endpoint import (
 )
 from fastapi_endpoint_detector.models.report import (
     AffectedEndpoint,
+    AnalysisLimitationReport,
     AnalysisReport,
     CallStackFrame,
     ChangeEffectKind,
@@ -59,6 +60,7 @@ from fastapi_endpoint_detector.models.report import (
     EndpointLifecycleKind,
     EvidenceProducer,
     EvidenceStatus,
+    ExecutionEvidence,
     ImpactChannel,
     OrphanChange,
 )
@@ -161,6 +163,7 @@ class _AffectedAccumulator:
     dependency_chains: list[list[str]] = field(default_factory=list)
     call_stacks: list[list[CallStackFrame]] = field(default_factory=list)
     effect_evidence: list[EffectEvidence] = field(default_factory=list)
+    execution_evidence: list[ExecutionEvidence] = field(default_factory=list)
 
     @classmethod
     def from_candidate(cls, candidate: AffectedEndpoint) -> _AffectedAccumulator:
@@ -218,6 +221,9 @@ class _AffectedAccumulator:
         for evidence in candidate.effect_evidence:
             if evidence not in self.effect_evidence:
                 self.effect_evidence.append(evidence)
+        for execution_evidence in candidate.execution_evidence:
+            if execution_evidence not in self.execution_evidence:
+                self.execution_evidence.append(execution_evidence)
 
     def materialize(self) -> AffectedEndpoint:
         return AffectedEndpoint(
@@ -229,6 +235,7 @@ class _AffectedAccumulator:
             changed_files=self.changed_files,
             call_stacks=self.call_stacks,
             effect_evidence=self.effect_evidence,
+            execution_evidence=tuple(self.execution_evidence),
         )
 
 
@@ -1233,6 +1240,19 @@ class ChangeMapper:
                     ),
                     *(list(effect_result.evidence) if effect_result else []),
                 ],
+                execution_evidence=tuple(
+                    ExecutionEvidence(
+                        file_path=span.file_path,
+                        start_line=span.start_line,
+                        start_column=span.start_column,
+                        end_line=span.end_line,
+                        end_column=span.end_column,
+                        execution_state=span.execution_state,
+                        provenance=span.provenance,
+                    )
+                    for span in deps.get_source_evidence_spans(file_path)
+                    if set(range(span.start_line, span.end_line + 1)) & set(display_lines)
+                ),
             )
 
         return None
@@ -1266,12 +1286,12 @@ class ChangeMapper:
         if any(not change.exact for change in relevant_changes):
             return False
         deferred_spans = deps.get_source_evidence_spans(
-            str(diff_file.path), execution_state="deferred"
+            str(diff_file.path), execution_state="deferred_execution"
         )
         if not deferred_spans:
             return False
         executed_spans = deps.get_source_evidence_spans(
-            str(diff_file.path), execution_state="executed"
+            str(diff_file.path), execution_state="established_execution"
         )
         if not relevant_changes:
             # This side has no changed bytes (for example, a suffix deletion
@@ -2042,6 +2062,29 @@ class ChangeMapper:
         self._append_dependency_completeness_warnings(
             "target", self.registry, self.mypy_analyzer, warnings
         )
+        analysis_limitations: list[AnalysisLimitationReport] = []
+        limited_endpoint_ids: set[str] = set()
+        for endpoint in self.registry.get_all():
+            dependencies = self.mypy_analyzer.get_endpoint_dependencies(endpoint)
+            if dependencies is None or not dependencies.analysis_limitations:
+                continue
+            limited_endpoint_ids.add(endpoint.identifier)
+            analysis_limitations.extend(
+                AnalysisLimitationReport(
+                    file_path=item.file_path,
+                    call_line=item.call_line,
+                    cap=item.cap,
+                    target_count=item.target_count,
+                    limit=item.limit,
+                )
+                for item in dependencies.analysis_limitations
+            )
+        for item in analysis_limitations:
+            warnings.append(
+                f"Mypy bounded analysis at {item.file_path}:{item.call_line} exceeded "
+                f"{item.cap} (targets={item.target_count}, limit={item.limit}); "
+                "analysis is partial."
+            )
         has_mypy_removals = any(
             DiffParser.get_changed_line_numbers(item)[1]
             or (item.source_path is not None and item.source_path != item.path)
@@ -2159,6 +2202,20 @@ class ChangeMapper:
         report_progress(95, 100, "Filtering results...")
         threshold = self.config.analysis.confidence_threshold
         materialized = [item.materialize() for item in all_affected.values()]
+        materialized = [
+            item.model_copy(
+                update={
+                    "confidence": ConfidenceLevel.LOW,
+                    "reason": (
+                        f"{item.reason} Bounded endpoint analysis prevents stronger confidence."
+                    ),
+                }
+            )
+            if item.endpoint.identifier in limited_endpoint_ids
+            and item.confidence in {ConfidenceLevel.HIGH, ConfidenceLevel.MEDIUM}
+            else item
+            for item in materialized
+        ]
         materialized = self._expand_resource_coupling_candidates(materialized, python_files)
         materialized = self._attach_contract_evidence(
             materialized,
@@ -2205,6 +2262,7 @@ class ChangeMapper:
             analysis_completeness=(
                 "partial"
                 if errors
+                or analysis_limitations
                 or any(
                     marker in warning.lower()
                     for warning in warnings
@@ -2212,6 +2270,7 @@ class ChangeMapper:
                 )
                 else "complete"
             ),
+            analysis_limitations=analysis_limitations,
             source_evidence_graph=target_source_graph,
             effect_contract_audit=self._effect_contract_audit,
             resource_coupling_graph=self._resource_coupling_graph,
