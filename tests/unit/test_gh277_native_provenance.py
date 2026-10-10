@@ -230,6 +230,299 @@ def test_import_and_all_export_owners_follow_only_the_imported_router(tmp_path: 
     assert native_route_structural_owners(local, app_file, {2}) == ()
 
 
+def test_recursive_reexport_owners_cover_each_export_hop_and_only_descendants(
+    tmp_path: Path,
+) -> None:
+    implementation = tmp_path / "implementation.py"
+    implementation.write_text(
+        "from fastapi import APIRouter\n"
+        "router = APIRouter()\n"
+        "@router.get('/deep')\n"
+        "def deep(): pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "level_one.py").write_text(
+        "from implementation import router as first\n__all__ = ['first']\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "level_two.py").write_text(
+        "from level_one import first as second\n__all__ = ['second']\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "public.py").write_text(
+        "from level_two import second as published\n__all__ = ['published']\n",
+        encoding="utf-8",
+    )
+    app_file = tmp_path / "main.py"
+    app_file.write_text(
+        "from fastapi import APIRouter, FastAPI\n"
+        "from public import published\n"
+        "other = APIRouter()\n"
+        "@other.get('/other')\n"
+        "def other_route(): pass\n"
+        "app = FastAPI()\n"
+        "app.include_router(published)\n"
+        "app.include_router(other)\n",
+        encoding="utf-8",
+    )
+
+    endpoints = SecureASTExtractor(app_file).extract_endpoints()
+    deep = next(item for item in endpoints if item.identifier == "GET /deep")
+    other = next(item for item in endpoints if item.identifier == "GET /other")
+    owners = deep.native_provenance.source_owners if deep.native_provenance else ()
+    assert {owner.qualified_binding for owner in owners if owner.owner_kind == "reexport"} == {
+        "public.published",
+        "level_two.second",
+        "level_one.first",
+    }
+    assert {owner.qualified_binding for owner in owners if owner.owner_kind == "all_export"} == {
+        "public.published",
+        "level_two.second",
+        "level_one.first",
+    }
+    for source in (tmp_path / "public.py", tmp_path / "level_two.py", tmp_path / "level_one.py"):
+        assert any(
+            owner.role == "object" for owner in native_route_structural_owners(deep, source, {1})
+        )
+        assert any(
+            owner.role == "object" for owner in native_route_structural_owners(deep, source, {2})
+        )
+        assert native_route_structural_owners(other, source, {1, 2}) == ()
+
+
+def test_reassigned_or_deleted_all_does_not_leave_stale_export_ownership(
+    tmp_path: Path,
+) -> None:
+    cases = {
+        "reassigned": (
+            "from implementation import router as published\n"
+            "__all__ = ['published']\n"
+            "__all__ = []\n",
+            {2},
+        ),
+        "deleted": (
+            "from implementation import router as published\n"
+            "__all__ = ['published']\n"
+            "del __all__\n",
+            {2},
+        ),
+        "annotation_without_value": (
+            "from implementation import router as published\n"
+            "__all__ = ['published']\n"
+            "__all__: list[str]\n",
+            {2, 3},
+        ),
+        "annotation_mutation": (
+            "from implementation import router as published\n"
+            "__all__ = ['published']\n"
+            "__all__: (__all__.clear() or list[str])\n",
+            {2, 3},
+        ),
+        "aliased_mutation": (
+            "from implementation import router as published\n"
+            "__all__ = ['published']\n"
+            "exports = __all__\n"
+            "exports.clear()\n",
+            {2, 3, 4},
+        ),
+        "alias_then_literal_reset": (
+            "from implementation import router as published\n"
+            "__all__ = ['published']\n"
+            "exports = __all__\n"
+            "exports.clear()\n"
+            "__all__ = ['published']\n",
+            {5},
+        ),
+        "destructured_all": (
+            "from implementation import router as published\n"
+            "__all__, untouched = ('published', 'x')\n",
+            {2},
+        ),
+        "chained_alias_mutation": (
+            "from implementation import router as published\n"
+            "__all__ = exports = ['published']\n"
+            "exports.clear()\n",
+            {2, 3},
+        ),
+        "chained_alias_reset": (
+            "from implementation import router as published\n"
+            "__all__ = exports = ['published']\n"
+            "exports.clear()\n"
+            "__all__ = ['published']\n",
+            {4},
+        ),
+    }
+    (tmp_path / "implementation.py").write_text(
+        "from fastapi import APIRouter\n"
+        "router = APIRouter()\n"
+        "@router.get('/owned')\n"
+        "def owned(): pass\n",
+        encoding="utf-8",
+    )
+    for name, (exports, changed_lines) in cases.items():
+        public = tmp_path / f"{name}.py"
+        public.write_text(exports, encoding="utf-8")
+        app_file = tmp_path / f"main_{name}.py"
+        app_file.write_text(
+            f"from fastapi import FastAPI\nfrom {name} import published\n"
+            "app = FastAPI()\napp.include_router(published)\n",
+            encoding="utf-8",
+        )
+        endpoint = SecureASTExtractor(app_file).extract_endpoints()[0]
+        provenance = endpoint.native_provenance
+        assert provenance is not None
+        all_owners = [
+            owner for owner in provenance.source_owners if owner.owner_kind == "all_export"
+        ]
+        if name == "annotation_without_value":
+            assert len(all_owners) == 1
+            assert all_owners[0].source_span.start_line == 2
+            assert any(
+                owner.role == "object"
+                for owner in native_route_structural_owners(endpoint, public, {2})
+            )
+            assert native_route_structural_owners(endpoint, public, {3}) == ()
+        elif name in {"alias_then_literal_reset", "chained_alias_reset"}:
+            reset_line = 5 if name == "alias_then_literal_reset" else 4
+            assert len(all_owners) == 1
+            assert all_owners[0].source_span.start_line == reset_line
+            assert any(
+                owner.role == "object"
+                for owner in native_route_structural_owners(endpoint, public, {reset_line})
+            )
+            assert not any(
+                owner.role == "object"
+                for owner in native_route_structural_owners(
+                    endpoint, public, set(range(2, reset_line))
+                )
+            )
+        else:
+            assert all_owners == []
+            assert not any(
+                owner.role == "object"
+                for owner in native_route_structural_owners(endpoint, public, changed_lines)
+            )
+
+
+def test_nested_all_escape_and_mutation_invalidate_stale_ownership(
+    tmp_path: Path,
+) -> None:
+    nested_statements = {
+        "if_alias": "if condition:\n    exports = __all__\n    exports.clear()\n",
+        "try_alias": (
+            "try:\n    exports = __all__\n    exports.clear()\nexcept Exception:\n    pass\n"
+        ),
+        "loop_alias": "for unused in [0]:\n    exports = __all__\n    exports.clear()\n",
+        "if_direct_mutation": "if condition:\n    __all__.clear()\n",
+        "if_delete": "if condition:\n    del __all__\n",
+        "try_delete": "try:\n    del __all__\nexcept Exception:\n    pass\n",
+        "for_delete": "for unused in [0]:\n    del __all__\n",
+        "while_delete": "while condition:\n    del __all__\n",
+        "with_delete": "with manager:\n    del __all__\n",
+        "match_delete": "match value:\n    case _:\n        del __all__\n",
+        "if_augassign": "if condition:\n    __all__ *= 0\n",
+        "try_augassign": "try:\n    __all__ *= 0\nexcept Exception:\n    pass\n",
+        "for_augassign": "for unused in [0]:\n    __all__ *= 0\n",
+        "while_augassign": "while condition:\n    __all__ *= 0\n",
+        "with_augassign": "with manager:\n    __all__ *= 0\n",
+        "match_augassign": "match value:\n    case _:\n        __all__ *= 0\n",
+        "if_namedexpr": "if (__all__ := []):\n    pass\n",
+        "except_alias": "try:\n    pass\nexcept Exception as __all__:\n    pass\n",
+        "match_capture": "match value:\n    case __all__:\n        pass\n",
+        "match_star_capture": "match value:\n    case [*__all__]:\n        pass\n",
+        "match_rest_capture": "match value:\n    case {**__all__}:\n        pass\n",
+        "if_annotation_only": "if condition:\n    __all__: list[str]\n",
+        "try_annotation_only": "try:\n    __all__: list[str]\nexcept Exception:\n    pass\n",
+        "for_annotation_only": "for unused in [0]:\n    __all__: list[str]\n",
+        "while_annotation_only": "while condition:\n    __all__: list[str]\n",
+        "with_annotation_only": "with manager:\n    __all__: list[str]\n",
+        "match_annotation_only": "match value:\n    case _:\n        __all__: list[str]\n",
+        "if_annotation_effect": "if condition:\n    __all__: (__all__.clear() or list[str])\n",
+        "annotation_namedexpr_effect": "__all__: (__all__ := [])\n",
+        "if_annotation_namedexpr_effect": "if condition:\n    __all__: (__all__ := [])\n",
+    }
+    (tmp_path / "implementation.py").write_text(
+        "from fastapi import APIRouter\n"
+        "router = APIRouter()\n"
+        "@router.get('/nested')\n"
+        "def nested(): pass\n",
+        encoding="utf-8",
+    )
+    for name, statement in nested_statements.items():
+        public = tmp_path / f"nested_{name}.py"
+        public.write_text(
+            f"from implementation import router as published\n__all__ = ['published']\n{statement}",
+            encoding="utf-8",
+        )
+        app_file = tmp_path / f"nested_main_{name}.py"
+        app_file.write_text(
+            f"from fastapi import FastAPI\nfrom nested_{name} import published\n"
+            "app = FastAPI()\napp.include_router(published)\n",
+            encoding="utf-8",
+        )
+        endpoint = SecureASTExtractor(app_file).extract_endpoints()[0]
+        provenance = endpoint.native_provenance
+        assert provenance is not None
+        if name.endswith("_annotation_only"):
+            all_owners = [
+                owner for owner in provenance.source_owners if owner.owner_kind == "all_export"
+            ]
+            assert len(all_owners) == 1
+            assert all_owners[0].source_span.start_line == 2
+            assert any(
+                owner.owner_kind == "all_export"
+                for owner in native_route_structural_owners(endpoint, public, {2})
+            )
+            assert not any(
+                owner.role == "object"
+                for owner in native_route_structural_owners(endpoint, public, set(range(3, 8)))
+            )
+        else:
+            assert not any(owner.owner_kind == "all_export" for owner in provenance.source_owners)
+            assert not any(
+                owner.role == "object"
+                for owner in native_route_structural_owners(endpoint, public, {2, *range(3, 8)})
+            )
+
+
+def test_later_literal_all_assignment_restores_deleted_export_ownership(tmp_path: Path) -> None:
+    (tmp_path / "implementation.py").write_text(
+        "from fastapi import APIRouter\n"
+        "router = APIRouter()\n"
+        "@router.get('/restored')\n"
+        "def restored(): pass\n",
+        encoding="utf-8",
+    )
+    public = tmp_path / "public.py"
+    public.write_text(
+        "from implementation import router as published\n"
+        "__all__ = ['published']\n"
+        "if condition:\n    del __all__\n"
+        "__all__ = ['published']\n",
+        encoding="utf-8",
+    )
+    app_file = tmp_path / "main.py"
+    app_file.write_text(
+        "from fastapi import FastAPI\nfrom public import published\n"
+        "app = FastAPI()\napp.include_router(published)\n",
+        encoding="utf-8",
+    )
+    endpoint = SecureASTExtractor(app_file).extract_endpoints()[0]
+    provenance = endpoint.native_provenance
+    assert provenance is not None
+    owners = [owner for owner in provenance.source_owners if owner.owner_kind == "all_export"]
+    assert len(owners) == 1
+    assert owners[0].source_span.start_line == 5
+    assert not any(
+        owner.role == "object"
+        for owner in native_route_structural_owners(endpoint, public, {2, 3, 4})
+    )
+    assert any(
+        owner.owner_kind == "all_export"
+        for owner in native_route_structural_owners(endpoint, public, {5})
+    )
+
+
 def test_factory_return_owner_tracks_only_the_factory_selected_route(tmp_path: Path) -> None:
     app_file = tmp_path / "main.py"
     app_file.write_text(

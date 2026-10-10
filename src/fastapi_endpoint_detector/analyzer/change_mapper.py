@@ -1455,45 +1455,70 @@ class ChangeMapper:
                         ),
                     )
 
-        # Native route registrations and exact include/mount/object occurrences own
-        # their materialized descendants. Each side uses its own coordinates.
-        for endpoint, kinds, overlap in self.registry.get_structural_overlaps(
-            diff_file.path, set(added_lines)
-        ):
-            matched_kinds = ", ".join(kinds)
-            changed_line = min(overlap)
-            _merge_affected(
-                affected,
-                AffectedEndpoint(
-                    endpoint=endpoint,
-                    confidence=ConfidenceLevel.HIGH,
-                    reason=(
-                        f"Native route assembly occurrence modified ({matched_kinds}) "
-                        f"in {diff_file.path}"
-                    ),
-                    dependency_chain=[str(diff_file.path), *kinds],
-                    changed_files=[str(diff_file.path)],
-                    effect_evidence=[
-                        EffectEvidence(
-                            producer=EvidenceProducer.STRUCTURAL,
-                            status=EvidenceStatus.ESTABLISHED,
-                            effect=ChangeEffectKind.ROUTE_ASSEMBLY,
-                            channel=ImpactChannel.UNKNOWN,
-                            disposition=EffectDisposition.INTERNAL_EFFECT,
-                            summary=(
-                                "Changed source overlaps exact secure-AST route assembly "
-                                "provenance for this endpoint occurrence."
-                            ),
-                            changed_location=CodeReference(
-                                file_path=str(diff_file.path),
-                                line_number=changed_line,
-                                symbol=matched_kinds,
-                            ),
-                        )
-                    ],
-                ),
+        # Resolve source ownership independently on each snapshot. Baseline
+        # coordinates never consume target additions or substitute target ranges.
+        structural_sides = [
+            (self.registry, diff_file.path, added_lines, "target", processed_added_lines)
+        ]
+        if removed_lines and self.baseline_app_path is not None and self._baseline_failure is None:
+            structural_sides.append(
+                (
+                    self.baseline_mypy_registry,
+                    diff_file.source_path or diff_file.path,
+                    removed_lines,
+                    "baseline",
+                    processed_removed_lines,
+                )
             )
-            processed_added_lines.update(overlap)
+        for (
+            side_registry,
+            changed_path,
+            structural_lines,
+            side,
+            processed_lines,
+        ) in structural_sides:
+            for endpoint, kinds, overlap in side_registry.get_structural_overlaps(
+                changed_path, set(structural_lines)
+            ):
+                matched_kinds = ", ".join(kinds)
+                changed_line = min(overlap)
+                _merge_affected(
+                    affected,
+                    AffectedEndpoint(
+                        endpoint=(
+                            self._target_equivalent_endpoint(endpoint)
+                            if side == "baseline"
+                            else endpoint
+                        ),
+                        confidence=ConfidenceLevel.HIGH,
+                        reason=(
+                            f"Native route assembly occurrence modified ({side}: {matched_kinds}) "
+                            f"in {changed_path}"
+                        ),
+                        dependency_chain=[str(changed_path), *kinds],
+                        changed_files=[str(changed_path)],
+                        effect_evidence=[
+                            EffectEvidence(
+                                producer=EvidenceProducer.STRUCTURAL,
+                                status=EvidenceStatus.ESTABLISHED,
+                                effect=ChangeEffectKind.ROUTE_ASSEMBLY,
+                                channel=ImpactChannel.UNKNOWN,
+                                disposition=EffectDisposition.INTERNAL_EFFECT,
+                                summary=(
+                                    f"Changed {side} source overlaps exact secure-AST "
+                                    "route assembly "
+                                    "provenance for this endpoint occurrence."
+                                ),
+                                changed_location=CodeReference(
+                                    file_path=str(changed_path),
+                                    line_number=changed_line,
+                                    symbol=matched_kinds,
+                                ),
+                            )
+                        ],
+                    ),
+                )
+                processed_lines.update(overlap)
 
         # Find endpoints whose handlers are defined in the changed file.
         file_endpoints = self.registry.get_by_file(diff_file.path)
@@ -1529,41 +1554,6 @@ class ChangeMapper:
         if removed_lines and self.baseline_app_path is not None and self._baseline_failure is None:
             source_path = diff_file.source_path or diff_file.path
             baseline_file = diff_file.model_copy(update={"path": source_path})
-            for endpoint, kinds, overlap in self.baseline_mypy_registry.get_structural_overlaps(
-                source_path, set(removed_lines)
-            ):
-                _merge_affected(
-                    affected,
-                    AffectedEndpoint(
-                        endpoint=self._target_equivalent_endpoint(endpoint),
-                        confidence=ConfidenceLevel.HIGH,
-                        reason=(
-                            "Native baseline route assembly occurrence removed "
-                            f"({', '.join(kinds)}) in {source_path}"
-                        ),
-                        dependency_chain=[str(source_path), *kinds],
-                        changed_files=[str(source_path)],
-                        effect_evidence=[
-                            EffectEvidence(
-                                producer=EvidenceProducer.STRUCTURAL,
-                                status=EvidenceStatus.ESTABLISHED,
-                                effect=ChangeEffectKind.ROUTE_ASSEMBLY,
-                                channel=ImpactChannel.UNKNOWN,
-                                disposition=EffectDisposition.INTERNAL_EFFECT,
-                                summary=(
-                                    "Removed source overlaps exact secure-AST route assembly "
-                                    "provenance in the independent baseline snapshot."
-                                ),
-                                changed_location=CodeReference(
-                                    file_path=str(source_path),
-                                    line_number=min(overlap),
-                                    symbol=", ".join(kinds),
-                                ),
-                            )
-                        ],
-                    ),
-                )
-                processed_removed_lines.update(overlap)
             for endpoint in self.baseline_mypy_registry:
                 result = self._check_mypy_dependency(
                     endpoint, baseline_file, [], removed_lines, self.baseline_mypy_analyzer
