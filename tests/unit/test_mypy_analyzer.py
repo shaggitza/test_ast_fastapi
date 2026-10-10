@@ -169,6 +169,74 @@ class TestMypyAnalyzerBasic:
         assert "motor" not in warm.verified_package_versions
         assert "motor-3.6.0.dist-info/METADATA" not in warm.verified_package_source_hashes
 
+    def test_unparsed_top_level_alias_does_not_block_coherent_metadata_cold_and_warm(
+        self, tmp_path: Path
+    ) -> None:
+        package = tmp_path / "foo"
+        package.mkdir()
+        (package / "__init__.pyi").write_text("class Client: ...\n", encoding="utf-8")
+        metadata = tmp_path / "motor-3.6.0.dist-info"
+        metadata.mkdir()
+        (metadata / "METADATA").write_text("Name: motor\nVersion: 3.6.0\n", encoding="utf-8")
+        (metadata / "top_level.txt").write_text("foo\nfoo_cli\n", encoding="utf-8")
+        app = tmp_path / "app.py"
+        app.write_text("from foo import Client\ndef handler() -> Client:\n    return Client()\n")
+        endpoint = Endpoint(
+            path="/coherent-alias",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=2),
+        )
+        cache = tmp_path / "coherent-alias-cache.json"
+
+        for analyzer in (MypyAnalyzer(tmp_path), MypyAnalyzer(tmp_path)):
+            analyzer.set_cache_path(cache)
+            analyzer.analyze_endpoints([endpoint])
+            assert analyzer.verified_package_versions["motor"] == "3.6.0"
+
+    def test_invalid_top_level_metadata_fails_closed_without_aborting_other_analysis(
+        self, tmp_path: Path
+    ) -> None:
+        good = tmp_path / "good_pkg"
+        good.mkdir()
+        (good / "__init__.pyi").write_text("class Good: ...\n", encoding="utf-8")
+        good_metadata = tmp_path / "good-pkg-1.0.dist-info"
+        good_metadata.mkdir()
+        (good_metadata / "METADATA").write_text(
+            "Name: good-pkg\nVersion: 1.0\n", encoding="utf-8"
+        )
+
+        bad = tmp_path / "odd_import"
+        bad.mkdir()
+        (bad / "__init__.pyi").write_text("class Bad: ...\n", encoding="utf-8")
+        bad_metadata = tmp_path / "unrelated-name-9.0.dist-info"
+        bad_metadata.mkdir()
+        (bad_metadata / "METADATA").write_text(
+            "Name: unrelated-name\nVersion: 9.0\n", encoding="utf-8"
+        )
+        (bad_metadata / "top_level.txt").write_bytes(b"odd_import\ninvalid:\xff\n")
+
+        app = tmp_path / "app.py"
+        app.write_text(
+            "from good_pkg import Good\nfrom odd_import import Bad\n"
+            "def handler() -> tuple[Good, Bad]:\n    return Good(), Bad()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/malformed-alias",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=3),
+        )
+        cache = tmp_path / "malformed-alias-cache.json"
+
+        for analyzer in (MypyAnalyzer(tmp_path), MypyAnalyzer(tmp_path)):
+            analyzer.set_cache_path(cache)
+            analyzer.analyze_endpoints([endpoint])
+            assert analyzer.verified_package_versions["good-pkg"] == "1.0"
+            assert "unrelated-name" not in analyzer.verified_package_versions
+            assert "unrelated-name-9.0.dist-info/METADATA" not in (
+                analyzer.verified_package_source_hashes
+            )
+
     def test_unreadable_package_source_leaves_source_pin_unverified(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -1140,6 +1140,10 @@ class MypyAnalyzer:
                                             for line in top_level_bytes.decode("utf-8").splitlines()
                                             if line.strip()
                                         }
+                                    except UnicodeDecodeError:
+                                        # Malformed alias metadata is not trusted;
+                                        # do not guess aliases from its bytes.
+                                        declared_top_levels = set()
                                     except OSError:
                                         declared_top_levels = set()
                                     belongs_to_parsed_root = bool(
@@ -1167,11 +1171,14 @@ class MypyAnalyzer:
                                     # Aliases are usable only when every parsed
                                     # declaration carrying that import name came
                                     # from this same installation.
+                                    parsed_declared_aliases = (
+                                        parsed_top_levels & declared_top_levels
+                                    )
                                     if any(
                                         len(parsed_roots_by_top_level.get(alias, set())) != 1
                                         or package_root
                                         not in parsed_roots_by_top_level.get(alias, set())
-                                        for alias in declared_top_levels
+                                        for alias in parsed_declared_aliases
                                     ):
                                         belongs_to_parsed_root = False
                                     # Distribution and import names are not
