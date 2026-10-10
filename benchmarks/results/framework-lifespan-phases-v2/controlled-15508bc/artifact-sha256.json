@@ -7,6 +7,7 @@
   "default/input-producer-source-manifest.json": "c27ef9bf7ef66decb34e03c4c8b27b80e25c908667ed033462c89d42b7ce8fdd",
   "default/target-runtime.json": "d3143678f2794565e83985003a9ecf0ab6b51e21e540f0788a8a3e4d9996ed80",
   "default/target-secure.json": "bbacf0d0fff7f52f77a9fb263c7be44cb167cfc44f7554c5e59d11f912c2c366",
+  "dependency-requirements.lock": "a9b9ba4e4dd4507e4ddd1e64bfbaa3c4680caddcb056aa81fc396e007f02d3d5",
   "explicit-entry/baseline-runtime.json": "446c88d2a0df09c3d66cfe926ed97e851bdb86cdb471272ec4682379e15a6463",
   "explicit-entry/baseline-secure.json": "f969862e7bae1cf7cf12da0d6a25c96b9c3825a6ee7a5e4e916fb1e704de315c",
   "explicit-entry/controlled-comparison.json": "30674159d212e73f4f95cd2ea9d83314df2486b9810c8c9d10eb9c670b855767",

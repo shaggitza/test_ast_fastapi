@@ -122,3 +122,5 @@ Application-process callback claims remain `self_reported_nonpositive`; the
 host discards them as positive evidence even when broker custody is signed.
 A trusted independent observer, complete phase coverage, peak RSS collection,
 real-world evaluation and the original GH104 acceptance remain open.
+
+The retained [dependency requirements lock](controlled-15508bc/dependency-requirements.lock) is the exact 22-package, hash-pinned export used for these runs. Its SHA-256 `a9b9ba4e4dd4507e4ddd1e64bfbaa3c4680caddcb056aa81fc396e007f02d3d5` matches both comparisons and is covered by the artifact manifest. It preserves the export command and does not replace the separate source manifest, image pin, SBOM provenance or observer-trust requirements.
