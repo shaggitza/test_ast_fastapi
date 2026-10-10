@@ -158,6 +158,20 @@ def test_diagnostic_probe_root_accepts_windows_separators() -> None:
         Path("/var/tmp/gh97_http_wheels_random"),
     )
     assert normalized == r"<private-probe>\app\fixture.py:7: error"
+    assert probe._diagnostic_line(normalized) == 7
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    [
+        "<private-probe>/site/httpx/fixture_helpers.py:7: error",
+        "<private-probe>/site/httpx/fixture.py:7: error",
+        r"<private-probe>\site\httpx\other_fixture.py:7: error",
+        "<private-probe>/app/fixture.py: error without a line number",
+    ],
+)
+def test_package_diagnostics_are_not_classified_as_fixture_calls(diagnostic: str) -> None:
+    assert probe._diagnostic_line(diagnostic) is None
 
 
 def test_source_provenance_survives_result_commits_and_rejects_dirty_sources(

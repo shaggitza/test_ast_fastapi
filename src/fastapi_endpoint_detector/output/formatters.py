@@ -3,10 +3,11 @@ Base formatter and formatter registry.
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable
-from typing import TYPE_CHECKING
+from collections.abc import Callable, Mapping
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
+    from fastapi_endpoint_detector.config import OutputConfig
     from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointInventory
     from fastapi_endpoint_detector.models.report import AnalysisReport
 
@@ -34,6 +35,29 @@ class BaseFormatter(ABC):
     def format_inventory(self, inventory: "EndpointInventory") -> str:
         """Format a strength-aware inventory; legacy formatters retain endpoint output."""
         return self.format_endpoints(inventory.endpoints)
+
+    @staticmethod
+    def summarize_source_observations(observations: dict[str, object]) -> str:
+        """Summarize the optional source-only report section for human formats."""
+        clients = observations.get("client_observations")
+        client_uncertainties = observations.get("client_uncertainties")
+        deployments = observations.get("deployment_observations")
+        matches = observations.get("surface_matches")
+        deployment_rows = deployments if isinstance(deployments, list) else []
+        exact_deployments = sum(
+            isinstance(item, dict) and item.get("certainty") == "exact" for item in deployment_rows
+        )
+        complete = observations.get("complete") is True
+        scanned_files = observations.get("scanned_files", 0)
+        return (
+            f"{'complete' if complete else 'incomplete'} scan of {scanned_files} files; "
+            f"{len(clients) if isinstance(clients, list) else 0} exact client observations, "
+            f"{len(client_uncertainties) if isinstance(client_uncertainties, list) else 0} "
+            "uncertain client calls, "
+            f"{exact_deployments} exact and "
+            f"{len(deployment_rows) - exact_deployments} uncertain deployment observations, "
+            f"{len(matches) if isinstance(matches, list) else 0} explicitly trusted route joins"
+        )
 
     @abstractmethod
     def format_endpoints(self, endpoints: list["Endpoint"]) -> str:
@@ -73,7 +97,17 @@ def register_formatter(
     return decorator
 
 
-def get_formatter(name: str) -> BaseFormatter:
+_OUTPUT_DEFAULTS = {
+    "show_confidence": True,
+    "show_dependency_chain": False,
+    "colorize": True,
+    "verbose": False,
+}
+
+
+def get_formatter(
+    name: str, output_config: "OutputConfig | Mapping[str, object] | None" = None
+) -> BaseFormatter:
     """
     Get a formatter instance by name.
 
@@ -99,4 +133,41 @@ def get_formatter(name: str) -> BaseFormatter:
         available = ", ".join(_FORMATTERS.keys())
         raise ValueError(f"Unknown formatter: {name}. Available: {available}")
 
-    return _FORMATTERS[name]()
+    formatter_type = _FORMATTERS[name]
+    if output_config is None:
+        return formatter_type()
+
+    if isinstance(output_config, Mapping):
+        unknown = set(output_config) - set(_OUTPUT_DEFAULTS)
+        if unknown:
+            option = sorted(unknown)[0]
+            raise ValueError(f"Unknown output option '{option}' for formatter '{name}'")
+        options = {**_OUTPUT_DEFAULTS, **output_config}
+    else:
+        options = {
+            key: getattr(output_config, key, default) for key, default in _OUTPUT_DEFAULTS.items()
+        }
+
+    unsupported = {
+        "json": {key for key, value in options.items() if value != _OUTPUT_DEFAULTS[key]},
+        "yaml": {key for key, value in options.items() if value != _OUTPUT_DEFAULTS[key]},
+    }
+    if unsupported.get(name):
+        option = sorted(unsupported[name])[0]
+        raise ValueError(
+            f"Output option '{option}' cannot be applied to '{name}' format; "
+            "structured output preserves the complete report schema"
+        )
+    if name != "text" and options["colorize"] is False:
+        raise ValueError("Output option 'colorize' is only supported by 'text' format")
+
+    if name in {"json", "yaml"}:
+        return formatter_type()
+
+    configured_formatter = cast("Callable[..., BaseFormatter]", formatter_type)
+    return configured_formatter(
+        show_confidence=options["show_confidence"],
+        show_dependency_chain=options["show_dependency_chain"],
+        colorize=options["colorize"],
+        verbose=options["verbose"],
+    )

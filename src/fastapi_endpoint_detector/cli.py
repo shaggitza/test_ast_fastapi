@@ -5,9 +5,13 @@ This module provides the CLI using Click framework for argument parsing
 and orchestrates the analysis pipeline.
 """
 
+from __future__ import annotations
+
+import html
 import json
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
 import yaml
@@ -31,7 +35,96 @@ from fastapi_endpoint_detector.models.effect_contract import (
 )
 from fastapi_endpoint_detector.models.surface_contract import load_surface_contracts
 
+if TYPE_CHECKING:
+    from fastapi_endpoint_detector.analyzer.source_inventory import SourceInventory
+    from fastapi_endpoint_detector.models.endpoint import Endpoint
+    from fastapi_endpoint_detector.output.formatters import BaseFormatter
+    from fastapi_endpoint_detector.parser.fastapi_extractor import FastAPIExtractor
+
 console = Console()
+
+
+def _reject_unsupported_vm_output_options(config: Config) -> None:
+    """Reject configured formatter options the isolated runtime cannot receive."""
+    defaults = type(config.output)()
+    for name, value in config.output.model_dump().items():
+        if value != getattr(defaults, name):
+            raise click.ClickException(f"Output option '{name}' cannot be applied with --vm")
+
+
+def _format_runtime_endpoint_list(
+    formatter: BaseFormatter,
+    output_format: str,
+    endpoints: list[Endpoint],
+    extractor: FastAPIExtractor,
+    source_inventory: SourceInventory,
+) -> str:
+    """Add whole-inventory scope metadata while preserving observed route records."""
+    rendered = formatter.format_endpoints(endpoints)
+    inventory_limitations = source_inventory.limitations
+    unresolved_imports = source_inventory.unresolved_imports
+    scope_limitations = extractor.source_inventory_limitations
+    warnings = [scope_limitations[1]] if len(scope_limitations) > 1 else []
+    if inventory_limitations or unresolved_imports:
+        warnings.append(
+            "Selected source inventory is incomplete "
+            f"({len(inventory_limitations)} recorded limitation(s), "
+            f"{len(unresolved_imports)} unresolved local import(s))."
+        )
+    inventory_status = (
+        "conditional" if inventory_limitations or unresolved_imports else "established"
+    )
+    source_scope = {
+        "selected_file_count": len(source_inventory.files),
+        "follow_imports": source_inventory.follow_imports,
+    }
+
+    if output_format == "json":
+        data = json.loads(rendered)
+        data["inventory_status"] = inventory_status
+        data["source_scope"] = source_scope
+        data["warnings"] = warnings
+        return json.dumps(data, indent=2)
+    if output_format == "yaml":
+        data = yaml.safe_load(rendered)
+        data["inventory_status"] = inventory_status
+        data["source_scope"] = source_scope
+        data["warnings"] = warnings
+        return yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    if output_format in {"text", "markdown"}:
+        if output_format == "markdown":
+            details = [
+                "## Source inventory",
+                "",
+                f"Status: `{inventory_status}`",
+                f"Selected files: {source_scope['selected_file_count']}",
+                f"Follow local imports: {source_scope['follow_imports']}",
+            ]
+            details.extend(f"- Warning: {warning}" for warning in warnings)
+            return "\n".join(details) + "\n\n" + rendered
+        details = [
+            f"Inventory status: {inventory_status}",
+            f"Selected source files: {source_scope['selected_file_count']}",
+            f"Follow local imports: {source_scope['follow_imports']}",
+        ]
+        details.extend(f"Warning: {warning}" for warning in warnings)
+        return "\n".join(details) + "\n\n" + rendered
+
+    if output_format == "html":
+        details = [
+            '<aside class="warning-box">',
+            "<h2>Source inventory</h2>",
+            f"<p>Status: {html.escape(inventory_status)}</p>",
+            f"<p>Selected files: {source_scope['selected_file_count']}</p>",
+            f"<p>Follow local imports: {source_scope['follow_imports']}</p>",
+        ]
+        if warnings:
+            details.append("<ul>")
+            details.extend(f"<li>{html.escape(warning)}</li>" for warning in warnings)
+            details.append("</ul>")
+        details.append("</aside>")
+        return rendered.replace("</body>", "\n".join(details) + "</body>", 1)
+    return rendered
 
 
 @click.group()
@@ -63,7 +156,7 @@ def cli(ctx: click.Context, config: Path | None) -> None:
 @click.option(
     "--baseline-app",
     type=click.Path(exists=True, path_type=Path),
-    help="Explicit baseline snapshot for SCIP analysis of removed Python lines.",
+    help="Explicit baseline snapshot for mypy or SCIP analysis of removed Python lines.",
 )
 @click.option(
     "--diff",
@@ -157,6 +250,15 @@ def analyze(
 
     config: Config = ctx.obj["config"]
 
+    try:
+        # Validate structured-format presentation constraints before constructing
+        # analyzers or starting the isolated runtime.
+        formatter = get_formatter(output_format, output_config=config.output)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if vm:
+        _reject_unsupported_vm_output_options(config)
+
     # Validate mutually exclusive options
     has_surface_contracts = any((config.analysis.surface_contracts, config.analysis.surface_preset))
     has_effect_contracts = any((config.analysis.effect_contracts, config.analysis.effect_preset))
@@ -184,8 +286,11 @@ def analyze(
     if bootstrap_entry is not None and not secure_ast:
         console.print("[red]Error:[/red] --bootstrap-entry requires --secure-ast")
         raise click.Abort()
-    if baseline_app is not None and not scip:
-        console.print("[red]Error:[/red] --baseline-app requires --scip")
+    if baseline_app is not None and vm:
+        console.print("[red]Error:[/red] --baseline-app is unavailable with --vm")
+        raise click.Abort()
+    if vm and config.analysis.route_observations.enabled:
+        console.print("[red]Error:[/red] analysis.route_observations is unavailable with --vm")
         raise click.Abort()
 
     if verbose:
@@ -298,8 +403,24 @@ def analyze(
 
             report = mapper.analyze_diff(diff, progress_callback=update_progress)
 
+        route_observations = config.analysis.route_observations
+        if route_observations.enabled:
+            from fastapi_endpoint_detector.analyzer.project_observations import (
+                scan_project_observations,
+            )
+
+            snapshot = scan_project_observations(
+                mapper.target_project_root,
+                endpoints=mapper.get_endpoints(),
+                client_include_patterns=route_observations.client_include_patterns,
+                deployment_include_patterns=route_observations.deployment_include_patterns,
+                max_files=route_observations.max_files,
+                max_file_bytes=route_observations.max_file_bytes,
+                trusted_server_origins=route_observations.trusted_server_origins,
+            )
+            report.source_observations = snapshot.to_dict()
+
         # Format and output results
-        formatter = get_formatter(output_format)
         formatted_output = formatter.format(report)
 
         if output:
@@ -694,6 +815,14 @@ def list_endpoints(
 
     config: Config = ctx.obj["config"]
 
+    try:
+        # Validate presentation options before endpoint discovery or runtime execution.
+        formatter = get_formatter(output_format, output_config=config.output)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if vm:
+        _reject_unsupported_vm_output_options(config)
+
     # Validate mutually exclusive options
     if config.analysis.surface_contracts is not None and not secure_ast:
         console.print("[red]Error:[/red] custom surface contracts require --secure-ast")
@@ -765,14 +894,24 @@ def list_endpoints(
             endpoints = inventory.endpoints
         else:
             # Use default runtime introspection
-            extractor = FastAPIExtractor(app_path=app, app_variable=app_var)
+            source_inventory = config.source_inventory(app)
+            extractor = FastAPIExtractor(
+                app_path=app,
+                app_variable=app_var,
+                source_inventory=source_inventory,
+            )
             endpoints = extractor.extract_endpoints()
 
-        formatter = get_formatter(output_format)
         formatted_output = (
             formatter.format_inventory(inventory)
             if secure_ast
-            else formatter.format_endpoints(endpoints)
+            else _format_runtime_endpoint_list(
+                formatter,
+                output_format,
+                endpoints,
+                extractor,
+                source_inventory,
+            )
         )
 
         if output:

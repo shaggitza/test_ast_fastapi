@@ -71,7 +71,7 @@ def _module_source(module: str) -> Path:
 
 
 def _diagnostic_line(item: str) -> int | None:
-    match = re.search(r"/fixture\.py:(\d+):", item)
+    match = re.search(r"<private-probe>[\\/]app[\\/]fixture\.py:(\d+):", item)
     return int(match.group(1)) if match else None
 
 

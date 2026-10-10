@@ -54,6 +54,28 @@ class ConfidenceLevel(str, Enum):
     LOW = "low"
 
 
+class EndpointLifecycleKind(str, Enum):
+    """Endpoint identity change between two source snapshots."""
+
+    TARGET = "target"
+    REMOVED = "removed"
+    RENAMED = "renamed"
+    MOVED = "moved"
+    AMBIGUOUS = "ambiguous"
+
+
+class EndpointLifecycle(BaseModel):
+    """Snapshot-qualified endpoint reconciliation evidence."""
+
+    identity: str
+    lifecycle: EndpointLifecycleKind
+    baseline_endpoint: Endpoint | None = None
+    target_endpoint: Endpoint | None = None
+
+    class Config:
+        frozen = True
+
+
 class EvidenceProducer(str, Enum):
     """Analyzer that produced an evidence record."""
 
@@ -403,6 +425,10 @@ class AnalysisReport(BaseModel):
         default_factory=list,
         description="All reachable candidates before presentation filtering",
     )
+    endpoint_lifecycle: list[EndpointLifecycle] = Field(
+        default_factory=list,
+        description="Unambiguous public endpoint identity lifecycle across snapshots.",
+    )
     orphan_changes: list[OrphanChange] = Field(
         default_factory=list,
         description="Code changes not related to any endpoint",
@@ -427,6 +453,10 @@ class AnalysisReport(BaseModel):
         default_factory=list,
         description="Any warnings from the analysis",
     )
+    analysis_completeness: Literal["complete", "partial"] = Field(
+        default="complete",
+        description="Whether every changed side was analyzed with its required snapshot.",
+    )
     effect_contract_audit: EffectContractAudit | None = Field(
         default=None,
         description="Complete exact contract audit when configured.",
@@ -442,6 +472,12 @@ class AnalysisReport(BaseModel):
     sql_transaction_path_report: SQLTransactionPathReport | None = Field(
         default=None,
         description="Bounded source-backed same-scope SQL ordering diagnostics.",
+    )
+    source_observations: dict[str, object] | None = Field(
+        default=None,
+        description=(
+            "Optional bounded client and deployment source observations; report-only evidence."
+        ),
     )
 
     @model_validator(mode="after")
