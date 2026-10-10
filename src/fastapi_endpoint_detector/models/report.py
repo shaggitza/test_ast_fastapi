@@ -9,7 +9,7 @@ import json
 import re
 from datetime import datetime
 from enum import Enum
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -559,6 +559,24 @@ class AnalysisReport(BaseModel):
             )
         }
         path_pairs: list[tuple[str, str, str]] = []
+        if path_report.source_projections:
+            # Source-only projections require their supplied snapshots. Re-sealing
+            # serialized digests does not substitute for checking those bytes and
+            # reconstructing the wrapper/delegate identities from source.
+            # Defer the analyzer import until validation to avoid model/analyzer cycles.
+            from fastapi_endpoint_detector.analyzer.sql_transaction_paths import (  # noqa: PLC0415
+                _fixture_source_projections,
+            )
+
+            expected_projections = {
+                item.id: item.identity_payload()
+                for item in _fixture_source_projections(Path(self.app_path).resolve(), audit)
+            }
+            if any(
+                expected_projections.get(item.id) != item.identity_payload()
+                for item in path_report.source_projections
+            ):
+                raise ValueError("SQL source projection contradicts its supplied source snapshots")
         for projection in path_report.source_projections:
             projection_begin = occurrence_by_id.get(projection.begin_occurrence_id)
             projection_stage = occurrence_by_id.get(projection.unresolved_stage_occurrence_id)

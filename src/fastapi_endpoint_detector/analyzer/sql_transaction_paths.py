@@ -575,6 +575,10 @@ def _module_binding_is_ambiguous(
 
     for statement in module.body:
         visit(statement)
+    # A module-executed wildcard import can replace any previously proved
+    # binding; its unknown exported names cannot establish wrapper ownership.
+    if any(bound == "*" for _, bound in bindings):
+        return True
     matching = [(node, bound) for node, bound in bindings if bound == name]
     return len(matching) != 1 or matching[0][0] is not allowed_binding
 

@@ -1274,6 +1274,9 @@ def test_source_projection_covers_each_shared_handler_route() -> None:
         ("source/langflow/services/deps.py.txt", "\ndel session_scope\n"),
         ("source/langflow/services/deps.py.txt", '\nexec("session_scope = foreign_scope")\n'),
         ("source/lfx/services/deps.py.txt", "\nsession_scope = foreign_scope\n"),
+        ("source/langflow/services/deps.py.txt", "\nfrom foreign import *\n"),
+        ("source/lfx/services/deps.py.txt", "\nfrom foreign import *\n"),
+        ("source/langflow/api/v1/traces.py.txt", "\nfrom foreign import *\n"),
     ],
 )
 def test_source_projection_rejects_rebound_wrapper_exports(
@@ -1319,6 +1322,13 @@ def test_source_projection_rejects_reassigned_delegated_receiver(
         "unresolved_stage_occurrence_id",
         "endpoint_file_path",
         "receiver_expression",
+        "function_name",
+        "receiver_hash",
+        "endpoint_source_hash",
+        "wrapper_file_path",
+        "wrapper_source_hash",
+        "delegated_wrapper_file_path",
+        "delegated_wrapper_source_hash",
     ],
 )
 def test_resealed_source_projection_must_belong_to_exact_audit(field: str) -> None:
@@ -1334,7 +1344,7 @@ def test_resealed_source_projection_must_belong_to_exact_audit(field: str) -> No
     }
     AnalysisReport.model_validate(valid)
     projection_data = paths.source_projections[0].model_dump(mode="json")
-    projection_data[field] = "sha256:" + "f" * 64 if field.endswith("_id") else "foreign"
+    projection_data[field] = "sha256:" + "f" * 64 if field.endswith(("_id", "_hash")) else "foreign"
     identity = {
         key: value for key, value in projection_data.items() if key not in {"id", "uncertainty"}
     }
@@ -1356,3 +1366,35 @@ def test_resealed_source_projection_must_belong_to_exact_audit(field: str) -> No
     )
     with pytest.raises(ValidationError, match="SQL source projection"):
         AnalysisReport.model_validate({**valid, "sql_transaction_path_report": resealed})
+
+
+def test_source_projection_requires_unchanged_supplied_snapshots(tmp_path: Path) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    audit, transaction, paths = _langflow_fixture_transaction_reports(copied)
+    valid = {
+        "app_path": str(copied),
+        "diff_source": "fixture",
+        "total_endpoints": 1,
+        "effect_contract_audit": audit,
+        "sql_transaction_report": transaction,
+        "sql_transaction_path_report": paths,
+    }
+    AnalysisReport.model_validate(valid)
+    projection = paths.source_projections[0]
+    for relative_path in (
+        projection.endpoint_file_path,
+        projection.wrapper_file_path,
+        projection.delegated_wrapper_file_path,
+    ):
+        source = copied / relative_path
+        original = source.read_bytes()
+        source.write_bytes(original + b"\n# changed snapshot bytes\n")
+        with pytest.raises(ValidationError, match="SQL source projection"):
+            AnalysisReport.model_validate(valid)
+        source.write_bytes(original)
+    source = copied / projection.delegated_wrapper_file_path
+    source.unlink()
+    with pytest.raises(ValidationError, match="SQL source projection"):
+        AnalysisReport.model_validate(valid)
