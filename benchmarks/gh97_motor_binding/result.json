@@ -5,11 +5,11 @@
     "max_depth": 1,
     "track_transitive": false
   },
-  "analyzer_revision": "7cfe01aa5d0d682f874c7eb9701664e816adaa95",
+  "analyzer_revision": "c610ed795bc05cc5fe3ad9db13e4d50f8052dd19",
   "analyzer_source_hashes": {
-    "src/fastapi_endpoint_detector/analyzer/effect_contract_auditor.py": "sha256:493b476382f72b9de0a974d569abe5c5a03abd74be9a78ba0c0e2659e45604e9",
-    "src/fastapi_endpoint_detector/analyzer/mypy_analyzer.py": "sha256:f561f7c1cf32ef7e167568b3d40895afada0b144d8e88e184fad55bfc1364416",
-    "src/fastapi_endpoint_detector/models/effect_contract.py": "sha256:97e8ef7292e68dcac144a5012f04c7e602c0f537a280528ce20478b81318372b",
+    "src/fastapi_endpoint_detector/analyzer/effect_contract_auditor.py": "sha256:21f84cc5e12ebc654ce4933dad972d49c136621d0aef2f75398e6e4cd1217aa0",
+    "src/fastapi_endpoint_detector/analyzer/mypy_analyzer.py": "sha256:774dbd76e2a0c39431ca2dd745e9efcfdbfb1d3397aeadd58ec5afe2d4273480",
+    "src/fastapi_endpoint_detector/models/effect_contract.py": "sha256:eeb0cad6e84dfff7ee8fb030aeb58e4071396990e545808faa17add0b6ceb1b0",
     "src/fastapi_endpoint_detector/models/endpoint.py": "sha256:2690e956c8022b3967cf53ab2600e89b1e887b9994c108d5bcf71f19e102c25c"
   },
   "artifact_hashes": {
@@ -406,7 +406,7 @@
     "fastapi_endpoint_detector.models.endpoint": "src/fastapi_endpoint_detector/models/endpoint.py"
   },
   "python": "3.11.16",
-  "runner_sha256": "sha256:1947e87fa1b6f9bcf128527f3778c3bf9b37c8270847f10e39142768a4769a09",
+  "runner_sha256": "sha256:5c78911bd83bde53e96a341ef9d67663b5639a59200d3eeb6846f515041a379c",
   "schema_version": 1,
   "scope": "exact artifacts only; static source and analyzer audit; no upstream import/execution",
   "verified_target_evidence": {
@@ -491,6 +491,7 @@
       "codecs.pyi": "sha256:54c0d7f1fc730ba0a0b694897611985d441c1623fcfff8b73bb31a3508e24782",
       "collections/__init__.pyi": "sha256:03e0cdf1ba4979ed9576b00c9ee58e8664e93fab4d04efab395e14cff74bc2fe",
       "collections/abc.pyi": "sha256:90189900dd153dff2aa642276e3a8a65145ed0f5eb67b8f1366086b38a3950e7",
+      "concurrent/__init__.pyi": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "concurrent/futures/__init__.pyi": "sha256:31af1080cdb69e1a6db2d0b03da870acb9f7c9f608a243591817d58d11af5677",
       "concurrent/futures/_base.pyi": "sha256:7294597f3cef3ad81686d9411a40a24dca6cf489e2b1d24853fa89543c9f8769",
       "concurrent/futures/process.pyi": "sha256:7014b24ebff620c76e8ef2c421a242593cc2aed25d4307318f79f2629a82fdf3",
@@ -585,6 +586,7 @@
       "pymongo/_csot.py": "sha256:fc034387195b572a353036d422fb2e5e913f28632e32e9d5badfd03e6bf0befd",
       "pymongo/_gcp_helpers.py": "sha256:f76fae5b9ef726ada2b44a5cc75c231769ef3dad8d60cfb30db04a39574dddce",
       "pymongo/_version.py": "sha256:ecdbb656658949b42c28cfb7e69099a3abcabc2555ef582e2693aa1723628bab",
+      "pymongo/asynchronous/__init__.py": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "pymongo/asynchronous/aggregation.py": "sha256:1916eb07fdd3ec81f823020c508d430686756ef13e1b212bf7fb439a6290f4f0",
       "pymongo/asynchronous/auth.py": "sha256:12396f1389c872471ac8d570cbef3de8a49915e2443792e0df2a1d5db425543d",
       "pymongo/asynchronous/auth_aws.py": "sha256:799dcf3ae00c706bbe2fe3ea34bf889abb213770cb1b736dc9160067d7795481",
@@ -654,6 +656,7 @@
       "pymongo/srv_resolver.py": "sha256:214cb18afdc4f31b625a6462be8b2b828dd68847cd1b6bc8ebab734ad85957c3",
       "pymongo/ssl_context.py": "sha256:bbee2c5d519930bd2f76877101117400bd465eecc7a3bc0d52eca5db24fe1ec3",
       "pymongo/ssl_support.py": "sha256:b22c7a22c10e6bc931239f8ee897834ecdad10304559b0f9461025c56b58edbd",
+      "pymongo/synchronous/__init__.py": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "pymongo/synchronous/aggregation.py": "sha256:d5d09152881a71f6e84f0bec4b75ae36964ef31085d45a914d2b81c6dc041411",
       "pymongo/synchronous/auth.py": "sha256:9f3f4f334d3fcb7ce69e1bfef32b6354eaf317242c8c8f58fc7db901cac0a301",
       "pymongo/synchronous/auth_aws.py": "sha256:6ee8eaa02ad7e297490c86c804fce052d51b67d0738bb260177f0c2da6d4659d",
@@ -705,6 +708,7 @@
       "typing.pyi": "sha256:b02d132f20a30f863e1bc8bc5dd883c15a7ba2278d34d0b1f340aa9cf8b01ca0",
       "typing_extensions.pyi": "sha256:9c355dd16139844ec2c4222163e0a310bd117d7c0b9cde3d0e28603058375058",
       "unicodedata.pyi": "sha256:51d78751d2eb2a554c599d5bb6d4bc9e9516b4f7290e3b773f34b7cb7e920190",
+      "urllib/__init__.pyi": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "urllib/error.pyi": "sha256:52a52a72a6f3f053ed962c5a24fd06a7779c51ce8ca4f25a60e3f276419140de",
       "urllib/parse.pyi": "sha256:63bc495692891e887113a6cf89fb9be3cc173bc6c9030600d3c953b4d028bf33",
       "urllib/request.pyi": "sha256:7c38b80cfd250c3c8bb3b01392cad2d443e56183824c09dc5d6e42bce621b085",

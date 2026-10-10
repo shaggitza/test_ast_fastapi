@@ -6,7 +6,11 @@ byte from commit `c376830`: 21,649 bytes, SHA-256
 It records producer `dd615f5c3fd298f5aa854a8e2c42b26a5bd0f404` and the
 original five calls with zero matches. Historical regressions use this fixed
 snapshot. `result.json` contains the separately replayed production-binding
-result; its own revision and source hashes identify the producer it validates.
+result from committed producer `c610ed795bc05cc5fe3ad9db13e4d50f8052dd19`;
+its raw SHA-256 is
+`fe43637e364c318129f3a0ec4deb9fd9c07ea42d6ca2f07e82fbe6147ab6543d`.
+An independent replay reproduced these bytes exactly. Its own revision and
+source hashes identify the producer it validates.
 
 This probe asks whether the current exact-symbol MongoDB preset binds typed
 Motor collection writes using Motor 3.6.0 and PyMongo 4.10.1 source. It does
@@ -17,7 +21,9 @@ byte snapshot once. It then passes a typed fixture to the repository's real
 `MypyAnalyzer` and `audit_effect_contracts`.
 
 Wheel bytes must match the two hardcoded SHA-256 digests before source
-extraction. Each loaded product module must resolve to this checkout's exact
+extraction. The runner checks its source, preset, and product module bytes against the
+committed Git revision before and after replay. Each loaded product module
+must resolve to this checkout's exact
 source file. Reported product paths are relative to the checkout so the stored
 result can be checked after cloning it elsewhere.
 
