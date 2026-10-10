@@ -596,6 +596,8 @@ class MypyAnalyzer:
         max_depth: int | None = None,
         module_root: Path | None = None,
         source_inventory: SourceInventory | None = None,
+        no_site_packages: bool = False,
+        target_platform: str | None = None,
     ) -> None:
         """Initialize the mypy analyzer."""
         inventory_root = (
@@ -614,6 +616,10 @@ class MypyAnalyzer:
         self.module_root = (module_root or self._infer_module_root(self.source_root)).resolve()
         self.source_inventory = source_inventory
         self.max_depth = effective_depth
+        # Hermetic source probes can opt out of all interpreter site packages.
+        # Ordinary analysis keeps mypy's historical environment discovery.
+        self.no_site_packages = no_site_packages
+        self.target_platform = target_platform
         self._endpoint_deps: dict[str, EndpointDependencies] = {}
         self._active_endpoint_dependencies: EndpointDependencies | None = None
         self._active_source_file = str(self.source_root)
@@ -869,6 +875,13 @@ class MypyAnalyzer:
         # Configure mypy for full analysis with AST retention
         options = Options()
         options.ignore_missing_imports = True
+        if self.target_platform is not None:
+            options.platform = self.target_platform
+        options.no_site_packages = self.no_site_packages
+        if self.no_site_packages:
+            # The programmatic API defaults this to sys.executable, which makes
+            # mypy add that interpreter's site-packages despite the flag.
+            options.python_executable = None
         options.follow_imports = self._effective_follow_imports()
         blocked_local_paths: set[str] | None = None
         if self.source_inventory is not None:
@@ -893,12 +906,19 @@ class MypyAnalyzer:
         options.export_types = True  # Critical for type information!
 
         original_path = sys.path.copy()
+        original_mypypath = os.environ.pop("MYPYPATH", None) if self.no_site_packages else None
         if str(self.module_root) not in sys.path:
             sys.path.insert(0, str(self.module_root))
 
         try:
             fscache = FileSystemCache()
-            self._build_result = mypy_build(sources=sources, options=options, fscache=fscache)
+            self._build_result = mypy_build(
+                sources=sources,
+                options=options,
+                fscache=fscache,
+                # mypy otherwise adds the process cwd even with no-site-packages.
+                alt_lib_path=str(self.module_root) if self.no_site_packages else None,
+            )
             analyzed_source_hashes: dict[str, str] = {}
 
             # Store the types map
@@ -968,6 +988,8 @@ class MypyAnalyzer:
 
         finally:
             sys.path = original_path
+            if self.no_site_packages and original_mypypath is not None:
+                os.environ["MYPYPATH"] = original_mypypath
 
     def _effective_follow_imports(self) -> str:
         """Translate inventory policy to mypy's string option vocabulary."""
@@ -4661,7 +4683,6 @@ class MypyAnalyzer:
                 return
             if target_depth >= self.max_depth:
                 self._record_analysis_limitation("MAX_DEPTH", limit=self.max_depth)
-                return
             if low_confidence_edge:
                 if finite_edge_budget[0] >= self.MAX_POINTS_TO_EDGES:
                     self._record_analysis_limitation(
@@ -5550,6 +5571,15 @@ class MypyAnalyzer:
                                     declaration[0]
                                 ):
                                     target_value = (declaration, receiver)
+                            if isinstance(target_value, _CallableUnion):
+                                # A partial over a branch-joined callable must not
+                                # assume the union has tuple indexing semantics.
+                                # Abstain until each alternative can be bound
+                                # independently, and surface the lost precision.
+                                self._record_analysis_limitation(
+                                    "CALLABLE_UNION_PARTIAL", limit=len(target_value.targets)
+                                )
+                                target_value = None
                             if target_value is not None:
                                 bound_callables: list[
                                     tuple[
@@ -5745,12 +5775,12 @@ class MypyAnalyzer:
                 partial_environment = dict(base_partials)
                 lambda_environment = dict(base_lambdas)
                 if n.else_body and selected is None:
-                    if not unknown_before_selection:
+                    if unknown_before_selection:
                         possible_execution_depth[0] += 1
                     try:
                         walk_node(n.else_body)
                     finally:
-                        if not unknown_before_selection:
+                        if unknown_before_selection:
                             possible_execution_depth[0] -= 1
                     branch_environments.append(dict(flow_environment))
                     branch_strings.append(dict(string_environment))
@@ -6306,6 +6336,13 @@ class MypyAnalyzer:
                 "engine": "fastapi-endpoint-detector:mypy-analyzer-v2",
                 "source_span_normalization": "source-call-order-verified-ast-spans-v2",
                 "max_depth": self.max_depth,
+                "no_site_packages": self.no_site_packages,
+                "hermetic_search_path_policy": (
+                    "explicit-module-root-without-cwd-v1" if self.no_site_packages else None
+                ),
+                "target_platform": (
+                    self.target_platform if self.target_platform is not None else sys.platform
+                ),
                 "module_root": str(self.module_root.resolve()),
                 "effective_mypy_config": {
                     "follow_imports": follow_imports,

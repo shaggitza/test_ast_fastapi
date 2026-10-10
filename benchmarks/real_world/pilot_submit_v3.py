@@ -671,10 +671,8 @@ def materialize_review(
     if completed_at.tzinfo is None or completed_at.utcoffset() is None:
         raise SubmissionRejected("COMPLETION_TIME_INVALID")
     completed_at = completed_at.astimezone(timezone.utc)
-    if (
-        completed_at < record.run.started_at
-        or completed_at
-        > record.run.started_at + timedelta(seconds=record.run.limits.max_seconds)
+    if completed_at < record.run.started_at or completed_at > record.run.started_at + timedelta(
+        seconds=record.run.limits.max_seconds
     ):
         raise SubmissionRejected("COMPLETION_TIME_INVALID")
 
@@ -1095,6 +1093,15 @@ def _success(receipt: SubmissionReceipt) -> dict[str, object]:
     }
 
 
+def _bind_private_socket(server: socket.socket, socket_path: Path) -> None:
+    """Bind privately without publishing the ready mode before listening."""
+    previous_umask = os.umask(0o777)
+    try:
+        server.bind(str(socket_path))
+    finally:
+        os.umask(previous_umask)
+
+
 def serve(  # noqa: PLR0912,PLR0915
     socket_path: Path,
     bindings_path: Path,
@@ -1117,6 +1124,7 @@ def serve(  # noqa: PLR0912,PLR0915
         if remaining <= 0:
             raise PilotSubmitError("broker absolute deadline expired")
         return remaining
+
     if not socket_path.is_absolute():
         _fail("socket path must be absolute")
     _reject_symlink_ancestors(socket_path)
@@ -1134,9 +1142,9 @@ def serve(  # noqa: PLR0912,PLR0915
     rejected = 0
     transport_failures = 0
     try:
-        server.bind(str(socket_path))
-        socket_path.chmod(0o600)
+        _bind_private_socket(server, socket_path)
         server.listen(1)
+        socket_path.chmod(0o600)
         while rejected < record.max_validation_attempts:
             server.settimeout(remaining_timeout())
             try:
@@ -1149,8 +1157,9 @@ def serve(  # noqa: PLR0912,PLR0915
                     peer_pid, peer_uid = _peer_credentials(connection)
                     if peer_uid != os.getuid():
                         raise SubmissionRejected("PEER_UID_INVALID")
+                    request_frame = _recv_frame(connection)
                     _verify_peer_cwd(peer_pid, record)
-                    draft = _request(_recv_frame(connection), record)
+                    draft = _request(request_frame, record)
                     remaining_timeout()
                     receipt = escrow_submission(draft, record, deadline=deadline)
                     try:

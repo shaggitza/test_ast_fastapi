@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,6 +23,7 @@ from fastapi_endpoint_detector.models.report import (
     ConfidenceLevel,
     EvidenceStatus,
 )
+from fastapi_endpoint_detector.output.json_output import JsonFormatter
 from fastapi_endpoint_detector.parser.diff_parser import DiffParser
 
 
@@ -508,6 +510,43 @@ def test_scip_seed_failure_does_not_discard_other_seed_results(tmp_path: Path) -
     assert [item.endpoint.identifier for item in affected] == ["GET /items"]
     assert any("services:__all__" in warning for warning in warnings)
 
+    report = mapper.analyze_diff(
+        "diff --git a/services.py b/services.py\n"
+        "new file mode 100644\n--- /dev/null\n+++ b/services.py\n"
+        "@@ -0,0 +1 @@\n+def changed(): pass\n"
+    )
+    assert [item.endpoint.identifier for item in report.candidate_endpoints] == ["GET /items"]
+    assert report.analysis_completeness == "partial"
+    assert any("ambiguous export" in warning for warning in report.warnings)
+    assert json.loads(JsonFormatter().format(report))["analysis_completeness"] == "partial"
+
+
+def test_scip_baseline_lifecycle_failure_is_partial_on_additions_only(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n"
+        "@app.get('/items')\ndef items():\n    return 1\n"
+    )
+    (target / "services.py").write_text("def changed(): pass\n")
+    mapper = ChangeMapper(
+        target,
+        baseline_app_path=tmp_path / "missing" / "main.py",
+        use_cache=False,
+        secure_ast=True,
+        use_scip=True,
+    )
+    mapper._scip_analyzer = EmptyTargetAnalyzer()  # type: ignore[assignment]
+    report = mapper.analyze_diff(
+        "diff --git a/services.py b/services.py\nnew file mode 100644\n"
+        "--- /dev/null\n+++ b/services.py\n@@ -0,0 +1 @@\n+def changed(): pass\n"
+    )
+    assert report.total_endpoints == 1
+    assert report.endpoint_lifecycle == []
+    assert report.analysis_completeness == "partial"
+    assert any("baseline endpoint lifecycle" in warning for warning in report.warnings)
+    assert json.loads(JsonFormatter().format(report))["analysis_completeness"] == "partial"
+
 
 def test_scip_mapper_rejects_identical_target_and_baseline(tmp_path: Path) -> None:
     with pytest.raises(ChangeMapperError, match="must differ"):
@@ -580,6 +619,53 @@ def test_deleted_helper_uses_baseline_index_and_unchanged_target_endpoint(
     assert [item.endpoint.identifier for item in affected] == ["GET /items"]
     assert affected[0].endpoint.handler.file_path == target / "main.py"
     assert not orphans
+
+
+def test_baseline_depth_limit_downgrades_deleted_candidate_and_is_structured(
+    tmp_path: Path,
+) -> None:
+    baseline = tmp_path / "baseline"
+    target = tmp_path / "target"
+    baseline.mkdir()
+    target.mkdir()
+    (baseline / "main.py").write_text(
+        "from fastapi import FastAPI\nfrom service import run\napp = FastAPI()\n"
+        "@app.get('/items')\ndef items():\n    return run()\n",
+        encoding="utf-8",
+    )
+    (baseline / "service.py").write_text(
+        "def run():\n    return 1\n", encoding="utf-8"
+    )
+    (target / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n"
+        "@app.get('/items')\ndef items():\n    return 0\n",
+        encoding="utf-8",
+    )
+    mapper = ChangeMapper(
+        target,
+        baseline_app_path=baseline,
+        use_cache=False,
+        secure_ast=True,
+        use_scip=False,
+    )
+    mapper.config.parser.max_depth = 1
+
+    report = mapper.analyze_diff(
+        "diff --git a/main.py b/main.py\n--- a/main.py\n+++ b/main.py\n"
+        "@@ -1,5 +1,4 @@\n"
+        " from fastapi import FastAPI\n-from service import run\n"
+        " app = FastAPI()\n @app.get('/items')\n def items():\n-    return run()\n+    return 0\n"
+        "diff --git a/service.py b/service.py\ndeleted file mode 100644\n"
+        "--- a/service.py\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-def run():\n-    return 1\n"
+    )
+
+    candidate = next(item for item in report.candidate_endpoints if item.endpoint.path == "/items")
+    assert candidate.confidence == ConfidenceLevel.LOW
+    assert report.analysis_completeness == "partial"
+    assert any(
+        item.cap == "MAX_DEPTH" and item.file_path.endswith("baseline/main.py")
+        for item in report.analysis_limitations
+    )
 
 
 def test_scip_mapper_reaches_direct_and_depends_endpoints(tmp_path: Path) -> None:

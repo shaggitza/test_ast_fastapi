@@ -14,7 +14,9 @@ from pathlib import Path
 from typing import Any
 
 if __package__ in {None, ""}:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    checkout_root = Path(__file__).resolve().parents[2]
+    sys.path.insert(0, str(checkout_root / "src"))
+    sys.path.insert(1, str(checkout_root))
 
 from benchmarks.real_world.benchmark_schema import (
     BenchmarkSchemaError,

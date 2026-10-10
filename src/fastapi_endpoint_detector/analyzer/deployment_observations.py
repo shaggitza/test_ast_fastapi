@@ -70,10 +70,10 @@ def _env_value(path: Path, line: int, key: str, value: str) -> DeploymentObserva
         try:
             parsed = urlsplit(unquoted)
         except ValueError:
-            parsed = None
-        if parsed is not None and (
-            parsed.username or parsed.password or parsed.query or parsed.fragment
-        ):
+            return DeploymentObservation(
+                path, line, "environment", key, None, "uncertain", "malformed URL"
+            )
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
             return DeploymentObservation(
                 path,
                 line,
@@ -123,12 +123,34 @@ def _docker_logical_lines(source: str) -> list[tuple[int, str]]:
     return logical
 
 
+def _unsupported_docker_escape(source: str, path: Path) -> DeploymentObservation | None:
+    for line_number, raw in enumerate(source.splitlines(), 1):
+        header = raw.strip()
+        if not header.startswith("#"):
+            break
+        directive = re.fullmatch(r"#\s*escape\s*=\s*(.+)", header, re.IGNORECASE)
+        if directive is not None and directive.group(1) != "\\":
+            return DeploymentObservation(
+                path,
+                line_number,
+                "container_argv",
+                None,
+                None,
+                "uncertain",
+                "unsupported Dockerfile escape directive",
+            )
+    return None
+
+
 def extract_dockerfile_observations(  # noqa: PLR0912, PLR0915
     source: str, source_path: Path | str = "Dockerfile"
 ) -> tuple[DeploymentObservation, ...]:
     """Observe route-relevant ENV, exposed ports, and exec-form startup argv."""
     path = Path(source_path)
     observations: list[DeploymentObservation] = []
+    unsupported_escape = _unsupported_docker_escape(source, path)
+    if unsupported_escape is not None:
+        return (unsupported_escape,)
     for line_number, raw in _docker_logical_lines(source):
         text = raw.strip()
         if not text or text.startswith("#"):
@@ -558,6 +580,8 @@ class _SubprocessObserver(ast.NodeVisitor):
                 (keyword.value for keyword in node.keywords if keyword.arg == "shell"),
                 ast.Constant(value=False),
             )
+            if any(keyword.arg is None for keyword in node.keywords):
+                shell = ast.Name(id="unknown_expanded_shell")
             argv = _literal_argv(node.args[0]) if node.args else None
             if isinstance(shell, ast.Constant) and shell.value is False and argv is not None:
                 self.observations.append(

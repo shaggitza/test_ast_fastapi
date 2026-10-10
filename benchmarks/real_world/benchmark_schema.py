@@ -3,14 +3,28 @@
 from __future__ import annotations
 
 import hashlib
-import json
-import math
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+from fastapi_endpoint_detector.models.artifact_validation import (
+    BenchmarkSchemaError,
+    finite_nonnegative,
+    strict_json_loads,
+)
+
+__all__ = [
+    "BenchmarkSchemaError",
+    "PrimaryArtifact",
+    "RecordKind",
+    "finite_nonnegative",
+    "read_primary_artifact",
+    "read_primary_jsonl",
+    "strict_json_loads",
+]
 
 RecordKind = Literal["ground_truth", "prediction"]
 _ALLOWED_CONFIDENCE = {"high", "medium", "low"}
@@ -32,10 +46,6 @@ _HTTP_ENTRYPOINT = re.compile(r"HTTP (?:GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD|T
 _WEBSOCKET_ENTRYPOINT = re.compile(r"WEBSOCKET /.*")
 
 
-class BenchmarkSchemaError(ValueError):
-    """A benchmark artifact is malformed or ambiguous."""
-
-
 @dataclass(frozen=True)
 class PrimaryArtifact:
     """One immutable byte snapshot and the records parsed from it."""
@@ -44,40 +54,6 @@ class PrimaryArtifact:
     content: bytes
     sha256: str
     records: list[dict[str, Any]]
-
-
-def _reject_duplicate_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for name, value in pairs:
-        if name in result:
-            raise BenchmarkSchemaError(f"duplicate JSON member {name!r}")
-        result[name] = value
-    return result
-
-
-def _reject_non_finite(token: str) -> None:
-    raise BenchmarkSchemaError(f"non-finite JSON number {token!r}")
-
-
-def strict_json_loads(content: str, source: str) -> Any:
-    """Decode JSON while rejecting duplicate object members and non-finite numbers."""
-    try:
-        return json.loads(
-            content,
-            object_pairs_hook=_reject_duplicate_members,
-            parse_constant=_reject_non_finite,
-        )
-    except (json.JSONDecodeError, BenchmarkSchemaError) as error:
-        raise BenchmarkSchemaError(f"invalid JSON in {source}: {error}") from error
-
-
-def finite_nonnegative(value: object, field: str) -> float:
-    """Return a finite non-negative timing value, rejecting bool-as-int."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise BenchmarkSchemaError(f"{field} must be a finite non-negative number")
-    if not math.isfinite(value) or value < 0:
-        raise BenchmarkSchemaError(f"{field} must be a finite non-negative number")
-    return float(value)
 
 
 def _record_identity(record: dict[str, Any], location: str) -> tuple[str, int]:

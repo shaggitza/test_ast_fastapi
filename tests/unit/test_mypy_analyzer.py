@@ -7,6 +7,8 @@ These tests verify the mypy-based dependency analysis, including:
 - Line progress callbacks
 """
 
+import sys
+from importlib.util import find_spec
 from pathlib import Path
 
 import pytest
@@ -24,6 +26,151 @@ from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, 
 
 class TestMypyAnalyzerBasic:
     """Basic tests for MypyAnalyzer."""
+
+    def test_branch_joined_callable_partial_abstains_with_limitation(self, tmp_path: Path) -> None:
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "from functools import partial\n"
+            "def first() -> int: return 1\n"
+            "def second() -> int: return 2\n"
+            "def handler(flag: bool) -> int:\n"
+            "    if flag:\n"
+            "        target = first\n"
+            "    else:\n"
+            "        target = second\n"
+            "    thunk = partial(target)\n"
+            "    return thunk()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/partial-union",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=4),
+        )
+
+        dependencies = MypyAnalyzer(tmp_path).analyze_endpoint(endpoint)
+
+        assert any(
+            item.cap == "CALLABLE_UNION_PARTIAL"
+            for item in dependencies.analysis_limitations
+        )
+        assert not dependencies.references_symbol_at_line(str(app_path), 2)
+        assert not dependencies.references_symbol_at_line(str(app_path), 3)
+
+    def test_uninvoked_and_dynamic_partials_do_not_trace_callable_bodies(
+        self, tmp_path: Path
+    ) -> None:
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "from functools import partial\n"
+            "def hidden() -> int: return 1\n"
+            "def handler(target):\n"
+            "    quiet = partial(hidden)\n"
+            "    dynamic = partial(target)\n"
+            "    return dynamic()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/partial-controls",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=3),
+        )
+
+        dependencies = MypyAnalyzer(tmp_path).analyze_endpoint(endpoint)
+
+        assert not dependencies.references_symbol_at_line(str(app_path), 2)
+
+    def test_lambda_in_unknown_if_else_is_possible_and_false_if_else_is_established(
+        self, tmp_path: Path
+    ) -> None:
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "def handler(flag: bool) -> None:\n"
+            "    if flag:\n"
+            "        pass\n"
+            "    else:\n"
+            "        conditional = lambda: 1\n"
+            "        conditional()\n"
+            "    if False:\n"
+            "        pass\n"
+            "    else:\n"
+            "        established = lambda: 2\n"
+            "        established()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/if-else",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=1),
+        )
+
+        dependencies = MypyAnalyzer(tmp_path).analyze_endpoint(endpoint)
+        states = {
+            (span.start_column, span.execution_state)
+            for span in dependencies.source_evidence_spans
+            if span.start_line in {5, 10}
+        }
+
+        assert any(state == "possible_execution" for _, state in states)
+        assert any(state == "established_execution" for _, state in states), states
+
+    def test_depth_cap_keeps_direct_callee_source_reference(self, tmp_path: Path) -> None:
+        app_path = tmp_path / "app.py"
+        selected_path = tmp_path / "selected.py"
+        blocked_path = tmp_path / "blocked.py"
+        app_path.write_text(
+            "from selected import run\n\n"
+            "def handler() -> int:\n"
+            "    return run()\n",
+            encoding="utf-8",
+        )
+        selected_path.write_text(
+            "from blocked import secret\n\n"
+            "def run() -> int:\n"
+            "    return secret()\n",
+            encoding="utf-8",
+        )
+        blocked_path.write_text(
+            "def secret() -> int:\n"
+            "    return 1\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/depth",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(
+                name="handler", module="app", file_path=app_path, line_number=3
+            ),
+        )
+
+        inventory = build_source_inventory(
+            app_path, include_patterns=("app.py",), max_depth=1
+        )
+        assert {item.path for item in inventory.files} == {app_path, selected_path}
+        analyzer = MypyAnalyzer(tmp_path, max_depth=1, source_inventory=inventory)
+        dependencies = analyzer.analyze_endpoint(endpoint)
+
+        assert dependencies.references_file(str(selected_path))
+        assert not dependencies.references_file(str(blocked_path))
+        assert dependencies.references_symbol_at_line(str(selected_path), 3) is not None
+        assert dependencies.references_symbol_at_line(str(blocked_path), 1) is None
+        assert {"app", "selected"} <= analyzer._project_modules
+        assert "blocked" not in analyzer._project_modules
+        assert any(item.cap == "MAX_DEPTH" for item in dependencies.analysis_limitations)
+        assert all(
+            frame.file_path != str(blocked_path)
+            for stacks in dependencies.call_stacks.values()
+            for stack in stacks
+            for frame in stack
+        )
+        cached = analyzer.analyze_endpoint(endpoint)
+        assert cached is not dependencies
+        assert cached.referenced_files == dependencies.referenced_files
+        other_endpoint = endpoint.model_copy(update={"path": "/other"})
+        isolated = analyzer.analyze_endpoint(other_endpoint)
+        assert isolated.endpoint_id == "GET /other"
+        assert isolated is not cached
+        assert analyzer.analyze_endpoint(endpoint).endpoint_id == "GET /depth"
 
     def test_resolves_top_level_import_from_application_directory(self, tmp_path: Path) -> None:
         """Resolve imports whose mypy fullname omits the directory name."""
@@ -103,6 +250,94 @@ class TestMypyAnalyzerBasic:
         analyzer = MypyAnalyzer(tmp_path)
         assert analyzer.app_path == tmp_path
         assert analyzer._endpoint_deps == {}
+
+    def test_site_package_mode_is_part_of_cache_identity(self, tmp_path: Path) -> None:
+        """Hermetic and ordinary analyzer caches cannot share a fingerprint."""
+        ordinary = MypyAnalyzer(tmp_path)
+        hermetic = MypyAnalyzer(tmp_path, no_site_packages=True)
+
+        assert ordinary._cache_fingerprint()[0] != hermetic._cache_fingerprint()[0]
+
+    def test_target_platform_is_part_of_cache_identity(self, tmp_path: Path) -> None:
+        """An explicit mypy target platform changes analysis cache identity."""
+        default = MypyAnalyzer(tmp_path)
+        explicit_default = MypyAnalyzer(tmp_path, target_platform=sys.platform)
+        other_platform = MypyAnalyzer(tmp_path, target_platform="win32")
+
+        assert default._cache_fingerprint()[0] == explicit_default._cache_fingerprint()[0]
+        assert default._cache_fingerprint()[0] != other_platform._cache_fingerprint()[0]
+
+    def test_hermetic_analysis_ignores_ambient_mypypath_decoy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Explicit source search paths and no-site-packages exclude MYPYPATH stubs."""
+        app = tmp_path / "app"
+        app.mkdir()
+        (app / "main.py").write_text(
+            "from optional_decoy import decoy_call\n\ndef handler() -> None:\n    decoy_call()\n",
+            encoding="utf-8",
+        )
+        ambient = tmp_path / "ambient"
+        ambient.mkdir()
+        (ambient / "optional_decoy.pyi").write_text(
+            "def decoy_call() -> None: ...\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("MYPYPATH", str(ambient))
+
+        analyzer = MypyAnalyzer(app, no_site_packages=True)
+        analyzer._ensure_mypy_built()
+
+        assert "optional_decoy" not in analyzer._trees
+        assert str(ambient) not in analyzer._module_to_path.values()
+
+    def test_hermetic_analysis_excludes_cwd_but_retains_explicit_project_imports(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        app = tmp_path / "app"
+        app.mkdir()
+        (app / "main.py").write_text(
+            "from optional_cwd_decoy import decoy_call\n"
+            "from helpers import project_call\n"
+            "def handler() -> None:\n    decoy_call()\n    project_call()\n",
+            encoding="utf-8",
+        )
+        helper = app / "helpers.py"
+        helper.write_text("def project_call() -> None: pass\n", encoding="utf-8")
+        ambient = tmp_path / "ambient"
+        ambient.mkdir()
+        decoy = ambient / "optional_cwd_decoy.pyi"
+        decoy.write_text("def decoy_call() -> None: ...\n", encoding="utf-8")
+        monkeypatch.chdir(ambient)
+        ordinary = MypyAnalyzer(app, module_root=app)
+        ordinary._ensure_mypy_built()
+        assert ordinary._module_to_path["optional_cwd_decoy"] == str(decoy)
+        hermetic = MypyAnalyzer(app, module_root=app, no_site_packages=True)
+        hermetic._ensure_mypy_built()
+        assert "optional_cwd_decoy" not in hermetic._trees
+        assert hermetic._module_to_path["helpers"] == str(helper)
+        assert hermetic._build_result is not None
+
+    def test_hermetic_analysis_excludes_interpreter_site_packages(self, tmp_path: Path) -> None:
+        """Hermetic builds skip interpreter packages while ordinary builds retain them."""
+        fastapi_spec = find_spec("fastapi")
+        if fastapi_spec is None or fastapi_spec.origin is None:
+            pytest.skip("FastAPI is not installed in the active interpreter")
+        app = tmp_path / "app"
+        app.mkdir()
+        (app / "main.py").write_text(
+            "from fastapi import FastAPI\n\napp = FastAPI()\n",
+            encoding="utf-8",
+        )
+
+        ordinary = MypyAnalyzer(app)
+        ordinary._ensure_mypy_built()
+        assert "fastapi" in ordinary._trees
+        assert ordinary._module_to_path["fastapi"] == fastapi_spec.origin
+
+        hermetic = MypyAnalyzer(app, no_site_packages=True)
+        hermetic._ensure_mypy_built()
+        assert "fastapi" not in hermetic._trees
+        assert fastapi_spec.origin not in hermetic._module_to_path.values()
 
     def test_cache_path_default(self, tmp_path: Path) -> None:
         """Test default cache path location."""

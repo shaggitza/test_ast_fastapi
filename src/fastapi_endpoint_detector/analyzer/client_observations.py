@@ -68,6 +68,7 @@ class _Token:
 
 
 _IDENT = re.compile(r"[A-Za-z_$][\w$]*")
+_LINE_END = re.compile(r"[\r\n\u2028\u2029]")
 
 
 def _tokens(source: str) -> list[_Token]:  # noqa: PLR0912, PLR0915
@@ -79,8 +80,8 @@ def _tokens(source: str) -> list[_Token]:  # noqa: PLR0912, PLR0915
             i += 1
             continue
         if source.startswith("//", i):
-            j = source.find("\n", i + 2)
-            i = n if j < 0 else j + 1
+            end = _LINE_END.search(source, i + 2)
+            i = n if end is None else end.end()
             continue
         if source.startswith("/*", i):
             j = source.find("*/", i + 2)
@@ -207,8 +208,15 @@ def _parse_url(  # noqa: PLR0911
             or parsed.password
         ):
             return None
-        if scheme and not parsed.netloc:
-            return None
+        if scheme:
+            port = parsed.port
+            if (
+                not parsed.hostname
+                or any(char.isspace() for char in parsed.netloc)
+                or parsed.netloc.endswith(":")
+                or (port is not None and not 1 <= port <= 65535)
+            ):
+                return None
         if not scheme and (parsed.netloc or not value.startswith(("/", "./", "../"))):
             return None
         protocol = "websocket" if scheme in {"ws", "wss"} else "http"
@@ -291,7 +299,105 @@ def _is_global_axios(tokens: list[_Token], index: int) -> bool:
     return previous.value not in {".", "["}
 
 
-def _shadowed_client_names(tokens: list[_Token]) -> tuple[set[str], set[str]]:  # noqa: PLR0912, PLR0915
+def _can_end_postfix_operand(tokens: list[_Token], index: int) -> bool:
+    token = tokens[index]
+    if token.kind == "id":
+        # A keyword can be a property name, but a bare keyword starts or
+        # separates expressions rather than supplying an update operand.
+        if index and tokens[index - 1].value == ".":
+            return True
+        return token.value not in {
+            "return",
+            "throw",
+            "yield",
+            "await",
+            "else",
+            "do",
+            "case",
+            "new",
+            "typeof",
+            "void",
+            "delete",
+            "in",
+            "instanceof",
+            "of",
+            "break",
+            "continue",
+        }
+    if token.kind == "punct" and token.value == ")":
+        depth = 1
+        for opening in range(index - 1, -1, -1):
+            if tokens[opening].kind != "punct":
+                continue
+            if tokens[opening].value == ")":
+                depth += 1
+            elif tokens[opening].value == "(":
+                depth -= 1
+                if depth == 0:
+                    return not (
+                        opening
+                        and tokens[opening - 1].value
+                        in {"if", "while", "for", "with", "switch", "catch"}
+                    )
+        return False
+    return token.kind in {"string", "template", "regex"} or token.value == "]"
+
+
+def _has_assignment_operator(tokens: list[_Token], index: int, source: str) -> bool:
+    """Read complete contiguous JS operators, excluding equality and arrows."""
+    if index >= 2:
+        previous, first = tokens[index - 1], tokens[index - 2]
+        if (
+            first.kind == previous.kind == "punct"
+            and first.value == previous.value
+            and first.value in {"+", "-"}
+            and first.end == previous.start
+        ):
+            # Whitespace and comments may separate a postfix operator from
+            # its operand. A line terminator in that gap makes it a prefix
+            # operator under JavaScript's automatic semicolon rules.
+            before_operator = tokens[index - 3] if index >= 3 else None
+            postfix = (
+                before_operator is not None
+                and not any(
+                    char in source[before_operator.end : first.start] for char in "\r\n\u2028\u2029"
+                )
+                and _can_end_postfix_operand(tokens, index - 3)
+            )
+            return not postfix
+    operator = ""
+    cursor = index + 1
+    while cursor < len(tokens) and len(operator) < 4 and tokens[cursor].kind == "punct":
+        if cursor > index + 1 and tokens[cursor - 1].end != tokens[cursor].start:
+            break
+        operator += tokens[cursor].value
+        cursor += 1
+    if operator.startswith("="):
+        return not operator.startswith(("==", "=>"))
+    return operator.startswith(
+        (
+            "+=",
+            "-=",
+            "*=",
+            "/=",
+            "%=",
+            "**=",
+            "&=",
+            "|=",
+            "^=",
+            "&&=",
+            "||=",
+            "??=",
+            "<<=",
+            ">>=",
+            ">>>=",
+            "++",
+            "--",
+        )
+    )
+
+
+def _shadowed_client_names(tokens: list[_Token], source: str) -> tuple[set[str], set[str]]:  # noqa: PLR0912, PLR0915
     """Fail closed file-wide when a client global has any local binding.
 
     This deliberately sacrifices some observations: proving JavaScript lexical
@@ -325,7 +431,10 @@ def _shadowed_client_names(tokens: list[_Token]) -> tuple[set[str], set[str]]:  
                         bind(candidate)
                 begin = pos + 1
 
-    for index, token in enumerate(tokens):
+    # Discover canonical import aliases before checking bindings anywhere in
+    # the file, including function declarations placed before the import.
+    for index, token in sorted(enumerate(tokens), key=lambda item: item[1].value != "import"):
+        names.update(axios_imports)
         # This structural check must run for punctuation tokens too; arrow
         # parameters are enclosed by the closing-parenthesis token.
         if (
@@ -392,18 +501,7 @@ def _shadowed_client_names(tokens: list[_Token]) -> tuple[set[str], set[str]]:  
         if (
             token.value in names
             and index + 1 < len(tokens)
-            and tokens[index + 1].value
-            in {
-                "=",
-                "+",
-                "-",
-                "*",
-                "/",
-                "%",
-                "&",
-                "|",
-                "?",
-            }
+            and _has_assignment_operator(tokens, index, source)
         ):
             bind(token)
         # Imported axios default/namespace bindings are accepted only from the
@@ -504,7 +602,7 @@ def extract_client_observation_inventory(  # noqa: PLR0912, PLR0915
                 mask[pos] = " "
         lexical_source = "".join(mask)
     ts = _tokens(lexical_source)
-    shadowed, axios_imports = _shadowed_client_names(ts)
+    shadowed, axios_imports = _shadowed_client_names(ts, lexical_source)
     found: list[ClientObservation] = []
     uncertain: list[ClientObservationIssue] = []
     i = 0
@@ -515,7 +613,7 @@ def extract_client_observation_inventory(  # noqa: PLR0912, PLR0915
             ts[i].kind == "id"
             and ts[i].value == "fetch"
             and "fetch" not in shadowed
-            and (i == 0 or ts[i - 1].value != ".")
+            and (i == 0 or ts[i - 1].value not in {".", "new"})
             and i + 1 < len(ts)
             and ts[i + 1].value == "("
         ):

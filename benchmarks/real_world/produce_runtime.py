@@ -23,6 +23,11 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol
 
+if __package__ in {None, ""}:
+    checkout_root = Path(__file__).resolve().parents[2]
+    sys.path.insert(0, str(checkout_root / "src"))
+    sys.path.insert(1, str(checkout_root))
+
 from benchmarks.real_world._secure_publish import (
     SecurePathError,
     ensure_publishable,
