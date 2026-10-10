@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import io
 import json
+import os
 import platform
 import re
 import subprocess
@@ -76,7 +77,9 @@ def _diagnostic_line(item: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def _normalize_diagnostic(item: str, checkout: Path, environment: Path, probe_root: Path) -> str:
+def _normalize_diagnostic(
+    item: str, checkout: Path, environment: Path, probe_root: Path, cwd: Path | None = None
+) -> str:
     # Diagnostics may use either slash style, regardless of the host path style.
     def portable_root_pattern(path: Path) -> str:
         # Path.as_posix() is useful on POSIX, but a Windows-style path supplied
@@ -97,6 +100,10 @@ def _normalize_diagnostic(item: str, checkout: Path, environment: Path, probe_ro
         return replaced
 
     normalized = replace_root(item, probe_root, "<private-probe>")
+    working_directory = cwd or Path.cwd()
+    relative_probe = Path(os.path.relpath(probe_root, working_directory))
+    if str(relative_probe) != str(probe_root):
+        normalized = replace_root(normalized, relative_probe, "<private-probe>")
     # Replace known roots before typeshed matching so whitespace in a root
     # cannot leave a partial host prefix behind.
     for path, label in sorted(
@@ -372,7 +379,7 @@ def run(wheels: dict[str, Path] = WHEELS) -> dict[str, Any]:
         ]
         raw_diagnostics = (
             [
-                _normalize_diagnostic(str(item), source_root, Path(sys.prefix), root)
+                _normalize_diagnostic(str(item), source_root, Path(sys.prefix), root, Path.cwd())
                 for item in analyzer._build_result.errors
             ]
             if analyzer._build_result

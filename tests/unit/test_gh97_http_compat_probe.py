@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import platform
 import subprocess
 import zipfile
@@ -189,6 +190,21 @@ def test_diagnostic_probe_root_accepts_windows_separators() -> None:
     )
     assert normalized == r"<private-probe>\app\fixture.py:7: error"
     assert probe._diagnostic_line(normalized) == 7
+
+
+def test_diagnostic_relative_probe_root_normalizes_exact_components(tmp_path: Path) -> None:
+    cwd = tmp_path / "working directory"
+    cwd.mkdir()
+    root = Path("/tmp/private probe")
+    relative = Path(os.path.relpath(root, cwd))
+    normalized = probe._normalize_diagnostic(
+        f"{relative.as_posix()}/requests/compat.py:4: note: keep {relative}-suffix",
+        Path("/checkout"), Path("/python"), root, cwd,
+    )
+    assert normalized == (
+        "<private-probe>/requests/compat.py:4: note: keep "
+        f"{relative}-suffix"
+    )
 
 
 def test_diagnostic_roots_and_typeshed_normalize_independent_of_separator_style() -> None:
