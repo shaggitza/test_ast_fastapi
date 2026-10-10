@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import importlib
 import importlib.abc
 import importlib.machinery
 import importlib.util
+import io
 import json
+import os
 import platform
+import re
 import shutil
 import stat
 import subprocess
@@ -17,9 +21,10 @@ import sys
 import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, cast
 
 from mypy import build as mypy_build
+from mypy.fscache import FileSystemCache
 from mypy.nodes import CallExpr, MemberExpr
 from mypy.options import Options
 from mypy.types import Instance, get_proper_type
@@ -46,6 +51,74 @@ FIXTURES = (
     "bogus_keyword",
     "wrong_type",
 )
+_MYPY_POSIX_FALLBACK_ROOT = "/usr/local/lib/mypy"
+
+
+@contextlib.contextmanager
+def _without_mypy_path() -> Any:
+    """Keep ambient MYPYPATH out of one build, restoring it even on failure."""
+    was_set = "MYPYPATH" in os.environ
+    value = os.environ.pop("MYPYPATH", None)
+    try:
+        yield
+    finally:
+        if was_set:
+            assert value is not None
+            os.environ["MYPYPATH"] = value
+
+
+def _within(path: str, root: str) -> bool:
+    """Return whether path is inside root using filesystem path boundaries."""
+    try:
+        resolved_path = Path(path).resolve()
+        resolved_root = Path(root).resolve()
+        return resolved_path == resolved_root or resolved_root in resolved_path.parents
+    except ValueError:  # Different Windows drives.
+        return False
+
+
+class _HermeticFileSystemCache(FileSystemCache):
+    """Hide mypy's POSIX ambient fallback except its bundled typeshed."""
+
+    def __init__(self, bundled_typeshed: Path | None = None) -> None:
+        super().__init__()
+        self._bundled_typeshed = (
+            bundled_typeshed.resolve() if bundled_typeshed is not None else None
+        )
+
+    def _fallback(self, path: str) -> bool:
+        try:
+            raw_in_fallback = os.path.commonpath(
+                (str(Path(path).absolute()), str(Path(_MYPY_POSIX_FALLBACK_ROOT).absolute()))
+            ) == str(Path(_MYPY_POSIX_FALLBACK_ROOT).absolute())
+        except ValueError:
+            raw_in_fallback = False
+        in_fallback = raw_in_fallback or _within(
+            os.path.realpath(path), os.path.realpath(_MYPY_POSIX_FALLBACK_ROOT)
+        )
+        if not in_fallback:
+            return False
+        return self._bundled_typeshed is None or not _within(
+            os.path.realpath(path), str(self._bundled_typeshed)
+        )
+
+    def stat_or_none(self, path: str) -> os.stat_result | None:
+        return None if self._fallback(path) else super().stat_or_none(path)
+
+    def listdir(self, path: str) -> list[str]:
+        if self._fallback(path):
+            raise FileNotFoundError(path)
+        return super().listdir(path)
+
+    def read(self, path: str) -> bytes:
+        if self._fallback(path):
+            raise FileNotFoundError(path)
+        return super().read(path)
+
+    def hash_digest(self, path: str) -> str:
+        if self._fallback(path):
+            raise FileNotFoundError(path)
+        return super().hash_digest(path)
 
 
 class ProbeError(ValueError):
@@ -90,11 +163,15 @@ def _load_candidate_product(root: Path) -> dict[str, Any]:
         contract_module = importlib.import_module(
             "fastapi_endpoint_detector.models.effect_contract"
         )
+        audit_model_module = importlib.import_module(
+            "fastapi_endpoint_detector.models.effect_contract_audit"
+        )
         endpoint_module = importlib.import_module("fastapi_endpoint_detector.models.endpoint")
         names = (
             "fastapi_endpoint_detector.analyzer.mypy_analyzer",
             "fastapi_endpoint_detector.analyzer.effect_contract_auditor",
             "fastapi_endpoint_detector.models.effect_contract",
+            "fastapi_endpoint_detector.models.effect_contract_audit",
             "fastapi_endpoint_detector.models.endpoint",
         )
         hashes: dict[str, str] = {}
@@ -110,6 +187,7 @@ def _load_candidate_product(root: Path) -> dict[str, Any]:
             "EndpointMethod": endpoint_module.EndpointMethod,
             "HandlerInfo": endpoint_module.HandlerInfo,
             "contracts": contract_module,
+            "EffectContractAudit": audit_model_module.EffectContractAudit,
             "source_hashes": hashes,
             "module_paths": {
                 name: str(Path(sys.modules[name].__file__ or "").resolve()) for name in names
@@ -155,7 +233,9 @@ def _analyzer_hashes() -> dict[str, str]:
     return hashes
 
 
-def verify_inputs(wheel: Path, manifest: Path) -> dict[str, Any]:
+def _verified_input_snapshot(
+    wheel: Path, manifest: Path
+) -> tuple[dict[str, Any], dict[str, Any], bytes]:
     manifest_bytes = manifest.read_bytes()
     if sha256(manifest_bytes) != MANIFEST_SHA256:
         raise ProbeError("matrix manifest SHA-256 does not match the pinned manifest")
@@ -171,18 +251,32 @@ def verify_inputs(wheel: Path, manifest: Path) -> dict[str, Any]:
         raise ProbeError(f"wheel filename must be exactly {WHEEL_NAME}")
     if wheel.stat().st_size > MAX_WHEEL_BYTES:
         raise ProbeError("wheel file exceeds size limit")
-    wheel_hash = sha256(wheel.read_bytes())
+    with wheel.open("rb") as source:
+        wheel_bytes = source.read(MAX_WHEEL_BYTES + 1)
+    if len(wheel_bytes) > MAX_WHEEL_BYTES:
+        raise ProbeError("wheel file exceeds size limit")
+    wheel_hash = sha256(wheel_bytes)
     if wheel_hash != WHEEL_SHA256:
         raise ProbeError("wheel SHA-256 does not match the pinned exact release")
-    return {
-        "matrix_manifest_sha256": f"sha256:{MANIFEST_SHA256}",
-        "wheel_sha256": f"sha256:{wheel_hash}",
-    }
+    return (
+        {
+            "matrix_manifest_sha256": f"sha256:{MANIFEST_SHA256}",
+            "wheel_sha256": f"sha256:{wheel_hash}",
+        },
+        matrix,
+        wheel_bytes,
+    )
 
 
-def extract_wheel(wheel: Path, destination: Path) -> None:
+def verify_inputs(wheel: Path, manifest: Path) -> dict[str, Any]:
+    artifact, _, _ = _verified_input_snapshot(wheel, manifest)
+    return artifact
+
+
+def extract_wheel(wheel: Path | bytes, destination: Path) -> None:
     total = 0
-    with zipfile.ZipFile(wheel) as archive:
+    snapshot = io.BytesIO(wheel) if isinstance(wheel, bytes) else wheel
+    with zipfile.ZipFile(snapshot) as archive:
         infos = archive.infolist()
         if len(infos) > MAX_ENTRIES:
             raise ProbeError("wheel has too many ZIP members")
@@ -282,6 +376,65 @@ def _binding_result(row: dict[str, Any]) -> dict[str, Any]:
     return statuses
 
 
+def _normalize_private_paths(value: Any, private_root: Path, cwd: Path) -> Any:
+    """Replace only exact known private-root path components in report strings."""
+    windows_root = (
+        os.name == "nt"
+        or re.match(r"^[A-Za-z]:[\\/]", str(private_root)) is not None
+        or str(private_root).startswith("\\\\")
+    )
+    roots: set[str] = set()
+    for root in (private_root, private_root.resolve()):
+        roots.add(str(root))
+        try:
+            roots.add(str(Path(os.path.relpath(root, cwd))))
+        except ValueError:
+            # A Windows cwd on another drive has no relative representation.
+            continue
+
+    def normalize(text: str) -> str:
+        result = text
+        for root in sorted(roots, key=len, reverse=True):
+            if root in {".", ""}:
+                continue
+            pattern = re.escape(root.replace("\\", "/")).replace("/", r"[\\/]")
+            result = re.sub(
+                r"(?<![A-Za-z0-9_.\\/:-])" + pattern + r"(?=[\\/]|$)",
+                "<private-s3-probe>",
+                result,
+                flags=re.IGNORECASE if windows_root else 0,
+            )
+        return result
+
+    if isinstance(value, str):
+        return normalize(value)
+    if isinstance(value, list):
+        return [_normalize_private_paths(item, private_root, cwd) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _normalize_private_paths(item, private_root, cwd) for key, item in value.items()
+        }
+    return value
+
+
+def _diagnostic_matches_path(error: str, path: Path, cwd: Path, line: int | None) -> bool:
+    location = re.match(r"^(.*):(\d+):", error)
+    if location is None or (line is not None and int(location.group(2)) != line):
+        return False
+    diagnostic_path = Path(location.group(1))
+    if not diagnostic_path.is_absolute():
+        diagnostic_path = cwd / diagnostic_path
+    with contextlib.suppress(OSError, ValueError):
+        resolved_diagnostic = diagnostic_path.resolve()
+        resolved_root = path.resolve()
+        return (
+            resolved_diagnostic == resolved_root
+            if line is not None
+            else resolved_diagnostic.is_relative_to(resolved_root)
+        )
+    return False
+
+
 def _product_adapter(source: Path) -> dict[str, Any]:
     """Exercise the repository analyzer and contract auditor on the controlled endpoint."""
     product = _load_candidate_product(ROOT)
@@ -296,7 +449,12 @@ def _product_adapter(source: Path) -> dict[str, Any]:
     call_rows: list[dict[str, Any]] = []
     loaded: Any = None
     try:
-        analyzer = product["MypyAnalyzer"](source)
+        # The verified artifact is a sibling of the fixture package. Name this
+        # private root explicitly; flat-project inference intentionally excludes
+        # a checkout parent's arbitrary files and site-package substitutes.
+        analyzer = product["MypyAnalyzer"](
+            source, module_root=source.parent.parent, no_site_packages=True
+        )
         dependencies = analyzer.analyze_endpoint(endpoint)
         sites = dependencies.get_resolved_call_sites(file_path=str(source))
         call_rows = [site.model_dump(mode="json") for site in sites]
@@ -312,8 +470,19 @@ def _product_adapter(source: Path) -> dict[str, Any]:
             cache_enabled=False,
             resolver_versions=[f"mypy@{analyzer._resolver_version}"],
         )
+        # Serialization must retain all model identities and corpus hashes.
+        audit = product["EffectContractAudit"].model_validate(audit.model_dump(mode="json"))
+        status = (
+            "completed"
+            if len(call_rows) == 1
+            and call_rows[0].get("canonical_symbol") == CANONICAL
+            and audit.summary.physical_occurrences == 1
+            and audit.summary.matched_calls == 1
+            else "partially_validated"
+        )
         return {
-            "status": "completed",
+            "status": status,
+            "binding_complete": status == "completed",
             "product_root": str((ROOT / "src").resolve()),
             "product_revision": _revision(ROOT),
             "product_source_sha256": product["source_hashes"],
@@ -333,6 +502,7 @@ def _product_adapter(source: Path) -> dict[str, Any]:
     except Exception as exc:
         return {
             "status": "unvalidated",
+            "binding_complete": False,
             "reason": f"{type(exc).__name__}: {exc}",
             "product_root": str((ROOT / "src").resolve()),
             "product_revision": _revision(ROOT),
@@ -360,29 +530,27 @@ def run_probe(wheel: Path, manifest: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
         raise ProbeError(f"requires Python {EXPECTED_PYTHON_VERSION}")
     if MYPY_VERSION != EXPECTED_MYPY_VERSION:
         raise ProbeError(f"requires mypy {EXPECTED_MYPY_VERSION}")
-    artifact = verify_inputs(wheel, manifest)
-    matrix = json.loads(manifest.read_bytes())
+    artifact, matrix, wheel_bytes = _verified_input_snapshot(wheel, manifest)
     package = next(row for row in matrix["packages"] if row["distribution"] == "mypy-boto3-s3")
     cases: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="gh97-s3-stub-probe-") as temp:
         private = Path(temp)
         stub_root = private / "stubtree"
         stub_root.mkdir()
-        extract_wheel(wheel, stub_root)
+        extract_wheel(wheel_bytes, stub_root)
         source_hashes: dict[str, str] = {}
         for source_info in package["inspected_sources"]:
             source_path = stub_root / source_info["path"]
             digest = sha256(source_path.read_bytes())
             if digest != source_info["sha256"]:
                 raise ProbeError(
-                    "inspected stub source hash differs from manifest: "
-                    f"{source_info['path']}"
+                    f"inspected stub source hash differs from manifest: {source_info['path']}"
                 )
             source_hashes[source_info["path"]] = f"sha256:{digest}"
         source_root = private / "fixture"
         source_root.mkdir()
-        # The product analyzer searches the fixture parent's mypy_path. Expose only the
-        # already verified stub package there; never import it as Python code.
+        # The product adapter explicitly selects this private artifact root.
+        # Expose only the verified stub package; never import it as Python code.
         shutil.copytree(stub_root / "mypy_boto3_s3", private / "mypy_boto3_s3")
         fixture_hashes: dict[str, str] = {}
         for fixture_name in FIXTURES:
@@ -391,6 +559,8 @@ def run_probe(wheel: Path, manifest: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
             source = source_root / f"{fixture_name}.py"
             source.write_text(fixture_text, encoding="utf-8")
             options = Options()
+            options.no_site_packages = True
+            options.python_executable = None
             options.incremental = False
             options.follow_imports = "normal"
             options.preserve_asts = True
@@ -398,9 +568,18 @@ def run_probe(wheel: Path, manifest: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
             options.ignore_missing_imports = False
             options.show_traceback = True
             options.mypy_path = [str(stub_root)]
-            result = mypy_build.build(
-                sources=[mypy_build.BuildSource(str(source), None, None)], options=options
+            fscache: FileSystemCache = (
+                _HermeticFileSystemCache(Path(mypy_build.default_data_dir()) / "typeshed")
+                if os.name != "nt"
+                else FileSystemCache()
             )
+            with _without_mypy_path():
+                result = mypy_build.build(
+                    sources=[mypy_build.BuildSource(str(source), None, None)],
+                    options=options,
+                    fscache=fscache,
+                    alt_lib_path=str(stub_root),
+                )
             state = next(
                 (candidate for candidate in result.graph.values() if candidate.path == str(source)),
                 None,
@@ -412,9 +591,7 @@ def run_probe(wheel: Path, manifest: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
                 raise ProbeError(f"mypy did not produce a typed tree for {fixture_name}")
             rows = _call_rows(tree, fixture_name, result.types)
             if len(rows) != 1:
-                raise ProbeError(
-                    f"expected one put_object call in fixture {fixture_name}"
-                )
+                raise ProbeError(f"expected one put_object call in fixture {fixture_name}")
             row = rows[0]
             call_line = row["line"]
             all_diagnostics = []
@@ -424,9 +601,9 @@ def run_probe(wheel: Path, manifest: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
             for error in result.errors:
                 item = {"raw": error}
                 all_diagnostics.append(item)
-                if error.startswith(f"{source}:") and f":{call_line}:" in error:
+                if _diagnostic_matches_path(error, source, Path.cwd(), call_line):
                     fixture_call_diagnostics.append(item)
-                elif str(stub_root) in error:
+                elif _diagnostic_matches_path(error, stub_root, Path.cwd(), None):
                     imported_stub_diagnostics.append(item)
                 else:
                     other_diagnostics.append(item)
@@ -470,10 +647,10 @@ def run_probe(wheel: Path, manifest: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
         != "misbound_positional_to_keyword_only_parameters"
     ):
         raise ProbeError("misbound Body selector control failed")
-    return {
+    report = {
         "schema_version": 1,
         "benchmark_id": "gh97-exact-release-installed-s3-stub-v1",
-        "status": "completed",
+        "status": product_adapter["status"],
         "scope": (
             "one exact S3 stub wheel and pinned analyzer environment; no compatibility range "
             "or production claims"
@@ -509,6 +686,7 @@ def run_probe(wheel: Path, manifest: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
         ],
         "product_adapter": product_adapter,
     }
+    return cast("dict[str, Any]", _normalize_private_paths(report, private, Path.cwd()))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -526,7 +704,7 @@ def main(argv: list[str] | None = None) -> int:
         args.output.write_text(encoded, encoding="utf-8")
     else:
         sys.stdout.write(encoded)
-    return 0
+    return 0 if report["status"] == "completed" else 2
 
 
 if __name__ == "__main__":

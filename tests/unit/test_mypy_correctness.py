@@ -496,11 +496,12 @@ def test_runtime_seeds_exact_children_under_unseedable_parents(tmp_path: Path) -
         "from functools import partial\n"
         "from fastapi import Depends, FastAPI\n\n"
         "def partial_leaf() -> int:\n    return 1\n\n"
-        "def parent(value: int = Depends(partial_leaf)) -> int:\n    return value\n\n"
+        "def parent(value: int = Depends(partial_leaf)) -> int:\n"
+        "    return value + partial_leaf()\n\n"
         "def instance_leaf() -> int:\n    return 2\n\n"
         "class Provider:\n"
         "    def __call__(self, value: int = Depends(instance_leaf)) -> int:\n"
-        "        return value\n\n"
+        "        return value + instance_leaf()\n\n"
         "provider = Provider()\n"
         "app = FastAPI(dependencies=[Depends(partial(parent)), Depends(provider)])\n\n"
         "@app.get('/')\n"
@@ -509,7 +510,11 @@ def test_runtime_seeds_exact_children_under_unseedable_parents(tmp_path: Path) -
     endpoint = FastAPIExtractor(main).extract_endpoints()[0]
     deps = MypyAnalyzer(tmp_path, max_depth=3).analyze_endpoint(endpoint)
     assert deps.references_symbol_at_line("parents.py", 4) is not None
+    # Runtime callable identities for partial(parent) and Provider() are
+    # physical source functions, so their bodies enter typed closure too.
+    assert deps.references_symbol_at_line("parents.py", 7) is not None
     assert deps.references_symbol_at_line("parents.py", 10) is not None
+    assert deps.references_symbol_at_line("parents.py", 14) is not None
 
 
 def test_bound_method_seed_preserves_exact_class_and_canonical_module(tmp_path: Path) -> None:

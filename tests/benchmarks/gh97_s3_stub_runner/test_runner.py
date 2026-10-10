@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import tempfile
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from benchmarks.gh97_s3_stub_runner.runner import (
@@ -12,11 +15,18 @@ from benchmarks.gh97_s3_stub_runner.runner import (
     ProbeError,
     _binding_result,
     _load_candidate_product,
+    _product_adapter,
+    _verified_input_snapshot,
     _verify_candidate_module_path,
     extract_wheel,
     run_probe,
+    sha256,
     verify_inputs,
 )
+from mypy import build as mypy_build
+from mypy.options import Options
+
+from benchmarks.gh97_s3_stub_runner import runner
 
 WHEEL = Path("/tmp/gh97-wheel-audit/mypy_boto3_s3-1.35.92-py3-none-any.whl")
 
@@ -67,6 +77,111 @@ def test_selector_binding_distinguishes_missing_and_positional_body() -> None:
     assert misbound["binding_status"] == "misbound_positional_to_keyword_only_parameters"
 
 
+@pytest.mark.parametrize("cwd", [Path("/tmp"), Path("/var/tmp/external review cwd")])
+def test_private_root_serialization_is_stable_and_component_bounded(
+    tmp_path: Path, cwd: Path
+) -> None:
+    private = Path("/tmp/gh97 s3 private root")
+    cwd.mkdir(parents=True, exist_ok=True)
+    relative = os.path.relpath(private, cwd)
+    payload = {
+        "calls": [
+            {
+                "file_path": str(private / "fixture/complete.py"),
+                "canonical_symbol": runner.CANONICAL,
+            }
+        ],
+        "diagnostics": [{"raw": f"{relative}/stubtree/client.pyi:8: note"}],
+        "unrelated": f"prefix{relative}/stubtree/file suffix {relative}-suffix",
+        "source_sha256": {"complete.py": "sha256:abc"},
+        "matched_calls": 1,
+    }
+    normalized = runner._normalize_private_paths(payload, private, cwd)
+    assert normalized["calls"][0]["file_path"] == ("<private-s3-probe>/fixture/complete.py")
+    assert normalized["calls"][0]["canonical_symbol"] == runner.CANONICAL
+    assert normalized["diagnostics"][0]["raw"] == ("<private-s3-probe>/stubtree/client.pyi:8: note")
+    assert normalized["unrelated"] == payload["unrelated"]
+    assert normalized["source_sha256"] == payload["source_sha256"]
+    assert normalized["matched_calls"] == 1
+
+
+def test_different_windows_drives_keep_absolute_private_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private = Path("D:/temp/private s3 root")
+    cwd = Path("C:/work")
+    monkeypatch.setattr(
+        os.path,
+        "relpath",
+        lambda _path, _cwd: (_ for _ in ()).throw(ValueError("different drives")),
+    )
+    normalized = runner._normalize_private_paths(
+        {"file_path": r"D:\temp\private s3 root\fixture\complete.py"},
+        private,
+        cwd,
+    )
+    assert normalized["file_path"] == "<private-s3-probe>\\fixture\\complete.py"
+
+
+@pytest.mark.parametrize(
+    "private", [Path("C:/TEMP/Private Root"), Path(r"\\Server\Share\TEMP\Private Root")]
+)
+def test_windows_private_root_casing_is_normalized_without_prefix_fanout(
+    private: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(os.path, "relpath", lambda _path, _cwd: "../TEMP/Private Root")
+    lower = str(private).lower().replace("/", "\\")
+    values = [
+        lower + r"\fixture\complete.py",
+        "../temp/private root/fixture/complete.py",
+        lower + "-other/file.py",
+        "prefix" + lower + r"\fixture.py",
+    ]
+    normalized = runner._normalize_private_paths(values, private, Path("D:/cwd"))
+    assert normalized[:2] == [
+        r"<private-s3-probe>\fixture\complete.py",
+        "<private-s3-probe>/fixture/complete.py",
+    ]
+    assert normalized[2:] == values[2:]
+
+
+def test_posix_private_root_remains_case_sensitive() -> None:
+    private = Path("/tmp/Private Root")
+    values = ["/tmp/Private Root/fixture.py", "/tmp/private root/fixture.py"]
+    assert runner._normalize_private_paths(values, private, Path("/tmp")) == [
+        "<private-s3-probe>/fixture.py",
+        values[1],
+    ]
+
+
+def test_symlink_temporary_root_normalizes_resolved_and_display_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "resolved temp root"
+    target.mkdir()
+    alias = tmp_path / "temp alias"
+    alias.symlink_to(target, target_is_directory=True)
+    monkeypatch.setattr(tempfile, "tempdir", str(alias))
+    cwd = tmp_path / "external cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+
+    with tempfile.TemporaryDirectory(prefix="probe-") as temp_name:
+        private = Path(temp_name)
+        resolved = private.resolve()
+        normalized = runner._normalize_private_paths(
+            {
+                "display": str(private / "fixture/complete.py"),
+                "diagnostic": str(resolved / "stubtree/client.pyi"),
+            },
+            private,
+            Path.cwd(),
+        )
+
+    assert normalized["display"] == "<private-s3-probe>/fixture/complete.py"
+    assert normalized["diagnostic"] == "<private-s3-probe>/stubtree/client.pyi"
+
+
 def test_invalid_typed_calls_are_classified_from_call_diagnostics() -> None:
     invalid = {
         "keyword_bindings": ["Bucket", "Key", "Body", "Bogus"],
@@ -92,6 +207,223 @@ def test_product_module_path_outside_checkout_is_rejected(tmp_path: Path) -> Non
         _verify_candidate_module_path(
             "analyzer", SimpleNamespace(__file__=str(outside)), package_root
         )
+
+
+def test_missing_private_stub_cannot_claim_completed_product_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private = tmp_path / "private"
+    fixture = private / "fixture"
+    fixture.mkdir(parents=True)
+    source = fixture / "complete.py"
+    source.write_text(
+        "from mypy_boto3_s3.client import S3Client\n\n"
+        "def run(client: S3Client) -> None:\n"
+        "    client.put_object(Bucket='bucket', Key='key', Body=b'payload')\n",
+        encoding="utf-8",
+    )
+    ambient = tmp_path / "ambient" / "mypy_boto3_s3"
+    ambient.mkdir(parents=True)
+    (ambient / "__init__.py").write_text("", encoding="utf-8")
+    (ambient / "client.py").write_text(
+        "class S3Client:\n"
+        "    def put_object(self, *, Bucket: str, Key: str, Body: bytes) -> None: ...\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MYPYPATH", str(ambient.parent))
+
+    result = _product_adapter(source)
+
+    assert result["status"] == "partially_validated"
+    assert result["binding_complete"] is False
+    assert not any(
+        call["canonical_symbol"] == "mypy_boto3_s3.client.S3Client.put_object"
+        for call in result["calls"]
+    )
+    assert os.environ["MYPYPATH"] == str(ambient.parent)
+
+
+def test_fixture_cache_excludes_ambient_fallback_but_keeps_explicit_project(tmp_path: Path) -> None:
+    fallback = tmp_path / "fallback"
+    fallback.mkdir()
+    (fallback / "ambient.pyi").write_text("VALUE: int\n", encoding="utf-8")
+    explicit = tmp_path / "project"
+    explicit.mkdir()
+    (explicit / "project.pyi").write_text("VALUE: str\n", encoding="utf-8")
+    previous = runner._MYPY_POSIX_FALLBACK_ROOT
+    runner._MYPY_POSIX_FALLBACK_ROOT = str(fallback)
+    try:
+        cache = runner._HermeticFileSystemCache()
+        assert cache.stat_or_none(str(fallback / "ambient.pyi")) is None
+        with pytest.raises(FileNotFoundError):
+            cache.listdir(str(fallback))
+        with pytest.raises(FileNotFoundError):
+            cache.read(str(fallback / "ambient.pyi"))
+        with pytest.raises(FileNotFoundError):
+            cache.hash_digest(str(fallback / "ambient.pyi"))
+        assert cache.read(str(explicit / "project.pyi")) == b"VALUE: str\n"
+        assert cache.stat_or_none(str(explicit / "project.pyi")) is not None
+    finally:
+        runner._MYPY_POSIX_FALLBACK_ROOT = previous
+
+
+def test_fixture_cache_allows_bundled_typeshed_inside_fallback(tmp_path: Path) -> None:
+    fallback = tmp_path / "fallback"
+    bundled = fallback / "typeshed"
+    bundled.mkdir(parents=True)
+    (bundled / "builtins.pyi").write_text("VALUE: int\n", encoding="utf-8")
+    (fallback / "ambient.pyi").write_text("VALUE: str\n", encoding="utf-8")
+    previous = runner._MYPY_POSIX_FALLBACK_ROOT
+    runner._MYPY_POSIX_FALLBACK_ROOT = str(fallback)
+    try:
+        cache = runner._HermeticFileSystemCache(bundled)
+        assert cache.stat_or_none(str(bundled / "builtins.pyi")) is not None
+        assert cache.read(str(bundled / "builtins.pyi")) == b"VALUE: int\n"
+        assert cache.listdir(str(bundled)) == ["builtins.pyi"]
+        assert cache.stat_or_none(str(fallback / "ambient.pyi")) is None
+        with pytest.raises(FileNotFoundError):
+            cache.read(str(fallback / "ambient.pyi"))
+    finally:
+        runner._MYPY_POSIX_FALLBACK_ROOT = previous
+
+
+def test_fixture_cache_rejects_bundled_typeshed_symlink_and_parent_escapes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fallback = tmp_path / "fallback"
+    bundled = fallback / "typeshed"
+    bundled.mkdir(parents=True)
+    outside = tmp_path / "outside.pyi"
+    outside.write_text("DECOY: int\n")
+    (fallback / "ambient.pyi").write_text("AMBIENT: int\n")
+    link = bundled / "escape.pyi"
+    link.symlink_to(outside)
+    monkeypatch.setattr(runner, "_MYPY_POSIX_FALLBACK_ROOT", str(fallback))
+    cache = runner._HermeticFileSystemCache(bundled)
+    for candidate in (link, bundled / ".." / "ambient.pyi", bundled / ".." / ".." / "outside.pyi"):
+        assert cache.stat_or_none(str(candidate)) is None
+        for operation in (cache.read, cache.hash_digest, cache.listdir):
+            with pytest.raises(FileNotFoundError):
+                operation(str(candidate))
+
+
+def test_fixture_resolver_keeps_installed_bundled_typeshed_when_under_fallback(
+    tmp_path: Path,
+) -> None:
+    data_dir = Path(mypy_build.default_data_dir()).resolve()
+    typeshed = data_dir / "typeshed"
+    assert typeshed.is_dir()
+    source = tmp_path / "main.py"
+    source.write_text("value: int = 1\n", encoding="utf-8")
+    previous = runner._MYPY_POSIX_FALLBACK_ROOT
+    runner._MYPY_POSIX_FALLBACK_ROOT = str(data_dir)
+    try:
+        options = Options()
+        options.no_site_packages = True
+        options.python_executable = None
+        result = mypy_build.build(
+            sources=[mypy_build.BuildSource(str(source), None, None)],
+            options=options,
+            fscache=runner._HermeticFileSystemCache(typeshed),
+            alt_lib_path=str(tmp_path),
+        )
+    finally:
+        runner._MYPY_POSIX_FALLBACK_ROOT = previous
+    assert not result.errors
+    assert "builtins" in result.graph
+
+
+def test_fixture_resolver_rejects_fallback_decoy_and_accepts_explicit_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fallback = tmp_path / "fallback"
+    fallback.mkdir()
+    (fallback / "ambient_only.pyi").write_text("VALUE: int\n", encoding="utf-8")
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "private_only.pyi").write_text("VALUE: str\n", encoding="utf-8")
+    source = tmp_path / "main.py"
+    source.write_text(
+        "import ambient_only\nimport private_only\nresult: str = private_only.VALUE\n",
+        encoding="utf-8",
+    )
+    previous = runner._MYPY_POSIX_FALLBACK_ROOT
+    runner._MYPY_POSIX_FALLBACK_ROOT = str(fallback)
+    monkeypatch.setenv("MYPYPATH", str(fallback))
+    try:
+        options = Options()
+        options.no_site_packages = True
+        options.python_executable = None
+        options.mypy_path = [str(fallback), str(project)]
+        result = mypy_build.build(
+            sources=[mypy_build.BuildSource(str(source), None, None)],
+            options=options,
+            fscache=runner._HermeticFileSystemCache(),
+            alt_lib_path=str(project),
+        )
+    finally:
+        runner._MYPY_POSIX_FALLBACK_ROOT = previous
+    assert any(
+        'Cannot find implementation or library stub for module named "ambient_only"' in e
+        for e in result.errors
+    )
+    assert not any("private_only" in e for e in result.errors)
+
+
+@pytest.mark.parametrize("value", [None, "", "/tmp/ambient-mypy-path"])
+@pytest.mark.parametrize("fail", [False, True])
+def test_direct_build_temporarily_removes_and_restores_mypy_path(
+    monkeypatch: pytest.MonkeyPatch, value: str | None, fail: bool
+) -> None:
+    if value is None:
+        monkeypatch.delenv("MYPYPATH", raising=False)
+    else:
+        monkeypatch.setenv("MYPYPATH", value)
+
+    def guarded_action() -> None:
+        # Exercise the build guard itself, independent of pinned-wheel inputs
+        # and the probe's required interpreter version.
+        with runner._without_mypy_path():
+            assert "MYPYPATH" not in os.environ
+            if fail:
+                raise RuntimeError("simulated mypy build failure")
+
+    if fail:
+        with pytest.raises(RuntimeError, match="simulated mypy build failure"):
+            guarded_action()
+    else:
+        guarded_action()
+    if value is None:
+        assert "MYPYPATH" not in os.environ
+    else:
+        assert os.environ["MYPYPATH"] == value
+
+
+@pytest.mark.skipif(not WHEEL.is_file(), reason="requires the supplied pinned wheel")
+def test_pinned_report_is_unchanged_by_ambient_mypy_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    baseline = run_probe(WHEEL, DEFAULT_MANIFEST)
+    ambient = tmp_path / "ambient"
+    for package in ("boto3", "botocore"):
+        package_root = ambient / package
+        package_root.mkdir(parents=True)
+        (package_root / "__init__.pyi").write_text("class AmbientDecoy: ...\n", encoding="utf-8")
+        (package_root / "client.pyi").write_text(
+            "class S3Client:\n    def put_object(self, *, Body: int) -> str: ...\n",
+            encoding="utf-8",
+        )
+    original_build = mypy_build.build
+
+    def check_build_scope(*args: Any, **kwargs: Any) -> Any:
+        assert "MYPYPATH" not in os.environ
+        return original_build(*args, **kwargs)
+
+    monkeypatch.setattr(mypy_build, "build", check_build_scope)
+    monkeypatch.setenv("MYPYPATH", str(ambient))
+    ambient_report = run_probe(WHEEL, DEFAULT_MANIFEST)
+    assert os.environ["MYPYPATH"] == str(ambient)
+    assert ambient_report == baseline
 
 
 @pytest.mark.skipif(
@@ -120,6 +452,8 @@ def test_exact_release_end_to_end_report() -> None:
     assert report["upstream_package_code_imported_or_executed"] is False
     product = report["product_adapter"]
     assert product["status"] in {"completed", "partially_validated", "unvalidated"}
+    assert product["status"] == "completed"
+    assert product["binding_complete"] is True
     assert "calls" in product
     assert product["resolver"] == "1.19.1"
     expected_root = (Path(__file__).resolve().parents[3] / "src").resolve()
@@ -130,6 +464,7 @@ def test_exact_release_end_to_end_report() -> None:
         "fastapi_endpoint_detector.analyzer.mypy_analyzer",
         "fastapi_endpoint_detector.analyzer.effect_contract_auditor",
         "fastapi_endpoint_detector.models.effect_contract",
+        "fastapi_endpoint_detector.models.effect_contract_audit",
         "fastapi_endpoint_detector.models.endpoint",
     }
     assert product["preset"]["name"] == "object-storage-v1"
@@ -142,4 +477,90 @@ def test_exact_release_end_to_end_report() -> None:
         assert product["calls"][0]["arguments"][2]["status"] == "unavailable"
         assert product["calls"][0]["arguments"][2]["reason_code"] == "dynamic_argument"
         assert product["audit"]["summary"]["matched_calls"] == 1
+        audit_model = _load_candidate_product(runner.ROOT)["EffectContractAudit"]
+        assert (
+            audit_model.model_validate(product["audit"]).model_dump(mode="json") == product["audit"]
+        )
     json.dumps(report)
+
+
+@pytest.mark.skipif(not WHEEL.is_file(), reason="requires the supplied pinned wheel")
+@pytest.mark.parametrize("cwd_kind", ["tmp", "external"])
+def test_outside_cwd_preserves_all_six_diagnostic_bindings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cwd_kind: str
+) -> None:
+    monkeypatch.chdir(Path("/tmp") if cwd_kind == "tmp" else tmp_path)
+    report = run_probe(WHEEL, DEFAULT_MANIFEST)
+    cases = {row["fixture"]: row for row in report["canonical_symbol_resolution"]["cases"]}
+    assert cases["complete"]["selector_binding_results"]["binding_status"] == "complete"
+    assert cases["omitted_body"]["selector_binding_results"]["binding_status"] == "incomplete"
+    assert cases["misbound_body"]["selector_binding_results"]["binding_status"].startswith(
+        "misbound"
+    )
+    assert cases["foreign_same_name"]["selector_binding_results"]["binding_status"] == (
+        "unvalidated_unmatched_canonical"
+    )
+    for name in ("bogus_keyword", "wrong_type"):
+        assert cases[name]["selector_binding_results"]["binding_status"] == "invalid_call"
+    for name in ("misbound_body", "bogus_keyword", "wrong_type"):
+        assert cases[name]["fixture_call_diagnostics"]
+    assert cases["omitted_body"]["selector_binding_results"]["binding_status"] == "incomplete"
+    assert cases["misbound_body"]["selector_binding_results"]["binding_status"].startswith(
+        "misbound"
+    )
+    for name in ("complete", "omitted_body", "foreign_same_name"):
+        assert cases[name]["fixture_call_diagnostics"] == []
+    assert report["status"] == report["product_adapter"]["status"]
+    assert report["product_adapter"]["audit"]["summary"]["physical_occurrences"] == 1
+    assert report["product_adapter"]["audit"]["summary"]["matched_calls"] == 1
+
+
+def test_main_returns_nonzero_for_partial_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "partial.json"
+    monkeypatch.setattr(
+        runner,
+        "run_probe",
+        lambda _wheel, _manifest: {
+            "status": "partially_validated",
+            "product_adapter": {"status": "partially_validated"},
+        },
+    )
+    assert runner.main(["--wheel", str(WHEEL), "--output", str(destination)]) == 2
+    assert json.loads(destination.read_text(encoding="utf-8"))["status"] == ("partially_validated")
+
+
+@pytest.mark.skipif(not WHEEL.is_file(), reason="requires the pinned supplied wheel")
+def test_authenticated_snapshot_survives_wheel_and_manifest_replacement(tmp_path: Path) -> None:
+    wheel = tmp_path / WHEEL.name
+    manifest = tmp_path / "manifest.json"
+    shutil.copyfile(WHEEL, wheel)
+    shutil.copyfile(DEFAULT_MANIFEST, manifest)
+    artifact, matrix, snapshot = _verified_input_snapshot(wheel, manifest)
+    wheel.write_bytes(b"replacement archive")
+    manifest.write_text("{}", encoding="utf-8")
+    destination = tmp_path / "extracted"
+    extract_wheel(snapshot, destination)
+    assert artifact["wheel_sha256"] == "sha256:" + sha256(snapshot)
+    package = next(row for row in matrix["packages"] if row["distribution"] == "mypy-boto3-s3")
+    for row in package["inspected_sources"]:
+        assert sha256((destination / row["path"]).read_bytes()) == row["sha256"]
+
+
+def test_wheel_read_remains_bounded_after_stat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel = tmp_path / runner.WHEEL_NAME
+    wheel.write_bytes(b"x" * 17)
+    monkeypatch.setattr(runner, "MAX_WHEEL_BYTES", 16)
+    original_stat = Path.stat
+
+    def stale_stat(path: Path, *, follow_symlinks: bool = True) -> os.stat_result | SimpleNamespace:
+        if path == wheel:
+            return SimpleNamespace(st_size=1)
+        return original_stat(path, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", stale_stat)
+    with pytest.raises(ProbeError, match="size limit"):
+        _verified_input_snapshot(wheel, DEFAULT_MANIFEST)

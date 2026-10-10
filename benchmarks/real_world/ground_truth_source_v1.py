@@ -263,6 +263,12 @@ class GitRunner:
             "-c",
             "core.hooksPath=/dev/null",
             "-c",
+            "maintenance.auto=false",
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "gc.autoDetach=false",
+            "-c",
             "protocol.allow=never",
             "-c",
             (
@@ -336,7 +342,7 @@ class GitRunner:
                     _fail("Git command timed out and process group was reaped")
                 if monitor_root is not None and now - last_disk_check >= 0.05:
                     try:
-                        _tree_bounds(monitor_root)
+                        _tree_bounds(monitor_root, live_fetch=True)
                     except SourceV1Error:
                         self._terminate(process)
                         raise
@@ -369,7 +375,7 @@ class GitRunner:
                     _fail("Git command timed out and process group was reaped")
                 if monitor_root is not None:
                     try:
-                        _tree_bounds(monitor_root)
+                        _tree_bounds(monitor_root, live_fetch=True)
                     except SourceV1Error:
                         self._terminate(process)
                         raise
@@ -392,16 +398,36 @@ class GitRunner:
         return bytes(stdout), bytes(stderr)
 
 
-def _tree_bounds(root: Path) -> tuple[int, int]:
+def _tree_bounds(root: Path, *, live_fetch: bool = False) -> tuple[int, int]:
+    """Bound staging disk use; publication checks require a stable tree.
+
+    Git atomically renames temporary pack/index files during fetch. Only the
+    in-flight monitor tolerates entries removed after directory enumeration.
+    The root and every surviving filesystem object remain subject to checks.
+    """
+    root_status = root.lstat()
+    if not stat.S_ISDIR(root_status.st_mode):
+        _fail("cache root must be a regular directory")
     total = 0
     files = 0
-    for directory, names, filenames in os.walk(root, followlinks=False):
+
+    def walk_error(error: OSError) -> None:
+        if live_fetch and isinstance(error, FileNotFoundError):
+            return
+        raise error
+
+    for directory, names, filenames in os.walk(root, followlinks=False, onerror=walk_error):
         files += len(names) + len(filenames)
         if files > _MAX_FILES:
             _fail("cache file bound exceeded")
         for name in [*names, *filenames]:
             path = Path(directory, name)
-            status = path.lstat()
+            try:
+                status = path.lstat()
+            except FileNotFoundError:
+                if not live_fetch:
+                    raise
+                continue
             if stat.S_ISLNK(status.st_mode):
                 _fail("cache contains a symlink")
             if stat.S_ISREG(status.st_mode):
@@ -410,6 +436,13 @@ def _tree_bounds(root: Path) -> tuple[int, int]:
                     _fail("cache disk bound exceeded")
             elif not stat.S_ISDIR(status.st_mode):
                 _fail("cache contains unsupported filesystem object")
+    final_root_status = root.lstat()
+    if (final_root_status.st_dev, final_root_status.st_ino, final_root_status.st_mode) != (
+        root_status.st_dev,
+        root_status.st_ino,
+        root_status.st_mode,
+    ):
+        _fail("cache root drifted during disk monitoring")
     return total, files
 
 

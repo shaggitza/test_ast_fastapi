@@ -1627,7 +1627,16 @@ class MypyAnalyzer:
             if (
                 occurrence.resolution_status != DependencyResolutionStatus.ESTABLISHED
                 or occurrence.callable_kind
-                not in {DependencyCallableKind.FUNCTION, DependencyCallableKind.BOUND_METHOD}
+                not in {
+                    DependencyCallableKind.FUNCTION,
+                    DependencyCallableKind.BOUND_METHOD,
+                    # The extractor records the physical wrapped function for
+                    # partials and user callable instances. Accept those only
+                    # after the same module, file, qualname, and span checks
+                    # below; their display/type names are never used as seeds.
+                    DependencyCallableKind.PARTIAL,
+                    DependencyCallableKind.CALLABLE_INSTANCE,
+                }
                 or occurrence.module is None
                 or occurrence.qualname is None
                 or occurrence.source_span is None
@@ -1677,10 +1686,107 @@ class MypyAnalyzer:
                 seeds[canonical_fullname] = occurrence.depth
         return seeds
 
+    def _native_dependency_seeds(self, endpoint: Endpoint) -> dict[str, int]:
+        """Resolve established source-qualified secure-AST dependency declarations.
+
+        The expressions are evidence, not executable imports: only a unique
+        project-local function definition with the same qualified binding is
+        admitted to the typed closure. Dynamic expressions and callable objects
+        remain conditional evidence and are intentionally not guessed here.
+        """
+        provenance = endpoint.native_provenance
+        if provenance is None:
+            return {}
+        declarations = [
+            dependency
+            for item in provenance.object_chain
+            for dependency in item.dependency_expressions
+        ]
+        declarations.extend(
+            dependency
+            for edge in provenance.assembly_chain
+            for dependency in edge.dependency_expressions
+        )
+        declarations.extend(provenance.registration.dependency_expressions)
+        # A Starlette mount is an ownership boundary. FastAPI dependencies on
+        # the parent application/router do not become child ASGI dependencies.
+        # Keep only object declarations at or below the mounted child, and
+        # assembly declarations after the final mount. If the child's object
+        # identity cannot be aligned exactly, abstain from inheriting any
+        # object declarations rather than guessing from a short name.
+        last_mount = max(
+            (
+                index
+                for index, edge in enumerate(provenance.assembly_chain)
+                if edge.operation == "mount"
+            ),
+            default=None,
+        )
+        if last_mount is not None:
+            mount_edge = provenance.assembly_chain[last_mount]
+            child_object_index = next(
+                (
+                    index
+                    for index, item in enumerate(provenance.object_chain)
+                    if item.module == mount_edge.child_module
+                    and item.symbol == mount_edge.child_symbol
+                ),
+                None,
+            )
+            object_items = (
+                provenance.object_chain[child_object_index:]
+                if child_object_index is not None
+                else ()
+            )
+            declarations = [
+                dependency for item in object_items for dependency in item.dependency_expressions
+            ]
+            declarations.extend(
+                dependency
+                for edge in provenance.assembly_chain[last_mount + 1 :]
+                for dependency in edge.dependency_expressions
+            )
+            declarations.extend(provenance.registration.dependency_expressions)
+        seeds: dict[str, int] = {}
+        root = self.source_root.resolve()
+        for declaration in declarations:
+            if declaration.confidence != "established" or declaration.side != provenance.side:
+                continue
+            for fullname in declaration.callable_expressions:
+                resolved = self._resolve_fullname_to_file(fullname)
+                if resolved is None:
+                    continue
+                file_path, module = resolved
+                try:
+                    Path(file_path).resolve().relative_to(root)
+                except (OSError, ValueError):
+                    continue
+                qualified = (
+                    fullname[len(module) + 1 :]
+                    if fullname.startswith(f"{module}.")
+                    else fullname.rsplit(".", 1)[-1]
+                )
+                result = (
+                    self._find_func_in_tree(
+                        self._trees.get(module),
+                        qualified.rsplit(".", 1)[-1],
+                        qualified_name=qualified,
+                    )
+                    if self._trees.get(module) is not None
+                    else None
+                )
+                if result is None or result[1] != qualified:
+                    continue
+                key = f"{module}.{result[1]}"
+                seeds[key] = min(seeds.get(key, 1), 1)
+        return seeds
+
     def _python_dependency_closure(self, endpoint: Endpoint) -> dict[str, int]:
         """Expand explicit and source-attested runtime dependencies to bounded depth."""
         depths: dict[str, int] = {}
         initial = dict.fromkeys(self._python_dependency_fullnames(endpoint), 1)
+        for fullname, depth in self._native_dependency_seeds(endpoint).items():
+            initial[fullname] = min(initial.get(fullname, depth), depth)
         for fullname, depth in self._runtime_dependency_seeds(endpoint).items():
             initial[fullname] = min(initial.get(fullname, depth), depth)
         queue = list(initial.items())
@@ -1734,16 +1840,21 @@ class MypyAnalyzer:
 
     @staticmethod
     def _endpoint_key(endpoint: Endpoint) -> str:
-        """Key dependency data by route, handler, and authoritative runtime graph."""
+        """Key dependency data by route, handler, and dependency evidence."""
         handler = endpoint.handler
         graph_payload = (
             None
             if endpoint.dependency_graph is None
             else endpoint.dependency_graph.model_dump(mode="json")
         )
+        provenance = (
+            None
+            if endpoint.native_provenance is None
+            else endpoint.native_provenance.model_dump(mode="json")
+        )
         graph_hash = hashlib.sha256(
             json.dumps(
-                graph_payload,
+                [graph_payload, provenance],
                 sort_keys=True,
                 separators=(",", ":"),
             ).encode()
