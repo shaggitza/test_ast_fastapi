@@ -7,6 +7,8 @@ import sys
 import zipfile
 from pathlib import Path
 
+import pytest
+
 from fastapi_endpoint_detector.analyzer import framework_phase_comparison
 
 
@@ -47,6 +49,75 @@ for raw in ('{"schema_version":1,"schema_version":1}', '{"schema_version":NaN}')
 """
     completed = subprocess.run(
         [sys.executable, "-I", "-c", probe, str(archive)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize(
+    ("script_name", "supports_help"),
+    [
+        ("compare_runtime.py", True),
+        ("evaluate.py", True),
+        ("build_training_dataset.py", True),
+        ("verify_truth_release_v2.py", True),
+        ("produce_runtime.py", False),
+    ],
+)
+def test_direct_benchmark_startup_bootstraps_checkout_source_tree(
+    tmp_path: Path, script_name: str, supports_help: bool
+) -> None:
+    repository = Path(__file__).resolve().parents[2]
+    script = repository / "benchmarks/real_world" / script_name
+    probe = r"""
+import runpy
+import sys
+from pathlib import Path
+
+repository, script = map(Path, sys.argv[1:3])
+source = (repository / "src").resolve()
+checkout = repository.resolve()
+sys.meta_path[:] = [
+    finder for finder in sys.meta_path
+    if "editable" not in type(finder).__name__.lower()
+]
+sys.path[:] = [
+    entry for entry in sys.path
+    if not entry
+    or (Path(entry).resolve() != source and source not in Path(entry).resolve().parents
+        and Path(entry).resolve() != checkout and checkout not in Path(entry).resolve().parents)
+]
+if sys.argv[3] == "help":
+    sys.argv = [str(script), "--help"]
+    try:
+        runpy.run_path(str(script), run_name="__main__")
+    except SystemExit as error:
+        assert error.code == 0, error.code
+    else:
+        raise AssertionError("--help did not exit")
+else:
+    sys.argv = [str(script)]
+    runpy.run_path(str(script), run_name="__main__")
+
+from fastapi_endpoint_detector.analyzer import runtime_artifact_comparison
+
+loaded_from = Path(runtime_artifact_comparison.__file__).resolve()
+assert loaded_from.is_relative_to(source), loaded_from
+"""
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            probe,
+            str(repository),
+            str(script),
+            "help" if supports_help else "import",
+        ],
         cwd=tmp_path,
         capture_output=True,
         text=True,
