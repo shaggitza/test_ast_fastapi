@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import platform
 import subprocess
 import zipfile
@@ -191,6 +192,21 @@ def test_diagnostic_probe_root_accepts_windows_separators() -> None:
     assert probe._diagnostic_line(normalized) == 7
 
 
+def test_diagnostic_relative_probe_root_normalizes_exact_components(tmp_path: Path) -> None:
+    cwd = tmp_path / "working directory"
+    cwd.mkdir()
+    root = Path("/tmp/private probe")
+    relative = Path(os.path.relpath(root, cwd))
+    normalized = probe._normalize_diagnostic(
+        f"{relative.as_posix()}/requests/compat.py:4: note: keep {relative}-suffix",
+        Path("/checkout"),
+        Path("/python"),
+        root,
+        cwd,
+    )
+    assert normalized == (f"<private-probe>/requests/compat.py:4: note: keep {relative}-suffix")
+
+
 def test_diagnostic_roots_and_typeshed_normalize_independent_of_separator_style() -> None:
     checkout = Path("C:/work/analyzer")
     environment = Path("C:/work/analyzer/.venv")
@@ -271,3 +287,43 @@ def test_diagnostic_root_suffix_in_unrelated_absolute_path_is_preserved() -> Non
         )
         == item
     )
+
+
+def test_different_windows_drives_keep_absolute_private_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def no_cross_drive_relative(_path: Path, _cwd: Path) -> str:
+        raise ValueError("path is on mount 'D:', start on mount 'C:'")
+
+    monkeypatch.setattr(os.path, "relpath", no_cross_drive_relative)
+    root = Path("D:/temp/private probe")
+    item = r"D:\temp\private probe\app\fixture.py:7: error"
+    normalized = probe._normalize_diagnostic(
+        item, Path("C:/checkout"), Path("C:/python"), root, Path("C:/work")
+    )
+    assert normalized == r"<private-probe>\app\fixture.py:7: error"
+
+
+@pytest.mark.parametrize(
+    ("environment", "diagnostic"),
+    [
+        (
+            "/Users/John Doe/.venv",
+            "/Users/John Doe/.venv/lib/python3.11/site-packages/mypy/typeshed/"
+            "stdlib/builtins.pyi:42: note: value",
+        ),
+        (
+            r"C:\Users\John Doe\.venv",
+            r"C:\Users\John Doe\.venv\Lib\site-packages\mypy\typeshed"
+            r"\stdlib\builtins.pyi:42: note: value",
+        ),
+    ],
+)
+def test_typeshed_normalization_removes_whitespace_environment_roots(
+    environment: str, diagnostic: str
+) -> None:
+    normalized = probe._normalize_diagnostic(
+        diagnostic, Path("/checkout"), Path(environment), Path("/private")
+    )
+    assert normalized == "<typeshed>/stdlib/builtins.pyi:42: note: value"
+    assert "John" not in normalized
