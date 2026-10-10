@@ -7,6 +7,8 @@ These tests verify the mypy-based dependency analysis, including:
 - Line progress callbacks
 """
 
+import sys
+from importlib.util import find_spec
 from pathlib import Path
 
 import pytest
@@ -108,6 +110,15 @@ class TestMypyAnalyzerBasic:
 
         assert ordinary._cache_fingerprint()[0] != hermetic._cache_fingerprint()[0]
 
+    def test_target_platform_is_part_of_cache_identity(self, tmp_path: Path) -> None:
+        """An explicit mypy target platform changes analysis cache identity."""
+        default = MypyAnalyzer(tmp_path)
+        explicit_default = MypyAnalyzer(tmp_path, target_platform=sys.platform)
+        other_platform = MypyAnalyzer(tmp_path, target_platform="win32")
+
+        assert default._cache_fingerprint()[0] == explicit_default._cache_fingerprint()[0]
+        assert default._cache_fingerprint()[0] != other_platform._cache_fingerprint()[0]
+
     def test_hermetic_analysis_ignores_ambient_mypypath_decoy(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -115,9 +126,7 @@ class TestMypyAnalyzerBasic:
         app = tmp_path / "app"
         app.mkdir()
         (app / "main.py").write_text(
-            "from optional_decoy import decoy_call\n\n"
-            "def handler() -> None:\n"
-            "    decoy_call()\n",
+            "from optional_decoy import decoy_call\n\ndef handler() -> None:\n    decoy_call()\n",
             encoding="utf-8",
         )
         ambient = tmp_path / "ambient"
@@ -132,6 +141,28 @@ class TestMypyAnalyzerBasic:
 
         assert "optional_decoy" not in analyzer._trees
         assert str(ambient) not in analyzer._module_to_path.values()
+
+    def test_hermetic_analysis_excludes_interpreter_site_packages(self, tmp_path: Path) -> None:
+        """Hermetic builds skip interpreter packages while ordinary builds retain them."""
+        fastapi_spec = find_spec("fastapi")
+        if fastapi_spec is None or fastapi_spec.origin is None:
+            pytest.skip("FastAPI is not installed in the active interpreter")
+        app = tmp_path / "app"
+        app.mkdir()
+        (app / "main.py").write_text(
+            "from fastapi import FastAPI\n\napp = FastAPI()\n",
+            encoding="utf-8",
+        )
+
+        ordinary = MypyAnalyzer(app)
+        ordinary._ensure_mypy_built()
+        assert "fastapi" in ordinary._trees
+        assert ordinary._module_to_path["fastapi"] == fastapi_spec.origin
+
+        hermetic = MypyAnalyzer(app, no_site_packages=True)
+        hermetic._ensure_mypy_built()
+        assert "fastapi" not in hermetic._trees
+        assert fastapi_spec.origin not in hermetic._module_to_path.values()
 
     def test_cache_path_default(self, tmp_path: Path) -> None:
         """Test default cache path location."""

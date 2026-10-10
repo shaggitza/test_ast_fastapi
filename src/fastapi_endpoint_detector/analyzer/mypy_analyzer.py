@@ -408,7 +408,12 @@ class MypyAnalyzer:
     }
 
     def __init__(
-        self, app_path: Path, *, max_depth: int = 10, no_site_packages: bool = False
+        self,
+        app_path: Path,
+        *,
+        max_depth: int = 10,
+        no_site_packages: bool = False,
+        target_platform: str | None = None,
     ) -> None:
         """Initialize the mypy analyzer."""
         if max_depth < 1:
@@ -419,6 +424,7 @@ class MypyAnalyzer:
         # Hermetic source probes can opt out of all interpreter site packages.
         # Ordinary analysis keeps mypy's historical environment discovery.
         self.no_site_packages = no_site_packages
+        self.target_platform = target_platform
         self._endpoint_deps: dict[str, EndpointDependencies] = {}
         self._mypy_available = self._check_mypy_available()
         self._cache_file: Path | None = None
@@ -525,7 +531,13 @@ class MypyAnalyzer:
         # Configure mypy for full analysis with AST retention
         options = Options()
         options.ignore_missing_imports = True
+        if self.target_platform is not None:
+            options.platform = self.target_platform
         options.no_site_packages = self.no_site_packages
+        if self.no_site_packages:
+            # The programmatic API defaults this to sys.executable, which makes
+            # mypy add that interpreter's site-packages despite the flag.
+            options.python_executable = None
         options.follow_imports = "normal"
         options.mypy_path = [str(source_root.parent)]
         options.namespace_packages = True
@@ -4078,6 +4090,9 @@ class MypyAnalyzer:
                 "schema": self.CACHE_SCHEMA_VERSION,
                 "max_depth": self.max_depth,
                 "no_site_packages": self.no_site_packages,
+                "target_platform": (
+                    self.target_platform if self.target_platform is not None else sys.platform
+                ),
                 "finite_points_to": {
                     "max_targets": self.MAX_POINTS_TO_TARGETS,
                     "max_factory_returns": self.MAX_FACTORY_RETURNS,
