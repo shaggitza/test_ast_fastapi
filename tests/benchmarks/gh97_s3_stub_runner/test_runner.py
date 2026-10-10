@@ -22,6 +22,8 @@ from benchmarks.gh97_s3_stub_runner.runner import (
     sha256,
     verify_inputs,
 )
+from mypy import build as mypy_build
+from mypy.options import Options
 
 from benchmarks.gh97_s3_stub_runner import runner
 
@@ -120,6 +122,37 @@ def test_different_windows_drives_keep_absolute_private_root(
     assert normalized["file_path"] == "<private-s3-probe>\\fixture\\complete.py"
 
 
+@pytest.mark.parametrize(
+    "private", [Path("C:/TEMP/Private Root"), Path(r"\\Server\Share\TEMP\Private Root")]
+)
+def test_windows_private_root_casing_is_normalized_without_prefix_fanout(
+    private: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(os.path, "relpath", lambda _path, _cwd: "../TEMP/Private Root")
+    lower = str(private).lower().replace("/", "\\")
+    values = [
+        lower + r"\fixture\complete.py",
+        "../temp/private root/fixture/complete.py",
+        lower + "-other/file.py",
+        "prefix" + lower + r"\fixture.py",
+    ]
+    normalized = runner._normalize_private_paths(values, private, Path("D:/cwd"))
+    assert normalized[:2] == [
+        r"<private-s3-probe>\fixture\complete.py",
+        "<private-s3-probe>/fixture/complete.py",
+    ]
+    assert normalized[2:] == values[2:]
+
+
+def test_posix_private_root_remains_case_sensitive() -> None:
+    private = Path("/tmp/Private Root")
+    values = ["/tmp/Private Root/fixture.py", "/tmp/private root/fixture.py"]
+    assert runner._normalize_private_paths(values, private, Path("/tmp")) == [
+        "<private-s3-probe>/fixture.py",
+        values[1],
+    ]
+
+
 def test_symlink_temporary_root_normalizes_resolved_and_display_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -207,6 +240,133 @@ def test_missing_private_stub_cannot_claim_completed_product_binding(
         for call in result["calls"]
     )
     assert os.environ["MYPYPATH"] == str(ambient.parent)
+
+
+def test_fixture_cache_excludes_ambient_fallback_but_keeps_explicit_project(tmp_path: Path) -> None:
+    fallback = tmp_path / "fallback"
+    fallback.mkdir()
+    (fallback / "ambient.pyi").write_text("VALUE: int\n", encoding="utf-8")
+    explicit = tmp_path / "project"
+    explicit.mkdir()
+    (explicit / "project.pyi").write_text("VALUE: str\n", encoding="utf-8")
+    previous = runner._MYPY_POSIX_FALLBACK_ROOT
+    runner._MYPY_POSIX_FALLBACK_ROOT = str(fallback)
+    try:
+        cache = runner._HermeticFileSystemCache()
+        assert cache.stat_or_none(str(fallback / "ambient.pyi")) is None
+        with pytest.raises(FileNotFoundError):
+            cache.listdir(str(fallback))
+        with pytest.raises(FileNotFoundError):
+            cache.read(str(fallback / "ambient.pyi"))
+        with pytest.raises(FileNotFoundError):
+            cache.hash_digest(str(fallback / "ambient.pyi"))
+        assert cache.read(str(explicit / "project.pyi")) == b"VALUE: str\n"
+        assert cache.stat_or_none(str(explicit / "project.pyi")) is not None
+    finally:
+        runner._MYPY_POSIX_FALLBACK_ROOT = previous
+
+
+def test_fixture_cache_allows_bundled_typeshed_inside_fallback(tmp_path: Path) -> None:
+    fallback = tmp_path / "fallback"
+    bundled = fallback / "typeshed"
+    bundled.mkdir(parents=True)
+    (bundled / "builtins.pyi").write_text("VALUE: int\n", encoding="utf-8")
+    (fallback / "ambient.pyi").write_text("VALUE: str\n", encoding="utf-8")
+    previous = runner._MYPY_POSIX_FALLBACK_ROOT
+    runner._MYPY_POSIX_FALLBACK_ROOT = str(fallback)
+    try:
+        cache = runner._HermeticFileSystemCache(bundled)
+        assert cache.stat_or_none(str(bundled / "builtins.pyi")) is not None
+        assert cache.read(str(bundled / "builtins.pyi")) == b"VALUE: int\n"
+        assert cache.listdir(str(bundled)) == ["builtins.pyi"]
+        assert cache.stat_or_none(str(fallback / "ambient.pyi")) is None
+        with pytest.raises(FileNotFoundError):
+            cache.read(str(fallback / "ambient.pyi"))
+    finally:
+        runner._MYPY_POSIX_FALLBACK_ROOT = previous
+
+
+def test_fixture_cache_rejects_bundled_typeshed_symlink_and_parent_escapes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fallback = tmp_path / "fallback"
+    bundled = fallback / "typeshed"
+    bundled.mkdir(parents=True)
+    outside = tmp_path / "outside.pyi"
+    outside.write_text("DECOY: int\n")
+    (fallback / "ambient.pyi").write_text("AMBIENT: int\n")
+    link = bundled / "escape.pyi"
+    link.symlink_to(outside)
+    monkeypatch.setattr(runner, "_MYPY_POSIX_FALLBACK_ROOT", str(fallback))
+    cache = runner._HermeticFileSystemCache(bundled)
+    for candidate in (link, bundled / ".." / "ambient.pyi", bundled / ".." / ".." / "outside.pyi"):
+        assert cache.stat_or_none(str(candidate)) is None
+        for operation in (cache.read, cache.hash_digest, cache.listdir):
+            with pytest.raises(FileNotFoundError):
+                operation(str(candidate))
+
+
+def test_fixture_resolver_keeps_installed_bundled_typeshed_when_under_fallback(
+    tmp_path: Path,
+) -> None:
+    data_dir = Path(mypy_build.default_data_dir()).resolve()
+    typeshed = data_dir / "typeshed"
+    assert typeshed.is_dir()
+    source = tmp_path / "main.py"
+    source.write_text("value: int = 1\n", encoding="utf-8")
+    previous = runner._MYPY_POSIX_FALLBACK_ROOT
+    runner._MYPY_POSIX_FALLBACK_ROOT = str(data_dir)
+    try:
+        options = Options()
+        options.no_site_packages = True
+        options.python_executable = None
+        result = mypy_build.build(
+            sources=[mypy_build.BuildSource(str(source), None, None)],
+            options=options,
+            fscache=runner._HermeticFileSystemCache(typeshed),
+            alt_lib_path=str(tmp_path),
+        )
+    finally:
+        runner._MYPY_POSIX_FALLBACK_ROOT = previous
+    assert not result.errors
+    assert "builtins" in result.graph
+
+
+def test_fixture_resolver_rejects_fallback_decoy_and_accepts_explicit_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fallback = tmp_path / "fallback"
+    fallback.mkdir()
+    (fallback / "ambient_only.pyi").write_text("VALUE: int\n", encoding="utf-8")
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "private_only.pyi").write_text("VALUE: str\n", encoding="utf-8")
+    source = tmp_path / "main.py"
+    source.write_text(
+        "import ambient_only\nimport private_only\nresult: str = private_only.VALUE\n",
+        encoding="utf-8",
+    )
+    previous = runner._MYPY_POSIX_FALLBACK_ROOT
+    runner._MYPY_POSIX_FALLBACK_ROOT = str(fallback)
+    monkeypatch.setenv("MYPYPATH", str(fallback))
+    try:
+        options = Options()
+        options.no_site_packages = True
+        options.python_executable = None
+        options.mypy_path = [str(fallback), str(project)]
+        result = mypy_build.build(
+            sources=[mypy_build.BuildSource(str(source), None, None)],
+            options=options,
+            fscache=runner._HermeticFileSystemCache(),
+            alt_lib_path=str(project),
+        )
+    finally:
+        runner._MYPY_POSIX_FALLBACK_ROOT = previous
+    assert any(
+        'Cannot find implementation or library stub for module named "ambient_only"' in e
+        for e in result.errors
+    )
+    assert not any("private_only" in e for e in result.errors)
 
 
 @pytest.mark.skipif(

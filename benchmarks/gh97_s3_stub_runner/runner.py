@@ -24,6 +24,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 from mypy import build as mypy_build
+from mypy.fscache import FileSystemCache
 from mypy.nodes import CallExpr, MemberExpr
 from mypy.options import Options
 from mypy.types import Instance, get_proper_type
@@ -50,6 +51,61 @@ FIXTURES = (
     "bogus_keyword",
     "wrong_type",
 )
+_MYPY_POSIX_FALLBACK_ROOT = "/usr/local/lib/mypy"
+
+
+def _within(path: str, root: str) -> bool:
+    """Return whether path is inside root using filesystem path boundaries."""
+    try:
+        resolved_path = Path(path).resolve()
+        resolved_root = Path(root).resolve()
+        return resolved_path == resolved_root or resolved_root in resolved_path.parents
+    except ValueError:  # Different Windows drives.
+        return False
+
+
+class _HermeticFileSystemCache(FileSystemCache):
+    """Hide mypy's POSIX ambient fallback except its bundled typeshed."""
+
+    def __init__(self, bundled_typeshed: Path | None = None) -> None:
+        super().__init__()
+        self._bundled_typeshed = (
+            bundled_typeshed.resolve() if bundled_typeshed is not None else None
+        )
+
+    def _fallback(self, path: str) -> bool:
+        try:
+            raw_in_fallback = os.path.commonpath(
+                (str(Path(path).absolute()), str(Path(_MYPY_POSIX_FALLBACK_ROOT).absolute()))
+            ) == str(Path(_MYPY_POSIX_FALLBACK_ROOT).absolute())
+        except ValueError:
+            raw_in_fallback = False
+        in_fallback = raw_in_fallback or _within(
+            os.path.realpath(path), os.path.realpath(_MYPY_POSIX_FALLBACK_ROOT)
+        )
+        if not in_fallback:
+            return False
+        return self._bundled_typeshed is None or not _within(
+            os.path.realpath(path), str(self._bundled_typeshed)
+        )
+
+    def stat_or_none(self, path: str) -> os.stat_result | None:
+        return None if self._fallback(path) else super().stat_or_none(path)
+
+    def listdir(self, path: str) -> list[str]:
+        if self._fallback(path):
+            raise FileNotFoundError(path)
+        return super().listdir(path)
+
+    def read(self, path: str) -> bytes:
+        if self._fallback(path):
+            raise FileNotFoundError(path)
+        return super().read(path)
+
+    def hash_digest(self, path: str) -> str:
+        if self._fallback(path):
+            raise FileNotFoundError(path)
+        return super().hash_digest(path)
 
 
 class ProbeError(ValueError):
@@ -309,6 +365,11 @@ def _binding_result(row: dict[str, Any]) -> dict[str, Any]:
 
 def _normalize_private_paths(value: Any, private_root: Path, cwd: Path) -> Any:
     """Replace only exact known private-root path components in report strings."""
+    windows_root = (
+        os.name == "nt"
+        or re.match(r"^[A-Za-z]:[\\/]", str(private_root)) is not None
+        or str(private_root).startswith("\\\\")
+    )
     roots: set[str] = set()
     for root in (private_root, private_root.resolve()):
         roots.add(str(root))
@@ -328,6 +389,7 @@ def _normalize_private_paths(value: Any, private_root: Path, cwd: Path) -> Any:
                 r"(?<![A-Za-z0-9_.\\/:-])" + pattern + r"(?=[\\/]|$)",
                 "<private-s3-probe>",
                 result,
+                flags=re.IGNORECASE if windows_root else 0,
             )
         return result
 
@@ -484,6 +546,8 @@ def run_probe(wheel: Path, manifest: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
             source = source_root / f"{fixture_name}.py"
             source.write_text(fixture_text, encoding="utf-8")
             options = Options()
+            options.no_site_packages = True
+            options.python_executable = None
             options.incremental = False
             options.follow_imports = "normal"
             options.preserve_asts = True
@@ -491,8 +555,16 @@ def run_probe(wheel: Path, manifest: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
             options.ignore_missing_imports = False
             options.show_traceback = True
             options.mypy_path = [str(stub_root)]
+            fscache: FileSystemCache = (
+                _HermeticFileSystemCache(Path(mypy_build.default_data_dir()) / "typeshed")
+                if os.name != "nt"
+                else FileSystemCache()
+            )
             result = mypy_build.build(
-                sources=[mypy_build.BuildSource(str(source), None, None)], options=options
+                sources=[mypy_build.BuildSource(str(source), None, None)],
+                options=options,
+                fscache=fscache,
+                alt_lib_path=str(stub_root),
             )
             state = next(
                 (candidate for candidate in result.graph.values() if candidate.path == str(source)),
