@@ -71,6 +71,73 @@ class TestMypyAnalyzerBasic:
             assert not states[line] & {"possible_execution", "established_execution"}, states
         assert "established_execution" in states[13], states
 
+    @pytest.mark.parametrize("first_predicate", ["flag", "False"])
+    def test_elif_predicate_and_literal_true_body_preserve_path_execution(
+        self, tmp_path: Path, first_predicate: str
+    ) -> None:
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "def handler(flag: bool) -> None:\n"
+            "    predicate = lambda: False\n"
+            "    selected = lambda: 1\n"
+            f"    if {first_predicate}:\n        pass\n"
+            "    elif predicate():\n        pass\n"
+            "    elif True:\n        selected()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/elif",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=1),
+        )
+        dependencies = MypyAnalyzer(tmp_path).analyze_endpoint(endpoint)
+        predicate_states = {
+            span.execution_state
+            for span in dependencies.source_evidence_spans
+            if span.start_line == 2
+        }
+        if first_predicate == "flag":
+            assert "possible_execution" in predicate_states
+            assert "established_execution" not in predicate_states
+        else:
+            assert "established_execution" in predicate_states
+        selected_states = {
+            span.execution_state
+            for span in dependencies.source_evidence_spans
+            if span.start_line == 3
+        }
+        assert "possible_execution" in selected_states
+        assert "established_execution" not in selected_states
+
+    @pytest.mark.parametrize("exit_statement", ["pass", "return", "raise RuntimeError"])
+    @pytest.mark.parametrize("conditional", [False, True])
+    def test_finally_callback_inherits_only_enclosing_execution_uncertainty(
+        self, tmp_path: Path, exit_statement: str, conditional: bool
+    ) -> None:
+        app_path = tmp_path / "app.py"
+        suite = f"try:\n    {exit_statement}\nfinally:\n    callback()\n"
+        if conditional:
+            suite = "if flag:\n" + "".join("    " + line for line in suite.splitlines(True))
+        app_path.write_text(
+            "def handler(flag: bool) -> None:\n    callback = lambda: 1\n"
+            + "".join("    " + line for line in suite.splitlines(True)),
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/finally",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=1),
+        )
+        dependencies = MypyAnalyzer(tmp_path).analyze_endpoint(endpoint)
+        states = {
+            span.execution_state
+            for span in dependencies.source_evidence_spans
+            if span.start_line == 2
+        }
+        expected = "possible_execution" if conditional else "established_execution"
+        assert expected in states
+        assert ("established_execution" if conditional else "possible_execution") not in states
+
     def test_branch_joined_callable_partial_abstains_with_limitation(self, tmp_path: Path) -> None:
         app_path = tmp_path / "app.py"
         app_path.write_text(

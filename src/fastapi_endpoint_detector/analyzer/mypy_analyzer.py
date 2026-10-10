@@ -5788,13 +5788,23 @@ class MypyAnalyzer:
                     callable_environment = dict(base_callables)
                     partial_environment = dict(base_partials)
                     lambda_environment = dict(base_lambdas)
-                    walk_node(expr)
-                    if literal is None:
+                    # An elif predicate is reached only if every preceding
+                    # branch declined. Preserve that uncertainty for the
+                    # predicate itself, and for even a literal-true body.
+                    if unknown_before_selection:
+                        possible_execution_depth[0] += 1
+                    try:
+                        walk_node(expr)
+                    finally:
+                        if unknown_before_selection:
+                            possible_execution_depth[0] -= 1
+                    branch_possible = literal is None or unknown_before_selection
+                    if branch_possible:
                         possible_execution_depth[0] += 1
                     try:
                         walk_node(body)
                     finally:
-                        if literal is None:
+                        if branch_possible:
                             possible_execution_depth[0] -= 1
                     branch_environments.append(dict(flow_environment))
                     branch_strings.append(dict(string_environment))
@@ -6081,11 +6091,10 @@ class MypyAnalyzer:
                         if all(path[key] is lambda_paths[0][key] for path in lambda_paths[1:])
                     }
                 if n.finally_body:
-                    possible_execution_depth[0] += 1
-                    try:
-                        walk_node(n.finally_body)
-                    finally:
-                        possible_execution_depth[0] -= 1
+                    # Finally runs on every exit from an entered try. Retain
+                    # enclosing uncertainty, without adding uncertainty just
+                    # because control exits normally, raises, or returns.
+                    walk_node(n.finally_body)
                 flow_environment.clear()
                 string_environment.clear()
                 deferred_environment.clear()
@@ -6388,6 +6397,7 @@ class MypyAnalyzer:
                 "schema": self.CACHE_SCHEMA_VERSION,
                 "engine": "fastapi-endpoint-detector:mypy-analyzer-v2",
                 "source_span_normalization": "source-call-order-verified-ast-spans-v2",
+                "execution_state_policy": "conditional-elif-guaranteed-finally-v2",
                 "max_depth": self.max_depth,
                 "no_site_packages": self.no_site_packages,
                 "hermetic_search_path_policy": (
