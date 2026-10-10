@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import subprocess
 import time
 from contextlib import contextmanager
@@ -738,7 +739,18 @@ def test_frozen_lane_copy_is_readable_by_runtime_uid_and_source_modes_stay_priva
     # exercise the private copy with owner-only source permissions.
     subprocess.run(["git", "-C", str(spec.app_path), "add", "nested/module.py"], check=True)
     subprocess.run(
-        ["git", "-C", str(spec.app_path), "commit", "-m", "add nested source"],
+        [
+            "git",
+            "-C",
+            str(spec.app_path),
+            "-c",
+            "user.name=Producer Test",
+            "-c",
+            "user.email=producer-test@example.invalid",
+            "commit",
+            "-m",
+            "add nested source",
+        ],
         check=True,
         capture_output=True,
         text=True,
@@ -771,30 +783,35 @@ def test_frozen_lane_copy_is_readable_by_runtime_uid_and_source_modes_stay_priva
         assert staged_source.stat().st_mode & 0o222 == 0
         assert staged_nested.stat().st_mode & 0o222 == 0
         assert staged_file.stat().st_mode & 0o222 == 0
-        # Confirm access under the same unprivileged uid used by the runtime.
-        unprivileged = [
-            "setpriv",
-            "--reuid=65532",
-            "--regid=65532",
-            "--clear-groups",
-            "test",
-        ]
-        assert (
-            subprocess.run(
-                [*unprivileged, "-r", "nested/module.py"],
-                cwd=lane.snapshot.app_path,
-                check=False,
-            ).returncode
-            == 0
-        )
-        assert (
-            subprocess.run(
-                [*unprivileged, "-x", "nested"],
-                cwd=lane.snapshot.app_path,
-                check=False,
-            ).returncode
-            == 0
-        )
+        # Permission bits and unchanged source modes are checked on every host.
+        # Switching to the runtime UID additionally requires root privileges.
+        assert os.access(staged_file, os.R_OK)
+        assert os.access(staged_nested, os.X_OK)
+        if os.geteuid() == 0:
+            # Confirm access under the same unprivileged uid used by the runtime.
+            unprivileged = [
+                "setpriv",
+                "--reuid=65532",
+                "--regid=65532",
+                "--clear-groups",
+                "test",
+            ]
+            assert (
+                subprocess.run(
+                    [*unprivileged, "-r", "nested/module.py"],
+                    cwd=lane.snapshot.app_path,
+                    check=False,
+                ).returncode
+                == 0
+            )
+            assert (
+                subprocess.run(
+                    [*unprivileged, "-x", "nested"],
+                    cwd=lane.snapshot.app_path,
+                    check=False,
+                ).returncode
+                == 0
+            )
 
     assert producer._source_digest(spec.app_path) == original_hash
     assert (source.stat().st_mode & 0o777, nested.stat().st_mode & 0o777) == original_modes
