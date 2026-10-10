@@ -382,6 +382,18 @@ def _safe_source_path(root: Path, relative_path: str) -> Path | None:
     return candidate
 
 
+def _read_source_snapshot(path: Path) -> bytes | None:
+    """Reject oversized snapshots before allocation and bound reads across growth."""
+    try:
+        if path.stat().st_size > _MAX_SOURCE_BYTES:
+            return None
+        with path.open("rb") as stream:
+            raw = stream.read(_MAX_SOURCE_BYTES + 1)
+    except OSError:
+        return None
+    return raw if len(raw) <= _MAX_SOURCE_BYTES else None
+
+
 def _load_call_index(
     root: Path,
     file_path: str,
@@ -391,11 +403,8 @@ def _load_call_index(
     source = _safe_source_path(root, file_path)
     if source is None:
         return {}
-    try:
-        raw = source.read_bytes()
-    except OSError:
-        return {}
-    if len(raw) > _MAX_SOURCE_BYTES:
+    raw = _read_source_snapshot(source)
+    if raw is None:
         return {}
     try:
         tree = ast.parse(raw, filename=str(source))
@@ -439,10 +448,10 @@ def _module_snapshot(root: Path, module: str) -> tuple[str, bytes] | None:
     path = _safe_source_path(root, relative.as_posix())
     if path is None:
         return None
-    try:
-        return relative.as_posix(), path.read_bytes()
-    except OSError:
+    raw = _read_source_snapshot(path)
+    if raw is None:
         return None
+    return relative.as_posix(), raw
 
 
 def _resolve_imported_module(root: Path, current_module: str, node: ast.ImportFrom) -> str | None:
@@ -557,7 +566,7 @@ def _has_ambiguous_scope_binding(  # noqa: PLR0911
 def _module_binding_is_ambiguous(
     module: ast.Module,
     name: str,
-    allowed_binding: ast.ImportFrom | ast.FunctionDef | ast.AsyncFunctionDef,
+    allowed_binding: ast.Import | ast.ImportFrom | ast.FunctionDef | ast.AsyncFunctionDef,
 ) -> bool:
     """Require exactly the source binding that supplied the wrapper."""
     bindings: list[tuple[ast.AST, str]] = []
@@ -761,6 +770,44 @@ def _has_dynamic_module_binding_mutation(module: ast.Module) -> bool:  # noqa: P
     return False
 
 
+def _has_verified_asynccontextmanager(
+    module: ast.Module, function: ast.FunctionDef | ast.AsyncFunctionDef
+) -> bool:
+    """Accept only the stdlib decorator under one unambiguous import binding."""
+    if len(function.decorator_list) != 1:
+        return False
+    decorator = function.decorator_list[0]
+    binding: ast.Import | ast.ImportFrom | None = None
+    bound_name: str | None = None
+    for statement in module.body:
+        if (
+            isinstance(decorator, ast.Name)
+            and isinstance(statement, ast.ImportFrom)
+            and statement.module == "contextlib"
+        ):
+            if any(
+                (alias.asname or alias.name) == decorator.id and alias.name == "asynccontextmanager"
+                for alias in statement.names
+            ):
+                binding, bound_name = statement, decorator.id
+        elif (
+            isinstance(decorator, ast.Attribute)
+            and decorator.attr == "asynccontextmanager"
+            and isinstance(decorator.value, ast.Name)
+            and isinstance(statement, ast.Import)
+            and any(
+                alias.name == "contextlib" and (alias.asname or "contextlib") == decorator.value.id
+                for alias in statement.names
+            )
+        ):
+            binding, bound_name = statement, decorator.value.id
+    return (
+        binding is not None
+        and bound_name is not None
+        and not _module_binding_is_ambiguous(module, bound_name, binding)
+    )
+
+
 def _enclosing_receiver_context(
     node: ast.AST,
     parents: dict[ast.AST, ast.AST],
@@ -776,6 +823,47 @@ def _enclosing_receiver_context(
             return current
         current = parents.get(current)
     return None
+
+
+def _has_unreachable_terminator(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> bool:
+    """Return whether an unconditional terminator precedes node in its block."""
+    current = node
+    while current in parents:
+        owner = parents[current]
+        if (
+            isinstance(owner, ast.If)
+            and isinstance(owner.test, ast.Constant)
+            and (
+                (owner.test.value is False and current in owner.body)
+                or (owner.test.value is True and current in owner.orelse)
+            )
+        ):
+            return True
+        if (
+            isinstance(owner, ast.While)
+            and isinstance(owner.test, ast.Constant)
+            and owner.test.value is False
+            and current in owner.body
+        ):
+            return True
+        if isinstance(owner, ast.stmt):
+            siblings = next(
+                (
+                    value
+                    for _name, value in ast.iter_fields(owner)
+                    if isinstance(value, list) and current in value
+                ),
+                None,
+            )
+            if siblings is not None:
+                position = siblings.index(current)
+                if any(
+                    isinstance(item, (ast.Return, ast.Raise, ast.Break, ast.Continue))
+                    for item in siblings[:position]
+                ):
+                    return True
+        current = owner
+    return False
 
 
 def _is_delegated_exit_boundary(
@@ -796,7 +884,14 @@ def _is_delegated_exit_boundary(
             if isinstance(parent, ast.Try) and current in parent.body:
                 allowed = parent.body + parent.orelse if name == "commit" else parent.handlers
                 if any(call in set(_owned_nodes(statement)) for statement in allowed):
-                    return True
+                    # A boundary must execute, rather than merely appear in a
+                    # dead suffix or an unawaited coroutine expression.
+                    parent = parents.get(call)
+                    if not isinstance(parent, ast.Await) or parent.value is not call:
+                        return False
+                    if call.keywords:
+                        return False
+                    return not _has_unreachable_terminator(call, parents)
             current = parent
     return False
 
@@ -854,8 +949,10 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
         endpoint_path = _safe_source_path(root, stage.file_path)
         if endpoint_path is None:
             continue
+        endpoint_bytes = _read_source_snapshot(endpoint_path)
+        if endpoint_bytes is None:
+            continue
         try:
-            endpoint_bytes = endpoint_path.read_bytes()
             wrapper_tree = ast.parse(wrapper[1], filename=wrapper[0])
             endpoint_tree = ast.parse(endpoint_bytes, filename=stage.file_path)
         except (OSError, SyntaxError, ValueError):
@@ -871,6 +968,7 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
         )
         if (
             wrapper_fn is None
+            or not _has_verified_asynccontextmanager(wrapper_tree, wrapper_fn)
             or _module_binding_is_ambiguous(wrapper_tree, wrapper_fn.name, wrapper_fn)
             or _has_dynamic_module_binding_mutation(wrapper_tree)
         ):
@@ -893,7 +991,8 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
             continue
         wrapper_scope_calls: dict[str, str] = {}
         wrapper_import_nodes: dict[str, ast.ImportFrom] = {}
-        for node in _owned_nodes(wrapper_fn):
+        wrapper_nodes = (*wrapper_tree.body, *_owned_nodes(wrapper_fn))
+        for node in wrapper_nodes:
             if isinstance(node, ast.ImportFrom):
                 imported_module = _resolve_imported_module(root, wrapper_module, node)
                 for alias in node.names:
@@ -908,6 +1007,7 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
                     if symbol_module:
                         wrapper_scope_calls[local_name] = f"{symbol_module}.{symbol_name}"
                         wrapper_import_nodes[local_name] = node
+        for node in wrapper_nodes:
             if isinstance(node, ast.AsyncWith):
                 for item in node.items:
                     captured = _target_key(item.optional_vars) if item.optional_vars else None
@@ -921,8 +1021,21 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
                         if canonical is None:
                             continue
                         import_node = wrapper_import_nodes.get(target.func.id)
-                        if import_node is None or _has_ambiguous_scope_binding(
-                            wrapper_fn, target.func.id, allowed_import=import_node
+                        if (
+                            import_node is None
+                            or (
+                                import_node in wrapper_tree.body
+                                and _module_binding_is_ambiguous(
+                                    wrapper_tree, target.func.id, import_node
+                                )
+                            )
+                            or _has_ambiguous_scope_binding(
+                                wrapper_fn,
+                                target.func.id,
+                                allowed_import=import_node
+                                if import_node in wrapper_fn.body
+                                else None,
+                            )
                         ):
                             continue
                         delegated_symbol = canonical
@@ -957,6 +1070,7 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
         )
         if (
             delegate_fn is None
+            or not _has_verified_asynccontextmanager(delegated_tree, delegate_fn)
             or _module_binding_is_ambiguous(delegated_tree, delegate_fn.name, delegate_fn)
             or _has_dynamic_module_binding_mutation(delegated_tree)
         ):

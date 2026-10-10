@@ -19,6 +19,7 @@ from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
 from fastapi_endpoint_detector.analyzer.effect_contract_auditor import audit_effect_contracts
 from fastapi_endpoint_detector.analyzer.sql_transaction import build_sql_transaction_diagnostics
 from fastapi_endpoint_detector.analyzer.sql_transaction_paths import (
+    _module_snapshot,
     _receiver_reassigned,
     build_sql_transaction_path_diagnostics,
 )
@@ -1431,6 +1432,101 @@ def test_source_projection_requires_context_exit_boundaries_after_yield(
 
 
 @pytest.mark.parametrize(
+    ("relative_path", "old", "new"),
+    [
+        (
+            "source/lfx/services/deps.py.txt",
+            "await session.commit()",
+            "session.commit()",
+        ),
+        (
+            "source/lfx/services/deps.py.txt",
+            "await session.rollback()",
+            "await session.rollback(force=True)",
+        ),
+        (
+            "source/langflow/services/deps.py.txt",
+            "@asynccontextmanager\nasync def session_scope()",
+            "@replace_with_foreign_scope\n@asynccontextmanager\nasync def session_scope()",
+        ),
+    ],
+)
+def test_source_projection_rejects_unexecutable_boundaries_and_replacing_decorators(
+    tmp_path: Path, relative_path: str, old: str, new: str
+) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    source = copied / relative_path
+    text = source.read_text(encoding="utf-8")
+    assert old in text
+    source.write_text(text.replace(old, new), encoding="utf-8")
+    assert _langflow_fixture_transaction_reports(copied)[2].source_projections == ()
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        (
+            "yield session\n            await session.commit()",
+            "yield session\n            raise RuntimeError()\n            await session.commit()",
+        ),
+        (
+            "yield session\n            await session.commit()",
+            "yield session\n            if False:\n                await session.commit()",
+        ),
+    ],
+)
+def test_source_projection_rejects_unreachable_exit_boundary(
+    tmp_path: Path, old: str, new: str
+) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    source = copied / "source/lfx/services/deps.py.txt"
+    text = source.read_text(encoding="utf-8")
+    assert old in text
+    source.write_text(text.replace(old, new, 1))
+    assert _langflow_fixture_transaction_reports(copied)[2].source_projections == ()
+
+
+def test_source_projection_resolves_module_scope_delegate_import(tmp_path: Path) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    wrapper = copied / "source/langflow/services/deps.py.txt"
+    text = wrapper.read_text(encoding="utf-8")
+    line = "    from lfx.services.deps import session_scope as lfx_session_scope\n"
+    assert line in text
+    wrapper.write_text(
+        text.replace(line, "", 1).replace(
+            "from contextlib import asynccontextmanager\n",
+            "from contextlib import asynccontextmanager\n"
+            "from lfx.services.deps import session_scope as lfx_session_scope\n",
+            1,
+        )
+    )
+    assert len(_langflow_fixture_transaction_reports(copied)[2].source_projections) == 1
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "source/langflow/api/v1/traces.py.txt",
+        "source/langflow/services/deps.py.txt",
+        "source/lfx/services/deps.py.txt",
+    ],
+)
+def test_source_projection_rejects_oversized_snapshots(tmp_path: Path, relative_path: str) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    source = copied / relative_path
+    source.write_bytes(source.read_bytes() + b"#" * (2 * 1024 * 1024))
+    assert _langflow_fixture_transaction_reports(copied)[2].source_projections == ()
+
+
+@pytest.mark.parametrize(
     "field",
     [
         "endpoint_id",
@@ -1540,3 +1636,21 @@ def test_source_projection_requires_unchanged_supplied_snapshots(tmp_path: Path)
     source.unlink()
     with pytest.raises(ValidationError, match="SQL source projection"):
         AnalysisReport.model_validate(valid)
+
+
+def test_oversized_projection_snapshot_is_rejected_before_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source" / "wrapper.py.txt"
+    source.parent.mkdir()
+    with source.open("wb") as stream:
+        stream.truncate(2 * 1024 * 1024 + 1)
+    original_open = Path.open
+
+    def guarded_open(path: Path, *args: Any, **kwargs: Any) -> Any:
+        if path == source:
+            raise AssertionError("oversized snapshot must not be read")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+    assert _module_snapshot(tmp_path, "wrapper") is None
