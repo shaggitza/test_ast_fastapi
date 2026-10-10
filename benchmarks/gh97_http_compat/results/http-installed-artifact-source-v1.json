@@ -1,0 +1,2115 @@
+{
+  "analysis_config": {
+    "ambient_mypypath": "excluded",
+    "max_depth": 2,
+    "module_root_policy": "explicit_verified_extracted_package_root",
+    "no_site_packages": true,
+    "preset": "http-clients-v1",
+    "target_platform": "linux",
+    "track_transitive": true
+  },
+  "analyzer_source_tree_sha": "41331974deb29f8ab3ac620fa18c82388cc734a6",
+  "audit_counts": {
+    "ambiguous": 1,
+    "matched": 30,
+    "unmatched": 1,
+    "unresolved": 0
+  },
+  "call_count": 32,
+  "compatibility_complete": false,
+  "diagnostic_count": 212,
+  "diagnostics": [
+    "<private-probe>/requests/compat.py:48: error: Library stubs not installed for \"simplejson\"  [import-untyped]",
+    "<private-probe>/requests/compat.py:48: note: Hint: \"python3 -m pip install types-simplejson\"",
+    "<private-probe>/requests/compat.py:48: note: (or run \"mypy --install-types\" to install all missing stub packages)",
+    "<private-probe>/requests/compat.py:48: note: See https://mypy.readthedocs.io/en/stable/running_mypy.html#missing-imports",
+    "<private-probe>/requests/compat.py:81: error: Module \"urllib.request\" has no attribute \"proxy_bypass_environment\"  [attr-defined]",
+    "<private-probe>/requests/cookies.py:20: error: Name \"threading\" already defined (by an import)  [no-redef]",
+    "<private-probe>/requests/cookies.py:358: error: Signature of \"update\" incompatible with supertype \"typing.MutableMapping\"  [override]",
+    "<private-probe>/requests/cookies.py:358: note:      Superclass:",
+    "<private-probe>/requests/cookies.py:358: note:          @overload",
+    "<private-probe>/requests/cookies.py:358: note:          def update(self, SupportsKeysAndGetItem[Any, Any], /) -> None",
+    "<private-probe>/requests/cookies.py:358: note:          @overload",
+    "<private-probe>/requests/cookies.py:358: note:          def update(self, SupportsKeysAndGetItem[str, Any], /, **kwargs: Any) -> None",
+    "<private-probe>/requests/cookies.py:358: note:          @overload",
+    "<private-probe>/requests/cookies.py:358: note:          def update(self, Iterable[tuple[Any, Any]], /) -> None",
+    "<private-probe>/requests/cookies.py:358: note:          @overload",
+    "<private-probe>/requests/cookies.py:358: note:          def update(self, Iterable[tuple[str, Any]], /, **kwargs: Any) -> None",
+    "<private-probe>/requests/cookies.py:358: note:          @overload",
+    "<private-probe>/requests/cookies.py:358: note:          def update(self, **kwargs: Any) -> None",
+    "<private-probe>/requests/cookies.py:358: note:      Subclass:",
+    "<private-probe>/requests/cookies.py:358: note:          def update(self, other: Any) -> Any",
+    "<private-probe>/requests/cookies.py:437: error: \"RequestsCookieJar\" has no attribute \"_policy\"; maybe \"get_policy\"?  [attr-defined]",
+    "<private-probe>/requests/cookies.py:556: error: \"CookieJar\" has no attribute \"update\"  [attr-defined]",
+    "<private-probe>/requests/utils.py:211: error: Incompatible types in assignment (expression has type \"Generator[str, None, None]\", variable has type \"tuple[str]\")  [assignment]",
+    "<private-probe>/requests/utils.py:241: error: Incompatible types in assignment (expression has type \"str\", variable has type \"bytes\")  [assignment]",
+    "<private-probe>/requests/utils.py:429: error: Need type annotation for \"result\" (hint: \"result: dict[<type>, <type>] = ...\")  [var-annotated]",
+    "<private-probe>/requests/utils.py:922: error: Need type annotation for \"links\" (hint: \"links: list[<type>] = ...\")  [var-annotated]",
+    "<private-probe>/requests/utils.py:1049: error: Incompatible types in assignment (expression has type \"Pattern[bytes]\", variable has type \"Pattern[str]\")  [assignment]",
+    "<private-probe>/requests/auth.py:176: error: \"None\" not callable  [misc]",
+    "<private-probe>/requests/models.py:72: error: \"LookupDict\" has no attribute \"moved\"  [attr-defined]",
+    "<private-probe>/requests/models.py:73: error: \"LookupDict\" has no attribute \"found\"  [attr-defined]",
+    "<private-probe>/requests/models.py:74: error: \"LookupDict\" has no attribute \"other\"  [attr-defined]",
+    "<private-probe>/requests/models.py:75: error: \"LookupDict\" has no attribute \"temporary_redirect\"  [attr-defined]",
+    "<private-probe>/requests/models.py:76: error: \"LookupDict\" has no attribute \"permanent_redirect\"  [attr-defined]",
+    "<private-probe>/requests/models.py:91: error: \"RequestEncodingMixin\" has no attribute \"url\"  [attr-defined]",
+    "<private-probe>/requests/models.py:210: error: \"RequestHooksMixin\" has no attribute \"hooks\"  [attr-defined]",
+    "<private-probe>/requests/models.py:213: error: Argument 2 to \"isinstance\" has incompatible type \"<typing special form>\"; expected \"_ClassInfo\"  [arg-type]",
+    "<private-probe>/requests/models.py:214: error: \"RequestHooksMixin\" has no attribute \"hooks\"  [attr-defined]",
+    "<private-probe>/requests/models.py:216: error: \"RequestHooksMixin\" has no attribute \"hooks\"  [attr-defined]",
+    "<private-probe>/requests/models.py:216: error: Argument 2 to \"isinstance\" has incompatible type \"<typing special form>\"; expected \"_ClassInfo\"  [arg-type]",
+    "<private-probe>/requests/models.py:224: error: \"RequestHooksMixin\" has no attribute \"hooks\"  [attr-defined]",
+    "<private-probe>/requests/models.py:549: error: Unsupported target for indexed assignment (\"Any | None\")  [index]",
+    "<private-probe>/requests/models.py:551: error: Unsupported target for indexed assignment (\"Any | None\")  [index]",
+    "<private-probe>/requests/models.py:567: error: Unsupported right operand type for in (\"Any | None\")  [operator]",
+    "<private-probe>/requests/models.py:568: error: Unsupported target for indexed assignment (\"Any | None\")  [index]",
+    "<private-probe>/requests/models.py:579: error: Unsupported target for indexed assignment (\"Any | None\")  [index]",
+    "<private-probe>/requests/models.py:582: error: Item \"None\" of \"Any | None\" has no attribute \"get\"  [union-attr]",
+    "<private-probe>/requests/models.py:586: error: Unsupported target for indexed assignment (\"Any | None\")  [index]",
+    "<private-probe>/requests/models.py:628: error: Unsupported target for indexed assignment (\"Any | None\")  [index]",
+    "<private-probe>/requests/models.py:780: error: \"LookupDict\" has no attribute \"moved_permanently\"  [attr-defined]",
+    "<private-probe>/requests/models.py:781: error: \"LookupDict\" has no attribute \"permanent_redirect\"  [attr-defined]",
+    "<private-probe>/requests/models.py:820: error: Item \"None\" of \"Any | None\" has no attribute \"stream\"  [union-attr]",
+    "<private-probe>/requests/models.py:832: error: Item \"None\" of \"Any | None\" has no attribute \"read\"  [union-attr]",
+    "<private-probe>/requests/models.py:900: error: Incompatible types in assignment (expression has type \"None\", variable has type \"bool\")  [assignment]",
+    "<private-probe>/requests/models.py:902: error: Incompatible types in assignment (expression has type \"bytes\", variable has type \"bool\")  [assignment]",
+    "<private-probe>/requests/models.py:935: error: Argument 2 to \"str\" has incompatible type \"Any | None\"; expected \"str\"  [arg-type]",
+    "<private-probe>/requests/models.py:1011: error: Incompatible types in assignment (expression has type \"Any | None\", variable has type \"str\")  [assignment]",
+    "<private-probe>/requests/models.py:1013: error: Unsupported operand types for <= (\"int\" and \"None\")  [operator]",
+    "<private-probe>/requests/models.py:1013: note: Right operand is of type \"Any | None\"",
+    "<private-probe>/requests/models.py:1013: error: Unsupported operand types for > (\"int\" and \"None\")  [operator]",
+    "<private-probe>/requests/models.py:1013: note: Left operand is of type \"Any | None\"",
+    "<private-probe>/requests/models.py:1018: error: Unsupported operand types for <= (\"int\" and \"None\")  [operator]",
+    "<private-probe>/requests/models.py:1018: note: Right operand is of type \"Any | None\"",
+    "<private-probe>/requests/models.py:1018: error: Unsupported operand types for > (\"int\" and \"None\")  [operator]",
+    "<private-probe>/requests/models.py:1018: note: Left operand is of type \"Any | None\"",
+    "<private-probe>/requests/models.py:1033: error: Item \"None\" of \"Any | None\" has no attribute \"close\"  [union-attr]",
+    "<private-probe>/requests/adapters.py:95: error: Invalid type comment or annotation  [valid-type]",
+    "<private-probe>/requests/adapters.py:392: error: \"Response\" has no attribute \"connection\"  [attr-defined]",
+    "<private-probe>/requests/sessions.py:190: error: \"SessionRedirectMixin\" has no attribute \"max_redirects\"  [attr-defined]",
+    "<private-probe>/requests/sessions.py:192: error: \"SessionRedirectMixin\" has no attribute \"max_redirects\"  [attr-defined]",
+    "<private-probe>/requests/sessions.py:225: error: \"LookupDict\" has no attribute \"temporary_redirect\"  [attr-defined]",
+    "<private-probe>/requests/sessions.py:226: error: \"LookupDict\" has no attribute \"permanent_redirect\"  [attr-defined]",
+    "<private-probe>/requests/sessions.py:241: error: \"SessionRedirectMixin\" has no attribute \"cookies\"  [attr-defined]",
+    "<private-probe>/requests/sessions.py:265: error: \"SessionRedirectMixin\" has no attribute \"send\"  [attr-defined]",
+    "<private-probe>/requests/sessions.py:276: error: \"SessionRedirectMixin\" has no attribute \"cookies\"  [attr-defined]",
+    "<private-probe>/requests/sessions.py:298: error: \"SessionRedirectMixin\" has no attribute \"trust_env\"  [attr-defined]",
+    "<private-probe>/requests/sessions.py:316: error: \"SessionRedirectMixin\" has no attribute \"trust_env\"  [attr-defined]",
+    "<private-probe>/requests/sessions.py:340: error: \"LookupDict\" has no attribute \"see_other\"  [attr-defined]",
+    "<private-probe>/requests/sessions.py:345: error: \"LookupDict\" has no attribute \"found\"  [attr-defined]",
+    "<private-probe>/requests/sessions.py:350: error: \"LookupDict\" has no attribute \"moved\"  [attr-defined]",
+    "<private-probe>/requests/__init__.py:128: error: Incompatible types in assignment (expression has type \"None\", variable has type Module)  [assignment]",
+    "<private-probe>/aiohttp/typedefs.py:43: error: Variable \"aiohttp.typedefs._CIMultiDict\" is not valid as a type  [valid-type]",
+    "<private-probe>/aiohttp/typedefs.py:43: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases",
+    "<private-probe>/aiohttp/typedefs.py:44: error: Variable \"aiohttp.typedefs._CIMultiDictProxy\" is not valid as a type  [valid-type]",
+    "<private-probe>/aiohttp/typedefs.py:44: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases",
+    "<private-probe>/aiohttp/http_exceptions.py:30: error: Variable \"aiohttp.typedefs._CIMultiDict\" is not valid as a type  [valid-type]",
+    "<private-probe>/aiohttp/http_exceptions.py:30: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases",
+    "<private-probe>/aiohttp/http_exceptions.py:50: error: Variable \"aiohttp.typedefs._CIMultiDict\" is not valid as a type  [valid-type]",
+    "<private-probe>/aiohttp/http_exceptions.py:50: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases",
+    "<private-probe>/aiohttp/web_routedef.py:104: error: Too many arguments for \"RouteDef\"  [call-arg]",
+    "<private-probe>/aiohttp/web_routedef.py:149: error: Too many arguments for \"StaticDef\"  [call-arg]",
+    "<private-probe>/aiohttp/web_routedef.py:184: error: Too many arguments for \"RouteDef\"  [call-arg]",
+    "<private-probe>/aiohttp/web_routedef.py:214: error: Too many arguments for \"StaticDef\"  [call-arg]",
+    "<private-probe>/aiohttp/helpers.py:294: error: Too many arguments for \"ProxyInfo\"  [call-arg]",
+    "<private-probe>/aiohttp/helpers.py:336: error: Unexpected keyword argument \"type\" for \"MimeType\"  [call-arg]",
+    "<typeshed>/stdlib/builtins.pyi:117: note: \"MimeType\" defined here",
+    "<private-probe>/aiohttp/helpers.py:336: error: Unexpected keyword argument \"subtype\" for \"MimeType\"  [call-arg]",
+    "<private-probe>/aiohttp/helpers.py:336: error: Unexpected keyword argument \"suffix\" for \"MimeType\"  [call-arg]",
+    "<private-probe>/aiohttp/helpers.py:336: error: Unexpected keyword argument \"parameters\" for \"MimeType\"  [call-arg]",
+    "<private-probe>/aiohttp/helpers.py:355: error: Unexpected keyword argument \"type\" for \"MimeType\"  [call-arg]",
+    "<private-probe>/aiohttp/helpers.py:355: error: Unexpected keyword argument \"subtype\" for \"MimeType\"  [call-arg]",
+    "<private-probe>/aiohttp/helpers.py:355: error: Unexpected keyword argument \"suffix\" for \"MimeType\"  [call-arg]",
+    "<private-probe>/aiohttp/helpers.py:355: error: Unexpected keyword argument \"parameters\" for \"MimeType\"  [call-arg]",
+    "<private-probe>/aiohttp/payload.py:158: error: Variable \"aiohttp.typedefs._CIMultiDict\" is not valid as a type  [valid-type]",
+    "<private-probe>/aiohttp/payload.py:158: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases",
+    "<private-probe>/aiohttp/payload.py:168: error: Variable \"aiohttp.typedefs._CIMultiDict\" is not valid as a type  [valid-type]",
+    "<private-probe>/aiohttp/payload.py:168: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases",
+    "<private-probe>/aiohttp/payload.py:197: error: Variable \"aiohttp.typedefs._CIMultiDict\" is not valid as a type  [valid-type]",
+    "<private-probe>/aiohttp/payload.py:197: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases",
+    "<private-probe>/aiohttp/payload.py:204: error: _CIMultiDict? has no attribute \"items\"  [attr-defined]",
+    "<private-probe>/aiohttp/payload.py:218: error: Value of type _CIMultiDict? is not indexable  [index]",
+    "<private-probe>/aiohttp/payload.py:228: error: Unsupported target for indexed assignment (_CIMultiDict?)  [index]",
+    "<private-probe>/aiohttp/payload.py:330: error: _CIMultiDict? has no attribute \"__iter__\" (not iterable)  [attr-defined]",
+    "<private-probe>/aiohttp/multipart.py:880: error: _CIMultiDict? has no attribute \"update\"  [attr-defined]",
+    "<private-probe>/aiohttp/multipart.py:899: error: _CIMultiDict? has no attribute \"keys\"  [attr-defined]",
+    "<private-probe>/aiohttp/multipart.py:902: error: _CIMultiDict? has no attribute \"__iter__\" (not iterable)  [attr-defined]",
+    "<private-probe>/aiohttp/multipart.py:907: error: _CIMultiDict? has no attribute \"get\"  [attr-defined]",
+    "<private-probe>/aiohttp/multipart.py:914: error: _CIMultiDict? has no attribute \"get\"  [attr-defined]",
+    "<private-probe>/aiohttp/multipart.py:923: error: Unsupported target for indexed assignment (_CIMultiDict?)  [index]",
+    "<private-probe>/aiohttp/multipart.py:993: error: _CIMultiDict? has no attribute \"__iter__\" (not iterable)  [attr-defined]",
+    "<private-probe>/aiohttp/multipart.py:994: error: Value of type _CIMultiDict? is not indexable  [index]",
+    "<private-probe>/aiohttp/tracing.py:358: error: Too many arguments for \"TraceRequestStartParams\"  [call-arg]",
+    "<private-probe>/aiohttp/tracing.py:367: error: Too many arguments for \"TraceRequestChunkSentParams\"  [call-arg]",
+    "<private-probe>/aiohttp/tracing.py:376: error: Too many arguments for \"TraceResponseChunkReceivedParams\"  [call-arg]",
+    "<private-probe>/aiohttp/tracing.py:389: error: Too many arguments for \"TraceRequestEndParams\"  [call-arg]",
+    "<private-probe>/aiohttp/tracing.py:402: error: Too many arguments for \"TraceRequestExceptionParams\"  [call-arg]",
+    "<private-probe>/aiohttp/tracing.py:415: error: Too many arguments for \"TraceRequestRedirectParams\"  [call-arg]",
+    "<private-probe>/aiohttp/tracing.py:445: error: Too many arguments for \"TraceDnsResolveHostStartParams\"  [call-arg]",
+    "<private-probe>/aiohttp/tracing.py:450: error: Too many arguments for \"TraceDnsResolveHostEndParams\"  [call-arg]",
+    "<private-probe>/aiohttp/tracing.py:455: error: Too many arguments for \"TraceDnsCacheHitParams\"  [call-arg]",
+    "<private-probe>/aiohttp/tracing.py:460: error: Too many arguments for \"TraceDnsCacheMissParams\"  [call-arg]",
+    "<private-probe>/aiohttp/tracing.py:469: error: Too many arguments for \"TraceRequestHeadersSentParams\"  [call-arg]",
+    "<private-probe>/aiohttp/client_ws.py:43: error: Unexpected keyword argument \"ws_receive\" for \"ClientWSTimeout\"  [call-arg]",
+    "<typeshed>/stdlib/builtins.pyi:117: note: \"ClientWSTimeout\" defined here",
+    "<private-probe>/aiohttp/client_ws.py:43: error: Unexpected keyword argument \"ws_close\" for \"ClientWSTimeout\"  [call-arg]",
+    "<private-probe>/aiohttp/client_reqrep.py:290: error: Variable \"aiohttp.typedefs.Query\" is not valid as a type  [valid-type]",
+    "<private-probe>/aiohttp/client_reqrep.py:290: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases",
+    "<private-probe>/aiohttp/client_reqrep.py:392: error: Item \"Iterable[tuple[str | Any, str]]\" of \"Mapping[str, str] | Any | Mapping[Any, str] | Iterable[tuple[str | Any, str]]\" has no attribute \"items\"  [union-attr]",
+    "<private-probe>/aiohttp/client_reqrep.py:967: error: Too many arguments for \"ContentDisposition\"  [call-arg]",
+    "<private-probe>/aiohttp/client.py:169: error: Variable \"aiohttp.typedefs.Query\" is not valid as a type  [valid-type]",
+    "<private-probe>/aiohttp/client.py:169: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases",
+    "<private-probe>/aiohttp/client.py:219: error: Unexpected keyword argument \"total\" for \"ClientTimeout\"  [call-arg]",
+    "<private-probe>/aiohttp/client.py:475: error: Variable \"aiohttp.typedefs.Query\" is not valid as a type  [valid-type]",
+    "<private-probe>/aiohttp/client.py:475: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases",
+    "<private-probe>/aiohttp/client.py:877: error: Variable \"aiohttp.typedefs.Query\" is not valid as a type  [valid-type]",
+    "<private-probe>/aiohttp/client.py:877: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases",
+    "<private-probe>/aiohttp/client.py:931: error: Variable \"aiohttp.typedefs.Query\" is not valid as a type  [valid-type]",
+    "<private-probe>/aiohttp/client.py:931: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases",
+    "<private-probe>/aiohttp/client.py:1478: error: Variable \"aiohttp.typedefs.Query\" is not valid as a type  [valid-type]",
+    "<private-probe>/aiohttp/client.py:1478: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases",
+    "<typeshed>/stdlib/builtins.pyi:117: note: \"ClientTimeout\" defined here",
+    "<private-probe>/aiohttp/client.py:219: error: Unexpected keyword argument \"sock_connect\" for \"ClientTimeout\"  [call-arg]",
+    "<private-probe>/aiohttp/client.py:775: error: Item \"Iterable[tuple[str | Any, str]]\" of \"Mapping[str, str] | Mapping[Any, str] | Iterable[tuple[str | Any, str]] | Any\" has no attribute \"get\"  [union-attr]",
+    "<private-probe>/aiohttp/client.py:776: error: Item \"Mapping[str, str]\" of \"Mapping[str, str] | Mapping[Any, str] | Iterable[tuple[str | Any, str]] | Any\" has no attribute \"pop\"  [union-attr]",
+    "<private-probe>/aiohttp/client.py:776: error: Item \"Mapping[Any, str]\" of \"Mapping[str, str] | Mapping[Any, str] | Iterable[tuple[str | Any, str]] | Any\" has no attribute \"pop\"  [union-attr]",
+    "<private-probe>/aiohttp/client.py:776: error: Item \"Iterable[tuple[str | Any, str]]\" of \"Mapping[str, str] | Mapping[Any, str] | Iterable[tuple[str | Any, str]] | Any\" has no attribute \"pop\"  [union-attr]",
+    "<private-probe>/aiohttp/client.py:816: error: Item \"Mapping[str, str]\" of \"Mapping[str, str] | Mapping[Any, str] | Iterable[tuple[str | Any, str]] | Any\" has no attribute \"pop\"  [union-attr]",
+    "<private-probe>/aiohttp/client.py:816: error: Item \"Mapping[Any, str]\" of \"Mapping[str, str] | Mapping[Any, str] | Iterable[tuple[str | Any, str]] | Any\" has no attribute \"pop\"  [union-attr]",
+    "<private-probe>/aiohttp/client.py:816: error: Item \"Iterable[tuple[str | Any, str]]\" of \"Mapping[str, str] | Mapping[Any, str] | Iterable[tuple[str | Any, str]] | Any\" has no attribute \"pop\"  [union-attr]",
+    "<private-probe>/aiohttp/client.py:1143: error: Item \"Iterable[tuple[str | Any, str]]\" of \"Mapping[str, str] | Mapping[Any, str] | Iterable[tuple[str | Any, str]] | Any\" has no attribute \"items\"  [union-attr]",
+    "<private-probe>/aiohttp/web_response.py:380: error: Unexpected keyword argument \"value\" for \"ETag\"  [call-arg]",
+    "<typeshed>/stdlib/builtins.pyi:117: note: \"ETag\" defined here",
+    "<private-probe>/aiohttp/web_response.py:385: error: Unexpected keyword argument \"is_weak\" for \"ETag\"  [call-arg]",
+    "<private-probe>/aiohttp/web_response.py:385: error: Unexpected keyword argument \"value\" for \"ETag\"  [call-arg]",
+    "<private-probe>/aiohttp/web_request.py:533: error: Unexpected keyword argument \"is_weak\" for \"ETag\"  [call-arg]",
+    "<typeshed>/stdlib/builtins.pyi:117: note: \"ETag\" defined here",
+    "<private-probe>/aiohttp/web_request.py:533: error: Unexpected keyword argument \"value\" for \"ETag\"  [call-arg]",
+    "<private-probe>/aiohttp/web_request.py:545: error: Unexpected keyword argument \"is_weak\" for \"ETag\"  [call-arg]",
+    "<private-probe>/aiohttp/web_request.py:545: error: Unexpected keyword argument \"value\" for \"ETag\"  [call-arg]",
+    "<private-probe>/aiohttp/web_request.py:757: error: Too many arguments for \"FileField\"  [call-arg]",
+    "<private-probe>/aiohttp/web_request.py:916: error: _RespPrepareSignal? has no attribute \"send\"  [attr-defined]",
+    "<private-probe>/aiohttp/web_ws.py:348: error: Too many arguments for \"WebSocketReady\"  [call-arg]",
+    "<private-probe>/aiohttp/web_ws.py:350: error: Too many arguments for \"WebSocketReady\"  [call-arg]",
+    "<private-probe>/aiohttp/web_urldispatcher.py:228: error: Incompatible return value type (got \"Callable[[Request], Coroutine[Any, Any, StreamResponse]] | Callable[[Request], GeneratorType[Any, Any, Any]] | type[AbstractView]\", expected \"Callable[[Request], Awaitable[StreamResponse]]\")  [return-value]",
+    "<private-probe>/aiohttp/web_protocol.py:383: error: Unexpected keyword argument \"status\" for \"_ErrInfo\"  [call-arg]",
+    "<typeshed>/stdlib/builtins.pyi:117: note: \"_ErrInfo\" defined here",
+    "<private-probe>/aiohttp/web_protocol.py:383: error: Unexpected keyword argument \"exc\" for \"_ErrInfo\"  [call-arg]",
+    "<private-probe>/aiohttp/web_protocol.py:383: error: Unexpected keyword argument \"message\" for \"_ErrInfo\"  [call-arg]",
+    "<private-probe>/aiohttp/web_app.py:155: error: Variable \"aiohttp.web_app._Middlewares\" is not valid as a type  [valid-type]",
+    "<private-probe>/aiohttp/web_app.py:155: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases",
+    "<private-probe>/aiohttp/web_app.py:168: error: Variable \"aiohttp.web_app._RespPrepareSignal\" is not valid as a type  [valid-type]",
+    "<private-probe>/aiohttp/web_app.py:168: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases",
+    "<private-probe>/aiohttp/web_app.py:169: error: Variable \"aiohttp.web_app._AppSignal\" is not valid as a type  [valid-type]",
+    "<private-probe>/aiohttp/web_app.py:169: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases",
+    "<private-probe>/aiohttp/web_app.py:170: error: Variable \"aiohttp.web_app._AppSignal\" is not valid as a type  [valid-type]",
+    "<private-probe>/aiohttp/web_app.py:170: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases",
+    "<private-probe>/aiohttp/web_app.py:171: error: Variable \"aiohttp.web_app._AppSignal\" is not valid as a type  [valid-type]",
+    "<private-probe>/aiohttp/web_app.py:171: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases",
+    "<private-probe>/aiohttp/web_app.py:298: error: _Middlewares? has no attribute \"freeze\"  [attr-defined]",
+    "<private-probe>/aiohttp/web_app.py:300: error: _RespPrepareSignal? has no attribute \"freeze\"  [attr-defined]",
+    "<private-probe>/aiohttp/web_app.py:302: error: _AppSignal? has no attribute \"freeze\"  [attr-defined]",
+    "<private-probe>/aiohttp/web_app.py:303: error: _AppSignal? has no attribute \"freeze\"  [attr-defined]",
+    "<private-probe>/aiohttp/web_app.py:304: error: _AppSignal? has no attribute \"freeze\"  [attr-defined]",
+    "<private-probe>/aiohttp/web_app.py:392: error: Variable \"aiohttp.web_app._RespPrepareSignal\" is not valid as a type  [valid-type]",
+    "<private-probe>/aiohttp/web_app.py:392: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases",
+    "<private-probe>/aiohttp/web_app.py:396: error: Variable \"aiohttp.web_app._AppSignal\" is not valid as a type  [valid-type]",
+    "<private-probe>/aiohttp/web_app.py:396: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases",
+    "<private-probe>/aiohttp/web_app.py:400: error: Variable \"aiohttp.web_app._AppSignal\" is not valid as a type  [valid-type]",
+    "<private-probe>/aiohttp/web_app.py:400: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases",
+    "<private-probe>/aiohttp/web_app.py:404: error: Variable \"aiohttp.web_app._AppSignal\" is not valid as a type  [valid-type]",
+    "<private-probe>/aiohttp/web_app.py:404: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases",
+    "<private-probe>/aiohttp/web_app.py:416: error: Variable \"aiohttp.web_app._Middlewares\" is not valid as a type  [valid-type]",
+    "<private-probe>/aiohttp/web_app.py:416: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases",
+    "<private-probe>/aiohttp/web_app.py:472: error: _AppSignal? has no attribute \"send\"  [attr-defined]",
+    "<private-probe>/aiohttp/web_app.py:479: error: _AppSignal? has no attribute \"send\"  [attr-defined]",
+    "<private-probe>/aiohttp/web_app.py:486: error: _AppSignal? has no attribute \"frozen\"  [attr-defined]",
+    "<private-probe>/aiohttp/web_app.py:487: error: _AppSignal? has no attribute \"send\"  [attr-defined]",
+    "<private-probe>/aiohttp/web_app.py:514: error: Need type annotation for \"m\"  [var-annotated]",
+    "<private-probe>/aiohttp/web_app.py:594: error: Variable \"aiohttp.web_app._CleanupContextBase\" is not valid as a type  [valid-type]",
+    "<private-probe>/aiohttp/web_app.py:594: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases",
+    "<private-probe>/aiohttp/web_app.py:594: error: Invalid base class \"_CleanupContextBase\"  [misc]",
+    "<private-probe>/aiohttp/web_runner.py:392: error: _AppSignal? has no attribute \"freeze\"  [attr-defined]",
+    "<private-probe>/aiohttp/web.py:352: error: Argument 2 to \"TCPSite\" has incompatible type \"str | memoryview[Any]\"; expected \"str | None\"  [arg-type]"
+  ],
+  "environment": {
+    "native_extension_extraction": false,
+    "package_imports": false,
+    "python_version": "3.11.16",
+    "source_execution": false
+  },
+  "fixture_controls": {
+    "deferred_function": 16,
+    "forwarded_wrapper_line": 10,
+    "unused_wrapper": 13
+  },
+  "fixture_diagnostics": [],
+  "fixture_sha256": "sha256:9501c8e223991167b331bd91bc976503716c325985d15b5f4cf329c579533c3f",
+  "git_revision": "50b09053395597339ca5a844877e141bc48b252e",
+  "global_diagnostic_count": 212,
+  "matched_call_count": 30,
+  "missing_dependency_diagnostics": [
+    "<private-probe>/requests/compat.py:48: error: Library stubs not installed for \"simplejson\"  [import-untyped]"
+  ],
+  "mypy_version": "1.19.1",
+  "observations": [
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:b53e20aba39adfcf6ae1931406ef2ec33a660916f7f3c0c36ad6e46ff8f86cb8"
+          ]
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "requests.sessions.Session.get",
+      "contract_id": "requests-session-get",
+      "invocation": "instance_method",
+      "line": 10,
+      "reason_code": null,
+      "receiver_candidates": [
+        "requests.sessions.Session"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:b53e20aba39adfcf6ae1931406ef2ec33a660916f7f3c0c36ad6e46ff8f86cb8"
+        ]
+      },
+      "source_spelling": "client.get"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+          ]
+        },
+        {
+          "keyword": "params",
+          "positional_index": null,
+          "reason_code": "dynamic_argument",
+          "source_index": 1,
+          "status": "unavailable",
+          "value_hashes": []
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "requests.sessions.Session.get",
+      "contract_id": "requests-session-get",
+      "invocation": "instance_method",
+      "line": 19,
+      "reason_code": null,
+      "receiver_candidates": [
+        "requests.sessions.Session"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+        ]
+      },
+      "source_spelling": "client0.get"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+          ]
+        },
+        {
+          "keyword": "json",
+          "positional_index": null,
+          "reason_code": "dynamic_argument",
+          "source_index": 1,
+          "status": "unavailable",
+          "value_hashes": []
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "requests.sessions.Session.post",
+      "contract_id": "requests-session-post",
+      "invocation": "instance_method",
+      "line": 20,
+      "reason_code": null,
+      "receiver_candidates": [
+        "requests.sessions.Session"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+        ]
+      },
+      "source_spelling": "client0.post"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+          ]
+        },
+        {
+          "keyword": "json",
+          "positional_index": null,
+          "reason_code": "dynamic_argument",
+          "source_index": 1,
+          "status": "unavailable",
+          "value_hashes": []
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "requests.sessions.Session.put",
+      "contract_id": "requests-session-put",
+      "invocation": "instance_method",
+      "line": 21,
+      "reason_code": null,
+      "receiver_candidates": [
+        "requests.sessions.Session"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+        ]
+      },
+      "source_spelling": "client0.put"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+          ]
+        },
+        {
+          "keyword": "json",
+          "positional_index": null,
+          "reason_code": "dynamic_argument",
+          "source_index": 1,
+          "status": "unavailable",
+          "value_hashes": []
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "requests.sessions.Session.patch",
+      "contract_id": "requests-session-patch",
+      "invocation": "instance_method",
+      "line": 22,
+      "reason_code": null,
+      "receiver_candidates": [
+        "requests.sessions.Session"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+        ]
+      },
+      "source_spelling": "client0.patch"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+          ]
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "requests.sessions.Session.delete",
+      "contract_id": "requests-session-delete",
+      "invocation": "instance_method",
+      "line": 23,
+      "reason_code": null,
+      "receiver_candidates": [
+        "requests.sessions.Session"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+        ]
+      },
+      "source_spelling": "client0.delete"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+          ]
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "requests.sessions.Session.head",
+      "contract_id": "requests-session-head",
+      "invocation": "instance_method",
+      "line": 24,
+      "reason_code": null,
+      "receiver_candidates": [
+        "requests.sessions.Session"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+        ]
+      },
+      "source_spelling": "client0.head"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+          ]
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "requests.sessions.Session.options",
+      "contract_id": "requests-session-options",
+      "invocation": "instance_method",
+      "line": 25,
+      "reason_code": null,
+      "receiver_candidates": [
+        "requests.sessions.Session"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+        ]
+      },
+      "source_spelling": "client0.options"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+          ]
+        },
+        {
+          "keyword": "params",
+          "positional_index": null,
+          "reason_code": "dynamic_argument",
+          "source_index": 1,
+          "status": "unavailable",
+          "value_hashes": []
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "httpx._client.Client.get",
+      "contract_id": "httpx-client-get",
+      "invocation": "instance_method",
+      "line": 26,
+      "reason_code": null,
+      "receiver_candidates": [
+        "httpx._client.Client"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+        ]
+      },
+      "source_spelling": "client1.get"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+          ]
+        },
+        {
+          "keyword": "json",
+          "positional_index": null,
+          "reason_code": "dynamic_argument",
+          "source_index": 1,
+          "status": "unavailable",
+          "value_hashes": []
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "httpx._client.Client.post",
+      "contract_id": "httpx-client-post",
+      "invocation": "instance_method",
+      "line": 27,
+      "reason_code": null,
+      "receiver_candidates": [
+        "httpx._client.Client"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+        ]
+      },
+      "source_spelling": "client1.post"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+          ]
+        },
+        {
+          "keyword": "json",
+          "positional_index": null,
+          "reason_code": "dynamic_argument",
+          "source_index": 1,
+          "status": "unavailable",
+          "value_hashes": []
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "httpx._client.Client.put",
+      "contract_id": "httpx-client-put",
+      "invocation": "instance_method",
+      "line": 28,
+      "reason_code": null,
+      "receiver_candidates": [
+        "httpx._client.Client"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+        ]
+      },
+      "source_spelling": "client1.put"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+          ]
+        },
+        {
+          "keyword": "json",
+          "positional_index": null,
+          "reason_code": "dynamic_argument",
+          "source_index": 1,
+          "status": "unavailable",
+          "value_hashes": []
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "httpx._client.Client.patch",
+      "contract_id": "httpx-client-patch",
+      "invocation": "instance_method",
+      "line": 29,
+      "reason_code": null,
+      "receiver_candidates": [
+        "httpx._client.Client"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+        ]
+      },
+      "source_spelling": "client1.patch"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+          ]
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "httpx._client.Client.delete",
+      "contract_id": "httpx-client-delete",
+      "invocation": "instance_method",
+      "line": 30,
+      "reason_code": null,
+      "receiver_candidates": [
+        "httpx._client.Client"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+        ]
+      },
+      "source_spelling": "client1.delete"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+          ]
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "httpx._client.Client.head",
+      "contract_id": "httpx-client-head",
+      "invocation": "instance_method",
+      "line": 31,
+      "reason_code": null,
+      "receiver_candidates": [
+        "httpx._client.Client"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+        ]
+      },
+      "source_spelling": "client1.head"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+          ]
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "httpx._client.Client.options",
+      "contract_id": "httpx-client-options",
+      "invocation": "instance_method",
+      "line": 32,
+      "reason_code": null,
+      "receiver_candidates": [
+        "httpx._client.Client"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+        ]
+      },
+      "source_spelling": "client1.options"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+          ]
+        },
+        {
+          "keyword": "params",
+          "positional_index": null,
+          "reason_code": "dynamic_argument",
+          "source_index": 1,
+          "status": "unavailable",
+          "value_hashes": []
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "httpx._client.AsyncClient.get",
+      "contract_id": "httpx-async-client-get",
+      "invocation": "instance_method",
+      "line": 33,
+      "reason_code": null,
+      "receiver_candidates": [
+        "httpx._client.AsyncClient"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+        ]
+      },
+      "source_spelling": "client2.get"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+          ]
+        },
+        {
+          "keyword": "json",
+          "positional_index": null,
+          "reason_code": "dynamic_argument",
+          "source_index": 1,
+          "status": "unavailable",
+          "value_hashes": []
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "httpx._client.AsyncClient.post",
+      "contract_id": "httpx-async-client-post",
+      "invocation": "instance_method",
+      "line": 34,
+      "reason_code": null,
+      "receiver_candidates": [
+        "httpx._client.AsyncClient"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+        ]
+      },
+      "source_spelling": "client2.post"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+          ]
+        },
+        {
+          "keyword": "json",
+          "positional_index": null,
+          "reason_code": "dynamic_argument",
+          "source_index": 1,
+          "status": "unavailable",
+          "value_hashes": []
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "httpx._client.AsyncClient.put",
+      "contract_id": "httpx-async-client-put",
+      "invocation": "instance_method",
+      "line": 35,
+      "reason_code": null,
+      "receiver_candidates": [
+        "httpx._client.AsyncClient"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+        ]
+      },
+      "source_spelling": "client2.put"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+          ]
+        },
+        {
+          "keyword": "json",
+          "positional_index": null,
+          "reason_code": "dynamic_argument",
+          "source_index": 1,
+          "status": "unavailable",
+          "value_hashes": []
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "httpx._client.AsyncClient.patch",
+      "contract_id": "httpx-async-client-patch",
+      "invocation": "instance_method",
+      "line": 36,
+      "reason_code": null,
+      "receiver_candidates": [
+        "httpx._client.AsyncClient"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+        ]
+      },
+      "source_spelling": "client2.patch"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+          ]
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "httpx._client.AsyncClient.delete",
+      "contract_id": "httpx-async-client-delete",
+      "invocation": "instance_method",
+      "line": 37,
+      "reason_code": null,
+      "receiver_candidates": [
+        "httpx._client.AsyncClient"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+        ]
+      },
+      "source_spelling": "client2.delete"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+          ]
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "httpx._client.AsyncClient.head",
+      "contract_id": "httpx-async-client-head",
+      "invocation": "instance_method",
+      "line": 38,
+      "reason_code": null,
+      "receiver_candidates": [
+        "httpx._client.AsyncClient"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+        ]
+      },
+      "source_spelling": "client2.head"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+          ]
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "httpx._client.AsyncClient.options",
+      "contract_id": "httpx-async-client-options",
+      "invocation": "instance_method",
+      "line": 39,
+      "reason_code": null,
+      "receiver_candidates": [
+        "httpx._client.AsyncClient"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+        ]
+      },
+      "source_spelling": "client2.options"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+          ]
+        },
+        {
+          "keyword": "params",
+          "positional_index": null,
+          "reason_code": "dynamic_argument",
+          "source_index": 1,
+          "status": "unavailable",
+          "value_hashes": []
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "aiohttp.client.ClientSession.get",
+      "contract_id": "aiohttp-session-get",
+      "invocation": "instance_method",
+      "line": 40,
+      "reason_code": null,
+      "receiver_candidates": [
+        "aiohttp.client.ClientSession"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+        ]
+      },
+      "source_spelling": "client3.get"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+          ]
+        },
+        {
+          "keyword": "json",
+          "positional_index": null,
+          "reason_code": "dynamic_argument",
+          "source_index": 1,
+          "status": "unavailable",
+          "value_hashes": []
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "aiohttp.client.ClientSession.post",
+      "contract_id": "aiohttp-session-post",
+      "invocation": "instance_method",
+      "line": 41,
+      "reason_code": null,
+      "receiver_candidates": [
+        "aiohttp.client.ClientSession"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+        ]
+      },
+      "source_spelling": "client3.post"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+          ]
+        },
+        {
+          "keyword": "json",
+          "positional_index": null,
+          "reason_code": "dynamic_argument",
+          "source_index": 1,
+          "status": "unavailable",
+          "value_hashes": []
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "aiohttp.client.ClientSession.put",
+      "contract_id": "aiohttp-session-put",
+      "invocation": "instance_method",
+      "line": 42,
+      "reason_code": null,
+      "receiver_candidates": [
+        "aiohttp.client.ClientSession"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+        ]
+      },
+      "source_spelling": "client3.put"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+          ]
+        },
+        {
+          "keyword": "json",
+          "positional_index": null,
+          "reason_code": "dynamic_argument",
+          "source_index": 1,
+          "status": "unavailable",
+          "value_hashes": []
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "aiohttp.client.ClientSession.patch",
+      "contract_id": "aiohttp-session-patch",
+      "invocation": "instance_method",
+      "line": 43,
+      "reason_code": null,
+      "receiver_candidates": [
+        "aiohttp.client.ClientSession"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+        ]
+      },
+      "source_spelling": "client3.patch"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+          ]
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "aiohttp.client.ClientSession.delete",
+      "contract_id": "aiohttp-session-delete",
+      "invocation": "instance_method",
+      "line": 44,
+      "reason_code": null,
+      "receiver_candidates": [
+        "aiohttp.client.ClientSession"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+        ]
+      },
+      "source_spelling": "client3.delete"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+          ]
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "aiohttp.client.ClientSession.head",
+      "contract_id": "aiohttp-session-head",
+      "invocation": "instance_method",
+      "line": 45,
+      "reason_code": null,
+      "receiver_candidates": [
+        "aiohttp.client.ClientSession"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+        ]
+      },
+      "source_spelling": "client3.head"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+          ]
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "aiohttp.client.ClientSession.options",
+      "contract_id": "aiohttp-session-options",
+      "invocation": "instance_method",
+      "line": 46,
+      "reason_code": null,
+      "receiver_candidates": [
+        "aiohttp.client.ClientSession"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": null,
+        "schema_version": 1,
+        "status": "exact",
+        "value_hashes": [
+          "sha256:54ca402e719d9059aec753e6cd87f7d80512213026a06ea57035342858ba4620"
+        ]
+      },
+      "source_spelling": "client3.options"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": null,
+          "source_index": 0,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:489a1f9c10722ef11d2f480091fd76d502543500d63504d4bb6bf6cded9809c4"
+          ]
+        }
+      ],
+      "audit_status": "ambiguous",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": null,
+      "contract_id": null,
+      "invocation": null,
+      "line": 47,
+      "reason_code": "open_receiver_dispatch",
+      "receiver_candidates": [
+        "app.fixture.Foreign"
+      ],
+      "receiver_origin": null,
+      "resolver_status": "ambiguous",
+      "resource": null,
+      "source_spelling": "foreign.get"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": "dynamic_argument",
+          "source_index": 0,
+          "status": "unavailable",
+          "value_hashes": []
+        }
+      ],
+      "audit_status": "matched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "requests.sessions.Session.get",
+      "contract_id": "requests-session-get",
+      "invocation": "instance_method",
+      "line": 48,
+      "reason_code": null,
+      "receiver_candidates": [
+        "requests.sessions.Session"
+      ],
+      "receiver_origin": {
+        "reason_code": "receiver_origin_unavailable",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "resolver_status": "exact",
+      "resource": {
+        "reason_code": "dynamic_argument",
+        "schema_version": 1,
+        "status": "unavailable",
+        "value_hashes": []
+      },
+      "source_spelling": "client0.get"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": "dynamic_argument",
+          "source_index": 0,
+          "status": "unavailable",
+          "value_hashes": []
+        },
+        {
+          "keyword": null,
+          "positional_index": 1,
+          "reason_code": null,
+          "source_index": 1,
+          "status": "exact",
+          "value_hashes": [
+            "sha256:b53e20aba39adfcf6ae1931406ef2ec33a660916f7f3c0c36ad6e46ff8f86cb8"
+          ]
+        }
+      ],
+      "audit_status": "unmatched",
+      "call_diagnostics": [],
+      "call_validation": "no_call_diagnostics",
+      "canonical_symbol": "app.fixture.forwarded",
+      "contract_id": null,
+      "invocation": "function",
+      "line": 49,
+      "reason_code": null,
+      "receiver_candidates": [],
+      "receiver_origin": null,
+      "resolver_status": "exact",
+      "resource": null,
+      "source_spelling": "forwarded"
+    }
+  ],
+  "other_global_diagnostic_count": 211,
+  "packages": {
+    "aiohttp": {
+      "distribution": "aiohttp",
+      "files": [
+        {
+          "path": "aiohttp/web_ws.py",
+          "sha256": "sha256:10e417dcb62a96b90d4079454da36966442939844265f47e9b56c74f822c7aaf"
+        },
+        {
+          "path": "aiohttp/web_runner.py",
+          "sha256": "sha256:bf51b59ca88e3908059d3491e0831ce88f5178414331a1ed30bbcefeba0333e0"
+        },
+        {
+          "path": "aiohttp/tracing.py",
+          "sha256": "sha256:eba5d0c2d751e431eff29f79dde78d2f497ca3a8870da3701fd6c16b26c75c3e"
+        },
+        {
+          "path": "aiohttp/web_fileresponse.py",
+          "sha256": "sha256:151b12d29f6bd4a539cbc71e1b44170589eb2fac608236f17174a623aa884789"
+        },
+        {
+          "path": "aiohttp/helpers.py",
+          "sha256": "sha256:2aa3d01027a227f12103dde4efee59a157591f4b24ff89f4b42a0cfc4fa23271"
+        },
+        {
+          "path": "aiohttp/streams.py",
+          "sha256": "sha256:b38a8cc412d030cb971d41714de39271f5f86a92fcad65af0b6a7176bad3afdf"
+        },
+        {
+          "path": "aiohttp/compression_utils.py",
+          "sha256": "sha256:d09dc400e47ed077a195822e7495d1bbf2abea1ad8098d087ee275a71f4c850b"
+        },
+        {
+          "path": "aiohttp/web_exceptions.py",
+          "sha256": "sha256:ee722e8b0859dfdbc927d2ab5aa02b03941c59b51daa4cf608bc04a496a978df"
+        },
+        {
+          "path": "aiohttp/client_reqrep.py",
+          "sha256": "sha256:540821d0dc4fd87bd85b1ea75f53ebf0520d7359be5bcfb9ab6cca79957af27f"
+        },
+        {
+          "path": "aiohttp/http_exceptions.py",
+          "sha256": "sha256:458981c9c26fbcf7ab2a48175e6f2fd78e48d4df9f6ec812a5cb1b3480be81d1"
+        },
+        {
+          "path": "aiohttp/web_routedef.py",
+          "sha256": "sha256:553d46031e81adac280e1e51c01c01bb9c120014aa816c007bbe00502c99004a"
+        },
+        {
+          "path": "aiohttp/http_parser.py",
+          "sha256": "sha256:52a7ab60f27303532a2e6786d6351185334ed5887050048add055c344cf499ef"
+        },
+        {
+          "path": "aiohttp/http.py",
+          "sha256": "sha256:f28f23f311fbd0e5a39df4d603d578e0d47bf3940fc443eb52dccc5e2015a707"
+        },
+        {
+          "path": "aiohttp/web_request.py",
+          "sha256": "sha256:8ff4925fdb3e77765e372a944e914868f51a35d4aa1f06fbc9f734b9f2fcc450"
+        },
+        {
+          "path": "aiohttp/web_server.py",
+          "sha256": "sha256:fbd58329402247d965fab49dc174aa1ba6236a85bbf5dd51e32d01192aa050c0"
+        },
+        {
+          "path": "aiohttp/client.py",
+          "sha256": "sha256:10f68efd8e15a5374801b70e7ccc011abcd27c151c61a9a963064ddc63b6566e"
+        },
+        {
+          "path": "aiohttp/web_middlewares.py",
+          "sha256": "sha256:b0523402078d8ddc808eecfdd90b4c2299e098948ec6ba9ed897dbb3804d52ed"
+        },
+        {
+          "path": "aiohttp/test_utils.py",
+          "sha256": "sha256:afb9016ac999b42ded418e4e9b231a225d41f4ff019e7ab5a0cde7a557003cab"
+        },
+        {
+          "path": "aiohttp/http_writer.py",
+          "sha256": "sha256:4514255310fb2bdf1a38d3ebac4f431a4595592b930d3cccd5cafcc5169122fc"
+        },
+        {
+          "path": "aiohttp/payload.py",
+          "sha256": "sha256:ac203d24923f44c0a293feea348682d41876d5a5e10011982b6b6c61e687450e"
+        },
+        {
+          "path": "aiohttp/client_exceptions.py",
+          "sha256": "sha256:bb229bc48da979984a97b9442c1331dd47aeb0d91fa5e98f5a9185ab4afa25e3"
+        },
+        {
+          "path": "aiohttp/formdata.py",
+          "sha256": "sha256:0942670960cd1c571749867f4eea5a4faac7918f90ee086cb2f5b369804f228d"
+        },
+        {
+          "path": "aiohttp/client_proto.py",
+          "sha256": "sha256:755eeef5f9681961beff1b43d9f2d462a880346e95b09b6ad073254e37f583e8"
+        },
+        {
+          "path": "aiohttp/http_websocket.py",
+          "sha256": "sha256:f155c52b0e8a4141263e0e3c1ad44c077eefd204caec0d229e8c57b83c4c6447"
+        },
+        {
+          "path": "aiohttp/web_urldispatcher.py",
+          "sha256": "sha256:4c833116684b8c446c786d31719bf611ff57ba8fc64c146a06a78c90280bd0af"
+        },
+        {
+          "path": "aiohttp/__init__.py",
+          "sha256": "sha256:36abefd132e6ffa47dceb64f7c97d137d491074e2053359d62b3e952f4df0fb4"
+        },
+        {
+          "path": "aiohttp/payload_streamer.py",
+          "sha256": "sha256:673118c9fcdc8c65a45642b75d1da906d852092232918bd8dd6af97064367937"
+        },
+        {
+          "path": "aiohttp/web.py",
+          "sha256": "sha256:02ce67a86432e105d631749a3ac87426e75255525522dfe7af79f46fc09a31bd"
+        },
+        {
+          "path": "aiohttp/base_protocol.py",
+          "sha256": "sha256:4e9f1cc543d0beff6450f937c3a940ce4e9dd8c033577b1cc08ff71a8dc2e3b7"
+        },
+        {
+          "path": "aiohttp/web_log.py",
+          "sha256": "sha256:ad7e43ef12ce5f607a04c76267e72199efca7c97d6e485c4a05c0b7e47e46a3b"
+        },
+        {
+          "path": "aiohttp/log.py",
+          "sha256": "sha256:05b34ac7d7b754c226d31623648d087010684bbc2375e21e49a88913bfaa2b68"
+        },
+        {
+          "path": "aiohttp/pytest_plugin.py",
+          "sha256": "sha256:01f27a5485b3b29e4a8295d1444b17df2a86519ac9c9f6fbcf370cab35b1cfb2"
+        },
+        {
+          "path": "aiohttp/tcp_helpers.py",
+          "sha256": "sha256:05269da9559a0693050d15a785a691f78d4df4c88367b6dd4ebc6009bd025be3"
+        },
+        {
+          "path": "aiohttp/web_protocol.py",
+          "sha256": "sha256:59916da79668c6bd0029fb7587fd44c62001e98c34530a4750cf9e75df1386ad"
+        },
+        {
+          "path": "aiohttp/client_ws.py",
+          "sha256": "sha256:fe7e21564ef51f9acaf1314e2184f46cf4c81ce98c090dc50c54ab53b72da5f2"
+        },
+        {
+          "path": "aiohttp/multipart.py",
+          "sha256": "sha256:d63221ec61058122fe7272d0cdb3412d65c726507858acb2d0d066fe2d58dd5e"
+        },
+        {
+          "path": "aiohttp/web_response.py",
+          "sha256": "sha256:eb96a58831138bbad9f0fefa92cb87408d194eed5c2a97250926a294dbb5d393"
+        },
+        {
+          "path": "aiohttp/resolver.py",
+          "sha256": "sha256:b09f3e2d80ad97f83d7fa827ff95f634543d150ef643632be3facbc68f4d55e2"
+        },
+        {
+          "path": "aiohttp/worker.py",
+          "sha256": "sha256:d25bf144d32318ce3b75d9505ad722e77ae2f58378d92bb555d77f67bccc307d"
+        },
+        {
+          "path": "aiohttp/hdrs.py",
+          "sha256": "sha256:dab8f933203eeb245d60f856e542a45b888d5a110094620e4811f90f816628d1"
+        },
+        {
+          "path": "aiohttp/typedefs.py",
+          "sha256": "sha256:c1496ac1ef4cc3d5bc8d3dc7b1825c624d34a8fdc430fcf79d39185e678d378f"
+        },
+        {
+          "path": "aiohttp/connector.py",
+          "sha256": "sha256:c96f2fc99cf87265db49c6c19029de305d208929745993c9d8d9cdc3e4de81b4"
+        },
+        {
+          "path": "aiohttp/cookiejar.py",
+          "sha256": "sha256:3d84752b59a42dadb81e6e9cf541099c08ad71c373cfdec26ec27243650b0255"
+        },
+        {
+          "path": "aiohttp/abc.py",
+          "sha256": "sha256:24b30ec6b28b1930da3d12dfada635a65fb191ae776221e1007f72685f504574"
+        },
+        {
+          "path": "aiohttp/web_app.py",
+          "sha256": "sha256:66b7b440733d240a7877b8eb8f9351c653e77d3aca2cdb80e3645db21f10d932"
+        },
+        {
+          "path": "aiohttp/_websocket/helpers.py",
+          "sha256": "sha256:3fe5cbbfc2146a284acc37a7554a9f294e4325b584e47bc6f2e86f5192bc21ce"
+        },
+        {
+          "path": "aiohttp/_websocket/reader_py.py",
+          "sha256": "sha256:6a766c04a65694bf123bc800aec64c0ecb47dfba81b993af240ee3b63d19f793"
+        },
+        {
+          "path": "aiohttp/_websocket/__init__.py",
+          "sha256": "sha256:31aaf747dfef04dfc46b896c5bb8930155c3ece2acc0a3c6a85e71812cadefb9"
+        },
+        {
+          "path": "aiohttp/_websocket/models.py",
+          "sha256": "sha256:5c0ce3b3ff0962ccd65c8819e91dd946b17eb57f50ffa2e20f8f56458a23a293"
+        },
+        {
+          "path": "aiohttp/_websocket/reader.py",
+          "sha256": "sha256:782e2a4b4739b0e790d9e6c01cb681a48693545692297efda58db1be1dcfab2c"
+        },
+        {
+          "path": "aiohttp/_websocket/reader_c.py",
+          "sha256": "sha256:6a766c04a65694bf123bc800aec64c0ecb47dfba81b993af240ee3b63d19f793"
+        },
+        {
+          "path": "aiohttp/_websocket/writer.py",
+          "sha256": "sha256:4f73f7ea232bcd53cf0b65de49cb1eac7303e6f77d6a7eb28b35b3a83524459d"
+        }
+      ],
+      "python_source_bytes": 771038,
+      "python_source_files": 52,
+      "source_manifest_sha256": "sha256:ee7f66baf34c7aabe9e08f47bacd147c65672c6cfbfc52fffaaa2d62e17703bc",
+      "version": "3.11.11",
+      "wheel": "aiohttp-3.11.11-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "wheel_sha256": "sha256:249cc6912405917344192b9f9ea5cd5b139d49e0d2f5c7f70bdfaf6b4dbf3a2e"
+    },
+    "httpx": {
+      "distribution": "httpx",
+      "files": [
+        {
+          "path": "httpx/__init__.py",
+          "sha256": "sha256:0ac6997bac998f4ac783adf6d8058a587193315afdb718047c3e4fdff46bcfad"
+        },
+        {
+          "path": "httpx/__version__.py",
+          "sha256": "sha256:2e853261e3974e2786cee3ffeb850bd30c5db718eebbf41b3af13b34e83e22a5"
+        },
+        {
+          "path": "httpx/_api.py",
+          "sha256": "sha256:aff660b388c8a5c3c92ea2b975b6d26b2aa8fe254c2856b164277ea0e1f12c4b"
+        },
+        {
+          "path": "httpx/_auth.py",
+          "sha256": "sha256:62bdd0c1a5122b5eeb198c7eee3f85762705233cf863d14557ed45e3eed15d7e"
+        },
+        {
+          "path": "httpx/_client.py",
+          "sha256": "sha256:c43f941baefe58c91e96d00039e1868fe719d91453026d7db1647194563bff8d"
+        },
+        {
+          "path": "httpx/_config.py",
+          "sha256": "sha256:a4fa7653ec2271f70ab05f8a6111352d876dddee84446788a1767c1a3a372d67"
+        },
+        {
+          "path": "httpx/_content.py",
+          "sha256": "sha256:2c61b3ac94d1dcebcde0c6f519554d2d7917247fbaa0a97002db4ef69e70ff28"
+        },
+        {
+          "path": "httpx/_decoders.py",
+          "sha256": "sha256:a74757f08d0d1077b1b37506a784ac66eb62321b17aeb5a5ebe1a7a956f488a3"
+        },
+        {
+          "path": "httpx/_exceptions.py",
+          "sha256": "sha256:6f15bb7f1ce054c01d3536f04f4567ab4e202435b5fe023f1858903ee3328cbd"
+        },
+        {
+          "path": "httpx/_main.py",
+          "sha256": "sha256:0a0f4631a6e24d3fecc1a0df5202118ad4b0c4b44c4b05033a6ecb7521aa940e"
+        },
+        {
+          "path": "httpx/_models.py",
+          "sha256": "sha256:e3ffc6bb2bf580bc6e6428708a6f247d036220e709f5a72b785392babbd97e6b"
+        },
+        {
+          "path": "httpx/_multipart.py",
+          "sha256": "sha256:28e1c465997aa28860f663da2b2caedf8e6aab5ac92e0df94d41b7600cd70776"
+        },
+        {
+          "path": "httpx/_status_codes.py",
+          "sha256": "sha256:0d89fedae7c180c797cb9b3cc77fd307bc2302e00031ec136a43eb9b9ad712c7"
+        },
+        {
+          "path": "httpx/_types.py",
+          "sha256": "sha256:272878d4642aec039ebfc20e58a0c083bcc26ef1c07ee7e65b983f3e24ed12b6"
+        },
+        {
+          "path": "httpx/_urlparse.py",
+          "sha256": "sha256:640987e3b38d7e4c6bae3f8f3d88467a21e36fa0232824be00d58837838bfca6"
+        },
+        {
+          "path": "httpx/_urls.py",
+          "sha256": "sha256:757f7d551d4348e1e9828f40abb3f360ee0529dc6a2a3c32369f20adff1d1cdd"
+        },
+        {
+          "path": "httpx/_utils.py",
+          "sha256": "sha256:fd355ea802afc4990a1ddcfb74579be2cd0b66a41781e1645d281f88704aff5a"
+        },
+        {
+          "path": "httpx/_transports/__init__.py",
+          "sha256": "sha256:19b52805200ea7bcfe97ef63e5884c851dc3308727e8554b863d3bd8edcd9e7a"
+        },
+        {
+          "path": "httpx/_transports/asgi.py",
+          "sha256": "sha256:1d17e20d830fb78c101f6805807660e1cfa2dec6e5a3a6cbe464ea7044fec73f"
+        },
+        {
+          "path": "httpx/_transports/base.py",
+          "sha256": "sha256:9194bf54c6d58987c5e7bd29a205022756ee973fb26df2f9d4faacf7292d79b5"
+        },
+        {
+          "path": "httpx/_transports/default.py",
+          "sha256": "sha256:03379a454c95c0271c4f2c8d25ec437f49f57457f3cf2769748420bf0ecf2e79"
+        },
+        {
+          "path": "httpx/_transports/mock.py",
+          "sha256": "sha256:3d3a34779ebb4484d7c46ae48ba90deffebbc300317f088c0dcb972626428c4a"
+        },
+        {
+          "path": "httpx/_transports/wsgi.py",
+          "sha256": "sha256:35c3d7dd76a9fc4c0215958efce692c9036e227098c7540c35b3bc1807a2ea36"
+        }
+      ],
+      "python_source_bytes": 284396,
+      "python_source_files": 23,
+      "source_manifest_sha256": "sha256:3a1f4cb9cabc52c7691d1e26bfdb8ff972f0036013b797825bc3cf119517e00f",
+      "version": "0.28.1",
+      "wheel": "httpx-0.28.1-py3-none-any.whl",
+      "wheel_sha256": "sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad"
+    },
+    "requests": {
+      "distribution": "requests",
+      "files": [
+        {
+          "path": "requests/__init__.py",
+          "sha256": "sha256:e3168011198f0c804fb1ad8fb23a54f6bd3aca8a0afb69992874d90215915adb"
+        },
+        {
+          "path": "requests/__version__.py",
+          "sha256": "sha256:1557e09606663509e660f5e93a8843539f05e4451bffe5674936807ac4b5f3b8"
+        },
+        {
+          "path": "requests/_internal_utils.py",
+          "sha256": "sha256:9cc4329abe21b37d93a95a3901b0ab99c24486f3d487bc57965bb2ab0b252e24"
+        },
+        {
+          "path": "requests/adapters.py",
+          "sha256": "sha256:28871e72c72a6a6eab78e097465e03c0fe235fc25c97cb1de7b7edd7b291d9c4"
+        },
+        {
+          "path": "requests/api.py",
+          "sha256": "sha256:fd96fd39aeedcd5222cd32b016b3e30c463d7a3b66fce9d2444467003c46b10b"
+        },
+        {
+          "path": "requests/auth.py",
+          "sha256": "sha256:905ef9b6a9cb72d67d31ffe19bd4d9223e1c4169cde6ec51cfca16b31e70991d"
+        },
+        {
+          "path": "requests/certs.py",
+          "sha256": "sha256:67d49be35d009efea35054f2b2cd23145854eb1b2df1cb442ea7f2f04bf6de0c"
+        },
+        {
+          "path": "requests/compat.py",
+          "sha256": "sha256:0b9c3f0cf2d2bab5cf81c75653bf1fa2b6b400f99b6245f61bcf50bc7e71ccf0"
+        },
+        {
+          "path": "requests/cookies.py",
+          "sha256": "sha256:6cd8be8aa123e0d3d9d34fa86feac7bf392f39bccdde5129830de0ea9692dd7c"
+        },
+        {
+          "path": "requests/exceptions.py",
+          "sha256": "sha256:8c93d2d545804ecf3a4a155468ba2b4e225bd52686ba83445a020225ea7e5646"
+        },
+        {
+          "path": "requests/help.py",
+          "sha256": "sha256:80f5f977f1fb5ddf3c6830017a386a1a097d075545453b79066898bcbdcfcc84"
+        },
+        {
+          "path": "requests/hooks.py",
+          "sha256": "sha256:0a2bb2b221c0dfd57951f702057148c7cdc8ac3a6ec1f37d45c4d482fdbc7ed4"
+        },
+        {
+          "path": "requests/models.py",
+          "sha256": "sha256:938daba17cc2f2efce6a000f422f54e0c91f3bb8b8af615d6aabccaacb4f7a17"
+        },
+        {
+          "path": "requests/packages.py",
+          "sha256": "sha256:fe0d2067af355320252874631fa91a9db6a8c71d9e01beaacdc5e2383c932287"
+        },
+        {
+          "path": "requests/sessions.py",
+          "sha256": "sha256:ca44c8f145864a5b4e7c7d3b1caa25947ee44c11b0e168620556901a67244f0e"
+        },
+        {
+          "path": "requests/status_codes.py",
+          "sha256": "sha256:889500780db96da4ddc3ee8f7c3d1e178aa1a48343251248fb268cab1b382c42"
+        },
+        {
+          "path": "requests/structures.py",
+          "sha256": "sha256:f886e6855cf4e92fb968f499b94b6167afba0fd5ce8d1b935c739a6d8d38d573"
+        },
+        {
+          "path": "requests/utils.py",
+          "sha256": "sha256:1e2402e8dabf0dade4b5a32217342487e7429378901c7284b184b990373ef02c"
+        }
+      ],
+      "python_source_bytes": 188462,
+      "python_source_files": 18,
+      "source_manifest_sha256": "sha256:a907c48f5bb32d6ac9099876ab930e1ea6ee27eec51e61cc2bb0f7b1854a7e23",
+      "version": "2.32.3",
+      "wheel": "requests-2.32.3-py3-none-any.whl",
+      "wheel_sha256": "sha256:70761cfe03c773ceb22aa2f671b4757976145175cdfca038c02654d061d6dcc6"
+    }
+  },
+  "preset": "http-clients-v1",
+  "preset_config_hash": "sha256:2e09fa80796e9f4b3ad00e223d6d1c70c1b4b467e472291011708951596e3588",
+  "preset_hash": "sha256:ab3d88b368db24f4c6c0879c8104105b09f23997997e63dd232856886bca6e2e",
+  "probe": "gh97-http-installed-artifact-source-compatibility-v1",
+  "product_imports": {
+    "fastapi_endpoint_detector.analyzer.effect_contract_auditor": {
+      "path": "src/fastapi_endpoint_detector/analyzer/effect_contract_auditor.py",
+      "source_sha256": "sha256:c6ecd7210e7c4fc054010c80e9df0961b1510fd9cb9599faa49a27e751258d57"
+    },
+    "fastapi_endpoint_detector.analyzer.mypy_analyzer": {
+      "path": "src/fastapi_endpoint_detector/analyzer/mypy_analyzer.py",
+      "source_sha256": "sha256:4fe8e0fa3a872bccab33739f175ecb7aeae4f4734a0941fccc20ac2d88625cdb"
+    },
+    "fastapi_endpoint_detector.models.effect_contract": {
+      "path": "src/fastapi_endpoint_detector/models/effect_contract.py",
+      "source_sha256": "sha256:b9e65ab6aead6392e98ba80ca59418820495b0f2e6f53864c868347b1bc3d7b3"
+    },
+    "fastapi_endpoint_detector.models.endpoint": {
+      "path": "src/fastapi_endpoint_detector/models/endpoint.py",
+      "source_sha256": "sha256:543a97269f4665fbb7eb3e2752e728307feb5e688c7eae37cab023e1c7fce138"
+    }
+  },
+  "python_version": "3.11.16",
+  "resolution_counts": {
+    "ambiguous": 1,
+    "exact": 31,
+    "unresolved": 0
+  },
+  "runner_revision": "889e491886ab85b259bbbb4296b0f5a18f489f48",
+  "runner_sha256": "sha256:9a65c05154abe1702caceae2e61f381a797186591a9e72ab2453978c0565ec20",
+  "schema_version": 1,
+  "selector_supported_call_count": 29
+}

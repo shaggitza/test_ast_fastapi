@@ -54,6 +54,7 @@ def test_trusted_origins_are_explicit_and_canonicalized() -> None:
         {"trusted_server_origins": {"surface": "https://api.example#fragment"}},
         {"trusted_server_origins": {"surface": "https://user:pass@api.example"}},
         {"trusted_server_origins": {"surface": "https://api.example:bad"}},
+        {"trusted_server_origins": {"surface": "https://api.example:0"}},
         {"trusted_server_origins": {"surface": "https://api.example:"}},
         {"trusted_server_origins": {"": "https://api.example"}},
     ],

@@ -25,6 +25,14 @@ from fastapi_endpoint_detector.analyzer.effect_contract_auditor import (
 )
 from fastapi_endpoint_detector.analyzer.endpoint_registry import EndpointRegistry
 from fastapi_endpoint_detector.analyzer.evidence_graph import EvidenceGraph, source_evidence_graph
+from fastapi_endpoint_detector.analyzer.framework_phase_integration import (
+    collect_framework_phase_evidence,
+)
+from fastapi_endpoint_detector.analyzer.framework_phase_report import (
+    FrameworkPhaseReport,
+    phase_report_payload,
+    unavailable_phase_report,
+)
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.analyzer.resource_coupling import build_resource_coupling_graph
 from fastapi_endpoint_detector.analyzer.scip_analyzer import (
@@ -401,7 +409,8 @@ def _expanded_scip_affected(
         except SCIPAnalyzerError as error:
             if warnings is not None:
                 warnings.append(
-                    f"SCIP reverse references for {definition.short_name} failed: {error}"
+                    "SCIP analysis incomplete: "
+                    f"reverse references for {definition.short_name} failed: {error}"
                 )
             continue
         if warnings is not None and limitations_for_seed:
@@ -422,7 +431,8 @@ def _expanded_scip_affected(
             except SCIPAnalyzerError as error:
                 if warnings is not None:
                     warnings.append(
-                        f"SCIP override bridge from {definition.short_name} failed: {error}"
+                        "SCIP analysis incomplete: "
+                        f"override bridge from {definition.short_name} failed: {error}"
                     )
                 bases = ()
             for base in sorted(bases, key=_scip_definition_key):
@@ -785,6 +795,10 @@ class ChangeMapper:
         if self.baseline_app_path is None:
             return []
         try:
+            if not self.baseline_app_path.exists():
+                raise FileNotFoundError(
+                    f"Baseline snapshot does not exist: {self.baseline_app_path}"
+                )
             baseline = self.baseline_mypy_registry.get_all()
         except Exception as exc:
             self._baseline_failure = str(exc)
@@ -865,6 +879,81 @@ class ChangeMapper:
         if self._inventory is None:
             raise ChangeMapperError("endpoint inventory is unavailable outside secure AST mode")
         return self._inventory
+
+    def map_framework_phase_report(  # noqa: PLR0911
+        self,
+        *,
+        snapshot_side: SnapshotSide = SnapshotSide.TARGET,
+    ) -> FrameworkPhaseReport | None:
+        """Map the explicitly selected framework-v1 catalog to a report payload.
+
+        This report-only hook does not affect endpoint candidates or confidence.
+        The current mapper retains mypy's full build result rather than the
+        explicit TypedBuild receipt required for typed phase authority, so phase
+        records are deliberately unavailable until that provider is connected.
+        """
+        if self.config.analysis.surface_preset != "framework-v1":
+            return None
+        if snapshot_side == SnapshotSide.BASELINE:
+            return unavailable_phase_report(
+                snapshot_side=snapshot_side.value,
+                limitation=(
+                    "the public mapper hook has only the target source inventory; "
+                    "baseline phase evidence is unavailable"
+                ),
+            )
+        if self.use_scip:
+            return unavailable_phase_report(
+                snapshot_side=snapshot_side.value,
+                limitation=(
+                    "framework phase evidence requires the bounded mypy callback frontend; "
+                    "the selected SCIP mapper does not provide it"
+                ),
+            )
+        if self._surface_contracts is None:
+            return unavailable_phase_report(
+                snapshot_side=snapshot_side.value,
+                limitation="the selected framework-v1 contract snapshot is unavailable",
+            )
+        analyzer = self._mypy_analyzer
+        if analyzer is None:
+            return unavailable_phase_report(
+                snapshot_side=snapshot_side.value,
+                limitation="the target mypy source snapshot has not been initialized",
+            )
+        try:
+            inventory = self.inventory
+        except ChangeMapperError as exc:
+            return unavailable_phase_report(
+                snapshot_side=snapshot_side.value,
+                limitation=f"the selected framework inventory is unavailable: {exc}",
+            )
+        source_root = Path(analyzer.source_root).resolve()
+        selected_sources = {
+            path.resolve()
+            for endpoint in inventory.endpoints
+            if endpoint.surface is not None
+            for path in (endpoint.handler.file_path, endpoint.surface.registration_file)
+        }
+        if any(not path.is_relative_to(source_root) for path in selected_sources):
+            return unavailable_phase_report(
+                snapshot_side=snapshot_side.value,
+                limitation=(
+                    "selected framework inventory contains callback or registration sources "
+                    "outside the mapper's target project root"
+                ),
+            )
+        evidence = collect_framework_phase_evidence(
+            inventory,
+            self._surface_contracts,
+            analyzer,
+            None,
+            snapshot_side=snapshot_side,
+            app_variable=self.app_variable,
+            app_entry=self.app_entry,
+            bootstrap_entry=self.bootstrap_entry,
+        )
+        return phase_report_payload(evidence)
 
     @property
     def scip_analyzer(self) -> SCIPAnalyzer:
@@ -1322,7 +1411,9 @@ class ChangeMapper:
             for side_registry, changed_path, side in (
                 (self.registry, diff_file.path, "target"),
                 (
-                    self.baseline_mypy_registry if self.baseline_app_path is not None else None,
+                    self.baseline_mypy_registry
+                    if self.baseline_app_path is not None and self._baseline_failure is None
+                    else None,
                     diff_file.source_path or diff_file.path,
                     "baseline",
                 ),
@@ -1364,46 +1455,70 @@ class ChangeMapper:
                         ),
                     )
 
-        # Native route registrations and exact include/mount/object occurrences own
-        # their materialized descendants. Only target additions are queried here:
-        # removed coordinates require the explicit baseline path handled by SCIP.
-        for endpoint, kinds, overlap in self.registry.get_structural_overlaps(
-            diff_file.path, set(added_lines)
-        ):
-            matched_kinds = ", ".join(kinds)
-            changed_line = min(overlap)
-            _merge_affected(
-                affected,
-                AffectedEndpoint(
-                    endpoint=endpoint,
-                    confidence=ConfidenceLevel.HIGH,
-                    reason=(
-                        f"Native route assembly occurrence modified ({matched_kinds}) "
-                        f"in {diff_file.path}"
-                    ),
-                    dependency_chain=[str(diff_file.path), *kinds],
-                    changed_files=[str(diff_file.path)],
-                    effect_evidence=[
-                        EffectEvidence(
-                            producer=EvidenceProducer.STRUCTURAL,
-                            status=EvidenceStatus.ESTABLISHED,
-                            effect=ChangeEffectKind.ROUTE_ASSEMBLY,
-                            channel=ImpactChannel.UNKNOWN,
-                            disposition=EffectDisposition.INTERNAL_EFFECT,
-                            summary=(
-                                "Changed source overlaps exact secure-AST route assembly "
-                                "provenance for this endpoint occurrence."
-                            ),
-                            changed_location=CodeReference(
-                                file_path=str(diff_file.path),
-                                line_number=changed_line,
-                                symbol=matched_kinds,
-                            ),
-                        )
-                    ],
-                ),
+        # Resolve source ownership independently on each snapshot. Baseline
+        # coordinates never consume target additions or substitute target ranges.
+        structural_sides = [
+            (self.registry, diff_file.path, added_lines, "target", processed_added_lines)
+        ]
+        if removed_lines and self.baseline_app_path is not None and self._baseline_failure is None:
+            structural_sides.append(
+                (
+                    self.baseline_mypy_registry,
+                    diff_file.source_path or diff_file.path,
+                    removed_lines,
+                    "baseline",
+                    processed_removed_lines,
+                )
             )
-            processed_added_lines.update(overlap)
+        for (
+            side_registry,
+            changed_path,
+            structural_lines,
+            side,
+            processed_lines,
+        ) in structural_sides:
+            for endpoint, kinds, overlap in side_registry.get_structural_overlaps(
+                changed_path, set(structural_lines)
+            ):
+                matched_kinds = ", ".join(kinds)
+                changed_line = min(overlap)
+                _merge_affected(
+                    affected,
+                    AffectedEndpoint(
+                        endpoint=(
+                            self._target_equivalent_endpoint(endpoint)
+                            if side == "baseline"
+                            else endpoint
+                        ),
+                        confidence=ConfidenceLevel.HIGH,
+                        reason=(
+                            f"Native route assembly occurrence modified ({side}: {matched_kinds}) "
+                            f"in {changed_path}"
+                        ),
+                        dependency_chain=[str(changed_path), *kinds],
+                        changed_files=[str(changed_path)],
+                        effect_evidence=[
+                            EffectEvidence(
+                                producer=EvidenceProducer.STRUCTURAL,
+                                status=EvidenceStatus.ESTABLISHED,
+                                effect=ChangeEffectKind.ROUTE_ASSEMBLY,
+                                channel=ImpactChannel.UNKNOWN,
+                                disposition=EffectDisposition.INTERNAL_EFFECT,
+                                summary=(
+                                    f"Changed {side} source overlaps exact secure-AST "
+                                    "route assembly "
+                                    "provenance for this endpoint occurrence."
+                                ),
+                                changed_location=CodeReference(
+                                    file_path=str(changed_path),
+                                    line_number=changed_line,
+                                    symbol=matched_kinds,
+                                ),
+                            )
+                        ],
+                    ),
+                )
+                processed_lines.update(overlap)
 
         # Find endpoints whose handlers are defined in the changed file.
         file_endpoints = self.registry.get_by_file(diff_file.path)
@@ -1436,7 +1551,7 @@ class ChangeMapper:
 
         # Removals are interpreted exclusively against an independently built
         # baseline graph. Without a baseline, leave them unresolved for reporting.
-        if removed_lines and self.baseline_app_path is not None:
+        if removed_lines and self.baseline_app_path is not None and self._baseline_failure is None:
             source_path = diff_file.source_path or diff_file.path
             baseline_file = diff_file.model_copy(update={"path": source_path})
             for endpoint in self.baseline_mypy_registry:
@@ -1949,6 +2064,8 @@ class ChangeMapper:
         start_time = time.time()
         errors: list[str] = []
         warnings: list[str] = []
+        # Failures describe this attempt; a recovered snapshot must be retried.
+        self._baseline_failure = None
 
         def report_progress(current: int, total: int, desc: str) -> None:
             if progress_callback:
@@ -2004,6 +2121,13 @@ class ChangeMapper:
             ]
             duration_ms = (time.time() - start_time) * 1000
             report_progress(100, 100, "Complete!")
+            endpoint_lifecycle = self._endpoint_lifecycle()
+            if self._baseline_failure:
+                warnings.append(
+                    "SCIP baseline analysis is incomplete: "
+                    "baseline endpoint lifecycle could not be reconciled "
+                    f"({self._baseline_failure})."
+                )
             return AnalysisReport(
                 app_path=str(self.app_path),
                 diff_source=diff_source_str,
@@ -2016,13 +2140,14 @@ class ChangeMapper:
                 ),
                 affected_endpoints=filtered,
                 candidate_endpoints=scip_affected,
-                endpoint_lifecycle=self._endpoint_lifecycle(),
+                endpoint_lifecycle=endpoint_lifecycle,
                 orphan_changes=scip_orphans,
                 total_files_changed=len(diff_files),
                 python_files_changed=len(python_files),
                 analysis_duration_ms=duration_ms,
                 errors=errors,
                 warnings=warnings,
+                framework_phase_report=self.map_framework_phase_report(),
                 analysis_completeness=(
                     "partial"
                     if errors
@@ -2051,6 +2176,10 @@ class ChangeMapper:
             )
         elif has_mypy_removals and self.baseline_app_path is not None:
             try:
+                if not self.baseline_app_path.exists():
+                    raise FileNotFoundError(
+                        f"Baseline snapshot does not exist: {self.baseline_app_path}"
+                    )
                 self._preanalyze_mypy_registry(
                     self.baseline_mypy_registry, self.baseline_mypy_analyzer, progress_callback
                 )
@@ -2207,12 +2336,15 @@ class ChangeMapper:
                 else "complete"
             ),
             source_evidence_graph=target_source_graph,
+            framework_phase_report=self.map_framework_phase_report(),
             effect_contract_audit=self._effect_contract_audit,
             resource_coupling_graph=self._resource_coupling_graph,
             sql_transaction_report=self._sql_transaction_report,
             sql_transaction_path_report=self._sql_transaction_path_report,
         )
         self.mypy_analyzer.release_typed_snapshot()
+        if self._baseline_mypy_analyzer is not None:
+            self._baseline_mypy_analyzer.release_typed_snapshot()
         return report
 
     def _preanalyze_mypy(

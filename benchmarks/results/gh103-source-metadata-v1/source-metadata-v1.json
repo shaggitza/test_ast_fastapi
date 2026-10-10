@@ -1,0 +1,369 @@
+{
+  "collection": {
+    "collector_sha256": "7b489e63a7b91b171b8b743fef6e54889ac1c26fdd27eac37eebeb6e83a30ea8",
+    "files_considered": 0,
+    "interpretation": "source metadata only; no compatibility or install/runtime feasibility proved",
+    "requests": 50,
+    "response_bytes": 0,
+    "token_present": false,
+    "wall_seconds": 17.527
+  },
+  "frozen_manifest_hashes": {
+    "v1": "sha256:194afecc671535639cf51b4b98e6fbe2d36a6159c882de1ae2bd3a4df1a28fe0",
+    "v2": "sha256:abd4ee6418a70bf1963a379b26d3ddaf1fe43b2a5a5b60f4090801d1ac5dbc1c"
+  },
+  "projects": [
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "fastapi/full-stack-fastapi-template",
+      "retrieval_status": "http_403",
+      "survey_commit": "4d3d5e92c1ea6b3fa0fab02c41124844ec45bca8"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "Kludex/starlette",
+      "retrieval_status": "http_403",
+      "survey_commit": "5174d4c8358a6f06aa8056bafd14c2272dab8dd1"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "PrefectHQ/prefect",
+      "retrieval_status": "http_403",
+      "survey_commit": "b749a6732bccbdcee1351e9afa806d32fb530d99"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "gradio-app/gradio",
+      "retrieval_status": "http_403",
+      "survey_commit": "ec3c6735a1df6824fe9d4cd9938ef8d0fbf41fc8"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "run-llama/llama_index",
+      "retrieval_status": "http_403",
+      "survey_commit": "67514f63410c6d4c2344e7ca14b3ea7214d0bb84"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "litestar-org/litestar",
+      "retrieval_status": "http_403",
+      "survey_commit": "2453f456ade2bda83ed6fbba91fe7b7224d8c2be"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "sanic-org/sanic",
+      "retrieval_status": "http_403",
+      "survey_commit": "5ffc7b3710838eaf016d2f9612a86a08626915e5"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "vllm-project/aibrix",
+      "retrieval_status": "http_403",
+      "survey_commit": "82afd1b916d08dbd39333900a9d27971a1065a07"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "Kludex/uvicorn",
+      "retrieval_status": "http_403",
+      "survey_commit": "7e11cc65f0642c823ef18ea01ff6b23af90aaa9e"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "apache/airflow",
+      "retrieval_status": "http_403",
+      "survey_commit": "5930c02ad0fc058a6a40ad37b2436105fd7fb51f"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "django/django",
+      "retrieval_status": "http_403",
+      "survey_commit": "cae38ec9b9bd394f630bdcbffa013c2761e831e9"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "saleor/saleor",
+      "retrieval_status": "http_403",
+      "survey_commit": "4086a98fdc787bf429db9653def58ed741c0a064"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "falconry/falcon",
+      "retrieval_status": "http_403",
+      "survey_commit": "6a498817595c788d0723cb312dc04298f75c4037"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "fastapi/fastapi",
+      "retrieval_status": "http_403",
+      "survey_commit": "9b8410bdc9fa1fd679ea7e65b926535c7045ab87"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "wagtail/wagtail",
+      "retrieval_status": "http_403",
+      "survey_commit": "af68909d2ee1408c1035ac028e7d552d51a605fd"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "pallets/flask",
+      "retrieval_status": "http_403",
+      "survey_commit": "36e4a824f340fdee7ed50937ba8e7f6bc7d17f81"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "netbox-community/netbox",
+      "retrieval_status": "http_403",
+      "survey_commit": "6c501413ee403613817c01709d3004cf243c9880"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "apache/superset",
+      "retrieval_status": "http_403",
+      "survey_commit": "8ce6d42942801f9dbc9e6382924424d7d64c6545"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "PrefectHQ/fastmcp",
+      "retrieval_status": "http_403",
+      "survey_commit": "1d932cc778a24cc0bf46fc4baad8306d4fed9c4b"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "modelcontextprotocol/python-sdk",
+      "retrieval_status": "http_403",
+      "survey_commit": "2713b53b127afc094dc97d6067df9f69b647661c"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "temporalio/sdk-python",
+      "retrieval_status": "http_403",
+      "survey_commit": "fd822986429b944f87341c4cb01784d69f1461e6"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "coleifer/huey",
+      "retrieval_status": "http_403",
+      "survey_commit": "42df37f2fdb84bd059b9fa7b355fb93578b52161"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "taskiq-python/taskiq",
+      "retrieval_status": "http_403",
+      "survey_commit": "ae2b788007a4c985394dda913f4df875ec79711a"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "ag2ai/faststream",
+      "retrieval_status": "http_403",
+      "survey_commit": "d1e756f112cb2f1f7cff95867e20f8ce1da65678"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "mosquito/aio-pika",
+      "retrieval_status": "http_403",
+      "survey_commit": "a6c69f6e292e7ee7ada34009e53dcd26b2ffd6a3"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "dpkp/kafka-python",
+      "retrieval_status": "http_403",
+      "survey_commit": "a48ac06d76a29e8755d02e64fb99ae70273f7cbd"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "aio-libs/aiokafka",
+      "retrieval_status": "http_403",
+      "survey_commit": "0ff6e7123a887fe254bb06b5d1f7b2742e6c4274"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "agronholm/apscheduler",
+      "retrieval_status": "http_403",
+      "survey_commit": "26bff5d1001d8d259f4d7ddaad6cf055072bb257"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "Bogdanp/dramatiq",
+      "retrieval_status": "http_403",
+      "survey_commit": "f5105d918af967afad035ef013e7507f83492db0"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "python-arq/arq",
+      "retrieval_status": "http_403",
+      "survey_commit": "5ee4b48cf6faf4dc181f1ccb76dfb1bc1fedf9bf"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "pallets/click",
+      "retrieval_status": "http_403",
+      "survey_commit": "b67832c2167e5b0ff6764a8c04a0a9087e697b5a"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "fastapi/typer",
+      "retrieval_status": "http_403",
+      "survey_commit": "60af34b60ab2650a74af32c6ce340c5cfbceb3d8"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "Textualize/rich",
+      "retrieval_status": "http_403",
+      "survey_commit": "9d8f9a372cc5916fd4781fec207ced7ddac2f08f"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "redis/redis-py",
+      "retrieval_status": "http_403",
+      "survey_commit": "a8b461458d9b7a3e412aecfa2f05f402e92c2ed2"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "mongodb/mongo-python-driver",
+      "retrieval_status": "http_403",
+      "survey_commit": "1a527ee2ef64f652e25a137028a8ae434a92bc21"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "sqlalchemy/sqlalchemy",
+      "retrieval_status": "http_403",
+      "survey_commit": "a559cd4b81ae0f4ca17744909a807e6c98db987e"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "encode/httpx",
+      "retrieval_status": "http_403",
+      "survey_commit": "b5addb64f0161ff6bfe94c124ef76f6a1fba5254"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "psf/requests",
+      "retrieval_status": "http_403",
+      "survey_commit": "f361ead047be5cb873174218582f7d8b9fcd9f49"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "aio-libs/aiohttp",
+      "retrieval_status": "http_403",
+      "survey_commit": "cba121d5864966d95b48f4a790ff0cefad7f041f"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "boto/boto3",
+      "retrieval_status": "http_403",
+      "survey_commit": "d2937da5351e7da82f983c2c572ba35615746b62"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "boto/botocore",
+      "retrieval_status": "http_403",
+      "survey_commit": "10f305e588ce4ebe24dd0c8d8ff0e825782bbd85"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "dbt-labs/dbt-core",
+      "retrieval_status": "http_403",
+      "survey_commit": "e308781defb22d4ef7c68733985e3c741dc64038"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "frappe/frappe",
+      "retrieval_status": "http_403",
+      "survey_commit": "e6b2dae094582118fbb452ba678bb47e38043065"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "home-assistant/core",
+      "retrieval_status": "http_403",
+      "survey_commit": "f3c69980ed65d191414e386aaca03ff89a1441a9"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "fivetran/great_expectations",
+      "retrieval_status": "http_403",
+      "survey_commit": "1b9d139ce4f92932f21b1291ebc5ca336e7d2def"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "mlflow/mlflow",
+      "retrieval_status": "http_403",
+      "survey_commit": "14414ab000889614875b07d970af95093c12ff8a"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "ray-project/ray",
+      "retrieval_status": "http_403",
+      "survey_commit": "338e9ac31567cc7686a5204b84f4d1d237e963cb"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "python-poetry/poetry",
+      "retrieval_status": "http_403",
+      "survey_commit": "f46702336862f30050d5c641d5ed6f7568ded793"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "pydantic/pydantic",
+      "retrieval_status": "http_403",
+      "survey_commit": "60a3c5938aa64c527fde2fb102426de7d800146d"
+    },
+    {
+      "commit_status": "unavailable_or_unverified",
+      "files": [],
+      "repository": "pytest-dev/pytest",
+      "retrieval_status": "http_403",
+      "survey_commit": "67a174fcee355334c53588be2eeba8df702477e9"
+    }
+  ],
+  "protocol": "gh103-source-metadata-v1",
+  "schema_version": 1
+}

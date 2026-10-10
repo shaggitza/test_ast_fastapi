@@ -125,12 +125,13 @@ differ from the analyzed snapshot.
 
 ## Package-owned presets
 
-Six conservative, independently versioned exact-symbol presets are bundled:
+Seven conservative, independently versioned exact-symbol presets are bundled:
 
 - `redis-v1`
 - `mongodb-v1`
 - `filesystem-v1`
 - `http-clients-v1`
+- `message-bus-v1` ([exact typed SQS scope](message-bus-preset.md))
 - `object-storage-v1`
 - `sqlalchemy-v1`
 
