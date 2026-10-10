@@ -166,7 +166,13 @@ def test_manifest_occurrence_identity_includes_registration_columns() -> None:
         PhaseManifest.model_validate({**manifest, "entries": [entry, entry]})
 
 
-def test_static_report_manifest_preserves_same_line_registration_columns() -> None:
+@pytest.mark.parametrize(
+    "contract_id", ["fastapi-on-event", "starlette-on-event", "starlette-add-event-handler"]
+)
+@pytest.mark.parametrize("phase", [FrameworkPhase.STARTUP, FrameworkPhase.SHUTDOWN])
+def test_static_report_manifest_preserves_same_line_registration_columns(
+    contract_id: str, phase: FrameworkPhase
+) -> None:
     catalog = load_surface_preset("framework-v1")
     callback = SourceIdentity(
         module="app",
@@ -179,23 +185,29 @@ def test_static_report_manifest_preserves_same_line_registration_columns() -> No
         source_sha256=_DIGEST,
     )
     common = {
-        "phase": FrameworkPhase.STARTUP,
+        "phase": phase,
         "callback": callback,
         "typed_callback_symbol": "app.start",
-        "typed_framework_symbol": "fastapi.FastAPI.on_event",
+        "typed_framework_symbol": (
+            "starlette.applications.Starlette.add_event_handler"
+            if contract_id == "starlette-add-event-handler"
+            else "starlette.applications.Starlette.on_event"
+            if contract_id == "starlette-on-event"
+            else "fastapi.FastAPI.on_event"
+        ),
         "framework_declaration_sha256": _DIGEST,
         "callback_file_sha256": "a" * 64,
         "registration_file_sha256": "b" * 64,
         "registration_call_site": object(),
-        "resource": "startup",
+        "resource": phase.value,
         "limitations": (),
         "execution_conditions": ("startup succeeds",),
         "source_sha256": _DIGEST,
         "inventory_sha256": _DIGEST,
         "engine_sha256": _DIGEST,
         "config_sha256": _DIGEST,
-        "contract_id": "fastapi-on-event",
-        "canonical_contract_sha256": catalog.document.contract_hashes["fastapi-on-event"],
+        "contract_id": contract_id,
+        "canonical_contract_sha256": catalog.document.contract_hashes[contract_id],
     }
     records = []
     for column in (10, 42):
@@ -215,6 +227,15 @@ def test_static_report_manifest_preserves_same_line_registration_columns() -> No
 
     assert len(manifest.entries) == 2
     assert [entry.registration.column for entry in manifest.entries] == [10, 42]
+    assert all(
+        entry.contract_id == contract_id and entry.phase == phase.value
+        for entry in manifest.entries
+    )
+    assert PhaseManifest.model_validate(manifest.model_dump(mode="json")) == manifest
+    malformed = manifest.model_dump(mode="json")
+    malformed["entries"][0]["contract_sha256"] = "sha256:" + "0" * 64
+    with pytest.raises(ValueError, match="contract digest does not match"):
+        PhaseManifest.model_validate(malformed)
 
 
 def test_lifespan_callback_mismatch_is_unavailable_and_not_observed(

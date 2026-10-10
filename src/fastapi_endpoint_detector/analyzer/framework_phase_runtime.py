@@ -37,6 +37,8 @@ class PhaseManifestEntry(BaseModel):
         event_contracts = {
             "fastapi-on-event",
             "fastapi-add-event-handler",
+            "starlette-on-event",
+            "starlette-add-event-handler",
             "fastapi-router-on-event",
             "fastapi-router-add-event-handler",
             "fastapi-constructor-on-startup-list",
@@ -114,6 +116,8 @@ def manifest_from_report(report: object) -> PhaseManifest:
             "fastapi-lifespan-shutdown",
             "fastapi-on-event",
             "fastapi-add-event-handler",
+            "starlette-on-event",
+            "starlette-add-event-handler",
             "fastapi-router-on-event",
             "fastapi-router-add-event-handler",
             "fastapi-constructor-on-startup-list",
