@@ -147,6 +147,102 @@ class RunRequest:
     phase_manifest_source_root: Path | None = None
 
 
+def _has_complete_static_phase_coverage(  # noqa: PLR0911
+    phase_report: dict[str, Any], manifest: dict[str, Any]
+) -> bool:
+    """Accept only a complete, exact static report/manifest correspondence.
+
+    Lifecycle phase-dispatch conditions are preserved in the manifest. They do
+    not mean the static registration is unknown; limitations, unavailable
+    records, or conditional surfaces still make coverage incomplete.
+    """
+    if (
+        phase_report.get("backend") in {None, "unavailable"}
+        or phase_report.get("limitations") not in ([], ())
+        or phase_report.get("lifecycle_conditional_surfaces") not in ([], ())
+    ):
+        return False
+
+    counts = {
+        name: phase_report.get(name)
+        for name in (
+            "record_count",
+            "established_count",
+            "conditional_count",
+            "unavailable_count",
+        )
+    }
+    if any(not isinstance(value, int) or isinstance(value, bool) for value in counts.values()):
+        return False
+    records = phase_report.get("records")
+    entries = manifest.get("entries")
+    if not isinstance(records, (list, tuple)) or not isinstance(entries, (list, tuple)):
+        return False
+    record_count = counts["record_count"]
+    if (
+        record_count == 0
+        or counts["established_count"] != 0
+        or counts["conditional_count"] != record_count
+        or counts["unavailable_count"] != 0
+        or len(records) != record_count
+        or len(entries) != record_count
+    ):
+        return False
+
+    for record, entry in zip(records, entries, strict=True):
+        if not isinstance(record, dict) or not isinstance(entry, dict):
+            return False
+        call_site = record.get("registration_call_site")
+        callback = record.get("callback")
+        registration = record.get("registration")
+        conditions = record.get("execution_conditions")
+        if (
+            record.get("status") != "conditional"
+            or record.get("limitations") not in ([], ())
+            or record.get("phase") not in {"startup", "shutdown"}
+            or record.get("typed_callback_symbol") is None
+            or record.get("typed_framework_symbol") is None
+            or not isinstance(call_site, dict)
+            or call_site.get("status") != "exact"
+            or call_site.get("canonical_symbol") != record.get("typed_framework_symbol")
+            or not isinstance(callback, dict)
+            or not isinstance(registration, dict)
+            or record.get("typed_callback_symbol")
+            != f"{callback.get('module')}.{callback.get('symbol')}"
+            or not isinstance(conditions, (list, tuple))
+            or not conditions
+        ):
+            return False
+        if any(
+            call_site.get(name) != registration.get(registration_name)
+            for name, registration_name in (
+                ("file_path", "file"),
+                ("line", "line"),
+                ("column", "column"),
+                ("end_line", "end_line"),
+                ("end_column", "end_column"),
+            )
+        ):
+            return False
+        correspondence = (
+            ("callback", callback),
+            ("registration", registration),
+            ("phase", record.get("phase")),
+            ("execution_conditions", conditions),
+            ("contract_id", record.get("contract_id")),
+            ("contract_sha256", record.get("canonical_contract_sha256")),
+            ("source_sha256", record.get("source_sha256")),
+            ("callback_file_sha256", record.get("callback_file_sha256")),
+            ("registration_file_sha256", record.get("registration_file_sha256")),
+            ("inventory_sha256", record.get("inventory_sha256")),
+            ("engine_sha256", record.get("engine_sha256")),
+            ("config_sha256", record.get("config_sha256")),
+        )
+        if any(entry.get(name) != value for name, value in correspondence):
+            return False
+    return True
+
+
 def _run_runtime_phase(phase: Literal["list", "impact"], request: RunRequest) -> InvocationResult:
     config = request.configuration
     executor = VMExecutor(
@@ -391,17 +487,7 @@ class CommandRunner:
                 ) from error
             if request.phase_manifest_state is not None:
                 manifest_value = manifest.model_dump(mode="json")
-                if (
-                    phase_report.get("backend") == "unavailable"
-                    or phase_report.get("lifecycle_conditional_surfaces")
-                    or any(
-                        phase_report.get(name, 0) > 0
-                        for name in ("conditional_count", "unavailable_count")
-                        if isinstance(phase_report.get(name, 0), int)
-                        and not isinstance(phase_report.get(name, 0), bool)
-                    )
-                    or phase_report.get("limitations")
-                ):
+                if not _has_complete_static_phase_coverage(phase_report, manifest_value):
                     request.phase_manifest_state.clear()
                     request.phase_manifest_state.update({"conditional": True})
                     return InvocationResult(

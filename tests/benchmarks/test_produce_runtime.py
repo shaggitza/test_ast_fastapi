@@ -899,6 +899,8 @@ def test_secure_public_command_emits_source_bound_startup_manifest(tmp_path: Pat
         "app = FastAPI()\n"
         "@app.on_event('startup')\n"
         "def startup() -> None: pass\n"
+        "@app.on_event('shutdown')\n"
+        "def shutdown() -> None: pass\n"
     )
     request = replace(
         _request_for_source_only_test(spec),
@@ -908,17 +910,126 @@ def test_secure_public_command_emits_source_bound_startup_manifest(tmp_path: Pat
     result = CommandRunner(timeout_seconds=120)("secure", "impact", request)
     assert result.impact is not None
     assert request.phase_manifest_state is not None
-    if request.phase_manifest_state == {"conditional": True}:
-        # The selected callback may lack the exact typed registration binding;
-        # preserve the operational impact result while abstaining on coverage.
-        return
+    assert request.phase_manifest_state != {"conditional": True}
     entries = request.phase_manifest_state["entries"]
-    assert len(entries) == 1
-    assert entries[0]["phase"] == "startup"
-    assert entries[0]["callback"]["module"] == "main"
-    assert entries[0]["callback"]["symbol"] == "startup"
-    assert entries[0]["callback"]["file"] == str(source.resolve())
-    assert entries[0]["callback_file_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert {entry["phase"] for entry in entries} == {"startup", "shutdown"}
+    assert {entry["callback"]["symbol"] for entry in entries} == {"startup", "shutdown"}
+    assert all(entry["callback"]["module"] == "main" for entry in entries)
+    assert all(entry["callback"]["file"] == str(source.resolve()) for entry in entries)
+    assert all(
+        entry["callback_file_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+        for entry in entries
+    )
+    assert all(
+        entry["execution_conditions"]
+        == [f"framework executes {entry['phase']} callback only when that phase is dispatched"]
+        for entry in entries
+    )
+
+
+def test_secure_public_command_keeps_startup_added_route_coverage_conditional(
+    tmp_path: Path,
+) -> None:
+    spec = _inputs(tmp_path)
+    source = spec.app_path / "main.py"
+    source.write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "async def late() -> dict[str, bool]: return {'ready': True}\n"
+        "@app.on_event('startup')\n"
+        "def startup() -> None:\n"
+        "    app.add_api_route('/late', late, methods=['POST'])\n"
+    )
+    request = replace(
+        _request_for_source_only_test(spec),
+        phase_manifest_state={},
+        phase_manifest_source_root=spec.app_path,
+    )
+
+    result = CommandRunner(timeout_seconds=120)("secure", "impact", request)
+
+    assert result.impact is not None
+    assert request.phase_manifest_state == {"conditional": True}
+
+
+def test_runtime_phase_gate_requires_complete_exact_record_manifest_pairs(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "main.py"
+    source.write_text("def startup() -> None: pass\n", encoding="utf-8")
+    manifest = _phase_manifest(source)
+    entry = manifest["entries"][0]
+    registration = entry["registration"]
+    report_record = {
+        "status": "conditional",
+        "phase": entry["phase"],
+        "callback": entry["callback"],
+        "registration": registration,
+        "typed_callback_symbol": "main.startup",
+        "typed_framework_symbol": "fastapi.applications.FastAPI.on_event",
+        "registration_call_site": {
+            "file_path": registration["file"],
+            "line": registration["line"],
+            "column": registration["column"],
+            "end_line": registration["end_line"],
+            "end_column": registration["end_column"],
+            "canonical_symbol": "fastapi.applications.FastAPI.on_event",
+            "status": "exact",
+        },
+        "limitations": [],
+        "execution_conditions": entry["execution_conditions"],
+        "contract_id": entry["contract_id"],
+        "canonical_contract_sha256": entry["contract_sha256"],
+        "source_sha256": entry["source_sha256"],
+        "callback_file_sha256": entry["callback_file_sha256"],
+        "registration_file_sha256": entry["registration_file_sha256"],
+        "inventory_sha256": entry["inventory_sha256"],
+        "engine_sha256": entry["engine_sha256"],
+        "config_sha256": entry["config_sha256"],
+    }
+    report: dict[str, Any] = {
+        "backend": "mypy",
+        "record_count": 1,
+        "established_count": 0,
+        "conditional_count": 1,
+        "unavailable_count": 0,
+        "records": [report_record],
+        "limitations": [],
+        "lifecycle_conditional_surfaces": [],
+    }
+    assert producer._has_complete_static_phase_coverage(report, manifest)
+
+    invalid_reports = [
+        {**report, "limitations": ["inventory unknown"]},
+        {**report, "lifecycle_conditional_surfaces": [{"surface_id": "/late"}]},
+        {**report, "unavailable_count": 1},
+        {**report, "record_count": 2},
+        {
+            **report,
+            "records": [{**report_record, "registration_call_site": {"status": "ambiguous"}}],
+        },
+    ]
+    invalid_manifests = [
+        {"entries": []},
+        {"entries": [{**entry, "execution_conditions": ["different condition"]}]},
+    ]
+    assert all(
+        not producer._has_complete_static_phase_coverage(candidate, manifest)
+        for candidate in invalid_reports
+    )
+    assert all(
+        not producer._has_complete_static_phase_coverage(report, candidate)
+        for candidate in invalid_manifests
+    )
+    empty_report = {
+        **report,
+        "record_count": 0,
+        "conditional_count": 0,
+        "records": [],
+    }
+    assert not producer._has_complete_static_phase_coverage(
+        empty_report, PhaseManifest(entries=()).model_dump(mode="json")
+    )
 
 
 def test_secure_runner_abstains_for_reported_phase_coverage_gaps(
@@ -962,20 +1073,6 @@ def test_secure_runner_abstains_for_reported_phase_coverage_gaps(
         unavailable_phase_report(
             snapshot_side="target", limitation="typed frontend unavailable"
         ).model_dump(mode="json"),
-        {
-            "backend": "mypy",
-            "unavailable_count": 0,
-            "conditional_count": 0,
-            "limitations": [],
-            "runtime_manifest": PhaseManifest(entries=()).model_dump(mode="json"),
-        },
-        {
-            "backend": "mypy",
-            "unavailable_count": 0,
-            "conditional_count": 0,
-            "limitations": [],
-            "runtime_manifest": _phase_manifest(source),
-        },
     ]
 
     for report in reports:
@@ -998,17 +1095,7 @@ def test_secure_runner_abstains_for_reported_phase_coverage_gaps(
         result = CommandRunner(timeout_seconds=10)("secure", "impact", request)
         assert result.impact == {"candidate_endpoints": []}
         assert request.phase_manifest_state is not None
-        if (
-            report.get("unavailable_count")
-            or report.get("limitations")
-            or report.get("backend") == "unavailable"
-        ):
-            assert request.phase_manifest_state == {"conditional": True}
-        else:
-            assert "entries" in request.phase_manifest_state
-            assert len(request.phase_manifest_state["entries"]) == len(
-                report["runtime_manifest"]["entries"]
-            )
+        assert request.phase_manifest_state == {"conditional": True}
 
 
 @pytest.mark.parametrize("expired_lane", [3, 4])

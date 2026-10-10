@@ -4388,6 +4388,7 @@ class SecureASTExtractor:
             "add_api_route",
             "add_api_websocket_route",
             "add_websocket_route",
+            "on_event",
         }
         route_collection_mutators = {
             "append",
@@ -4906,6 +4907,7 @@ class SecureASTExtractor:
             direct_effect_node: ast.AST | None = None,
             decorator_handler: HandlerInfo | None = None,
             decorator_route_order: int | None = None,
+            decorator_expression: bool = False,
             discarded_decorator_factory: bool = False,
         ) -> None:
             if isinstance(node, ast.BinOp):
@@ -4936,6 +4938,7 @@ class SecureASTExtractor:
                         decorator_route_order=(
                             _node_order(node) if direct_handler is not None else None
                         ),
+                        decorator_expression=True,
                     )
                 for default in [*node.args.defaults, *node.args.kw_defaults]:
                     if default is not None:
@@ -4996,10 +4999,24 @@ class SecureASTExtractor:
                     }
                     and exact_receiver is not None
                 )
+                lifecycle_registration = (
+                    not conditional
+                    and decorator_expression
+                    and operation == "on_event"
+                    and exact_receiver is not None
+                    and len(node.args) == 1
+                    and not node.keywords
+                    and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value in {"startup", "shutdown"}
+                )
                 route_collection_mutation = operation in route_collection_mutators and (
                     receiver_attributes in {("routes",), ("router", "routes")}
                 )
-                if discarded_decorator_factory or inventory_neutral_method:
+                if (
+                    discarded_decorator_factory
+                    or inventory_neutral_method
+                    or lifecycle_registration
+                ):
                     pass
                 elif (
                     conditional

@@ -996,6 +996,105 @@ if enabled:
         assert inventory.status == InventoryStatus.CONDITIONAL
         assert "unresolved route-state method" in inventory.limitations[0].reason
 
+    def test_exact_fastapi_lifecycle_registration_is_inventory_neutral(
+        self, tmp_path: Path
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "@app.on_event('startup')\n"
+            "def startup(): pass\n"
+            "@app.get('/probe')\n"
+            "def probe(): return {'ok': True}\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.ESTABLISHED
+        assert [endpoint.path for endpoint in inventory.endpoints] == ["/probe"]
+        assert not inventory.limitations
+
+    def test_conditional_or_rebound_lifecycle_registration_remains_conditional(
+        self, tmp_path: Path
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "def startup(): pass\n"
+            "if enabled:\n"
+            "    app.on_event('startup', startup)\n"
+            "app.on_event = replacement\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        reasons = [limitation.reason for limitation in inventory.limitations]
+        assert any("conditionally mutate route inventory" in reason for reason in reasons)
+        assert any("replace a route registration method" in reason for reason in reasons)
+
+    def test_unknown_on_event_phase_does_not_silence_route_inventory_limit(
+        self, tmp_path: Path
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "@app.on_event(event_name)\n"
+            "def startup(): pass\n"
+            "@app.get('/probe')\n"
+            "def probe(): return {'ok': True}\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert any(
+            "registration could not be modeled" in item.reason for item in inventory.limitations
+        )
+
+    def test_foreign_on_event_method_name_does_not_establish_fastapi_ownership(
+        self, tmp_path: Path
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "class Foreign:\n"
+            "    def on_event(self, event): return self\n"
+            "    def __call__(self, callback): return callback\n"
+            "app = FastAPI()\n"
+            "foreign = Foreign()\n"
+            "@foreign.on_event('startup')\n"
+            "def not_lifecycle(): pass\n"
+            "@app.get('/probe')\n"
+            "def probe(): return {'ok': True}\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.ESTABLISHED
+        assert [endpoint.path for endpoint in inventory.endpoints] == ["/probe"]
+
+    def test_dynamic_lifecycle_registration_remains_conditional(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "def startup(): pass\n"
+            "exec(\"app.on_event('startup', startup)\")\n"
+            "@app.get('/probe')\n"
+            "def probe(): return {'ok': True}\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert any(
+            "dynamic module-level execution" in item.reason for item in inventory.limitations
+        )
+
     def test_unrelated_conditional_app_attribute_read_does_not_weaken_inventory(
         self, tmp_path: Path
     ) -> None:
