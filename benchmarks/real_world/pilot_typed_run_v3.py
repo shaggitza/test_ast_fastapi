@@ -967,13 +967,13 @@ def _wait_socket(path: Path, pid: int, identity: str, timeout: int = 30) -> None
     while time.monotonic() < deadline:
         if path.exists():
             status = path.lstat()
-            if (
-                stat.S_ISSOCK(status.st_mode)
-                and status.st_uid == os.getuid()
-                and stat.S_IMODE(status.st_mode) == 0o600
-            ):
+            mode = stat.S_IMODE(status.st_mode)
+            if not stat.S_ISSOCK(status.st_mode) or status.st_uid != os.getuid():
+                _fail("native broker socket is unsafe")
+            if mode == 0o600:
                 return
-            _fail("native broker socket is unsafe")
+            if mode != 0:
+                _fail("native broker socket is unsafe")
         if not _same_process(pid, identity):
             _fail("native broker failed before readiness")
         time.sleep(0.01)
