@@ -1,11 +1,11 @@
 schema_version: 1
 preset:
   id: pymongo-effects
-  version: 1.0.0
+  version: 1.1.0
   provenance:
     kind: preset
     source: fastapi-endpoint-detector/effects_mongodb_v1.yaml
-    revision: "1"
+    revision: "2"
 contracts:
   - id: pymongo-find-one
     symbol: pymongo.synchronous.collection.Collection.find_one
@@ -39,3 +39,27 @@ contracts:
     resource: {kind: receiver}
     value: {kind: argument, index: 0}
     package: {distribution: pymongo, version: ">=4.9,<5"}
+  - id: motor-insert-one
+    symbol: motor.core.AgnosticCollection.insert_one
+    invocation: instance_method
+    operation: write
+    channel: mongodb
+    resource: {kind: receiver}
+    value: {kind: argument, index: 0}
+    package: {distribution: motor, version: "==3.6.0"}
+  - id: motor-update-one
+    symbol: motor.core.AgnosticCollection.update_one
+    invocation: instance_method
+    operation: update
+    channel: mongodb
+    resource: {kind: receiver}
+    value: {kind: argument, index: 1}
+    package: {distribution: motor, version: "==3.6.0"}
+  - id: motor-delete-one
+    symbol: motor.core.AgnosticCollection.delete_one
+    invocation: instance_method
+    operation: delete
+    channel: mongodb
+    resource: {kind: receiver}
+    value: {kind: argument, index: 0}
+    package: {distribution: motor, version: "==3.6.0"}

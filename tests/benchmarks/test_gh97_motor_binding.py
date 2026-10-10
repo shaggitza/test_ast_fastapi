@@ -1,6 +1,10 @@
 """Narrow contract checks for the exact Motor source-only probe result."""
 
 import json
+import os
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -10,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 RESULT = ROOT / "benchmarks/gh97_motor_binding/result.json"
 
 
-def test_motor_probe_is_pinned_and_reports_no_fabricated_positive_binding() -> None:
+def test_historical_motor_probe_is_pinned_and_preserves_original_finding() -> None:
     result = json.loads(RESULT.read_text())
 
     assert result["probe_id"] == "gh97-motor-typed-binding-v1"
@@ -45,7 +49,7 @@ def test_motor_probe_is_pinned_and_reports_no_fabricated_positive_binding() -> N
         "resolved_but_unmatched": 2,
         "unsupported_or_ambiguous_resolution": 3,
     }
-    assert not any(row["audit_status"] == "matched" for row in result["occurrences"])
+    assert result["extracted_python_source_hashes"]
 
 
 def test_same_name_and_wrapper_controls_remain_unmatched() -> None:
@@ -58,16 +62,61 @@ def test_same_name_and_wrapper_controls_remain_unmatched() -> None:
     assert rows["wrapped.insert_one"]["audit_status"] == "unmatched"
 
 
-def test_motor_collection_operations_abstain_when_receiver_is_dynamic() -> None:
-    result = json.loads(RESULT.read_text())
+def test_live_motor_probe_binds_real_vendor_stub_declarations() -> None:
+    artifacts = os.environ.get("GH97_MOTOR_ARTIFACT_DIR", "/tmp/gh97-wheel-audit")
+    if not Path(artifacts).is_dir():
+        pytest.skip("pinned Motor and PyMongo artifacts are unavailable")
+    with tempfile.TemporaryDirectory(prefix="gh97-motor-test-") as temp:
+        output = Path(temp) / "live-result.json"
+        repo = ROOT
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(repo / "src")
+        subprocess.run(
+            [
+                sys.executable,
+                str(repo / "benchmarks/gh97_motor_binding/run.py"),
+                "--artifacts",
+                artifacts,
+                "--output",
+                str(output),
+            ],
+            check=True,
+            cwd=repo,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        result = json.loads(output.read_text())
     rows = {row["source_spelling"]: row for row in result["occurrences"]}
 
     for operation in ("insert_one", "update_one", "delete_one"):
         row = rows[f"collection.{operation}"]
-        assert row["resolver_status"] == "unresolved"
-        assert row["canonical_symbol"] is None
-        assert row["reason_code"] == "dynamic_receiver"
-        assert row["audit_status"] == "unresolved"
+        assert row["resolver_status"] == "exact"
+        assert row["canonical_symbol"] == f"motor.core.AgnosticCollection.{operation}"
+        assert row["audit_status"] == "matched"
+    assert result["classification"] == {
+        "all_calls": 8,
+        "exact_resolution_and_audit_binding": 5,
+        "resolved_but_unmatched": 2,
+        "unsupported_or_ambiguous_resolution": 1,
+    }
+    assert rows["unknown_collection.insert_one"]["resolver_status"] == "unresolved"
+    assert rows["unknown_collection.insert_one"]["reason_code"] == "dynamic_receiver"
+    assert rows["unknown_collection.insert_one"]["audit_status"] == "unresolved"
+    invalid_calls = [
+        row
+        for row in result["occurrences"]
+        if row["source_spelling"] == "collection.insert_one" and not row["arguments"]
+    ]
+    assert len(invalid_calls) == 1
+    assert invalid_calls[0]["resolver_status"] == "exact"
+    diagnostics = result["fixture_diagnostics"]
+    assert any('Missing positional argument "document"' in error for error in diagnostics)
+    assert any('Unexpected keyword argument "mystery"' in error for error in diagnostics)
+    source_hashes = result["extracted_typed_source_hashes"]["motor"]
+    assert "motor/motor_asyncio.pyi" in source_hashes
+    assert "motor/core.pyi" in source_hashes
+    assert "motor/py.typed" in source_hashes
 
 
 def test_motor_probe_rejects_modified_artifact_bytes(tmp_path: Path) -> None:

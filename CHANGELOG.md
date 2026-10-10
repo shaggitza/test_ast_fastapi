@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Added exact Motor 3.6.0 insert, update, and delete bindings to MongoDB preset 1.1.0. The vendor source proof is pinned to wheel SHA-256 `9f07ed96f1754963d4386944e1b52d403a5350c687edc60da487d66f98dbf894`; `motor/core.pyi` SHA-256 `648fa05c34b81d6510b0cc672ac041e9ebfbb88c7ffbb5573e6d40c8571dcde0`, `motor/motor_asyncio.pyi` SHA-256 `6103c4af1c7c81ba3f7bccbfb478f897982eb0e38fef6592a111a22e41eee736`, and `motor/py.typed` SHA-256 `cf044d8d9395de5785cc67707e46ef18e7c66c1a2994879e66ee20edde8ff76f`.
+- Extended the bounded Motor probe to snapshot `.pyi` declarations and `py.typed` markers from hash-pinned wheels without importing Motor or PyMongo.
+
 ### Changed
 - **Simplified to mypy-only analysis**: Removed `import` (grimp-based) and `coverage` analysis backends
   - Removed `dependency_graph.py` module and grimp dependency
