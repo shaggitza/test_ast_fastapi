@@ -94,6 +94,7 @@ class _FrameworkRegistrationEvent:
 class _FrameworkUnknownOverrideEvent:
     token: _FrameworkToken
     surface_kind: str
+    resources: tuple[str, ...] | None
     condition: EndpointDiscoveryCondition
 
 
@@ -1244,6 +1245,10 @@ class CustomSurfaceExtractor:
                     or endpoint.surface.surface_kind != event.surface_kind
                     or not self._contract_has_multiplicity(
                         endpoint.surface.contract_id, ContractMultiplicity.LAST_WINS
+                    )
+                    or (
+                        event.resources is not None
+                        and endpoint.surface.resource not in event.resources
                     )
                 ]
                 conditions.setdefault(event.token, []).append(event.condition)
@@ -2462,19 +2467,19 @@ class CustomSurfaceExtractor:
                 )
                 return
         positional: list[_EvaluatedArgument] = []
-        if (
-            isinstance(call.func, ast.Name)
-            and call.func.id == "getattr"
-            and self._is_builtin_getattr_call(call, callable_state)
-            and call.args
-        ):
-            # Python evaluates getattr's object before its name/default. Keep
-            # that binding even if the default expression rebinds the name.
-            self._captured_getattr_receivers[id(call)] = self._binding_from_expression(
-                call.args[0], state, module.name
-            )
-        for argument in call.args:
+        for argument_index, argument in enumerate(call.args):
             self._inspect_expression(module, argument, state, inherited_conditions)
+            if (
+                argument_index == 0
+                and isinstance(call.func, ast.Name)
+                and call.func.id == "getattr"
+                and self._is_builtin_getattr_call(call, callable_state)
+            ):
+                # getattr evaluates its object expression first. Capture the
+                # resulting binding now, before its name/default arguments run.
+                self._captured_getattr_receivers[id(call)] = self._binding_from_expression(
+                    argument, state, module.name
+                )
             positional.append(
                 _EvaluatedArgument(
                     expression=argument,
@@ -3297,8 +3302,46 @@ class CustomSurfaceExtractor:
                 f"registration is unresolved: {reason}"
             ),
         )
+        resources: tuple[str, ...] | None = None
+        if contract.surface.kind == "framework.exception_handler":
+            expression = call.args[0] if call.args else None
+            if expression is None and isinstance(call.func, ast.Attribute):
+                expression = next(
+                    (
+                        item.value
+                        for item in call.keywords
+                        if item.arg
+                        in {
+                            "exc_class_or_status_code",
+                            "exc_class",
+                            "exc",
+                            "exception_class",
+                        }
+                    ),
+                    None,
+                )
+            identity = self._symbol_identity_from_state(expression, state)
+            if (
+                identity is None
+                and isinstance(expression, ast.Name)
+                and expression.id
+                in {
+                    "Exception",
+                    "BaseException",
+                    "RuntimeError",
+                    "ValueError",
+                    "TypeError",
+                    "LookupError",
+                    "KeyError",
+                    "AssertionError",
+                    "OSError",
+                }
+            ):
+                identity = f"builtins.{expression.id}"
+            if identity is not None:
+                resources = (identity,)
         self._framework_events.append(
-            _FrameworkUnknownOverrideEvent(token, contract.surface.kind, condition)
+            _FrameworkUnknownOverrideEvent(token, contract.surface.kind, resources, condition)
         )
         return True
 

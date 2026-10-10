@@ -97,6 +97,33 @@ def test_getattr_default_walrus_preserves_receiver_captured_first(
     assert [item.handler.name for item in inventory.endpoints] == ["selected"]
 
 
+@pytest.mark.parametrize("receiver", ["app", "unused"])
+def test_getattr_receiver_walrus_captures_after_object_evaluation(
+    tmp_path: Path, receiver: str
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "unused = FastAPI()\n"
+        "async def selected(): pass\n"
+        "async def unrelated(): pass\n"
+        "receiver = unused\n"
+        f"getattr((receiver := {receiver}), 'add_event_handler')('startup', selected)\n"
+        "unused.add_event_handler('shutdown', unrelated)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    if receiver == "app":
+        assert inventory.status == InventoryStatus.ESTABLISHED
+        assert [item.handler.name for item in inventory.endpoints] == ["selected"]
+    else:
+        assert inventory.status == InventoryStatus.ESTABLISHED
+        assert inventory.endpoints == []
+        assert inventory.limitations == ()
+
+
 def test_imported_bound_lifecycle_alias_resolves_project_receiver(tmp_path: Path) -> None:
     (tmp_path / "registrations.py").write_text(
         "from fastapi import FastAPI\napp = FastAPI()\nregister = app.add_event_handler\n",
@@ -270,3 +297,54 @@ def test_unknown_exception_override_through_alias_invalidates_only_receiver(
         assert inventory.status == InventoryStatus.ESTABLISHED
         assert [endpoint.handler.name for endpoint in inventory.endpoints] == ["original"]
         assert inventory.limitations == ()
+
+
+@pytest.mark.parametrize("registration", ["direct", "bound alias"])
+def test_unknown_exception_override_invalidates_only_exact_exception_key(
+    tmp_path: Path, registration: str
+) -> None:
+    if registration == "bound alias":
+        replacement = "register = app.add_exception_handler\nregister(ValueError, choose())\n"
+    else:
+        replacement = "app.add_exception_handler(ValueError, choose())\n"
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "async def value_handler(request, exc): pass\n"
+        "async def key_handler(request, exc): pass\n"
+        "def choose(): pass\n"
+        "app.add_exception_handler(ValueError, value_handler)\n"
+        "app.add_exception_handler(KeyError, key_handler)\n" + replacement,
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert [endpoint.handler.name for endpoint in inventory.endpoints] == ["key_handler"]
+    assert {endpoint.surface.resource for endpoint in inventory.endpoints} == {"builtins.KeyError"}
+    assert any("may override" in item.reason for item in inventory.limitations)
+
+
+def test_unknown_exception_override_dynamic_key_invalidates_all_possible_keys(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "async def value_handler(request, exc): pass\n"
+        "async def key_handler(request, exc): pass\n"
+        "def choose(): pass\n"
+        "def get_exception_type(): pass\n"
+        "exception_type = get_exception_type()\n"
+        "app.add_exception_handler(ValueError, value_handler)\n"
+        "app.add_exception_handler(KeyError, key_handler)\n"
+        "app.add_exception_handler(exception_type, choose())\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert inventory.endpoints == []
+    assert any("may override" in item.reason for item in inventory.limitations)
