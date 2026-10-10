@@ -2131,6 +2131,75 @@ def test_source_projection_requires_compatible_commit_branch(
 
 
 @pytest.mark.parametrize(
+    ("before_commit", "expected"),
+    [
+        (
+            "if flag:\n                return\n"
+            "            else:\n                return\n            ",
+            0,
+        ),
+        ("if flag:\n                return\n            ", 1),
+    ],
+)
+def test_source_projection_checks_compound_transfer_before_commit(
+    tmp_path: Path, before_commit: str, expected: int
+) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    source = copied / "source/lfx/services/deps.py.txt"
+    text = source.read_text()
+    original = "            yield session\n            await session.commit()"
+    assert text.count(original) == 1
+    replacement = (
+        "            yield session\n            " + before_commit + "await session.commit()"
+    )
+    source.write_text(text.replace(original, replacement, 1))
+    assert len(_langflow_fixture_transaction_reports(copied)[2].source_projections) == expected
+
+
+@pytest.mark.parametrize(
+    ("delegate_signature", "delegate_call", "expected"),
+    [
+        ("(*, unexpected: bool = False)", "()", 1),
+        ("(*, unexpected: bool = False)", "(unexpected=True)", 0),
+        ("(*, unexpected: bool)", "()", 0),
+    ],
+)
+def test_source_projection_checks_zero_argument_delegate_binding(
+    tmp_path: Path, delegate_signature: str, delegate_call: str, expected: int
+) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    delegate = copied / "source/lfx/services/deps.py.txt"
+    delegate_text = delegate.read_text()
+    signature = "async def session_scope() -> AsyncGenerator[AsyncSession, None]:"
+    assert delegate_text.count(signature) == 1
+    delegate.write_text(
+        delegate_text.replace(
+            signature,
+            "async def session_scope"
+            + delegate_signature
+            + " -> AsyncGenerator[AsyncSession, None]:",
+            1,
+        )
+    )
+    wrapper = copied / "source/langflow/services/deps.py.txt"
+    wrapper_text = wrapper.read_text()
+    original = "async with lfx_session_scope() as session:"
+    assert wrapper_text.count(original) == 1
+    wrapper.write_text(
+        wrapper_text.replace(
+            original,
+            "async with lfx_session_scope" + delegate_call + " as session:",
+            1,
+        )
+    )
+    assert len(_langflow_fixture_transaction_reports(copied)[2].source_projections) == expected
+
+
+@pytest.mark.parametrize(
     "relative_path",
     [
         "source/langflow/services/deps.py.txt",

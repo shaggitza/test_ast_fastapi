@@ -977,9 +977,8 @@ def _has_unreachable_terminator(node: ast.AST, parents: dict[ast.AST, ast.AST]) 
             )
             if siblings is not None:
                 position = siblings.index(current)
-                if any(
-                    isinstance(item, (ast.Return, ast.Raise, ast.Break, ast.Continue))
-                    for item in siblings[:position]
+                if _block_must_transfer(
+                    [item for item in siblings[:position] if isinstance(item, ast.stmt)]
                 ):
                     return True
         current = owner
@@ -1001,6 +1000,16 @@ def _block_must_transfer(statements: list[ast.stmt]) -> bool:
         if isinstance(statement, ast.Try) and _block_must_transfer(statement.finalbody):
             return True
     return False
+
+
+def _supports_zero_argument_call(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Check that a direct call with no arguments can bind this function."""
+    arguments = function.args
+    positional = [*arguments.posonlyargs, *arguments.args]
+    required_positional = len(positional) - len(arguments.defaults)
+    if required_positional:
+        return False
+    return not any(default is None for default in arguments.kw_defaults)
 
 
 def _yield_can_reach_normal_boundary(  # noqa: PLR0912
@@ -1235,6 +1244,8 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
                         captured is not None
                         and isinstance(target, ast.Call)
                         and isinstance(target.func, ast.Name)
+                        and not target.args
+                        and not target.keywords
                     ):
                         canonical = wrapper_scope_calls.get(target.func.id)
                         import_node = wrapper_import_nodes.get(target.func.id)
@@ -1304,6 +1315,7 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
             or not _has_verified_asynccontextmanager(delegated_tree, delegate_fn)
             or _module_binding_is_ambiguous(delegated_tree, delegate_fn.name, delegate_fn)
             or _has_dynamic_module_binding_mutation(delegated_tree)
+            or not _supports_zero_argument_call(delegate_fn)
         ):
             continue
         delegate_parents = _scope_parents(delegate_fn)
