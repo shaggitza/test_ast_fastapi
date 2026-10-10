@@ -120,6 +120,7 @@ class CallFrame:
     code_context: str = ""
     caller_file_path: str | None = None
     caller_line_number: int | None = None
+    caller_column_number: int | None = None
 
 
 @dataclass(frozen=True)
@@ -180,10 +181,13 @@ class AnalysisLimitation:
     cap: str
     target_count: int | None = None
     limit: int | None = None
+    call_column: int | None = None
 
     def __post_init__(self) -> None:
         if self.call_line < 1 or not self.cap:
             raise ValueError("analysis limitation requires a source line and cap name")
+        if self.call_column is not None and self.call_column < 0:
+            raise ValueError("analysis limitation call column cannot be negative")
 
 
 @dataclass
@@ -541,6 +545,7 @@ class _PartialCallable:
     bound_callables: tuple[
         tuple[str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]], ...
     ] = ()
+    bound_strings: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -585,7 +590,7 @@ class MypyAnalyzer:
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
     MAX_POINTS_TO_EDGES = 4096
-    EXECUTION_SUMMARY_VERSION = 5
+    EXECUTION_SUMMARY_VERSION = 7
     GENERATOR_CONSUMERS: ClassVar[dict[str, tuple[int, str, bool | None]]] = {
         "starlette.responses.StreamingResponse": (0, "content", None),
     }
@@ -639,6 +644,7 @@ class MypyAnalyzer:
         self._active_endpoint_dependencies: EndpointDependencies | None = None
         self._active_source_file = str(self.source_root)
         self._active_source_line = 0
+        self._active_source_column: int | None = None
         self._analysis_build_failed = False
         self._mypy_available = self._check_mypy_available()
         self._cache_file: Path | None = None
@@ -698,7 +704,12 @@ class MypyAnalyzer:
         if deps is not None and self._active_source_line > 0:
             deps.add_analysis_limitation(
                 AnalysisLimitation(
-                    self._active_source_file, self._active_source_line, cap, target_count, limit
+                    self._active_source_file,
+                    self._active_source_line,
+                    cap,
+                    target_count,
+                    limit,
+                    self._active_source_column,
                 )
             )
 
@@ -2302,6 +2313,7 @@ class MypyAnalyzer:
                 self._active_source_line = (
                     call_site.line if call_site is not None else handler.line_number
                 )
+                self._active_source_column = call_site.column if call_site is not None else None
                 self._record_analysis_limitation("MAX_DEPTH", limit=self.max_depth)
 
         trace_roots: list[Any]
@@ -3475,6 +3487,29 @@ class MypyAnalyzer:
             value = MypyAnalyzer._literal_boolean(expression.expr)
             return None if value is None else not value
         return None
+
+    @staticmethod
+    def _finite_string_condition(
+        expression: Any,
+        environment: dict[str, tuple[str, ...]],
+    ) -> bool | None:
+        """Resolve exact equality tests over bounded string arguments."""
+        from mypy.nodes import ComparisonExpr
+
+        if not isinstance(expression, ComparisonExpr) or len(expression.operators) != 1:
+            return None
+        operator = expression.operators[0]
+        if operator not in {"==", "!="}:
+            return None
+        left = MypyAnalyzer._finite_string_values(expression.operands[0], environment)
+        right = MypyAnalyzer._finite_string_values(expression.operands[1], environment)
+        if left is None or right is None:
+            return None
+        outcomes = {a == b for a in left for b in right}
+        if len(outcomes) != 1:
+            return None
+        equal = next(iter(outcomes))
+        return equal if operator == "==" else not equal
 
     @staticmethod
     def _returned_nested_function(parent: Any, nested: Any) -> bool:
@@ -4726,6 +4761,7 @@ class MypyAnalyzer:
             self._active_endpoint_dependencies,
             self._active_source_file,
             self._active_source_line,
+            self._active_source_column,
         )
         try:
             self._trace_references_impl(*args, **kwargs)
@@ -4734,6 +4770,7 @@ class MypyAnalyzer:
                 self._active_endpoint_dependencies,
                 self._active_source_file,
                 self._active_source_line,
+                self._active_source_column,
             ) = saved
 
     def _trace_references_impl(
@@ -4796,6 +4833,7 @@ class MypyAnalyzer:
             AssignmentStmt,
             AwaitExpr,
             Block,
+            BreakStmt,
             CallExpr,
             ClassDef,
             ComparisonExpr,
@@ -4882,6 +4920,7 @@ class MypyAnalyzer:
             fullname: str,
             call_line: int,
             *,
+            call_column: int | None = None,
             low_confidence_edge: bool = False,
             target_receiver: _FinitePointsTo | None = None,
             target_environment: dict[str, _FinitePointsTo] | None = None,
@@ -4895,6 +4934,7 @@ class MypyAnalyzer:
             """Resolve a fullname and preserve LOW provenance through descendants."""
             self._active_source_file = current_file
             self._active_source_line = call_line
+            self._active_source_column = call_column
             target_depth = depth + 1
             # External and unresolved symbols do not consume project traversal depth.
             result = self._resolve_fullname_to_file(fullname)
@@ -4984,6 +5024,7 @@ class MypyAnalyzer:
                     code_context=f"Execution summary: {edge_kind}" if edge_kind else "",
                     caller_file_path=current_file,
                     caller_line_number=call_line,
+                    caller_column_number=call_column,
                 )
                 new_stack = [*call_stack, new_frame]
                 deps.add_call_stack(target_path, new_stack)
@@ -5029,6 +5070,7 @@ class MypyAnalyzer:
                             fullname,
                             caller_file_path=current_file,
                             caller_line_number=call_line,
+                            caller_column_number=call_column,
                         ),
                     ]
                     deps.add_call_stack(target_path, class_stack)
@@ -5150,6 +5192,7 @@ class MypyAnalyzer:
                                 lambda_name,
                                 caller_file_path=current_file,
                                 caller_line_number=call.line,
+                                caller_column_number=call.column,
                             ),
                         ]
                         deps.add_symbol_reference(
@@ -5197,14 +5240,80 @@ class MypyAnalyzer:
                 )
                 if callable_aliases:
                     binding_call: Any = call
+                    invocation_keywords = {
+                        name
+                        for kind, name in zip(call.arg_kinds, call.arg_names, strict=True)
+                        if kind == ARG_NAMED and name is not None
+                    }
+                    partial_function = (
+                        self._function_node_for_fullname(partial_alias.declaration[0])
+                        if partial_alias is not None
+                        else None
+                    )
+                    positional_formals = []
+                    if partial_function is not None:
+                        partial_arguments = list(
+                            getattr(self._actual_function(partial_function[0]), "arguments", ())
+                        )
+                        if (
+                            partial_alias is not None
+                            and partial_alias.declaration[1] == InvocationKind.INSTANCE_METHOD
+                        ):
+                            partial_arguments = partial_arguments[1:]
+                        positional_formals = [
+                            item for item in partial_arguments if item.kind in (ARG_POS, ARG_OPT)
+                        ]
+                    positional_partial_parameters = (
+                        {
+                            positional_formals[index].variable.name
+                            for index, kind in enumerate(partial_alias.arg_kinds)
+                            if kind == ARG_POS and index < len(positional_formals)
+                        }
+                        if partial_alias is not None and partial_function is not None
+                        else set()
+                    )
+                    invocation_positional_parameters: set[str] = set()
+                    invocation_parameters = set(invocation_keywords)
+                    if partial_function is not None:
+                        partial_positional_count = (
+                            sum(kind == ARG_POS for kind in partial_alias.arg_kinds)
+                            if partial_alias is not None
+                            else 0
+                        )
+                        positional_formals = positional_formals[partial_positional_count:]
+                        invocation_positional_count = 0
+                        for kind, name in zip(call.arg_kinds, call.arg_names, strict=True):
+                            if kind == ARG_POS and name is None:
+                                if invocation_positional_count < len(positional_formals):
+                                    parameter_name = positional_formals[
+                                        invocation_positional_count
+                                    ].variable.name
+                                    invocation_parameters.add(parameter_name)
+                                    invocation_positional_parameters.add(parameter_name)
+                                invocation_positional_count += 1
+                    stored_keyword_parameters: set[str] = set()
+                    if partial_alias is not None and partial_function is not None:
+                        for kind, name in zip(
+                            partial_alias.arg_kinds,
+                            partial_alias.arg_names,
+                            strict=True,
+                        ):
+                            if kind == ARG_NAMED and name is not None:
+                                stored_keyword_parameters.add(name)
+                    invalid_partial_duplicate = bool(
+                        partial_alias is not None
+                        and (
+                            any(
+                                parameter in invocation_keywords
+                                and parameter in positional_partial_parameters
+                                for parameter, _captured in partial_alias.bound_callables
+                            )
+                            or bool(stored_keyword_parameters & invocation_positional_parameters)
+                        )
+                    )
                     if partial_alias is not None:
                         from types import SimpleNamespace as _CallShape
 
-                        invocation_keywords = {
-                            name
-                            for kind, name in zip(call.arg_kinds, call.arg_names, strict=True)
-                            if kind == ARG_NAMED and name is not None
-                        }
                         kept_bound = [
                             (expression, kind, name)
                             for expression, kind, name in zip(
@@ -5227,6 +5336,7 @@ class MypyAnalyzer:
                             and call_site.status != CallResolutionStatus.EXACT
                             and alias_invocation == InvocationKind.FUNCTION
                             and not callable_alias_is_possible
+                            and not invalid_partial_duplicate
                         ):
                             deps.add_resolved_call_site(
                                 call_site.model_copy(
@@ -5265,10 +5375,20 @@ class MypyAnalyzer:
                             if resolved_function is not None
                             else None
                         )
-                        if target_callables is not None and partial_alias is not None:
+                        if partial_alias is not None:
                             # Creation-time callable values win over later rebinding
                             # of the source variable used to construct the partial.
-                            target_callables.update(dict(partial_alias.bound_callables))
+                            if target_callables is None:
+                                target_callables = {}
+                            for parameter, captured_value in partial_alias.bound_callables:
+                                if parameter not in invocation_parameters:
+                                    target_callables[parameter] = captured_value
+                        if partial_alias is not None:
+                            if target_strings is None:
+                                target_strings = {}
+                            for parameter, captured_values in partial_alias.bound_strings:
+                                if parameter not in invocation_parameters:
+                                    target_strings[parameter] = captured_values
                         deps.add_reference(current_file, call.line, alias_fullname)
                         alias_is_unawaited_coroutine = bool(
                             resolved_function is not None
@@ -5277,10 +5397,20 @@ class MypyAnalyzer:
                             )
                             and id(call) not in awaited_call_ids
                         )
-                        if not alias_is_unawaited_coroutine:
+                        if invalid_partial_duplicate:
+                            deps.add_analysis_limitation(
+                                AnalysisLimitation(
+                                    file_path=current_file,
+                                    call_line=call.line,
+                                    cap="INVALID_PARTIAL_ARGUMENTS",
+                                    call_column=call.column,
+                                )
+                            )
+                        elif not alias_is_unawaited_coroutine:
                             resolve_and_trace(
                                 alias_fullname,
                                 call.line,
+                                call_column=call.column,
                                 low_confidence_edge=callable_alias_is_possible,
                                 target_receiver=(
                                     bound_receiver
@@ -5357,6 +5487,7 @@ class MypyAnalyzer:
                             current_file,
                             call.line,
                             "UNRESOLVED_GENERATOR_CONSUMER_ARGUMENTS",
+                            call_column=call.column,
                         )
                     )
 
@@ -5437,6 +5568,7 @@ class MypyAnalyzer:
                         resolve_and_trace(
                             callback_fullname,
                             call.line,
+                            call_column=call.column,
                             low_confidence_edge=True,
                             target_receiver=callback_receiver,
                             target_environment=callback_environment,
@@ -5464,6 +5596,7 @@ class MypyAnalyzer:
                     resolve_and_trace(
                         finite_fullname,
                         call.line,
+                        call_column=call.column,
                         low_confidence_edge=True,
                         target_receiver=finite_receiver,
                     )
@@ -5501,6 +5634,7 @@ class MypyAnalyzer:
                     resolve_and_trace(
                         call_site.canonical_symbol,
                         call.line,
+                        call_column=call.column,
                         target_string_environment=target_strings,
                         target_callable_environment=target_callables,
                         low_confidence_edge=eager_generator_expression_depth[0] > 0,
@@ -5539,7 +5673,7 @@ class MypyAnalyzer:
                 )
                 if exact_fullname is not None and self._function_node_for_fullname(exact_fullname):
                     deps.add_reference(current_file, call.line, exact_fullname)
-                    resolve_and_trace(exact_fullname, call.line)
+                    resolve_and_trace(exact_fullname, call.line, call_column=call.column)
                     traced = True
 
             # FastAPI dependency injection passes callables as values rather
@@ -5561,6 +5695,7 @@ class MypyAnalyzer:
                     resolve_and_trace(
                         dependency_fullname,
                         argument.line,
+                        call_column=argument.column,
                         edge_kind=f"fastapi_dependency:{wrapper_symbol}",
                     )
 
@@ -5610,6 +5745,7 @@ class MypyAnalyzer:
             if isinstance(node_line, int) and node_line > 0:
                 self._active_source_file = current_file
                 self._active_source_line = node_line
+                self._active_source_column = None
 
             source_line = int(getattr(n, "line", 0) or 0)
             if source_line > 0 and not isinstance(n, LambdaExpr):
@@ -5625,6 +5761,9 @@ class MypyAnalyzer:
                 )
 
             if isinstance(n, CallExpr):
+                self._active_source_file = current_file
+                self._active_source_line = n.line
+                self._active_source_column = n.column
                 handle_call_expr(n)
 
             elif isinstance(n, MemberExpr):
@@ -5823,6 +5962,7 @@ class MypyAnalyzer:
                                         tuple[tuple[str, InvocationKind], _FinitePointsTo | None],
                                     ]
                                 ] = []
+                                bound_strings: list[tuple[str, tuple[str, ...]]] = []
                                 target_node = self._function_node_for_fullname(target_value[0][0])
                                 if target_node is not None:
                                     actual = self._actual_function(target_node[0])
@@ -5898,6 +6038,14 @@ class MypyAnalyzer:
                                             bound_callables.append(
                                                 (parameter.variable.name, callable_actual)
                                             )
+                                        if parameter is not None:
+                                            string_actual = self._finite_string_values(
+                                                expression, string_environment
+                                            )
+                                            if string_actual is not None:
+                                                bound_strings.append(
+                                                    (parameter.variable.name, string_actual)
+                                                )
                                 partial_value = _PartialCallable(
                                     declaration=target_value[0],
                                     receiver=target_value[1],
@@ -5905,6 +6053,7 @@ class MypyAnalyzer:
                                     arg_kinds=tuple(n.rvalue.arg_kinds[1:]),
                                     arg_names=tuple(n.rvalue.arg_names[1:]),
                                     bound_callables=tuple(bound_callables),
+                                    bound_strings=tuple(bound_strings),
                                 )
                             callable_value = None
                         returned_declaration = self._returned_project_callable(
@@ -5973,6 +6122,8 @@ class MypyAnalyzer:
                 unknown_before_selection = False
                 for expr, body in zip(n.expr, n.body, strict=True):
                     literal = self._literal_boolean(expr)
+                    if literal is None:
+                        literal = self._finite_string_condition(expr, base_strings)
                     if literal is False:
                         # Evaluating the condition is harmless; the body is
                         # statically unreachable.
@@ -6056,11 +6207,10 @@ class MypyAnalyzer:
                         else set()
                     )
                     string_environment = {
-                        name: values
+                        name: branch_strings[0][name]
                         for name in common_string_names
                         if all(
-                            (values := branch_strings[0][name]) == branch[name]
-                            for branch in branch_strings[1:]
+                            branch_strings[0][name] == branch[name] for branch in branch_strings[1:]
                         )
                     }
                     if branch_deferred:
@@ -6109,29 +6259,46 @@ class MypyAnalyzer:
                     if n.else_body is not None:
                         walk_node(n.else_body)
                     return
+                mandatory_single_pass = (
+                    self._literal_boolean(n.expr) is True
+                    and bool(n.body.body)
+                    and isinstance(n.body.body[-1], BreakStmt)
+                    and all(
+                        not isinstance(item, (IfStmt, WhileStmt, ForStmt, TryStmt, BreakStmt))
+                        for item in n.body.body[:-1]
+                    )
+                )
                 before_callables = dict(callable_environment)
                 before_partials = dict(partial_environment)
                 before_lambdas = dict(lambda_environment)
-                possible_execution_depth[0] += 1
+                if not mandatory_single_pass:
+                    possible_execution_depth[0] += 1
                 try:
                     walk_node(n.body)
                 finally:
-                    possible_execution_depth[0] -= 1
+                    if not mandatory_single_pass:
+                        possible_execution_depth[0] -= 1
                 after_callables = dict(callable_environment)
                 after_partials = dict(partial_environment)
                 after_lambdas = dict(lambda_environment)
-                callable_environment = self._join_callable_environments(
-                    [before_callables, after_callables]
+                callable_environment = (
+                    after_callables
+                    if mandatory_single_pass
+                    else self._join_callable_environments([before_callables, after_callables])
                 )
                 partial_environment = {
                     name: value
-                    for name, value in before_partials.items()
-                    if after_partials.get(name) == value
+                    for name, value in (
+                        after_partials.items() if mandatory_single_pass else before_partials.items()
+                    )
+                    if mandatory_single_pass or after_partials.get(name) == value
                 }
                 lambda_environment = {
                     name: value
-                    for name, value in before_lambdas.items()
-                    if after_lambdas.get(name) is value
+                    for name, value in (
+                        after_lambdas.items() if mandatory_single_pass else before_lambdas.items()
+                    )
+                    if mandatory_single_pass or after_lambdas.get(name) is value
                 }
                 flow_environment.clear()
                 string_environment.clear()
@@ -6191,6 +6358,8 @@ class MypyAnalyzer:
                 before_partials = dict(partial_environment)
                 before_lambdas = dict(lambda_environment)
                 try_assigned_names: set[str] = set()
+                try_assignment_lines: dict[str, int] = {}
+                potentially_raising_lines: list[int] = []
                 assignment_stack: list[Any] = [n.body]
                 assignment_seen: set[int] = set()
                 while assignment_stack:
@@ -6198,29 +6367,16 @@ class MypyAnalyzer:
                     if assignment_item is None or id(assignment_item) in assignment_seen:
                         continue
                     assignment_seen.add(id(assignment_item))
-                    if isinstance(assignment_item, Block):
-                        assignment_stack.extend(assignment_item.body)
-                    elif isinstance(assignment_item, AssignmentStmt):
-                        try_assigned_names.update(
-                            target.name
-                            for target in assignment_item.lvalues
-                            if isinstance(target, NameExpr)
-                        )
-                    elif isinstance(assignment_item, IfStmt):
-                        assignment_stack.extend(assignment_item.body)
-                        if assignment_item.else_body is not None:
-                            assignment_stack.append(assignment_item.else_body)
-                    elif isinstance(assignment_item, (ForStmt, WhileStmt)):
-                        assignment_stack.append(assignment_item.body)
-                        if assignment_item.else_body is not None:
-                            assignment_stack.append(assignment_item.else_body)
-                    elif isinstance(assignment_item, TryStmt):
-                        assignment_stack.append(assignment_item.body)
-                        assignment_stack.extend(assignment_item.handlers)
-                        assignment_stack.append(assignment_item.else_body)
-                        assignment_stack.append(assignment_item.finally_body)
-                    elif isinstance(assignment_item, WithStmt):
-                        assignment_stack.append(assignment_item.body)
+                    if isinstance(assignment_item, AssignmentStmt):
+                        for target in assignment_item.lvalues:
+                            if isinstance(target, NameExpr):
+                                try_assigned_names.add(target.name)
+                                try_assignment_lines[target.name] = assignment_item.line
+                    if isinstance(assignment_item, CallExpr):
+                        potentially_raising_lines.append(assignment_item.line)
+                    children = getattr(assignment_item, "children", None)
+                    if callable(children):
+                        assignment_stack.extend(child for child in children() if child is not None)
                 walk_node(n.body)
                 body_callables = dict(callable_environment)
                 body_partials = dict(partial_environment)
@@ -6234,11 +6390,16 @@ class MypyAnalyzer:
                 handler_partials: list[dict[str, _PartialCallable]] = []
                 handler_lambdas: list[dict[str, Any]] = []
                 for handler in n.handlers:
-                    callable_environment = {
-                        key: value
-                        for key, value in before_callables.items()
-                        if key not in try_assigned_names and body_callables.get(key) == value
-                    }
+                    exception_callables = dict(before_callables)
+                    for name, assignment_line in try_assignment_lines.items():
+                        if (
+                            any(line > assignment_line for line in potentially_raising_lines)
+                            and name in body_callables
+                        ):
+                            exception_callables[name] = body_callables[name]
+                    callable_environment = self._join_callable_environments(
+                        [before_callables, exception_callables]
+                    )
                     partial_environment = {
                         key: value
                         for key, value in before_partials.items()
@@ -6463,7 +6624,7 @@ class MypyAnalyzer:
                         actual_fullname = import_map[decorator.name]
                     deps.add_reference(current_file, decorator.line, actual_fullname)
                     # Trace into the decorator function to find its dependencies
-                    resolve_and_trace(actual_fullname, decorator.line)
+                    resolve_and_trace(actual_fullname, decorator.line, call_column=decorator.column)
                     # Applying an exact project decorator installs its
                     # returned callable as the endpoint implementation. The
                     # decorator factory body runs at definition time, while
@@ -6473,6 +6634,7 @@ class MypyAnalyzer:
                         resolve_and_trace(
                             returned_wrapper[0],
                             decorator.line,
+                            call_column=decorator.column,
                             edge_kind="decorator_wrapper_invocation",
                         )
                 else:
@@ -6768,6 +6930,7 @@ class MypyAnalyzer:
                     {
                         "file_path": item.file_path,
                         "call_line": item.call_line,
+                        "call_column": item.call_column,
                         "cap": item.cap,
                         "target_count": item.target_count,
                         "limit": item.limit,
@@ -6814,6 +6977,7 @@ class MypyAnalyzer:
                                 "code_context": frame.code_context,
                                 "caller_file_path": frame.caller_file_path,
                                 "caller_line_number": frame.caller_line_number,
+                                "caller_column_number": frame.caller_column_number,
                             }
                             for frame in stack
                         ]
@@ -6902,6 +7066,7 @@ class MypyAnalyzer:
                                 code_context=frame.get("code_context", ""),
                                 caller_file_path=frame.get("caller_file_path"),
                                 caller_line_number=frame.get("caller_line_number"),
+                                caller_column_number=frame.get("caller_column_number"),
                             )
                             for frame in stack_data
                         ]
