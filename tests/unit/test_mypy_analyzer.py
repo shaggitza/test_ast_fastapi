@@ -183,6 +183,80 @@ class TestMypyAnalyzerBasic:
         assert second_site.status.value != "exact"
         assert warm.verified_package_versions["typing-dep"] == "1.1"
 
+    @pytest.mark.parametrize("change", ["stub", "removed-stub", "metadata"])
+    def test_partial_cache_is_invalidated_when_typed_environment_changes(
+        self, tmp_path: Path, change: str
+    ) -> None:
+        stub = tmp_path / "typing_dep.pyi"
+        stub.write_text(
+            "class Store:\n    def put(self, value: str) -> None: ...\n", encoding="utf-8"
+        )
+        dist_info = tmp_path / "typing-dep-1.0.dist-info"
+        dist_info.mkdir()
+        metadata = dist_info / "METADATA"
+        metadata.write_text(
+            "Metadata-Version: 2.1\nName: typing-dep\nVersion: 1.0\n", encoding="utf-8"
+        )
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "from typing_dep import Store\n"
+            "def handler_a() -> None:\n    Store().put('value')\n"
+            "def handler_b() -> None:\n    Store().put('other')\n",
+            encoding="utf-8",
+        )
+        endpoint_a = Endpoint(
+            path="/cache-partial-a",
+            methods=[EndpointMethod.POST],
+            handler=HandlerInfo(name="handler_a", module="app", file_path=app_path, line_number=2),
+        )
+        endpoint_b = Endpoint(
+            path="/cache-partial-b",
+            methods=[EndpointMethod.POST],
+            handler=HandlerInfo(name="handler_b", module="app", file_path=app_path, line_number=4),
+        )
+        cache_path = tmp_path / "partial-typed-cache.json"
+        cold = MypyAnalyzer(tmp_path)
+        cold.set_cache_path(cache_path)
+        first = next(iter(cold.analyze_endpoints([endpoint_a]).values()))
+        assert any(
+            site.canonical_symbol == "typing_dep.Store.put" for site in first.resolved_call_sites
+        )
+
+        if change == "stub":
+            stub.write_text("class Store:\n    pass\n", encoding="utf-8")
+        elif change == "removed-stub":
+            stub.unlink()
+            metadata.write_text(
+                "Metadata-Version: 2.1\nName: typing-dep\nVersion: 1.1\n", encoding="utf-8"
+            )
+        else:
+            metadata.write_text(
+                "Metadata-Version: 2.1\nName: typing-dep\nVersion: 1.1\n", encoding="utf-8"
+            )
+
+        warm = MypyAnalyzer(tmp_path)
+        warm.set_cache_path(cache_path)
+        analyzed: list[str] = []
+        original_analyze = warm.analyze_endpoint
+
+        def record_analyze(endpoint: Endpoint) -> EndpointDependencies:
+            analyzed.append(endpoint.path)
+            return original_analyze(endpoint)
+
+        warm.analyze_endpoint = record_analyze  # type: ignore[method-assign]
+        results = warm.analyze_endpoints([endpoint_a, endpoint_b])
+
+        assert analyzed == [endpoint_a.path, endpoint_b.path]
+        if change == "stub":
+            assert all(
+                site.canonical_symbol != "typing_dep.Store.put"
+                for site in results[warm._endpoint_key(endpoint_a)].resolved_call_sites
+            )
+        elif change == "removed-stub":
+            assert warm.verified_mypy_source_hashes.get("typing_dep.pyi") is None
+        else:
+            assert warm.verified_package_versions["typing-dep"] == "1.1"
+
     @pytest.mark.parametrize(
         "declared_name", ["beautifulsoup4", "ZoPe.Interface", "zope__..interface"]
     )

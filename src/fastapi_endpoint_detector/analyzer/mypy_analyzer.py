@@ -6513,14 +6513,11 @@ class MypyAnalyzer:
         """Analyze one snapshot while sharing its local-module policy."""
         # Try to load from cache
         if use_cache and self.cache_path.exists() and self._load_cache():
-            all_cached = all(self._endpoint_key(ep) in self._endpoint_deps for ep in endpoints)
-            if all_cached:
-                # Endpoint call sites can be reused, but package applicability
-                # evidence must be derived from the current typed source tree
-                # and adjacent distribution metadata. It is intentionally not
-                # restored from cache JSON: those hashes and version labels
-                # would be caller-editable claims unless revalidated against
-                # the bytes mypy actually analyzed.
+            if self._endpoint_deps:
+                # Validate imported typing inputs before retaining even a
+                # partial set of endpoint rows. Otherwise a request that adds
+                # an endpoint can combine rows analyzed against old stubs with
+                # rows analyzed against the current environment.
                 try:
                     self._ensure_mypy_built()
                 except MypyAnalyzerError:
@@ -6530,14 +6527,21 @@ class MypyAnalyzer:
                     self._endpoint_deps.clear()
                 else:
                     if (
-                        self._cached_typed_environment_fingerprint
-                        and self._cached_typed_environment_fingerprint
-                        == self._typed_environment_fingerprint
+                        not self._cached_typed_environment_fingerprint
+                        or self._cached_typed_environment_fingerprint
+                        != self._typed_environment_fingerprint
                     ):
-                        return self._endpoint_deps
-                    # Call-site resolution depends on imported declarations,
-                    # so a dependency typing change invalidates endpoint rows.
-                    self._endpoint_deps.clear()
+                        # Call-site resolution depends on imported declarations.
+                        self._endpoint_deps.clear()
+            all_cached = all(self._endpoint_key(ep) in self._endpoint_deps for ep in endpoints)
+            if all_cached:
+                # Endpoint call sites can be reused, but package applicability
+                # evidence must be derived from the current typed source tree
+                # and adjacent distribution metadata. It is intentionally not
+                # restored from cache JSON: those hashes and version labels
+                # would be caller-editable claims unless revalidated against
+                # the bytes mypy actually analyzed.
+                return self._endpoint_deps
         else:
             self._endpoint_deps.clear()
 
