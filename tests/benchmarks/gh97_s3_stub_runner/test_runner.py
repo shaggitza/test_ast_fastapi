@@ -7,6 +7,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from benchmarks.gh97_s3_stub_runner.runner import (
@@ -367,6 +368,48 @@ def test_fixture_resolver_rejects_fallback_decoy_and_accepts_explicit_project(
         for e in result.errors
     )
     assert not any("private_only" in e for e in result.errors)
+
+
+def test_direct_build_temporarily_removes_and_restores_mypy_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MYPYPATH", "/tmp/ambient-mypy-path")
+
+    def fail_build(*args: Any, **kwargs: Any) -> Any:
+        assert "MYPYPATH" not in os.environ
+        raise RuntimeError("simulated mypy build failure")
+
+    monkeypatch.setattr(mypy_build, "build", fail_build)
+    with pytest.raises(RuntimeError, match="simulated mypy build failure"):
+        run_probe(WHEEL, DEFAULT_MANIFEST)
+    assert os.environ["MYPYPATH"] == "/tmp/ambient-mypy-path"
+
+
+@pytest.mark.skipif(not WHEEL.is_file(), reason="requires the supplied pinned wheel")
+def test_pinned_report_is_unchanged_by_ambient_mypy_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    baseline = run_probe(WHEEL, DEFAULT_MANIFEST)
+    ambient = tmp_path / "ambient"
+    for package in ("boto3", "botocore"):
+        package_root = ambient / package
+        package_root.mkdir(parents=True)
+        (package_root / "__init__.pyi").write_text("class AmbientDecoy: ...\n", encoding="utf-8")
+        (package_root / "client.pyi").write_text(
+            "class S3Client:\n    def put_object(self, *, Body: int) -> str: ...\n",
+            encoding="utf-8",
+        )
+    original_build = mypy_build.build
+
+    def check_build_scope(*args: Any, **kwargs: Any) -> Any:
+        assert "MYPYPATH" not in os.environ
+        return original_build(*args, **kwargs)
+
+    monkeypatch.setattr(mypy_build, "build", check_build_scope)
+    monkeypatch.setenv("MYPYPATH", str(ambient))
+    ambient_report = run_probe(WHEEL, DEFAULT_MANIFEST)
+    assert os.environ["MYPYPATH"] == str(ambient)
+    assert ambient_report == baseline
 
 
 @pytest.mark.skipif(

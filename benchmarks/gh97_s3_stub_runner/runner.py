@@ -54,6 +54,19 @@ FIXTURES = (
 _MYPY_POSIX_FALLBACK_ROOT = "/usr/local/lib/mypy"
 
 
+@contextlib.contextmanager
+def _without_mypy_path() -> Any:
+    """Keep ambient MYPYPATH out of one build, restoring it even on failure."""
+    was_set = "MYPYPATH" in os.environ
+    value = os.environ.pop("MYPYPATH", None)
+    try:
+        yield
+    finally:
+        if was_set:
+            assert value is not None
+            os.environ["MYPYPATH"] = value
+
+
 def _within(path: str, root: str) -> bool:
     """Return whether path is inside root using filesystem path boundaries."""
     try:
@@ -560,12 +573,13 @@ def run_probe(wheel: Path, manifest: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
                 if os.name != "nt"
                 else FileSystemCache()
             )
-            result = mypy_build.build(
-                sources=[mypy_build.BuildSource(str(source), None, None)],
-                options=options,
-                fscache=fscache,
-                alt_lib_path=str(stub_root),
-            )
+            with _without_mypy_path():
+                result = mypy_build.build(
+                    sources=[mypy_build.BuildSource(str(source), None, None)],
+                    options=options,
+                    fscache=fscache,
+                    alt_lib_path=str(stub_root),
+                )
             state = next(
                 (candidate for candidate in result.graph.values() if candidate.path == str(source)),
                 None,
