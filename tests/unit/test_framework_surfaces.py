@@ -751,6 +751,50 @@ def test_duplicate_keyword_from_separate_expansions_fails_closed(tmp_path: Path)
     assert any("duplicate keyword names" in item.reason for item in inventory.limitations)
 
 
+@pytest.mark.parametrize(
+    "arguments,expected",
+    [
+        ("**{'x': 1}, **{'x': 2}, later=app.add_event_handler('startup', cb)", False),
+        ("**{'x': 1}, **{'x': 2}, **{'later': app.add_event_handler('startup', cb)}", False),
+        ("**{'x': 1}, **{'x': 2, 'later': app.add_event_handler('startup', cb)}", True),
+        ("**{'x': 1, 'x': 2}, later=app.add_event_handler('startup', cb)", True),
+    ],
+)
+def test_keyword_mapping_failure_preserves_exact_expression_evaluation_order(
+    tmp_path: Path, arguments: str, expected: bool
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\nunused = FastAPI()\n"
+        "async def cb(): pass\n"
+        f"unused.add_event_handler({arguments})\n",
+        encoding="utf-8",
+    )
+    inventory = _extract(tmp_path)
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert [item.handler.name for item in inventory.endpoints] == (["cb"] if expected else [])
+    assert not inventory.limitations
+
+
+@pytest.mark.parametrize("receiver", ["app", "unused"])
+def test_shadowed_getattr_can_evaluate_nested_outer_registrations(
+    tmp_path: Path, receiver: str
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\nunused = FastAPI()\n"
+        "async def cb(): pass\n"
+        "def my_getattr(obj, name): return obj.add_event_handler\n"
+        "getattr = my_getattr\n"
+        f"getattr({receiver}, 'add_event_handler')('startup', "
+        "app.add_event_handler('shutdown', cb))\n",
+        encoding="utf-8",
+    )
+    inventory = _extract(tmp_path)
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert [item.handler.name for item in inventory.endpoints] == ["cb"]
+    assert inventory.endpoints[0].discovery_status.value == "conditional"
+    assert any("shadowed getattr" in item.reason for item in inventory.limitations)
+
+
 @pytest.mark.parametrize("entrypoint", ["factory", "bootstrap"])
 def test_selected_deferred_entrypoint_duplicate_keyword_calls_fail_closed(
     tmp_path: Path, entrypoint: str

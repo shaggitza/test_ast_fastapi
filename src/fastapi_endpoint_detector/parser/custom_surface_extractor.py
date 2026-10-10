@@ -2645,12 +2645,24 @@ class CustomSurfaceExtractor:
                         ),
                     )
                 )
-                if self._is_builtin_getattr_call(call.func, callable_state):
-                    # A dynamic method name prevents exact registration, but a
-                    # valid getattr still evaluates the outer call arguments.
-                    unsupported_getattr_registration = True
-                else:
-                    return
+            if self._is_builtin_getattr_call(call.func, callable_state):
+                # A dynamic method name prevents exact registration, but a
+                # valid getattr still evaluates the outer call arguments.
+                unsupported_getattr_registration = True
+            elif "getattr" in callable_state:
+                # A replacement can return a callable. Its outer arguments
+                # remain potentially evaluated, unlike an invalid builtin call.
+                unsupported_getattr_registration = True
+                inherited_conditions = (
+                    *inherited_conditions,
+                    EndpointDiscoveryCondition(
+                        source_path=module.path,
+                        source_line=call.lineno,
+                        reason="shadowed getattr returns a callable successfully",
+                    ),
+                )
+            else:
+                return
         positional: list[_EvaluatedArgument] = []
         for argument_index, argument in enumerate(call.args):
             self._inspect_expression(module, argument, state, inherited_conditions)
@@ -2717,6 +2729,8 @@ class CustomSurfaceExtractor:
                         keyword_positions[keyword.arg] = len(keywords)
                 keywords.append(capture)
                 effective_keywords.append(keyword)
+                if duplicate_keywords:
+                    break
                 continue
             expanded_literal = True
             mapping_names: set[str] = set()
@@ -2754,6 +2768,10 @@ class CustomSurfaceExtractor:
                     # Duplicate keys within one dict replace the value in place.
                     keywords[position] = capture
                     effective_keywords[position] = ast.keyword(arg=name, value=entry_value)
+            # The whole mapping expression is evaluated before merging it.
+            # A failed merge prevents evaluation of subsequent keywords.
+            if duplicate_keywords:
+                break
         if expanded_literal:
             call = ast.copy_location(
                 ast.Call(func=call.func, args=list(call.args), keywords=effective_keywords), call
