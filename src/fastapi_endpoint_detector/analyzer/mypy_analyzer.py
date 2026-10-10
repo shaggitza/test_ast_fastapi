@@ -966,6 +966,12 @@ class MypyAnalyzer:
             if self.no_site_packages and original_mypypath is not None:
                 os.environ["MYPYPATH"] = original_mypypath
 
+    def framework_phase_build_snapshot(self) -> tuple[Any, dict[str, bytes | None]] | None:
+        """Return the retained build and source bytes, without triggering a build."""
+        if self._build_result is None or not self._trees:
+            return None
+        return self._build_result, dict(self._analysis_source_snapshots)
+
     def _effective_follow_imports(self) -> str:
         """Translate inventory policy to mypy's string option vocabulary."""
         value = getattr(self.source_inventory, "follow_imports", True)
