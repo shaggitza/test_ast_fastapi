@@ -263,6 +263,12 @@ class GitRunner:
             "-c",
             "core.hooksPath=/dev/null",
             "-c",
+            "maintenance.auto=false",
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "gc.autoDetach=false",
+            "-c",
             "protocol.allow=never",
             "-c",
             (

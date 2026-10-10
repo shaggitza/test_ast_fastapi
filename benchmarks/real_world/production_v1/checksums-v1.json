@@ -3,7 +3,7 @@
     "benchmarks/real_world/ground_truth_campaign_v1.py": "sha256:994b6c8f1c3e03021fa461d7bd07cbfaf471c26dfbd330998219e766568a3f44",
     "benchmarks/real_world/ground_truth_packet_v1.py": "sha256:76d7efe22dbb91136d975afe71c1d66e317d76fd0c45b53247a240cd608f28d6",
     "benchmarks/real_world/ground_truth_run_v1.py": "sha256:c4cc67f049655546afe2cd9d7b966848b075026c6c98d60fa476c48065102c23",
-    "benchmarks/real_world/ground_truth_source_v1.py": "sha256:04e2e268bb6ba276bcda4255f3440683e3d9419a1259dae4ea9b9b9261d882bc",
+    "benchmarks/real_world/ground_truth_source_v1.py": "sha256:962e1c635ce7911c769f09cd656b056db512fcc161e821ca8762265968644db4",
     "benchmarks/real_world/ground_truth_submit_v1.py": "sha256:1dcd23c2d9869e3802c31e37c0aab99b1bde922390a4990f4abcdcb7a1d7f27b",
     "benchmarks/real_world/pilot_packet_v2.py": "sha256:7347c6fa91afb7122707980369c273c50419d4de654bdd9c4e57b3d006651895",
     "benchmarks/real_world/production_v1/README.md": "sha256:1509c0d083b32dfeb12b83ccd6b6714735645ef79a7f5cef39d58e988ef9755b",

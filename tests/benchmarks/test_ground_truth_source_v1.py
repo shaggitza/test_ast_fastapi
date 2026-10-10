@@ -743,3 +743,20 @@ def test_live_disk_monitor_does_not_suppress_read_denial(
     monkeypatch.setattr(Path, "lstat", deny)
     with pytest.raises(PermissionError):
         source._tree_bounds(tmp_path, live_fetch=True)
+
+
+def test_git_runner_overrides_automatic_background_maintenance(tmp_path: Path) -> None:
+    remote, _commits = _remote(tmp_path)
+    _git(remote, "config", "maintenance.auto", "true")
+    _git(remote, "config", "gc.auto", "1")
+    _git(remote, "config", "gc.autoDetach", "true")
+    runner = source.GitRunner()
+    for key, expected in (
+        ("maintenance.auto", b"false"),
+        ("gc.auto", b"0"),
+        ("gc.autoDetach", b"false"),
+    ):
+        result = runner.run(remote, ["config", "--get", key])
+        assert result.stdout.strip() == expected
+    # The command policy wins without modifying the on-disk local config.
+    assert _git(remote, "config", "--get", "maintenance.auto").strip() == b"true"
