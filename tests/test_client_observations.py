@@ -83,10 +83,11 @@ def test_fetch_requires_exact_literal_method_options_and_join_needs_origin_trust
     )
     assert [(item.method, item.route_path) for item in calls] == [
         ("POST", "/items"),
+        ("GET", "/x"),
         ("GET", "/items"),
     ]
     relative = calls[0]
-    absolute = calls[1]
+    absolute = calls[2]
     surfaces = (
         EstablishedSurface("untrusted", "/items", "POST", "https://api.test", False),
         EstablishedSurface("trusted", "/items", "GET", "https://api.test", True),
@@ -110,16 +111,73 @@ def test_dynamic_urls_and_unknown_request_options_are_uncertainties_only() -> No
     )
     exact, uncertain = extract_client_observation_inventory(source, Path("client.ts"))
     assert [(item.method, item.route_path) for item in exact] == [
+        ("GET", "/items"),
         ("POST", "/items"),
         ("GET", "/reversed"),
     ]
     assert [item.reason for item in uncertain] == [
-        "dynamic_or_nonliteral_url",
         "dynamic_or_unsupported_request_options",
         "unsupported_or_dynamic_request_options",
         "unsupported_or_dynamic_axios_options",
     ]
     assert all(item.start_offset < item.end_offset for item in uncertain)
+
+
+def test_dynamic_base_fetch_templates_keep_static_route_and_query_evidence() -> None:
+    source = r"""
+fetch(`${khojUrl}/api/content?client=obsidian`, {
+  method: 'PATCH', headers: { Authorization: token }, body: formData,
+});
+fetch(`${WEBUI_API_BASE_URL}/chats/search?${searchParams.toString()}`, {
+  method: 'GET', headers: { Accept: 'application/json' },
+});
+"""
+    observations = extract_client_observations(source, Path("api.ts"))
+    assert [(item.method, item.route_path, item.query, item.origin) for item in observations] == [
+        ("PATCH", "/api/content", "client=obsidian", None),
+        ("GET", "/chats/search", "dynamic", None),
+    ]
+    surfaces = (
+        EstablishedSurface("unattested", "/api/content", "PATCH", "https://server.test", True),
+        EstablishedSurface("untrusted", "/api/content", "PATCH", None, True),
+    )
+    assert join_established_surfaces(observations, surfaces) == ()
+
+
+def test_dynamic_base_templates_and_options_reject_ambiguous_shapes() -> None:
+    source = """
+fetch(`${base}/items/${id}`, {method: 'GET'});
+fetch(`${base}items`, {method: 'GET'});
+fetch(`${base}/items#fragment`, {method: 'GET'});
+fetch(`${base}/items?query=${}`, {method: 'GET'});
+fetch(`${base}/items`, {...options, method: 'GET'});
+fetch(`${base}/items`, {[key]: 'x', method: 'GET'});
+fetch(`${base}/items`, {get method() { return 'GET'; }});
+fetch(`${base}/items`, {method: 'GET', method: 'POST'});
+fetch(`${base}/items`, {headers: {method: 'GET'}});
+function fetch(url, options) { return url; }
+fetch(`${base}/foreign`, {method: 'GET'});
+"""
+    observations = extract_client_observations(source, Path("client.ts"))
+    assert observations == ()
+
+
+def test_foreign_fetch_receiver_is_not_a_global_fetch_call() -> None:
+    observations = extract_client_observations(
+        "Foreign.fetch(`${base}/foreign`, {method:'GET'}); "
+        "fetch(`${base}/global`, {method:'GET'});",
+        Path("client.ts"),
+    )
+    assert [(item.method, item.route_path) for item in observations] == [("GET", "/global")]
+
+
+def test_dynamic_base_template_observations_do_not_join_but_explicit_origin_does() -> None:
+    template = extract_client_observations("fetch(`${base}/items?q=1`, {method:'GET'});")
+    surfaces = (EstablishedSurface("items", "/items", "GET", "https://api.test", True),)
+    assert len(template) == 1 and template[0].origin is None
+    assert join_established_surfaces(template, surfaces) == ()
+    literal = extract_client_observations("fetch('https://api.test/items?q=1');")
+    assert [match.surface_id for match in join_established_surfaces(literal, surfaces)] == ["items"]
 
 
 def test_svelte_scans_script_blocks_only() -> None:

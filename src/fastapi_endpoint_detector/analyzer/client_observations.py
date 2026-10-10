@@ -241,24 +241,83 @@ def _parse_url(  # noqa: PLR0911
         return None
 
 
-def _method_option(arg: list[_Token]) -> str | None:
-    # Deliberately allow only an object containing the single literal method.
+def _method_option(arg: list[_Token]) -> str | None:  # noqa: PLR0911, PLR0912
+    """Read one literal top-level method from an ordinary options object."""
     if len(arg) < 5 or arg[0].value != "{" or arg[-1].value != "}":
         return None
-    inner = arg[1:-1]
-    if (
-        len(inner) == 3
-        and inner[0].value == "method"
-        and inner[1].value == ":"
-        and inner[2].kind == "string"
-    ):
-        method = inner[2].value.upper()
-        return (
-            method
-            if method in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
-            else None
-        )
-    return None
+    properties: list[list[_Token]] = []
+    begin, stack = 1, []
+    pairs = {"{": "}", "[": "]", "(": ")"}
+    for index in range(1, len(arg) - 1):
+        value = arg[index].value
+        if value in pairs:
+            stack.append(pairs[value])
+        elif value in {"}", "]", ")"}:
+            if not stack or stack.pop() != value:
+                return None
+        elif value == "," and not stack:
+            if index == begin:
+                return None
+            properties.append(arg[begin:index])
+            begin = index + 1
+    if stack:
+        return None
+    if begin < len(arg) - 1:
+        properties.append(arg[begin:-1])
+    elif not properties:
+        return None
+    methods: list[list[_Token]] = []
+    for prop in properties:
+        if len(prop) < 3 or prop[0].kind not in {"id", "string"} or prop[1].value != ":":
+            return None
+        if prop[0].value == "method":
+            methods.append(prop)
+        elif any(token.kind == "id" and token.value == "method" for token in prop[2:]):
+            return None
+    if len(methods) != 1:
+        return None
+    prop = methods[0]
+    if len(prop) != 3 or prop[2].kind != "string":
+        return None
+    method = prop[2].value.upper()
+    return (
+        method if method in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"} else None
+    )
+
+
+def _template_url(  # noqa: PLR0911
+    arg: list[_Token],
+) -> tuple[str, str, str, str | None, str | None] | None:
+    """Accept a dynamic base followed by a static path and optional query."""
+    if len(arg) != 1 or arg[0].kind != "template":
+        return None
+    raw = arg[0].value
+    if "\\" in raw or not raw.startswith("${"):
+        return None
+    close = raw.find("}")
+    if close <= 2:
+        return None
+    base_expression = raw[2:close]
+    if any(char in base_expression for char in "{} `"):
+        return None
+    suffix = raw[close + 1 :]
+    if not suffix.startswith("/") or "#" in suffix:
+        return None
+    path, separator, query = suffix.partition("?")
+    if any(char in path for char in "${}`"):
+        return None
+    if separator:
+        probe = re.sub(r"\$\{[^{}]+\}", "", query)
+        if "${" in probe or "}" in probe or "{" in probe or "`" in query:
+            return None
+        query_evidence = "dynamic" if "${" in query else query or None
+    else:
+        query_evidence = None
+    parsed = _parse_url(path)
+    if parsed is None:
+        return None
+    protocol, default, route, _query, _origin = parsed
+    return protocol, default, route, query_evidence, None
 
 
 def _axios_config(arg: list[_Token]) -> tuple[str, str] | None:
@@ -670,14 +729,19 @@ def extract_client_observation_inventory(  # noqa: PLR0912, PLR0915
             continue
         args, close_i = parsed_args
         url: str | None = None
+        parsed_url: tuple[str, str, str, str | None, str | None] | None = None
         method = fixed or "GET"
         uncertainty: str | None = None
         if name in {"fetch", "websocket"}:
             if 1 <= len(args) <= 2:
                 url = _literal(args[0])
+                if name == "fetch" and url is None:
+                    parsed_url = _template_url(args[0])
+                    if parsed_url is not None:
+                        url = args[0][0].value
                 if url is None:
                     uncertainty = "dynamic_or_nonliteral_url"
-                elif _has_string_escape(args[0]):
+                elif parsed_url is None and _has_string_escape(args[0]):
                     uncertainty = "escaped_url_literal"
                 if len(args) == 2:
                     parsed_method = _method_option(args[1])
@@ -714,7 +778,8 @@ def extract_client_observation_inventory(  # noqa: PLR0912, PLR0915
                 uncertainty = "unsupported_or_dynamic_axios_options"
         else:
             uncertainty = "unsupported_argument_shape"
-        parsed_url = _parse_url(url) if url is not None else None
+        if parsed_url is None:
+            parsed_url = _parse_url(url) if url is not None else None
         if parsed_url is None and uncertainty is None:
             uncertainty = "unsupported_url"
         if parsed_url and method and uncertainty is None:
