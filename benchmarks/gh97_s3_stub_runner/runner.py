@@ -309,16 +309,18 @@ def _binding_result(row: dict[str, Any]) -> dict[str, Any]:
 
 def _normalize_private_paths(value: Any, private_root: Path, cwd: Path) -> Any:
     """Replace only exact known private-root path components in report strings."""
-    try:
-        relative_root = str(Path(os.path.relpath(private_root, cwd)))
-    except ValueError:
-        # A Windows cwd on another drive has no relative representation.
-        relative_root = str(private_root)
-    roots = (str(private_root), relative_root)
+    roots: set[str] = set()
+    for root in (private_root, private_root.resolve()):
+        roots.add(str(root))
+        try:
+            roots.add(str(Path(os.path.relpath(root, cwd))))
+        except ValueError:
+            # A Windows cwd on another drive has no relative representation.
+            continue
 
     def normalize(text: str) -> str:
         result = text
-        for root in sorted(set(roots), key=len, reverse=True):
+        for root in sorted(roots, key=len, reverse=True):
             if root in {".", ""}:
                 continue
             pattern = re.escape(root.replace("\\", "/")).replace("/", r"[\\/]")

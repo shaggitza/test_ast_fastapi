@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import tempfile
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -117,6 +118,34 @@ def test_different_windows_drives_keep_absolute_private_root(
         cwd,
     )
     assert normalized["file_path"] == "<private-s3-probe>\\fixture\\complete.py"
+
+
+def test_symlink_temporary_root_normalizes_resolved_and_display_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "resolved temp root"
+    target.mkdir()
+    alias = tmp_path / "temp alias"
+    alias.symlink_to(target, target_is_directory=True)
+    monkeypatch.setattr(tempfile, "tempdir", str(alias))
+    cwd = tmp_path / "external cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+
+    with tempfile.TemporaryDirectory(prefix="probe-") as temp_name:
+        private = Path(temp_name)
+        resolved = private.resolve()
+        normalized = runner._normalize_private_paths(
+            {
+                "display": str(private / "fixture/complete.py"),
+                "diagnostic": str(resolved / "stubtree/client.pyi"),
+            },
+            private,
+            Path.cwd(),
+        )
+
+    assert normalized["display"] == "<private-s3-probe>/fixture/complete.py"
+    assert normalized["diagnostic"] == "<private-s3-probe>/stubtree/client.pyi"
 
 
 def test_invalid_typed_calls_are_classified_from_call_diagnostics() -> None:
