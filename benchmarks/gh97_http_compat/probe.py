@@ -77,15 +77,39 @@ def _diagnostic_line(item: str) -> int | None:
 
 def _normalize_diagnostic(item: str, checkout: Path, environment: Path, probe_root: Path) -> str:
     # Diagnostics may use either slash style, regardless of the host path style.
-    root_pattern = re.escape(probe_root.resolve().as_posix()).replace("/", r"[\\/]")
-    normalized = re.sub(root_pattern + r"(?=[\\/]|$)", "<private-probe>", item)
-    normalized = re.sub(r"/[^\s\"']*/mypy/typeshed/", "<typeshed>/", normalized)
+    def portable_root_pattern(path: Path) -> str:
+        # Path.as_posix() is useful on POSIX, but a Windows-style path supplied
+        # as a Path on POSIX retains backslashes. Treat either as separators.
+        normalized_root = str(path).replace("\\", "/").rstrip("/")
+        return re.escape(normalized_root).replace("/", r"[\\/]")
+
+    def replace_root(value: str, path: Path, label: str) -> str:
+        pattern = portable_root_pattern(path)
+        flags = re.IGNORECASE if re.match(r"^[A-Za-z]:", str(path)) else 0
+        replaced = re.sub(
+            r"(?<![A-Za-z0-9_.\\/:-])" + pattern + r"(?=[\\/]|$)",
+            label,
+            value,
+            flags=flags,
+        )
+
+        return replaced
+
+    normalized = replace_root(item, probe_root, "<private-probe>")
+    # Typeshed can be reported below any environment root, with either slash
+    # style. Match the mypy/typeshed component boundary rather than stripping
+    # arbitrary preceding paths.
+    normalized = re.sub(
+        r"(?<![A-Za-z0-9_.-])[^\s\"']*?[\\/]mypy[\\/]typeshed[\\/]([^\s\"']+)",
+        lambda match: "<typeshed>/" + match.group(1).replace("\\", "/"),
+        normalized,
+    )
     for path, label in sorted(
         ((checkout, "<analyzer-project>"), (environment, "<python-environment>")),
-        key=lambda pair: len(str(pair[0])),
+        key=lambda pair: len(portable_root_pattern(pair[0])),
         reverse=True,
     ):
-        normalized = normalized.replace(str(path) + "/", label + "/")
+        normalized = replace_root(normalized, path, label)
     return normalized
 
 

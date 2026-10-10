@@ -162,6 +162,36 @@ def test_diagnostic_probe_root_accepts_windows_separators() -> None:
     assert probe._diagnostic_line(normalized) == 7
 
 
+def test_diagnostic_roots_and_typeshed_normalize_independent_of_separator_style() -> None:
+    checkout = Path("C:/work/analyzer")
+    environment = Path("C:/work/analyzer/.venv")
+    probe_root = Path("D:/tmp/gh97_probe")
+    item = (
+        r"C:\work\analyzer\src\module.py:4: note: D:\tmp\gh97_probe\app\fixture.py:12: error; "
+        r"C:\work\analyzer\.venv\Lib\site-packages\mypy\typeshed\stdlib\builtins.pyi: "
+        r"note: C:/work/analyzer/helper.py; /opt/mypy/typeshed/stdlib/typing.pyi"
+    )
+    normalized = probe._normalize_diagnostic(item, checkout, environment, probe_root)
+    assert normalized == (
+        r"<analyzer-project>\src\module.py:4: note: <private-probe>\app\fixture.py:12: error; "
+        r"<typeshed>/stdlib/builtins.pyi: note: <analyzer-project>/helper.py; "
+        "<typeshed>/stdlib/typing.pyi"
+    )
+    assert probe._diagnostic_line(normalized) == 12
+
+
+def test_diagnostic_roots_require_component_boundaries() -> None:
+    normalized = probe._normalize_diagnostic(
+        "/workspace/project-sibling/file.py:1: /tmp/probe-extra/app/fixture.py:2: error",
+        Path("/workspace/project"),
+        Path("/workspace/project/.venv"),
+        Path("/tmp/probe"),
+    )
+    assert normalized == (
+        "/workspace/project-sibling/file.py:1: /tmp/probe-extra/app/fixture.py:2: error"
+    )
+
+
 @pytest.mark.parametrize(
     "diagnostic",
     [
@@ -202,3 +232,13 @@ def test_source_provenance_survives_result_commits_and_rejects_dirty_sources(
     (tmp_path / "src" / "untracked.py").write_text("# new code\n", encoding="utf-8")
     with pytest.raises(RuntimeError, match="source tree must match committed source bytes"):
         probe._source_provenance(tmp_path, runner)
+
+
+def test_diagnostic_root_suffix_in_unrelated_absolute_path_is_preserved() -> None:
+    item = "/other/workspace/project/file.py:1: error"
+    assert (
+        probe._normalize_diagnostic(
+            item, Path("/workspace/project"), Path("/workspace/project/.venv"), Path("/tmp/probe")
+        )
+        == item
+    )
