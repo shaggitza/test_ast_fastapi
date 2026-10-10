@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import hashlib
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 import yaml
 from pydantic import ValidationError
 
 from fastapi_endpoint_detector.analyzer.effect_contract_auditor import audit_effect_contracts
+from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.models.effect_contract import (
     CallArgumentEvidence,
     CallResolutionStatus,
@@ -32,9 +33,6 @@ from fastapi_endpoint_detector.models.endpoint import (
     HandlerInfo,
     InventoryStatus,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _loaded(path: Path):
@@ -204,6 +202,70 @@ def test_motor_contract_requires_exact_pinned_typed_sources(tmp_path: Path) -> N
     ).occurrences[0]
     assert rejected_metadata.audit_status == AuditCallStatus.UNMATCHED
     assert rejected_metadata.reason_code == "package_applicability_unverified"
+
+
+def test_denied_motor_metadata_read_is_audited_as_unverified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = tmp_path / "motor"
+    package.mkdir()
+    core = package / "core.pyi"
+    core.write_text(
+        "class AgnosticCollection:\n    def insert_one(self, doc: object) -> None: ...\n",
+        encoding="utf-8",
+    )
+    asyncio_stub = package / "motor_asyncio.pyi"
+    asyncio_stub.write_text("from .core import AgnosticCollection\n", encoding="utf-8")
+    dist = tmp_path / "motor-3.6.0.dist-info"
+    dist.mkdir()
+    metadata = dist / "METADATA"
+    metadata.write_text("Name: motor\nVersion: 3.6.0\n", encoding="utf-8")
+    app_path = tmp_path / "app.py"
+    app_path.write_text(
+        "from motor.core import AgnosticCollection\n"
+        "def handler(c: AgnosticCollection) -> None:\n"
+        "    c.insert_one({})\n",
+        encoding="utf-8",
+    )
+    endpoint = Endpoint(
+        path="/metadata-denied",
+        methods=[EndpointMethod.GET],
+        handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=2),
+    )
+    original_read_bytes = Path.read_bytes
+
+    def deny_metadata(path: Path) -> bytes:
+        if path == metadata:
+            raise PermissionError("synthetic metadata denial")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", deny_metadata)
+    analyzer = MypyAnalyzer(tmp_path)
+    analyzer.analyze_endpoints([endpoint], use_cache=False)
+
+    site = _site(
+        tmp_path,
+        column=5,
+        symbol="motor.core.AgnosticCollection.insert_one",
+        invocation=InvocationKind.INSTANCE_METHOD,
+        spelling="c.insert_one",
+    )
+    audit = audit_effect_contracts(
+        load_effect_preset("mongodb-v1"),
+        source_root=tmp_path,
+        inventory=EndpointInventory(endpoints=[endpoint]),
+        endpoint_call_sites=[(endpoint, [site])],
+        track_transitive=False,
+        max_depth=1,
+        cache_enabled=False,
+        resolver_versions=("mypy@1.19.1",),
+        verified_mypy_source_hashes=analyzer.verified_mypy_source_hashes,
+        verified_package_source_hashes=analyzer.verified_package_source_hashes,
+        verified_package_versions=analyzer.verified_package_versions,
+    )
+    occurrence = audit.occurrences[0]
+    assert occurrence.audit_status == AuditCallStatus.UNMATCHED
+    assert occurrence.reason_code == "package_applicability_unverified"
 
 
 @pytest.mark.parametrize(

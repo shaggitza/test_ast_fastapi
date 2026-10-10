@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
+from fastapi_endpoint_detector.config import Config, OutputConfig
 from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, HandlerInfo
 from fastapi_endpoint_detector.models.report import (
     AffectedEndpoint,
@@ -16,6 +18,24 @@ from fastapi_endpoint_detector.models.report import (
     ExecutionEvidence,
 )
 from fastapi_endpoint_detector.output.formatters import get_formatter
+
+
+@pytest.mark.parametrize(
+    "field", ["show_confidence", "show_dependency_chain", "colorize", "verbose"]
+)
+@pytest.mark.parametrize("raw", ['"false"', '"yes"', "1", "0"])
+def test_raw_yaml_output_options_reject_non_booleans_before_coercion(field: str, raw: str) -> None:
+    payload = yaml.safe_load(f"output:\n  {field}: {raw}\n")
+    with pytest.raises(ValidationError):
+        Config.model_validate(payload)
+    with pytest.raises(ValidationError):
+        OutputConfig.model_validate(payload["output"])
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_output_options_accept_actual_booleans(value: bool) -> None:
+    options = dict.fromkeys(OutputConfig.model_fields, value)
+    assert Config.model_validate({"output": options}).output.model_dump() == options
 
 
 def make_report(changed_files: list[str] | None = None) -> AnalysisReport:

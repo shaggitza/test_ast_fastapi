@@ -173,7 +173,9 @@ class PackageApplicability(_StrictModel):
         if self.distribution is None and self.python is None:
             raise ValueError("package applicability requires a distribution or Python range")
         if any(
-            not path or path.startswith("/") or ".." in path.split("/")
+            not path
+            or path.startswith("/")
+            or ".." in path.split("/")
             or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
             for path, digest in self.source_hashes.items()
         ):

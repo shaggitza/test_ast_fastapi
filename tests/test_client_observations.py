@@ -324,3 +324,55 @@ def test_separate_unary_operators_do_not_count_as_prefix_mutation() -> None:
         "fetch('/fetch'); axios.get('/axios'); new WebSocket('wss://api.test/events');"
     )
     assert [item.route_path for item in observations] == ["/fetch", "/axios", "/events"]
+
+
+def test_client_updates_respect_line_terminators_and_maximal_munch() -> None:
+    for source in (
+        "fetch\n++counter\nfetch('/items');",
+        "fetch /*\n*/ --counter; fetch('/items');",
+        "fetch\u2028++counter; fetch('/items');",
+        "counter+++fetch('/items');",
+        "counter---axios.get('/items');",
+        "counter++ + fetch('/items');",
+        "counter-- - axios.get('/items');",
+    ):
+        observations = extract_client_observations(source)
+        assert [(item.method, item.route_path) for item in observations] == [("GET", "/items")], (
+            source
+        )
+    for source in (
+        "++fetch; fetch('/items');",
+        "--axios; axios.get('/items');",
+        "fetch++; fetch('/items');",
+        "fetch /*no newline*/ ++; fetch('/items');",
+        "counter + ++fetch; fetch('/items');",
+        "counter\n++fetch; fetch('/items');",
+        "import http from 'axios'; ++http; http.get('/items');",
+        "setTimeout(() => fetch('/items'), 0)\n++fetch",
+        "setTimeout(() => axios.get('/items'), 0)\n--axios",
+        "setTimeout(() => new WebSocket('wss://api.test/items'), 0)\n++WebSocket",
+        "import http from 'axios'; setTimeout(() => http.get('/items'), 0)\n--http",
+    ):
+        assert extract_client_observations(source) == (), source
+
+
+def test_invalid_literal_ports_and_hosts_produce_uncertainties_without_abort() -> None:
+    for url in (
+        "https://example.com:notaport/items",
+        "https://example.com:65536/items",
+        "https://[bad/items",
+        "https://example.com:/items",
+    ):
+        source = f'fetch("{url}");'
+        observations, issues = extract_client_observation_inventory(source)
+        assert observations == ()
+        assert len(issues) == 1
+        assert issues[0].reason == "unsupported_url"
+        assert issues[0].start_offset == 0
+        assert issues[0].end_offset == len(source) - 1
+    observations, issues = extract_client_observation_inventory(
+        'fetch("https://example.com:443/items");'
+    )
+    assert not issues
+    assert len(observations) == 1
+    assert observations[0].origin == "https://example.com:443"

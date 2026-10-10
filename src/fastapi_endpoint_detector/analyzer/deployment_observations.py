@@ -155,14 +155,10 @@ def extract_dockerfile_observations(  # noqa: PLR0912, PLR0915
         text = raw.strip()
         if not text or text.startswith("#"):
             continue
-        instruction, separator, argument = text.partition(" ")
-        if not separator:
-            instruction, separator, argument = text.partition("\t")
-        if not separator:
-            match = re.match(r"(\S+)(\s+)(.*)", text)
-            if match is None:
-                continue
-            instruction, _separator, argument = match.groups()
+        match = re.match(r"(\S+)\s+(.*)", text)
+        if match is None:
+            continue
+        instruction, argument = match.groups()
         instruction = instruction.upper()
         if instruction not in _INSTRUCTIONS:
             continue

@@ -10,15 +10,20 @@ These tests verify the mypy-based dependency analysis, including:
 import sys
 from importlib.util import find_spec
 from pathlib import Path
+from typing import Any
 
+import mypy.build
 import pytest
+from mypy import modulefinder
 from mypy.nodes import MemberExpr, NameExpr
 
+from fastapi_endpoint_detector.analyzer import mypy_analyzer
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import (
     CallFrame,
     EndpointDependencies,
     MypyAnalyzer,
     MypyAnalyzerError,
+    _is_path_within,
 )
 from fastapi_endpoint_detector.analyzer.source_inventory import build_source_inventory
 from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, HandlerInfo
@@ -26,6 +31,115 @@ from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, 
 
 class TestMypyAnalyzerBasic:
     """Basic tests for MypyAnalyzer."""
+
+    def test_adjacent_metadata_is_scanned_once_per_package_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        package = tmp_path / "multi_pkg"
+        package.mkdir()
+        (package / "__init__.pyi").write_text("from . import api\n", encoding="utf-8")
+        (package / "api.pyi").write_text("def call() -> None: ...\n", encoding="utf-8")
+        dist_info = tmp_path / "multi-pkg-1.0.dist-info"
+        dist_info.mkdir()
+        (dist_info / "METADATA").write_text("Name: multi-pkg\nVersion: 1.0\n", encoding="utf-8")
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "from multi_pkg import api\ndef handler() -> None:\n    api.call()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/single-metadata-scan",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=2),
+        )
+        original_read_bytes = Path.read_bytes
+        metadata_reads = 0
+
+        def counted_read_bytes(path: Path) -> bytes:
+            nonlocal metadata_reads
+            if path.name == "METADATA" and path.parent == dist_info:
+                metadata_reads += 1
+            return original_read_bytes(path)
+
+        monkeypatch.setattr(Path, "read_bytes", counted_read_bytes)
+        analyzer = MypyAnalyzer(tmp_path)
+        analyzer.analyze_endpoints([endpoint], use_cache=False)
+
+        # One read authenticates the package during the build and one fingerprints
+        # the typed environment; per-module rescans would multiply this count.
+        assert metadata_reads == 2
+        assert analyzer.verified_package_versions["multi-pkg"] == "1.0"
+
+    def test_unreadable_package_source_leaves_source_pin_unverified(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        package = tmp_path / "unreadable_pkg"
+        package.mkdir()
+        typed_source = package / "__init__.pyi"
+        typed_source.write_text("def call() -> None: ...\n", encoding="utf-8")
+        dist_info = tmp_path / "unreadable-pkg-1.0.dist-info"
+        dist_info.mkdir()
+        (dist_info / "METADATA").write_text(
+            "Name: unreadable-pkg\nVersion: 1.0\n", encoding="utf-8"
+        )
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "from unreadable_pkg import call\ndef handler() -> None:\n    call()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/unreadable-source",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=2),
+        )
+        original_read_bytes = Path.read_bytes
+
+        def denied(path: Path) -> bytes:
+            if path == typed_source:
+                raise PermissionError("synthetic read denial")
+            return original_read_bytes(path)
+
+        monkeypatch.setattr(Path, "read_bytes", denied)
+        analyzer = MypyAnalyzer(tmp_path)
+        analyzer.analyze_endpoints([endpoint], use_cache=False)
+
+        assert "unreadable_pkg/__init__.pyi" not in analyzer.verified_mypy_source_hashes
+        assert analyzer.verified_package_versions["unreadable-pkg"] == "1.0"
+
+    def test_source_changed_after_mypy_parse_cannot_authenticate_source_pin(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        package = tmp_path / "racing_pkg"
+        package.mkdir()
+        typed_source = package / "__init__.pyi"
+        original = b"def call() -> None: ...\n"
+        typed_source.write_bytes(original)
+        dist_info = tmp_path / "racing-pkg-1.0.dist-info"
+        dist_info.mkdir()
+        (dist_info / "METADATA").write_text("Name: racing-pkg\nVersion: 1.0\n", encoding="utf-8")
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "from racing_pkg import call\ndef handler() -> None:\n    call()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/changed-source",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=2),
+        )
+        original_build = mypy.build.build
+
+        def mutate_after_parse(*args: Any, **kwargs: Any) -> Any:
+            result = original_build(*args, **kwargs)
+            typed_source.write_bytes(b"def call() -> int: ...\n")
+            return result
+
+        monkeypatch.setattr(mypy.build, "build", mutate_after_parse)
+        analyzer = MypyAnalyzer(tmp_path)
+        analyzer.analyze_endpoints([endpoint], use_cache=False)
+
+        assert "racing_pkg/__init__.pyi" not in analyzer.verified_mypy_source_hashes
+        assert analyzer.verified_package_versions["racing-pkg"] == "1.0"
 
     def test_cached_call_sites_are_recomputed_when_dependency_typing_changes(
         self, tmp_path: Path
@@ -129,6 +243,142 @@ class TestMypyAnalyzerBasic:
         )
         assert "empty_pkg.py" not in analyzer.verified_mypy_source_hashes
         assert analyzer.verified_package_versions["empty-pkg"] == "1.0"
+
+    def test_expression_branches_preserve_possible_and_dead_lambda_execution(
+        self, tmp_path: Path
+    ) -> None:
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "def handler(flag: bool) -> None:\n"
+            "    maybe_and = lambda: 1\n"
+            "    flag and maybe_and()\n"
+            "    maybe_or = lambda: 2\n"
+            "    flag or maybe_or()\n"
+            "    dead_and = lambda: 3\n"
+            "    False and dead_and()\n"
+            "    dead_or = lambda: 4\n"
+            "    True or dead_or()\n"
+            "    maybe_true = lambda: 5\n"
+            "    maybe_false = lambda: 6\n"
+            "    maybe_true() if flag else maybe_false()\n"
+            "    selected = lambda: 7\n"
+            "    dead_arm = lambda: 8\n"
+            "    selected() if True else dead_arm()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/expressions",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=1),
+        )
+        dependencies = MypyAnalyzer(tmp_path).analyze_endpoint(endpoint)
+        states = {
+            line: {
+                span.execution_state
+                for span in dependencies.source_evidence_spans
+                if span.start_line == line
+            }
+            for line in (2, 4, 6, 8, 10, 11, 13, 14)
+        }
+        for line in (2, 4, 10, 11):
+            assert "possible_execution" in states[line], states
+            assert "established_execution" not in states[line], states
+        for line in (6, 8, 14):
+            assert "deferred_execution" in states[line], states
+            assert not states[line] & {"possible_execution", "established_execution"}, states
+        assert "established_execution" in states[13], states
+
+    @pytest.mark.parametrize("first_predicate", ["flag", "False"])
+    def test_elif_predicate_and_literal_true_body_preserve_path_execution(
+        self, tmp_path: Path, first_predicate: str
+    ) -> None:
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "def handler(flag: bool) -> None:\n"
+            "    predicate = lambda: False\n"
+            "    selected = lambda: 1\n"
+            f"    if {first_predicate}:\n        pass\n"
+            "    elif predicate():\n        pass\n"
+            "    elif True:\n        selected()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/elif",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=1),
+        )
+        dependencies = MypyAnalyzer(tmp_path).analyze_endpoint(endpoint)
+        predicate_states = {
+            span.execution_state
+            for span in dependencies.source_evidence_spans
+            if span.start_line == 2
+        }
+        if first_predicate == "flag":
+            assert "possible_execution" in predicate_states
+            assert "established_execution" not in predicate_states
+        else:
+            assert "established_execution" in predicate_states
+        selected_states = {
+            span.execution_state
+            for span in dependencies.source_evidence_spans
+            if span.start_line == 3
+        }
+        assert "possible_execution" in selected_states
+        assert "established_execution" not in selected_states
+
+    @pytest.mark.parametrize("exit_statement", ["pass", "return", "raise RuntimeError"])
+    @pytest.mark.parametrize("conditional", [False, True])
+    def test_finally_callback_inherits_only_enclosing_execution_uncertainty(
+        self, tmp_path: Path, exit_statement: str, conditional: bool
+    ) -> None:
+        app_path = tmp_path / "app.py"
+        suite = f"try:\n    {exit_statement}\nfinally:\n    callback()\n"
+        if conditional:
+            suite = "if flag:\n" + "".join("    " + line for line in suite.splitlines(True))
+        app_path.write_text(
+            "def handler(flag: bool) -> None:\n    callback = lambda: 1\n"
+            + "".join("    " + line for line in suite.splitlines(True)),
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/finally",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=1),
+        )
+        dependencies = MypyAnalyzer(tmp_path).analyze_endpoint(endpoint)
+        states = {
+            span.execution_state
+            for span in dependencies.source_evidence_spans
+            if span.start_line == 2
+        }
+        expected = "possible_execution" if conditional else "established_execution"
+        assert expected in states
+        assert ("established_execution" if conditional else "possible_execution") not in states
+
+    def test_try_else_lambda_invocation_is_possible_execution(self, tmp_path: Path) -> None:
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "def may_raise() -> None: pass\n"
+            "def handler() -> None:\n"
+            "    callback = lambda: 1\n"
+            "    try:\n        may_raise()\n"
+            "    except RuntimeError:\n        pass\n"
+            "    else:\n        callback()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/try-else",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=2),
+        )
+        dependencies = MypyAnalyzer(tmp_path).analyze_endpoint(endpoint)
+        states = {
+            span.execution_state
+            for span in dependencies.source_evidence_spans
+            if span.start_line == 3
+        }
+        assert "possible_execution" in states
+        assert "established_execution" not in states
 
     def test_branch_joined_callable_partial_abstains_with_limitation(self, tmp_path: Path) -> None:
         app_path = tmp_path / "app.py"
@@ -382,6 +632,136 @@ class TestMypyAnalyzerBasic:
 
         assert "optional_decoy" not in analyzer._trees
         assert str(ambient) not in analyzer._module_to_path.values()
+
+    def test_hermetic_filesystem_cache_hides_simulated_mypy_fallback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Hermetic builds ignore fallback stubs and retain explicit project imports."""
+        fallback = tmp_path / "usr-local-mypy"
+        fallback.mkdir()
+        decoy = fallback / "simplejson.pyi"
+        decoy.write_text("def loads(value: str) -> int: ...\n", encoding="utf-8")
+        app = tmp_path / "app"
+        app.mkdir()
+        helper_bytes = b"def project_call() -> None: pass\n"
+        (app / "helpers.py").write_bytes(helper_bytes)
+        (app / "main.py").write_text(
+            "import simplejson\nfrom helpers import project_call\n"
+            "def handler() -> None:\n    simplejson.loads('x')\n    project_call()\n",
+            encoding="utf-8",
+        )
+        original_default_lib_path = modulefinder.default_lib_path
+        original_build = mypy.build.build
+        captured_caches = []
+
+        def capture_cache(*args: Any, **kwargs: Any) -> Any:
+            captured_caches.append(kwargs["fscache"])
+            return original_build(*args, **kwargs)
+
+        monkeypatch.setattr(mypy_analyzer, "_MYPY_POSIX_FALLBACK_ROOT", str(fallback))
+        monkeypatch.setattr(mypy.build, "build", capture_cache)
+        monkeypatch.setattr(
+            modulefinder,
+            "default_lib_path",
+            lambda data_dir, pyversion, custom_typeshed_dir: [
+                *original_default_lib_path(data_dir, pyversion, custom_typeshed_dir),
+                str(fallback),
+            ],
+        )
+
+        analyzer = MypyAnalyzer(app, module_root=app, no_site_packages=True)
+        analyzer._ensure_mypy_built()
+
+        assert "simplejson" not in analyzer._trees
+        assert analyzer._module_to_path["helpers"] == str(app / "helpers.py")
+        assert len(captured_caches) == 1
+        cache = captured_caches[0]
+        assert cache.stat_or_none(str(decoy)) is None
+        assert not cache.isfile(str(decoy))
+        with pytest.raises(FileNotFoundError):
+            cache.listdir(str(fallback))
+        with pytest.raises(FileNotFoundError):
+            cache.read(str(decoy))
+        with pytest.raises(FileNotFoundError):
+            cache.hash_digest(str(decoy))
+        assert cache.read(str(app / "helpers.py")) == helper_bytes
+        assert _is_path_within(str(decoy), str(fallback))
+        assert not _is_path_within(str(tmp_path / "usr-local-mypy-extra/file.pyi"), str(fallback))
+
+    def test_hermetic_cache_preserves_bundled_typeshed_under_fallback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The authenticated mypy bundle remains readable inside a fallback root."""
+        data_dir = Path(mypy.build.default_data_dir()).resolve()
+        typeshed = data_dir / "typeshed"
+        builtins = typeshed / "stdlib" / "builtins.pyi"
+        assert builtins.is_file()
+        app = tmp_path / "app"
+        app.mkdir()
+        (app / "main.py").write_text("value: int = 1\n", encoding="utf-8")
+        original_default_lib_path = modulefinder.default_lib_path
+        original_build = mypy.build.build
+        captured_caches = []
+
+        def capture_cache(*args: Any, **kwargs: Any) -> Any:
+            captured_caches.append(kwargs["fscache"])
+            return original_build(*args, **kwargs)
+
+        monkeypatch.setattr(mypy_analyzer, "_MYPY_POSIX_FALLBACK_ROOT", str(data_dir))
+        monkeypatch.setattr(mypy.build, "build", capture_cache)
+        monkeypatch.setattr(
+            modulefinder,
+            "default_lib_path",
+            lambda actual_data_dir, pyversion, custom_typeshed_dir: [
+                *original_default_lib_path(actual_data_dir, pyversion, custom_typeshed_dir),
+                str(data_dir),
+            ],
+        )
+
+        analyzer = MypyAnalyzer(app, module_root=app, no_site_packages=True)
+        analyzer._ensure_mypy_built()
+
+        assert "builtins" in analyzer._trees
+        assert len(captured_caches) == 1
+        assert captured_caches[0].read(str(builtins)) == builtins.read_bytes()
+        assert captured_caches[0].stat_or_none(str(typeshed)) is not None
+
+    def test_hermetic_cache_rejects_bundled_typeshed_symlink_and_parent_escapes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fallback = tmp_path / "fallback"
+        bundled = fallback / "typeshed"
+        bundled.mkdir(parents=True)
+        outside = tmp_path / "outside.pyi"
+        outside.write_text("DECOY: int\n")
+        (fallback / "ambient.pyi").write_text("AMBIENT: int\n")
+        link = bundled / "escape.pyi"
+        link.symlink_to(outside)
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "main.py").write_text("value: int = 1\n")
+        captured_caches = []
+
+        def capture_cache(*args: Any, **kwargs: Any) -> Any:
+            captured_caches.append(kwargs["fscache"])
+            raise RuntimeError("controlled cache capture")
+
+        monkeypatch.setattr(mypy_analyzer, "_MYPY_POSIX_FALLBACK_ROOT", str(fallback))
+        monkeypatch.setattr(mypy.build, "default_data_dir", lambda: str(fallback))
+        monkeypatch.setattr(mypy.build, "build", capture_cache)
+        with pytest.raises(RuntimeError, match="controlled cache capture"):
+            MypyAnalyzer(project, module_root=project, no_site_packages=True)._ensure_mypy_built()
+        assert len(captured_caches) == 1
+        cache = captured_caches[0]
+        for candidate in (
+            link,
+            bundled / ".." / "ambient.pyi",
+            bundled / ".." / ".." / "outside.pyi",
+        ):
+            assert cache.stat_or_none(str(candidate)) is None
+            for operation in (cache.read, cache.hash_digest, cache.listdir):
+                with pytest.raises(FileNotFoundError):
+                    operation(str(candidate))
 
     def test_hermetic_analysis_excludes_cwd_but_retains_explicit_project_imports(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -1,5 +1,6 @@
 """Narrow contract checks for the exact Motor source-only probe result."""
 
+import hashlib
 import json
 import os
 import subprocess
@@ -11,11 +12,15 @@ import pytest
 from benchmarks.gh97_motor_binding.run import verified_product_path, verify_artifact_hash
 
 ROOT = Path(__file__).resolve().parents[2]
-RESULT = ROOT / "benchmarks/gh97_motor_binding/result.json"
+HISTORICAL_RESULT = ROOT / "benchmarks/gh97_motor_binding/historical-source-only-v1.json"
 
 
 def test_historical_motor_probe_is_pinned_and_preserves_original_finding() -> None:
-    result = json.loads(RESULT.read_text())
+    raw = HISTORICAL_RESULT.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == (
+        "cabcfb198491c16788146f4983d650de5189238a99514e4d23194662fd0113e8"
+    )
+    result = json.loads(raw)
 
     assert result["probe_id"] == "gh97-motor-typed-binding-v1"
     assert result["python"] == "3.11.16"
@@ -53,7 +58,7 @@ def test_historical_motor_probe_is_pinned_and_preserves_original_finding() -> No
 
 
 def test_same_name_and_wrapper_controls_remain_unmatched() -> None:
-    result = json.loads(RESULT.read_text())
+    result = json.loads(HISTORICAL_RESULT.read_text())
     rows = {row["source_spelling"]: row for row in result["occurrences"]}
 
     assert rows["decoy.insert_one"]["canonical_symbol"].endswith("Decoy.insert_one")
@@ -119,12 +124,16 @@ def test_live_motor_probe_binds_real_vendor_stub_declarations() -> None:
     assert "motor/core.pyi" in source_hashes
     assert "motor/py.typed" in source_hashes
     assert result["verified_target_evidence"]["package_versions"]["motor"] == "3.6.0"
-    assert result["verified_target_evidence"]["package_metadata_hashes"][
-        "motor-3.6.0.dist-info/METADATA"
-    ] == "sha256:dce8b401625d673eed6b2c0c66d9d196a13de0649c0788da8b3e2a72edb2965d"
-    assert result["verified_target_evidence"]["mypy_source_hashes"][
-        "motor/__init__.py"
-    ] == source_hashes["motor/__init__.py"]
+    assert (
+        result["verified_target_evidence"]["package_metadata_hashes"][
+            "motor-3.6.0.dist-info/METADATA"
+        ]
+        == "sha256:dce8b401625d673eed6b2c0c66d9d196a13de0649c0788da8b3e2a72edb2965d"
+    )
+    assert (
+        result["verified_target_evidence"]["mypy_source_hashes"]["motor/__init__.py"]
+        == source_hashes["motor/__init__.py"]
+    )
     assert result["verified_target_evidence"]["audit_evidence_hash"].startswith("sha256:")
 
 

@@ -1,5 +1,13 @@
 # GH97 Motor binding probe
 
+`historical-source-only-v1.json` preserves the original unbound result byte for
+byte from commit `c376830`: 21,649 bytes, SHA-256
+`cabcfb198491c16788146f4983d650de5189238a99514e4d23194662fd0113e8`.
+It records producer `dd615f5c3fd298f5aa854a8e2c42b26a5bd0f404` and the
+original five calls with zero matches. Historical regressions use this fixed
+snapshot. `result.json` contains the separately replayed production-binding
+result; its own revision and source hashes identify the producer it validates.
+
 This probe asks whether the current exact-symbol MongoDB preset binds typed
 Motor collection writes using Motor 3.6.0 and PyMongo 4.10.1 source. It does
 not claim installed-package or runtime behavior. It never imports either

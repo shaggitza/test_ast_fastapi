@@ -50,6 +50,17 @@ from fastapi_endpoint_detector.models.surface_contract import CallbackRangeMode
 
 # Type alias for line-level progress callback (file_path, line_number, symbol_name)
 LineProgressCallback = Callable[[str, int, str], None]
+_MYPY_POSIX_FALLBACK_ROOT = "/usr/local/lib/mypy"
+
+
+def _is_path_within(path: str, root: str) -> bool:
+    """Check lexical path containment without crossing path-component boundaries."""
+    absolute = str(Path(path).absolute())
+    absolute_root = str(Path(root).absolute())
+    try:
+        return os.path.commonpath((absolute, absolute_root)) == absolute_root
+    except ValueError:
+        return False
 
 
 class SourceFileRecord(Protocol):
@@ -866,6 +877,7 @@ class MypyAnalyzer:
             raise MypyAnalyzerError("mypy is not installed")
 
         from mypy.build import build as mypy_build
+        from mypy.build import default_data_dir
         from mypy.fscache import FileSystemCache
         from mypy.modulefinder import BuildSource
         from mypy.options import Options
@@ -935,7 +947,59 @@ class MypyAnalyzer:
             sys.path.insert(0, str(self.module_root))
 
         try:
-            fscache = FileSystemCache()
+            fscache: FileSystemCache
+            if self.no_site_packages and sys.platform != "win32":
+                # mypy 1.19.1 unconditionally adds /usr/local/lib/mypy to its
+                # typeshed search paths on POSIX. Hide that one ambient fallback
+                # at the per-build filesystem boundary; changing modulefinder's
+                # global path function would race with concurrent builds.
+                class HermeticFileSystemCache(FileSystemCache):
+                    def __init__(self) -> None:
+                        super().__init__()
+                        self._bundled_typeshed = Path(default_data_dir()).resolve() / "typeshed"
+
+                    @staticmethod
+                    def _is_fallback_path(path: str) -> bool:
+                        # Check both spellings: mypy may receive the configured
+                        # path while the OS resolves it through a symlink.
+                        return _is_path_within(path, _MYPY_POSIX_FALLBACK_ROOT) or (
+                            _is_path_within(
+                                os.path.realpath(path),
+                                os.path.realpath(_MYPY_POSIX_FALLBACK_ROOT),
+                            )
+                        )
+
+                    def _is_blocked_fallback_path(self, path: str) -> bool:
+                        if not self._is_fallback_path(path):
+                            return False
+                        return not _is_path_within(
+                            os.path.realpath(path),
+                            os.path.realpath(self._bundled_typeshed),
+                        )
+
+                    def stat_or_none(self, path: str) -> os.stat_result | None:
+                        if self._is_blocked_fallback_path(path):
+                            return None
+                        return super().stat_or_none(path)
+
+                    def listdir(self, path: str) -> list[str]:
+                        if self._is_blocked_fallback_path(path):
+                            raise FileNotFoundError(path)
+                        return super().listdir(path)
+
+                    def read(self, path: str) -> bytes:
+                        if self._is_blocked_fallback_path(path):
+                            raise FileNotFoundError(path)
+                        return super().read(path)
+
+                    def hash_digest(self, path: str) -> str:
+                        if self._is_blocked_fallback_path(path):
+                            raise FileNotFoundError(path)
+                        return super().hash_digest(path)
+
+                fscache = HermeticFileSystemCache()
+            else:
+                fscache = FileSystemCache()
             self._build_result = mypy_build(
                 sources=sources,
                 options=options,
@@ -950,6 +1014,7 @@ class MypyAnalyzer:
             conflicting_mypy_source_paths: set[str] = set()
             conflicting_package_source_paths: set[str] = set()
             analyzed_source_hashes: dict[str, str] = {}
+            scanned_metadata_roots: set[Path] = set()
 
             # Store the types map
             self._types_map = self._build_result.types
@@ -970,9 +1035,14 @@ class MypyAnalyzer:
                     if isinstance(source_hash, str):
                         analyzed_source_hashes[state_path] = source_hash
                         source_file = Path(state_path)
-                        if source_file.is_file() and source_file.suffix in {".py", ".pyi"}:
-                            vendor_bytes: bytes | None = source_file.read_bytes()
-                        else:
+                        try:
+                            if source_file.is_file() and source_file.suffix in {".py", ".pyi"}:
+                                vendor_bytes: bytes | None = source_file.read_bytes()
+                            else:
+                                vendor_bytes = None
+                        except OSError:
+                            # The module remains useful for type resolution, but
+                            # unreadable bytes cannot authenticate package evidence.
                             vendor_bytes = None
                         if (
                             vendor_bytes is not None
@@ -996,12 +1066,19 @@ class MypyAnalyzer:
                                     self._verified_mypy_source_hashes.pop(relative_source, None)
                                 elif relative_source not in conflicting_mypy_source_paths:
                                     self._verified_mypy_source_hashes[relative_source] = digest
-                            if relative_source:
+                            if relative_source and package_root not in scanned_metadata_roots:
+                                scanned_metadata_roots.add(package_root)
                                 metadata_candidates = sorted(
                                     package_root.glob("*.dist-info/METADATA")
                                 )
                                 for metadata_path in metadata_candidates:
-                                    metadata_bytes = metadata_path.read_bytes()
+                                    try:
+                                        metadata_bytes = metadata_path.read_bytes()
+                                    except OSError:
+                                        # Missing evidence is deliberately absent
+                                        # from the verified maps, so package pins
+                                        # fail closed in the contract auditor.
+                                        continue
                                     metadata = BytesParser(policy=compat32).parsebytes(
                                         metadata_bytes
                                     )
@@ -5909,13 +5986,23 @@ class MypyAnalyzer:
                     callable_environment = dict(base_callables)
                     partial_environment = dict(base_partials)
                     lambda_environment = dict(base_lambdas)
-                    walk_node(expr)
-                    if literal is None:
+                    # An elif predicate is reached only if every preceding
+                    # branch declined. Preserve that uncertainty for the
+                    # predicate itself, and for even a literal-true body.
+                    if unknown_before_selection:
+                        possible_execution_depth[0] += 1
+                    try:
+                        walk_node(expr)
+                    finally:
+                        if unknown_before_selection:
+                            possible_execution_depth[0] -= 1
+                    branch_possible = literal is None or unknown_before_selection
+                    if branch_possible:
                         possible_execution_depth[0] += 1
                     try:
                         walk_node(body)
                     finally:
-                        if literal is None:
+                        if branch_possible:
                             possible_execution_depth[0] -= 1
                     branch_environments.append(dict(flow_environment))
                     branch_strings.append(dict(string_environment))
@@ -6178,7 +6265,11 @@ class MypyAnalyzer:
                     callable_environment = dict(body_callables)
                     partial_environment = dict(body_partials)
                     lambda_environment = dict(body_lambdas)
-                    walk_node(n.else_body)
+                    possible_execution_depth[0] += 1
+                    try:
+                        walk_node(n.else_body)
+                    finally:
+                        possible_execution_depth[0] -= 1
                     normal_callables = dict(callable_environment)
                     normal_partials = dict(partial_environment)
                     normal_lambdas = dict(lambda_environment)
@@ -6202,11 +6293,10 @@ class MypyAnalyzer:
                         if all(path[key] is lambda_paths[0][key] for path in lambda_paths[1:])
                     }
                 if n.finally_body:
-                    possible_execution_depth[0] += 1
-                    try:
-                        walk_node(n.finally_body)
-                    finally:
-                        possible_execution_depth[0] -= 1
+                    # Finally runs on every exit from an entered try. Retain
+                    # enclosing uncertainty, without adding uncertainty just
+                    # because control exits normally, raises, or returns.
+                    walk_node(n.finally_body)
                 flow_environment.clear()
                 string_environment.clear()
                 deferred_environment.clear()
@@ -6225,7 +6315,22 @@ class MypyAnalyzer:
 
             elif isinstance(n, OpExpr):
                 walk_node(n.left)
-                walk_node(n.right)
+                if n.op in {"and", "or"}:
+                    left_truth = self._literal_boolean(n.left)
+                    if (n.op == "and" and left_truth is False) or (
+                        n.op == "or" and left_truth is True
+                    ):
+                        return
+                    if left_truth is None:
+                        possible_execution_depth[0] += 1
+                        try:
+                            walk_node(n.right)
+                        finally:
+                            possible_execution_depth[0] -= 1
+                    else:
+                        walk_node(n.right)
+                else:
+                    walk_node(n.right)
 
             elif isinstance(n, ComparisonExpr):
                 for op in n.operands:
@@ -6235,17 +6340,17 @@ class MypyAnalyzer:
                 walk_node(n.expr)
 
             elif isinstance(n, ConditionalExpr):
-                # mypy uses cond/if_true/if_false but some versions use different names
-                if hasattr(n, "cond"):
-                    walk_node(n.cond)
-                if hasattr(n, "if_true"):
-                    walk_node(n.if_true)
-                elif hasattr(n, "then"):
-                    walk_node(n.then)
-                if hasattr(n, "if_false"):
-                    walk_node(n.if_false)
-                elif hasattr(n, "else_"):
-                    walk_node(n.else_)
+                walk_node(n.cond)
+                condition_truth = self._literal_boolean(n.cond)
+                if condition_truth is not None:
+                    walk_node(n.if_expr if condition_truth else n.else_expr)
+                else:
+                    possible_execution_depth[0] += 1
+                    try:
+                        walk_node(n.if_expr)
+                        walk_node(n.else_expr)
+                    finally:
+                        possible_execution_depth[0] -= 1
 
             elif isinstance(n, (ListExpr, TupleExpr, SetExpr)):
                 for item in n.items:
@@ -6496,16 +6601,18 @@ class MypyAnalyzer:
                         ):
                             package_roots.add(root)
                             break
-            except OSError:
-                continue
+            except OSError as exc:
+                inputs[str(path.resolve())] = f"unreadable:{type(exc).__name__}"
         for root in package_roots:
             try:
                 for metadata_path in root.glob("*.dist-info/METADATA"):
                     inputs[str(metadata_path.resolve())] = hashlib.sha256(
                         metadata_path.read_bytes()
                     ).hexdigest()
-            except OSError:
-                continue
+            except OSError as exc:
+                inputs[str(root.resolve()) + "/<metadata-scan>"] = (
+                    f"unreadable:{type(exc).__name__}"
+                )
         payload = json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(payload).hexdigest()
 
@@ -6556,6 +6663,7 @@ class MypyAnalyzer:
                 "schema": self.CACHE_SCHEMA_VERSION,
                 "engine": "fastapi-endpoint-detector:mypy-analyzer-v2",
                 "source_span_normalization": "source-call-order-verified-ast-spans-v2",
+                "execution_state_policy": "conditional-elif-try-else-guaranteed-finally-v3",
                 "max_depth": self.max_depth,
                 "no_site_packages": self.no_site_packages,
                 "hermetic_search_path_policy": (
