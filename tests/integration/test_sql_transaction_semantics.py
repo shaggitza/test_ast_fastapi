@@ -155,6 +155,31 @@ def _fixture_endpoint_calls(fixture: Path) -> tuple[Endpoint, tuple[ResolvedCall
         if isinstance(node, ast.ImportFrom) and node.module is not None
         for alias in node.names
     }
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom) or node.module != "services":
+            continue
+        package_path = fixture / "source/langflow/services/__init__.py.txt"
+        if not package_path.is_file():
+            continue
+        package_tree = ast.parse(package_path.read_bytes(), filename=str(package_path))
+        for alias in node.names:
+            local_name = alias.asname or alias.name
+            exports = [
+                (statement, exported)
+                for statement in package_tree.body
+                if isinstance(statement, ast.ImportFrom)
+                for exported in statement.names
+                if (exported.asname or exported.name) == alias.name
+            ]
+            if len(exports) != 1:
+                continue
+            statement, exported = exports[0]
+            module = statement.module or ""
+            base = "langflow.services"
+            if statement.level:
+                base_parts = base.split(".")[: len(base.split(".")) - statement.level + 1]
+                module = ".".join([*base_parts, *module.split(".")])
+            imported_symbols[local_name] = f"{module}.{exported.name}"
     prefix = next(
         keyword.value.value
         for node in tree.body
@@ -1310,6 +1335,167 @@ def test_source_projection_resolves_endpoint_relative_imports_against_its_packag
         )
     )
     assert len(_langflow_fixture_transaction_reports(copied)[2].source_projections) == expected
+
+
+def test_source_projection_resolves_relative_package_initializer_export(tmp_path: Path) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    endpoint = copied / "source/langflow/api/v1/traces.py.txt"
+    endpoint.write_text(
+        endpoint.read_text().replace(
+            "from langflow.services.deps import session_scope",
+            "from ...services import exported_scope as session_scope",
+            1,
+        )
+    )
+    package = copied / "source/langflow/services/__init__.py.txt"
+    package.write_text("from .deps import session_scope as exported_scope\n")
+    projections = _langflow_fixture_transaction_reports(copied)[2].source_projections
+    assert len(projections) == 1
+    assert projections[0].endpoint_file_path == "source/langflow/api/v1/traces.py.txt"
+    assert projections[0].unresolved_stage_occurrence_id
+
+
+def test_source_projection_rejects_wrong_package_initializer_export(tmp_path: Path) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    endpoint = copied / "source/langflow/api/v1/traces.py.txt"
+    endpoint.write_text(
+        endpoint.read_text().replace(
+            "from langflow.services.deps import session_scope",
+            "from ...services import exported_scope as session_scope",
+            1,
+        )
+    )
+    package = copied / "source/langflow/services/__init__.py.txt"
+    package.write_text("from .foreign import session_scope as exported_scope\n")
+    foreign = copied / "source/langflow/services/foreign.py.txt"
+    foreign.write_text("async def session_scope():\n    pass\n")
+    assert _langflow_fixture_transaction_reports(copied)[2].source_projections == ()
+
+
+@pytest.mark.parametrize(
+    "initializer",
+    [
+        "from .deps import session_scope as exported_scope\nexported_scope = foreign_scope\n",
+        "from .deps import session_scope as exported_scope\n"
+        "exported_scope: object = foreign_scope\n",
+        "from .deps import session_scope as exported_scope\nexported_scope += foreign_scope\n",
+        "from .deps import session_scope as exported_scope\ndel exported_scope\n",
+        "from .deps import session_scope as exported_scope\n"
+        "if FLAG:\n    exported_scope = foreign_scope\n",
+        "from .deps import session_scope as exported_scope\n"
+        "exec('exported_scope = foreign_scope')\n",
+    ],
+)
+def test_source_projection_rejects_rebound_package_initializer_export(
+    tmp_path: Path, initializer: str
+) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    endpoint = copied / "source/langflow/api/v1/traces.py.txt"
+    endpoint.write_text(
+        endpoint.read_text().replace(
+            "from langflow.services.deps import session_scope",
+            "from ...services import exported_scope as session_scope",
+            1,
+        )
+    )
+    package = copied / "source/langflow/services/__init__.py.txt"
+    package.write_text(initializer)
+    assert _langflow_fixture_transaction_reports(copied)[2].source_projections == ()
+
+
+def test_source_projection_rejects_overridden_package_initializer_definition(
+    tmp_path: Path,
+) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    endpoint = copied / "source/langflow/api/v1/traces.py.txt"
+    endpoint.write_text(
+        endpoint.read_text().replace(
+            "from langflow.services.deps import session_scope",
+            "from ...services import session_scope",
+            1,
+        )
+    )
+    package = copied / "source/langflow/services/__init__.py.txt"
+    package.write_text("def session_scope():\n    pass\nsession_scope = foreign_scope\n")
+    assert _langflow_fixture_transaction_reports(copied)[2].source_projections == ()
+
+
+@pytest.mark.parametrize("terminator", ["return", "raise RuntimeError()"])
+def test_source_projection_rejects_unreachable_endpoint_stage(
+    tmp_path: Path, terminator: str
+) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    endpoint = copied / "source/langflow/api/v1/traces.py.txt"
+    text = endpoint.read_text()
+    stage = "            await session.execute(delete_stmt)"
+    assert stage in text
+    endpoint.write_text(text.replace(stage, f"            {terminator}\n{stage}", 1))
+    assert _langflow_fixture_transaction_reports(copied)[2].source_projections == ()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "contextlib.asynccontextmanager = foreign_factory",
+        "del contextlib.asynccontextmanager",
+        "contextlib.asynccontextmanager += foreign_factory",
+        "factory_owner = contextlib\nfactory_owner.asynccontextmanager = foreign_factory",
+        'setattr(contextlib, "asynccontextmanager", foreign_factory)',
+    ],
+)
+def test_source_projection_rejects_mutated_qualified_context_factory(
+    tmp_path: Path, mutation: str
+) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    wrapper = copied / "source/langflow/services/deps.py.txt"
+    text = wrapper.read_text()
+    text = text.replace(
+        "from contextlib import asynccontextmanager",
+        "import contextlib\n" + mutation,
+        1,
+    ).replace(
+        "@asynccontextmanager\nasync def session_scope",
+        "@contextlib.asynccontextmanager\nasync def session_scope",
+        1,
+    )
+    wrapper.write_text(text)
+    assert _langflow_fixture_transaction_reports(copied)[2].source_projections == ()
+
+
+def test_source_projection_accepts_qualified_context_factory_and_late_mutation(
+    tmp_path: Path,
+) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    wrapper = copied / "source/langflow/services/deps.py.txt"
+    text = (
+        wrapper.read_text()
+        .replace(
+            "from contextlib import asynccontextmanager",
+            "import contextlib",
+            1,
+        )
+        .replace(
+            "@asynccontextmanager\nasync def session_scope",
+            "@contextlib.asynccontextmanager\nasync def session_scope",
+            1,
+        )
+    )
+    wrapper.write_text(text + "\ncontextlib.asynccontextmanager = foreign_factory\n")
+    assert len(_langflow_fixture_transaction_reports(copied)[2].source_projections) == 1
 
 
 def test_source_projection_report_accepts_a_file_application_root(tmp_path: Path) -> None:

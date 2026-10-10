@@ -481,6 +481,107 @@ def _resolve_imported_module(root: Path, current_module: str, node: ast.ImportFr
     return ".".join(base) or None
 
 
+def _resolve_imported_symbol(  # noqa: PLR0911
+    root: Path, current_module: str, node: ast.ImportFrom, alias: ast.alias
+) -> str | None:
+    """Resolve a symbol exported by a package initializer without inventing a submodule."""
+    imported_module = _resolve_imported_module(root, current_module, node)
+    if imported_module is None:
+        return None
+    init_path = _safe_source_path(
+        root, Path("source", *imported_module.split("."), "__init__.py.txt").as_posix()
+    )
+    if node.module is not None and (init_path is None or not init_path.is_file()):
+        return f"{imported_module}.{alias.name}"
+    snapshot = _module_snapshot(root, imported_module)
+    if snapshot is None:
+        return None
+    try:
+        tree = ast.parse(snapshot[1], filename=snapshot[0])
+    except (SyntaxError, ValueError):
+        return None
+    if _has_dynamic_module_binding_mutation(tree):
+        return None
+    exports = [
+        (statement, item)
+        for statement in tree.body
+        if isinstance(statement, ast.ImportFrom)
+        for item in statement.names
+        if (item.asname or item.name) == alias.name and item.name != "*"
+    ]
+    if len(exports) == 1:
+        statement, exported = exports[0]
+        if _module_binding_is_ambiguous(tree, alias.name, statement):
+            return None
+        target_module = _resolve_imported_module(root, imported_module, statement)
+        return f"{target_module}.{exported.name}" if target_module else None
+    definitions = [
+        statement
+        for statement in tree.body
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and statement.name == alias.name
+    ]
+    if len(definitions) == 1:
+        if _module_binding_is_ambiguous(tree, alias.name, definitions[0]):
+            return None
+        return f"{imported_module}.{alias.name}"
+    if node.module is not None and _module_snapshot(root, f"{imported_module}.{alias.name}"):
+        return f"{imported_module}.{alias.name}"
+    return None
+
+
+def _has_attribute_binding_mutation(  # noqa: PLR0912
+    module: ast.Module, namespace: str, attribute: str, *, before_line: int
+) -> bool:
+    """Reject direct writes to a proven imported namespace attribute."""
+    aliases = {namespace}
+    changed = True
+    while changed:
+        changed = False
+        for statement in module.body:
+            if statement.lineno >= before_line:
+                continue
+            if isinstance(statement, ast.Assign):
+                value: ast.expr | None = statement.value
+                targets = statement.targets
+            elif isinstance(statement, ast.AnnAssign):
+                value = statement.value
+                targets = [statement.target]
+            else:
+                continue
+            if isinstance(value, ast.Name) and value.id in aliases:
+                for target in targets:
+                    if isinstance(target, ast.Name) and target.id not in aliases:
+                        aliases.add(target.id)
+                        changed = True
+    for node in ast.walk(module):
+        if getattr(node, "lineno", before_line + 1) >= before_line:
+            continue
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == attribute
+            and isinstance(node.value, ast.Name)
+            and node.value.id in aliases
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+        ):
+            return True
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in {"setattr", "delattr"}
+            and len(node.args) >= 2
+        ):
+            target, name = node.args[:2]
+            if (
+                isinstance(target, ast.Name)
+                and target.id in aliases
+                and isinstance(name, ast.Constant)
+                and name.value == attribute
+            ):
+                return True
+    return False
+
+
 def _attribute_on_name(call: ast.Call, attribute: str, name: str) -> bool:
     return (
         isinstance(call.func, ast.Attribute)
@@ -572,7 +673,9 @@ def _has_ambiguous_scope_binding(  # noqa: PLR0911
 def _module_binding_is_ambiguous(
     module: ast.Module,
     name: str,
-    allowed_binding: ast.Import | ast.ImportFrom | ast.FunctionDef | ast.AsyncFunctionDef,
+    allowed_binding: (
+        ast.Import | ast.ImportFrom | ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
+    ),
 ) -> bool:
     """Require exactly the source binding that supplied the wrapper."""
     bindings: list[tuple[ast.AST, str]] = []
@@ -808,6 +911,7 @@ def _has_verified_asynccontextmanager(
             )
         ):
             binding, bound_name = statement, decorator.value.id
+    namespace = bound_name if isinstance(decorator, ast.Attribute) else None
     return (
         binding is not None
         and bound_name is not None
@@ -815,6 +919,12 @@ def _has_verified_asynccontextmanager(
         # an import later in the module cannot provide this binding.
         and binding.lineno < function.lineno
         and not _module_binding_is_ambiguous(module, bound_name, binding)
+        and not (
+            namespace is not None
+            and _has_attribute_binding_mutation(
+                module, namespace, "asynccontextmanager", before_line=function.lineno
+            )
+        )
     )
 
 
@@ -1100,36 +1210,21 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
             if module_positions[node] >= module_positions.get(wrapper_fn, -1):
                 continue
             if isinstance(node, ast.ImportFrom):
-                imported_module = _resolve_imported_module(root, wrapper_module, node)
                 for alias in node.names:
                     local_name = alias.asname or alias.name
-                    symbol_module = imported_module
-                    symbol_name = alias.name
-                    if node.module is None:
-                        symbol_module = (
-                            f"{imported_module}.{alias.name}" if imported_module else None
-                        )
-                        symbol_name = alias.name
-                    if symbol_module:
-                        wrapper_scope_calls[local_name] = f"{symbol_module}.{symbol_name}"
+                    canonical = _resolve_imported_symbol(root, wrapper_module, node, alias)
+                    if canonical:
+                        wrapper_scope_calls[local_name] = canonical
                         wrapper_import_nodes[local_name] = node
         for node in wrapper_fn.body:
             if isinstance(node, ast.ImportFrom):
-                imported_module = _resolve_imported_module(root, wrapper_module, node)
                 for alias in node.names:
                     local_name = alias.asname or alias.name
-                    symbol_module = imported_module
-                    symbol_name = alias.name
-                    if node.module is None:
-                        symbol_module = (
-                            f"{imported_module}.{alias.name}" if imported_module else None
-                        )
-                    if symbol_module:
+                    canonical = _resolve_imported_symbol(root, wrapper_module, node, alias)
+                    if canonical:
                         # Retain function-local bindings separately; their
                         # validity is checked against the actual use below.
-                        wrapper_scope_calls[f"{local_name}@local:{node.lineno}"] = (
-                            f"{symbol_module}.{symbol_name}"
-                        )
+                        wrapper_scope_calls[f"{local_name}@local:{node.lineno}"] = canonical
                         wrapper_import_nodes[f"{local_name}@local:{node.lineno}"] = node
         for owned_node in _owned_nodes(wrapper_fn):
             if isinstance(owned_node, ast.AsyncWith):
@@ -1300,9 +1395,9 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
             (node, alias.asname or alias.name)
             for node in endpoint_tree.body
             if isinstance(node, ast.ImportFrom)
-            and _resolve_imported_module(root, endpoint_module, node) == wrapper_module
             for alias in node.names
-            if f"{wrapper_module}.{alias.name}" == begin.canonical_symbol
+            if _resolve_imported_symbol(root, endpoint_module, node, alias)
+            == begin.canonical_symbol
         ]
         if len(imported_wrapper_bindings) != 1:
             continue
@@ -1351,6 +1446,8 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
                 isinstance(child, ast.Await) and child.value is stage_node
                 for child in _owned_nodes(owned_node)
             ):
+                continue
+            if _has_unreachable_terminator(stage_node, _scope_parents(handler)):
                 continue
             # The stage must be a direct expression in the owned context body.
             if not any(
