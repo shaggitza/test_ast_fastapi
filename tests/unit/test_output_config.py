@@ -20,6 +20,28 @@ from fastapi_endpoint_detector.models.report import (
 from fastapi_endpoint_detector.output.formatters import get_formatter
 
 
+@pytest.mark.parametrize("value", [True, False, 1.0, "1"])
+def test_analysis_limitation_call_column_requires_strict_nonnegative_int(value: object) -> None:
+    with pytest.raises(ValidationError):
+        AnalysisLimitationReport(
+            file_path="service.py",
+            call_line=1,
+            call_column=value,
+            cap="MAX_DEPTH",
+        )
+
+
+@pytest.mark.parametrize("value", [None, 0, 7])
+def test_analysis_limitation_call_column_accepts_optional_int(value: int | None) -> None:
+    item = AnalysisLimitationReport(
+        file_path="service.py",
+        call_line=1,
+        call_column=value,
+        cap="MAX_DEPTH",
+    )
+    assert item.call_column == value
+
+
 @pytest.mark.parametrize(
     "field", ["show_confidence", "show_dependency_chain", "colorize", "verbose"]
 )
@@ -161,8 +183,21 @@ def test_structured_formats_preserve_bounded_execution_evidence(name: str) -> No
     report = make_report()
     report.analysis_limitations = [
         AnalysisLimitationReport(
-            file_path="service.py", call_line=17, cap="MAX_DEPTH", target_count=2, limit=1
-        )
+            file_path="service.py",
+            call_line=17,
+            call_column=9,
+            cap="MAX_DEPTH",
+            target_count=2,
+            limit=1,
+        ),
+        AnalysisLimitationReport(
+            file_path="service.py",
+            call_line=17,
+            call_column=31,
+            cap="MAX_POINTS_TO_EDGES",
+            target_count=3,
+            limit=2,
+        ),
     ]
     execution_evidence = tuple(
         ExecutionEvidence(
@@ -188,6 +223,9 @@ def test_structured_formats_preserve_bounded_execution_evidence(name: str) -> No
     report.candidate_endpoints = [affected]
     before = report.model_dump(mode="json")
     output = get_formatter(name).format(report)
+    assert [
+        item["call_column"] for item in report.model_dump(mode="json")["analysis_limitations"]
+    ] == [9, 31]
     data = json.loads(output) if name == "json" else yaml.safe_load(output)
     assert data["analysis_limitations"] == before["analysis_limitations"]
     for collection in ("affected_endpoints", "candidate_endpoints"):

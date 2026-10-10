@@ -572,6 +572,9 @@ class MypyAnalyzer:
     # Schema 27 distinguishes typed execution evidence and creation-time partial
     # callable snapshots from the incompatible schema-26 cache formats.
     CACHE_SCHEMA_VERSION = 27
+    EXECUTION_STATE_POLICY = (
+        "conditional-elif-try-else-guaranteed-finally-v4-raising-snapshots-iteration-possible"
+    )
     MAX_CALL_SPAN_SOURCE_BYTES = 2_000_000
     MAX_CALL_SPAN_SOURCE_NODES = 100_000
     MAX_CALL_SPAN_SOURCE_ITEMS = 200_000
@@ -4704,6 +4707,7 @@ class MypyAnalyzer:
             ClassDef,
             ComparisonExpr,
             ConditionalExpr,
+            ContinueStmt,
             Decorator,
             DictExpr,
             DictionaryComprehension,
@@ -4759,6 +4763,10 @@ class MypyAnalyzer:
         lambda_environment: dict[str, Any] = {}
         lambda_execution_states: dict[int, str] = {}
         possible_execution_depth = [0]
+        try_callable_snapshots: list[
+            list[dict[str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]]]
+        ] = []
+        try_assignment_target_ids: list[set[int]] = []
 
         def record_lambda_execution(expression: Any, state: str) -> None:
             """Attach exact source-body state when its AST identity is unique."""
@@ -5012,9 +5020,19 @@ class MypyAnalyzer:
                 ):
                     consume_deferred_generator(generator, line)
 
+        def walk_per_iteration(expression: Any) -> None:
+            """Walk work whose execution depends on an iterable yielding an item."""
+            possible_execution_depth[0] += 1
+            try:
+                walk_node(expression)
+            finally:
+                possible_execution_depth[0] -= 1
+
         def handle_call_expr(call: CallExpr) -> None:
             """Trace exact calls, adding bounded finite receiver edges as LOW only."""
             nonlocal string_environment
+            for snapshots in try_callable_snapshots:
+                snapshots.append(dict(callable_environment))
             call_site = self._resolved_call_site(
                 call,
                 current_file,
@@ -5589,12 +5607,14 @@ class MypyAnalyzer:
                     exposed_names.update(flow_environment)
                     exposed_names.update(deferred_environment)
                     exposed_names.update(callable_environment)
+                    exposed_names.update(partial_environment)
             for name in exposed_names:
                 flow_environment.pop(name, None)
                 deferred_environment.pop(name, None)
                 callable_environment.pop(name, None)
                 lambda_environment.pop(name, None)
                 string_environment.pop(name, None)
+                partial_environment.pop(name, None)
 
         def walk_node(n: Any) -> None:
             """Recursively walk a mypy AST node with a bounded local environment."""
@@ -5607,6 +5627,44 @@ class MypyAnalyzer:
                 string_environment
             if n is None:
                 return
+            # Preserve callable state immediately before operations that can
+            # raise. A linear snapshot after every simple assignment would
+            # invent handler states for assignments that cannot themselves
+            # fail (for example, after a call that already raised).
+            if isinstance(
+                n,
+                (
+                    AwaitExpr,
+                    CallExpr,
+                    ComparisonExpr,
+                    ConditionalExpr,
+                    DictExpr,
+                    DictionaryComprehension,
+                    ForStmt,
+                    GeneratorExpr,
+                    IndexExpr,
+                    ListComprehension,
+                    MemberExpr,
+                    NameExpr,
+                    OpExpr,
+                    RaiseStmt,
+                    ReturnStmt,
+                    SetComprehension,
+                    UnaryExpr,
+                    WithStmt,
+                    YieldExpr,
+                    YieldFromExpr,
+                ),
+            ) and not (
+                isinstance(n, NameExpr)
+                and (
+                    n.node is not None
+                    or any(id(n) in targets for targets in try_assignment_target_ids)
+                )
+            ):
+                for snapshots in try_callable_snapshots:
+                    if not snapshots or snapshots[-1] != callable_environment:
+                        snapshots.append(dict(callable_environment))
             node_line = getattr(n, "line", 0)
             if isinstance(node_line, int) and node_line > 0:
                 self._active_source_file = current_file
@@ -5689,7 +5747,7 @@ class MypyAnalyzer:
                     walk_node(stmt)
                     # Statements following an unconditional terminal cannot
                     # contribute executable references in this block.
-                    if isinstance(stmt, (ReturnStmt, RaiseStmt)):
+                    if isinstance(stmt, (ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt)):
                         break
 
             elif isinstance(n, ExpressionStmt):
@@ -6130,7 +6188,19 @@ class MypyAnalyzer:
                     and bool(n.body.body)
                     and isinstance(n.body.body[-1], BreakStmt)
                     and all(
-                        not isinstance(item, (IfStmt, WhileStmt, ForStmt, TryStmt, BreakStmt))
+                        not isinstance(
+                            item,
+                            (
+                                IfStmt,
+                                WhileStmt,
+                                ForStmt,
+                                TryStmt,
+                                BreakStmt,
+                                ContinueStmt,
+                                ReturnStmt,
+                                RaiseStmt,
+                            ),
+                        )
                         for item in n.body.body[:-1]
                     )
                 )
@@ -6224,26 +6294,52 @@ class MypyAnalyzer:
                 before_partials = dict(partial_environment)
                 before_lambdas = dict(lambda_environment)
                 try_assigned_names: set[str] = set()
-                try_assignment_lines: dict[str, int] = {}
-                potentially_raising_lines: list[int] = []
-                assignment_stack: list[Any] = [n.body]
-                assignment_seen: set[int] = set()
-                while assignment_stack:
-                    assignment_item = assignment_stack.pop()
-                    if assignment_item is None or id(assignment_item) in assignment_seen:
+                assignment_target_ids: set[int] = set()
+                callable_snapshots: list[
+                    dict[str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]]
+                ] = []
+                from types import GetSetDescriptorType, MemberDescriptorType
+
+                from mypy.nodes import Node
+
+                syntax_stack: list[Node] = [n.body]
+                syntax_seen: set[int] = set()
+                while syntax_stack:
+                    syntax_item = syntax_stack.pop()
+                    if id(syntax_item) in syntax_seen:
                         continue
-                    assignment_seen.add(id(assignment_item))
-                    if isinstance(assignment_item, AssignmentStmt):
-                        for target in assignment_item.lvalues:
+                    syntax_seen.add(id(syntax_item))
+                    if isinstance(syntax_item, AssignmentStmt):
+                        for target in syntax_item.lvalues:
+                            assignment_target_ids.add(id(target))
                             if isinstance(target, NameExpr):
                                 try_assigned_names.add(target.name)
-                                try_assignment_lines[target.name] = assignment_item.line
-                    if isinstance(assignment_item, CallExpr):
-                        potentially_raising_lines.append(assignment_item.line)
-                    children = getattr(assignment_item, "children", None)
-                    if callable(children):
-                        assignment_stack.extend(child for child in children() if child is not None)
-                walk_node(n.body)
+                    for cls in type(syntax_item).__mro__:
+                        for attribute, descriptor in cls.__dict__.items():
+                            if attribute in {"node", "info", "type", "unanalyzed_type", "analyzed"}:
+                                continue
+                            if isinstance(syntax_item, FuncDef) and attribute == "body":
+                                continue
+                            if isinstance(syntax_item, ClassDef) and attribute == "defs":
+                                continue
+                            if not isinstance(
+                                descriptor, (GetSetDescriptorType, MemberDescriptorType)
+                            ):
+                                continue
+                            child = getattr(syntax_item, attribute, None)
+                            if isinstance(child, Node):
+                                syntax_stack.append(child)
+                            elif isinstance(child, (list, tuple)):
+                                syntax_stack.extend(
+                                    item for item in child if isinstance(item, Node)
+                                )
+                try_callable_snapshots.append(callable_snapshots)
+                try_assignment_target_ids.append(assignment_target_ids)
+                try:
+                    walk_node(n.body)
+                finally:
+                    try_assignment_target_ids.pop()
+                    try_callable_snapshots.pop()
                 body_callables = dict(callable_environment)
                 body_partials = dict(partial_environment)
                 body_lambdas = dict(lambda_environment)
@@ -6256,15 +6352,8 @@ class MypyAnalyzer:
                 handler_partials: list[dict[str, _PartialCallable]] = []
                 handler_lambdas: list[dict[str, Any]] = []
                 for handler in n.handlers:
-                    exception_callables = dict(before_callables)
-                    for name, assignment_line in try_assignment_lines.items():
-                        if (
-                            any(line > assignment_line for line in potentially_raising_lines)
-                            and name in body_callables
-                        ):
-                            exception_callables[name] = body_callables[name]
                     callable_environment = self._join_callable_environments(
-                        [before_callables, exception_callables]
+                        [before_callables, *callable_snapshots]
                     )
                     partial_environment = {
                         key: value
@@ -6390,39 +6479,49 @@ class MypyAnalyzer:
 
             elif isinstance(n, (ListComprehension, SetComprehension)):
                 generator = n.generator
-                for sequence, is_async in zip(
-                    generator.sequences,
-                    generator.is_async,
-                    strict=True,
+                for index, (sequence, is_async) in enumerate(
+                    zip(
+                        generator.sequences,
+                        generator.is_async,
+                        strict=True,
+                    )
                 ):
                     consume_generator_expression(
                         sequence,
                         sequence.line,
                         require_async=bool(is_async),
                     )
-                    walk_node(sequence)
+                    if index:
+                        walk_per_iteration(sequence)
+                    else:
+                        walk_node(sequence)
                 for conditions in generator.condlists:
                     for condition in conditions:
-                        walk_node(condition)
-                walk_node(generator.left_expr)
+                        walk_per_iteration(condition)
+                walk_per_iteration(generator.left_expr)
 
             elif isinstance(n, DictionaryComprehension):
-                for sequence, is_async in zip(n.sequences, n.is_async, strict=True):
+                for index, (sequence, is_async) in enumerate(
+                    zip(n.sequences, n.is_async, strict=True)
+                ):
                     consume_generator_expression(
                         sequence,
                         sequence.line,
                         require_async=bool(is_async),
                     )
-                    walk_node(sequence)
+                    if index:
+                        walk_per_iteration(sequence)
+                    else:
+                        walk_node(sequence)
                 for conditions in n.condlists:
                     for condition in conditions:
-                        walk_node(condition)
-                walk_node(n.key)
-                walk_node(n.value)
+                        walk_per_iteration(condition)
+                walk_per_iteration(n.key)
+                walk_per_iteration(n.value)
 
             elif isinstance(n, GeneratorExpr):
                 if id(n) in consumed_generator_expression_ids:
-                    for sequence in n.sequences:
+                    for index, sequence in enumerate(n.sequences):
                         # Iterating a nested generator as an outer generator's
                         # iterable consumes that inner generator as well.
                         if isinstance(sequence, GeneratorExpr):
@@ -6431,13 +6530,16 @@ class MypyAnalyzer:
                                 sequence.line,
                                 require_async=None,
                             )
-                        walk_node(sequence)
+                        if index:
+                            walk_per_iteration(sequence)
+                        else:
+                            walk_node(sequence)
                     for conditions in n.condlists:
                         for condition in conditions:
-                            walk_node(condition)
+                            walk_per_iteration(condition)
                     eager_generator_expression_depth[0] += 1
                     try:
-                        walk_node(n.left_expr)
+                        walk_per_iteration(n.left_expr)
                     finally:
                         eager_generator_expression_depth[0] -= 1
                 elif n.sequences:
@@ -6627,7 +6729,7 @@ class MypyAnalyzer:
                 "schema": self.CACHE_SCHEMA_VERSION,
                 "engine": "fastapi-endpoint-detector:mypy-analyzer-v2",
                 "source_span_normalization": "source-call-order-verified-ast-spans-v2",
-                "execution_state_policy": "conditional-elif-try-else-guaranteed-finally-v3",
+                "execution_state_policy": self.EXECUTION_STATE_POLICY,
                 "max_depth": self.max_depth,
                 "no_site_packages": self.no_site_packages,
                 "hermetic_search_path_policy": (

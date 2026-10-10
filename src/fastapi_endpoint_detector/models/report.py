@@ -421,6 +421,7 @@ class AnalysisLimitationReport(BaseModel):
 
     file_path: str
     call_line: int
+    call_column: int | None = Field(default=None, ge=0, strict=True)
     cap: str
     target_count: int | None = None
     limit: int | None = None
