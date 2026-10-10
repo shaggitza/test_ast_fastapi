@@ -117,6 +117,11 @@ def test_live_motor_probe_binds_real_vendor_stub_declarations() -> None:
     assert "motor/motor_asyncio.pyi" in source_hashes
     assert "motor/core.pyi" in source_hashes
     assert "motor/py.typed" in source_hashes
+    assert result["verified_target_evidence"]["package_versions"]["motor"] == "3.6.0"
+    assert result["verified_target_evidence"]["package_metadata_hashes"][
+        "motor-3.6.0.dist-info/METADATA"
+    ] == "sha256:dce8b401625d673eed6b2c0c66d9d196a13de0649c0788da8b3e2a72edb2965d"
+    assert result["verified_target_evidence"]["audit_evidence_hash"].startswith("sha256:")
 
 
 def test_motor_probe_rejects_modified_artifact_bytes(tmp_path: Path) -> None:

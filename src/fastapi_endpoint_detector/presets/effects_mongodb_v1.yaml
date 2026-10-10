@@ -1,11 +1,11 @@
 schema_version: 1
 preset:
   id: pymongo-effects
-  version: 1.1.0
+  version: 1.2.0
   provenance:
     kind: preset
     source: fastapi-endpoint-detector/effects_mongodb_v1.yaml
-    revision: "2"
+    revision: "3"
 contracts:
   - id: pymongo-find-one
     symbol: pymongo.synchronous.collection.Collection.find_one
@@ -46,7 +46,13 @@ contracts:
     channel: mongodb
     resource: {kind: receiver}
     value: {kind: argument, index: 0}
-    package: {distribution: motor, version: "==3.6.0"}
+    package:
+      distribution: motor
+      version: "==3.6.0"
+      source_hashes:
+        motor/core.pyi: sha256:648fa05c34b81d6510b0cc672ac041e9ebfbb88c7ffbb5573e6d40c8571dcde0
+        motor/motor_asyncio.pyi: sha256:6103c4af1c7c81ba3f7bccbfb478f897982eb0e38fef6592a111a22e41eee736
+        motor-3.6.0.dist-info/METADATA: sha256:dce8b401625d673eed6b2c0c66d9d196a13de0649c0788da8b3e2a72edb2965d
   - id: motor-update-one
     symbol: motor.core.AgnosticCollection.update_one
     invocation: instance_method
@@ -54,7 +60,13 @@ contracts:
     channel: mongodb
     resource: {kind: receiver}
     value: {kind: argument, index: 1}
-    package: {distribution: motor, version: "==3.6.0"}
+    package:
+      distribution: motor
+      version: "==3.6.0"
+      source_hashes:
+        motor/core.pyi: sha256:648fa05c34b81d6510b0cc672ac041e9ebfbb88c7ffbb5573e6d40c8571dcde0
+        motor/motor_asyncio.pyi: sha256:6103c4af1c7c81ba3f7bccbfb478f897982eb0e38fef6592a111a22e41eee736
+        motor-3.6.0.dist-info/METADATA: sha256:dce8b401625d673eed6b2c0c66d9d196a13de0649c0788da8b3e2a72edb2965d
   - id: motor-delete-one
     symbol: motor.core.AgnosticCollection.delete_one
     invocation: instance_method
@@ -62,4 +74,10 @@ contracts:
     channel: mongodb
     resource: {kind: receiver}
     value: {kind: argument, index: 0}
-    package: {distribution: motor, version: "==3.6.0"}
+    package:
+      distribution: motor
+      version: "==3.6.0"
+      source_hashes:
+        motor/core.pyi: sha256:648fa05c34b81d6510b0cc672ac041e9ebfbb88c7ffbb5573e6d40c8571dcde0
+        motor/motor_asyncio.pyi: sha256:6103c4af1c7c81ba3f7bccbfb478f897982eb0e38fef6592a111a22e41eee736
+        motor-3.6.0.dist-info/METADATA: sha256:dce8b401625d673eed6b2c0c66d9d196a13de0649c0788da8b3e2a72edb2965d

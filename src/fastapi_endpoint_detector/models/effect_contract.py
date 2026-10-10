@@ -156,7 +156,7 @@ class PresetMetadata(_StrictModel):
 
 
 class PackageApplicability(_StrictModel):
-    """Target-environment applicability metadata; v1 does not enforce it."""
+    """Optional package version and exact typed-source constraints."""
 
     distribution: str | None = Field(
         default=None,
@@ -164,6 +164,7 @@ class PackageApplicability(_StrictModel):
     )
     version: str | None = Field(default=None, min_length=1)
     python: str | None = Field(default=None, min_length=1)
+    source_hashes: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_scope(self) -> PackageApplicability:
@@ -171,6 +172,12 @@ class PackageApplicability(_StrictModel):
             raise ValueError("distribution and version must be provided together")
         if self.distribution is None and self.python is None:
             raise ValueError("package applicability requires a distribution or Python range")
+        if any(
+            not path or path.startswith("/") or ".." in path.split("/")
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
+            for path, digest in self.source_hashes.items()
+        ):
+            raise ValueError("package source hashes must use safe relative paths and SHA-256")
         return self
 
 

@@ -48,14 +48,18 @@ def sha(data: bytes) -> str:
 
 
 def bounded_python_sources(wheel: bytes, destination: Path, filename: str) -> dict[str, str]:
-    """Extract bounded Python implementations, declarations, and typing markers."""
+    """Extract bounded code, typing markers, and distribution metadata."""
     hashes: dict[str, str] = {}
     total = 0
     with zipfile.ZipFile(io.BytesIO(wheel)) as archive:
         members = [
             m
             for m in archive.infolist()
-            if m.filename.endswith((".py", ".pyi")) or m.filename.endswith("/py.typed")
+            if (
+                m.filename.endswith((".py", ".pyi"))
+                or m.filename.endswith("/py.typed")
+                or m.filename.endswith(".dist-info/METADATA")
+            )
         ]
         if len(members) > LIMIT_FILES:
             raise ValueError(f"too many Python members in {filename}")
@@ -67,7 +71,10 @@ def bounded_python_sources(wheel: bytes, destination: Path, filename: str) -> di
                 or member.file_size > LIMIT_MEMBER_BYTES
             ):
                 raise ValueError(f"unsafe or oversized member: {member.filename}")
-            if not relative.parts or relative.parts[0] not in {"motor", "pymongo", "bson"}:
+            if not relative.parts or not (
+                relative.parts[0] in {"motor", "pymongo", "bson"}
+                or relative.parts[0].endswith(".dist-info")
+            ):
                 continue
             data = archive.read(member)
             total += len(data)
@@ -219,7 +226,8 @@ wrapped: Wrapper
             handler=HandlerInfo(name="handler", module="main", file_path=main_path, line_number=7),
         )
         analyzer = MypyAnalyzer(app_root, module_root=root, max_depth=1)
-        dependencies = analyzer.analyze_endpoint(endpoint)
+        dependencies_by_endpoint = analyzer.analyze_endpoints([endpoint], use_cache=True)
+        dependencies = next(iter(dependencies_by_endpoint.values()))
         call_sites = dependencies.get_resolved_call_sites()
         loaded = load_effect_preset("mongodb-v1")
         audit = audit_effect_contracts(
@@ -229,9 +237,35 @@ wrapped: Wrapper
             endpoint_call_sites=[(endpoint, call_sites)],
             track_transitive=False,
             max_depth=1,
-            cache_enabled=False,
+            cache_enabled=True,
             resolver_versions=(f"mypy@{analyzer.resolver_version}",),
+            verified_mypy_source_hashes=analyzer.verified_mypy_source_hashes,
+            verified_package_source_hashes=analyzer.verified_package_source_hashes,
+            verified_package_versions=analyzer.verified_package_versions,
         )
+        warm_analyzer = MypyAnalyzer(app_root, module_root=root, max_depth=1)
+        warm_dependencies = warm_analyzer.analyze_endpoints([endpoint], use_cache=True)
+        warm_call_sites = next(iter(warm_dependencies.values())).get_resolved_call_sites()
+        warm_audit = audit_effect_contracts(
+            loaded,
+            source_root=root,
+            inventory=EndpointInventory(endpoints=[endpoint]),
+            endpoint_call_sites=[(endpoint, warm_call_sites)],
+            track_transitive=False,
+            max_depth=1,
+            cache_enabled=True,
+            resolver_versions=(f"mypy@{warm_analyzer.resolver_version}",),
+            verified_mypy_source_hashes=warm_analyzer.verified_mypy_source_hashes,
+            verified_package_source_hashes=warm_analyzer.verified_package_source_hashes,
+            verified_package_versions=warm_analyzer.verified_package_versions,
+        )
+        if (
+            warm_audit.provenance.package_evidence_hash
+            != audit.provenance.package_evidence_hash
+            or [row.model_dump(mode="json") for row in warm_audit.occurrences]
+            != [row.model_dump(mode="json") for row in audit.occurrences]
+        ):
+            raise RuntimeError("cold and warm Motor audit evidence differ")
         arguments_by_line = {site.line: site.arguments for site in call_sites}
         occurrences = []
         for row in audit.occurrences:
@@ -273,7 +307,8 @@ wrapped: Wrapper
             "analysis_config": {
                 "max_depth": 1,
                 "track_transitive": False,
-                "audit_cache_enabled": False,
+                "audit_cache_enabled": True,
+                "cold_warm_audit_equal": True,
             },
             "fixture_diagnostics": [
                 error.replace(str(main_path), "app/main.py")
@@ -284,6 +319,12 @@ wrapped: Wrapper
             "product_module_paths": product_paths,
             "artifact_hashes": artifact_meta,
             "extracted_typed_source_hashes": extracted,
+            "verified_target_evidence": {
+                "package_versions": analyzer.verified_package_versions,
+                "mypy_source_hashes": analyzer.verified_mypy_source_hashes,
+                "package_metadata_hashes": analyzer.verified_package_source_hashes,
+                "audit_evidence_hash": audit.provenance.package_evidence_hash,
+            },
             "fixture_sha256": sha(fixture.encode()),
             "analyzer_source_hashes": {
                 str(p.relative_to(repo)): digest_file(p) for p in analyzer_paths

@@ -23,6 +23,8 @@ import tempfile
 import tokenize
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from email.parser import BytesParser
+from email.policy import compat32
 from importlib.metadata import PackageNotFoundError, version
 from importlib.util import find_spec
 from pathlib import Path, PurePosixPath
@@ -652,6 +654,9 @@ class MypyAnalyzer:
         self._source_record_snapshots: dict[str, bytes | None] = {}
         self._source_record_snapshot_bytes = 0
         self._last_source_records: list[tuple[Path, str, str]] = []
+        self._verified_mypy_source_hashes: dict[str, str] = {}
+        self._verified_package_source_hashes: dict[str, str] = {}
+        self._verified_package_versions: dict[str, str] = {}
         self._local_module_census_depth = 0
         self._local_module_census: tuple[tuple[str, bool, str, bool], ...] | None = None
         self._analysis_source_snapshots: dict[str, bytes | None] = {}
@@ -693,6 +698,21 @@ class MypyAnalyzer:
     def resolver_version(self) -> str:
         """Version of the typed resolver used for call-site provenance."""
         return self._resolver_version
+
+    @property
+    def verified_mypy_source_hashes(self) -> dict[str, str]:
+        """Hashes of source bytes that matched mypy's parsed source digests."""
+        return dict(self._verified_mypy_source_hashes)
+
+    @property
+    def verified_package_versions(self) -> dict[str, str]:
+        """Versions from distribution metadata adjacent to parsed typed modules."""
+        return dict(self._verified_package_versions)
+
+    @property
+    def verified_package_source_hashes(self) -> dict[str, str]:
+        """Hashes of adjacent distribution metadata bytes read by the analyzer."""
+        return dict(self._verified_package_source_hashes)
 
     def set_cache_path(self, path: Path) -> None:
         """Set a custom cache file path."""
@@ -919,6 +939,10 @@ class MypyAnalyzer:
                 # mypy otherwise adds the process cwd even with no-site-packages.
                 alt_lib_path=str(self.module_root) if self.no_site_packages else None,
             )
+            self._verified_mypy_source_hashes = {}
+            self._verified_package_source_hashes = {}
+            self._verified_package_versions = {}
+            conflicting_package_versions: set[str] = set()
             analyzed_source_hashes: dict[str, str] = {}
 
             # Store the types map
@@ -939,6 +963,63 @@ class MypyAnalyzer:
                     source_hash = getattr(state, "source_hash", None)
                     if isinstance(source_hash, str):
                         analyzed_source_hashes[state_path] = source_hash
+                        source_file = Path(state_path)
+                        if source_file.is_file() and source_file.suffix in {".py", ".pyi"}:
+                            vendor_bytes = source_file.read_bytes()
+                        else:
+                            vendor_bytes = b""
+                        if vendor_bytes and hashlib.sha1(vendor_bytes).hexdigest() == source_hash:
+                            suffix = ".pyi" if state_path.endswith(".pyi") else ".py"
+                            self._verified_mypy_source_hashes[
+                                module_name.replace(".", "/") + suffix
+                            ] = "sha256:" + hashlib.sha256(vendor_bytes).hexdigest()
+                            parts = module_name.split(".")
+                            if len(parts) > 1:
+                                distribution = parts[0].replace("_", "-").lower()
+                                package_root = source_file.parent
+                                while package_root.name == parts[0] or package_root.name in parts:
+                                    package_root = package_root.parent
+                                metadata_candidates = sorted(
+                                    package_root.glob(
+                                        f"{distribution}-*.dist-info/METADATA"
+                                    )
+                                )
+                                for metadata_path in metadata_candidates:
+                                    metadata_bytes = metadata_path.read_bytes()
+                                    metadata = BytesParser(policy=compat32).parsebytes(
+                                        metadata_bytes
+                                    )
+                                    metadata_distribution = (
+                                        str(metadata.get("Name", ""))
+                                        .replace("_", "-")
+                                        .lower()
+                                    )
+                                    if metadata_distribution == distribution:
+                                        metadata_relative = metadata_path.relative_to(
+                                            package_root
+                                        ).as_posix()
+                                        self._verified_package_source_hashes[
+                                            metadata_relative
+                                        ] = "sha256:" + hashlib.sha256(
+                                            metadata_bytes
+                                        ).hexdigest()
+                                        version_text = metadata.get("Version")
+                                        if (
+                                            isinstance(version_text, str)
+                                            and distribution not in conflicting_package_versions
+                                        ):
+                                            previous = self._verified_package_versions.get(
+                                                distribution
+                                            )
+                                            if previous is not None and previous != version_text:
+                                                conflicting_package_versions.add(distribution)
+                                                self._verified_package_versions.pop(
+                                                    distribution, None
+                                                )
+                                            else:
+                                                self._verified_package_versions[
+                                                    distribution
+                                                ] = version_text
                     if inventory_paths is None or state_path in inventory_paths:
                         self._module_to_path[module_name] = state_path
                 tree = state.tree
@@ -6289,6 +6370,18 @@ class MypyAnalyzer:
         if use_cache and self.cache_path.exists() and self._load_cache():
             all_cached = all(self._endpoint_key(ep) in self._endpoint_deps for ep in endpoints)
             if all_cached:
+                # Endpoint call sites can be reused, but package applicability
+                # evidence must be derived from the current typed source tree
+                # and adjacent distribution metadata. It is intentionally not
+                # restored from cache JSON: those hashes and version labels
+                # would be caller-editable claims unless revalidated against
+                # the bytes mypy actually analyzed.
+                try:
+                    self._ensure_mypy_built()
+                except MypyAnalyzerError:
+                    self._verified_mypy_source_hashes = {}
+                    self._verified_package_source_hashes = {}
+                    self._verified_package_versions = {}
                 return self._endpoint_deps
         else:
             self._endpoint_deps.clear()

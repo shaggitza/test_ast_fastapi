@@ -1877,6 +1877,9 @@ class ChangeMapper:
             max_depth=effective_depth,
             cache_enabled=self.use_cache,
             resolver_versions=(f"mypy@{self.mypy_analyzer.resolver_version}",),
+            verified_mypy_source_hashes=self.mypy_analyzer.verified_mypy_source_hashes,
+            verified_package_source_hashes=self.mypy_analyzer.verified_package_source_hashes,
+            verified_package_versions=self.mypy_analyzer.verified_package_versions,
         )
 
     def _attach_contract_evidence(

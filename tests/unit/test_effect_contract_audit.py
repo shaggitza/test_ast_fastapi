@@ -15,9 +15,11 @@ from fastapi_endpoint_detector.models.effect_contract import (
     ResolvedCallSite,
     ResourceIdentityEvidence,
     load_effect_contracts,
+    load_effect_preset,
 )
 from fastapi_endpoint_detector.models.effect_contract_audit import (
     AuditCallStatus,
+    EffectContractAudit,
     EffectContractAuditError,
 )
 from fastapi_endpoint_detector.models.endpoint import (
@@ -130,6 +132,77 @@ def _audit(
         cache_enabled=cache_enabled,
         resolver_versions=("mypy@1.19.1",),
     )
+
+
+def test_motor_contract_requires_exact_pinned_typed_sources(tmp_path: Path) -> None:
+    endpoint = _endpoint(tmp_path, "handler")
+    site = _site(
+        tmp_path,
+        column=2,
+        symbol="motor.core.AgnosticCollection.insert_one",
+        invocation=InvocationKind.INSTANCE_METHOD,
+        spelling="collection.insert_one",
+    )
+    loaded = load_effect_preset("mongodb-v1")
+    valid_hashes = {
+        "motor/core.pyi": "sha256:648fa05c34b81d6510b0cc672ac041e9ebfbb88c7ffbb5573e6d40c8571dcde0",
+        "motor/motor_asyncio.pyi": (
+            "sha256:6103c4af1c7c81ba3f7bccbfb478f897982eb0e38fef6592a111a22e41eee736"
+        ),
+    }
+    metadata_hashes = {
+        "motor-3.6.0.dist-info/METADATA": (
+            "sha256:dce8b401625d673eed6b2c0c66d9d196a13de0649c0788da8b3e2a72edb2965d"
+        )
+    }
+
+    def audit(
+        source_hashes: dict[str, str],
+        versions: dict[str, str],
+        metadata_hashes: dict[str, str] | None = None,
+    ) -> EffectContractAudit:
+        return audit_effect_contracts(
+            loaded,
+            source_root=tmp_path,
+            inventory=EndpointInventory(endpoints=[endpoint]),
+            endpoint_call_sites=[(endpoint, [site])],
+            track_transitive=False,
+            max_depth=1,
+            cache_enabled=False,
+            resolver_versions=("mypy@1.19.1",),
+            verified_mypy_source_hashes=source_hashes,
+            verified_package_source_hashes=metadata_hashes or {},
+            verified_package_versions=versions,
+        )
+
+    matched = audit(valid_hashes, {"motor": "3.6.0"}, metadata_hashes)
+    occurrence = matched.occurrences[0]
+    assert occurrence.audit_status == AuditCallStatus.MATCHED
+    assert matched.scope.package_applicability == "source_pins_evaluated"
+
+    for changed in (
+        {},
+        {**valid_hashes, "motor/core.pyi": "sha256:" + "0" * 64},
+        {
+            **valid_hashes,
+            "motor/motor_asyncio.pyi": "sha256:" + "0" * 64,
+        },
+    ):
+        rejected = audit(changed, {"motor": "3.6.0"}, metadata_hashes).occurrences[0]
+        assert rejected.resolver_status == CallResolutionStatus.EXACT
+        assert rejected.audit_status == AuditCallStatus.UNMATCHED
+        assert rejected.reason_code == "package_applicability_unverified"
+    for versions in ({}, {"motor": "3.6.1"}, {"motor": "3.6.0rc1"}):
+        rejected = audit(valid_hashes, versions, metadata_hashes).occurrences[0]
+        assert rejected.audit_status == AuditCallStatus.UNMATCHED
+        assert rejected.reason_code == "package_applicability_unverified"
+    rejected_metadata = audit(
+        valid_hashes,
+        {"motor": "3.6.0"},
+        {"motor-3.6.0.dist-info/METADATA": "sha256:" + "0" * 64},
+    ).occurrences[0]
+    assert rejected_metadata.audit_status == AuditCallStatus.UNMATCHED
+    assert rejected_metadata.reason_code == "package_applicability_unverified"
 
 
 def test_composite_resource_cartesian_overflow_is_unavailable(tmp_path: Path) -> None:
