@@ -139,7 +139,22 @@ def checkout_revision(repo: Path) -> str:
     ).stdout.strip()
 
 
-def main() -> int:
+def verify_committed_sources(repo: Path, revision: str, paths: tuple[Path, ...]) -> None:
+    """Require report source pins to be the producer revision's exact Git bytes."""
+    if checkout_revision(repo) != revision:
+        raise ValueError("producer revision changed during probe")
+    for path in paths:
+        relative = path.resolve().relative_to(repo.resolve()).as_posix()
+        committed = subprocess.run(
+            ["git", "-C", str(repo), "show", f"{revision}:{relative}"],
+            check=True,
+            capture_output=True,
+        ).stdout
+        if path.read_bytes() != committed:
+            raise ValueError(f"probe source differs from producer revision: {relative}")
+
+
+def main() -> int:  # noqa: PLR0915
     parser = argparse.ArgumentParser()
     parser.add_argument("--artifacts", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -162,6 +177,9 @@ def main() -> int:
         repo / "src/fastapi_endpoint_detector/models/effect_contract.py",
         repo / "src/fastapi_endpoint_detector/models/endpoint.py",
     ]
+    revision = checkout_revision(repo)
+    pinned_paths = (*analyzer_paths, Path(__file__), preset_path, product_path)
+    verify_committed_sources(repo, revision, pinned_paths)
     product_paths = {
         ".".join(path.relative_to(repo / "src").with_suffix("").parts): verified_product_path(
             repo,
@@ -260,8 +278,7 @@ wrapped: Wrapper
             verified_package_versions=warm_analyzer.verified_package_versions,
         )
         if (
-            warm_audit.provenance.package_evidence_hash
-            != audit.provenance.package_evidence_hash
+            warm_audit.provenance.package_evidence_hash != audit.provenance.package_evidence_hash
             or [row.model_dump(mode="json") for row in warm_audit.occurrences]
             != [row.model_dump(mode="json") for row in audit.occurrences]
         ):
@@ -293,6 +310,7 @@ wrapped: Wrapper
                     ],
                 }
             )
+        verify_committed_sources(repo, revision, pinned_paths)
         output = {
             "schema_version": 1,
             "probe_id": "gh97-motor-typed-binding-v1",
@@ -302,7 +320,7 @@ wrapped: Wrapper
             ),
             "python": platform.python_version(),
             "mypy": analyzer.resolver_version,
-            "analyzer_revision": checkout_revision(repo),
+            "analyzer_revision": revision,
             "runner_sha256": digest_file(Path(__file__)),
             "analysis_config": {
                 "max_depth": 1,

@@ -9,7 +9,12 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from benchmarks.gh97_motor_binding.run import verified_product_path, verify_artifact_hash
+from benchmarks.gh97_motor_binding.run import (
+    checkout_revision,
+    verified_product_path,
+    verify_artifact_hash,
+    verify_committed_sources,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 HISTORICAL_RESULT = ROOT / "benchmarks/gh97_motor_binding/historical-source-only-v1.json"
@@ -152,3 +157,51 @@ def test_motor_probe_rejects_product_module_outside_expected_checkout(tmp_path: 
             "fastapi_endpoint_detector.models.endpoint",
             "src/fastapi_endpoint_detector/models/endpoint.py",
         )
+
+
+def test_motor_report_source_pins_require_the_exact_producer_commit(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    source = tmp_path / "analyzer.py"
+    source.write_bytes(b"verified source\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "analyzer.py"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Probe Test",
+            "-c",
+            "user.email=probe@example.invalid",
+            "commit",
+            "-m",
+            "source",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    revision = checkout_revision(tmp_path)
+    verify_committed_sources(tmp_path, revision, (source,))
+    source.write_bytes(b"different source\n")
+    with pytest.raises(ValueError, match="source differs from producer revision"):
+        verify_committed_sources(tmp_path, revision, (source,))
+    source.write_bytes(b"verified source\n")
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Probe Test",
+            "-c",
+            "user.email=probe@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "new revision",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    with pytest.raises(ValueError, match="revision changed"):
+        verify_committed_sources(tmp_path, revision, (source,))
