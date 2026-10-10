@@ -307,6 +307,8 @@ def _validate(record: dict[str, Any], expected_mode: str) -> None:  # noqa: PLR0
         _validate_failure(record.get("failure"))
         if "framework_phase" in record:
             raise ComparisonError("failed records forbid runtime phase observations")
+        if "runtime_custody" in record:
+            raise ComparisonError("failed records forbid runtime custody metadata")
         if "framework_phase_manifest" in record:
             try:
                 PhaseManifest.model_validate(record["framework_phase_manifest"])

@@ -438,6 +438,47 @@ def test_failed_runtime_forbids_unsigned_phase_metadata(
         compare(secure, runtime)
 
 
+@pytest.mark.parametrize("mode", ["secure", "runtime"])
+@pytest.mark.parametrize("custody_value", [None, {}, "forged", {"list": {}, "impact": {}}])
+def test_failed_records_forbid_any_runtime_custody(
+    tmp_path: Path, mode: str, custody_value: object
+) -> None:
+    paths = {name: tmp_path / f"{name}.json" for name in ("secure", "runtime")}
+    for name, path in paths.items():
+        record = _record(name)
+        if name == mode:
+            record.update(
+                status="failure",
+                failure={"phase": "unavailable", "message": "abstain"},
+                inventory=None,
+                impact=None,
+                runtime_custody=custody_value,
+            )
+            record.pop("framework_phase", None)
+        _write(path, record)
+    with pytest.raises(ComparisonError, match="failed records forbid runtime custody"):
+        compare(paths["secure"], paths["runtime"])
+
+
+def test_failed_runtime_rejects_previously_valid_success_custody(tmp_path: Path) -> None:
+    secure = tmp_path / "secure.json"
+    runtime = tmp_path / "runtime.json"
+    _write(secure, _record("secure"))
+    record = _record("runtime")
+    _sign_controlled_record(record)
+    assert set(record["runtime_custody"]) == {"list", "impact"}
+    record.update(
+        status="failure",
+        failure={"phase": "import", "message": "abstain"},
+        inventory=None,
+        impact=None,
+    )
+    record.pop("framework_phase")
+    _write(runtime, record)
+    with pytest.raises(ComparisonError, match="failed records forbid runtime custody"):
+        compare(secure, runtime)
+
+
 def _compare_matrix(paths: dict[tuple[str, str], Path]) -> dict[str, Any]:
     return compare_target_baseline(
         secure_target_path=paths[("target", "secure")],
