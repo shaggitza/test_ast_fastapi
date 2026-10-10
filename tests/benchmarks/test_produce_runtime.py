@@ -998,9 +998,11 @@ def test_secure_runner_abstains_for_reported_phase_coverage_gaps(
         result = CommandRunner(timeout_seconds=10)("secure", "impact", request)
         assert result.impact == {"candidate_endpoints": []}
         assert request.phase_manifest_state is not None
-        if report.get("unavailable_count") or report.get("limitations") or report.get(
-            "backend"
-        ) == "unavailable":
+        if (
+            report.get("unavailable_count")
+            or report.get("limitations")
+            or report.get("backend") == "unavailable"
+        ):
             assert request.phase_manifest_state == {"conditional": True}
         else:
             assert "entries" in request.phase_manifest_state
