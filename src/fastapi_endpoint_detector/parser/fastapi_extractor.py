@@ -815,7 +815,13 @@ class FastAPIExtractor:
             if capped:
                 break
 
-        overrides = getattr(self._app, "dependency_overrides", None)
+        # APIRoute binds the override provider that its request handler uses.
+        # A mounted child's provider is independent of the selected parent.
+        # An explicit None means no provider; only legacy route-like objects
+        # without this attribute fall back to the selected application.
+        has_provider, provider = self._safe_attribute(route, "dependency_overrides_provider")
+        provider = provider if has_provider else self._app
+        overrides = getattr(provider, "dependency_overrides", None)
         try:
             overrides_visible = bool(overrides)
         except Exception:

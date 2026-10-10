@@ -601,6 +601,14 @@ class _Route:
     operation: str | None = None
     source_span: NativeSourceSpan | None = None
     dependency_expressions: tuple[NativeRouteDependencyExpressionEvidence, ...] = ()
+    bootstrap_helper_owners: tuple[
+        tuple[
+            Literal["bootstrap_helper_call", "bootstrap_helper_definition"],
+            str,
+            NativeSourceSpan,
+        ],
+        ...,
+    ] = ()
 
 
 @dataclass(frozen=True)
@@ -1671,6 +1679,17 @@ class SecureASTExtractor:
                                 confidence="established",
                                 expression=f"{route.operation}({route.handler.name})",
                                 source_span=route.source_span,
+                            )
+                        )
+                    for helper_kind, helper_binding, helper_span in route.bootstrap_helper_owners:
+                        source_owners.append(
+                            NativeRouteSourceOwnerEvidence(
+                                side=self.snapshot_side,
+                                owner_kind=helper_kind,
+                                qualified_binding=helper_binding,
+                                related_binding=route.handler.module + "." + route.handler.name,
+                                confidence="established",
+                                source_span=helper_span,
                             )
                         )
                     for structural_edge in assembly_chain:
@@ -3438,6 +3457,14 @@ class SecureASTExtractor:
             router_view_env: set[str],
             string_env: dict[str, str],
             stack: frozenset[tuple[str, str, int]],
+            helper_owners: tuple[
+                tuple[
+                    Literal["bootstrap_helper_call", "bootstrap_helper_definition"],
+                    str,
+                    NativeSourceSpan,
+                ],
+                ...,
+            ],
         ) -> None:
             identity = (current_module.name, current.name, current.lineno)
             if (
@@ -4086,6 +4113,7 @@ class SecureASTExtractor:
                                     registration_kind=NativeRegistrationKind.IMPERATIVE,
                                     operation=operation,
                                     source_span=_native_span(current_module.path, call),
+                                    bootstrap_helper_owners=helper_owners,
                                 )
                             )
                     continue
@@ -4261,6 +4289,19 @@ class SecureASTExtractor:
                         nested_router_views,
                         nested_strings,
                         stack | {identity},
+                        (
+                            *helper_owners,
+                            (
+                                "bootstrap_helper_call",
+                                f"{current_module.name}.{current.name}",
+                                _native_span(current_module.path, call),
+                            ),
+                            (
+                                "bootstrap_helper_definition",
+                                f"{target_module.name}.{target_function.name}",
+                                _function_header_span(target_module.path, target_function),
+                            ),
+                        ),
                     )
                     continue
                 if touches_tracked(call):
@@ -4322,7 +4363,7 @@ class SecureASTExtractor:
             value = self._literal_string(default, module, function.lineno)
             if value is not None:
                 initial_strings[parameter.arg] = value
-        apply(module, function, initial_objects, set(), initial_strings, frozenset())
+        apply(module, function, initial_objects, set(), initial_strings, frozenset(), ())
 
     @staticmethod
     def _record_object_limitation(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 from typing import TYPE_CHECKING
 
 import pytest
@@ -1114,3 +1115,165 @@ def test_same_line_route_registrations_have_distinct_physical_occurrence_order(
     assert first_registration.source_span.start_line == second_registration.source_span.start_line
     assert first_registration.source_span != second_registration.source_span
     assert first_registration.occurrence_order < second_registration.occurrence_order
+
+
+@pytest.mark.parametrize(
+    "selection", ["factory_return", "bootstrap_registration", "bootstrap_helper_header"]
+)
+def test_public_two_snapshot_selected_factory_and_bootstrap_owner_changes(
+    tmp_path: Path, selection: str
+) -> None:
+    baseline = tmp_path / "baseline"
+    target = tmp_path / "target"
+    if selection == "factory_return":
+        before = (
+            "from fastapi import FastAPI\n"
+            "def create_app():\n"
+            "    selected = FastAPI()\n"
+            "    alternate = FastAPI()\n"
+            "    unused = FastAPI()\n"
+            "    @selected.get('/first')\n"
+            "    def first(): return 1\n"
+            "    @alternate.get('/second')\n"
+            "    def second(): return 2\n"
+            "    @unused.get('/unrelated')\n"
+            "    def unrelated(): return 3\n"
+            "    return selected\n"
+        )
+        after = before.replace("return selected", "return alternate")
+        options = {"app_entry": "main:create_app"}
+        expected = {"GET /first", "GET /second"}
+    elif selection == "bootstrap_registration":
+        before = (
+            "from fastapi import FastAPI\napp = FastAPI()\nunused = FastAPI()\n"
+            "def handler(): return 1\n"
+            "@app.get('/safe')\n"
+            "def safe(): return 2\n"
+            "def register(target, path):\n"
+            "    target.add_api_route(path, handler)\n"
+            "def run():\n"
+            "    register(app, '/old')\n"
+            "    register(unused, '/unrelated')\n"
+        )
+        after = before.replace("'/old'", "'/new'")
+        options = {"bootstrap_entry": "main:run"}
+        expected = {"GET /old", "GET /new"}
+    else:
+        before = (
+            "from fastapi import FastAPI\napp = FastAPI()\nunused = FastAPI()\n"
+            "def handler(): return 1\n"
+            "@app.get('/safe')\n"
+            "def safe(): return 2\n"
+            "def register(target, path='/old'):\n"
+            "    target.add_api_route(path, handler)\n"
+            "def unrelated(target):\n"
+            "    target.add_api_route('/unrelated', handler)\n"
+            "def run():\n"
+            "    register(app)\n"
+            "    unrelated(unused)\n"
+        )
+        after = before.replace("path='/old'", "path='/new'")
+        options = {"bootstrap_entry": "main:run"}
+        expected = {"GET /old", "GET /new"}
+    for root, source in ((baseline, before), (target, after)):
+        root.mkdir()
+        (root / "main.py").write_text(source, encoding="utf-8")
+    diff = "diff --git a/main.py b/main.py\n" + "".join(
+        difflib.unified_diff(
+            before.splitlines(True),
+            after.splitlines(True),
+            fromfile="a/main.py",
+            tofile="b/main.py",
+            n=0,
+        )
+    )
+    report = ChangeMapper(
+        target / "main.py",
+        baseline_app_path=baseline / "main.py",
+        secure_ast=True,
+        use_cache=False,
+        **options,
+    ).analyze_diff(diff)
+    assert {item.endpoint.identifier for item in report.candidate_endpoints} == expected
+    assert all(item.endpoint.identifier != "GET /unrelated" for item in report.candidate_endpoints)
+    assert all(item.endpoint.identifier != "GET /safe" for item in report.candidate_endpoints)
+    assert all(item.endpoint.native_provenance is not None for item in report.candidate_endpoints)
+
+
+def test_bootstrap_helper_definition_and_call_are_exact_structural_owners(tmp_path: Path) -> None:
+    app_file = tmp_path / "main.py"
+    app_file.write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "unused = FastAPI()\n"
+        "def handler(): pass\n"
+        "def register(target, path):\n"
+        "    target.add_api_route(path, handler)\n"
+        "def unrelated(target):\n"
+        "    target.add_api_route('/unrelated', handler)\n"
+        "def run():\n"
+        "    register(app, '/inside')\n"
+        "    unrelated(unused)\n",
+        encoding="utf-8",
+    )
+    endpoint = next(
+        item
+        for item in SecureASTExtractor(app_file, bootstrap_entry="main:run").extract_endpoints()
+        if item.path == "/inside"
+    )
+    provenance = endpoint.native_provenance
+    assert provenance is not None
+    helper_owners = [
+        owner
+        for owner in provenance.source_owners
+        if owner.owner_kind.startswith("bootstrap_helper_")
+    ]
+    assert {owner.owner_kind for owner in helper_owners} == {
+        "bootstrap_helper_call",
+        "bootstrap_helper_definition",
+    }
+    lines = app_file.read_text().splitlines()
+    call_line = next(i for i, line in enumerate(lines, 1) if "register(app" in line)
+    definition_line = next(i for i, line in enumerate(lines, 1) if "def register" in line)
+    unrelated_line = next(i for i, line in enumerate(lines, 1) if "def unrelated" in line)
+    assert native_route_structural_owners(endpoint, app_file, {call_line})
+    assert native_route_structural_owners(endpoint, app_file, {definition_line})
+    assert native_route_structural_owners(endpoint, app_file, {unrelated_line}) == ()
+
+
+def test_public_mapper_ignores_unrelated_statement_inside_invoked_bootstrap_helper(
+    tmp_path: Path,
+) -> None:
+    baseline = tmp_path / "baseline"
+    target = tmp_path / "target"
+    before = (
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "def handler(): return 1\n"
+        "def register(target, path):\n"
+        "    target.add_api_route(path, handler)\n"
+        "    marker = 1\n"
+        "def run():\n"
+        "    register(app, '/stable')\n"
+    )
+    after = before.replace("    marker = 1", "    marker = 2")
+    for root, source in ((baseline, before), (target, after)):
+        root.mkdir()
+        (root / "main.py").write_text(source, encoding="utf-8")
+    diff = "diff --git a/main.py b/main.py\n" + "".join(
+        difflib.unified_diff(
+            before.splitlines(True),
+            after.splitlines(True),
+            fromfile="a/main.py",
+            tofile="b/main.py",
+            n=0,
+        )
+    )
+    report = ChangeMapper(
+        target / "main.py",
+        baseline_app_path=baseline / "main.py",
+        bootstrap_entry="main:run",
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+    assert not report.candidate_endpoints

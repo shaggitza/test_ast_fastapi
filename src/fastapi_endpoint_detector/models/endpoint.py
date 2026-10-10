@@ -433,6 +433,8 @@ class NativeRouteStructuralOwnerEvidence(BaseModel):
             "class_decorator",
             "factory_return",
             "bootstrap_registration",
+            "bootstrap_helper_call",
+            "bootstrap_helper_definition",
         ]
         | None
     ) = None
@@ -458,6 +460,8 @@ class NativeRouteSourceOwnerEvidence(BaseModel):
         "class_decorator",
         "factory_return",
         "bootstrap_registration",
+        "bootstrap_helper_call",
+        "bootstrap_helper_definition",
     ]
     qualified_binding: str = Field(min_length=1, max_length=2048)
     related_binding: str | None = Field(default=None, min_length=1, max_length=2048)
