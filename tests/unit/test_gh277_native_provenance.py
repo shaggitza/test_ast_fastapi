@@ -1277,3 +1277,107 @@ def test_public_mapper_ignores_unrelated_statement_inside_invoked_bootstrap_help
         use_cache=False,
     ).analyze_diff(diff)
     assert not report.candidate_endpoints
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "expected"),
+    [
+        (
+            "def run(path='/old'):\n    app.add_api_route(path, handler)\n",
+            "def run(path='/new'):\n    app.add_api_route(path, handler)\n",
+            {"GET /old", "GET /new"},
+        ),
+        (
+            "def run():\n    path = '/old'\n    app.add_api_route(path, handler)\n",
+            "def run():\n    path = '/new'\n    app.add_api_route(path, handler)\n",
+            {"GET /old", "GET /new"},
+        ),
+        (
+            "def attach(target, prefix='/old'):\n    target.include_router(router, prefix=prefix)\n"
+            "def run():\n    attach(app)\n",
+            "def attach(target, prefix='/new'):\n    target.include_router(router, prefix=prefix)\n"
+            "def run():\n    attach(app)\n",
+            {"GET /old/item", "GET /new/item"},
+        ),
+        (
+            "def attach(target, path='/old'):\n    target.mount(path, child)\n"
+            "def run():\n    attach(app)\n",
+            "def attach(target, path='/new'):\n    target.mount(path, child)\n"
+            "def run():\n    attach(app)\n",
+            {"GET /old/item", "GET /new/item"},
+        ),
+    ],
+    ids=["entry-default", "entry-local", "include-default", "mount-default"],
+)
+def test_public_mapper_retains_bootstrap_route_input_provenance(
+    tmp_path: Path, before: str, after: str, expected: set[str]
+) -> None:
+    base = (
+        "from fastapi import APIRouter, FastAPI\n"
+        "app = FastAPI()\n"
+        "router = APIRouter()\n"
+        "@router.get('/item')\n"
+        "def handler(): pass\n"
+        "child = FastAPI()\n"
+        "@child.get('/item')\n"
+        "def child_handler(): pass\n"
+    )
+    baseline = tmp_path / "baseline"
+    target = tmp_path / "target"
+    baseline.mkdir()
+    target.mkdir()
+    old_source = base + before
+    new_source = base + after
+    (baseline / "main.py").write_text(old_source, encoding="utf-8")
+    (target / "main.py").write_text(new_source, encoding="utf-8")
+    diff = "diff --git a/main.py b/main.py\n" + "".join(
+        difflib.unified_diff(
+            old_source.splitlines(True),
+            new_source.splitlines(True),
+            fromfile="a/main.py",
+            tofile="b/main.py",
+            n=0,
+        )
+    )
+    report = ChangeMapper(
+        target / "main.py",
+        baseline_app_path=baseline / "main.py",
+        bootstrap_entry="main:run",
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+    assert {item.endpoint.identifier for item in report.candidate_endpoints} == expected
+
+
+def test_public_mapper_does_not_own_unrelated_bootstrap_statement(tmp_path: Path) -> None:
+    baseline = tmp_path / "baseline"
+    target = tmp_path / "target"
+    before = (
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "def handler(): pass\n"
+        "def run():\n"
+        "    marker = 1\n"
+        "    app.add_api_route('/stable', handler)\n"
+    )
+    after = before.replace("marker = 1", "marker = 2")
+    for root, source in ((baseline, before), (target, after)):
+        root.mkdir()
+        (root / "main.py").write_text(source, encoding="utf-8")
+    diff = "diff --git a/main.py b/main.py\n" + "".join(
+        difflib.unified_diff(
+            before.splitlines(True),
+            after.splitlines(True),
+            fromfile="a/main.py",
+            tofile="b/main.py",
+            n=0,
+        )
+    )
+    report = ChangeMapper(
+        target / "main.py",
+        baseline_app_path=baseline / "main.py",
+        bootstrap_entry="main:run",
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+    assert not report.candidate_endpoints

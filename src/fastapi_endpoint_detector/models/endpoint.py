@@ -361,6 +361,7 @@ class NativeRouteAssemblyEdgeEvidence(BaseModel):
     source_span: NativeSourceSpan
     dependency_expressions: tuple["NativeRouteDependencyExpressionEvidence", ...] = ()
     prefix_binding_spans: tuple[NativeSourceSpan, ...] = ()
+    source_owners: tuple["NativeRouteSourceOwnerEvidence", ...] = ()
 
     class Config:
         frozen = True
