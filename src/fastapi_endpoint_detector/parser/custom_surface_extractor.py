@@ -1241,6 +1241,7 @@ class CustomSurfaceExtractor:
         conditions: dict[_FrameworkToken, list[EndpointDiscoveryCondition]] = {}
         included_by: dict[_FrameworkToken, set[_FrameworkToken]] = {}
         mounted_by: dict[_FrameworkToken, set[_FrameworkToken]] = {}
+        mount_edges: dict[_FrameworkToken, list[tuple[_FrameworkToken, NativeSourceSpan]]] = {}
         for event in self._framework_events:
             if isinstance(event, _FrameworkRegistrationEvent):
                 live.setdefault(event.token, []).append(event.endpoint)
@@ -1339,7 +1340,12 @@ class CustomSurfaceExtractor:
                     else endpoint
                     for endpoint in copied_endpoints
                 )
-            live.setdefault(event.parent, []).extend(copied_endpoints)
+            # Mounts retain a live child application; include_router copies
+            # at this registration point. Project mounted request callbacks
+            # after replay so later child registrations and overrides remain
+            # visible without letting a parent's overrides alter the child.
+            if not event.routes_only:
+                live.setdefault(event.parent, []).extend(copied_endpoints)
             conditions.setdefault(event.parent, []).extend(copied_conditions)
             copied_lifecycle_conditions = self._framework_copied_lifecycle_conditions(
                 copied_endpoints
@@ -1349,8 +1355,70 @@ class CustomSurfaceExtractor:
                 conditions[ancestor].extend(copied_lifecycle_conditions)
             if event.routes_only:
                 mounted_by.setdefault(event.child, set()).add(event.parent)
+                mount_edges.setdefault(event.parent, []).append((event.child, event.source_span))
             else:
                 included_by.setdefault(event.child, set()).add(event.parent)
+
+        source_live = {token: tuple(endpoints) for token, endpoints in live.items()}
+
+        def mounted_request_surfaces(
+            token: _FrameworkToken, seen: frozenset[_FrameworkToken]
+        ) -> list[Endpoint]:
+            if token in seen:
+                return []
+            result = [
+                endpoint
+                for endpoint in source_live.get(token, ())
+                if endpoint.surface is not None
+                and endpoint.surface.surface_kind
+                in {"framework.middleware", "framework.exception_handler"}
+            ]
+            for child, span in mount_edges.get(token, ()):
+                for endpoint in mounted_request_surfaces(child, seen | {token}):
+                    surface = endpoint.surface
+                    assert surface is not None
+                    copied = endpoint.model_copy(
+                        update={
+                            "surface": surface.model_copy(
+                                update={
+                                    "include_reference_spans": (
+                                        *surface.include_reference_spans,
+                                        span,
+                                    )
+                                }
+                            )
+                        }
+                    )
+                    if surface.surface_kind == "framework.exception_handler":
+                        copied = self._qualify_mounted_exception(copied)
+                    result.append(copied)
+            return result
+
+        source_conditions = tuple((token, tuple(items)) for token, items in conditions.items())
+        for parent, edges in mount_edges.items():
+            for child, span in edges:
+                for endpoint in mounted_request_surfaces(child, frozenset({parent})):
+                    surface = endpoint.surface
+                    assert surface is not None
+                    copied = endpoint.model_copy(
+                        update={
+                            "surface": surface.model_copy(
+                                update={
+                                    "include_reference_spans": (
+                                        *surface.include_reference_spans,
+                                        span,
+                                    )
+                                }
+                            )
+                        }
+                    )
+                    if surface.surface_kind == "framework.exception_handler":
+                        copied = self._qualify_mounted_exception(copied)
+                    live.setdefault(parent, []).append(copied)
+            # Preserve selected-app uncertainty from late registrations too.
+            for child, child_conditions in source_conditions:
+                if parent in self._framework_mount_ancestors(child, mounted_by):
+                    conditions.setdefault(parent, []).extend(child_conditions)
 
         for token, endpoints in tuple(live.items()):
             latest: dict[tuple[str, str, tuple[NativeSourceSpan, ...]], Endpoint] = {}
@@ -2744,6 +2812,11 @@ class CustomSurfaceExtractor:
             values = [item.get(name) for item in states]
             if all(value == values[0] for value in values[1:]):
                 joined[name] = values[0]
+            else:
+                # A missing global in one branch can mean builtin fallback,
+                # while another branch still shadows it. Retain uncertainty
+                # instead of treating the joined absence as a proven builtin.
+                joined[name] = None
         return joined
 
     @staticmethod

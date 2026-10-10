@@ -2902,3 +2902,94 @@ def test_startup_over_budget_reason_is_local_and_lifecycle_evidence_remains(
     ]
     assert len(budget_limitations) == 1
     assert budget_limitations[0].source_line == 9
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("register_before_mount", [False, True])
+def test_mounted_request_callbacks_are_live_after_mount(
+    tmp_path: Path, nested: bool, register_before_mount: bool
+) -> None:
+    setup = (
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\nchild = FastAPI()\nunused = FastAPI()\n"
+        "@app.exception_handler(ValueError)\n"
+        "async def parent_error(request, exc): return None\n"
+        "@child.exception_handler(ValueError)\n"
+        "async def old_error(request, exc): return None\n"
+        "async def child_error(request, exc): return None\n"
+        "async def child_start(): pass\n"
+        "async def unused_error(request, exc): return None\n"
+    )
+    mount = (
+        "middle = FastAPI()\napp.mount('/middle', middle)\nmiddle.mount('/child', child)\n"
+        if nested
+        else "app.mount('/child', child)\n"
+    )
+    registrations = (
+        "@child.middleware('http')\n"
+        "async def audit(request, call_next): return await call_next(request)\n"
+        "child.add_exception_handler(ValueError, child_error)\n"
+        "child.add_event_handler('startup', child_start)\n"
+        "unused.add_exception_handler(ValueError, unused_error)\n"
+    )
+    (tmp_path / "main.py").write_text(
+        setup + (registrations + mount if register_before_mount else mount + registrations),
+        encoding="utf-8",
+    )
+    inventory = _extract(tmp_path)
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert sorted(item.handler.name for item in inventory.endpoints) == [
+        "audit",
+        "child_error",
+        "parent_error",
+    ]
+    child_error = next(item for item in inventory.endpoints if item.handler.name == "child_error")
+    assert child_error.surface is not None
+    assert len(child_error.surface.include_reference_spans) == (2 if nested else 1)
+    assert "@mount:" in child_error.surface.surface_id
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_late_mounted_unknown_override_removes_stale_child_only(
+    tmp_path: Path, nested: bool
+) -> None:
+    mount = (
+        "middle = FastAPI()\napp.mount('/middle', middle)\nmiddle.mount('/child', child)\n"
+        if nested
+        else "app.mount('/child', child)\n"
+    )
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\nchild = FastAPI()\n"
+        "@app.exception_handler(ValueError)\n"
+        "async def parent_error(request, exc): return None\n"
+        "@child.exception_handler(ValueError)\n"
+        "async def child_error(request, exc): return None\n"
+        + mount
+        + "child.add_exception_handler(ValueError, dynamic_handler)\n",
+        encoding="utf-8",
+    )
+    inventory = _extract(tmp_path)
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert [item.handler.name for item in inventory.endpoints] == ["parent_error"]
+    assert any("unresolved" in condition.reason for condition in inventory.limitations)
+
+
+@pytest.mark.parametrize("branch", ["flag", "True", "False"])
+def test_conditional_deleted_getattr_retains_shadow_uncertainty(
+    tmp_path: Path, branch: str
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n"
+        "def custom_getattr(*args): return lambda *args: None\n"
+        "async def startup(): pass\ngetattr = custom_getattr\n"
+        f"if {branch}:\n    del getattr\n"
+        "getattr(app, 'add_event_handler')('startup', startup)\n",
+        encoding="utf-8",
+    )
+    inventory = _extract(tmp_path)
+    if branch == "True":
+        assert inventory.status == InventoryStatus.ESTABLISHED
+        assert [item.handler.name for item in inventory.endpoints] == ["startup"]
+    else:
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert not inventory.endpoints
