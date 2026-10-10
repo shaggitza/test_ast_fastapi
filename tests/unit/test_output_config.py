@@ -5,12 +5,15 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml
 
 from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, HandlerInfo
 from fastapi_endpoint_detector.models.report import (
     AffectedEndpoint,
+    AnalysisLimitationReport,
     AnalysisReport,
     ConfidenceLevel,
+    ExecutionEvidence,
 )
 from fastapi_endpoint_detector.output.formatters import get_formatter
 
@@ -131,3 +134,61 @@ def test_unconfigured_factory_and_direct_formatter_constructors_remain_compatibl
     assert "Chain: service.py → items" in get_formatter("text").format(report)
     assert "**Chain:**" in get_formatter("markdown").format(report)
     assert "Chain:" in get_formatter("html").format(report)
+
+
+@pytest.mark.parametrize("name", ["json", "yaml"])
+def test_structured_formats_preserve_bounded_execution_evidence(name: str) -> None:
+    report = make_report()
+    report.analysis_limitations = [
+        AnalysisLimitationReport(
+            file_path="service.py", call_line=17, cap="MAX_DEPTH", target_count=2, limit=1
+        )
+    ]
+    execution_evidence = tuple(
+        ExecutionEvidence(
+            file_path="service.py",
+            start_line=17,
+            start_column=4,
+            end_line=17,
+            end_column=20,
+            execution_state=state,
+            provenance="bounded source callable evidence",
+        )
+        for state in (
+            "lexical_reference",
+            "possible_execution",
+            "established_execution",
+            "deferred_execution",
+        )
+    )
+    affected_data = report.affected_endpoints[0].model_dump()
+    affected_data["execution_evidence"] = execution_evidence
+    affected = AffectedEndpoint.model_validate(affected_data)
+    report.affected_endpoints = [affected]
+    report.candidate_endpoints = [affected]
+    before = report.model_dump(mode="json")
+    output = get_formatter(name).format(report)
+    data = json.loads(output) if name == "json" else yaml.safe_load(output)
+    assert data["analysis_limitations"] == before["analysis_limitations"]
+    for collection in ("affected_endpoints", "candidate_endpoints"):
+        assert (
+            data[collection][0]["execution_evidence"] == before[collection][0]["execution_evidence"]
+        )
+    assert report.model_dump(mode="json") == before
+
+
+@pytest.mark.parametrize("name", ["text", "markdown", "html", "json", "yaml"])
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("show_confidence", "false"),
+        ("show_dependency_chain", 1),
+        ("colorize", None),
+        ("verbose", []),
+    ],
+)
+def test_formatter_factory_rejects_non_boolean_presentation_values(
+    name: str, option: str, value: object
+) -> None:
+    with pytest.raises(ValueError, match=f"Output option '{option}'.*'{name}'.*must be a bool"):
+        get_formatter(name, {option: value})

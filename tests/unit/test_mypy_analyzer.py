@@ -51,8 +51,7 @@ class TestMypyAnalyzerBasic:
         dependencies = MypyAnalyzer(tmp_path).analyze_endpoint(endpoint)
 
         assert any(
-            item.cap == "CALLABLE_UNION_PARTIAL"
-            for item in dependencies.analysis_limitations
+            item.cap == "CALLABLE_UNION_PARTIAL" for item in dependencies.analysis_limitations
         )
         assert not dependencies.references_symbol_at_line(str(app_path), 2)
         assert not dependencies.references_symbol_at_line(str(app_path), 3)
@@ -119,33 +118,24 @@ class TestMypyAnalyzerBasic:
         selected_path = tmp_path / "selected.py"
         blocked_path = tmp_path / "blocked.py"
         app_path.write_text(
-            "from selected import run\n\n"
-            "def handler() -> int:\n"
-            "    return run()\n",
+            "from selected import run\n\ndef handler() -> int:\n    return run()\n",
             encoding="utf-8",
         )
         selected_path.write_text(
-            "from blocked import secret\n\n"
-            "def run() -> int:\n"
-            "    return secret()\n",
+            "from blocked import secret\n\ndef run() -> int:\n    return secret()\n",
             encoding="utf-8",
         )
         blocked_path.write_text(
-            "def secret() -> int:\n"
-            "    return 1\n",
+            "def secret() -> int:\n    return 1\n",
             encoding="utf-8",
         )
         endpoint = Endpoint(
             path="/depth",
             methods=[EndpointMethod.GET],
-            handler=HandlerInfo(
-                name="handler", module="app", file_path=app_path, line_number=3
-            ),
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=3),
         )
 
-        inventory = build_source_inventory(
-            app_path, include_patterns=("app.py",), max_depth=1
-        )
+        inventory = build_source_inventory(app_path, include_patterns=("app.py",), max_depth=1)
         assert {item.path for item in inventory.files} == {app_path, selected_path}
         analyzer = MypyAnalyzer(tmp_path, max_depth=1, source_inventory=inventory)
         dependencies = analyzer.analyze_endpoint(endpoint)

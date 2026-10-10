@@ -63,6 +63,109 @@ def test_dependency_expressions_are_side_qualified_and_structurally_owned(
     assert dependency.callable_expressions == ("main.route_dep",)
 
 
+def test_global_prefix_ownership_is_limited_to_descendant_routes_and_side(
+    tmp_path: Path,
+) -> None:
+    app_file = tmp_path / "main.py"
+    app_file.write_text(
+        "from fastapi import APIRouter, FastAPI\n"
+        "PREFIX_PART = '/api'\n"
+        "PREFIX = (\n"
+        "    PREFIX_PART\n"
+        ")\n"
+        "DECOY = '/decoy'\n"
+        "router = APIRouter()\n"
+        "@router.get('/items')\n"
+        "def items(): pass\n"
+        "@router.get('/other')\n"
+        "def other(): pass\n"
+        "unrelated = APIRouter()\n"
+        "@unrelated.get('/unrelated')\n"
+        "def unrelated_route(): pass\n"
+        "app = FastAPI()\n"
+        "app.include_router(router, prefix=PREFIX)\n"
+        "app.include_router(unrelated, prefix='/safe')\n",
+        encoding="utf-8",
+    )
+    baseline = SecureASTExtractor(app_file, snapshot_side=SnapshotSide.BASELINE).extract_endpoints()
+    target = SecureASTExtractor(app_file, snapshot_side=SnapshotSide.TARGET).extract_endpoints()
+    line_prefix = 2
+    line_alias = 3
+    for endpoints, side in ((baseline, SnapshotSide.BASELINE), (target, SnapshotSide.TARGET)):
+        items = next(endpoint for endpoint in endpoints if endpoint.identifier == "GET /api/items")
+        other = next(endpoint for endpoint in endpoints if endpoint.identifier == "GET /api/other")
+        prefix_owners = [
+            owner
+            for owner in native_route_structural_owners(
+                items, app_file, {line_prefix, line_alias, 4, 5}
+            )
+            if owner.role == "assembly"
+        ]
+        assert {owner.source_span.start_line for owner in prefix_owners} == {
+            line_prefix,
+            line_alias,
+        }
+        alias_owner = next(
+            owner for owner in prefix_owners if owner.source_span.start_line == line_alias
+        )
+        assert (alias_owner.source_span.start_line, alias_owner.source_span.end_line) == (
+            line_alias,
+            5,
+        )
+        assert {owner.endpoint_identifier for owner in prefix_owners} == {items.identifier}
+        assert {owner.side for owner in prefix_owners} == {side}
+        assert any(
+            owner.role == "assembly"
+            for owner in native_route_structural_owners(other, app_file, {4})
+        )
+        safe = next(
+            endpoint for endpoint in endpoints if endpoint.identifier == "GET /safe/unrelated"
+        )
+        assert native_route_structural_owners(safe, app_file, {line_prefix, line_alias}) == ()
+
+    baseline_items = next(
+        endpoint for endpoint in baseline if endpoint.identifier == "GET /api/items"
+    )
+    evidence = baseline_items.native_provenance
+    assert evidence is not None
+    restored = type(baseline_items).model_validate(baseline_items.model_dump())
+    app_file.write_text(
+        app_file.read_text(encoding="utf-8").replace(
+            "PREFIX_PART = '/api'", "PREFIX_PART = '/changed'"
+        ),
+        encoding="utf-8",
+    )
+    after_rewrite = native_route_structural_owners(restored, app_file, {2})
+    assert {owner.source_span.start_line for owner in after_rewrite} == {2}
+    assert {owner.side for owner in after_rewrite} == {SnapshotSide.BASELINE}
+
+
+def test_global_prefix_ownership_fails_closed_for_dynamic_or_reassigned_names(
+    tmp_path: Path,
+) -> None:
+    for filename, assignments in (
+        ("dynamic.py", "PREFIX = make_prefix()\n"),
+        ("reassigned.py", "PREFIX = '/api'\nPREFIX = '/other'\n"),
+    ):
+        app_file = tmp_path / filename
+        app_file.write_text(
+            "from fastapi import APIRouter, FastAPI\n"
+            + assignments
+            + "router = APIRouter()\n"
+            + "@router.get('/items')\n"
+            + "def items(): pass\n"
+            + "app = FastAPI()\n"
+            + "app.include_router(router, prefix=PREFIX)\n",
+            encoding="utf-8",
+        )
+        endpoints = SecureASTExtractor(app_file).extract_endpoints()
+        for endpoint in endpoints:
+            assert not any(
+                owner.role == "assembly"
+                for owner in native_route_structural_owners(endpoint, app_file, {2, 3})
+            )
+
+
 def test_dynamic_dependency_expression_is_retained_as_conditional(
     tmp_path: Path,
 ) -> None:

@@ -570,7 +570,7 @@ class MypyAnalyzer:
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
     MAX_POINTS_TO_EDGES = 4096
-    EXECUTION_SUMMARY_VERSION = 4
+    EXECUTION_SUMMARY_VERSION = 5
     GENERATOR_CONSUMERS: ClassVar[dict[str, tuple[int, str, bool | None]]] = {
         "starlette.responses.StreamingResponse": (0, "content", None),
     }
@@ -3687,9 +3687,46 @@ class MypyAnalyzer:
 
     @staticmethod
     def _valid_builtin_generator_consumer(call: Any, fullname: str) -> bool:
-        """Accept only eager builtin iterator consumers with exact call shapes."""
+        """Recognize exact eager consumer shapes from Python's documented signatures."""
         from mypy.nodes import ARG_NAMED, ARG_POS
 
+        arguments = list(zip(call.arg_kinds, call.arg_names, strict=True))
+        if any(
+            kind not in {ARG_POS, ARG_NAMED}
+            or (kind == ARG_POS and name is not None)
+            or (kind == ARG_NAMED and name is None)
+            for kind, name in arguments
+        ):
+            return False
+        named = [name for kind, name in arguments if kind == ARG_NAMED]
+        if len(named) != len(set(named)):
+            return False
+        positional = len([kind for kind, _name in arguments if kind == ARG_POS])
+        first_is_positional = bool(arguments) and arguments[0] == (ARG_POS, None)
+        if fullname == "collections.deque":
+            return (
+                positional <= 2
+                and set(named) <= {"iterable", "maxlen"}
+                and not (positional >= 1 and "iterable" in named)
+                and not (positional >= 2 and "maxlen" in named)
+                and (first_is_positional or "iterable" in named)
+            )
+        if not first_is_positional:
+            return False
+        if fullname == "builtins.dict":
+            # Dictionary keywords are entries, never the iterable argument.
+            return positional == 1
+        if fullname == "builtins.sum":
+            return (
+                positional in {1, 2}
+                and set(named) <= {"start"}
+                and not (positional == 2 and "start" in named)
+            )
+        if fullname in {"builtins.min", "builtins.max"}:
+            # The multi-argument form compares arguments without consuming them.
+            return positional == 1 and set(named) <= {"key", "default"}
+        if fullname == "builtins.sorted":
+            return positional == 1 and set(named) <= {"key", "reverse"}
         counts = {
             "builtins.all": {1},
             "builtins.any": {1},
@@ -3697,26 +3734,10 @@ class MypyAnalyzer:
             "builtins.set": {1},
             "builtins.frozenset": {1},
             "builtins.tuple": {1},
-            "builtins.sum": {1, 2},
-            "builtins.min": {1},
-            "builtins.max": {1},
             "builtins.next": {1, 2},
             "builtins.anext": {1, 2},
         }
-        if fullname == "builtins.sorted":
-            if not call.args or call.arg_kinds[0] != ARG_POS or call.arg_names[0] is not None:
-                return False
-            if sum(kind == ARG_POS for kind in call.arg_kinds) != 1:
-                return False
-            return all(
-                (kind == ARG_POS and name is None)
-                or (kind == ARG_NAMED and name in {"key", "reverse"})
-                for kind, name in zip(call.arg_kinds[1:], call.arg_names[1:], strict=True)
-            )
-        return len(call.args) in counts.get(fullname, set()) and all(
-            kind == ARG_POS and name is None
-            for kind, name in zip(call.arg_kinds, call.arg_names, strict=True)
-        )
+        return positional in counts.get(fullname, set()) and not named
 
     def _callback_binding(
         self,
@@ -5113,16 +5134,33 @@ class MypyAnalyzer:
                 "builtins.min": False,
                 "builtins.max": False,
                 "builtins.sorted": False,
+                "builtins.dict": False,
+                "collections.deque": False,
             }.get(canonical_symbol)
             if builtin_consumer is not None and self._valid_builtin_generator_consumer(
                 call,
                 canonical_symbol,
             ):
-                consume_generator_expression(
-                    call.args[0],
-                    call.line,
-                    require_async=builtin_consumer,
+                consumed = (
+                    self._exact_call_argument(call, 0, "iterable")
+                    if canonical_symbol == "collections.deque"
+                    else call.args[0]
                 )
+                if consumed is not None:
+                    consume_generator_expression(
+                        consumed,
+                        call.line,
+                        require_async=builtin_consumer,
+                    )
+            elif builtin_consumer is not None:
+                if any(kind in {ARG_STAR, ARG_STAR2} for kind in call.arg_kinds):
+                    deps.add_analysis_limitation(
+                        AnalysisLimitation(
+                            current_file,
+                            call.line,
+                            "UNRESOLVED_GENERATOR_CONSUMER_ARGUMENTS",
+                        )
+                    )
 
             generator_kind = self._generator_function_kind(call_site)
             if generator_kind is not None:

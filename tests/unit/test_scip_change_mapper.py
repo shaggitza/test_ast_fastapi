@@ -633,9 +633,7 @@ def test_baseline_depth_limit_downgrades_deleted_candidate_and_is_structured(
         "@app.get('/items')\ndef items():\n    return run()\n",
         encoding="utf-8",
     )
-    (baseline / "service.py").write_text(
-        "def run():\n    return 1\n", encoding="utf-8"
-    )
+    (baseline / "service.py").write_text("def run():\n    return 1\n", encoding="utf-8")
     (target / "main.py").write_text(
         "from fastapi import FastAPI\napp = FastAPI()\n"
         "@app.get('/items')\ndef items():\n    return 0\n",

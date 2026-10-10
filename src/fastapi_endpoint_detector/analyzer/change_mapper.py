@@ -2268,9 +2268,7 @@ class ChangeMapper:
             )
             if analysis_limitations:
                 warnings = [
-                    warning
-                    for warning in warnings
-                    if "Mypy bounded analysis at " not in warning
+                    warning for warning in warnings if "Mypy bounded analysis at " not in warning
                 ]
                 warnings.extend(
                     f"Mypy bounded analysis at {item.file_path}:{item.call_line} exceeded "
