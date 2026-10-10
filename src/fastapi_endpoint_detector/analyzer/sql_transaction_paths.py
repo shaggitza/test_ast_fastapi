@@ -691,6 +691,20 @@ def _has_dynamic_module_binding_mutation(module: ast.Module) -> bool:  # noqa: P
                 )
 
     for node in executed_nodes(module):
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+            and isinstance(node.value, ast.Subscript)
+            and isinstance(node.value.slice, ast.Name)
+            and node.value.slice.id == "__name__"
+            and (
+                (isinstance(node.value.value, ast.Attribute) and node.value.value.attr == "modules")
+                or isinstance(node.value.value, ast.Name)
+            )
+        ):
+            # sys.modules[__name__] exposes this module's live namespace,
+            # including aliases imported for the modules mapping.
+            return True
         if any(
             isinstance(child, ast.Attribute) and child.attr == "__dict__"
             for child in ast.walk(node)
@@ -762,6 +776,29 @@ def _enclosing_receiver_context(
             return current
         current = parents.get(current)
     return None
+
+
+def _is_delegated_exit_boundary(
+    call: ast.Call,
+    name: str,
+    yielded_contexts: tuple[
+        tuple[ast.Yield, tuple[str, ...] | None, ast.With | ast.AsyncWith | None], ...
+    ],
+    parents: dict[ast.AST, ast.AST],
+) -> bool:
+    """Require a boundary on an exit path of the delegated yield's try."""
+    for yield_node, _receiver, _context in yielded_contexts:
+        if (call.lineno, call.col_offset) <= (yield_node.lineno, yield_node.col_offset):
+            continue
+        current: ast.AST | None = yield_node
+        while current is not None:
+            parent = parents.get(current)
+            if isinstance(parent, ast.Try) and current in parent.body:
+                allowed = parent.body + parent.orelse if name == "commit" else parent.handlers
+                if any(call in set(_owned_nodes(statement)) for statement in allowed):
+                    return True
+            current = parent
+    return False
 
 
 def _fixture_source_projections(  # noqa: PLR0912, PLR0915
@@ -846,6 +883,13 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
         # A projection proves only one captured delegation. Multiple contexts
         # or branch alternatives need path reconciliation rather than last-wins.
         if len(wrapper_contexts) != 1 or len(wrapper_contexts[0].items) != 1:
+            continue
+        wrapper_yields = [
+            node
+            for node in _owned_nodes(wrapper_fn)
+            if isinstance(node, (ast.Yield, ast.YieldFrom))
+        ]
+        if len(wrapper_yields) != 1:
             continue
         wrapper_scope_calls: dict[str, str] = {}
         wrapper_import_nodes: dict[str, ast.ImportFrom] = {}
@@ -943,11 +987,15 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
             yielded_receivers: set[tuple[str, ...] | None] = yielded,
             expected_contexts: set[ast.With | ast.AsyncWith] = context_nodes,
             parents: dict[ast.AST, ast.AST] = delegate_parents,
+            expected_yields: tuple[
+                tuple[ast.Yield, tuple[str, ...] | None, ast.With | ast.AsyncWith | None], ...
+            ] = yielded_contexts,
         ) -> bool:
             return any(
                 node.func.attr == name
                 and _receiver_key(node.func.value) in yielded_receivers
                 and node.args == []
+                and _is_delegated_exit_boundary(node, name, expected_yields, parents)
                 and _enclosing_receiver_context(node, parents, _receiver_key(node.func.value))
                 in expected_contexts
                 for node in calls

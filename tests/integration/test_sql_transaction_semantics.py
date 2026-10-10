@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import re
 import shutil
 from importlib.util import resolve_name
 from pathlib import Path
@@ -1340,6 +1341,18 @@ def test_source_projection_report_accepts_a_file_application_root(tmp_path: Path
         ("source/langflow/services/deps.py.txt", "\nfrom foreign import *\n"),
         ("source/lfx/services/deps.py.txt", "\nfrom foreign import *\n"),
         ("source/langflow/api/v1/traces.py.txt", "\nfrom foreign import *\n"),
+        (
+            "source/langflow/services/deps.py.txt",
+            "\nimport sys\nsys.modules[__name__].session_scope = unrelated_scope\n",
+        ),
+        (
+            "source/lfx/services/deps.py.txt",
+            "\nimport sys\nsys.modules[__name__].session_scope = unrelated_scope\n",
+        ),
+        (
+            "source/langflow/api/v1/traces.py.txt",
+            "\nimport sys\nsys.modules[__name__].session_scope = unrelated_scope\n",
+        ),
     ],
 )
 def test_source_projection_rejects_rebound_wrapper_exports(
@@ -1374,6 +1387,46 @@ def test_source_projection_rejects_reassigned_delegated_receiver(
     old = "yield session\n            await session.commit()"
     assert old in text
     source.write_text(text.replace(old, replacement + "\n            await session.commit()", 1))
+    assert _langflow_fixture_transaction_reports(copied)[2].source_projections == ()
+
+
+def test_source_projection_rejects_alternate_wrapper_yields(tmp_path: Path) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    source = copied / "source/langflow/services/deps.py.txt"
+    text = source.read_text()
+    original = "    async with lfx_session_scope() as session:\n        yield session"
+    assert original in text
+    replacement = (
+        "    if flag:\n        yield other\n    else:\n"
+        "        async with lfx_session_scope() as session:\n"
+        "            yield session"
+    )
+    source.write_text(text.replace(original, replacement, 1))
+    assert _langflow_fixture_transaction_reports(copied)[2].source_projections == ()
+
+
+@pytest.mark.parametrize("boundary", ["commit", "rollback"])
+def test_source_projection_requires_context_exit_boundaries_after_yield(
+    tmp_path: Path, boundary: str
+) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    source = copied / "source/lfx/services/deps.py.txt"
+    text = source.read_text()
+    if boundary == "commit":
+        original = "yield session\n            await session.commit()"
+        replacement = "await session.commit()\n            yield session"
+        assert original in text
+        text = text.replace(original, replacement, 1)
+    else:
+        text = text.replace("await session.rollback()", "pass # rollback removed")
+        text = text.replace(
+            "yield session", "await session.rollback()\n            yield session", 1
+        )
+    source.write_text(text)
     assert _langflow_fixture_transaction_reports(copied)[2].source_projections == ()
 
 
@@ -1468,7 +1521,9 @@ def test_source_projection_requires_unchanged_supplied_snapshots(tmp_path: Path)
     }
     validated = AnalysisReport.model_validate(valid)
     for output_format in ("text", "markdown", "html"):
-        assert "1 source projections" in get_formatter(output_format).format(validated).lower()
+        rendered = get_formatter(output_format).format(validated)
+        plain = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", rendered)
+        assert "1 source projections" in " ".join(plain.lower().split())
     projection = paths.source_projections[0]
     for relative_path in (
         projection.endpoint_file_path,
