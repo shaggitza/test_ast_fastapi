@@ -237,6 +237,9 @@ def test_orphan_evidence_deduplicates_and_subtracts_all_processed_lines() -> Non
 
 
 class _NoopMypyAnalyzer:
+    def get_endpoint_dependencies(self, _endpoint: Endpoint | str) -> None:
+        return None
+
     def release_typed_snapshot(self) -> None:
         return
 
