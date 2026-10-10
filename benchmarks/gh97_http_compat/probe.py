@@ -101,7 +101,11 @@ def _normalize_diagnostic(
 
     normalized = replace_root(item, probe_root, "<private-probe>")
     working_directory = cwd or Path.cwd()
-    relative_probe = Path(os.path.relpath(probe_root, working_directory))
+    try:
+        relative_probe = Path(os.path.relpath(probe_root, working_directory))
+    except ValueError:
+        # Windows cannot form a relative path between different drives.
+        relative_probe = probe_root
     if str(relative_probe) != str(probe_root):
         normalized = replace_root(normalized, relative_probe, "<private-probe>")
     # Replace known roots before typeshed matching so whitespace in a root

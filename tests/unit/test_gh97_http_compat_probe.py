@@ -199,12 +199,12 @@ def test_diagnostic_relative_probe_root_normalizes_exact_components(tmp_path: Pa
     relative = Path(os.path.relpath(root, cwd))
     normalized = probe._normalize_diagnostic(
         f"{relative.as_posix()}/requests/compat.py:4: note: keep {relative}-suffix",
-        Path("/checkout"), Path("/python"), root, cwd,
+        Path("/checkout"),
+        Path("/python"),
+        root,
+        cwd,
     )
-    assert normalized == (
-        "<private-probe>/requests/compat.py:4: note: keep "
-        f"{relative}-suffix"
-    )
+    assert normalized == (f"<private-probe>/requests/compat.py:4: note: keep {relative}-suffix")
 
 
 def test_diagnostic_roots_and_typeshed_normalize_independent_of_separator_style() -> None:
@@ -287,6 +287,21 @@ def test_diagnostic_root_suffix_in_unrelated_absolute_path_is_preserved() -> Non
         )
         == item
     )
+
+
+def test_different_windows_drives_keep_absolute_private_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def no_cross_drive_relative(_path: Path, _cwd: Path) -> str:
+        raise ValueError("path is on mount 'D:', start on mount 'C:'")
+
+    monkeypatch.setattr(os.path, "relpath", no_cross_drive_relative)
+    root = Path("D:/temp/private probe")
+    item = r"D:\temp\private probe\app\fixture.py:7: error"
+    normalized = probe._normalize_diagnostic(
+        item, Path("C:/checkout"), Path("C:/python"), root, Path("C:/work")
+    )
+    assert normalized == r"<private-probe>\app\fixture.py:7: error"
 
 
 @pytest.mark.parametrize(
