@@ -2064,6 +2064,8 @@ class ChangeMapper:
         start_time = time.time()
         errors: list[str] = []
         warnings: list[str] = []
+        # Failures describe this attempt; a recovered snapshot must be retried.
+        self._baseline_failure = None
 
         def report_progress(current: int, total: int, desc: str) -> None:
             if progress_callback:

@@ -102,3 +102,61 @@ def test_missing_baseline_preserves_target_handler_findings(tmp_path: Path) -> N
     assert report.analysis_completeness == "partial"
     assert report.orphan_changes
     assert any("baseline" in warning.lower() for warning in report.warnings)
+
+
+def test_recovered_baseline_retries_removed_assembly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    baseline = tmp_path / "baseline"
+    target = tmp_path / "target"
+    baseline.mkdir()
+    target.mkdir()
+    common = (
+        "from fastapi import APIRouter, FastAPI\n"
+        "child = APIRouter()\n"
+        "@child.get('/items')\n"
+        "def items(): return 1\n"
+        "app = FastAPI()\n"
+    )
+    before = common + "app.include_router(child)\n"
+    (baseline / "main.py").write_text(before, encoding="utf-8")
+    (target / "main.py").write_text(common, encoding="utf-8")
+    diff = "diff --git a/main.py b/main.py\n" + "".join(
+        difflib.unified_diff(
+            before.splitlines(keepends=True),
+            common.splitlines(keepends=True),
+            fromfile="a/main.py",
+            tofile="b/main.py",
+        )
+    )
+    mapper = ChangeMapper(
+        target / "main.py",
+        baseline_app_path=baseline / "main.py",
+        secure_ast=True,
+        use_cache=False,
+    )
+    preanalyze = mapper._preanalyze_mypy_registry
+    attempts = 0
+
+    def transient_failure(*args: object, **kwargs: object) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("temporary baseline analysis failure")
+        preanalyze(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(mapper, "_preanalyze_mypy_registry", transient_failure)
+    failed = mapper.analyze_diff(diff)
+    assert failed.analysis_completeness == "partial"
+    assert failed.orphan_changes
+    assert not failed.candidate_endpoints
+    assert any("temporary baseline analysis failure" in item for item in failed.warnings)
+
+    recovered = mapper.analyze_diff(diff)
+    assert attempts == 2
+    assert {item.endpoint.identifier for item in recovered.candidate_endpoints} == {"GET /items"}
+    assert recovered.candidate_endpoints[0].confidence == ConfidenceLevel.HIGH
+    assert recovered.analysis_completeness == "complete"
+    assert not recovered.orphan_changes
+    assert not recovered.errors
+    assert not any("temporary baseline analysis failure" in item for item in recovered.warnings)
