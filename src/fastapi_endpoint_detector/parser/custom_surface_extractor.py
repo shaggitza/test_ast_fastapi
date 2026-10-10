@@ -6025,6 +6025,15 @@ class CustomSurfaceExtractor:
                 ):
                     return assigned_value.value
                 return None
+            # A later executed deletion or nested rebinding invalidates the
+            # earlier literal. Deferred function bodies do not mutate it yet.
+            mutation = _EagerStateMutationVisitor()
+            if isinstance(statement, ast.AnnAssign) and statement.value is None:
+                mutation.visit(statement.annotation)
+            else:
+                mutation.visit(statement)
+            if expression.id in mutation.rebound_names:
+                return None
         return None
 
     def _binding_from_expression(

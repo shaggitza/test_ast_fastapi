@@ -348,3 +348,34 @@ def test_unknown_exception_override_dynamic_key_invalidates_all_possible_keys(
     assert inventory.status == InventoryStatus.CONDITIONAL
     assert inventory.endpoints == []
     assert any("may override" in item.reason for item in inventory.limitations)
+
+
+@pytest.mark.parametrize(
+    ("intervening", "expected"),
+    [
+        ("del method", False),
+        ("if flag:\n    method = replacement", False),
+        ("if flag:\n    del method", False),
+        ("try:\n    method = replacement\nexcept Exception:\n    pass", False),
+        ("method += suffix", False),
+        ("other = 'unrelated'", True),
+        ("method: str", True),
+        ("def deferred():\n    global method\n    method = replacement", True),
+    ],
+)
+def test_getattr_method_literal_invalidates_intervening_binding(
+    tmp_path: Path, intervening: str, expected: bool
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n"
+        "async def selected(): pass\nmethod = 'add_event_handler'\n"
+        + intervening
+        + "\ngetattr(app, method)('startup', selected)\n",
+        encoding="utf-8",
+    )
+    inventory = _extract(tmp_path)
+    assert [item.handler.name for item in inventory.endpoints] == (["selected"] if expected else [])
+    if expected:
+        assert inventory.status == InventoryStatus.ESTABLISHED
+    else:
+        assert inventory.status == InventoryStatus.CONDITIONAL
