@@ -536,9 +536,9 @@ def _has_ambiguous_scope_binding(  # noqa: PLR0911
 def _module_binding_is_ambiguous(
     module: ast.Module,
     name: str,
-    allowed_import: ast.ImportFrom,
+    allowed_binding: ast.ImportFrom | ast.FunctionDef | ast.AsyncFunctionDef,
 ) -> bool:
-    """Require one module binding: the import that supplied the wrapper."""
+    """Require exactly the source binding that supplied the wrapper."""
     bindings: list[tuple[ast.AST, str]] = []
 
     def visit(node: ast.AST) -> None:
@@ -576,7 +576,7 @@ def _module_binding_is_ambiguous(
     for statement in module.body:
         visit(statement)
     matching = [(node, bound) for node, bound in bindings if bound == name]
-    return len(matching) != 1 or matching[0][0] is not allowed_import
+    return len(matching) != 1 or matching[0][0] is not allowed_binding
 
 
 def _has_dynamic_module_binding_mutation(module: ast.Module) -> bool:  # noqa: PLR0911, PLR0912, PLR0915
@@ -811,7 +811,11 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
             ),
             None,
         )
-        if wrapper_fn is None:
+        if (
+            wrapper_fn is None
+            or _module_binding_is_ambiguous(wrapper_tree, wrapper_fn.name, wrapper_fn)
+            or _has_dynamic_module_binding_mutation(wrapper_tree)
+        ):
             continue
         delegated_module = None
         wrapper_yields_receiver = False
@@ -848,6 +852,8 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
                             and child.value.value is not None
                             and _target_key(child.value.value) == captured
                             for child in node.body
+                        ) and not _receiver_reassigned(
+                            tuple(node.body), -1, len(node.body), captured
                         )
         if not delegated_module or not wrapper_yields_receiver:
             continue
@@ -868,7 +874,11 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
             ),
             None,
         )
-        if delegate_fn is None:
+        if (
+            delegate_fn is None
+            or _module_binding_is_ambiguous(delegated_tree, delegate_fn.name, delegate_fn)
+            or _has_dynamic_module_binding_mutation(delegated_tree)
+        ):
             continue
         delegate_parents = _scope_parents(delegate_fn)
         yielded_contexts = tuple(
@@ -913,6 +923,15 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
             and len(context_nodes) == 1
             and len(yielded_contexts) == 1
         )
+        # A matching spelling is insufficient after a receiver assignment.
+        # Inspect the captured context body, excluding its initial `as` binding.
+        if any(
+            receiver is None
+            or context is None
+            or _receiver_reassigned(tuple(context.body), -1, len(context.body), receiver)
+            for _node, receiver, context in yielded_contexts
+        ):
+            continue
         has_commit = has_boundary("commit")
         has_rollback = has_boundary("rollback")
         if not (yield_session and has_commit and has_rollback):

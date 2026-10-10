@@ -1196,3 +1196,95 @@ def test_deferred_dynamic_exec_does_not_rebind_module_wrapper(
 
     _audit, _transaction, paths = _langflow_fixture_transaction_reports(copied)
     assert len(paths.source_projections) == 1
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "suffix"),
+    [
+        ("source/langflow/services/deps.py.txt", "\nsession_scope = foreign_scope\n"),
+        ("source/langflow/services/deps.py.txt", "\nasync def session_scope():\n    pass\n"),
+        ("source/langflow/services/deps.py.txt", "\ndel session_scope\n"),
+        ("source/langflow/services/deps.py.txt", '\nexec("session_scope = foreign_scope")\n'),
+        ("source/lfx/services/deps.py.txt", "\nsession_scope = foreign_scope\n"),
+    ],
+)
+def test_source_projection_rejects_rebound_wrapper_exports(
+    tmp_path: Path, relative_path: str, suffix: str
+) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    source = copied / relative_path
+    source.write_text(source.read_text() + suffix)
+    assert _langflow_fixture_transaction_reports(copied)[2].source_projections == ()
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        "yield session\n            session = foreign_session",
+        "yield session\n            session += foreign_session",
+        "yield session\n            del session",
+        "yield session\n            if flag:\n                session = foreign_session",
+        "session = foreign_session\n            yield session",
+    ],
+)
+def test_source_projection_rejects_reassigned_delegated_receiver(
+    tmp_path: Path, replacement: str
+) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    source = copied / "source/lfx/services/deps.py.txt"
+    text = source.read_text()
+    old = "yield session\n            await session.commit()"
+    assert old in text
+    source.write_text(text.replace(old, replacement + "\n            await session.commit()", 1))
+    assert _langflow_fixture_transaction_reports(copied)[2].source_projections == ()
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "endpoint_id",
+        "begin_occurrence_id",
+        "unresolved_stage_occurrence_id",
+        "endpoint_file_path",
+        "receiver_expression",
+    ],
+)
+def test_resealed_source_projection_must_belong_to_exact_audit(field: str) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    audit, transaction, paths = _langflow_fixture_transaction_reports(fixture)
+    valid = {
+        "app_path": str(fixture),
+        "diff_source": "fixture",
+        "total_endpoints": 1,
+        "effect_contract_audit": audit,
+        "sql_transaction_report": transaction,
+        "sql_transaction_path_report": paths,
+    }
+    AnalysisReport.model_validate(valid)
+    projection_data = paths.source_projections[0].model_dump(mode="json")
+    projection_data[field] = "sha256:" + "f" * 64 if field.endswith("_id") else "foreign"
+    identity = {
+        key: value for key, value in projection_data.items() if key not in {"id", "uncertainty"}
+    }
+    projection_data["id"] = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )
+    projection = type(paths.source_projections[0]).model_validate(projection_data)
+    resealed = build_sql_transaction_path_report(
+        effect_audit_hash=paths.effect_audit_hash,
+        transaction_report_hash=paths.transaction_report_hash,
+        max_pairs=paths.max_pairs,
+        ordered_paths=paths.ordered_paths,
+        context_paths=paths.context_paths,
+        source_projections=(projection,),
+        diagnostics=paths.diagnostics,
+    )
+    with pytest.raises(ValidationError, match="SQL source projection"):
+        AnalysisReport.model_validate({**valid, "sql_transaction_path_report": resealed})

@@ -559,6 +559,27 @@ class AnalysisReport(BaseModel):
             )
         }
         path_pairs: list[tuple[str, str, str]] = []
+        for projection in path_report.source_projections:
+            projection_begin = occurrence_by_id.get(projection.begin_occurrence_id)
+            projection_stage = occurrence_by_id.get(projection.unresolved_stage_occurrence_id)
+            if (
+                projection_begin is None
+                or projection_stage is None
+                or projection_begin.resolver_status.value != "exact"
+                or projection_begin.audit_status.value != "matched"
+                or projection_stage.resolver_status.value != "unresolved"
+                or projection_stage.reason_code != "fixture_type_proof_unavailable"
+                or projection_stage.source_spelling != f"{projection.receiver_expression}.execute"
+            ):
+                raise ValueError("SQL source projection roles contradict its exact audit")
+            if any(
+                occurrence.file_path != projection.endpoint_file_path
+                or not any(
+                    endpoint.id == projection.endpoint_id for endpoint in occurrence.endpoints
+                )
+                for occurrence in (projection_begin, projection_stage)
+            ):
+                raise ValueError("SQL source projection is absent from its endpoint source audit")
         for path in path_report.ordered_paths:
             evidence = evidence_by_endpoint.get(path.endpoint_id)
             if evidence is None:
