@@ -9,9 +9,11 @@ inputs only and never writes benchmark truth or aggregate results.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import shutil
 import stat
 import subprocess
@@ -21,7 +23,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 if __package__ in {None, ""}:
     checkout_root = Path(__file__).resolve().parents[2]
@@ -40,6 +42,15 @@ from benchmarks.real_world.compare_runtime import (
     compare_target_baseline,
 )
 
+from fastapi_endpoint_detector.analyzer.framework_phase_runtime import PhaseManifest
+from fastapi_endpoint_detector.analyzer.runtime_custody import (
+    CustodyBinding,
+    RuntimeCustodyError,
+    custody_digest,
+    runtime_custody_authority_from_environment,
+    runtime_record_request_digest,
+    verify_runtime_custody,
+)
 from fastapi_endpoint_detector.executor.vm_executor import VMExecutor, VMExecutorError
 
 if TYPE_CHECKING:
@@ -82,7 +93,7 @@ class EntryConfiguration:
 
 @dataclass(frozen=True)
 class TrustedRuntimeEvidence:
-    """Host operator's receipt binding a passed trusted canary to these exact pins."""
+    """Signed host receipt; the signing key is configured outside the receipt."""
 
     status: str
     host_boundary: str
@@ -94,6 +105,11 @@ class TrustedRuntimeEvidence:
     seccomp_sha256: str
     policy_sha256: str
     canary_receipt_sha256: str
+    key_id: str = ""
+    issued_at: int = 0
+    expires_at: int = 0
+    request_sha256: str = ""
+    signature: str = ""
 
 
 @dataclass(frozen=True)
@@ -102,6 +118,9 @@ class InvocationResult:
     impact: dict[str, Any] | None = None
     seconds: float | None = None
     peak_rss_bytes: int | None = None
+    custody_receipt: dict[str, Any] | None = None
+    phase_manifest: dict[str, Any] | None = None
+    phase_observation: dict[str, Any] | None = None
 
 
 class ArtifactRunner(Protocol):
@@ -123,12 +142,13 @@ class RunRequest:
     sbom_sha256: str
     seccomp_sha256: str
     runtime_policy_sha256: str
+    custody_binding: CustodyBinding | None = None
+    phase_manifest_state: dict[str, Any] | None = None
+    phase_manifest_source_root: Path | None = None
 
 
 def _run_runtime_phase(phase: Literal["list", "impact"], request: RunRequest) -> InvocationResult:
     config = request.configuration
-    if config.backend != "mypy":
-        raise PhaseFailure("dependency", "runtime worker supports only the mypy backend")
     executor = VMExecutor(
         image=request.runtime_image,
         dependency_lock_hash=request.dependency_lock_sha256,
@@ -139,6 +159,15 @@ def _run_runtime_phase(phase: Literal["list", "impact"], request: RunRequest) ->
     )
     started = time.monotonic()
     try:
+        phase_manifest = request.phase_manifest_state
+        if not isinstance(phase_manifest, dict):
+            raise PhaseFailure("unavailable", "static runtime phase manifest is unavailable")
+        try:
+            PhaseManifest.model_validate(phase_manifest)
+        except (ImportError, TypeError, ValueError) as error:
+            raise PhaseFailure(
+                "unavailable", "static runtime phase coverage is conditional"
+            ) from error
         payload = executor.analyze_in_vm(
             app_path=request.snapshot.app_path,
             diff_path=request.snapshot.diff_path if phase == "impact" else None,
@@ -146,6 +175,8 @@ def _run_runtime_phase(phase: Literal["list", "impact"], request: RunRequest) ->
             output_format="json",
             app_entry=config.app_entry,
             bootstrap_entry=config.bootstrap_entry,
+            phase_manifest=phase_manifest,
+            phase_manifest_source_root=request.phase_manifest_source_root,
         )
     except VMExecutorError as error:
         raise PhaseFailure(_failure_phase(str(error)), str(error)) from error
@@ -176,6 +207,8 @@ def _run_runtime_phase(phase: Literal["list", "impact"], request: RunRequest) ->
             inventory={"inventory_status": "runtime_observed", "endpoints": endpoints},
             seconds=elapsed,
             peak_rss_bytes=peak_rss,
+            phase_manifest=phase_manifest,
+            phase_observation=payload.get("phase_observation"),
         )
     candidates = payload.get("candidate_endpoints")
     if not isinstance(candidates, list):
@@ -184,7 +217,54 @@ def _run_runtime_phase(phase: Literal["list", "impact"], request: RunRequest) ->
         impact={"candidate_endpoints": candidates},
         seconds=elapsed,
         peak_rss_bytes=peak_rss,
+        phase_manifest=phase_manifest,
+        phase_observation=payload.get("phase_observation"),
     )
+
+
+def _invocation_payload(result: InvocationResult) -> dict[str, Any]:
+    payload = {
+        "inventory": result.inventory,
+        "impact": result.impact,
+        "seconds": result.seconds,
+        "peak_rss_bytes": result.peak_rss_bytes,
+    }
+    if result.phase_manifest is not None:
+        payload["phase_manifest"] = result.phase_manifest
+    if result.phase_observation is not None:
+        payload["phase_observation"] = result.phase_observation
+    return payload
+
+
+def _broker_runtime_invocation(
+    phase: Literal["list", "impact"], request: RunRequest
+) -> InvocationResult:
+    """Issue custody only after this host broker owns the gated VM invocation.
+
+    Signing material stays in the trusted host process; it is never sent to
+    the worker. This path cannot attest an arbitrary caller-supplied result.
+    """
+    binding = request.custody_binding
+    if binding is None:
+        raise ProducerError("runtime broker requires a fresh host challenge")
+    authority = runtime_custody_authority_from_environment()
+    if binding.runtime_version != authority.runtime_version or binding.phase != phase:
+        raise ProducerError("runtime broker challenge conflicts with operator pins")
+    result = _run_runtime_phase(phase, request)
+    issued_at = int(time.time())
+    receipt = {
+        "binding": binding.model_dump(mode="json"),
+        "result_sha256": custody_digest(_invocation_payload(result)),
+        "key_id": authority.key_id,
+        "issued_at": issued_at,
+        "expires_at": issued_at + authority.max_validity_seconds,
+    }
+    signature = hmac.new(
+        authority.secret,
+        json.dumps(receipt, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return replace(result, custody_receipt={**receipt, "signature": signature})
 
 
 class CommandRunner:
@@ -195,7 +275,7 @@ class CommandRunner:
             raise ValueError("timeout_seconds must be positive")
         self.timeout_seconds = timeout_seconds
 
-    def __call__(  # noqa: PLR0912
+    def __call__(  # noqa: PLR0912, PLR0915
         self,
         mode: Mode,
         phase: Literal["list", "impact"],
@@ -204,7 +284,7 @@ class CommandRunner:
         config = request.configuration
         app = request.snapshot.app_path
         if mode == "runtime":
-            return _run_runtime_phase(phase, request)
+            return _broker_runtime_invocation(phase, request)
 
         args = [
             sys.executable,
@@ -269,6 +349,47 @@ class CommandRunner:
         candidates = payload.get("candidate_endpoints")
         if not isinstance(candidates, list):
             raise PhaseFailure("extraction", "impact output lacks candidate_endpoints")
+        phase_report = payload.get("framework_phase_report")
+        if isinstance(phase_report, dict) and isinstance(
+            phase_report.get("runtime_manifest"), dict
+        ):
+            try:
+                manifest = PhaseManifest.model_validate(phase_report["runtime_manifest"])
+            except (ImportError, TypeError, ValueError) as error:
+                raise PhaseFailure(
+                    "extraction", "secure phase manifest failed validation"
+                ) from error
+            if request.phase_manifest_state is not None:
+                manifest_value = manifest.model_dump(mode="json")
+                if phase_report.get("backend") == "unavailable" or phase_report.get(
+                    "lifecycle_conditional_surfaces"
+                ):
+                    request.phase_manifest_state.clear()
+                    request.phase_manifest_state.update({"conditional": True})
+                    return InvocationResult(
+                        impact={"candidate_endpoints": candidates}, seconds=elapsed
+                    )
+                source_root = request.phase_manifest_source_root
+                if source_root is None:
+                    raise PhaseFailure("extraction", "phase manifest source root is unavailable")
+                for entry in manifest_value["entries"]:
+                    for identity_name in ("callback", "registration"):
+                        identity = entry[identity_name]
+                        staged_file = Path(identity["file"]).resolve(strict=True)
+                        try:
+                            relative = staged_file.relative_to(app.resolve(strict=True))
+                            original_file = (
+                                source_root.resolve(strict=True)
+                                if not source_root.is_dir()
+                                else (source_root / relative).resolve(strict=True)
+                            )
+                        except (OSError, ValueError) as error:
+                            raise PhaseFailure(
+                                "extraction", "phase manifest source is outside staged app"
+                            ) from error
+                        identity["file"] = str(original_file)
+                request.phase_manifest_state.clear()
+                request.phase_manifest_state.update(manifest_value)
         return InvocationResult(impact={"candidate_endpoints": candidates}, seconds=elapsed)
 
 
@@ -480,6 +601,9 @@ def _frozen_lane_request(
         try:
             yield staged_request
         finally:
+            manifest_state = staged_request.phase_manifest_state
+            if isinstance(manifest_state, dict) and manifest_state:
+                PhaseManifest.model_validate(manifest_state)
             if _source_digest(staged_root) != source_hash:
                 raise ProducerError("read-only staged source changed during lane execution")
             if _hash_file(staged_diff, "staged impact diff") != request.snapshot.diff_path_sha256:
@@ -526,14 +650,102 @@ def _runtime_policy_digest(request_values: dict[str, str]) -> str:
     return _sha256_bytes(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode())
 
 
-def _validate_evidence(evidence: TrustedRuntimeEvidence | None, request: RunRequest) -> NoReturn:
-    # Evidence is intentionally rejected until an independently configured trust
-    # provider can authenticate receipt provenance, freshness, and host identity.
-    # A caller-written JSON record and its self-reported digest are not authority.
-    del evidence, request
-    raise ProducerError(
-        "runtime gate closed: no independently trusted canary receipt verifier is configured"
+def _request_digest(request: RunRequest) -> str:
+    payload = {
+        "source_sha256": _source_digest(request.snapshot.app_path),
+        "source_revision": request.snapshot.source_revision,
+        "snapshot": request.snapshot.side,
+        "diff_sha256": _hash_file(request.snapshot.diff_path, "diff"),
+        "app_entry": request.configuration.app_entry,
+        "bootstrap_entry": request.configuration.bootstrap_entry,
+        "app_variable": request.configuration.app_variable,
+        "backend": request.configuration.backend,
+        "dependency_lock_sha256": request.dependency_lock_sha256,
+        "snapshot_lock_sha256": request.snapshot_lock_sha256,
+        "image_digest": request.runtime_image,
+        "sbom_sha256": request.sbom_sha256,
+        "seccomp_sha256": request.seccomp_sha256,
+        "policy_sha256": request.runtime_policy_sha256,
+    }
+    return (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
     )
+
+
+def _evidence_payload(evidence: TrustedRuntimeEvidence) -> dict[str, Any]:
+    return {
+        "status": evidence.status,
+        "host_boundary": evidence.host_boundary,
+        "runtime_version": evidence.runtime_version,
+        "image_digest": evidence.image_digest,
+        "dependency_lock_sha256": evidence.dependency_lock_sha256,
+        "snapshot_lock_sha256": evidence.snapshot_lock_sha256,
+        "sbom_sha256": evidence.sbom_sha256,
+        "seccomp_sha256": evidence.seccomp_sha256,
+        "policy_sha256": evidence.policy_sha256,
+        "canary_receipt_sha256": evidence.canary_receipt_sha256,
+        "key_id": evidence.key_id,
+        "issued_at": evidence.issued_at,
+        "expires_at": evidence.expires_at,
+        "request_sha256": evidence.request_sha256,
+    }
+
+
+def _validate_evidence(evidence: TrustedRuntimeEvidence | None, request: RunRequest) -> None:
+    """Authenticate a fresh host receipt against an out-of-band HMAC trust anchor."""
+    key = os.environ.get("FASTAPI_DETECTOR_RUNTIME_TRUST_KEY")
+    configured_key_id = os.environ.get("FASTAPI_DETECTOR_RUNTIME_TRUST_KEY_ID")
+    configured_runtime_version = os.environ.get("FASTAPI_DETECTOR_RUNTIME_TRUST_VERSION")
+    if not key or not configured_key_id or not configured_runtime_version:
+        raise ProducerError("runtime gate closed: no independently trusted authority is configured")
+    if evidence is None:
+        raise ProducerError("runtime gate closed: signed host receipt is missing")
+    expected = {
+        "status": "passed",
+        "host_boundary": "gvisor",
+        "runtime_version": configured_runtime_version,
+        "image_digest": request.runtime_image,
+        "dependency_lock_sha256": request.dependency_lock_sha256,
+        "snapshot_lock_sha256": request.snapshot_lock_sha256,
+        "sbom_sha256": request.sbom_sha256,
+        "seccomp_sha256": request.seccomp_sha256,
+        "policy_sha256": request.runtime_policy_sha256,
+        "request_sha256": _request_digest(request),
+        "key_id": configured_key_id,
+    }
+    payload = _evidence_payload(evidence)
+    for field, value in expected.items():
+        if payload[field] != value:
+            raise ProducerError(f"runtime receipt pin mismatch: {field}")
+    if any(
+        not isinstance(value, str) or not value
+        for name, value in payload.items()
+        if name not in {"issued_at", "expires_at"}
+    ) or not isinstance(evidence.signature, str):
+        raise ProducerError("runtime receipt has invalid field types")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", evidence.canary_receipt_sha256):
+        raise ProducerError("runtime receipt canary digest is malformed")
+    now = int(time.time())
+    if (
+        type(evidence.issued_at) is not int
+        or type(evidence.expires_at) is not int
+        or evidence.issued_at <= 0
+        or evidence.issued_at >= evidence.expires_at
+        or evidence.expires_at <= now
+        or evidence.issued_at > now + 60
+        or evidence.expires_at - evidence.issued_at > 3600
+    ):
+        raise ProducerError("runtime receipt is stale, expired, or has an invalid validity window")
+    signature = evidence.signature
+    if not re.fullmatch(r"[0-9a-f]{64}", signature):
+        raise ProducerError("runtime receipt signature is malformed")
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    expected_signature = hmac.new(key.encode(), canonical, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature, expected_signature):
+        raise ProducerError("runtime receipt signature authentication failed")
 
 
 def _measured(seconds: float | None) -> dict[str, Any]:
@@ -542,7 +754,43 @@ def _measured(seconds: float | None) -> dict[str, Any]:
     return {"status": "measured", "seconds": seconds}
 
 
-def _record(  # noqa: PLR0911
+def _invoke_record_phase(
+    mode: Mode,
+    phase: Literal["list", "impact"],
+    request: RunRequest,
+    record: dict[str, Any],
+    runner: ArtifactRunner,
+    evidence: TrustedRuntimeEvidence | None,
+) -> InvocationResult:
+    if mode == "secure":
+        return runner(mode, phase, request)
+    authority = runtime_custody_authority_from_environment()
+    assert evidence is not None
+    binding = CustodyBinding(
+        snapshot=request.snapshot.side,
+        phase=phase,
+        nonce=secrets.token_hex(16),
+        request_sha256=runtime_record_request_digest(record),
+        canary_receipt_sha256=evidence.canary_receipt_sha256,
+        runtime_version=authority.runtime_version,
+    )
+    result = runner(mode, phase, replace(request, custody_binding=binding))
+    receipt = verify_runtime_custody(
+        result.custody_receipt,
+        expected=binding,
+        result=_invocation_payload(result),
+        authority=authority,
+        now=int(time.time()),
+    )
+    record.setdefault("runtime_custody", {})[phase] = {
+        "binding": binding.model_dump(mode="json"),
+        "result": _invocation_payload(result),
+        "receipt": receipt.model_dump(mode="json"),
+    }
+    return result
+
+
+def _record(  # noqa: PLR0911, PLR0912
     *,
     mode: Mode,
     snapshot: SnapshotInput,
@@ -579,6 +827,21 @@ def _record(  # noqa: PLR0911
         provenance.update(
             runtime_seccomp_sha256=request.seccomp_sha256,
             runtime_policy_sha256=request.runtime_policy_sha256,
+            runtime_canary_receipt_sha256=(
+                evidence.canary_receipt_sha256 if evidence is not None else "sha256:" + "0" * 64
+            ),
+            runtime_attestation_sha256=(
+                "sha256:"
+                + hashlib.sha256(
+                    json.dumps(
+                        {**_evidence_payload(evidence), "signature": evidence.signature},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest()
+                if evidence is not None
+                else "sha256:" + "0" * 64
+            ),
         )
     record: dict[str, Any] = {
         "schema_version": 1,
@@ -602,33 +865,37 @@ def _record(  # noqa: PLR0911
         "impact": None,
         "provenance": provenance,
     }
+    if request.phase_manifest_state and request.phase_manifest_state.get("entries"):
+        record["framework_phase_manifest"] = request.phase_manifest_state
     if mode == "runtime":
         try:
             _validate_evidence(evidence, request)
         except ProducerError as error:
             record["failure"] = {"phase": "unavailable", "message": str(error)}
-        # The configured verifier is NoReturn while no external trust authority
-        # exists. Runtime records therefore always abstain before either lane runs.
-        return record
+            return record
     results: dict[str, InvocationResult] = {}
     for phase in ("list", "impact"):
         try:
             with _frozen_lane_request(request, source_hash, tool_hash) as lane_request:
-                result = runner(mode, phase, lane_request)
+                result = _invoke_record_phase(mode, phase, lane_request, record, runner, evidence)
             if result.seconds is not None:
                 record["timing"][phase] = _measured(result.seconds)
             results[phase] = result
         except PhaseFailure as error:
+            record.pop("runtime_custody", None)
             record["failure"] = {"phase": error.phase, "message": str(error)[:4096]}
             return record
-        except ProducerError as error:
+        except (ProducerError, RuntimeCustodyError) as error:
+            record.pop("runtime_custody", None)
             record["failure"] = {"phase": "unavailable", "message": str(error)[:4096]}
             return record
         except (OSError, TimeoutError) as error:
+            record.pop("runtime_custody", None)
             phase_name = "timeout" if isinstance(error, TimeoutError) else "unavailable"
             record["failure"] = {"phase": phase_name, "message": str(error)[:4096] or phase_name}
             return record
         except Exception as error:  # adapters classify; unknown errors are extraction abstentions
+            record.pop("runtime_custody", None)
             record["failure"] = {
                 "phase": "extraction",
                 "message": str(error)[:4096] or type(error).__name__,
@@ -643,6 +910,7 @@ def _record(  # noqa: PLR0911
         or not isinstance(impact, dict)
         or not isinstance(impact.get("candidate_endpoints"), list)
     ):
+        record.pop("runtime_custody", None)
         record["failure"] = {
             "phase": "extraction",
             "message": "runner omitted complete list or impact output",
@@ -655,6 +923,20 @@ def _record(  # noqa: PLR0911
             "bytes": max(value for value in rss_values if value is not None),
         }
     record.update(status="success", failure=None, inventory=inventory, impact=impact)
+    static_manifest = request.phase_manifest_state
+    if isinstance(static_manifest, dict) and "entries" in static_manifest:
+        record["framework_phase_manifest"] = static_manifest
+    if mode == "runtime":
+        manifest = results["list"].phase_manifest
+        observations = {phase: results[phase].phase_observation for phase in ("list", "impact")}
+        if isinstance(manifest, dict) and all(
+            isinstance(item, dict) for item in observations.values()
+        ):
+            record["framework_phase"] = {
+                "manifest": manifest,
+                "observations": observations,
+                "role": "positive_observation_only",
+            }
     return record
 
 
@@ -717,6 +999,8 @@ def produce_snapshot_pair(
         sbom_sha256=sbom_hash,
         seccomp_sha256=seccomp_hash,
         runtime_policy_sha256=policy_hash,
+        phase_manifest_state={},
+        phase_manifest_source_root=app_path,
     )
     invocation = {
         "program": "fastapi-endpoint-detector",
@@ -869,6 +1153,11 @@ def load_evidence(path: Path) -> TrustedRuntimeEvidence:
         "seccomp_sha256",
         "policy_sha256",
         "canary_receipt_sha256",
+        "key_id",
+        "issued_at",
+        "expires_at",
+        "request_sha256",
+        "signature",
     }:
         raise ProducerError("trusted runtime evidence has an unknown or incomplete schema")
     try:

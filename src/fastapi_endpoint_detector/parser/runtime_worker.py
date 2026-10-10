@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import hashlib
+import inspect
 import json
 import os
 import re
 import sys
 import threading
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout, suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
 from fastapi_endpoint_detector.analyzer.endpoint_registry import EndpointRegistry
@@ -194,12 +197,27 @@ def _collect_bounded_models(
 def _validate_request(value: Any) -> dict[str, Any]:  # noqa: PLR0912
     if (
         not isinstance(value, dict)
-        or set(value) != _REQUEST_FIELDS
+        or (
+            set(value) != _REQUEST_FIELDS
+            and set(value) != _REQUEST_FIELDS | {"phase_manifest", "phase_manifest_sha256"}
+        )
         or value.get("schema_version") != _PROTOCOL_VERSION
     ):
         raise ValueError("unsupported runtime worker request")
-    if value.get("phase") not in {"list", "analyze"}:
-        raise ValueError("runtime worker phase must be list or analyze")
+    if value.get("phase") not in {"list", "analyze", "lifespan"}:
+        raise ValueError("runtime worker phase must be list, analyze, or lifespan")
+    if value.get("phase_manifest") is not None:
+        from fastapi_endpoint_detector.analyzer.framework_phase_runtime import (  # noqa: PLC0415
+            PhaseManifest,
+        )
+
+        if not isinstance(value.get("phase_manifest"), dict):
+            raise ValueError("runtime worker phase manifest must be an object")
+        manifest = PhaseManifest.model_validate(value["phase_manifest"])
+        if value.get("phase_manifest_sha256") != manifest.digest:
+            raise ValueError(
+                "runtime worker phase manifest does not match its trusted request digest"
+            )
     for field in ("app_path", "app_variable"):
         if not isinstance(value.get(field), str) or not value[field]:
             raise ValueError(f"runtime worker request requires {field}")
@@ -270,7 +288,271 @@ def _analyze(request: dict[str, Any], endpoints: Any) -> dict[str, Any]:
     }
 
 
-def run_request(raw_request: str) -> tuple[dict[str, Any], int]:
+def _runtime_callable_identity(value: Any) -> tuple[str, str, int] | None:
+    """Return the loaded Python callback's physical code identity, without executing it."""
+    candidate = value
+    if not inspect.isfunction(candidate):
+        candidate = getattr(candidate, "__wrapped__", None)
+    while candidate is not None and hasattr(candidate, "__wrapped__"):
+        candidate = candidate.__wrapped__
+    code = getattr(candidate, "__code__", None)
+    if code is None:
+        return None
+    return str(Path(code.co_filename).resolve()), code.co_name, code.co_firstlineno
+
+
+def _manifest_callback_registered(app: Any, item: Any) -> bool:
+    """Bind a manifest callback to the selected app's actual registration table."""
+    router = getattr(app, "router", None)
+    contract = item.contract_id
+    if contract in {"fastapi-lifespan-startup", "fastapi-lifespan-shutdown"}:
+        return _same_callback_identity(
+            _runtime_callable_identity(getattr(router, "lifespan_context", None)),
+            item.callback.file,
+            item.callback.symbol,
+            item.callback.line,
+        )
+    callbacks = getattr(router, "on_startup" if item.phase == "startup" else "on_shutdown", None)
+    if not isinstance(callbacks, (list, tuple)):
+        return False
+    expected = (
+        str(Path(item.callback.file).resolve()),
+        item.callback.symbol.rsplit(".", 1)[-1],
+        item.callback.line,
+    )
+    return any(_runtime_callable_identity(callback) == expected for callback in callbacks)
+
+
+async def _run_lifespan(request: dict[str, Any]) -> dict[str, Any]:  # noqa: PLR0915
+    """Run the selected app's real lifespan context inside the isolated worker."""
+    from fastapi_endpoint_detector.analyzer.framework_phase_runtime import (  # noqa: PLC0415
+        PhaseManifest,
+        PhaseObservation,
+    )
+
+    manifest = PhaseManifest.model_validate(request["phase_manifest"])
+    app_root = Path(request["app_path"]).resolve(strict=True)
+    unavailable: list[dict[str, object]] = []
+    eligible = []
+    for item in manifest.entries:
+        try:
+            callback_path = Path(item.callback.file).resolve(strict=True)
+            registration_path = Path(item.registration.file).resolve(strict=True)
+            if app_root.is_dir():
+                callback_path.relative_to(app_root)
+                registration_path.relative_to(app_root)
+            elif callback_path != app_root or registration_path != app_root:
+                raise ValueError("source identity lies outside the selected app file")
+            if hashlib.sha256(callback_path.read_bytes()).hexdigest() != item.callback_file_sha256:
+                raise ValueError("callback source file digest mismatch")
+            registration_digest = hashlib.sha256(registration_path.read_bytes()).hexdigest()
+            if registration_digest != item.registration_file_sha256:
+                raise ValueError("registration source file digest mismatch")
+            eligible.append(item)
+        except (OSError, ValueError) as error:
+            unavailable.append(
+                {"callback": item.callback.model_dump(mode="json"), "reason": str(error)}
+            )
+    extractor = _extractor(request)
+    app = extractor._load_app()
+    observed: list[dict[str, object]] = []
+    matching = [item for item in eligible if _manifest_callback_registered(app, item)]
+    unmatched = [item for item in eligible if item not in matching]
+    unavailable.extend(
+        {
+            "callback": item.callback.model_dump(mode="json"),
+            "reason": "loaded callback identity mismatch",
+        }
+        for item in unmatched
+    )
+    messages = iter(
+        (
+            {"type": "lifespan.startup"},
+            {"type": "lifespan.shutdown"},
+        )
+    )
+    sent: list[str] = []
+    phase_now = "startup"
+    status: Literal["completed", "startup_failed", "unavailable"] = "unavailable"
+    entered: set[tuple[str, str, int, str]] = set()
+    targets = {
+        (
+            str(Path(item.callback.file).resolve()),
+            item.callback.symbol.rsplit(".", 1)[-1],
+            item.callback.line,
+            item.phase,
+        )
+        for item in matching
+    }
+
+    def trace(frame: Any, event: str, _arg: Any) -> Any:
+        if event in {"call", "line"}:
+            identity = (
+                str(Path(frame.f_code.co_filename).resolve()),
+                frame.f_code.co_name,
+                frame.f_code.co_firstlineno,
+                phase_now,
+            )
+            if identity in targets:
+                entered.add(identity)
+        return trace
+
+    async def receive() -> dict[str, str]:
+        try:
+            return next(messages)
+        except StopIteration as error:
+            raise RuntimeError("ASGI lifespan app requested an unexpected message") from error
+
+    async def send(message: dict[str, Any]) -> None:
+        nonlocal phase_now
+        message_type = message.get("type")
+        expected = {
+            (): "lifespan.startup.complete",
+            ("lifespan.startup.complete",): "lifespan.shutdown.complete",
+        }.get(tuple(sent))
+        failure = (
+            "lifespan.startup.failed"
+            if not sent
+            else "lifespan.shutdown.failed"
+            if sent == ["lifespan.startup.complete"]
+            else None
+        )
+        allowed = {expected, failure}
+        if not isinstance(message_type, str) or message_type not in allowed:
+            raise RuntimeError("ASGI lifespan emitted an invalid or out-of-order message")
+        sent.append(message_type)
+        if message_type == "lifespan.startup.complete":
+            phase_now = "shutdown"
+
+    try:
+        if not callable(app):
+            raise TypeError("selected application does not implement the ASGI call interface")
+        sys.settrace(trace)
+        await app(
+            {"type": "lifespan", "asgi": {"version": "3.0", "spec_version": "2.0"}},
+            receive,
+            send,
+        )
+        sys.settrace(None)
+        shutdown_complete = sent == [
+            "lifespan.startup.complete",
+            "lifespan.shutdown.complete",
+        ]
+        status = "completed" if shutdown_complete else "unavailable"
+        if shutdown_complete:
+            observed.extend(_observed_entries(matching, "startup", manifest.digest, entered))
+            observed.extend(_observed_entries(matching, "shutdown", manifest.digest, entered))
+    except BaseException as error:
+        sys.settrace(None)
+        # Startup exceptions prevent a valid shutdown observation.
+        status = "startup_failed" if "lifespan.startup.complete" not in sent else "unavailable"
+        unavailable.extend(
+            {
+                "callback": item.callback.model_dump(mode="json"),
+                "reason": "startup did not complete",
+            }
+            for item in matching
+            if item.phase == "shutdown"
+        )
+        if isinstance(error, (KeyboardInterrupt, SystemExit)):
+            raise
+    return PhaseObservation(
+        manifest_sha256=manifest.digest,
+        observed=tuple(observed),
+        unavailable=tuple(unavailable),
+        execution_status=status,
+    ).model_dump(mode="json")
+
+
+def _same_callback_identity(
+    actual: tuple[str, str, int] | None, file: str, symbol: str, line: int
+) -> bool:
+    if actual is None:
+        return False
+    actual_file, actual_symbol, actual_line = actual
+    return (
+        actual_file == str(Path(file).resolve())
+        and actual_symbol == symbol.rsplit(".", 1)[-1]
+        and actual_line == line
+    )
+
+
+def _observed_entries(
+    entries: list[Any],
+    phase: str,
+    manifest_digest: str,
+    entered: set[tuple[str, str, int, str]],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "callback": item.callback.model_dump(mode="json"),
+            "registration": item.registration.model_dump(mode="json"),
+            "phase": phase,
+            "manifest_sha256": manifest_digest,
+            "execution_conditions": list(item.execution_conditions),
+        }
+        for item in entries
+        if item.phase == phase
+        and (
+            str(Path(item.callback.file).resolve()),
+            item.callback.symbol.rsplit(".", 1)[-1],
+            item.callback.line,
+            phase,
+        )
+        in entered
+    ]
+
+
+def _lifespan_child(request: dict[str, Any], connection: Any) -> None:
+    """Keep imported application code in a disposable child of the sandbox worker."""
+    try:
+        result = asyncio.run(_run_lifespan(request))
+        connection.send_bytes(_encoded_json({"ok": True, "result": result}))
+    except BaseException as error:
+        with suppress(BrokenPipeError, OSError):
+            connection.send_bytes(
+                _encoded_json({"ok": False, "error": f"{type(error).__name__}: {error}"[:2048]})
+            )
+        if isinstance(error, (KeyboardInterrupt, SystemExit)):
+            raise
+    finally:
+        connection.close()
+
+
+def _run_lifespan_isolated(request: dict[str, Any]) -> dict[str, Any]:
+    """Run lifespan in a fresh forked child, retaining the container as the security boundary."""
+    import multiprocessing  # noqa: PLC0415
+
+    if "fork" not in multiprocessing.get_all_start_methods():
+        raise RuntimeError("lifespan child isolation requires fork support")
+    context = multiprocessing.get_context("fork")
+    receiver, sender = context.Pipe(duplex=False)
+    process = context.Process(target=_lifespan_child, args=(request, sender), daemon=False)
+    process.start()
+    sender.close()
+    try:
+        if not receiver.poll(240):
+            process.kill()
+            raise RuntimeError("isolated lifespan child timed out")
+        payload = json.loads(receiver.recv_bytes(4 * 1024 * 1024))
+        process.join(timeout=5)
+        if process.is_alive():
+            process.kill()
+            process.join()
+        if process.exitcode != 0 or not isinstance(payload, dict) or payload.get("ok") is not True:
+            raise RuntimeError("isolated lifespan child failed")
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError("isolated lifespan child returned malformed output")
+        return result
+    finally:
+        receiver.close()
+        if process.is_alive():
+            process.kill()
+            process.join()
+
+
+def run_request(raw_request: str) -> tuple[dict[str, Any], int]:  # noqa: PLR0912
     """Run one validated list/analyze request and return a bounded JSON payload."""
     output_limit = _DEFAULT_OUTPUT_LIMIT_BYTES
     try:
@@ -289,14 +571,21 @@ def run_request(raw_request: str) -> tuple[dict[str, Any], int]:
         request = _validate_request(raw_value)
         with _ContainerRssSampler() as rss_sampler:
             extractor = _extractor(request)
-            # App code runs in FastAPIExtractor's isolated child, so it cannot
-            # monkeypatch this supervisor's pin validation or RSS telemetry.
-            endpoints = extractor.extract_endpoints()
-            result = (
-                {"endpoints": endpoints}
-                if request["phase"] == "list"
-                else _analyze(request, endpoints)
-            )
+            if request["phase"] == "lifespan":
+                result: dict[str, Any] = {"phase_observation": _run_lifespan_isolated(request)}
+            else:
+                # App code runs in FastAPIExtractor's isolated child, so it cannot
+                # monkeypatch this supervisor's pin validation or RSS telemetry.
+                endpoints = extractor.extract_endpoints()
+                result = (
+                    {"endpoints": endpoints}
+                    if request["phase"] == "list"
+                    else _analyze(request, endpoints)
+                )
+                if request.get("phase_manifest") is not None:
+                    # Keep lifecycle execution in its own app-loaded child and include
+                    # its result alongside this invocation's actual list or impact.
+                    result["phase_observation"] = _run_lifespan_isolated(request)
         peak = rss_sampler.peak_bytes
         telemetry = {
             "container_peak_rss_bytes": peak,

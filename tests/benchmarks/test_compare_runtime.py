@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import secrets
+import time
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -16,6 +20,30 @@ from benchmarks.real_world.compare_runtime import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+from fastapi_endpoint_detector.analyzer.framework_phase_bridge import SourceIdentity
+from fastapi_endpoint_detector.analyzer.framework_phase_runtime import (
+    PhaseManifest,
+    PhaseManifestEntry,
+    PhaseObservation,
+)
+from fastapi_endpoint_detector.analyzer.runtime_custody import (
+    CustodyBinding,
+    custody_digest,
+    runtime_record_request_digest,
+)
+from fastapi_endpoint_detector.models.surface_contract import load_surface_preset
+
+CUSTODY_TEST_KEY = "controlled-custody-test-secret-at-least-32-bytes"
+
+
+@pytest.fixture(autouse=True)
+def controlled_custody_authority(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Synthetic comparator inputs use a test authority, never a real sandbox receipt.
+    monkeypatch.setenv("FASTAPI_DETECTOR_RUNTIME_CUSTODY_KEY", CUSTODY_TEST_KEY)
+    monkeypatch.setenv("FASTAPI_DETECTOR_RUNTIME_CUSTODY_KEY_ID", "fixture-custody-authority")
+    monkeypatch.setenv("FASTAPI_DETECTOR_RUNTIME_TRUST_VERSION", "controlled protocol fixture")
+
 
 H = "sha256:" + "a" * 64
 
@@ -78,8 +106,10 @@ def _record(
         provenance.update(
             runtime_seccomp_sha256=_digest("5"),
             runtime_policy_sha256=_digest("6"),
+            runtime_attestation_sha256=_digest("7"),
+            runtime_canary_receipt_sha256=_digest("8"),
         )
-    return {
+    value = {
         "schema_version": 1,
         "mode": mode,
         "snapshot": snapshot,
@@ -92,9 +122,105 @@ def _record(
         "impact": impact,
         "provenance": provenance,
     }
+    manifest = _phase_manifest(source)
+    value["framework_phase_manifest"] = manifest
+    if mode == "runtime":
+        observations = {
+            phase: PhaseObservation(
+                manifest_sha256=PhaseManifest.model_validate(manifest).digest,
+                observed=(),
+                unavailable=(),
+                execution_status="completed",
+            ).model_dump(mode="json")
+            for phase in ("list", "impact")
+        }
+        value["framework_phase"] = {
+            "manifest": manifest,
+            "observations": observations,
+            "role": "positive_observation_only",
+        }
+    return value
+
+
+def _phase_manifest(source: str) -> dict[str, Any]:
+    identity = SourceIdentity(
+        module="app",
+        symbol="startup",
+        file="/snapshot/app.py",
+        line=1,
+        column=0,
+        source_sha256=source,
+    )
+    digest = source.removeprefix("sha256:")
+    entry = PhaseManifestEntry(
+        callback=identity,
+        registration=identity,
+        phase="startup",
+        execution_conditions=("startup succeeds",),
+        contract_id="fastapi-lifespan-startup",
+        contract_sha256=load_surface_preset("framework-v1").document.contract_hashes[
+            "fastapi-lifespan-startup"
+        ],
+        source_sha256=source,
+        callback_file_sha256=digest,
+        registration_file_sha256=digest,
+        inventory_sha256=source,
+        engine_sha256=source,
+        config_sha256=source,
+    )
+    return PhaseManifest(entries=(entry,)).model_dump(mode="json")
+
+
+def _sign_controlled_record(value: dict[str, Any]) -> None:
+    """Seal the final synthetic fixture; mutations after this must fail verification."""
+    envelopes = {}
+    for phase in ("list", "impact"):
+        binding = CustodyBinding(
+            snapshot=value["snapshot"],
+            phase=phase,
+            nonce=secrets.token_hex(16),
+            request_sha256=runtime_record_request_digest(value),
+            canary_receipt_sha256=value["provenance"]["runtime_canary_receipt_sha256"],
+            runtime_version="controlled protocol fixture",
+        )
+        result = {
+            "inventory": value["inventory"] if phase == "list" else None,
+            "impact": value["impact"] if phase == "impact" else None,
+            "seconds": value["timing"][phase].get("seconds"),
+            "peak_rss_bytes": value["resources"]["peak_rss_bytes"].get("bytes"),
+            "phase_manifest": value["framework_phase_manifest"],
+            "phase_observation": value["framework_phase"]["observations"][phase],
+        }
+        now = int(time.time())
+        receipt = {
+            "binding": binding.model_dump(mode="json"),
+            "result_sha256": custody_digest(result),
+            "key_id": "fixture-custody-authority",
+            "issued_at": now,
+            "expires_at": now + 60,
+        }
+        signature = hmac.new(
+            CUSTODY_TEST_KEY.encode(),
+            json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        envelopes[phase] = {
+            "binding": binding.model_dump(mode="json"),
+            "result": result,
+            "receipt": {**receipt, "signature": signature},
+        }
+    value["runtime_custody"] = envelopes
 
 
 def _write(path: Path, value: object) -> None:
+    if (
+        isinstance(value, dict)
+        and value.get("mode") == "runtime"
+        and value.get("status") == "success"
+        and isinstance(value.get("provenance"), dict)
+        and "runtime_canary_receipt_sha256" in value["provenance"]
+    ):
+        _sign_controlled_record(value)
     path.write_text(json.dumps(value), encoding="utf-8")
 
 
@@ -107,6 +233,105 @@ def _matrix_paths(tmp_path: Path) -> dict[tuple[str, str], Path]:
             _write(path, _record(mode, snapshot=snapshot, lock=lock))
             paths[(snapshot, mode)] = path
     return paths
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "inventory",
+        "impact",
+        "request",
+        "receipt",
+        "rss",
+        "phase_manifest",
+        "callback",
+        "observation",
+    ],
+)
+def test_runtime_custody_rejects_changes_after_receipt_issuance(
+    tmp_path: Path, mutation: str
+) -> None:
+    secure = tmp_path / "secure.json"
+    runtime = tmp_path / "runtime.json"
+    _write(secure, _record("secure"))
+    record = _record("runtime")
+    _sign_controlled_record(record)
+    if mutation == "inventory":
+        record["inventory"]["endpoints"] = []
+    elif mutation == "impact":
+        record["impact"]["candidate_endpoints"] = []
+    elif mutation == "request":
+        record["provenance"]["runtime_canary_receipt_sha256"] = _digest("9")
+    elif mutation == "receipt":
+        record.pop("runtime_custody")
+    elif mutation == "phase_manifest":
+        record["framework_phase_manifest"]["entries"][0]["contract_sha256"] = _digest("9")
+        record["framework_phase"]["manifest"] = record["framework_phase_manifest"]
+    elif mutation == "callback":
+        record["framework_phase_manifest"]["entries"][0]["callback"]["symbol"] = "altered"
+        record["framework_phase"]["manifest"] = record["framework_phase_manifest"]
+    elif mutation == "observation":
+        record["framework_phase"]["observations"]["list"]["execution_status"] = "unavailable"
+    else:
+        record["resources"]["peak_rss_bytes"]["bytes"] += 1
+    # Deliberately write without the fixture signer: retained receipts are immutable.
+    runtime.write_text(json.dumps(record), encoding="utf-8")
+    with pytest.raises(ComparisonError):
+        compare(secure, runtime)
+
+
+def test_runtime_comparator_rejects_success_without_phase_observations(tmp_path: Path) -> None:
+    secure = tmp_path / "secure.json"
+    runtime = tmp_path / "runtime.json"
+    _write(secure, _record("secure"))
+    record = _record("runtime")
+    _sign_controlled_record(record)
+    record.pop("framework_phase")
+    record.pop("framework_phase_manifest")
+    runtime.write_text(json.dumps(record), encoding="utf-8")
+    with pytest.raises(ComparisonError, match="phase comparison"):
+        compare(secure, runtime)
+
+
+def test_runtime_comparator_accepts_signed_completed_empty_phase_inventory(tmp_path: Path) -> None:
+    secure = tmp_path / "secure.json"
+    runtime = tmp_path / "runtime.json"
+    secure_record = _record("secure")
+    record = _record("runtime")
+    manifest = PhaseManifest(entries=()).model_dump(mode="json")
+    digest = PhaseManifest.model_validate(manifest).digest
+    secure_record["framework_phase_manifest"] = manifest
+    _write(secure, secure_record)
+    record["framework_phase_manifest"] = manifest
+    record["framework_phase"] = {
+        "manifest": manifest,
+        "observations": {
+            phase: PhaseObservation(
+                manifest_sha256=digest,
+                observed=(),
+                unavailable=(),
+                execution_status="completed",
+            ).model_dump(mode="json")
+            for phase in ("list", "impact")
+        },
+        "role": "positive_observation_only",
+    }
+    _write(runtime, record)
+
+    compare(secure, runtime)
+
+
+def test_failed_lifespan_cannot_claim_positive_phase_observations(tmp_path: Path) -> None:
+    secure = tmp_path / "secure.json"
+    runtime = tmp_path / "runtime.json"
+    _write(secure, _record("secure"))
+    record = _record("runtime")
+    record["framework_phase"]["observations"]["list"]["execution_status"] = "unavailable"
+    record["framework_phase"]["observations"]["list"]["observed"] = [{"phase": "startup"}]
+    _sign_controlled_record(record)
+    runtime.write_text(json.dumps(record), encoding="utf-8")
+    with pytest.raises(ComparisonError, match="phase comparison"):
+        compare(secure, runtime)
 
 
 def _compare_matrix(paths: dict[tuple[str, str], Path]) -> dict[str, Any]:

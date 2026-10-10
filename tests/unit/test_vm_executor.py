@@ -351,6 +351,71 @@ def test_list_and_analyze_preserve_equivalent_app_configuration(tmp_path: Path) 
     assert analyze_request["diff_path"] == "/workspace/change.diff"
 
 
+def test_lifespan_manifest_uses_same_hardened_worker_request(tmp_path: Path) -> None:
+    app = tmp_path / "application.py"
+    app.write_text("application = None\n", encoding="utf-8")
+    executor = _executor(tmp_path)
+    executor._resolved_image = _DIGEST
+    identity = {
+        "module": "sample",
+        "symbol": "lifespan",
+        "file": str(app.resolve()),
+        "line": 1,
+        "column": 0,
+        "end_line": 1,
+        "end_column": 1,
+        "source_sha256": "sha256:" + "a" * 64,
+    }
+    manifest = {
+        "schema_version": 1,
+        "protocol": "framework-phase-manifest-v1",
+        "entries": [
+            {
+                "callback": identity,
+                "registration": identity,
+                "phase": "startup",
+                "execution_conditions": [],
+                "contract_id": "fastapi-lifespan-startup",
+                "contract_sha256": "sha256:" + "b" * 64,
+                "source_sha256": "sha256:" + "c" * 64,
+                "callback_file_sha256": "d" * 64,
+                "registration_file_sha256": "e" * 64,
+                "inventory_sha256": "sha256:" + "f" * 64,
+                "engine_sha256": "sha256:" + "1" * 64,
+                "config_sha256": "sha256:" + "2" * 64,
+            }
+        ],
+    }
+
+    command = executor._container_command(
+        app,
+        None,
+        "application",
+        "json",
+        tmp_path / "phase.cid",
+        "phase-name",
+        phase_manifest=manifest,
+    )
+    request = json.loads(command[-1])
+
+    assert request["phase"] == "list"
+    assert request["phase_manifest"]["entries"][0]["callback"]["file"] == (
+        "/workspace/application.py"
+    )
+    assert (
+        request["phase_manifest_sha256"]
+        == "sha256:"
+        + hashlib.sha256(
+            json.dumps(request["phase_manifest"], sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )
+    assert "--runtime" in command
+    assert executor.policy.runtime in command
+    assert "--network" in command and command[command.index("--network") + 1] == "none"
+    assert "--pid" in command and command[command.index("--pid") + 1] == ""
+    assert "--security-opt" in command
+
+
 def test_selected_runtime_entry_is_explicit_in_worker_argv(tmp_path: Path) -> None:
     app = tmp_path / "app"
     app.mkdir()

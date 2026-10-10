@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import sys
@@ -10,6 +11,13 @@ from typing import TYPE_CHECKING
 import pytest
 from pydantic import BaseModel
 
+from fastapi_endpoint_detector.analyzer.framework_phase_bridge import SourceIdentity
+from fastapi_endpoint_detector.analyzer.framework_phase_runtime import (
+    PhaseManifest,
+    PhaseManifestEntry,
+    PhaseObservation,
+)
+from fastapi_endpoint_detector.models.surface_contract import load_surface_preset
 from fastapi_endpoint_detector.parser import runtime_worker
 from fastapi_endpoint_detector.parser.fastapi_extractor import (
     FastAPIExtractor,
@@ -76,7 +84,7 @@ def test_worker_list_uses_exact_selected_factory_and_bootstrap(tmp_path: Path, m
     _toy_project(tmp_path)
     monkeypatch.setattr(runtime_worker, "_container_process_rss_bytes", lambda: None)
     payload, status = runtime_worker.run_request(_request(tmp_path, phase="list"))
-    assert status == 0
+    assert status == 0, payload
     assert payload["status"] == "ok"
     assert payload["phase"] == "list"
     assert [item["path"] for item in payload["endpoints"]] == ["/selected-root"]
@@ -85,6 +93,102 @@ def test_worker_list_uses_exact_selected_factory_and_bootstrap(tmp_path: Path, m
         "container_peak_rss_status": "unsupported",
         "source": None,
     }
+
+
+@pytest.mark.parametrize(("phase", "expected_phase"), [("list", "list"), ("analyze", "analyze")])
+def test_worker_keeps_list_or_impact_output_with_lifespan_observation(
+    tmp_path: Path, monkeypatch, phase: str, expected_phase: str
+) -> None:
+    package = _toy_project(tmp_path)
+    source = package / "factory.py"
+    file_digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    identity = SourceIdentity(
+        module="toy_api.factory",
+        symbol="create_app",
+        file=str(source.resolve()),
+        line=2,
+        column=0,
+        source_sha256="sha256:" + file_digest,
+    )
+    entry = PhaseManifestEntry(
+        callback=identity,
+        registration=identity,
+        phase="startup",
+        execution_conditions=("startup succeeds",),
+        contract_id="fastapi-lifespan-startup",
+        contract_sha256=load_surface_preset("framework-v1").document.contract_hashes[
+            "fastapi-lifespan-startup"
+        ],
+        source_sha256=identity.source_sha256,
+        callback_file_sha256=file_digest,
+        registration_file_sha256=file_digest,
+        inventory_sha256=identity.source_sha256,
+        engine_sha256=identity.source_sha256,
+        config_sha256=identity.source_sha256,
+    )
+    manifest = PhaseManifest(entries=(entry,))
+    request = json.loads(
+        _request(
+            tmp_path,
+            phase=phase,
+            diff=(tmp_path / "change.diff") if phase == "analyze" else None,
+        )
+    )
+    if phase == "analyze":
+        request["diff_path"] = str(package / "change.diff")
+        (package / "change.diff").write_text("diff --git a/x b/x\n", encoding="utf-8")
+    request["phase_manifest"] = manifest.model_dump(mode="json")
+    request["phase_manifest_sha256"] = manifest.digest
+    observation = PhaseObservation(
+        manifest_sha256=manifest.digest,
+        observed=(),
+        unavailable=(),
+        execution_status="completed",
+    ).model_dump(mode="json")
+    monkeypatch.setattr(runtime_worker, "_run_lifespan_isolated", lambda _request: observation)
+    monkeypatch.setattr(runtime_worker, "_container_process_rss_bytes", lambda: None)
+    if phase == "analyze":
+        monkeypatch.setattr(
+            runtime_worker,
+            "_analyze",
+            lambda _request, _endpoints: {"candidate_endpoints": [], "affected_endpoints": []},
+        )
+
+    payload, status = runtime_worker.run_request(json.dumps(request))
+
+    assert status == 0
+    assert payload["phase"] == expected_phase
+    if phase == "list":
+        assert "endpoints" in payload
+    else:
+        assert "candidate_endpoints" in payload
+    assert payload["phase_observation"] == observation
+
+
+def test_worker_accepts_complete_empty_phase_inventory(tmp_path: Path, monkeypatch) -> None:
+    _toy_project(tmp_path)
+    request = json.loads(_request(tmp_path, phase="list"))
+    manifest = PhaseManifest(entries=())
+    request["phase_manifest"] = manifest.model_dump(mode="json")
+    request["phase_manifest_sha256"] = manifest.digest
+    monkeypatch.setattr(
+        runtime_worker,
+        "_run_lifespan_isolated",
+        lambda _request: PhaseObservation(
+            manifest_sha256=manifest.digest,
+            observed=(),
+            unavailable=(),
+            execution_status="completed",
+        ).model_dump(mode="json"),
+    )
+    monkeypatch.setattr(runtime_worker, "_container_process_rss_bytes", lambda: None)
+
+    payload, status = runtime_worker.run_request(json.dumps(request))
+
+    assert status == 0, payload
+    assert payload["endpoints"]
+    assert payload["phase_observation"]["execution_status"] == "completed"
+    assert payload["phase_observation"]["observed"] == []
 
 
 def test_worker_requires_complete_exact_pins_and_bounded_config(tmp_path: Path) -> None:

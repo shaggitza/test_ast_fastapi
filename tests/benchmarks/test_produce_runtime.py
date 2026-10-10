@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import subprocess
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -26,6 +29,14 @@ from benchmarks.real_world.produce_runtime import (
     produce_target_baseline,
 )
 
+from fastapi_endpoint_detector.analyzer.framework_phase_bridge import SourceIdentity
+from fastapi_endpoint_detector.analyzer.framework_phase_runtime import (
+    PhaseManifest,
+    PhaseManifestEntry,
+    PhaseObservation,
+)
+from fastapi_endpoint_detector.models.surface_contract import load_surface_preset
+
 H = "sha256:" + "a" * 64
 IMAGE = "registry.example/detector@sha256:" + "b" * 64
 
@@ -34,9 +45,13 @@ class FakeRunner:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
 
-    def __call__(self, mode: str, phase: str, request: Any) -> InvocationResult:  # noqa: ARG002
+    def __call__(self, mode: str, phase: str, request: Any) -> InvocationResult:
         self.calls.append((mode, phase))
         seconds = 0.25 if phase == "list" else 0.5
+        if mode == "secure" and phase == "impact" and request.phase_manifest_state is not None:
+            request.phase_manifest_state.update(
+                _phase_manifest(request.snapshot.app_path / "main.py")
+            )
         if phase == "list":
             status = "established" if mode == "secure" else "runtime_observed"
             return InvocationResult(
@@ -46,6 +61,19 @@ class FakeRunner:
                 },
                 seconds=seconds,
                 peak_rss_bytes=2048,
+                phase_manifest=(request.phase_manifest_state if mode == "runtime" else None),
+                phase_observation=(
+                    PhaseObservation(
+                        manifest_sha256=PhaseManifest.model_validate(
+                            request.phase_manifest_state
+                        ).digest,
+                        observed=(),
+                        unavailable=(),
+                        execution_status="completed",
+                    ).model_dump(mode="json")
+                    if mode == "runtime" and request.phase_manifest_state
+                    else None
+                ),
             )
         return InvocationResult(
             impact={
@@ -55,7 +83,48 @@ class FakeRunner:
             },
             seconds=seconds,
             peak_rss_bytes=2048,
+            phase_manifest=(request.phase_manifest_state if mode == "runtime" else None),
+            phase_observation=(
+                PhaseObservation(
+                    manifest_sha256=PhaseManifest.model_validate(
+                        request.phase_manifest_state
+                    ).digest,
+                    observed=(),
+                    unavailable=(),
+                    execution_status="completed",
+                ).model_dump(mode="json")
+                if mode == "runtime" and request.phase_manifest_state
+                else None
+            ),
         )
+
+
+class SignedFakeRunner(FakeRunner):
+    """Controlled protocol double; never operational runtime attestation."""
+
+    def __init__(self, key: str) -> None:
+        super().__init__()
+        self.key = key
+
+    def __call__(self, mode: str, phase: str, request: Any) -> InvocationResult:
+        result = super().__call__(mode, phase, request)
+        if mode != "runtime":
+            return result
+        assert request.custody_binding is not None
+        now = int(time.time())
+        receipt = {
+            "binding": request.custody_binding.model_dump(mode="json"),
+            "result_sha256": producer.custody_digest(producer._invocation_payload(result)),
+            "key_id": "fixture-custody-authority",
+            "issued_at": now,
+            "expires_at": now + 60,
+        }
+        signature = hmac.new(
+            self.key.encode(),
+            json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        return replace(result, custody_receipt={**receipt, "signature": signature})
 
 
 class FailingRunner(FakeRunner):
@@ -140,6 +209,58 @@ def _evidence(paths: dict[str, Path], spec: SnapshotInput) -> TrustedRuntimeEvid
         policy_sha256=runtime["provenance"]["runtime_policy_sha256"],
         canary_receipt_sha256=H,
     )
+
+
+def _request(spec: SnapshotInput) -> RunRequest:
+    lock_hash = _hash_file(spec.dependency_lock, "lock")
+    snapshot_hash = _hash_file(spec.source_snapshot_lock, "source lock")
+    sbom_hash = _hash_file(spec.sbom, "sbom")
+    seccomp = (
+        producer.PROJECT_ROOT
+        / "src/fastapi_endpoint_detector/executor/policies/"
+        / "runtime-seccomp-v1.json"
+    )
+    seccomp_hash = _hash_file(seccomp, "seccomp")
+    values = {
+        "image": spec.runtime_image,
+        "dependency_lock_sha256": lock_hash,
+        "snapshot_lock_sha256": snapshot_hash,
+        "sbom_sha256": sbom_hash,
+        "seccomp_sha256": seccomp_hash,
+    }
+    return RunRequest(
+        snapshot=spec,
+        configuration=EntryConfiguration(None, None, "app", "mypy"),
+        dependency_lock_sha256=lock_hash,
+        snapshot_lock_sha256=snapshot_hash,
+        runtime_image=spec.runtime_image,
+        sbom_sha256=sbom_hash,
+        seccomp_sha256=seccomp_hash,
+        runtime_policy_sha256=producer._runtime_policy_digest(values),
+    )
+
+
+def _signed_evidence(request: RunRequest, key: str) -> TrustedRuntimeEvidence:
+    now = int(time.time())
+    value = TrustedRuntimeEvidence(
+        status="passed",
+        host_boundary="gvisor",
+        runtime_version="controlled protocol fixture",
+        image_digest=request.runtime_image,
+        dependency_lock_sha256=request.dependency_lock_sha256,
+        snapshot_lock_sha256=request.snapshot_lock_sha256,
+        sbom_sha256=request.sbom_sha256,
+        seccomp_sha256=request.seccomp_sha256,
+        policy_sha256=request.runtime_policy_sha256,
+        canary_receipt_sha256=H,
+        key_id="test-authority",
+        issued_at=now,
+        expires_at=now + 300,
+        request_sha256=producer._request_digest(request),
+    )
+    payload = json.dumps(producer._evidence_payload(value), sort_keys=True, separators=(",", ":"))
+    signature = hmac.new(key.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return replace(value, signature=signature)
 
 
 def test_default_runtime_gate_abstains_without_calling_runtime(tmp_path: Path) -> None:
@@ -341,6 +462,59 @@ def test_matrix_publication_rolls_back_earlier_new_files_on_late_collision(
     assert not second.exists()
 
 
+def test_independent_signature_verifies_exact_pins_and_expiry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _request(_inputs(tmp_path))
+    key = "controlled-test-secret"
+    monkeypatch.setenv("FASTAPI_DETECTOR_RUNTIME_TRUST_KEY", key)
+    monkeypatch.setenv("FASTAPI_DETECTOR_RUNTIME_TRUST_KEY_ID", "test-authority")
+    monkeypatch.setenv("FASTAPI_DETECTOR_RUNTIME_TRUST_VERSION", "controlled protocol fixture")
+    receipt = _signed_evidence(request, key)
+    producer._validate_evidence(receipt, request)
+    with pytest.raises(ProducerError, match="signature authentication"):
+        producer._validate_evidence(replace(receipt, signature="f" * 64), request)
+    with pytest.raises(ProducerError, match="request_sha256"):
+        producer._validate_evidence(replace(receipt, request_sha256=H), request)
+    expired = replace(receipt, issued_at=int(time.time()) - 4000, expires_at=int(time.time()) - 1)
+    body = json.dumps(producer._evidence_payload(expired), sort_keys=True, separators=(",", ":"))
+    signature = hmac.new(key.encode(), body.encode(), hashlib.sha256).hexdigest()
+    expired = replace(expired, signature=signature)
+    with pytest.raises(ProducerError, match="stale, expired"):
+        producer._validate_evidence(expired, request)
+
+
+def test_valid_signed_receipt_reaches_runtime_runner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = _inputs(tmp_path)
+    key = "controlled-test-secret"
+    monkeypatch.setenv("FASTAPI_DETECTOR_RUNTIME_TRUST_KEY", key)
+    monkeypatch.setenv("FASTAPI_DETECTOR_RUNTIME_TRUST_KEY_ID", "test-authority")
+    monkeypatch.setenv("FASTAPI_DETECTOR_RUNTIME_TRUST_VERSION", "controlled protocol fixture")
+    receipt = _signed_evidence(_request(spec), key)
+    custody_key = "controlled-custody-test-secret-at-least-32-bytes"
+    monkeypatch.setenv("FASTAPI_DETECTOR_RUNTIME_CUSTODY_KEY", custody_key)
+    monkeypatch.setenv("FASTAPI_DETECTOR_RUNTIME_CUSTODY_KEY_ID", "fixture-custody-authority")
+    runner = SignedFakeRunner(custody_key)
+    outputs = produce_snapshot_pair(
+        spec,
+        EntryConfiguration(None, None, "app", "mypy"),
+        tmp_path / "signed-pair",
+        runner=runner,
+        runtime_evidence=receipt,
+    )
+    assert runner.calls == [
+        ("secure", "list"),
+        ("secure", "impact"),
+        ("runtime", "list"),
+        ("runtime", "impact"),
+    ]
+    runtime = json.loads(outputs["runtime"].read_text(encoding="utf-8"))
+    assert runtime["status"] == "success"
+    assert runtime["provenance"]["runtime_attestation_sha256"].startswith("sha256:")
+
+
 def test_target_baseline_orchestrator_publishes_comparator_valid_matrix(tmp_path: Path) -> None:
     outputs = produce_target_baseline(
         _inputs(tmp_path / "target", side="target"),
@@ -359,6 +533,41 @@ def test_target_baseline_orchestrator_publishes_comparator_valid_matrix(tmp_path
     )
     assert result["operational"]["artifact_count"] == 4
     assert result["operational"]["failure_phase_counts"]["runtime"] == {"unavailable": 2}
+
+
+@pytest.mark.parametrize("tampered", [False, True], ids=["unsigned", "changed-after-signing"])
+def test_valid_admission_does_not_accept_unattested_runtime_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tampered: bool
+) -> None:
+    spec = _inputs(tmp_path)
+    trust_key = "controlled-test-secret"
+    custody_key = "controlled-custody-test-secret-at-least-32-bytes"
+    monkeypatch.setenv("FASTAPI_DETECTOR_RUNTIME_TRUST_KEY", trust_key)
+    monkeypatch.setenv("FASTAPI_DETECTOR_RUNTIME_TRUST_KEY_ID", "test-authority")
+    monkeypatch.setenv("FASTAPI_DETECTOR_RUNTIME_TRUST_VERSION", "controlled protocol fixture")
+    monkeypatch.setenv("FASTAPI_DETECTOR_RUNTIME_CUSTODY_KEY", custody_key)
+    monkeypatch.setenv("FASTAPI_DETECTOR_RUNTIME_CUSTODY_KEY_ID", "fixture-custody-authority")
+
+    class TamperingRunner(SignedFakeRunner):
+        def __call__(self, mode: str, phase: str, request: Any) -> InvocationResult:
+            result = super().__call__(mode, phase, request)
+            if mode == "runtime":
+                return replace(result, seconds=result.seconds + 1)
+            return result
+
+    runner = TamperingRunner(custody_key) if tampered else FakeRunner()
+    outputs = produce_snapshot_pair(
+        spec,
+        EntryConfiguration(None, None, "app", "mypy"),
+        tmp_path / "rejected",
+        runner=runner,
+        runtime_evidence=_signed_evidence(_request(spec), trust_key),
+    )
+    runtime = json.loads(outputs["runtime"].read_text(encoding="utf-8"))
+    assert runtime["status"] == "failure"
+    assert runtime["inventory"] is None
+    assert runtime["impact"] is None
+    assert "runtime_custody" not in runtime
 
 
 def test_secure_command_runs_only_ast_over_local_fixture(tmp_path: Path) -> None:
@@ -380,7 +589,8 @@ def test_runtime_command_uses_worker_phases_with_exact_configuration_pins(
     request = _request_for_source_only_test(_inputs(tmp_path))
     request = replace(
         request,
-        configuration=EntryConfiguration("main:create_app", "main:bootstrap", "app", "mypy"),
+        configuration=EntryConfiguration("main:create_app", "main:bootstrap", "app", "scip"),
+        phase_manifest_state=_phase_manifest(request.snapshot.app_path / "main.py"),
     )
     constructor_args: dict[str, Any] = {}
     invocations: list[dict[str, Any]] = []
@@ -405,9 +615,9 @@ def test_runtime_command_uses_worker_phases_with_exact_configuration_pins(
             }
 
     monkeypatch.setattr(producer, "VMExecutor", FakeVMExecutor)
-    runner = CommandRunner()
-    listed = runner("runtime", "list", request)
-    analyzed = runner("runtime", "impact", request)
+    # This tests VM argument forwarding, separately from the host custody broker.
+    listed = producer._run_runtime_phase("list", request)
+    analyzed = producer._run_runtime_phase("impact", request)
 
     assert constructor_args == {
         "image": request.runtime_image,
@@ -421,6 +631,11 @@ def test_runtime_command_uses_worker_phases_with_exact_configuration_pins(
     assert [call["bootstrap_entry"] for call in invocations] == ["main:bootstrap"] * 2
     assert invocations[0]["diff_path"] is None
     assert invocations[1]["diff_path"] == request.snapshot.diff_path
+    assert all(call["phase_manifest"] == request.phase_manifest_state for call in invocations)
+    assert all(
+        call["phase_manifest_source_root"] == request.phase_manifest_source_root
+        for call in invocations
+    )
     assert listed.inventory == {
         "inventory_status": "runtime_observed",
         "endpoints": [{"path": "/fixture"}],
@@ -441,3 +656,74 @@ def _request_for_source_only_test(spec: SnapshotInput) -> Any:
         seccomp_sha256=_hash_file(policy, "seccomp"),
         runtime_policy_sha256="sha256:" + "c" * 64,
     )
+
+
+def _phase_manifest(source: Path) -> dict[str, Any]:
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    source_digest = "sha256:" + digest
+    identity = SourceIdentity(
+        module="main",
+        symbol="startup",
+        file=str(source.resolve()),
+        line=1,
+        column=0,
+        source_sha256=source_digest,
+    )
+    entry = PhaseManifestEntry(
+        callback=identity,
+        registration=identity,
+        phase="startup",
+        execution_conditions=("startup succeeds",),
+        contract_id="fastapi-lifespan-startup",
+        contract_sha256=load_surface_preset("framework-v1").document.contract_hashes[
+            "fastapi-lifespan-startup"
+        ],
+        source_sha256=source_digest,
+        callback_file_sha256=digest,
+        registration_file_sha256=digest,
+        inventory_sha256=source_digest,
+        engine_sha256=source_digest,
+        config_sha256=source_digest,
+    )
+    return PhaseManifest(entries=(entry,)).model_dump(mode="json")
+
+
+@pytest.mark.parametrize("field", ["runtime_version", "issued_at", "canary_receipt_sha256"])
+def test_resigned_receipt_rejects_untrusted_runtime_or_invalid_schema(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    request = _request(_inputs(tmp_path))
+    key = "controlled-test-secret"
+    monkeypatch.setenv("FASTAPI_DETECTOR_RUNTIME_TRUST_KEY", key)
+    monkeypatch.setenv("FASTAPI_DETECTOR_RUNTIME_TRUST_KEY_ID", "test-authority")
+    monkeypatch.setenv("FASTAPI_DETECTOR_RUNTIME_TRUST_VERSION", "controlled protocol fixture")
+    receipt = _signed_evidence(request, key)
+    changes = {
+        "runtime_version": "a different authorized-but-unpinned runtime",
+        "issued_at": float(receipt.issued_at),
+        "canary_receipt_sha256": "arbitrary non-digest",
+    }
+    receipt = replace(receipt, **{field: changes[field]})
+    body = json.dumps(producer._evidence_payload(receipt), sort_keys=True, separators=(",", ":"))
+    receipt = replace(
+        receipt, signature=hmac.new(key.encode(), body.encode(), hashlib.sha256).hexdigest()
+    )
+    with pytest.raises(ProducerError):
+        producer._validate_evidence(receipt, request)
+
+
+def test_receipt_request_binds_snapshot_side_and_actual_diff_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _request(_inputs(tmp_path))
+    key = "controlled-test-secret"
+    monkeypatch.setenv("FASTAPI_DETECTOR_RUNTIME_TRUST_KEY", key)
+    monkeypatch.setenv("FASTAPI_DETECTOR_RUNTIME_TRUST_KEY_ID", "test-authority")
+    monkeypatch.setenv("FASTAPI_DETECTOR_RUNTIME_TRUST_VERSION", "controlled protocol fixture")
+    receipt = _signed_evidence(request, key)
+    other_side = replace(request, snapshot=replace(request.snapshot, side="baseline"))
+    with pytest.raises(ProducerError, match="request_sha256"):
+        producer._validate_evidence(receipt, other_side)
+    request.snapshot.diff_path.write_text("changed diff bytes\n")
+    with pytest.raises(ProducerError, match="request_sha256"):
+        producer._validate_evidence(receipt, request)

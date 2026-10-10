@@ -20,6 +20,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, ClassVar
 
+from fastapi_endpoint_detector.analyzer.framework_phase_runtime import (
+    PhaseManifest,
+    PhaseObservation,
+)
 from fastapi_endpoint_detector.models.endpoint import Endpoint
 
 
@@ -400,6 +404,8 @@ class VMExecutor:
         name: str,
         app_entry: str | None = None,
         bootstrap_entry: str | None = None,
+        phase_manifest: dict[str, Any] | None = None,
+        phase_manifest_source_root: Path | None = None,
     ) -> list[str]:
         seccomp_hash = self._verified_seccomp_hash()
         dependency_lock_hash = self._validated_hash(self.dependency_lock_hash, "dependency lock")
@@ -423,7 +429,7 @@ class VMExecutor:
             "--ipc",
             "none",
             "--pid",
-            "private",
+            "",
             "--log-driver",
             "none",
             "--read-only",
@@ -479,6 +485,16 @@ class VMExecutor:
                 and policy["policy_sha256"] != self.expected_policy_sha256
             ):
                 raise VMExecutorError("runtime policy does not match the producer's immutable pin")
+            container_manifest = (
+                self._container_phase_manifest(
+                    phase_manifest,
+                    app,
+                    app_target,
+                    source_root=phase_manifest_source_root,
+                )
+                if phase_manifest is not None
+                else None
+            )
             worker_request = {
                 "schema_version": 3,
                 "phase": "analyze" if diff_target is not None else "list",
@@ -501,6 +517,14 @@ class VMExecutor:
                     "runtime_policy_sha256": policy["policy_sha256"],
                 },
             }
+            if container_manifest is not None:
+                worker_request["phase_manifest"] = container_manifest
+                encoded_manifest = json.dumps(
+                    container_manifest, sort_keys=True, separators=(",", ":")
+                ).encode()
+                worker_request["phase_manifest_sha256"] = (
+                    "sha256:" + hashlib.sha256(encoded_manifest).hexdigest()
+                )
             cli = [
                 "python",
                 "-m",
@@ -539,6 +563,48 @@ class VMExecutor:
         command.extend(f"{key}={value}" for key, value in sorted(self.CLEAN_ENV.items()))
         command.extend(cli)
         return command
+
+    @staticmethod
+    def _container_phase_manifest(
+        manifest: dict[str, Any],
+        app_root: Path,
+        app_target: str,
+        *,
+        source_root: Path | None = None,
+    ) -> dict[str, Any]:
+        """Translate exact host snapshot paths to their read-only container mount paths."""
+        if set(manifest) != {"schema_version", "protocol", "entries"}:
+            raise VMExecutorError("runtime phase manifest has an unknown or incomplete schema")
+        entries = manifest.get("entries")
+        if not isinstance(entries, list):
+            raise VMExecutorError("runtime phase manifest entries must be an array")
+        translated: list[dict[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise VMExecutorError("runtime phase manifest entries must be objects")
+            copied = json.loads(json.dumps(entry))
+            for identity_name in ("callback", "registration"):
+                identity = copied.get(identity_name)
+                if not isinstance(identity, dict) or not isinstance(identity.get("file"), str):
+                    raise VMExecutorError("runtime phase manifest identities require source files")
+                try:
+                    host_file = Path(identity["file"]).resolve(strict=True)
+                    declared_root = (
+                        source_root.resolve(strict=True) if source_root is not None else app_root
+                    )
+                    if declared_root.is_dir():
+                        relative = host_file.relative_to(declared_root)
+                        identity["file"] = str(Path(app_target) / relative)
+                    elif host_file == declared_root:
+                        identity["file"] = app_target
+                    else:
+                        raise ValueError("identity file is outside the application mount")
+                except (OSError, ValueError) as error:
+                    raise VMExecutorError(
+                        f"runtime phase manifest source is outside the mounted snapshot: {error}"
+                    ) from error
+            translated.append(copied)
+        return {**manifest, "entries": translated}
 
     @staticmethod
     def _absence_query_failure(container_filter: str, label: str) -> str | None:
@@ -687,8 +753,12 @@ class VMExecutor:
         output_format: str = "json",
         app_entry: str | None = None,
         bootstrap_entry: str | None = None,
+        phase_manifest: dict[str, Any] | None = None,
+        phase_manifest_source_root: Path | None = None,
     ) -> Any:
         """Run list/analyze with no host import and return bounded output."""
+        app = Path(app_path).resolve(strict=True)
+        app_target = "/workspace/app" if app.is_dir() else f"/workspace/{app.name}"
         with tempfile.TemporaryDirectory(prefix="endpoint-detector-cid-") as directory:
             cidfile = Path(directory) / "container.cid"
             name = f"endpoint-detector-{uuid.uuid4().hex}"
@@ -701,14 +771,116 @@ class VMExecutor:
                 name,
                 app_entry,
                 bootstrap_entry,
+                phase_manifest,
+                phase_manifest_source_root,
             )
             stdout, _stderr = self._execute_bounded(command, cidfile, name)
         if output_format != "json":
             return stdout
         try:
-            return json.loads(stdout)
+            payload = json.loads(stdout)
         except json.JSONDecodeError as exc:
             raise VMExecutorError("Failed to parse bounded JSON output") from exc
+        if phase_manifest is not None:
+            try:
+                request = json.loads(command[-1])
+                expected_manifest = request["phase_manifest_sha256"]
+                observation = PhaseObservation.model_validate(payload["phase_observation"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise VMExecutorError(
+                    "runtime worker returned a malformed phase observation"
+                ) from exc
+            if observation.manifest_sha256 != expected_manifest:
+                raise VMExecutorError(
+                    "runtime phase observation does not match the requested manifest"
+                )
+            if phase_manifest is not None:
+                payload["phase_observation"] = self._host_phase_observation(
+                    observation.model_dump(mode="json"),
+                    phase_manifest,
+                    phase_manifest_source_root or app,
+                    app_target,
+                )
+        return payload
+
+    @staticmethod
+    def _host_phase_observation(  # noqa: PLR0912
+        observation: dict[str, Any], manifest: dict[str, Any], app_root: Path, app_target: str
+    ) -> dict[str, Any]:
+        """Map identities from the container mount back to exact host snapshot paths."""
+        root = app_root.resolve(strict=True)
+        for collection in ("observed", "unavailable"):
+            values = observation.get(collection)
+            if not isinstance(values, list):
+                raise VMExecutorError("runtime phase observation has malformed identity arrays")
+            for item in values:
+                if not isinstance(item, dict):
+                    raise VMExecutorError("runtime phase observation identity is malformed")
+                names = ("callback", "registration") if collection == "observed" else ("callback",)
+                for name in names:
+                    identity = item.get(name)
+                    if not isinstance(identity, dict) or not isinstance(identity.get("file"), str):
+                        raise VMExecutorError("runtime phase observation identity lacks a file")
+                    container_file = Path(identity["file"])
+                    try:
+                        relative = container_file.relative_to(Path(app_target))
+                        host_file = (
+                            (root / relative).resolve(strict=True) if root.is_dir() else root
+                        )
+                        host_file.relative_to(root if root.is_dir() else root.parent)
+                    except (OSError, ValueError) as error:
+                        raise VMExecutorError(
+                            "runtime phase observation identity is outside the mounted snapshot"
+                        ) from error
+                    identity["file"] = str(host_file)
+        try:
+            trusted = PhaseManifest.model_validate(manifest)
+            observation["manifest_sha256"] = trusted.digest
+            parsed = PhaseObservation.model_validate(observation)
+            allowed = {
+                (
+                    json.dumps(entry.callback.model_dump(mode="json"), sort_keys=True),
+                    json.dumps(entry.registration.model_dump(mode="json"), sort_keys=True),
+                    entry.phase,
+                    entry.execution_conditions,
+                )
+                for entry in trusted.entries
+            }
+            allowed_callbacks = {
+                json.dumps(entry.callback.model_dump(mode="json"), sort_keys=True)
+                for entry in trusted.entries
+            }
+            for item in parsed.observed:
+                callback = item["callback"]
+                registration = item["registration"]
+                conditions = item["execution_conditions"]
+                if (
+                    not isinstance(callback, dict)
+                    or not isinstance(registration, dict)
+                    or not isinstance(conditions, list)
+                    or any(not isinstance(condition, str) for condition in conditions)
+                ):
+                    raise ValueError("observation contains malformed callback identities")
+                key: tuple[str, str, str, tuple[str, ...]] = (
+                    json.dumps(callback, sort_keys=True),
+                    json.dumps(registration, sort_keys=True),
+                    str(item["phase"]),
+                    tuple(conditions),
+                )
+                if key not in allowed:
+                    raise ValueError("observation identity is not in the requested manifest")
+            for item in parsed.unavailable:
+                callback = item["callback"]
+                if (
+                    not isinstance(callback, dict)
+                    or json.dumps(callback, sort_keys=True) not in allowed_callbacks
+                ):
+                    raise ValueError("unavailable callback is not in the requested manifest")
+        except (TypeError, ValueError, KeyError) as error:
+            raise VMExecutorError(
+                f"runtime phase observation identity rejected: {error}"
+            ) from error
+        return observation
 
     def list_endpoints_in_vm(
         self,
