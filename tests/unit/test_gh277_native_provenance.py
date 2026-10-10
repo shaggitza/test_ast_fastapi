@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
+
+from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
+from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.models.endpoint import SnapshotSide
 from fastapi_endpoint_detector.parser.secure_ast_extractor import (
     SecureASTExtractor,
@@ -61,6 +65,138 @@ def test_dependency_expressions_are_side_qualified_and_structurally_owned(
     assert dependency.kind == "depends"
     assert dependency.confidence == "established"
     assert dependency.callable_expressions == ("main.route_dep",)
+
+
+def test_native_route_dependency_reaches_typed_transitive_helper_without_fanout(
+    tmp_path: Path,
+) -> None:
+    app_file = tmp_path / "main.py"
+    app_file.write_text(
+        "from fastapi import APIRouter, Depends, FastAPI\n"
+        "from helpers import app_helper, include_helper, route_helper, router_helper\n"
+        "def app_dep(): return app_helper()\n"
+        "def router_dep(): return router_helper()\n"
+        "def include_dep(): return include_helper()\n"
+        "def route_dep(): return route_helper()\n"
+        "app = FastAPI(dependencies=[Depends(app_dep)])\n"
+        "router = APIRouter(dependencies=[Depends(router_dep)])\n"
+        "@router.get('/items', dependencies=[Depends(route_dep)])\n"
+        "def handler(): return 1\n"
+        "@router.get('/safe')\n"
+        "def safe_handler(): return 2\n"
+        "app.include_router(router, dependencies=[Depends(include_dep)])\n",
+        encoding="utf-8",
+    )
+    helper_file = tmp_path / "helpers.py"
+    helper_file.write_text(
+        "def app_helper(): return 3\n"
+        "def router_helper(): return 4\n"
+        "def include_helper(): return 5\n"
+        "def route_helper(): return 6\n",
+        encoding="utf-8",
+    )
+    endpoints = SecureASTExtractor(app_file).extract_endpoints()
+    selected = next(endpoint for endpoint in endpoints if endpoint.identifier == "GET /items")
+    unrelated = next(endpoint for endpoint in endpoints if endpoint.identifier == "GET /safe")
+    analyzer = MypyAnalyzer(tmp_path, max_depth=4)
+
+    result = analyzer.analyze_endpoint(selected)
+    unrelated_result = analyzer.analyze_endpoint(unrelated)
+    for line in range(3, 7):
+        assert result.references_symbol_at_line("main.py", line) is not None
+    for line in range(1, 5):
+        assert result.references_symbol_at_line("helpers.py", line) is not None
+    for line in range(3, 6):
+        assert unrelated_result.references_symbol_at_line("main.py", line) is not None
+    assert unrelated_result.references_symbol_at_line("main.py", 6) is None
+    for line in range(1, 4):
+        assert unrelated_result.references_symbol_at_line("helpers.py", line) is not None
+    assert unrelated_result.references_symbol_at_line("helpers.py", 4) is None
+    assert analyzer._endpoint_key(selected) != analyzer._endpoint_key(
+        selected.model_copy(update={"native_provenance": None})
+    )
+
+
+@pytest.mark.parametrize(
+    ("scope", "helper", "expected"),
+    [
+        ("app", "app_helper", {"GET /items", "GET /safe", "GET /foreign"}),
+        ("router", "router_helper", {"GET /items", "GET /safe"}),
+        ("include", "include_helper", {"GET /items", "GET /safe"}),
+        ("route", "route_helper", {"GET /items"}),
+    ],
+)
+def test_native_dependency_helper_diff_reaches_only_public_descendant_routes(
+    tmp_path: Path,
+    scope: str,
+    helper: str,
+    expected: set[str],
+) -> None:
+    baseline = tmp_path / "baseline"
+    target = tmp_path / "target"
+    for root in (baseline, target):
+        root.mkdir()
+        (root / "helpers.py").write_text(
+            "def app_helper(): return 1\n"
+            "def router_helper(): return 2\n"
+            "def include_helper(): return 3\n"
+            "def route_helper(): return 4\n"
+            "def foreign_helper(): return 5\n",
+            encoding="utf-8",
+        )
+        (root / "foreign.py").write_text("def route_helper(): return 6\n", encoding="utf-8")
+        (root / "main.py").write_text(
+            "from fastapi import APIRouter, Depends, FastAPI\n"
+            "from helpers import app_helper, include_helper, router_helper, route_helper\n"
+            "from foreign import route_helper as foreign_route_helper\n"
+            "def app_dep(): return app_helper()\n"
+            "def router_dep(): return router_helper()\n"
+            "def include_dep(): return include_helper()\n"
+            "def route_dep(): return route_helper()\n"
+            "app = FastAPI(dependencies=[Depends(app_dep)])\n"
+            "router = APIRouter(dependencies=[Depends(router_dep)])\n"
+            "@router.get('/items', dependencies=[Depends(route_dep)])\n"
+            "def items(): return 1\n"
+            "@router.get('/safe')\n"
+            "def safe(): return 2\n"
+            "@app.get('/foreign', dependencies=[Depends(foreign_route_helper)])\n"
+            "def foreign(): return 3\n"
+            "app.include_router(router, dependencies=[Depends(include_dep)])\n",
+            encoding="utf-8",
+        )
+
+    # Edit exactly one bound helper in each public dependency scope. The same
+    # short route_helper name in foreign.py must never create a candidate.
+    helper_lines = (target / "helpers.py").read_text(encoding="utf-8").splitlines()
+    helper_index = next(
+        index for index, line in enumerate(helper_lines) if line.startswith(f"def {helper}()")
+    )
+    old_line = helper_lines[helper_index]
+    new_line = old_line.replace("return ", "return 40 + ", 1)
+    helper_lines[helper_index] = new_line
+    (target / "helpers.py").write_text("\n".join(helper_lines) + "\n", encoding="utf-8")
+    diff = (
+        "diff --git a/helpers.py b/helpers.py\n"
+        "--- a/helpers.py\n"
+        "+++ b/helpers.py\n"
+        f"@@ -{helper_index + 1},1 +{helper_index + 1},1 @@\n"
+        f"-{old_line}\n"
+        f"+{new_line}\n"
+    )
+
+    report = ChangeMapper(
+        target / "main.py",
+        baseline_app_path=baseline / "main.py",
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+
+    candidates = {item.endpoint.identifier: item for item in report.candidate_endpoints}
+    assert set(candidates) == expected
+    assert {item.endpoint.identifier for item in report.affected_endpoints} == expected
+    for candidate in candidates.values():
+        assert candidate.endpoint.native_provenance is not None
+        assert candidate.endpoint.native_provenance.side == SnapshotSide.TARGET
 
 
 def test_global_prefix_ownership_is_limited_to_descendant_routes_and_side(
