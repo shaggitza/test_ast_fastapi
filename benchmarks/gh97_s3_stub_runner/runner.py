@@ -8,6 +8,7 @@ import importlib
 import importlib.abc
 import importlib.machinery
 import importlib.util
+import io
 import json
 import platform
 import shutil
@@ -155,7 +156,9 @@ def _analyzer_hashes() -> dict[str, str]:
     return hashes
 
 
-def verify_inputs(wheel: Path, manifest: Path) -> dict[str, Any]:
+def _verified_input_snapshot(
+    wheel: Path, manifest: Path
+) -> tuple[dict[str, Any], dict[str, Any], bytes]:
     manifest_bytes = manifest.read_bytes()
     if sha256(manifest_bytes) != MANIFEST_SHA256:
         raise ProbeError("matrix manifest SHA-256 does not match the pinned manifest")
@@ -171,18 +174,32 @@ def verify_inputs(wheel: Path, manifest: Path) -> dict[str, Any]:
         raise ProbeError(f"wheel filename must be exactly {WHEEL_NAME}")
     if wheel.stat().st_size > MAX_WHEEL_BYTES:
         raise ProbeError("wheel file exceeds size limit")
-    wheel_hash = sha256(wheel.read_bytes())
+    with wheel.open("rb") as source:
+        wheel_bytes = source.read(MAX_WHEEL_BYTES + 1)
+    if len(wheel_bytes) > MAX_WHEEL_BYTES:
+        raise ProbeError("wheel file exceeds size limit")
+    wheel_hash = sha256(wheel_bytes)
     if wheel_hash != WHEEL_SHA256:
         raise ProbeError("wheel SHA-256 does not match the pinned exact release")
-    return {
-        "matrix_manifest_sha256": f"sha256:{MANIFEST_SHA256}",
-        "wheel_sha256": f"sha256:{wheel_hash}",
-    }
+    return (
+        {
+            "matrix_manifest_sha256": f"sha256:{MANIFEST_SHA256}",
+            "wheel_sha256": f"sha256:{wheel_hash}",
+        },
+        matrix,
+        wheel_bytes,
+    )
 
 
-def extract_wheel(wheel: Path, destination: Path) -> None:
+def verify_inputs(wheel: Path, manifest: Path) -> dict[str, Any]:
+    artifact, _, _ = _verified_input_snapshot(wheel, manifest)
+    return artifact
+
+
+def extract_wheel(wheel: Path | bytes, destination: Path) -> None:
     total = 0
-    with zipfile.ZipFile(wheel) as archive:
+    snapshot = io.BytesIO(wheel) if isinstance(wheel, bytes) else wheel
+    with zipfile.ZipFile(snapshot) as archive:
         infos = archive.infolist()
         if len(infos) > MAX_ENTRIES:
             raise ProbeError("wheel has too many ZIP members")
@@ -296,7 +313,12 @@ def _product_adapter(source: Path) -> dict[str, Any]:
     call_rows: list[dict[str, Any]] = []
     loaded: Any = None
     try:
-        analyzer = product["MypyAnalyzer"](source)
+        # The verified artifact is a sibling of the fixture package. Name this
+        # private root explicitly; flat-project inference intentionally excludes
+        # a checkout parent's arbitrary files and site-package substitutes.
+        analyzer = product["MypyAnalyzer"](
+            source, module_root=source.parent.parent, no_site_packages=True
+        )
         dependencies = analyzer.analyze_endpoint(endpoint)
         sites = dependencies.get_resolved_call_sites(file_path=str(source))
         call_rows = [site.model_dump(mode="json") for site in sites]
@@ -312,8 +334,17 @@ def _product_adapter(source: Path) -> dict[str, Any]:
             cache_enabled=False,
             resolver_versions=[f"mypy@{analyzer._resolver_version}"],
         )
+        status = (
+            "completed"
+            if len(call_rows) == 1
+            and call_rows[0].get("canonical_symbol") == CANONICAL
+            and audit.summary.physical_occurrences == 1
+            and audit.summary.matched_calls == 1
+            else "partially_validated"
+        )
         return {
-            "status": "completed",
+            "status": status,
+            "binding_complete": status == "completed",
             "product_root": str((ROOT / "src").resolve()),
             "product_revision": _revision(ROOT),
             "product_source_sha256": product["source_hashes"],
@@ -333,6 +364,7 @@ def _product_adapter(source: Path) -> dict[str, Any]:
     except Exception as exc:
         return {
             "status": "unvalidated",
+            "binding_complete": False,
             "reason": f"{type(exc).__name__}: {exc}",
             "product_root": str((ROOT / "src").resolve()),
             "product_revision": _revision(ROOT),
@@ -360,29 +392,27 @@ def run_probe(wheel: Path, manifest: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
         raise ProbeError(f"requires Python {EXPECTED_PYTHON_VERSION}")
     if MYPY_VERSION != EXPECTED_MYPY_VERSION:
         raise ProbeError(f"requires mypy {EXPECTED_MYPY_VERSION}")
-    artifact = verify_inputs(wheel, manifest)
-    matrix = json.loads(manifest.read_bytes())
+    artifact, matrix, wheel_bytes = _verified_input_snapshot(wheel, manifest)
     package = next(row for row in matrix["packages"] if row["distribution"] == "mypy-boto3-s3")
     cases: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="gh97-s3-stub-probe-") as temp:
         private = Path(temp)
         stub_root = private / "stubtree"
         stub_root.mkdir()
-        extract_wheel(wheel, stub_root)
+        extract_wheel(wheel_bytes, stub_root)
         source_hashes: dict[str, str] = {}
         for source_info in package["inspected_sources"]:
             source_path = stub_root / source_info["path"]
             digest = sha256(source_path.read_bytes())
             if digest != source_info["sha256"]:
                 raise ProbeError(
-                    "inspected stub source hash differs from manifest: "
-                    f"{source_info['path']}"
+                    f"inspected stub source hash differs from manifest: {source_info['path']}"
                 )
             source_hashes[source_info["path"]] = f"sha256:{digest}"
         source_root = private / "fixture"
         source_root.mkdir()
-        # The product analyzer searches the fixture parent's mypy_path. Expose only the
-        # already verified stub package there; never import it as Python code.
+        # The product adapter explicitly selects this private artifact root.
+        # Expose only the verified stub package; never import it as Python code.
         shutil.copytree(stub_root / "mypy_boto3_s3", private / "mypy_boto3_s3")
         fixture_hashes: dict[str, str] = {}
         for fixture_name in FIXTURES:
@@ -412,9 +442,7 @@ def run_probe(wheel: Path, manifest: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
                 raise ProbeError(f"mypy did not produce a typed tree for {fixture_name}")
             rows = _call_rows(tree, fixture_name, result.types)
             if len(rows) != 1:
-                raise ProbeError(
-                    f"expected one put_object call in fixture {fixture_name}"
-                )
+                raise ProbeError(f"expected one put_object call in fixture {fixture_name}")
             row = rows[0]
             call_line = row["line"]
             all_diagnostics = []

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,11 +13,16 @@ from benchmarks.gh97_s3_stub_runner.runner import (
     ProbeError,
     _binding_result,
     _load_candidate_product,
+    _product_adapter,
+    _verified_input_snapshot,
     _verify_candidate_module_path,
     extract_wheel,
     run_probe,
+    sha256,
     verify_inputs,
 )
+
+from benchmarks.gh97_s3_stub_runner import runner
 
 WHEEL = Path("/tmp/gh97-wheel-audit/mypy_boto3_s3-1.35.92-py3-none-any.whl")
 
@@ -94,6 +100,40 @@ def test_product_module_path_outside_checkout_is_rejected(tmp_path: Path) -> Non
         )
 
 
+def test_missing_private_stub_cannot_claim_completed_product_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private = tmp_path / "private"
+    fixture = private / "fixture"
+    fixture.mkdir(parents=True)
+    source = fixture / "complete.py"
+    source.write_text(
+        "from mypy_boto3_s3.client import S3Client\n\n"
+        "def run(client: S3Client) -> None:\n"
+        "    client.put_object(Bucket='bucket', Key='key', Body=b'payload')\n",
+        encoding="utf-8",
+    )
+    ambient = tmp_path / "ambient" / "mypy_boto3_s3"
+    ambient.mkdir(parents=True)
+    (ambient / "__init__.py").write_text("", encoding="utf-8")
+    (ambient / "client.py").write_text(
+        "class S3Client:\n"
+        "    def put_object(self, *, Bucket: str, Key: str, Body: bytes) -> None: ...\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MYPYPATH", str(ambient.parent))
+
+    result = _product_adapter(source)
+
+    assert result["status"] == "partially_validated"
+    assert result["binding_complete"] is False
+    assert not any(
+        call["canonical_symbol"] == "mypy_boto3_s3.client.S3Client.put_object"
+        for call in result["calls"]
+    )
+    assert os.environ["MYPYPATH"] == str(ambient.parent)
+
+
 @pytest.mark.skipif(
     not os.environ.get("GH97_S3_WHEEL"),
     reason="set GH97_S3_WHEEL for the pinned artifact probe",
@@ -120,6 +160,8 @@ def test_exact_release_end_to_end_report() -> None:
     assert report["upstream_package_code_imported_or_executed"] is False
     product = report["product_adapter"]
     assert product["status"] in {"completed", "partially_validated", "unvalidated"}
+    assert product["status"] == "completed"
+    assert product["binding_complete"] is True
     assert "calls" in product
     assert product["resolver"] == "1.19.1"
     expected_root = (Path(__file__).resolve().parents[3] / "src").resolve()
@@ -143,3 +185,38 @@ def test_exact_release_end_to_end_report() -> None:
         assert product["calls"][0]["arguments"][2]["reason_code"] == "dynamic_argument"
         assert product["audit"]["summary"]["matched_calls"] == 1
     json.dumps(report)
+
+
+@pytest.mark.skipif(not WHEEL.is_file(), reason="requires the pinned supplied wheel")
+def test_authenticated_snapshot_survives_wheel_and_manifest_replacement(tmp_path: Path) -> None:
+    wheel = tmp_path / WHEEL.name
+    manifest = tmp_path / "manifest.json"
+    shutil.copyfile(WHEEL, wheel)
+    shutil.copyfile(DEFAULT_MANIFEST, manifest)
+    artifact, matrix, snapshot = _verified_input_snapshot(wheel, manifest)
+    wheel.write_bytes(b"replacement archive")
+    manifest.write_text("{}", encoding="utf-8")
+    destination = tmp_path / "extracted"
+    extract_wheel(snapshot, destination)
+    assert artifact["wheel_sha256"] == "sha256:" + sha256(snapshot)
+    package = next(row for row in matrix["packages"] if row["distribution"] == "mypy-boto3-s3")
+    for row in package["inspected_sources"]:
+        assert sha256((destination / row["path"]).read_bytes()) == row["sha256"]
+
+
+def test_wheel_read_remains_bounded_after_stat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel = tmp_path / runner.WHEEL_NAME
+    wheel.write_bytes(b"x" * 17)
+    monkeypatch.setattr(runner, "MAX_WHEEL_BYTES", 16)
+    original_stat = Path.stat
+
+    def stale_stat(path: Path, *args: object, **kwargs: object) -> object:
+        if path == wheel:
+            return SimpleNamespace(st_size=1)
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stale_stat)
+    with pytest.raises(ProbeError, match="size limit"):
+        _verified_input_snapshot(wheel, DEFAULT_MANIFEST)
