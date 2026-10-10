@@ -982,27 +982,30 @@ class ChangeMapper:
         if len(selected.files) > 4096:
             raise IncrementalBuildError("selected source inventory exceeds the file budget")
         paths: dict[str, str] = {}
+        file_sizes: dict[str, int] = {}
         total_bytes = 0
         for record in selected.files:
             if record.module in paths:
                 raise IncrementalBuildError("selected source inventory has duplicate module IDs")
-            data = analyzer._read_discovered_source(record.path)
+            remaining_bytes = analyzer.MAX_LAMBDA_SOURCE_SNAPSHOT_BYTES - total_bytes
+            if remaining_bytes < 0:
+                raise IncrementalBuildError("selected source inventory exceeds the byte budget")
+            source_limit = min(analyzer.MAX_LAMBDA_SOURCE_FILE_BYTES, remaining_bytes)
+            data = analyzer.framework_phase_source_bytes(record.path, max_bytes=source_limit)
             if data is None:
                 raise IncrementalBuildError(
-                    "selected source inventory is unreadable or uses a symlink path"
+                    "selected source inventory exceeds the byte budget or is unreadable "
+                    "or uses a symlink path"
                 )
             size = len(data)
             total_bytes += size
-            if size > analyzer.MAX_LAMBDA_SOURCE_FILE_BYTES or (
-                total_bytes > analyzer.MAX_LAMBDA_SOURCE_SNAPSHOT_BYTES
-            ):
-                raise IncrementalBuildError("selected source inventory exceeds the byte budget")
             actual_digest = hashlib.sha256(data).hexdigest()
             if actual_digest != record.sha256:
                 raise IncrementalBuildError(
                     f"selected source inventory changed before typed build for {record.module}"
                 )
             paths[record.module] = str(record.path)
+            file_sizes[record.module] = size
         if not paths:
             raise IncrementalBuildError("selected source inventory is empty")
         retained = analyzer.framework_phase_build_snapshot()
@@ -1025,7 +1028,9 @@ class ChangeMapper:
                     raise IncrementalBuildError(
                         f"retained mypy graph identity differs for selected module {module}"
                     )
-                current = analyzer._read_discovered_source(Path(path))
+                current = analyzer.framework_phase_source_bytes(
+                    Path(path), max_bytes=file_sizes[module]
+                )
                 if (
                     current is None
                     or hashlib.sha256(current).hexdigest() != digests[module]
@@ -1050,9 +1055,7 @@ class ChangeMapper:
                 raise IncrementalBuildError(
                     "retained mypy build does not expose its effective option fields"
                 )
-            effective_config = {
-                key: repr(getattr(options, key)) for key in sorted(option_fields)
-            }
+            effective_config = {key: repr(getattr(options, key)) for key in sorted(option_fields)}
             config_fingerprint = hashlib.sha256(
                 json.dumps(
                     {

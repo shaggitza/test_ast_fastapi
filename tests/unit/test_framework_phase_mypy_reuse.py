@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import mypy.build
 import pytest
 
-from fastapi_endpoint_detector.analyzer import mypy_incremental
+from fastapi_endpoint_detector.analyzer import mypy_analyzer, mypy_incremental
 from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper, _mypy_inventory
 from fastapi_endpoint_detector.analyzer.framework_phase_integration import (
     collect_framework_phase_evidence,
@@ -52,8 +53,7 @@ def _semantic_records(records: list[dict[str, object]]) -> list[dict[str, object
         "config_sha256",
     }
     return [
-        {key: value for key, value in record.items() if key not in ignored}
-        for record in records
+        {key: value for key, value in record.items() if key not in ignored} for record in records
     ]
 
 
@@ -64,9 +64,7 @@ def test_public_analyze_diff_reuses_its_exact_mypy_build(tmp_path: Path, monkeyp
     provider = MypyIncrementalProvider(BuildConfig(tmp_path)).build({"main": app})
     baseline_analyzer = MypyAnalyzer(tmp_path)
     baseline_analyzer.analyze_endpoints([], use_cache=False)
-    baseline = collect_framework_phase_evidence(
-        inventory, contracts, baseline_analyzer, provider
-    )
+    baseline = collect_framework_phase_evidence(inventory, contracts, baseline_analyzer, provider)
 
     mapper = ChangeMapper(
         app,
@@ -161,3 +159,115 @@ def test_retained_graph_identity_mismatches_fail_closed(tmp_path: Path, mismatch
 
     with pytest.raises(IncrementalBuildError, match="retained mypy graph"):
         mapper._framework_typed_build(analyzer)
+
+
+def test_bounded_source_read_stays_limited_if_file_grows_after_stat(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app = _write_app(tmp_path)
+    mapper = ChangeMapper(
+        app,
+        config=Config(analysis=AnalysisConfig(surface_preset="framework-v1")),
+        secure_ast=True,
+        use_cache=False,
+    )
+    analyzer = mapper.mypy_analyzer
+    byte_limit = max(128, app.stat().st_size + 8)
+    analyzer.MAX_LAMBDA_SOURCE_FILE_BYTES = byte_limit
+    analyzer.MAX_LAMBDA_SOURCE_SNAPSHOT_BYTES = byte_limit * 2
+    original_read = os.read
+    requests: list[int] = []
+    returned_sizes: list[int] = []
+
+    def grow_then_read(descriptor: int, count: int) -> bytes:
+        requests.append(count)
+        with app.open("ab") as source:
+            source.write(b"#" * (byte_limit + 16))
+        data = original_read(descriptor, count)
+        returned_sizes.append(len(data))
+        return data
+
+    monkeypatch.setattr(mypy_analyzer.os, "read", grow_then_read)
+    with pytest.raises(IncrementalBuildError, match="byte budget"):
+        mapper._framework_typed_build(analyzer)
+
+    assert requests == [byte_limit + 1]
+    assert returned_sizes == [byte_limit + 1]
+
+
+def test_aggregate_source_budget_rejects_before_reading_file(tmp_path: Path, monkeypatch) -> None:
+    app = _write_app(tmp_path)
+    mapper = ChangeMapper(
+        app,
+        config=Config(analysis=AnalysisConfig(surface_preset="framework-v1")),
+        secure_ast=True,
+        use_cache=False,
+    )
+    analyzer = mapper.mypy_analyzer
+    analyzer.MAX_LAMBDA_SOURCE_FILE_BYTES = app.stat().st_size + 10
+    analyzer.MAX_LAMBDA_SOURCE_SNAPSHOT_BYTES = app.stat().st_size - 1
+    requests: list[int] = []
+    original_read = os.read
+
+    def count_read(descriptor: int, count: int) -> bytes:
+        requests.append(count)
+        return original_read(descriptor, count)
+
+    monkeypatch.setattr(mypy_analyzer.os, "read", count_read)
+    with pytest.raises(IncrementalBuildError, match="byte budget"):
+        mapper._framework_typed_build(analyzer)
+
+    assert requests == []
+
+
+def test_bounded_reader_rejects_parent_symlink_swap_before_outside_read(
+    tmp_path: Path, monkeypatch
+) -> None:
+    package = tmp_path / "pkg"
+    package.mkdir()
+    source = package / "mod.py"
+    source.write_bytes(b"original module bytes")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_marker = outside / "mod.py"
+    outside_marker.write_bytes(b"outside marker bytes")
+    analyzer = MypyAnalyzer(tmp_path)
+
+    assert analyzer.framework_phase_source_bytes(source, max_bytes=1024) == b"original module bytes"
+
+    original_open = os.open
+    original_read = os.read
+    swapped = False
+    outside_reads: list[int] = []
+    marker_stat = outside_marker.stat()
+
+    def swap_parent_then_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        if path == "pkg" and dir_fd is not None and not swapped:
+            package.rename(tmp_path / "moved_pkg")
+            package.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    def track_outside_read(descriptor: int, count: int) -> bytes:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) == (marker_stat.st_dev, marker_stat.st_ino):
+            outside_reads.append(count)
+        return original_read(descriptor, count)
+
+    monkeypatch.setattr(mypy_analyzer.os, "open", swap_parent_then_open)
+    monkeypatch.setattr(
+        mypy_analyzer.os,
+        "supports_dir_fd",
+        mypy_analyzer.os.supports_dir_fd | {swap_parent_then_open},
+    )
+    monkeypatch.setattr(mypy_analyzer.os, "read", track_outside_read)
+    assert analyzer.framework_phase_source_bytes(source, max_bytes=1024) is None
+    assert swapped
+    assert outside_reads == []
