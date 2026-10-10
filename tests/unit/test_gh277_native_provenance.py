@@ -199,6 +199,75 @@ def test_native_dependency_helper_diff_reaches_only_public_descendant_routes(
         assert candidate.endpoint.native_provenance.side == SnapshotSide.TARGET
 
 
+@pytest.mark.parametrize(
+    ("helper", "expected"),
+    [
+        ("parent_helper", {"GET /parent"}),
+        ("child_helper", {"GET /child/item"}),
+    ],
+)
+def test_mounted_child_dependency_diff_respects_mount_ownership_boundary(
+    tmp_path: Path,
+    helper: str,
+    expected: set[str],
+) -> None:
+    baseline = tmp_path / "baseline"
+    target = tmp_path / "target"
+    for root in (baseline, target):
+        root.mkdir()
+        (root / "helpers.py").write_text(
+            "def parent_helper(): return 1\ndef child_helper(): return 2\n",
+            encoding="utf-8",
+        )
+        (root / "main.py").write_text(
+            "from fastapi import Depends, FastAPI\n"
+            "from helpers import child_helper, parent_helper\n"
+            "def parent_dep(): return parent_helper()\n"
+            "def child_dep(): return child_helper()\n"
+            "app = FastAPI(dependencies=[Depends(parent_dep)])\n"
+            "child = FastAPI(dependencies=[Depends(child_dep)])\n"
+            "@app.get('/parent')\n"
+            "def parent_route(): return 1\n"
+            "@child.get('/item')\n"
+            "def child_route(): return 2\n"
+            "app.mount('/child', child)\n",
+            encoding="utf-8",
+        )
+
+    helper_lines = (target / "helpers.py").read_text(encoding="utf-8").splitlines()
+    helper_index = next(
+        index for index, line in enumerate(helper_lines) if line.startswith(f"def {helper}()")
+    )
+    old_line = helper_lines[helper_index]
+    new_line = old_line.replace("return ", "return 40 + ", 1)
+    helper_lines[helper_index] = new_line
+    (target / "helpers.py").write_text("\n".join(helper_lines) + "\n", encoding="utf-8")
+    diff = (
+        "diff --git a/helpers.py b/helpers.py\n"
+        "--- a/helpers.py\n"
+        "+++ b/helpers.py\n"
+        f"@@ -{helper_index + 1},1 +{helper_index + 1},1 @@\n"
+        f"-{old_line}\n"
+        f"+{new_line}\n"
+    )
+
+    report = ChangeMapper(
+        target / "main.py",
+        baseline_app_path=baseline / "main.py",
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+    candidates = {item.endpoint.identifier: item for item in report.candidate_endpoints}
+    assert set(candidates) == expected
+    assert {item.endpoint.identifier for item in report.affected_endpoints} == expected
+    for candidate in candidates.values():
+        provenance = candidate.endpoint.native_provenance
+        assert provenance is not None
+        assert provenance.side == SnapshotSide.TARGET
+        if candidate.endpoint.identifier == "GET /child/item":
+            assert any(edge.operation == "mount" for edge in provenance.assembly_chain)
+
+
 def test_global_prefix_ownership_is_limited_to_descendant_routes_and_side(
     tmp_path: Path,
 ) -> None:

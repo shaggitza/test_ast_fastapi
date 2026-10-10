@@ -1541,7 +1541,16 @@ class MypyAnalyzer:
             if (
                 occurrence.resolution_status != DependencyResolutionStatus.ESTABLISHED
                 or occurrence.callable_kind
-                not in {DependencyCallableKind.FUNCTION, DependencyCallableKind.BOUND_METHOD}
+                not in {
+                    DependencyCallableKind.FUNCTION,
+                    DependencyCallableKind.BOUND_METHOD,
+                    # The extractor records the physical wrapped function for
+                    # partials and user callable instances. Accept those only
+                    # after the same module, file, qualname, and span checks
+                    # below; their display/type names are never used as seeds.
+                    DependencyCallableKind.PARTIAL,
+                    DependencyCallableKind.CALLABLE_INSTANCE,
+                }
                 or occurrence.module is None
                 or occurrence.qualname is None
                 or occurrence.source_span is None
@@ -1613,6 +1622,45 @@ class MypyAnalyzer:
             for dependency in edge.dependency_expressions
         )
         declarations.extend(provenance.registration.dependency_expressions)
+        # A Starlette mount is an ownership boundary. FastAPI dependencies on
+        # the parent application/router do not become child ASGI dependencies.
+        # Keep only object declarations at or below the mounted child, and
+        # assembly declarations after the final mount. If the child's object
+        # identity cannot be aligned exactly, abstain from inheriting any
+        # object declarations rather than guessing from a short name.
+        last_mount = max(
+            (
+                index
+                for index, edge in enumerate(provenance.assembly_chain)
+                if edge.operation == "mount"
+            ),
+            default=None,
+        )
+        if last_mount is not None:
+            mount_edge = provenance.assembly_chain[last_mount]
+            child_object_index = next(
+                (
+                    index
+                    for index, item in enumerate(provenance.object_chain)
+                    if item.module == mount_edge.child_module
+                    and item.symbol == mount_edge.child_symbol
+                ),
+                None,
+            )
+            object_items = (
+                provenance.object_chain[child_object_index:]
+                if child_object_index is not None
+                else ()
+            )
+            declarations = [
+                dependency for item in object_items for dependency in item.dependency_expressions
+            ]
+            declarations.extend(
+                dependency
+                for edge in provenance.assembly_chain[last_mount + 1 :]
+                for dependency in edge.dependency_expressions
+            )
+            declarations.extend(provenance.registration.dependency_expressions)
         seeds: dict[str, int] = {}
         root = self.source_root.resolve()
         for declaration in declarations:
