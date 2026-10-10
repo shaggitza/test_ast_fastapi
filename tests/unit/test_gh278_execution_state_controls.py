@@ -370,6 +370,80 @@ def test_handler_preserves_pre_try_callable_as_exception_target(tmp_path: Path) 
     assert mapper.analyze_diff(_diff("helpers.py", 2)).candidate_endpoints == []
 
 
+def test_handler_keeps_callable_before_resolved_unbound_local_load(tmp_path: Path) -> None:
+    (tmp_path / "helpers.py").write_text(
+        "def base(): return 0\ndef second(): return 1\ndef third(): return 2\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\nfrom helpers import base, second, third\n"
+        "app=FastAPI()\n@app.get('/try-local-load')\ndef handler():\n"
+        "    callback = base\n    try:\n        callback = second\n"
+        "        value = maybe_local\n        callback = third\n"
+        "        callback()\n"
+        "    except Exception:\n        callback()\n    maybe_local = 1\n"
+        "    return 0\n",
+        encoding="utf-8",
+    )
+    mapper = ChangeMapper(tmp_path, secure_ast=True, use_cache=False)
+
+    intermediate = mapper.analyze_diff(_diff("helpers.py", 2))
+    assert {item.endpoint.identifier for item in intermediate.candidate_endpoints} == {
+        "GET /try-local-load"
+    }
+    assert mapper.analyze_diff(_diff("helpers.py", 3)).candidate_endpoints == []
+
+
+@pytest.mark.parametrize(
+    ("parameter", "prefix", "expected"),
+    [
+        (True, "", (False, True)),
+        (False, "    maybe_local = 0\n", (False, True)),
+        (False, "    if condition:\n        maybe_local = 0\n", (True, True)),
+    ],
+)
+def test_exception_snapshots_preserve_local_binding_guards(
+    tmp_path: Path,
+    parameter: bool,
+    prefix: str,
+    expected: tuple[bool, bool],
+) -> None:
+    (tmp_path / "helpers.py").write_text(
+        "def base(): return 0\ndef second(): return 1\ndef third(): return 2\n",
+        encoding="utf-8",
+    )
+    argument = "maybe_local" if parameter else "condition"
+    lines = [
+        "from fastapi import FastAPI",
+        "from helpers import base, second, third",
+        "app=FastAPI()",
+        "@app.get('/try-binding')",
+        f"def handler({argument}):",
+    ]
+    lines.extend(prefix.rstrip("\n").splitlines() if prefix else [])
+    lines.extend(
+        [
+            "    callback = base",
+            "    try:",
+            "        callback = second",
+            "        value = maybe_local",
+            "        callback = third",
+            "        callback()",
+            "    except Exception:",
+            "        callback()",
+            "    maybe_local = 1",
+            "    return 0",
+        ]
+    )
+    (tmp_path / "main.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    mapper = ChangeMapper(tmp_path, secure_ast=True, use_cache=False)
+
+    second = mapper.analyze_diff(_diff("helpers.py", 2)).candidate_endpoints
+    third = mapper.analyze_diff(_diff("helpers.py", 3)).candidate_endpoints
+    assert bool(second) is expected[0]
+    assert bool(third) is expected[1]
+
+
 def test_conditional_break_loop_remains_conservative(tmp_path: Path) -> None:
     (tmp_path / "helpers.py").write_text(
         "def first(): return 1\ndef second(): return 2\n", encoding="utf-8"

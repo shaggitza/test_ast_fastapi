@@ -4767,6 +4767,8 @@ class MypyAnalyzer:
             list[dict[str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]]]
         ] = []
         try_assignment_target_ids: list[set[int]] = []
+        try_unbound_name_load_ids: list[set[int]] = []
+        try_definite_unbound_name_load_ids: list[set[int]] = []
 
         def record_lambda_execution(expression: Any, state: str) -> None:
             """Attach exact source-body state when its AST identity is unique."""
@@ -5655,11 +5657,11 @@ class MypyAnalyzer:
                     YieldExpr,
                     YieldFromExpr,
                 ),
-            ) and not (
-                isinstance(n, NameExpr)
-                and (
-                    n.node is not None
-                    or any(id(n) in targets for targets in try_assignment_target_ids)
+            ) and (
+                not isinstance(n, NameExpr)
+                or (
+                    not any(id(n) in targets for targets in try_assignment_target_ids)
+                    and any(id(n) in loads for loads in try_unbound_name_load_ids)
                 )
             ):
                 for snapshots in try_callable_snapshots:
@@ -5745,6 +5747,14 @@ class MypyAnalyzer:
             elif isinstance(n, Block):
                 for stmt in n.body:
                     walk_node(stmt)
+                    if (
+                        isinstance(stmt, AssignmentStmt)
+                        and isinstance(stmt.rvalue, NameExpr)
+                        and any(
+                            id(stmt.rvalue) in loads for loads in try_definite_unbound_name_load_ids
+                        )
+                    ):
+                        break
                     # Statements following an unconditional terminal cannot
                     # contribute executable references in this block.
                     if isinstance(stmt, (ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt)):
@@ -6300,20 +6310,72 @@ class MypyAnalyzer:
                 ] = []
                 from types import GetSetDescriptorType, MemberDescriptorType
 
-                from mypy.nodes import Node
+                from mypy.nodes import (
+                    LDEF,
+                    BytesExpr,
+                    EllipsisExpr,
+                    FloatExpr,
+                    IntExpr,
+                    Node,
+                    StrExpr,
+                )
+                from mypy.nodes import NameExpr as MypyNameExpr
 
                 syntax_stack: list[Node] = [n.body]
                 syntax_seen: set[int] = set()
+                syntax_nodes: list[Node] = []
+                assignment_positions: dict[str, list[tuple[int, int]]] = {}
+                function_assignment_positions: dict[str, list[tuple[int, int]]] = {}
+                function_stack: list[Node] = [function_node.body]
+                function_seen: set[int] = set()
+                while function_stack:
+                    function_item = function_stack.pop()
+                    if id(function_item) in function_seen:
+                        continue
+                    function_seen.add(id(function_item))
+                    if isinstance(function_item, AssignmentStmt):
+                        for target in function_item.lvalues:
+                            if isinstance(target, NameExpr):
+                                function_assignment_positions.setdefault(target.name, []).append(
+                                    (target.line, target.column)
+                                )
+                    for cls in type(function_item).__mro__:
+                        for attribute, descriptor in cls.__dict__.items():
+                            if attribute in {"node", "info", "type", "unanalyzed_type", "analyzed"}:
+                                continue
+                            if (
+                                isinstance(function_item, FuncDef)
+                                and function_item is not function_node
+                                and attribute == "body"
+                            ):
+                                continue
+                            if isinstance(function_item, ClassDef) and attribute == "defs":
+                                continue
+                            if not isinstance(
+                                descriptor, (GetSetDescriptorType, MemberDescriptorType)
+                            ):
+                                continue
+                            child = getattr(function_item, attribute, None)
+                            if isinstance(child, Node):
+                                function_stack.append(child)
+                            elif isinstance(child, (list, tuple)):
+                                function_stack.extend(
+                                    item for item in child if isinstance(item, Node)
+                                )
                 while syntax_stack:
                     syntax_item = syntax_stack.pop()
                     if id(syntax_item) in syntax_seen:
                         continue
                     syntax_seen.add(id(syntax_item))
+                    syntax_nodes.append(syntax_item)
                     if isinstance(syntax_item, AssignmentStmt):
                         for target in syntax_item.lvalues:
                             assignment_target_ids.add(id(target))
                             if isinstance(target, NameExpr):
                                 try_assigned_names.add(target.name)
+                                assignment_positions.setdefault(target.name, []).append(
+                                    (target.line, target.column)
+                                )
                     for cls in type(syntax_item).__mro__:
                         for attribute, descriptor in cls.__dict__.items():
                             if attribute in {"node", "info", "type", "unanalyzed_type", "analyzed"}:
@@ -6333,12 +6395,67 @@ class MypyAnalyzer:
                                 syntax_stack.extend(
                                     item for item in child if isinstance(item, Node)
                                 )
+                parameter_names = {
+                    argument.variable.name
+                    for argument in getattr(function_node, "arguments", ())
+                    if getattr(argument, "variable", None) is not None
+                }
+                definitely_bound_positions: dict[str, list[tuple[int, int]]] = {}
+                for statement in getattr(function_node.body, "body", ()):
+                    if isinstance(statement, AssignmentStmt) and isinstance(
+                        statement.rvalue,
+                        (BytesExpr, EllipsisExpr, FloatExpr, IntExpr, StrExpr),
+                    ):
+                        for target in statement.lvalues:
+                            if isinstance(target, NameExpr):
+                                definitely_bound_positions.setdefault(target.name, []).append(
+                                    (target.line, target.column)
+                                )
+                unbound_name_load_ids = {
+                    id(item)
+                    for item in syntax_nodes
+                    if isinstance(item, MypyNameExpr)
+                    and (
+                        item.node is None
+                        or (
+                            item.kind == LDEF
+                            and item.name not in parameter_names
+                            and any(
+                                position > (item.line, item.column)
+                                for position in function_assignment_positions.get(item.name, ())
+                            )
+                            and not any(
+                                position < (item.line, item.column)
+                                for position in definitely_bound_positions.get(item.name, ())
+                            )
+                        )
+                    )
+                }
+                definite_unbound_name_load_ids = {
+                    id(item)
+                    for item in syntax_nodes
+                    if isinstance(item, MypyNameExpr)
+                    and item.kind == LDEF
+                    and item.name not in parameter_names
+                    and any(
+                        position > (item.line, item.column)
+                        for position in function_assignment_positions.get(item.name, ())
+                    )
+                    and not any(
+                        position < (item.line, item.column)
+                        for position in function_assignment_positions.get(item.name, ())
+                    )
+                }
                 try_callable_snapshots.append(callable_snapshots)
                 try_assignment_target_ids.append(assignment_target_ids)
+                try_unbound_name_load_ids.append(unbound_name_load_ids)
+                try_definite_unbound_name_load_ids.append(definite_unbound_name_load_ids)
                 try:
                     walk_node(n.body)
                 finally:
                     try_assignment_target_ids.pop()
+                    try_unbound_name_load_ids.pop()
+                    try_definite_unbound_name_load_ids.pop()
                     try_callable_snapshots.pop()
                 body_callables = dict(callable_environment)
                 body_partials = dict(partial_environment)
