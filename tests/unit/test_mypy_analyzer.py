@@ -41,9 +41,7 @@ class TestMypyAnalyzerBasic:
         )
         app_path = tmp_path / "app.py"
         app_path.write_text(
-            "from typing_dep import Store\n"
-            "def handler() -> None:\n"
-            "    Store().put('value')\n",
+            "from typing_dep import Store\ndef handler() -> None:\n    Store().put('value')\n",
             encoding="utf-8",
         )
         endpoint = Endpoint(
@@ -60,9 +58,7 @@ class TestMypyAnalyzerBasic:
         assert first_site.status.value == "exact"
         assert first_site.canonical_symbol == "typing_dep.Store.put"
 
-        (tmp_path / "typing_dep.pyi").write_text(
-            "class Store:\n    pass\n", encoding="utf-8"
-        )
+        (tmp_path / "typing_dep.pyi").write_text("class Store:\n    pass\n", encoding="utf-8")
         metadata.write_text(
             "Metadata-Version: 2.1\nName: typing-dep\nVersion: 1.1\n", encoding="utf-8"
         )
@@ -73,8 +69,11 @@ class TestMypyAnalyzerBasic:
         assert second_site.status.value != "exact"
         assert warm.verified_package_versions["typing-dep"] == "1.1"
 
+    @pytest.mark.parametrize(
+        "declared_name", ["beautifulsoup4", "ZoPe.Interface", "zope__..interface"]
+    )
     def test_distribution_metadata_uses_declared_name_not_import_name(
-        self, tmp_path: Path
+        self, tmp_path: Path, declared_name: str
     ) -> None:
         package = tmp_path / "bs4"
         package.mkdir()
@@ -82,14 +81,12 @@ class TestMypyAnalyzerBasic:
         metadata = tmp_path / "beautifulsoup4-1.2.3.dist-info"
         metadata.mkdir()
         (metadata / "METADATA").write_text(
-            "Metadata-Version: 2.1\nName: beautifulsoup4\nVersion: 1.2.3\n",
+            f"Metadata-Version: 2.1\nName: {declared_name}\nVersion: 1.2.3\n",
             encoding="utf-8",
         )
         app_path = tmp_path / "app.py"
         app_path.write_text(
-            "from bs4 import Soup\n"
-            "def handler() -> Soup:\n"
-            "    return Soup()\n",
+            "from bs4 import Soup\ndef handler() -> Soup:\n    return Soup()\n",
             encoding="utf-8",
         )
         endpoint = Endpoint(
@@ -101,10 +98,37 @@ class TestMypyAnalyzerBasic:
         analyzer = MypyAnalyzer(tmp_path)
         analyzer.analyze_endpoints([endpoint], use_cache=False)
 
-        assert analyzer.verified_package_versions["beautifulsoup4"] == "1.2.3"
+        expected_name = "beautifulsoup4" if declared_name == "beautifulsoup4" else "zope-interface"
+        assert analyzer.verified_package_versions[expected_name] == "1.2.3"
         assert analyzer.verified_package_source_hashes[
             "beautifulsoup4-1.2.3.dist-info/METADATA"
         ].startswith("sha256:")
+
+    def test_empty_package_initializer_retains_verified_source_hash(self, tmp_path: Path) -> None:
+        package = tmp_path / "empty_pkg"
+        package.mkdir()
+        (package / "__init__.pyi").write_bytes(b"")
+        (package / "api.pyi").write_text("def emit() -> None: ...\n", encoding="utf-8")
+        metadata = tmp_path / "empty_pkg-1.0.dist-info"
+        metadata.mkdir()
+        (metadata / "METADATA").write_text("Name: empty-pkg\nVersion: 1.0\n", encoding="utf-8")
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "from empty_pkg.api import emit\ndef handler() -> None:\n    emit()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/empty-source",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=2),
+        )
+        analyzer = MypyAnalyzer(tmp_path)
+        analyzer.analyze_endpoints([endpoint], use_cache=False)
+        assert analyzer.verified_mypy_source_hashes["empty_pkg/__init__.pyi"] == (
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        )
+        assert "empty_pkg.py" not in analyzer.verified_mypy_source_hashes
+        assert analyzer.verified_package_versions["empty-pkg"] == "1.0"
 
     def test_branch_joined_callable_partial_abstains_with_limitation(self, tmp_path: Path) -> None:
         app_path = tmp_path / "app.py"

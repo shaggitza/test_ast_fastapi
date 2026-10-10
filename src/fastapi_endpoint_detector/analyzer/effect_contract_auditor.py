@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from packaging.specifiers import SpecifierSet
+from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
 from fastapi_endpoint_detector.models.effect_contract import (
@@ -279,10 +280,9 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
     )
     pinned_distributions = sorted(
         {
-            (package.distribution or "").lower().replace("_", "-")
+            canonicalize_name(package.distribution or "")
             for contract in applicability_contracts
-            if (package := contract.package) is not None
-            and package.distribution is not None
+            if (package := contract.package) is not None and package.distribution is not None
         }
     )
     observed_target_sources = {
@@ -290,9 +290,7 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
         **(verified_package_source_hashes or {}),
     }
     package_evidence = {
-        "source_hashes": {
-            path: observed_target_sources.get(path) for path in pinned_source_paths
-        },
+        "source_hashes": {path: observed_target_sources.get(path) for path in pinned_source_paths},
         "versions": {
             distribution: (verified_package_versions or {}).get(distribution)
             for distribution in pinned_distributions
@@ -394,9 +392,7 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
                     observed_target_sources.get(path) != digest
                     for path, digest in contract.package.source_hashes.items()
                 )
-                distribution = (contract.package.distribution or "").lower().replace(
-                    "_", "-"
-                )
+                distribution = canonicalize_name(contract.package.distribution or "")
                 observed_version = (verified_package_versions or {}).get(distribution)
                 if contract.package.distribution is not None:
                     if observed_version is None:
@@ -405,15 +401,15 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
                         try:
                             applicability_failure |= not SpecifierSet(
                                 contract.package.version or ""
-                            ).contains(Version(observed_version), prereleases=False)
+                            ).contains(Version(observed_version))
                         except (InvalidVersion, ValueError):
                             applicability_failure = True
                 if contract.package.python is not None:
                     python_version = target_python_version or platform.python_version()
                     try:
-                        applicability_failure |= not SpecifierSet(
-                            contract.package.python
-                        ).contains(Version(python_version), prereleases=False)
+                        applicability_failure |= not SpecifierSet(contract.package.python).contains(
+                            Version(python_version)
+                        )
                     except (InvalidVersion, ValueError):
                         applicability_failure = True
                 if applicability_failure:
@@ -591,9 +587,7 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
                 for item in occurrences
             ],
             **(
-                {
-                    "package_evidence_hash": _semantic_hash(package_evidence)
-                }
+                {"package_evidence_hash": _semantic_hash(package_evidence)}
                 if applicability_contracts
                 and (
                     verified_mypy_source_hashes is not None

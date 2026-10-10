@@ -31,6 +31,8 @@ from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Any, ClassVar, Literal, Protocol, cast
 
+from packaging.utils import canonicalize_name
+
 from fastapi_endpoint_detector.models.effect_contract import (
     CallArgumentEvidence,
     CallResolutionStatus,
@@ -969,10 +971,13 @@ class MypyAnalyzer:
                         analyzed_source_hashes[state_path] = source_hash
                         source_file = Path(state_path)
                         if source_file.is_file() and source_file.suffix in {".py", ".pyi"}:
-                            vendor_bytes = source_file.read_bytes()
+                            vendor_bytes: bytes | None = source_file.read_bytes()
                         else:
-                            vendor_bytes = b""
-                        if vendor_bytes and hashlib.sha1(vendor_bytes).hexdigest() == source_hash:
+                            vendor_bytes = None
+                        if (
+                            vendor_bytes is not None
+                            and hashlib.sha1(vendor_bytes).hexdigest() == source_hash
+                        ):
                             parts = module_name.split(".")
                             package_root = source_file.parent
                             while package_root.name in parts:
@@ -1000,10 +1005,8 @@ class MypyAnalyzer:
                                     metadata = BytesParser(policy=compat32).parsebytes(
                                         metadata_bytes
                                     )
-                                    metadata_distribution = (
+                                    metadata_distribution = canonicalize_name(
                                         str(metadata.get("Name", ""))
-                                        .replace("_", "-")
-                                        .lower()
                                     )
                                     # Distribution and import names are not
                                     # interchangeable. Record adjacent metadata
@@ -1013,9 +1016,9 @@ class MypyAnalyzer:
                                         metadata_relative = metadata_path.relative_to(
                                             package_root
                                         ).as_posix()
-                                        metadata_digest = "sha256:" + hashlib.sha256(
-                                            metadata_bytes
-                                        ).hexdigest()
+                                        metadata_digest = (
+                                            "sha256:" + hashlib.sha256(metadata_bytes).hexdigest()
+                                        )
                                         previous_metadata_digest = (
                                             self._verified_package_source_hashes.get(
                                                 metadata_relative
@@ -1025,9 +1028,7 @@ class MypyAnalyzer:
                                             previous_metadata_digest is not None
                                             and previous_metadata_digest != metadata_digest
                                         ):
-                                            conflicting_package_source_paths.add(
-                                                metadata_relative
-                                            )
+                                            conflicting_package_source_paths.add(metadata_relative)
                                             self._verified_package_source_hashes.pop(
                                                 metadata_relative, None
                                             )

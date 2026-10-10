@@ -206,7 +206,13 @@ def test_motor_contract_requires_exact_pinned_typed_sources(tmp_path: Path) -> N
     assert rejected_metadata.reason_code == "package_applicability_unverified"
 
 
-def test_python_only_source_pins_are_enforced_without_distribution_version(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "constraint, accepted, rejected",
+    [(">=3.10,<4", "3.11.16", "2.7.18"), ("==3.14.0rc1", "3.14.0rc1", "3.14.0rc2")],
+)
+def test_python_only_source_pins_are_enforced_without_distribution_version(
+    tmp_path: Path, constraint: str, accepted: str, rejected: str
+) -> None:
     endpoint = _endpoint(tmp_path, "handler")
     site = _site(tmp_path, column=2)
     client_source = tmp_path / "client.py"
@@ -228,7 +234,7 @@ def test_python_only_source_pins_are_enforced_without_distribution_version(tmp_p
                 "operation": "publish",
                 "channel": "message_bus",
                 "package": {
-                    "python": ">=3.10,<4",
+                    "python": constraint,
                     "source_hashes": {"client.py": source_digest},
                 },
             }
@@ -251,10 +257,64 @@ def test_python_only_source_pins_are_enforced_without_distribution_version(tmp_p
             target_python_version=python_version,
         )
 
-    assert audit("3.11.16").occurrences[0].audit_status == AuditCallStatus.MATCHED
-    rejected = audit("2.7.18").occurrences[0]
-    assert rejected.audit_status == AuditCallStatus.UNMATCHED
-    assert rejected.reason_code == "package_applicability_unverified"
+    assert audit(accepted).occurrences[0].audit_status == AuditCallStatus.MATCHED
+    occurrence = audit(rejected).occurrences[0]
+    assert occurrence.audit_status == AuditCallStatus.UNMATCHED
+    assert occurrence.reason_code == "package_applicability_unverified"
+
+
+@pytest.mark.parametrize("distribution", ["zope-interface", "ZoPe.Interface", "zope__..interface"])
+def test_source_pinned_distribution_separator_and_prerelease_applicability(
+    tmp_path: Path, distribution: str
+) -> None:
+    digest = "sha256:" + "a" * 64
+    path = tmp_path / "effects.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "preset": {
+                    "id": "distribution",
+                    "version": "1",
+                    "provenance": {"kind": "user", "source": "effects.yaml"},
+                },
+                "contracts": [
+                    {
+                        "id": "emit",
+                        "symbol": "company.events.emit",
+                        "invocation": "function",
+                        "operation": "publish",
+                        "channel": "message_bus",
+                        "package": {
+                            "distribution": distribution,
+                            "version": "==2.0rc1",
+                            "source_hashes": {"client.py": digest},
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    endpoint = _endpoint(tmp_path, "handler")
+    loaded = load_effect_contracts(path)
+    for observed_version, expected_status in [
+        ("2.0rc1", AuditCallStatus.MATCHED),
+        ("2.0rc2", AuditCallStatus.UNMATCHED),
+    ]:
+        audit = audit_effect_contracts(
+            loaded,
+            source_root=tmp_path,
+            inventory=EndpointInventory(endpoints=[endpoint]),
+            endpoint_call_sites=[(endpoint, [_site(tmp_path, column=2)])],
+            track_transitive=False,
+            max_depth=1,
+            cache_enabled=False,
+            resolver_versions=("mypy@1.19.1",),
+            verified_mypy_source_hashes={"client.py": digest},
+            verified_package_versions={"zope-interface": observed_version},
+        )
+        assert audit.occurrences[0].audit_status == expected_status
 
 
 def test_composite_resource_cartesian_overflow_is_unavailable(tmp_path: Path) -> None:
