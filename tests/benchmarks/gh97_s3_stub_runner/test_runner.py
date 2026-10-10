@@ -73,6 +73,34 @@ def test_selector_binding_distinguishes_missing_and_positional_body() -> None:
     assert misbound["binding_status"] == "misbound_positional_to_keyword_only_parameters"
 
 
+@pytest.mark.parametrize("cwd", [Path("/tmp"), Path("/var/tmp/external review cwd")])
+def test_private_root_serialization_is_stable_and_component_bounded(
+    tmp_path: Path, cwd: Path
+) -> None:
+    private = Path("/tmp/gh97 s3 private root")
+    cwd.mkdir(parents=True, exist_ok=True)
+    relative = os.path.relpath(private, cwd)
+    payload = {
+        "calls": [{"file_path": str(private / "fixture/complete.py"),
+                   "canonical_symbol": runner.CANONICAL}],
+        "diagnostics": [{"raw": f"{relative}/stubtree/client.pyi:8: note"}],
+        "unrelated": f"prefix{relative}/stubtree/file suffix {relative}-suffix",
+        "source_sha256": {"complete.py": "sha256:abc"},
+        "matched_calls": 1,
+    }
+    normalized = runner._normalize_private_paths(payload, private, cwd)
+    assert normalized["calls"][0]["file_path"] == (
+        "<private-s3-probe>/fixture/complete.py"
+    )
+    assert normalized["calls"][0]["canonical_symbol"] == runner.CANONICAL
+    assert normalized["diagnostics"][0]["raw"] == (
+        "<private-s3-probe>/stubtree/client.pyi:8: note"
+    )
+    assert normalized["unrelated"] == payload["unrelated"]
+    assert normalized["source_sha256"] == payload["source_sha256"]
+    assert normalized["matched_calls"] == 1
+
+
 def test_invalid_typed_calls_are_classified_from_call_diagnostics() -> None:
     invalid = {
         "keyword_bindings": ["Bucket", "Key", "Body", "Bogus"],
@@ -212,10 +240,12 @@ def test_wheel_read_remains_bounded_after_stat(
     monkeypatch.setattr(runner, "MAX_WHEEL_BYTES", 16)
     original_stat = Path.stat
 
-    def stale_stat(path: Path, *args: object, **kwargs: object) -> object:
+    def stale_stat(
+        path: Path, *, follow_symlinks: bool = True
+    ) -> os.stat_result | SimpleNamespace:
         if path == wheel:
             return SimpleNamespace(st_size=1)
-        return original_stat(path, *args, **kwargs)
+        return original_stat(path, follow_symlinks=follow_symlinks)
 
     monkeypatch.setattr(Path, "stat", stale_stat)
     with pytest.raises(ProbeError, match="size limit"):

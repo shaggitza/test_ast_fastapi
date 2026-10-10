@@ -10,7 +10,9 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import os
 import platform
+import re
 import shutil
 import stat
 import subprocess
@@ -18,7 +20,7 @@ import sys
 import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, cast
 
 from mypy import build as mypy_build
 from mypy.nodes import CallExpr, MemberExpr
@@ -299,6 +301,35 @@ def _binding_result(row: dict[str, Any]) -> dict[str, Any]:
     return statuses
 
 
+def _normalize_private_paths(value: Any, private_root: Path, cwd: Path) -> Any:
+    """Replace only exact known private-root path components in report strings."""
+    roots = (str(private_root), str(Path(os.path.relpath(private_root, cwd))))
+
+    def normalize(text: str) -> str:
+        result = text
+        for root in sorted(set(roots), key=len, reverse=True):
+            if root in {".", ""}:
+                continue
+            pattern = re.escape(root.replace("\\", "/")).replace("/", r"[\\/]")
+            result = re.sub(
+                r"(?<![A-Za-z0-9_.\\/:-])" + pattern + r"(?=[\\/]|$)",
+                "<private-s3-probe>",
+                result,
+            )
+        return result
+
+    if isinstance(value, str):
+        return normalize(value)
+    if isinstance(value, list):
+        return [_normalize_private_paths(item, private_root, cwd) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _normalize_private_paths(item, private_root, cwd)
+            for key, item in value.items()
+        }
+    return value
+
+
 def _product_adapter(source: Path) -> dict[str, Any]:
     """Exercise the repository analyzer and contract auditor on the controlled endpoint."""
     product = _load_candidate_product(ROOT)
@@ -498,7 +529,7 @@ def run_probe(wheel: Path, manifest: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
         != "misbound_positional_to_keyword_only_parameters"
     ):
         raise ProbeError("misbound Body selector control failed")
-    return {
+    report = {
         "schema_version": 1,
         "benchmark_id": "gh97-exact-release-installed-s3-stub-v1",
         "status": "completed",
@@ -537,6 +568,7 @@ def run_probe(wheel: Path, manifest: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
         ],
         "product_adapter": product_adapter,
     }
+    return cast("dict[str, Any]", _normalize_private_paths(report, private, Path.cwd()))
 
 
 def main(argv: list[str] | None = None) -> int:
