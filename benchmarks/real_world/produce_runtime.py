@@ -232,7 +232,28 @@ def _invocation_payload(result: InvocationResult) -> dict[str, Any]:
     if result.phase_manifest is not None:
         payload["phase_manifest"] = result.phase_manifest
     if result.phase_observation is not None:
-        payload["phase_observation"] = result.phase_observation
+        observation = dict(result.phase_observation)
+        manifest_value = result.phase_manifest
+        try:
+            manifest = PhaseManifest.model_validate(manifest_value)
+        except (TypeError, ValueError):
+            # Preserve malformed data for the verifier to reject; never normalize
+            # an unbound observation into a trusted result.
+            payload["phase_observation"] = observation
+        else:
+            observation.update(
+                manifest_sha256=manifest.digest,
+                observed=[],
+                unavailable=[
+                    {
+                        "callback": entry.callback.model_dump(mode="json"),
+                        "reason": "application-process phase observation is self-reported",
+                    }
+                    for entry in manifest.entries
+                ],
+                role="self_reported_nonpositive",
+            )
+            payload["phase_observation"] = observation
     return payload
 
 
@@ -596,9 +617,15 @@ def _frozen_lane_request(
         shutil.copyfile(request.snapshot.diff_path, staged_diff)
         if _hash_file(staged_diff, "staged impact diff") != request.snapshot.diff_path_sha256:
             raise ProducerError("impact diff changed while staging the pinned lane")
+        # The runtime container runs as uid 65532.  Make the private copy
+        # readable/traversable by that uid while keeping every staged object
+        # immutable; never change modes on the source checkout.
         for path in sorted((*staged_root.rglob("*"), staged_root), reverse=True):
             current_mode = path.stat(follow_symlinks=False).st_mode
-            path.chmod(stat.S_IMODE(current_mode) & ~0o222)
+            if stat.S_ISDIR(current_mode):
+                path.chmod(0o555)
+            elif stat.S_ISREG(current_mode):
+                path.chmod(0o444)
         staged_diff.chmod(0o444)
         staged_snapshot = replace(
             request.snapshot,
@@ -944,14 +971,17 @@ def _record(  # noqa: PLR0911, PLR0912
         record["framework_phase_manifest"] = static_manifest
     if mode == "runtime":
         manifest = results["list"].phase_manifest
-        observations = {phase: results[phase].phase_observation for phase in ("list", "impact")}
+        observations = {
+            phase: _invocation_payload(results[phase]).get("phase_observation")
+            for phase in ("list", "impact")
+        }
         if isinstance(manifest, dict) and all(
             isinstance(item, dict) for item in observations.values()
         ):
             record["framework_phase"] = {
                 "manifest": manifest,
                 "observations": observations,
-                "role": "positive_observation_only",
+                "role": "self_reported_nonpositive",
             }
     return record
 

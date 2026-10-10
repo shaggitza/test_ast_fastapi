@@ -13,10 +13,11 @@ from typing import Any
 
 import pytest
 
-from fastapi_endpoint_detector.analyzer.framework_phase_bridge import SourceIdentity
+from fastapi_endpoint_detector.analyzer.framework_phase_bridge import FrameworkPhase, SourceIdentity
 from fastapi_endpoint_detector.analyzer.framework_phase_runtime import (
     PhaseManifest,
     PhaseManifestEntry,
+    manifest_from_report,
 )
 from fastapi_endpoint_detector.models.surface_contract import load_surface_preset
 from fastapi_endpoint_detector.parser import runtime_worker
@@ -146,6 +147,74 @@ def test_lifespan_observation_requires_loaded_callback_identity_and_records_both
     assert [item["phase"] for item in result["observed"]] == ["startup", "shutdown"]
     assert result["observed"][0]["registration"]["line"] == _definition_line(callback)
     assert result["unavailable"] == []
+
+
+def test_manifest_occurrence_identity_includes_registration_columns() -> None:
+    callback = inspect.unwrap(_successful_lifespan)
+    manifest = _manifest(
+        callback,
+        path=Path(callback.__code__.co_filename),
+        line=_definition_line(callback),
+    )
+    entry = manifest["entries"][0]
+    distinct_callsite = {**entry, "registration": {**entry["registration"], "column": 1}}
+
+    accepted = PhaseManifest.model_validate({**manifest, "entries": [entry, distinct_callsite]})
+
+    assert len(accepted.entries) == 2
+    with pytest.raises(ValueError, match="duplicate callback registrations"):
+        PhaseManifest.model_validate({**manifest, "entries": [entry, entry]})
+
+
+def test_static_report_manifest_preserves_same_line_registration_columns() -> None:
+    catalog = load_surface_preset("framework-v1")
+    callback = SourceIdentity(
+        module="app",
+        symbol="start",
+        file="/snapshot/app.py",
+        line=4,
+        column=0,
+        end_line=4,
+        end_column=5,
+        source_sha256=_DIGEST,
+    )
+    common = {
+        "phase": FrameworkPhase.STARTUP,
+        "callback": callback,
+        "typed_callback_symbol": "app.start",
+        "typed_framework_symbol": "fastapi.FastAPI.on_event",
+        "framework_declaration_sha256": _DIGEST,
+        "callback_file_sha256": "a" * 64,
+        "registration_file_sha256": "b" * 64,
+        "registration_call_site": object(),
+        "resource": "startup",
+        "limitations": (),
+        "execution_conditions": ("startup succeeds",),
+        "source_sha256": _DIGEST,
+        "inventory_sha256": _DIGEST,
+        "engine_sha256": _DIGEST,
+        "config_sha256": _DIGEST,
+        "contract_id": "fastapi-on-event",
+        "canonical_contract_sha256": catalog.document.contract_hashes["fastapi-on-event"],
+    }
+    records = []
+    for column in (10, 42):
+        registration = SourceIdentity(
+            module="app",
+            symbol="on_event",
+            file="/snapshot/app.py",
+            line=8,
+            column=column,
+            end_line=8,
+            end_column=column + 10,
+            source_sha256=_DIGEST,
+        )
+        records.append(SimpleNamespace(**common, registration=registration))
+
+    manifest = manifest_from_report(SimpleNamespace(records=tuple(records)))
+
+    assert len(manifest.entries) == 2
+    assert [entry.registration.column for entry in manifest.entries] == [10, 42]
 
 
 def test_lifespan_callback_mismatch_is_unavailable_and_not_observed(

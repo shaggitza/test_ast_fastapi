@@ -66,8 +66,14 @@ class PhaseManifest(BaseModel):
                 item.phase,
                 item.callback.file,
                 item.callback.line,
+                item.callback.column,
+                item.callback.end_line,
+                item.callback.end_column,
                 item.registration.file,
                 item.registration.line,
+                item.registration.column,
+                item.registration.end_line,
+                item.registration.end_column,
             )
             for item in self.entries
         ]
@@ -90,7 +96,9 @@ class PhaseObservation(BaseModel):
     observed: tuple[dict[str, object], ...]
     unavailable: tuple[dict[str, object], ...]
     execution_status: Literal["completed", "startup_failed", "unavailable"]
-    role: Literal["positive_observation_only"] = "positive_observation_only"
+    role: Literal["positive_observation_only", "self_reported_nonpositive"] = (
+        "positive_observation_only"
+    )
 
 
 def manifest_from_report(report: object) -> PhaseManifest:

@@ -134,13 +134,14 @@ def _record(
                 observed=(),
                 unavailable=(),
                 execution_status="completed",
+                role="self_reported_nonpositive",
             ).model_dump(mode="json")
             for phase in ("list", "impact")
         }
         value["framework_phase"] = {
             "manifest": manifest,
             "observations": observations,
-            "role": "positive_observation_only",
+            "role": "self_reported_nonpositive",
         }
     return value
 
@@ -314,14 +315,45 @@ def test_runtime_comparator_accepts_signed_completed_empty_phase_inventory(tmp_p
                 observed=(),
                 unavailable=(),
                 execution_status="completed",
+                role="self_reported_nonpositive",
             ).model_dump(mode="json")
             for phase in ("list", "impact")
         },
-        "role": "positive_observation_only",
+        "role": "self_reported_nonpositive",
     }
     _write(runtime, record)
 
     compare(secure, runtime)
+
+
+def test_runtime_comparator_never_promotes_legacy_positive_phase_claims(tmp_path: Path) -> None:
+    secure = tmp_path / "secure.json"
+    runtime = tmp_path / "runtime.json"
+    _write(secure, _record("secure"))
+    record = _record("runtime")
+    record["framework_phase"]["role"] = "positive_observation_only"
+    manifest = PhaseManifest.model_validate(record["framework_phase_manifest"])
+    entry = manifest.entries[0]
+    record["framework_phase"]["observations"]["list"].update(
+        role="positive_observation_only",
+        observed=[
+            {
+                "callback": entry.callback.model_dump(mode="json"),
+                "registration": entry.registration.model_dump(mode="json"),
+                "phase": entry.phase,
+                "manifest_sha256": manifest.digest,
+                "execution_conditions": list(entry.execution_conditions),
+            }
+        ],
+    )
+    _sign_controlled_record(record)
+    _write(runtime, record)
+
+    result = compare(secure, runtime)
+
+    phase = result["framework_phase_comparison"]
+    assert phase["role"] == "self_reported_nonpositive"
+    assert phase["observations"]["list"]["observed_count"] == 0
 
 
 def test_phase_manifest_accepts_distinct_snapshot_and_segment_hashes(tmp_path: Path) -> None:

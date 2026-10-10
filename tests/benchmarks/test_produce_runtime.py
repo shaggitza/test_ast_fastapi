@@ -110,6 +110,28 @@ class SignedFakeRunner(FakeRunner):
         result = super().__call__(mode, phase, request)
         if mode != "runtime":
             return result
+        if (
+            result.phase_manifest
+            and result.phase_manifest.get("entries")
+            and result.phase_observation
+        ):
+            entry = result.phase_manifest["entries"][0]
+            forged_observation = dict(result.phase_observation)
+            forged_observation.update(
+                observed=[
+                    {
+                        "callback": entry["callback"],
+                        "registration": entry["registration"],
+                        "phase": entry["phase"],
+                        "manifest_sha256": PhaseManifest.model_validate(
+                            result.phase_manifest
+                        ).digest,
+                        "execution_conditions": entry["execution_conditions"],
+                    }
+                ],
+                role="positive_observation_only",
+            )
+            result = replace(result, phase_observation=forged_observation)
         assert request.custody_binding is not None
         now = int(time.time())
         receipt = {
@@ -552,6 +574,11 @@ def test_valid_signed_receipt_reaches_runtime_runner(
     runtime = json.loads(outputs["runtime"].read_text(encoding="utf-8"))
     assert runtime["status"] == "success"
     assert runtime["provenance"]["runtime_attestation_sha256"].startswith("sha256:")
+    assert runtime["framework_phase"]["role"] == "self_reported_nonpositive"
+    for phase, observation in runtime["framework_phase"]["observations"].items():
+        assert observation["observed"] == []
+        assert observation["role"] == "self_reported_nonpositive"
+        assert runtime["runtime_custody"][phase]["result"]["phase_observation"] == observation
 
 
 def test_target_baseline_orchestrator_publishes_comparator_valid_matrix(tmp_path: Path) -> None:
@@ -695,6 +722,81 @@ def _request_for_source_only_test(spec: SnapshotInput) -> Any:
         seccomp_sha256=_hash_file(policy, "seccomp"),
         runtime_policy_sha256="sha256:" + "c" * 64,
     )
+
+
+def test_frozen_lane_copy_is_readable_by_runtime_uid_and_source_modes_stay_private(
+    tmp_path: Path,
+) -> None:
+    spec = _inputs(tmp_path)
+    source = spec.app_path / "main.py"
+    nested = spec.app_path / "nested"
+    nested.mkdir()
+    nested_file = nested / "module.py"
+    nested_file.write_text("value = 1\n", encoding="utf-8")
+    # Update the pinned fixture revision to include the nested file, then
+    # exercise the private copy with owner-only source permissions.
+    subprocess.run(["git", "-C", str(spec.app_path), "add", "nested/module.py"], check=True)
+    subprocess.run(
+        ["git", "-C", str(spec.app_path), "commit", "-m", "add nested source"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    revision = subprocess.run(
+        ["git", "-C", str(spec.app_path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    spec = replace(
+        spec,
+        source_revision=revision,
+        diff_path_sha256=_hash_file(spec.diff_path, "test diff"),
+    )
+    source.chmod(0o600)
+    nested.chmod(0o700)
+    nested_file.chmod(0o600)
+    original_hash = producer._source_digest(spec.app_path)
+    original_modes = (source.stat().st_mode & 0o777, nested.stat().st_mode & 0o777)
+    request = _request_for_source_only_test(spec)
+
+    with producer._frozen_lane_request(request, original_hash, producer._tool_digest()) as lane:
+        staged_source = lane.snapshot.app_path / "main.py"
+        staged_nested = lane.snapshot.app_path / "nested"
+        staged_file = staged_nested / "module.py"
+        assert staged_source.stat().st_mode & 0o444 == 0o444
+        assert staged_nested.stat().st_mode & 0o555 == 0o555
+        assert staged_file.stat().st_mode & 0o444 == 0o444
+        assert staged_source.stat().st_mode & 0o222 == 0
+        assert staged_nested.stat().st_mode & 0o222 == 0
+        assert staged_file.stat().st_mode & 0o222 == 0
+        # Confirm access under the same unprivileged uid used by the runtime.
+        unprivileged = [
+            "setpriv",
+            "--reuid=65532",
+            "--regid=65532",
+            "--clear-groups",
+            "test",
+        ]
+        assert (
+            subprocess.run(
+                [*unprivileged, "-r", "nested/module.py"],
+                cwd=lane.snapshot.app_path,
+                check=False,
+            ).returncode
+            == 0
+        )
+        assert (
+            subprocess.run(
+                [*unprivileged, "-x", "nested"],
+                cwd=lane.snapshot.app_path,
+                check=False,
+            ).returncode
+            == 0
+        )
+
+    assert producer._source_digest(spec.app_path) == original_hash
+    assert (source.stat().st_mode & 0o777, nested.stat().st_mode & 0o777) == original_modes
 
 
 def _phase_manifest(source: Path) -> dict[str, Any]:

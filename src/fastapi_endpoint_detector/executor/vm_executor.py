@@ -783,6 +783,11 @@ class VMExecutor:
             payload = json.loads(stdout)
         except json.JSONDecodeError as exc:
             raise VMExecutorError("Failed to parse bounded JSON output") from exc
+        if isinstance(payload, dict) and payload.get("status") == "error":
+            message = payload.get("message")
+            if not isinstance(message, str) or not message:
+                message = "runtime worker reported an unspecified failure"
+            raise VMExecutorError(f"runtime worker failed: {message[:2048]}")
         if phase_manifest is not None:
             try:
                 request = json.loads(command[-1])
@@ -837,7 +842,19 @@ class VMExecutor:
                     identity["file"] = str(host_file)
         try:
             trusted = PhaseManifest.model_validate(manifest)
+            # The phase callback runs in the same interpreter as application code.
+            # Its trace-derived claims are therefore self-reported, even when the
+            # worker and custody envelope are otherwise valid.
             observation["manifest_sha256"] = trusted.digest
+            observation["observed"] = []
+            observation["unavailable"] = [
+                {
+                    "callback": entry.callback.model_dump(mode="json"),
+                    "reason": "application-process phase observation is self-reported",
+                }
+                for entry in trusted.entries
+            ]
+            observation["role"] = "self_reported_nonpositive"
             parsed = PhaseObservation.model_validate(observation)
             allowed = {
                 (

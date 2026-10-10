@@ -14,6 +14,7 @@ from fastapi_endpoint_detector.executor.vm_executor import (
     VMExecutor,
     VMExecutorError,
 )
+from fastapi_endpoint_detector.models.surface_contract import load_surface_preset
 
 _DIGEST = "registry.example/detector@sha256:" + "a" * 64
 
@@ -376,7 +377,9 @@ def test_lifespan_manifest_uses_same_hardened_worker_request(tmp_path: Path) -> 
                 "phase": "startup",
                 "execution_conditions": [],
                 "contract_id": "fastapi-lifespan-startup",
-                "contract_sha256": "sha256:" + "b" * 64,
+                "contract_sha256": load_surface_preset("framework-v1").document.contract_hashes[
+                    "fastapi-lifespan-startup"
+                ],
                 "source_sha256": "sha256:" + "c" * 64,
                 "callback_file_sha256": "d" * 64,
                 "registration_file_sha256": "e" * 64,
@@ -523,6 +526,120 @@ def test_analyze_uses_bounded_executor_and_parses_json(tmp_path: Path) -> None:
     request = json.loads(command[-1])
     assert request["phase"] == "list"
     assert request["app_path"] == "/workspace/app.py"
+
+
+def test_worker_error_is_preserved_before_phase_observation_validation(tmp_path: Path) -> None:
+    app = tmp_path / "app.py"
+    app.write_text("app = None\n", encoding="utf-8")
+    executor = _executor(tmp_path)
+    executor._resolved_image = _DIGEST
+
+    manifest = _phase_manifest_for_test(app)
+    with (
+        patch.object(
+            executor,
+            "_execute_bounded",
+            return_value=(
+                json.dumps(
+                    {
+                        "status": "error",
+                        "schema_version": 3,
+                        "message": (
+                            "Failed to load FastAPI app: selected runtime module 'main' "
+                            "is not present"
+                        ),
+                    }
+                ),
+                "",
+            ),
+        ),
+        pytest.raises(VMExecutorError, match="selected runtime module 'main' is not present"),
+    ):
+        executor.analyze_in_vm(app, phase_manifest=manifest)
+
+
+def test_successful_worker_response_still_requires_phase_observation(tmp_path: Path) -> None:
+    app = tmp_path / "app.py"
+    app.write_text("app = None\n", encoding="utf-8")
+    executor = _executor(tmp_path)
+    executor._resolved_image = _DIGEST
+
+    manifest = _phase_manifest_for_test(app)
+    with (
+        patch.object(
+            executor,
+            "_execute_bounded",
+            return_value=('{"status":"ok","endpoints":[]}', ""),
+        ),
+        pytest.raises(VMExecutorError, match="malformed phase observation"),
+    ):
+        executor.analyze_in_vm(app, phase_manifest=manifest)
+
+
+def test_host_phase_boundary_discards_application_process_positive_claims(tmp_path: Path) -> None:
+    app = tmp_path / "app.py"
+    app.write_text("app = None\n", encoding="utf-8")
+    manifest = _phase_manifest_for_test(app)
+    entry = manifest["entries"][0]
+    container_identity = {**entry["callback"], "file": "/workspace/app.py"}
+    claimed = {
+        "schema_version": 1,
+        "protocol": "framework-phase-observation-v1",
+        "manifest_sha256": "sha256:" + "0" * 64,
+        "observed": [
+            {
+                "callback": container_identity,
+                "registration": {**entry["registration"], "file": "/workspace/app.py"},
+                "phase": "startup",
+                "manifest_sha256": "sha256:" + "0" * 64,
+                "execution_conditions": [],
+            }
+        ],
+        "unavailable": [],
+        "execution_status": "completed",
+        "role": "positive_observation_only",
+    }
+
+    sanitized = VMExecutor._host_phase_observation(claimed, manifest, app, "/workspace/app.py")
+
+    assert sanitized["observed"] == []
+    assert sanitized["role"] == "self_reported_nonpositive"
+    assert sanitized["unavailable"][0]["reason"].endswith("self-reported")
+
+
+def _phase_manifest_for_test(app: Path) -> dict[str, Any]:
+    identity = {
+        "module": "sample",
+        "symbol": "lifespan",
+        "file": str(app.resolve()),
+        "line": 1,
+        "column": 0,
+        "end_line": 1,
+        "end_column": 1,
+        "source_sha256": "sha256:" + "a" * 64,
+    }
+    return {
+        "schema_version": 1,
+        "protocol": "framework-phase-manifest-v1",
+        "entries": [
+            {
+                "callback": identity,
+                "registration": identity,
+                "phase": "startup",
+                "execution_conditions": [],
+                "contract_id": "fastapi-lifespan-startup",
+                "contract_sha256": load_surface_preset("framework-v1").document.contract_hashes[
+                    "fastapi-lifespan-startup"
+                ],
+                "source_sha256": "sha256:" + "c" * 64,
+                "callback_file_sha256": "d" * 64,
+                "registration_file_sha256": "e" * 64,
+                "inventory_sha256": "sha256:" + "f" * 64,
+                "engine_sha256": "sha256:" + "1" * 64,
+                "config_sha256": "sha256:" + "2" * 64,
+            }
+        ],
+    }
 
 
 def test_invalid_json_and_endpoint_payload_fail_closed(tmp_path: Path) -> None:

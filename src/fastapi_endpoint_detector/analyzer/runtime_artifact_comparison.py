@@ -255,7 +255,14 @@ def _validate(record: dict[str, Any], expected_mode: str) -> None:  # noqa: PLR0
             manifest_value = record.get("framework_phase_manifest")
             if not isinstance(phase, dict) or set(phase) != {"manifest", "observations", "role"}:
                 raise ComparisonError("runtime success requires a bound framework phase comparison")
-            if phase["role"] != "positive_observation_only" or phase["manifest"] != manifest_value:
+            if (
+                phase["role"]
+                not in {
+                    "positive_observation_only",
+                    "self_reported_nonpositive",
+                }
+                or phase["manifest"] != manifest_value
+            ):
                 raise ComparisonError("runtime phase manifest identity or truth role is invalid")
             try:
                 manifest = PhaseManifest.model_validate(manifest_value)
@@ -266,9 +273,11 @@ def _validate(record: dict[str, Any], expected_mode: str) -> None:  # noqa: PLR0
                     observation = PhaseObservation.model_validate(observation_value)
                     if observation.manifest_sha256 != manifest.digest:
                         raise ValueError("observation manifest digest mismatch")
-                    if observation.execution_status != "completed" and observation.observed:
+                    if phase["role"] == "self_reported_nonpositive" and (
+                        observation.role != "self_reported_nonpositive" or observation.observed
+                    ):
                         raise ValueError(
-                            "failed or unavailable lifespan cannot contain positive observations"
+                            "application-process observations cannot be positive evidence"
                         )
                 custody = record.get("runtime_custody")
                 if not isinstance(custody, dict) or set(custody) != {"list", "impact"}:
@@ -442,13 +451,13 @@ def _compare_loaded(
     if isinstance(phase_value, dict):
         observations = phase_value["observations"]
         result["framework_phase_comparison"] = {
-            "role": "positive_observation_only",
+            "role": "self_reported_nonpositive",
             "manifest_sha256": PhaseManifest.model_validate(phase_value["manifest"]).digest,
             "observations": {
                 name: {
                     "execution_status": observation["execution_status"],
-                    "observed_count": len(observation["observed"]),
-                    "unavailable_count": len(observation["unavailable"]),
+                    "observed_count": 0,
+                    "unavailable_count": len(phase_value["manifest"]["entries"]),
                 }
                 for name, observation in observations.items()
             },
