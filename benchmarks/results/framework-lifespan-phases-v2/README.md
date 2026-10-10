@@ -86,3 +86,39 @@ unavailable lifecycle callbacks, custody tampering, missing observations,
 wrong snapshot side, replayed challenges, and unsigned runtime results remain
 failures or unavailable states. An unavailable callback is not an absence
 claim.
+
+
+## Controlled isolated-image verification at 15508bc
+
+The retained Mypy graph repair was independently reviewed at exact source
+`15508bc8a477fb6fad170df0be0b95e0b2e3fc79`: the combined 76 phase/producer tests,
+strict source type checks and Ruff checks passed. It reuses a source-verified
+retained typed graph, with bounded file reads and directory traversal that
+rejects symlinks, rather than rebuilding the frontend for the phase report.
+
+[Controlled artifacts](controlled-15508bc/artifact-sha256.json) retain two
+synthetic baseline/target comparisons using the same fixture and the exact
+image `test-ast-runtime-phase-15508bc@sha256:8c2d95773208aab2a4391316ba4bd6446ac6d896ba581420545053822d9f24e4`.
+The default selection and an explicit `main:app` selection each produced two
+successful secure records and two runtime abstentions: `unavailable`, with
+`static runtime phase coverage is conditional`. Both comparisons have zero
+eligible successful runtime pairs and no runtime quality metrics. The secure
+inventory marks the HTTP route conditional because its startup/shutdown
+registrations leave a route-state limitation. Neither selection clears that
+limitation; no complete application runtime observation is claimed.
+
+The image was built offline from the 76 committed source blobs and the same
+pinned dependency image. All 31 source/provenance/sandbox checks passed,
+including gVisor, UID/GID 65532, network disabled, read-only root, dropped
+capabilities, no host binds, the pinned seccomp profile and verified cleanup.
+The checks used the existing 512 MiB memory, 0.5 CPU, 128-process and 64 MiB
+no-exec temporary filesystem policy. Application comparisons retained the
+existing 60-second runtime timeout. Sanitized infrastructure summaries retain
+the original receipt hash; private signing keys are excluded.
+
+These are locally controlled synthetic operational records, not independent
+host attestation, corpus truth, performance acceptance or a runtime speedup.
+Application-process callback claims remain `self_reported_nonpositive`; the
+host discards them as positive evidence even when broker custody is signed.
+A trusted independent observer, complete phase coverage, peak RSS collection,
+real-world evaluation and the original GH104 acceptance remain open.
