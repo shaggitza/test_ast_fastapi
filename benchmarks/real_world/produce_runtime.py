@@ -42,6 +42,7 @@ from benchmarks.real_world.compare_runtime import (
     compare_target_baseline,
 )
 
+from fastapi_endpoint_detector.analyzer.framework_phase_bridge import canonical_framework_phase
 from fastapi_endpoint_detector.analyzer.framework_phase_runtime import PhaseManifest
 from fastapi_endpoint_detector.analyzer.runtime_custody import (
     CustodyBinding,
@@ -52,6 +53,7 @@ from fastapi_endpoint_detector.analyzer.runtime_custody import (
     verify_runtime_custody,
 )
 from fastapi_endpoint_detector.executor.vm_executor import VMExecutor, VMExecutorError
+from fastapi_endpoint_detector.models.surface_contract import CallbackRangeMode, load_surface_preset
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -147,7 +149,7 @@ class RunRequest:
     phase_manifest_source_root: Path | None = None
 
 
-def _has_complete_static_phase_coverage(  # noqa: PLR0911
+def _has_complete_static_phase_coverage(  # noqa: PLR0911, PLR0912
     phase_report: dict[str, Any], manifest: dict[str, Any]
 ) -> bool:
     """Accept only a complete, exact static report/manifest correspondence.
@@ -157,7 +159,9 @@ def _has_complete_static_phase_coverage(  # noqa: PLR0911
     records, or conditional surfaces still make coverage incomplete.
     """
     if (
-        phase_report.get("backend") in {None, "unavailable"}
+        phase_report.get("backend") != "mypy"
+        or not isinstance(phase_report.get("backend_version"), str)
+        or not phase_report.get("backend_version")
         or phase_report.get("limitations") not in ([], ())
         or phase_report.get("lifecycle_conditional_surfaces") not in ([], ())
     ):
@@ -189,6 +193,12 @@ def _has_complete_static_phase_coverage(  # noqa: PLR0911
     ):
         return False
 
+    catalog = load_surface_preset("framework-v1")
+    type_fullnames = {
+        "fastapi.FastAPI": "fastapi.applications.FastAPI",
+        "fastapi.APIRouter": "fastapi.routing.APIRouter",
+        "starlette.applications.Starlette": "starlette.applications.Starlette",
+    }
     for record, entry in zip(records, entries, strict=True):
         if not isinstance(record, dict) or not isinstance(entry, dict):
             return False
@@ -196,6 +206,41 @@ def _has_complete_static_phase_coverage(  # noqa: PLR0911
         callback = record.get("callback")
         registration = record.get("registration")
         conditions = record.get("execution_conditions")
+        contract_id = record.get("contract_id")
+        resource = record.get("resource")
+        callback_range = record.get("callback_range")
+        if (
+            not isinstance(contract_id, str)
+            or not isinstance(resource, str)
+            or not isinstance(callback_range, str)
+        ):
+            return False
+        contract = next(
+            (item for item in catalog.document.contracts if item.id == contract_id), None
+        )
+        try:
+            phase = (
+                canonical_framework_phase(
+                    contract,
+                    resource,
+                    CallbackRangeMode(callback_range),
+                    catalog,
+                )
+                if contract is not None
+                else None
+            )
+        except ValueError:
+            phase = None
+        declared_symbol = contract.registration.symbol if contract is not None else None
+        declared_receiver = contract.registration.receiver_type if contract is not None else None
+        expected_type = type_fullnames.get(declared_receiver or declared_symbol or "")
+        if contract is not None and contract.registration.invocation == "constructor":
+            expected_symbol = expected_type
+        elif expected_type is not None and declared_symbol is not None:
+            expected_symbol = f"{expected_type}.{declared_symbol.rsplit('.', 1)[-1]}"
+        else:
+            expected_symbol = None
+        registration_symbol = registration.get("symbol") if isinstance(registration, dict) else None
         if (
             record.get("status") != "conditional"
             or record.get("limitations") not in ([], ())
@@ -209,6 +254,23 @@ def _has_complete_static_phase_coverage(  # noqa: PLR0911
             or not isinstance(registration, dict)
             or record.get("typed_callback_symbol")
             != f"{callback.get('module')}.{callback.get('symbol')}"
+            or record.get("snapshot_side") != phase_report.get("snapshot_side")
+            or phase is None
+            or phase.value != record.get("phase")
+            or resource not in {"startup", "shutdown"}
+            or contract is None
+            or catalog.document.contract_hashes.get(contract_id)
+            != record.get("canonical_contract_sha256")
+            or registration_symbol != declared_symbol
+            or record.get("typed_framework_symbol") != expected_symbol
+            or record.get("framework_declaration_sha256") is None
+            or record.get("typed_provider_fingerprint") is None
+            or call_site.get("resolver") != "mypy"
+            or call_site.get("resolver_version") != phase_report.get("backend_version")
+            or call_site.get("invocation") != contract.registration.invocation
+            or call_site.get("canonical_symbol") != expected_symbol
+            or call_site.get("receiver_candidates")
+            != ([expected_type] if contract.registration.invocation != "constructor" else [])
             or not isinstance(conditions, (list, tuple))
             or not conditions
         ):

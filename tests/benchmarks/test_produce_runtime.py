@@ -850,6 +850,97 @@ def _phase_manifest(source: Path) -> dict[str, Any]:
     return PhaseManifest(entries=(entry,)).model_dump(mode="json")
 
 
+def _exact_lifecycle_report_and_manifest(source: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    source_digest = "sha256:" + digest
+    catalog = load_surface_preset("framework-v1")
+    contract_id = "fastapi-on-event"
+    contract_hash = catalog.document.contract_hashes[contract_id]
+    callback = SourceIdentity(
+        module="main",
+        symbol="startup",
+        file=str(source.resolve()),
+        line=1,
+        column=0,
+        source_sha256=source_digest,
+    ).model_dump(mode="json")
+    registration = SourceIdentity(
+        module="main",
+        symbol="fastapi.FastAPI.on_event",
+        file=str(source.resolve()),
+        line=2,
+        column=0,
+        end_line=2,
+        end_column=1,
+        source_sha256=source_digest,
+    ).model_dump(mode="json")
+    entry = PhaseManifestEntry(
+        callback=callback,
+        registration=registration,
+        phase="startup",
+        execution_conditions=("startup phase dispatches this callback",),
+        contract_id=contract_id,
+        contract_sha256=contract_hash,
+        source_sha256=source_digest,
+        callback_file_sha256=digest,
+        registration_file_sha256=digest,
+        inventory_sha256=source_digest,
+        engine_sha256=source_digest,
+        config_sha256=source_digest,
+    )
+    manifest = PhaseManifest(entries=(entry,)).model_dump(mode="json")
+    site = {
+        "file_path": str(source.resolve()),
+        "line": 2,
+        "column": 0,
+        "end_line": 2,
+        "end_column": 1,
+        "canonical_symbol": "fastapi.applications.FastAPI.on_event",
+        "invocation": "instance_method",
+        "status": "exact",
+        "resolver": "mypy",
+        "resolver_version": "1.19.1",
+        "receiver_candidates": ["fastapi.applications.FastAPI"],
+    }
+    record = {
+        "status": "conditional",
+        "phase": "startup",
+        "resource": "startup",
+        "callback_range": "full",
+        "snapshot_side": "target",
+        "callback": callback,
+        "registration": registration,
+        "typed_callback_symbol": "main.startup",
+        "typed_framework_symbol": "fastapi.applications.FastAPI.on_event",
+        "registration_call_site": site,
+        "limitations": [],
+        "execution_conditions": list(entry.execution_conditions),
+        "contract_id": contract_id,
+        "canonical_contract_sha256": contract_hash,
+        "framework_declaration_sha256": source_digest,
+        "typed_provider_fingerprint": "typed-build-fixture",
+        "source_sha256": source_digest,
+        "callback_file_sha256": digest,
+        "registration_file_sha256": digest,
+        "inventory_sha256": source_digest,
+        "engine_sha256": source_digest,
+        "config_sha256": source_digest,
+    }
+    report = {
+        "backend": "mypy",
+        "backend_version": "1.19.1",
+        "snapshot_side": "target",
+        "record_count": 1,
+        "established_count": 0,
+        "conditional_count": 1,
+        "unavailable_count": 0,
+        "records": [record],
+        "limitations": [],
+        "lifecycle_conditional_surfaces": [],
+    }
+    return report, manifest
+
+
 @pytest.mark.parametrize("field", ["runtime_version", "issued_at", "canary_receipt_sha256"])
 def test_resigned_receipt_rejects_untrusted_runtime_or_invalid_schema(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
@@ -957,61 +1048,62 @@ def test_runtime_phase_gate_requires_complete_exact_record_manifest_pairs(
 ) -> None:
     source = tmp_path / "main.py"
     source.write_text("def startup() -> None: pass\n", encoding="utf-8")
-    manifest = _phase_manifest(source)
-    entry = manifest["entries"][0]
-    registration = entry["registration"]
-    report_record = {
-        "status": "conditional",
-        "phase": entry["phase"],
-        "callback": entry["callback"],
-        "registration": registration,
-        "typed_callback_symbol": "main.startup",
-        "typed_framework_symbol": "fastapi.applications.FastAPI.on_event",
-        "registration_call_site": {
-            "file_path": registration["file"],
-            "line": registration["line"],
-            "column": registration["column"],
-            "end_line": registration["end_line"],
-            "end_column": registration["end_column"],
-            "canonical_symbol": "fastapi.applications.FastAPI.on_event",
-            "status": "exact",
-        },
-        "limitations": [],
-        "execution_conditions": entry["execution_conditions"],
-        "contract_id": entry["contract_id"],
-        "canonical_contract_sha256": entry["contract_sha256"],
-        "source_sha256": entry["source_sha256"],
-        "callback_file_sha256": entry["callback_file_sha256"],
-        "registration_file_sha256": entry["registration_file_sha256"],
-        "inventory_sha256": entry["inventory_sha256"],
-        "engine_sha256": entry["engine_sha256"],
-        "config_sha256": entry["config_sha256"],
-    }
-    report: dict[str, Any] = {
-        "backend": "mypy",
-        "record_count": 1,
-        "established_count": 0,
-        "conditional_count": 1,
-        "unavailable_count": 0,
-        "records": [report_record],
-        "limitations": [],
-        "lifecycle_conditional_surfaces": [],
-    }
+    report, manifest = _exact_lifecycle_report_and_manifest(source)
     assert producer._has_complete_static_phase_coverage(report, manifest)
 
     invalid_reports = [
+        {**report, "backend": "made-up-backend"},
         {**report, "limitations": ["inventory unknown"]},
         {**report, "lifecycle_conditional_surfaces": [{"surface_id": "/late"}]},
         {**report, "unavailable_count": 1},
         {**report, "record_count": 2},
         {
             **report,
-            "records": [{**report_record, "registration_call_site": {"status": "ambiguous"}}],
+            "records": [
+                {**report["records"][0], "typed_framework_symbol": "evil.NotFastAPI.on_event"}
+            ],
+        },
+        {
+            **report,
+            "records": [
+                {
+                    **report["records"][0],
+                    "registration_call_site": {
+                        **report["records"][0]["registration_call_site"],
+                        "canonical_symbol": "evil.NotFastAPI.on_event",
+                        "receiver_candidates": ["evil.NotFastAPI"],
+                    },
+                }
+            ],
+        },
+        {
+            **report,
+            "records": [
+                {
+                    **report["records"][0],
+                    "registration_call_site": {
+                        **report["records"][0]["registration_call_site"],
+                        "receiver_candidates": ["fastapi.routing.APIRouter"],
+                    },
+                }
+            ],
+        },
+        {
+            **report,
+            "records": [
+                {**report["records"][0], "canonical_contract_sha256": "sha256:" + "0" * 64}
+            ],
+        },
+        {
+            **report,
+            "records": [
+                {**report["records"][0], "registration_call_site": {"status": "ambiguous"}}
+            ],
         },
     ]
     invalid_manifests = [
         {"entries": []},
-        {"entries": [{**entry, "execution_conditions": ["different condition"]}]},
+        {"entries": [{**manifest["entries"][0], "execution_conditions": ["different condition"]}]},
     ]
     assert all(
         not producer._has_complete_static_phase_coverage(candidate, manifest)
@@ -1096,6 +1188,51 @@ def test_secure_runner_abstains_for_reported_phase_coverage_gaps(
         assert result.impact == {"candidate_endpoints": []}
         assert request.phase_manifest_state is not None
         assert request.phase_manifest_state == {"conditional": True}
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["backend", "symbol", "receiver", "contract_hash"],
+)
+def test_secure_runner_preserves_manifest_but_abstains_on_untrusted_phase_proof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    spec = _inputs(tmp_path)
+    source = spec.app_path / "main.py"
+    source.write_text("def startup() -> None: pass\n", encoding="utf-8")
+    report, manifest = _exact_lifecycle_report_and_manifest(source)
+    record = report["records"][0]
+    if mutation == "backend":
+        report["backend"] = "made-up-backend"
+    elif mutation == "symbol":
+        record["typed_framework_symbol"] = "evil.NotFastAPI.on_event"
+        record["registration_call_site"]["canonical_symbol"] = "evil.NotFastAPI.on_event"
+        record["registration_call_site"]["receiver_candidates"] = ["evil.NotFastAPI"]
+    elif mutation == "receiver":
+        record["registration_call_site"]["receiver_candidates"] = ["fastapi.routing.APIRouter"]
+    else:
+        record["canonical_contract_sha256"] = "sha256:" + "0" * 64
+    report["runtime_manifest"] = manifest
+    request = replace(
+        _request(spec),
+        phase_manifest_state={},
+        phase_manifest_source_root=spec.app_path,
+    )
+    payload = {"candidate_endpoints": [], "framework_phase_report": report}
+    monkeypatch.setattr(
+        producer.subprocess,
+        "run",
+        lambda _command, **_kwargs: SimpleNamespace(
+            returncode=0, stdout=json.dumps(payload), stderr=""
+        ),
+    )
+
+    result = CommandRunner(timeout_seconds=10)("secure", "impact", request)
+
+    assert result.impact == {"candidate_endpoints": []}
+    assert request.phase_manifest_state == {"conditional": True}
 
 
 @pytest.mark.parametrize("expired_lane", [3, 4])
