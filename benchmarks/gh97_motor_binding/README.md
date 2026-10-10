@@ -60,3 +60,14 @@ The effect auditor currently matches contracts by exact symbol and invocation;
 its `matched` label does not certify argument validity. No API/network/service
 calls are made. The probe uses temporary source extraction and deletes it on
 exit.
+
+A separate composed replay is retained in
+`results/composed-production-binding-v2.json`, from committed analyzer
+`b0dc2c6849de69d43a8fb9931ddd8eed3bf9724a`. Its raw SHA-256 is
+`d5eb24506368db4e824d13b9373f67883eeda20de2c5d1ac6e2ea03959d22a70`.
+It includes the reviewed partial-cache invalidation and callable-analysis
+changes. The eight physical calls again yield five exact static audit bindings,
+two resolved nonmatches and one ambiguous receiver; the two invalid-arity
+bindings remain declarations, not valid invocation claims. This is a new replay,
+not a relabeling of either historical report. Installed-package behavior,
+version ranges and real-world GH97 evaluation remain open.
