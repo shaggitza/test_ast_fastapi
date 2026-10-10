@@ -14,6 +14,7 @@ from benchmarks.gh97_motor_binding.run import (
     verified_product_path,
     verify_artifact_hash,
     verify_committed_sources,
+    verify_no_dirty_tracked_files,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -205,3 +206,33 @@ def test_motor_report_source_pins_require_the_exact_producer_commit(tmp_path: Pa
     )
     with pytest.raises(ValueError, match="revision changed"):
         verify_committed_sources(tmp_path, revision, (source,))
+
+
+def test_motor_report_rejects_any_dirty_tracked_product_source(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    product_source = tmp_path / "models/effect_contract_audit.py"
+    product_source.parent.mkdir()
+    product_source.write_bytes(b"committed report model validation\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Probe Test",
+            "-c",
+            "user.email=probe@example.invalid",
+            "commit",
+            "-m",
+            "source",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    # Generated output is untracked and remains allowed.
+    (tmp_path / "live-result.json").write_text("{}\n")
+    verify_no_dirty_tracked_files(tmp_path)
+    product_source.write_bytes(b"modified report model validation\n")
+    with pytest.raises(ValueError, match="dirty tracked files"):
+        verify_no_dirty_tracked_files(tmp_path)

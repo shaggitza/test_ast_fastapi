@@ -139,6 +139,18 @@ def checkout_revision(repo: Path) -> str:
     ).stdout.strip()
 
 
+def verify_no_dirty_tracked_files(repo: Path) -> None:
+    """Refuse a HEAD-labelled report when any tracked checkout file is dirty."""
+    result = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=no"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    if result.stdout:
+        raise ValueError("producer checkout has dirty tracked files")
+
+
 def verify_committed_sources(repo: Path, revision: str, paths: tuple[Path, ...]) -> None:
     """Require report source pins to be the producer revision's exact Git bytes."""
     if checkout_revision(repo) != revision:
@@ -167,6 +179,7 @@ def main() -> int:  # noqa: PLR0915
     artifact_meta, artifact_snapshots = artifact_metadata(args.artifacts)
 
     repo = Path(__file__).resolve().parents[2]
+    verify_no_dirty_tracked_files(repo)
     product_path = verified_product_path(
         repo, "fastapi_endpoint_detector", "src/fastapi_endpoint_detector/__init__.py"
     )
@@ -310,7 +323,6 @@ wrapped: Wrapper
                     ],
                 }
             )
-        verify_committed_sources(repo, revision, pinned_paths)
         output = {
             "schema_version": 1,
             "probe_id": "gh97-motor-typed-binding-v1",
@@ -372,6 +384,8 @@ wrapped: Wrapper
             ),
         }
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    verify_no_dirty_tracked_files(repo)
+    verify_committed_sources(repo, revision, pinned_paths)
     args.output.write_text(json.dumps(output, indent=2, sort_keys=True) + "\n")
     print(json.dumps(output["classification"], sort_keys=True))
     return 0

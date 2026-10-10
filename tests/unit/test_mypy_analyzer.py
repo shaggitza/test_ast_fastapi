@@ -70,6 +70,105 @@ class TestMypyAnalyzerBasic:
         assert metadata_reads == 2
         assert analyzer.verified_package_versions["multi-pkg"] == "1.0"
 
+    @pytest.mark.parametrize("remote_root_name", ["site-packages", "typed-vendor"])
+    def test_metadata_in_unrelated_parsed_root_cannot_authenticate_local_package(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        remote_root_name: str,
+    ) -> None:
+        local = tmp_path / "local"
+        motor = local / "motor"
+        motor.mkdir(parents=True)
+        (motor / "__init__.pyi").write_text("from .motor_asyncio import Client\n")
+        (motor / "motor_asyncio.pyi").write_text("class Client: ...\n")
+        remote = tmp_path / remote_root_name
+        pymongo = remote / "pymongo"
+        pymongo.mkdir(parents=True)
+        (pymongo / "__init__.pyi").write_text("class MongoClient: ...\n")
+        metadata = remote / "motor-3.6.0.dist-info"
+        metadata.mkdir()
+        (metadata / "METADATA").write_text("Name: motor\nVersion: 3.6.0\n")
+        # Even a contradictory alias hint from the unrelated distribution
+        # cannot overrule the conventional Motor import resolved locally.
+        (metadata / "top_level.txt").write_text("pymongo\n")
+        app = local / "app.py"
+        app.write_text(
+            "from motor.motor_asyncio import Client\n"
+            "from pymongo import MongoClient\n"
+            "mongo: MongoClient\n"
+            "def handler() -> Client:\n    return Client()\n"
+        )
+        monkeypatch.setenv("MYPYPATH", str(remote))
+        endpoint = Endpoint(
+            path="/unbound-motor",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=4),
+        )
+        cache = tmp_path / "cache.json"
+        cold = MypyAnalyzer(local, module_root=local)
+        cold.set_cache_path(cache)
+        cold.analyze_endpoints([endpoint])
+        assert (
+            Path(cold._build_result.graph["pymongo"].path)
+            .resolve()
+            .is_relative_to(remote.resolve())
+        )
+        assert "motor/__init__.pyi" in cold.verified_mypy_source_hashes
+        assert "motor/motor_asyncio.pyi" in cold.verified_mypy_source_hashes
+        assert "motor" not in cold.verified_package_versions
+        assert "motor-3.6.0.dist-info/METADATA" not in cold.verified_package_source_hashes
+
+        warm = MypyAnalyzer(local, module_root=local)
+        warm.set_cache_path(cache)
+        warm.analyze_endpoints([endpoint])
+        assert "motor" not in warm.verified_package_versions
+        assert "motor-3.6.0.dist-info/METADATA" not in warm.verified_package_source_hashes
+
+    def test_split_package_declarations_cannot_be_bound_to_one_root_metadata(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        local = tmp_path / "local"
+        motor = local / "motor"
+        motor.mkdir(parents=True)
+        (motor / "__init__.pyi").write_text("from .core import AgnosticCollection\n")
+        (motor / "core.pyi").write_text("class AgnosticCollection: ...\n")
+        remote = tmp_path / "typed-vendor"
+        remote_motor = remote / "motor"
+        remote_motor.mkdir(parents=True)
+        (remote_motor / "motor_asyncio.pyi").write_text("class AsyncIOMotorClient: ...\n")
+        metadata = remote / "motor-3.6.0.dist-info"
+        metadata.mkdir()
+        (metadata / "METADATA").write_text("Name: motor\nVersion: 3.6.0\n")
+        app = local / "app.py"
+        app.write_text(
+            "from motor.core import AgnosticCollection\n"
+            "from motor.motor_asyncio import AsyncIOMotorClient\n"
+            "def handler() -> AgnosticCollection:\n    return AgnosticCollection()\n"
+        )
+        monkeypatch.setenv("MYPYPATH", str(remote))
+        endpoint = Endpoint(
+            path="/split-motor",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=3),
+        )
+        cache = tmp_path / "split-motor-cache.json"
+
+        cold = MypyAnalyzer(local, module_root=local)
+        cold.set_cache_path(cache)
+        cold.analyze_endpoints([endpoint])
+        graph = cold._build_result.graph
+        assert Path(graph["motor.core"].path).resolve().is_relative_to(local.resolve())
+        assert Path(graph["motor.motor_asyncio"].path).resolve().is_relative_to(remote.resolve())
+        assert "motor" not in cold.verified_package_versions
+        assert "motor-3.6.0.dist-info/METADATA" not in cold.verified_package_source_hashes
+
+        warm = MypyAnalyzer(local, module_root=local)
+        warm.set_cache_path(cache)
+        warm.analyze_endpoints([endpoint])
+        assert "motor" not in warm.verified_package_versions
+        assert "motor-3.6.0.dist-info/METADATA" not in warm.verified_package_source_hashes
+
     def test_unreadable_package_source_leaves_source_pin_unverified(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -104,7 +203,12 @@ class TestMypyAnalyzerBasic:
         analyzer.analyze_endpoints([endpoint], use_cache=False)
 
         assert "unreadable_pkg/__init__.pyi" not in analyzer.verified_mypy_source_hashes
-        assert analyzer.verified_package_versions["unreadable-pkg"] == "1.0"
+        # Mypy parsed this file, but we could not bind those parsed bytes to
+        # the disk snapshot; package metadata cannot stand in for that proof.
+        assert "unreadable-pkg" not in analyzer.verified_package_versions
+        assert "unreadable-pkg-1.0.dist-info/METADATA" not in (
+            analyzer.verified_package_source_hashes
+        )
 
     def test_source_changed_after_mypy_parse_cannot_authenticate_source_pin(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -139,7 +243,10 @@ class TestMypyAnalyzerBasic:
         analyzer.analyze_endpoints([endpoint], use_cache=False)
 
         assert "racing_pkg/__init__.pyi" not in analyzer.verified_mypy_source_hashes
-        assert analyzer.verified_package_versions["racing-pkg"] == "1.0"
+        # The final source snapshot detected a parse/read race, so all package
+        # pins from that build are cleared together with the stale source pin.
+        assert "racing-pkg" not in analyzer.verified_package_versions
+        assert "racing-pkg-1.0.dist-info/METADATA" not in (analyzer.verified_package_source_hashes)
 
     def test_cached_call_sites_are_recomputed_when_dependency_typing_changes(
         self, tmp_path: Path
@@ -272,6 +379,7 @@ class TestMypyAnalyzerBasic:
             f"Metadata-Version: 2.1\nName: {declared_name}\nVersion: 1.2.3\n",
             encoding="utf-8",
         )
+        (metadata / "top_level.txt").write_text("bs4\n", encoding="utf-8")
         app_path = tmp_path / "app.py"
         app_path.write_text(
             "from bs4 import Soup\ndef handler() -> Soup:\n    return Soup()\n",

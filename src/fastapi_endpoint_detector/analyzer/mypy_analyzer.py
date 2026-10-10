@@ -1022,11 +1022,33 @@ class MypyAnalyzer:
             self._verified_package_source_hashes = {}
             self._verified_package_versions = {}
             conflicting_package_versions: set[str] = set()
+            package_metadata_roots: dict[str, Path] = {}
+            conflicting_package_metadata_roots: set[str] = set()
             conflicting_mypy_source_paths: set[str] = set()
             conflicting_package_source_paths: set[str] = set()
             analyzed_source_hashes: dict[str, str] = {}
             scanned_metadata_roots: set[Path] = set()
             authenticated_metadata_hashes: dict[str, str] = {}
+            parsed_top_levels_by_root: dict[Path, set[str]] = {}
+            parsed_roots_by_top_level: dict[str, set[Path]] = {}
+
+            # Metadata can authenticate a parsed package only when its
+            # installation root also supplied that package's declarations.
+            # Collect roots before scanning metadata because module traversal
+            # order is not an installation boundary.
+            for module_name, state in self._build_result.graph.items():
+                if not state.path:
+                    continue
+                source_path = Path(state.path).resolve()
+                if source_path.suffix not in {".py", ".pyi"}:
+                    continue
+                package_root = source_path.parent
+                parts = module_name.split(".")
+                while package_root.name in parts:
+                    package_root = package_root.parent
+                top_level = parts[0]
+                parsed_top_levels_by_root.setdefault(package_root, set()).add(top_level)
+                parsed_roots_by_top_level.setdefault(top_level, set()).add(package_root)
 
             # Store the types map
             self._types_map = self._build_result.types
@@ -1056,10 +1078,7 @@ class MypyAnalyzer:
                             # The module remains useful for type resolution, but
                             # unreadable bytes cannot authenticate package evidence.
                             vendor_bytes = None
-                        if (
-                            vendor_bytes is not None
-                            and hashlib.sha1(vendor_bytes).hexdigest() == source_hash
-                        ):
+                        if vendor_bytes is not None:
                             parts = module_name.split(".")
                             package_root = source_file.parent
                             while package_root.name in parts:
@@ -1068,7 +1087,10 @@ class MypyAnalyzer:
                                 relative_source = source_file.relative_to(package_root).as_posix()
                             except ValueError:
                                 relative_source = ""
-                            if relative_source:
+                            if (
+                                relative_source
+                                and hashlib.sha1(vendor_bytes).hexdigest() == source_hash
+                            ):
                                 digest = "sha256:" + hashlib.sha256(vendor_bytes).hexdigest()
                                 previous_digest = self._verified_mypy_source_hashes.get(
                                     relative_source
@@ -1100,14 +1122,95 @@ class MypyAnalyzer:
                                     metadata_distribution = canonicalize_name(
                                         str(metadata.get("Name", ""))
                                     )
+                                    parsed_top_levels = parsed_top_levels_by_root.get(
+                                        package_root, set()
+                                    )
+                                    # top_level.txt is the distribution's
+                                    # installation-level declaration for import
+                                    # names that differ from the distribution
+                                    # name (for example bs4/beautifulsoup4).
+                                    top_level_path = metadata_path.parent / "top_level.txt"
+                                    try:
+                                        top_level_bytes = top_level_path.read_bytes()
+                                        authenticated_metadata_hashes[
+                                            str(top_level_path.resolve())
+                                        ] = hashlib.sha256(top_level_bytes).hexdigest()
+                                        declared_top_levels = {
+                                            line.strip().partition(".")[0]
+                                            for line in top_level_bytes.decode("utf-8").splitlines()
+                                            if line.strip()
+                                        }
+                                    except OSError:
+                                        declared_top_levels = set()
+                                    belongs_to_parsed_root = bool(
+                                        parsed_top_levels
+                                        & (
+                                            declared_top_levels
+                                            | {metadata_distribution.replace("-", "_")}
+                                        )
+                                    )
+                                    conventional_import = metadata_distribution.replace("-", "_")
+                                    conventional_roots = parsed_roots_by_top_level.get(
+                                        conventional_import, set()
+                                    )
+                                    # A distribution's conventional import name
+                                    # takes precedence over a conflicting alias
+                                    # hint. For example, another package's
+                                    # top_level.txt cannot bind Motor metadata
+                                    # to a root where pymongo was parsed when
+                                    # Motor's declarations resolved elsewhere.
+                                    if conventional_roots and (
+                                        len(conventional_roots) != 1
+                                        or package_root not in conventional_roots
+                                    ):
+                                        belongs_to_parsed_root = False
+                                    # Aliases are usable only when every parsed
+                                    # declaration carrying that import name came
+                                    # from this same installation.
+                                    if any(
+                                        len(parsed_roots_by_top_level.get(alias, set())) != 1
+                                        or package_root
+                                        not in parsed_roots_by_top_level.get(alias, set())
+                                        for alias in declared_top_levels
+                                    ):
+                                        belongs_to_parsed_root = False
                                     # Distribution and import names are not
                                     # interchangeable. Record adjacent metadata
                                     # under its own authenticated path/name;
                                     # contracts bind the exact metadata bytes.
-                                    if metadata_distribution:
+                                    if metadata_distribution and belongs_to_parsed_root:
                                         metadata_relative = metadata_path.relative_to(
                                             package_root
                                         ).as_posix()
+                                        previous_root = package_metadata_roots.get(
+                                            metadata_distribution
+                                        )
+                                        if (
+                                            previous_root is not None
+                                            and previous_root != package_root
+                                        ):
+                                            conflicting_package_metadata_roots.add(
+                                                metadata_distribution
+                                            )
+                                            conflicting_package_versions.add(metadata_distribution)
+                                            self._verified_package_versions.pop(
+                                                metadata_distribution, None
+                                            )
+                                            package_metadata_roots.pop(metadata_distribution, None)
+                                            conflicting_package_source_paths.add(metadata_relative)
+                                            self._verified_package_source_hashes.pop(
+                                                metadata_relative, None
+                                            )
+                                            continue_metadata = False
+                                        else:
+                                            package_metadata_roots[metadata_distribution] = (
+                                                package_root
+                                            )
+                                            continue_metadata = metadata_distribution not in (
+                                                conflicting_package_metadata_roots
+                                            )
+                                        if not continue_metadata:
+                                            continue
                                         metadata_digest = (
                                             "sha256:" + hashlib.sha256(metadata_bytes).hexdigest()
                                         )
@@ -6805,6 +6908,12 @@ class MypyAnalyzer:
                     metadata_digest = hashlib.sha256(metadata_path.read_bytes()).hexdigest()
                     inputs[metadata_key] = metadata_digest
                     metadata_snapshot_hashes[metadata_key] = metadata_digest
+                    top_level_path = metadata_path.parent / "top_level.txt"
+                    if top_level_path.exists():
+                        top_level_key = str(top_level_path.resolve())
+                        top_level_digest = hashlib.sha256(top_level_path.read_bytes()).hexdigest()
+                        inputs[top_level_key] = top_level_digest
+                        metadata_snapshot_hashes[top_level_key] = top_level_digest
             except OSError as exc:
                 inputs[str(root.resolve()) + "/<metadata-scan>"] = (
                     f"unreadable:{type(exc).__name__}"
