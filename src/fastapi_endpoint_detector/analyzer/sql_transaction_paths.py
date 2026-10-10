@@ -6,14 +6,17 @@ import ast
 import hashlib
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from fastapi_endpoint_detector.models.effect_contract import load_effect_contracts
 from fastapi_endpoint_detector.models.sql_transaction import (
     SQLTransactionContextPath,
     SQLTransactionOrderedPath,
     SQLTransactionPathDiagnostic,
     SQLTransactionPathError,
     SQLTransactionPathReport,
+    SQLTransactionSourceProjection,
     build_sql_transaction_context_path,
     build_sql_transaction_ordered_path,
     build_sql_transaction_path_report,
@@ -21,7 +24,6 @@ from fastapi_endpoint_detector.models.sql_transaction import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
-    from pathlib import Path
 
     from fastapi_endpoint_detector.models.effect_contract_audit import (
         EffectContractAudit,
@@ -380,6 +382,18 @@ def _safe_source_path(root: Path, relative_path: str) -> Path | None:
     return candidate
 
 
+def _read_source_snapshot(path: Path) -> bytes | None:
+    """Reject oversized snapshots before allocation and bound reads across growth."""
+    try:
+        if path.stat().st_size > _MAX_SOURCE_BYTES:
+            return None
+        with path.open("rb") as stream:
+            raw = stream.read(_MAX_SOURCE_BYTES + 1)
+    except OSError:
+        return None
+    return raw if len(raw) <= _MAX_SOURCE_BYTES else None
+
+
 def _load_call_index(
     root: Path,
     file_path: str,
@@ -389,11 +403,8 @@ def _load_call_index(
     source = _safe_source_path(root, file_path)
     if source is None:
         return {}
-    try:
-        raw = source.read_bytes()
-    except OSError:
-        return {}
-    if len(raw) > _MAX_SOURCE_BYTES:
+    raw = _read_source_snapshot(source)
+    if raw is None:
         return {}
     try:
         tree = ast.parse(raw, filename=str(source))
@@ -430,6 +441,1145 @@ def _diagnostic(
         boundary_occurrence_id=boundary_id,
         reason_code=reason,
     )
+
+
+def _module_snapshot(root: Path, module: str) -> tuple[str, bytes] | None:
+    candidates = (
+        Path("source", *module.split(".")).with_suffix(".py.txt"),
+        Path("source", *module.split("."), "__init__.py.txt"),
+    )
+    snapshots = []
+    for relative in candidates:
+        path = _safe_source_path(root, relative.as_posix())
+        if path is not None and path.is_file():
+            snapshots.append((relative, path))
+    if len(snapshots) != 1:
+        return None
+    relative, path = snapshots[0]
+    raw = _read_source_snapshot(path)
+    return None if raw is None else (relative.as_posix(), raw)
+
+
+def _resolve_imported_module(root: Path, current_module: str, node: ast.ImportFrom) -> str | None:
+    """Resolve an import using the package represented by the source snapshot."""
+    if node.level == 0:
+        return node.module
+    module_path = Path("source", *current_module.split(".")).with_suffix(".py.txt")
+    current_source = _safe_source_path(root, module_path.as_posix())
+    init_path = Path("source", *current_module.split("."), "__init__.py.txt")
+    init_source = _safe_source_path(root, init_path.as_posix())
+    is_package = init_source is not None and init_source.is_file()
+    if not is_package and (current_source is None or not current_source.is_file()):
+        return None
+    package_parts = current_module.split(".") if is_package else current_module.split(".")[:-1]
+    remove = node.level - 1
+    if remove >= len(package_parts):
+        return None
+    base = package_parts[: len(package_parts) - remove]
+    if node.module:
+        base.extend(node.module.split("."))
+    return ".".join(base) or None
+
+
+def _resolve_imported_symbol(  # noqa: PLR0911
+    root: Path, current_module: str, node: ast.ImportFrom, alias: ast.alias
+) -> str | None:
+    """Resolve a symbol exported by a package initializer without inventing a submodule."""
+    imported_module = _resolve_imported_module(root, current_module, node)
+    if imported_module is None:
+        return None
+    init_path = _safe_source_path(
+        root, Path("source", *imported_module.split("."), "__init__.py.txt").as_posix()
+    )
+    if node.module is not None and (init_path is None or not init_path.is_file()):
+        return f"{imported_module}.{alias.name}"
+    snapshot = _module_snapshot(root, imported_module)
+    if snapshot is None:
+        return None
+    try:
+        tree = ast.parse(snapshot[1], filename=snapshot[0])
+    except (SyntaxError, ValueError):
+        return None
+    if _has_dynamic_module_binding_mutation(tree):
+        return None
+    exports = [
+        (statement, item)
+        for statement in tree.body
+        if isinstance(statement, ast.ImportFrom)
+        for item in statement.names
+        if (item.asname or item.name) == alias.name and item.name != "*"
+    ]
+    if len(exports) == 1:
+        statement, exported = exports[0]
+        if _module_binding_is_ambiguous(tree, alias.name, statement):
+            return None
+        target_module = _resolve_imported_module(root, imported_module, statement)
+        return f"{target_module}.{exported.name}" if target_module else None
+    definitions = [
+        statement
+        for statement in tree.body
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and statement.name == alias.name
+    ]
+    if len(definitions) == 1:
+        if _module_binding_is_ambiguous(tree, alias.name, definitions[0]):
+            return None
+        return f"{imported_module}.{alias.name}"
+    if node.module is not None and _module_snapshot(root, f"{imported_module}.{alias.name}"):
+        return f"{imported_module}.{alias.name}"
+    return None
+
+
+def _has_attribute_binding_mutation(  # noqa: PLR0912
+    module: ast.Module, namespace: str, attribute: str, *, before_line: int
+) -> bool:
+    """Reject direct writes to a proven imported namespace attribute."""
+    aliases = {namespace}
+    changed = True
+    while changed:
+        changed = False
+        for statement in module.body:
+            if statement.lineno >= before_line:
+                continue
+            if isinstance(statement, ast.Assign):
+                value: ast.expr | None = statement.value
+                targets = statement.targets
+            elif isinstance(statement, ast.AnnAssign):
+                value = statement.value
+                targets = [statement.target]
+            else:
+                continue
+            if isinstance(value, ast.Name) and value.id in aliases:
+                for target in targets:
+                    if isinstance(target, ast.Name) and target.id not in aliases:
+                        aliases.add(target.id)
+                        changed = True
+    for node in ast.walk(module):
+        if getattr(node, "lineno", before_line + 1) >= before_line:
+            continue
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == attribute
+            and isinstance(node.value, ast.Name)
+            and node.value.id in aliases
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+        ):
+            return True
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in {"setattr", "delattr"}
+            and len(node.args) >= 2
+        ):
+            target, name = node.args[:2]
+            if (
+                isinstance(target, ast.Name)
+                and target.id in aliases
+                and isinstance(name, ast.Constant)
+                and name.value == attribute
+            ):
+                return True
+    return False
+
+
+def _attribute_on_name(call: ast.Call, attribute: str, name: str) -> bool:
+    return (
+        isinstance(call.func, ast.Attribute)
+        and call.func.attr == attribute
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == name
+        and isinstance(call.func.value.ctx, ast.Load)
+    )
+
+
+def _owned_nodes(node: ast.AST) -> Iterable[ast.AST]:
+    """Walk one executable scope, excluding deferred nested scopes."""
+    yield node
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            yield child
+            continue
+        yield from _owned_nodes(child)
+
+
+def _scope_parents(root: ast.AST) -> dict[ast.AST, ast.AST]:
+    """Map parents within one scope, leaving deferred nested bodies disconnected."""
+    parents: dict[ast.AST, ast.AST] = {}
+
+    def visit(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+            if not isinstance(
+                child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+            ):
+                visit(child)
+
+    visit(root)
+    return parents
+
+
+def _has_ambiguous_scope_binding(  # noqa: PLR0911
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+    name: str,
+    *,
+    allowed_import: ast.ImportFrom | None = None,
+) -> bool:
+    """Reject names that Python may bind locally anywhere in this function."""
+    arguments = function.args
+    if any(
+        argument.arg == name
+        for argument in (
+            *arguments.posonlyargs,
+            *arguments.args,
+            *arguments.kwonlyargs,
+            *([arguments.vararg] if arguments.vararg else []),
+            *([arguments.kwarg] if arguments.kwarg else []),
+        )
+    ):
+        return True
+    for node in _owned_nodes(function):
+        if isinstance(node, (ast.Global, ast.Nonlocal)) and name in node.names:
+            return True
+        if isinstance(node, ast.ExceptHandler) and node.name == name:
+            return True
+        if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name == name:
+            return True
+        if isinstance(node, ast.MatchMapping) and node.rest == name:
+            return True
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            if node is allowed_import:
+                continue
+            for alias in node.names:
+                bound = alias.asname or (
+                    alias.name.split(".")[0] if isinstance(node, ast.Import) else alias.name
+                )
+                if bound == name:
+                    return True
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and node is not function
+            and node.name == name
+        ):
+            return True
+        if (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+            and node.id == name
+        ):
+            return True
+    return False
+
+
+def _module_binding_is_ambiguous(
+    module: ast.Module,
+    name: str,
+    allowed_binding: (
+        ast.Import | ast.ImportFrom | ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
+    ),
+) -> bool:
+    """Require exactly the source binding that supplied the wrapper."""
+    bindings: list[tuple[ast.AST, str]] = []
+
+    def visit(node: ast.AST) -> None:
+        # Function and class bodies have their own namespaces. Their names bind
+        # in the containing scope, while decorators/defaults/bases execute here.
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            bindings.append((node, node.name))
+            for expression in (*node.decorator_list, *node.args.defaults, *node.args.kw_defaults):
+                if expression is not None:
+                    visit(expression)
+            return
+        if isinstance(node, ast.ClassDef):
+            bindings.append((node, node.name))
+            for class_expression in (*node.decorator_list, *node.bases, *node.keywords):
+                visit(class_expression)
+            return
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                bound = alias.asname or (
+                    alias.name.split(".")[0] if isinstance(node, ast.Import) else alias.name
+                )
+                bindings.append((node, bound))
+            return
+        if isinstance(node, ast.ExceptHandler) and node.name:
+            bindings.append((node, node.name))
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            bindings.append((node, node.id))
+        if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+            bindings.append((node, node.name))
+        if isinstance(node, ast.MatchMapping) and node.rest:
+            bindings.append((node, node.rest))
+        for nested in ast.iter_child_nodes(node):
+            visit(nested)
+
+    for statement in module.body:
+        visit(statement)
+    # A module-executed wildcard import can replace any previously proved
+    # binding; its unknown exported names cannot establish wrapper ownership.
+    if any(bound == "*" for _, bound in bindings):
+        return True
+    matching = [(node, bound) for node, bound in bindings if bound == name]
+    return len(matching) != 1 or matching[0][0] is not allowed_binding
+
+
+def _has_dynamic_module_binding_mutation(module: ast.Module) -> bool:  # noqa: PLR0911, PLR0912, PLR0915
+    """Reject module-executed operations that can replace a binding indirectly.
+
+    Static binding counts cannot account for writes through the module globals
+    mapping, or code evaluated in that namespace. Keep the policy deliberately
+    conservative and inspect only code executed while the module is initialized.
+    """
+
+    postponed_annotations = any(
+        isinstance(statement, ast.ImportFrom)
+        and statement.module == "__future__"
+        and any(alias.name == "annotations" for alias in statement.names)
+        for statement in module.body
+    )
+
+    def executed_nodes(node: ast.AST) -> Iterable[ast.AST]:  # noqa: PLR0912
+        """Walk expressions evaluated during module initialization.
+
+        Function bodies and lambda bodies are deferred, but their decorators,
+        defaults and annotations (when eagerly evaluated) are not. Class bodies
+        execute immediately and can access the module globals mapping.
+        """
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                expressions: list[ast.AST] = [
+                    *child.decorator_list,
+                    *child.args.defaults,
+                    *(item for item in child.args.kw_defaults if item is not None),
+                ]
+                if not postponed_annotations:
+                    arguments = child.args.args + child.args.kwonlyargs + child.args.posonlyargs
+                    expressions.extend(
+                        argument.annotation
+                        for argument in arguments
+                        if argument.annotation is not None
+                    )
+                    if child.args.vararg and child.args.vararg.annotation:
+                        expressions.append(child.args.vararg.annotation)
+                    if child.args.kwarg and child.args.kwarg.annotation:
+                        expressions.append(child.args.kwarg.annotation)
+                    if child.returns:
+                        expressions.append(child.returns)
+                for expression in expressions:
+                    yield expression
+                    yield from executed_nodes(expression)
+                continue
+            if isinstance(child, ast.Lambda):
+                for default_expr in (*child.args.defaults, *child.args.kw_defaults):
+                    if default_expr is not None:
+                        yield default_expr
+                        yield from executed_nodes(default_expr)
+                continue
+            if isinstance(child, ast.ClassDef):
+                for class_expression in (*child.decorator_list, *child.bases, *child.keywords):
+                    yield class_expression
+                    yield from executed_nodes(class_expression)
+                for statement in child.body:
+                    yield statement
+                    yield from executed_nodes(statement)
+                continue
+            yield child
+            yield from executed_nodes(child)
+
+    # Track simple module aliases of dynamic evaluators (for example
+    # ``rebind = exec`` and ``from builtins import exec as run``).
+    dynamic_aliases = {"exec", "eval", "globals", "locals", "vars", "delattr", "setattr"}
+    for statement in executed_nodes(module):
+        if isinstance(statement, ast.ImportFrom) and statement.module == "builtins":
+            dynamic_aliases.update(
+                alias.asname or alias.name
+                for alias in statement.names
+                if alias.name in {"exec", "eval", "globals", "locals", "vars", "delattr", "setattr"}
+            )
+        if isinstance(statement, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+            value = statement.value
+            if isinstance(value, ast.Name) and value.id in dynamic_aliases:
+                targets = (
+                    statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+                )
+                dynamic_aliases.update(
+                    target.id
+                    for item in targets
+                    for target in ast.walk(item)
+                    if isinstance(target, ast.Name)
+                )
+
+    for node in executed_nodes(module):
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+            and isinstance(node.value, ast.Subscript)
+            and isinstance(node.value.slice, ast.Name)
+            and node.value.slice.id == "__name__"
+            and (
+                (isinstance(node.value.value, ast.Attribute) and node.value.value.attr == "modules")
+                or isinstance(node.value.value, ast.Name)
+            )
+        ):
+            # sys.modules[__name__] exposes this module's live namespace,
+            # including aliases imported for the modules mapping.
+            return True
+        if any(
+            isinstance(child, ast.Attribute) and child.attr == "__dict__"
+            for child in ast.walk(node)
+        ):
+            return True
+        if (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+            and any(
+                isinstance(child, ast.Attribute) and child.attr == "__dict__"
+                for child in ast.walk(node.value)
+            )
+        ):
+            return True
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id in dynamic_aliases:
+            return True
+        if isinstance(func, ast.Attribute) and func.attr in {"exec", "eval", "delattr", "setattr"}:
+            return True
+        if isinstance(func, ast.Name) and func.id == "getattr" and len(node.args) >= 2:
+            if isinstance(node.args[1], ast.Constant) and node.args[1].value in {"exec", "eval"}:
+                return True
+            if isinstance(node.args[0], ast.Name) and node.args[0].id == "__builtins__":
+                return True
+        if (
+            isinstance(func, ast.Subscript)
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "__builtins__"
+        ):
+            return True
+        # Any access to globals() during module initialization can expose the
+        # namespace to mutation, including aliases and update/setitem forms.
+        if any(
+            isinstance(child, ast.Call)
+            and isinstance(child.func, ast.Name)
+            and child.func.id in {"globals", "locals"}
+            for child in ast.walk(node)
+        ):
+            return True
+        if isinstance(func, ast.Name) and func.id == "vars" and not node.args:
+            return True
+        if isinstance(func, ast.Attribute) and func.attr in {"setattr", "update"}:
+            if any(
+                isinstance(child, ast.Attribute) and child.attr == "__dict__"
+                for child in ast.walk(func.value)
+            ):
+                return True
+            if isinstance(func.value, ast.Name) and func.value.id == "setattr":
+                return True
+        if isinstance(func, ast.Name) and func.id == "setattr":
+            return True
+    return False
+
+
+def _has_verified_asynccontextmanager(
+    module: ast.Module, function: ast.FunctionDef | ast.AsyncFunctionDef
+) -> bool:
+    """Accept only the stdlib decorator under one unambiguous import binding."""
+    if not isinstance(function, ast.AsyncFunctionDef):
+        return False
+    if len(function.decorator_list) != 1:
+        return False
+    decorator = function.decorator_list[0]
+    binding: ast.Import | ast.ImportFrom | None = None
+    bound_name: str | None = None
+    for statement in module.body:
+        if (
+            isinstance(decorator, ast.Name)
+            and isinstance(statement, ast.ImportFrom)
+            and statement.module == "contextlib"
+            and statement.level == 0
+        ):
+            if any(
+                (alias.asname or alias.name) == decorator.id and alias.name == "asynccontextmanager"
+                for alias in statement.names
+            ):
+                binding, bound_name = statement, decorator.id
+        elif (
+            isinstance(decorator, ast.Attribute)
+            and decorator.attr == "asynccontextmanager"
+            and isinstance(decorator.value, ast.Name)
+            and isinstance(statement, ast.Import)
+            and any(
+                alias.name == "contextlib" and (alias.asname or "contextlib") == decorator.value.id
+                for alias in statement.names
+            )
+        ):
+            binding, bound_name = statement, decorator.value.id
+    namespace = bound_name if isinstance(decorator, ast.Attribute) else None
+    return (
+        binding is not None
+        and bound_name is not None
+        # Decorators are evaluated while the function statement executes, so
+        # an import later in the module cannot provide this binding.
+        and binding.lineno < function.lineno
+        and not _module_binding_is_ambiguous(module, bound_name, binding)
+        and not (
+            namespace is not None
+            and _has_attribute_binding_mutation(
+                module, namespace, "asynccontextmanager", before_line=function.lineno
+            )
+        )
+    )
+
+
+def _enclosing_receiver_context(
+    node: ast.AST,
+    parents: dict[ast.AST, ast.AST],
+    receiver: tuple[str, ...] | None,
+) -> ast.With | ast.AsyncWith | None:
+    current = parents.get(node)
+    while current is not None:
+        if isinstance(current, (ast.With, ast.AsyncWith)) and any(
+            _target_key(item.optional_vars) == receiver
+            for item in current.items
+            if item.optional_vars is not None
+        ):
+            return current
+        current = parents.get(current)
+    return None
+
+
+def _has_unreachable_terminator(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> bool:
+    """Return whether an unconditional terminator precedes node in its block."""
+    current = node
+    while current in parents:
+        owner = parents[current]
+        if (
+            isinstance(owner, ast.If)
+            and isinstance(owner.test, ast.Constant)
+            and (
+                (not bool(owner.test.value) and current in owner.body)
+                or (bool(owner.test.value) and current in owner.orelse)
+            )
+        ):
+            return True
+        if (
+            isinstance(owner, ast.While)
+            and isinstance(owner.test, ast.Constant)
+            and not bool(owner.test.value)
+            and current in owner.body
+        ):
+            return True
+        if isinstance(owner, ast.stmt):
+            siblings = next(
+                (
+                    value
+                    for _name, value in ast.iter_fields(owner)
+                    if isinstance(value, list) and current in value
+                ),
+                None,
+            )
+            if siblings is not None:
+                position = siblings.index(current)
+                if _block_must_transfer(
+                    [item for item in siblings[:position] if isinstance(item, ast.stmt)]
+                ):
+                    return True
+        current = owner
+    return False
+
+
+def _block_must_transfer(statements: list[ast.stmt]) -> bool:
+    """Recognize paths with no normal fallthrough in a bounded statement block."""
+    for statement in statements:
+        if isinstance(statement, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
+            return True
+        if isinstance(statement, ast.If):
+            if isinstance(statement.test, ast.Constant):
+                selected = statement.body if bool(statement.test.value) else statement.orelse
+                if _block_must_transfer(selected):
+                    return True
+            elif _block_must_transfer(statement.body) and _block_must_transfer(statement.orelse):
+                return True
+        if isinstance(statement, ast.Try) and _block_must_transfer(statement.finalbody):
+            return True
+    return False
+
+
+def _supports_zero_argument_call(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Check that a direct call with no arguments can bind this function."""
+    arguments = function.args
+    positional = [*arguments.posonlyargs, *arguments.args]
+    required_positional = len(positional) - len(arguments.defaults)
+    if required_positional:
+        return False
+    return not any(default is None for default in arguments.kw_defaults)
+
+
+def _call_binds_function(  # noqa: PLR0911
+    call: ast.Call, function: ast.FunctionDef | ast.AsyncFunctionDef
+) -> bool:
+    """Prove that explicit call arguments bind without a Python TypeError."""
+    parameters = function.args
+    positional = [*parameters.posonlyargs, *parameters.args]
+    required_positional_count = len(positional) - len(parameters.defaults)
+    keyword_only = {item.arg for item in parameters.kwonlyargs}
+    required_keyword_only = {
+        item.arg
+        for item, default in zip(parameters.kwonlyargs, parameters.kw_defaults, strict=True)
+        if default is None
+    }
+    var_keyword = parameters.kwarg is not None
+    bound: set[str] = set()
+
+    for index, argument in enumerate(call.args):
+        if isinstance(argument, ast.Starred):
+            return False
+        if index < len(positional):
+            bound.add(positional[index].arg)
+        elif parameters.vararg is None:
+            return False
+
+    seen_keywords: set[str] = set()
+    for keyword in call.keywords:
+        if keyword.arg is None or keyword.arg in seen_keywords:
+            return False
+        name = keyword.arg
+        seen_keywords.add(name)
+        if name in {item.arg for item in parameters.posonlyargs}:
+            if not var_keyword:
+                return False
+            continue
+        if name in {item.arg for item in parameters.args}:
+            if name in bound:
+                return False
+            bound.add(name)
+        elif name in keyword_only:
+            bound.add(name)
+        elif not var_keyword:
+            return False
+
+    required_positional = {item.arg for item in positional[:required_positional_count]}
+    return required_positional <= bound and required_keyword_only <= bound
+
+
+def _yield_can_reach_normal_boundary(  # noqa: PLR0912
+    yielded: ast.Yield, boundary: ast.Call, parents: dict[ast.AST, ast.AST]
+) -> bool:
+    """Check fallthrough from the suspended yield through its enclosing blocks.
+
+    A sibling check at the boundary alone loses return/raise statements inside
+    the branch which reached the yield. Inspect each exited block's suffix too.
+    """
+    if _has_unreachable_terminator(yielded, parents):
+        return False
+    # A boundary in the sibling arm of a conditional cannot follow this yield.
+    yield_cursor: ast.AST = yielded
+    while yield_cursor in parents:
+        owner = parents[yield_cursor]
+        if isinstance(owner, ast.If):
+            in_body = any(yield_cursor in set(_owned_nodes(item)) for item in owner.body)
+            in_else = any(yield_cursor in set(_owned_nodes(item)) for item in owner.orelse)
+            call_body = any(boundary in set(_owned_nodes(item)) for item in owner.body)
+            call_else = any(boundary in set(_owned_nodes(item)) for item in owner.orelse)
+            if (in_body and call_else) or (in_else and call_body):
+                return False
+        if isinstance(owner, ast.Match):
+            yield_case = next(
+                (case for case in owner.cases if yielded in set(_owned_nodes(case))), None
+            )
+            boundary_case = next(
+                (case for case in owner.cases if boundary in set(_owned_nodes(case))), None
+            )
+            if (
+                yield_case is not None
+                and boundary_case is not None
+                and yield_case is not boundary_case
+            ):
+                return False
+        yield_cursor = owner
+    boundary_ancestors: set[ast.AST] = {boundary}
+    current: ast.AST = boundary
+    while current in parents:
+        current = parents[current]
+        boundary_ancestors.add(current)
+    current = yielded
+    while current in parents:
+        owner = parents[current]
+        for _field, values in ast.iter_fields(owner):
+            if not isinstance(values, list) or current not in values:
+                continue
+            suffix = values[values.index(current) + 1 :]
+            # Only the statements before the boundary's containing statement
+            # matter once both paths share a block.
+            before_boundary = []
+            for sibling in suffix:
+                if sibling in boundary_ancestors:
+                    break
+                if isinstance(sibling, ast.stmt):
+                    before_boundary.append(sibling)
+            if _block_must_transfer(before_boundary):
+                return False
+        if owner in boundary_ancestors:
+            return True
+        current = owner
+    return False
+
+
+def _is_delegated_exit_boundary(
+    call: ast.Call,
+    name: str,
+    yielded_contexts: tuple[
+        tuple[ast.Yield, tuple[str, ...] | None, ast.With | ast.AsyncWith | None], ...
+    ],
+    parents: dict[ast.AST, ast.AST],
+) -> bool:
+    """Require a boundary on an exit path of the delegated yield's try."""
+    for yield_node, _receiver, _context in yielded_contexts:
+        if (call.lineno, call.col_offset) <= (yield_node.lineno, yield_node.col_offset):
+            continue
+        current: ast.AST | None = yield_node
+        while current is not None:
+            parent = parents.get(current)
+            if isinstance(parent, ast.Try) and current in parent.body:
+                allowed = parent.body + parent.orelse if name == "commit" else parent.handlers
+                if any(call in set(_owned_nodes(statement)) for statement in allowed):
+                    # A nested except arm cannot handle the exception injected
+                    # at this yield. Only the yield's own handler is in scope.
+                    ancestor = parents.get(call)
+                    while ancestor is not None and ancestor is not parent:
+                        if isinstance(ancestor, ast.ExceptHandler) and ancestor not in allowed:
+                            return False
+                        ancestor = parents.get(ancestor)
+                    # A boundary must execute, rather than merely appear in a
+                    # dead suffix or an unawaited coroutine expression.
+                    parent = parents.get(call)
+                    if not isinstance(parent, ast.Await) or parent.value is not call:
+                        return False
+                    if call.keywords:
+                        return False
+                    return not _has_unreachable_terminator(call, parents) and (
+                        name != "commit"
+                        or _yield_can_reach_normal_boundary(yield_node, call, parents)
+                    )
+            current = parent
+    return False
+
+
+def _fixture_source_projections(  # noqa: PLR0912, PLR0915
+    root: Path,
+    audit: EffectContractAudit,
+) -> list[SQLTransactionSourceProjection]:
+    """Associate an unresolved SQL method with an exact yielded wrapper receiver.
+
+    This is deliberately a source projection, not a resolved SQL stage: the
+    method remains unresolved and the record cannot establish persistence.
+    """
+    result: list[SQLTransactionSourceProjection] = []
+    fixture_effects = root / "effects.yaml"
+    try:
+        loaded_contracts = load_effect_contracts(fixture_effects)
+    except (OSError, ValueError):
+        return result
+    contract_by_id = {item.id: item for item in loaded_contracts.document.contracts}
+    for begin in audit.occurrences:
+        contract = contract_by_id.get(begin.contract_id or "")
+        if (
+            contract is None
+            or loaded_contracts.contract_hashes.get(contract.id) != begin.contract_hash
+            or contract.behavior.stage_receiver_from_yield is not True
+            or contract.behavior.context_exit is None
+            or not begin.canonical_symbol
+        ):
+            continue
+        wrapper_module = begin.canonical_symbol.rsplit(".", 1)[0]
+        wrapper = _module_snapshot(root, wrapper_module)
+        endpoint_candidates = [
+            item
+            for item in audit.occurrences
+            if item.resolver_status.value != "exact"
+            and item.reason_code == "fixture_type_proof_unavailable"
+            and any(
+                endpoint.id == begin_endpoint.id
+                for endpoint in item.endpoints
+                for begin_endpoint in begin.endpoints
+            )
+            and item.file_path == begin.file_path
+            and item.source_spelling.endswith(".execute")
+        ]
+        if wrapper is None or len(endpoint_candidates) != 1:
+            continue
+        stage = endpoint_candidates[0]
+        endpoint_ids = sorted(
+            {endpoint.id for endpoint in begin.endpoints}
+            & {endpoint.id for endpoint in stage.endpoints}
+        )
+        if not endpoint_ids:
+            continue
+        endpoint_path = _safe_source_path(root, stage.file_path)
+        if endpoint_path is None:
+            continue
+        endpoint_bytes = _read_source_snapshot(endpoint_path)
+        if endpoint_bytes is None:
+            continue
+        try:
+            wrapper_tree = ast.parse(wrapper[1], filename=wrapper[0])
+            endpoint_tree = ast.parse(endpoint_bytes, filename=stage.file_path)
+        except (OSError, SyntaxError, ValueError):
+            continue
+        wrapper_fn = next(
+            (
+                node
+                for node in wrapper_tree.body
+                if isinstance(node, ast.AsyncFunctionDef)
+                and node.name == begin.canonical_symbol.rsplit(".", 1)[-1]
+            ),
+            None,
+        )
+        if (
+            wrapper_fn is None
+            or not _has_verified_asynccontextmanager(wrapper_tree, wrapper_fn)
+            or _module_binding_is_ambiguous(wrapper_tree, wrapper_fn.name, wrapper_fn)
+            or _has_dynamic_module_binding_mutation(wrapper_tree)
+        ):
+            continue
+        delegated_symbol = None
+        wrapper_yields_receiver = False
+        wrapper_contexts = [
+            node for node in _owned_nodes(wrapper_fn) if isinstance(node, ast.AsyncWith)
+        ]
+        # A projection proves only one captured delegation. Multiple contexts
+        # or branch alternatives need path reconciliation rather than last-wins.
+        if len(wrapper_contexts) != 1 or len(wrapper_contexts[0].items) != 1:
+            continue
+        wrapper_yields = [
+            node
+            for node in _owned_nodes(wrapper_fn)
+            if isinstance(node, (ast.Yield, ast.YieldFrom))
+        ]
+        if len(wrapper_yields) != 1:
+            continue
+        wrapper_scope_calls: dict[str, str] = {}
+        wrapper_import_nodes: dict[str, ast.ImportFrom] = {}
+        # Module imports must execute before the wrapper definition. Function
+        # local imports must be unconditional direct statements before the
+        # async-with use; delayed or conditional imports do not dominate it.
+        module_positions = {node: index for index, node in enumerate(wrapper_tree.body)}
+        function_positions = {node: index for index, node in enumerate(wrapper_fn.body)}
+        for node in wrapper_tree.body:
+            if module_positions[node] >= module_positions.get(wrapper_fn, -1):
+                continue
+            if isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    local_name = alias.asname or alias.name
+                    canonical = _resolve_imported_symbol(root, wrapper_module, node, alias)
+                    if canonical:
+                        wrapper_scope_calls[local_name] = canonical
+                        wrapper_import_nodes[local_name] = node
+        for node in wrapper_fn.body:
+            if isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    local_name = alias.asname or alias.name
+                    canonical = _resolve_imported_symbol(root, wrapper_module, node, alias)
+                    if canonical:
+                        # Retain function-local bindings separately; their
+                        # validity is checked against the actual use below.
+                        wrapper_scope_calls[f"{local_name}@local:{node.lineno}"] = canonical
+                        wrapper_import_nodes[f"{local_name}@local:{node.lineno}"] = node
+        for owned_node in _owned_nodes(wrapper_fn):
+            if isinstance(owned_node, ast.AsyncWith):
+                for item in owned_node.items:
+                    captured = _target_key(item.optional_vars) if item.optional_vars else None
+                    target = item.context_expr
+                    if (
+                        captured is not None
+                        and isinstance(target, ast.Call)
+                        and isinstance(target.func, ast.Name)
+                        and not target.args
+                        and not target.keywords
+                    ):
+                        canonical = wrapper_scope_calls.get(target.func.id)
+                        import_node = wrapper_import_nodes.get(target.func.id)
+                        if canonical is None:
+                            for key, candidate in wrapper_import_nodes.items():
+                                if key.startswith(f"{target.func.id}@local:"):
+                                    import_position = function_positions.get(candidate, -1)
+                                    use_position = function_positions.get(owned_node, -1)
+                                    if 0 <= import_position < use_position:
+                                        canonical = wrapper_scope_calls[key]
+                                        import_node = candidate
+                                        break
+                        if canonical is None:
+                            continue
+                        if (
+                            import_node is None
+                            or (
+                                import_node in module_positions
+                                and _module_binding_is_ambiguous(
+                                    wrapper_tree, target.func.id, import_node
+                                )
+                            )
+                            or _has_ambiguous_scope_binding(
+                                wrapper_fn,
+                                target.func.id,
+                                allowed_import=import_node
+                                if import_node in function_positions
+                                else None,
+                            )
+                        ):
+                            continue
+                        delegated_symbol = canonical
+                        target = item.context_expr
+                        wrapper_yields_receiver = any(
+                            isinstance(child, ast.Expr)
+                            and isinstance(child.value, ast.Yield)
+                            and child.value.value is not None
+                            and _target_key(child.value.value) == captured
+                            and not _has_unreachable_terminator(
+                                child.value, _scope_parents(wrapper_fn)
+                            )
+                            for child in owned_node.body
+                        ) and not _receiver_reassigned(
+                            tuple(owned_node.body), -1, len(owned_node.body), captured
+                        )
+        if not delegated_symbol or not wrapper_yields_receiver:
+            continue
+        delegated_module, delegate_name = delegated_symbol.rsplit(".", 1)
+        delegated = _module_snapshot(root, delegated_module)
+        if delegated is None:
+            continue
+        try:
+            delegated_tree = ast.parse(delegated[1], filename=delegated[0])
+        except SyntaxError:
+            continue
+        delegate_fn = next(
+            (
+                node
+                for node in delegated_tree.body
+                if isinstance(node, ast.AsyncFunctionDef) and node.name == delegate_name
+            ),
+            None,
+        )
+        if (
+            delegate_fn is None
+            or not _has_verified_asynccontextmanager(delegated_tree, delegate_fn)
+            or _module_binding_is_ambiguous(delegated_tree, delegate_fn.name, delegate_fn)
+            or _has_dynamic_module_binding_mutation(delegated_tree)
+            or not _supports_zero_argument_call(delegate_fn)
+        ):
+            continue
+        delegate_parents = _scope_parents(delegate_fn)
+        yielded_contexts = tuple(
+            (
+                node,
+                _receiver_key(node.value),
+                _enclosing_receiver_context(node, delegate_parents, _receiver_key(node.value)),
+            )
+            for node in _owned_nodes(delegate_fn)
+            if isinstance(node, ast.Yield) and node.value is not None
+        )
+        yielded = {receiver for _node, receiver, context in yielded_contexts if context is not None}
+        context_nodes = {
+            context for _node, _receiver, context in yielded_contexts if context is not None
+        }
+        boundary_calls = tuple(
+            node
+            for node in _owned_nodes(delegate_fn)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        )
+
+        def has_boundary(
+            name: str,
+            calls: tuple[ast.Call, ...] = boundary_calls,
+            yielded_receivers: set[tuple[str, ...] | None] = yielded,
+            expected_contexts: set[ast.With | ast.AsyncWith] = context_nodes,
+            parents: dict[ast.AST, ast.AST] = delegate_parents,
+            expected_yields: tuple[
+                tuple[ast.Yield, tuple[str, ...] | None, ast.With | ast.AsyncWith | None], ...
+            ] = yielded_contexts,
+        ) -> bool:
+            return any(
+                node.func.attr == name
+                and _receiver_key(node.func.value) in yielded_receivers
+                and node.args == []
+                and _is_delegated_exit_boundary(node, name, expected_yields, parents)
+                and _enclosing_receiver_context(node, parents, _receiver_key(node.func.value))
+                in expected_contexts
+                for node in calls
+                if isinstance(node.func, ast.Attribute)
+            )
+
+        yield_session = (
+            len(yielded) == 1
+            and None not in yielded
+            and len(context_nodes) == 1
+            and len(yielded_contexts) == 1
+        )
+        # A matching spelling is insufficient after a receiver assignment.
+        # Inspect the captured context body, excluding its initial `as` binding.
+        if any(
+            receiver is None
+            or context is None
+            or _receiver_reassigned(tuple(context.body), -1, len(context.body), receiver)
+            for _node, receiver, context in yielded_contexts
+        ):
+            continue
+        has_commit = has_boundary("commit")
+        has_rollback = has_boundary("rollback")
+        if not (yield_session and has_commit and has_rollback):
+            continue
+        handler = next(
+            (
+                node
+                for node in endpoint_tree.body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and any(
+                    isinstance(child, ast.Call)
+                    and child.func.lineno == stage.line
+                    and child.func.col_offset == stage.column
+                    for child in _owned_nodes(node)
+                )
+            ),
+            None,
+        )
+        if handler is None:
+            continue
+        endpoint_module_path = Path(stage.file_path)
+        if endpoint_module_path.parts[0] != "source" or not endpoint_module_path.name.endswith(
+            ".py.txt"
+        ):
+            continue
+        endpoint_parts = [*endpoint_module_path.parts[1:-1], endpoint_module_path.name[:-7]]
+        if endpoint_parts[-1] == "__init__":
+            endpoint_parts.pop()
+        endpoint_module = ".".join(endpoint_parts)
+        imported_wrapper_bindings = [
+            (node, alias.asname or alias.name)
+            for node in endpoint_tree.body
+            if isinstance(node, ast.ImportFrom)
+            for alias in node.names
+            if _resolve_imported_symbol(root, endpoint_module, node, alias)
+            == begin.canonical_symbol
+        ]
+        if len(imported_wrapper_bindings) != 1:
+            continue
+        wrapper_import, imported_wrapper_name = imported_wrapper_bindings[0]
+        if _module_binding_is_ambiguous(endpoint_tree, imported_wrapper_name, wrapper_import):
+            continue
+        if _has_dynamic_module_binding_mutation(endpoint_tree):
+            continue
+        if _has_ambiguous_scope_binding(handler, imported_wrapper_name):
+            continue
+        match = None
+        for owned_node in _owned_nodes(handler):
+            if not isinstance(owned_node, ast.AsyncWith) or len(owned_node.items) != 1:
+                continue
+            item = owned_node.items[0]
+            context_call = item.context_expr
+            if (
+                not isinstance(context_call, ast.Call)
+                or not isinstance(context_call.func, ast.Name)
+                or context_call.func.id != imported_wrapper_name
+            ):
+                continue
+            if not _call_binds_function(context_call, wrapper_fn):
+                continue
+            if (
+                context_call.func.lineno,
+                context_call.func.col_offset,
+                context_call.func.end_lineno,
+                context_call.func.end_col_offset,
+            ) != (begin.line, begin.column, begin.end_line, begin.end_column):
+                continue
+            captured = _target_key(item.optional_vars) if item.optional_vars is not None else None
+            if captured is None or len(captured) != 1:
+                continue
+            receiver_name = captured[0]
+            stage_node = next(
+                (
+                    child
+                    for child in _owned_nodes(owned_node)
+                    if isinstance(child, ast.Call)
+                    and _attribute_on_name(child, "execute", receiver_name)
+                    and child.func.lineno == stage.line
+                    and child.func.col_offset == stage.column
+                ),
+                None,
+            )
+            if stage_node is None or not any(
+                isinstance(child, ast.Await) and child.value is stage_node
+                for child in _owned_nodes(owned_node)
+            ):
+                continue
+            if _has_unreachable_terminator(stage_node, _scope_parents(handler)):
+                continue
+            # The stage must be a direct expression in the owned context body.
+            if not any(
+                isinstance(stmt, ast.Expr)
+                and isinstance(stmt.value, ast.Await)
+                and stmt.value.value is stage_node
+                for stmt in owned_node.body
+            ):
+                continue
+            if (
+                len(
+                    [
+                        child
+                        for child in _owned_nodes(handler)
+                        if isinstance(child, ast.Call)
+                        and _attribute_on_name(child, "execute", receiver_name)
+                    ]
+                )
+                != 1
+            ):
+                continue
+            match = owned_node
+            break
+        if match is None:
+            continue
+        captured_target = match.items[0].optional_vars
+        if captured_target is None:
+            continue
+        receiver = ast.unparse(captured_target)
+        receiver_key = _target_key(captured_target)
+        if receiver_key is None or _receiver_reassigned(
+            tuple(match.body), -1, len(match.body), receiver_key
+        ):
+            continue
+        receiver_hash = _semantic_hash({"kind": "receiver_expression", "parts": receiver_key})
+        endpoint_hash = f"sha256:{hashlib.sha256(endpoint_bytes).hexdigest()}"
+        wrapper_hash = f"sha256:{hashlib.sha256(wrapper[1]).hexdigest()}"
+        delegated_hash = f"sha256:{hashlib.sha256(delegated[1]).hexdigest()}"
+        uncertainty = (
+            "SQL method identity is unresolved because fixture type proof is unavailable.",
+            "Projection depends on the exact matched context contract and captured yield receiver.",
+            "Normal or exceptional exit is conditional; runtime outcome and persistence are not "
+            "established.",
+        )
+        for endpoint_id in endpoint_ids:
+            provisional = SQLTransactionSourceProjection.model_construct(
+                id="sha256:" + "0" * 64,
+                endpoint_id=endpoint_id,
+                begin_occurrence_id=begin.id,
+                unresolved_stage_occurrence_id=stage.id,
+                endpoint_file_path=stage.file_path,
+                endpoint_source_hash=endpoint_hash,
+                wrapper_file_path=wrapper[0],
+                wrapper_source_hash=wrapper_hash,
+                delegated_wrapper_file_path=delegated[0],
+                delegated_wrapper_source_hash=delegated_hash,
+                function_name=handler.name,
+                receiver_hash=receiver_hash,
+                receiver_expression=receiver,
+                uncertainty=uncertainty,
+            )
+            result.append(
+                SQLTransactionSourceProjection.model_validate(
+                    {
+                        **provisional.model_dump(mode="python"),
+                        "id": _semantic_hash(provisional.identity_payload()),
+                    }
+                )
+            )
+    return result
 
 
 def _nearest_begin(
@@ -746,5 +1896,6 @@ def build_sql_transaction_path_diagnostics(  # noqa: PLR0912, PLR0915
         tuple(unique_paths.values()),
         tuple(unique_diagnostics.values()),
         context_paths=tuple(unique_context_paths.values()),
+        source_projections=tuple(_fixture_source_projections(root, audit)),
         max_pairs=max_pairs,
     )
