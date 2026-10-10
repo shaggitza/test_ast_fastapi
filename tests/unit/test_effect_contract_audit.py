@@ -805,7 +805,19 @@ def test_package_applicability_is_reported_but_not_used_for_matching(tmp_path: P
     assert audit.scope.package_applicability == "not_evaluated"
 
 
-@pytest.mark.parametrize("mutation", ["stable", "changed", "removed", "unreadable", "added"])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "stable",
+        "changed",
+        "removed",
+        "unreadable",
+        "added",
+        "source_changed",
+        "source_removed",
+        "source_unreadable",
+    ],
+)
 def test_cold_audit_uses_final_metadata_snapshot(  # noqa: PLR0915 - one cold evidence fixture
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
 ) -> None:
@@ -879,7 +891,7 @@ def test_cold_audit_uses_final_metadata_snapshot(  # noqa: PLR0915 - one cold ev
         return raw
 
     monkeypatch.setattr(Path, "read_bytes", raced_read)
-    if mutation == "added":
+    if mutation == "added" or mutation.startswith("source_"):
         original_fingerprint = MypyAnalyzer._fingerprint_typed_environment
 
         def add_before_final_snapshot(
@@ -888,7 +900,21 @@ def test_cold_audit_uses_final_metadata_snapshot(  # noqa: PLR0915 - one cold ev
             authenticated_metadata_hashes: dict[str, str] | None = None,
             authenticated_metadata_roots: set[Path] | None = None,
         ) -> str:
-            if authenticated_metadata_hashes is not None:
+            if authenticated_metadata_hashes is not None and mutation.startswith("source_"):
+                assert self.verified_mypy_source_hashes
+                if mutation == "source_changed":
+                    stub.write_text("def emit(value: int) -> None: ...\n", encoding="utf-8")
+                elif mutation == "source_removed":
+                    stub.unlink()
+                else:
+
+                    def deny_source_read(path: Path) -> bytes:
+                        if path == stub:
+                            raise PermissionError("synthetic final source read denial")
+                        return raced_read(path)
+
+                    monkeypatch.setattr(Path, "read_bytes", deny_source_read)
+            if authenticated_metadata_hashes is not None and mutation == "added":
                 assert str(metadata.resolve()) in authenticated_metadata_hashes
                 added = dist.parent / "race-pkg-2.0.dist-info"
                 added.mkdir()

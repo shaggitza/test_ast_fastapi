@@ -6757,6 +6757,7 @@ class MypyAnalyzer:
         if self._build_result is None:
             return ""
         inputs: dict[str, str] = {}
+        source_snapshot_changed = False
         package_roots: set[Path] = set()
         for state in self._build_result.graph.values():
             state_path = getattr(state, "path", None)
@@ -6764,10 +6765,15 @@ class MypyAnalyzer:
                 continue
             path = Path(state_path)
             try:
-                if path.is_file() and path.suffix in {".py", ".pyi"}:
+                if path.suffix in {".py", ".pyi"}:
                     content = path.read_bytes()
                     current_digest = hashlib.sha256(content).hexdigest()
                     parsed_digest = getattr(state, "source_hash", None)
+                    if (
+                        isinstance(parsed_digest, str)
+                        and hashlib.sha1(content).hexdigest() != parsed_digest
+                    ):
+                        source_snapshot_changed = True
                     inputs[str(path.resolve())] = (
                         f"{current_digest}:{parsed_digest}"
                         if isinstance(parsed_digest, str)
@@ -6781,6 +6787,14 @@ class MypyAnalyzer:
                             break
             except OSError as exc:
                 inputs[str(path.resolve())] = f"unreadable:{type(exc).__name__}"
+                if isinstance(getattr(state, "source_hash", None), str):
+                    source_snapshot_changed = True
+        if source_snapshot_changed:
+            # Final cache inputs must still match the bytes mypy parsed.
+            # A stale authenticated pin cannot survive source drift or a lost read.
+            self._verified_mypy_source_hashes.clear()
+            self._verified_package_source_hashes.clear()
+            self._verified_package_versions.clear()
         metadata_snapshot_hashes: dict[str, str] = {}
         if authenticated_metadata_roots is not None:
             package_roots.update(authenticated_metadata_roots)
