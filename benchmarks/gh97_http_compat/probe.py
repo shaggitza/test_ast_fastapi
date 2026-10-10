@@ -248,7 +248,7 @@ def run(wheels: dict[str, Path] = WHEELS) -> dict[str, Any]:
     source = fixture_source()
     with tempfile.TemporaryDirectory(prefix="gh97_http_wheels_") as temp:
         root = Path(temp)
-        package_root = root / "site"
+        package_root = root
         manifests = {
             name: extract_python_sources(wheel, package_root, name)
             for name, wheel in wheels.items()
@@ -257,13 +257,15 @@ def run(wheels: dict[str, Path] = WHEELS) -> dict[str, Any]:
         app.mkdir()
         fixture = app / "fixture.py"
         fixture.write_text(source, encoding="utf-8")
-        # MypyAnalyzer prepends source_root.parent to MYPYPATH. Point its standard
-        # source-root parent at extracted packages while keeping the app separate.
-        # Symlink/copy-free package lookup is provided with a temporary package root.
-        analyzer = MypyAnalyzer(app, max_depth=2, no_site_packages=True, target_platform="linux")
-        # Analyzer's supported mypy_path is app.parent; place packages there.
-        for child in package_root.iterdir():
-            child.rename(root / child.name)
+        # Keep fixture inventory rooted at app while explicitly pointing mypy at
+        # the separately extracted, verified package sources.
+        analyzer = MypyAnalyzer(
+            app,
+            module_root=package_root,
+            max_depth=2,
+            no_site_packages=True,
+            target_platform="linux",
+        )
         handler_line = next(
             index
             for index, line in enumerate(source.splitlines(), 1)
@@ -383,6 +385,7 @@ def run(wheels: dict[str, Path] = WHEELS) -> dict[str, Any]:
                 "max_depth": 2,
                 "no_site_packages": True,
                 "target_platform": "linux",
+                "module_root_policy": "explicit_verified_extracted_package_root",
                 "ambient_mypypath": "excluded",
             },
             "preset": PRESET,

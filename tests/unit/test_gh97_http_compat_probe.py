@@ -39,8 +39,12 @@ def test_installed_artifact_calls_are_resolved_from_wheel_sources() -> None:
         sum(row["contract_id"] is not None for row in observations) == report["matched_call_count"]
     )
     foreign = next(row for row in observations if row["source_spelling"] == "foreign.get")
-    assert foreign["canonical_symbol"] == "app.fixture.Foreign.get"
-    assert foreign["audit_status"] == "unmatched"
+    assert foreign["canonical_symbol"] is None
+    assert foreign["audit_status"] == "ambiguous"
+    assert foreign["resolver_status"] == "ambiguous"
+    assert foreign["reason_code"] == "open_receiver_dispatch"
+    assert foreign["contract_id"] is None
+    assert any(candidate.endswith("Foreign") for candidate in foreign["receiver_candidates"])
     forwarded = next(
         row
         for row in observations
@@ -49,7 +53,10 @@ def test_installed_artifact_calls_are_resolved_from_wheel_sources() -> None:
     assert forwarded["source_spelling"] == "client.get"
     assert forwarded["contract_id"] == "requests-session-get"
     assert forwarded["audit_status"] == "matched"
-    assert forwarded["receiver_origin"]["status"] == "unavailable"
+    assert forwarded["resource"]["status"] == "exact"
+    assert len(forwarded["resource"]["value_hashes"]) == 1
+    # The 28 literal package calls plus the forwarded literal URL support selectors.
+    assert report["selector_supported_call_count"] == 29
     assert not any(
         row["line"]
         in {
@@ -67,15 +74,6 @@ def test_installed_artifact_calls_are_resolved_from_wheel_sources() -> None:
     )
     assert dynamic["contract_id"] == "requests-session-get"
     assert dynamic["resource"]["status"] == "unavailable"
-    assert (
-        sum(
-            row["contract_id"] is not None
-            and row["resource"] is not None
-            and row["resource"]["status"] != "unavailable"
-            for row in observations
-        )
-        == 28
-    )
     assert {
         name: item["wheel_sha256"].removeprefix("sha256:")
         for name, item in report["packages"].items()
@@ -85,6 +83,9 @@ def test_installed_artifact_calls_are_resolved_from_wheel_sources() -> None:
     assert all(row["call_diagnostics"] == [] for row in observations)
     assert all(row["call_validation"] == "no_call_diagnostics" for row in observations)
     assert report["compatibility_complete"] is False
+    assert report["analysis_config"]["module_root_policy"] == (
+        "explicit_verified_extracted_package_root"
+    )
     assert report["global_diagnostic_count"] > 0
     assert all(not Path(item["path"]).is_absolute() for item in report["product_imports"].values())
     assert all(not Path(item["wheel"]).is_absolute() for item in report["packages"].values())
