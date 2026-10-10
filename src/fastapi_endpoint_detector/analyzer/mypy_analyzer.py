@@ -627,6 +627,7 @@ class MypyAnalyzer:
             str, dict[tuple[str, int, int], tuple[ast.Lambda, ...]] | None
         ] = {}
         self._resolved_call_site_cache: dict[int, ResolvedCallSite | None] = {}
+        self._imported_callable_mutation_cache: dict[str, bool] = {}
         self._finite_global_value_cache: dict[str, _FinitePointsTo | None] = {}
         self._finite_global_in_progress: set[str] = set()
         self._exact_project_identity_cache: dict[str, tuple[str, str] | None] = {}
@@ -1001,6 +1002,7 @@ class MypyAnalyzer:
         self._python_ast_nodes_cache.clear()
         self._python_verified_call_spans.clear()
         self._python_call_span_abstained.clear()
+        self._imported_callable_mutation_cache.clear()
         self._call_source_snapshot_cache.clear()
         self._source_bytes_cache.clear()
         if clear_source_records:
@@ -2645,6 +2647,206 @@ class MypyAnalyzer:
             receiver = MypyAnalyzer._explicit_import_fullname(expression.expr, import_map)
             return f"{receiver}.{expression.name}" if receiver is not None else None
         return None
+
+    def _source_callable_declaration(self, fullname: str) -> tuple[str, InvocationKind] | None:
+        """Follow source-visible re-exports for a call target, including dependencies."""
+        visited: set[str] = set()
+        current = fullname
+        for _depth in range(self.max_depth + 1):
+            if current in visited:
+                return None
+            visited.add(current)
+            resolved = self._resolve_fullname_to_file(current)
+            if resolved is None:
+                return None
+            _path, module = resolved
+            tree = self._trees.get(module)
+            if tree is None or not current.startswith(f"{module}."):
+                return None
+            qualified = current[len(module) + 1 :]
+            if "." in qualified:
+                return None
+            symbol = tree.names.get(qualified)
+            if symbol is not None:
+                declaration = self._callable_declaration(symbol.node)
+                if declaration is not None:
+                    return declaration
+            reexport = self._import_map_for_tree(tree, module).get(qualified)
+            if reexport is None:
+                return None
+            current = reexport
+        return None
+
+    def _imported_callable_is_mutated(self, fullname: str) -> bool:
+        """Fail closed when analyzed source rebinds an imported callable or module."""
+        cached = self._imported_callable_mutation_cache.get(fullname)
+        if cached is not None:
+            return cached
+
+        def imported_path(expression: ast.expr, aliases: dict[str, str]) -> str | None:
+            if isinstance(expression, ast.Name):
+                return aliases.get(expression.id)
+            if isinstance(expression, ast.Attribute):
+                receiver = imported_path(expression.value, aliases)
+                if receiver == "*":
+                    return "*"
+                return f"{receiver}.{expression.attr}" if receiver else None
+            return None
+
+        def module_aliases(nodes: list[ast.AST], module_name: str) -> dict[str, str]:
+            aliases: dict[str, str] = {}
+            package = module_name.rpartition(".")[0].split(".") if "." in module_name else []
+
+            def bind(local: str, imported: str) -> None:
+                previous = aliases.get(local)
+                aliases[local] = imported if previous in {None, imported} else "*"
+
+            for statement in nodes:
+                if isinstance(statement, ast.Import):
+                    for item in statement.names:
+                        local = item.asname or item.name.split(".")[0]
+                        bind(local, item.name if item.asname else item.name.split(".")[0])
+                elif isinstance(statement, ast.ImportFrom):
+                    imported = statement.module or ""
+                    if statement.level:
+                        parent = package[: max(0, len(package) - statement.level + 1)]
+                        imported = ".".join([*parent, imported] if imported else parent)
+                    for item in statement.names:
+                        if item.name != "*":
+                            bind(item.asname or item.name, f"{imported}.{item.name}".strip("."))
+                elif isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                    value = statement.value
+                    resolved = imported_path(value, aliases) if value is not None else None
+                    targets = (
+                        statement.targets
+                        if isinstance(statement, ast.Assign)
+                        else [statement.target]
+                    )
+                    if resolved is not None:
+                        for target in targets:
+                            if isinstance(target, ast.Name):
+                                bind(target.id, resolved)
+
+            return aliases
+
+        def target_is_mutation(target: ast.expr, aliases: dict[str, str]) -> bool:
+            path = imported_path(target, aliases)
+            if path is None:
+                if (
+                    isinstance(target, ast.Subscript)
+                    and isinstance(target.value, ast.Attribute)
+                    and target.value.attr == "__dict__"
+                ):
+                    receiver = imported_path(target.value.value, aliases)
+                    if receiver and fullname.startswith(f"{receiver}."):
+                        key = target.slice
+                        return not (
+                            isinstance(key, ast.Constant)
+                            and isinstance(key.value, str)
+                            and not fullname.startswith(f"{receiver}.{key.value}.")
+                            and fullname != f"{receiver}.{key.value}"
+                        )
+                return False
+            if path == "*":
+                return True
+            declaration = self._source_callable_declaration(path)
+            if declaration is not None:
+                return declaration[0] == fullname
+            return fullname.startswith(f"{path}.") or path == fullname
+
+        found_mutation = False
+        uncertain = False
+        for module_name in sorted(self._project_modules):
+            path = self._module_to_path.get(module_name)
+            if path is None:
+                uncertain = True
+                break
+            snapshot = self._bounded_call_source_snapshot(path)
+            if snapshot is None:
+                uncertain = True
+                break
+            try:
+                tree = ast.parse(snapshot.decode("utf-8"), filename=path)
+            except (SyntaxError, UnicodeError, RecursionError):
+                uncertain = True
+                break
+            bounded_nodes = self._python_ast_nodes(str(Path(path).resolve()), tree)
+            if bounded_nodes is None:
+                uncertain = True
+                break
+            aliases = module_aliases(bounded_nodes, module_name)
+            for node in bounded_nodes:
+                targets: list[ast.expr] = []
+                if isinstance(node, ast.Assign):
+                    targets = list(node.targets)
+                elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+                    targets = [node.target]
+                elif isinstance(node, ast.Delete):
+                    targets = list(node.targets)
+                for target in targets:
+                    stack = [target]
+                    while stack:
+                        candidate = stack.pop()
+                        if target_is_mutation(candidate, aliases):
+                            found_mutation = True
+                            break
+                        if isinstance(candidate, (ast.Tuple, ast.List)):
+                            stack.extend(candidate.elts)
+                    if found_mutation:
+                        break
+                if found_mutation:
+                    break
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                    dynamic_name = node.func.id
+                    dynamic_fullname = aliases.get(dynamic_name, "")
+                    if dynamic_name in {"exec", "eval"} or dynamic_fullname in {
+                        "builtins.exec",
+                        "builtins.eval",
+                    }:
+                        if any(
+                            module == "*"
+                            or fullname.startswith(f"{module}.")
+                            or (
+                                (declaration := self._source_callable_declaration(module))
+                                is not None
+                                and declaration[0] == fullname
+                            )
+                            for module in aliases.values()
+                        ):
+                            found_mutation = True
+                            break
+                    if dynamic_name in {"setattr", "delattr"} or dynamic_fullname in {
+                        "builtins.setattr",
+                        "builtins.delattr",
+                    }:
+                        if len(node.args) < 2:
+                            continue
+                        receiver = imported_path(node.args[0], aliases)
+                        attribute = node.args[1]
+                        if receiver == "*" or (receiver and fullname.startswith(f"{receiver}.")):
+                            if receiver == "*":
+                                found_mutation = True
+                                break
+                            if not isinstance(attribute, ast.Constant) or not isinstance(
+                                attribute.value, str
+                            ):
+                                found_mutation = True
+                                break
+                            mutated_path = f"{receiver}.{attribute.value}"
+                            declaration = self._source_callable_declaration(mutated_path)
+                            if (
+                                (declaration is not None and declaration[0] == fullname)
+                                or fullname.startswith(f"{mutated_path}.")
+                                or mutated_path == fullname
+                            ):
+                                found_mutation = True
+                                break
+            if found_mutation:
+                break
+
+        result = found_mutation or uncertain
+        self._imported_callable_mutation_cache[fullname] = result
+        return result
 
     def _project_member_declaration(self, fullname: str) -> tuple[str, InvocationKind] | None:
         """Resolve a method through an exact source-proven project class export."""
@@ -4371,6 +4573,25 @@ class MypyAnalyzer:
                 reason_code = None
             else:
                 reason_code = "unresolved_super_dispatch"
+        if status == CallResolutionStatus.EXACT and canonical_symbol is not None:
+            imported_fullname = self._explicit_import_fullname(callee, import_map)
+            if imported_fullname is None and isinstance(callee, NameExpr):
+                imported_fullname = import_map.get(callee.name)
+            imported_declaration = (
+                self._source_callable_declaration(imported_fullname)
+                if imported_fullname is not None
+                else None
+            )
+            if (
+                imported_declaration is not None
+                and imported_declaration[0] == canonical_symbol
+                and self._imported_callable_is_mutated(canonical_symbol)
+            ):
+                status = CallResolutionStatus.AMBIGUOUS
+                canonical_symbol = None
+                invocation = None
+                receiver_candidates = ()
+                reason_code = "mutated_imported_callable"
         resolver_version = self._resolver_version
         receiver_origin = (
             self._receiver_origin_identity(callee, current_file, import_map, line)
