@@ -561,6 +561,8 @@ class SurfaceRegistrationEvidence(BaseModel):
     registration_file: Path
     registration_line: int = Field(ge=1)
     registration_column: int = Field(ge=0)
+    callback_reference_span: NativeSourceSpan | None = None
+    include_reference_spans: tuple[NativeSourceSpan, ...] = ()
     registration_source_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     handler_source_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     contract_source_path: str

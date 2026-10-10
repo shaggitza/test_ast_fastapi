@@ -20,6 +20,7 @@ from fastapi_endpoint_detector.models.endpoint import (
     EndpointMethod,
     HandlerInfo,
     InventoryStatus,
+    NativeSourceSpan,
     RouteActivationEvidence,
     SurfaceRegistrationEvidence,
 )
@@ -101,6 +102,7 @@ class _FrameworkIncludeEvent:
     parent: _FrameworkToken
     child: _FrameworkToken | None
     condition: EndpointDiscoveryCondition | None
+    source_span: NativeSourceSpan
     routes_only: bool = False
 
 
@@ -782,7 +784,7 @@ class CustomSurfaceExtractor:
         self._endpoints: list[Endpoint] = []
         self._limitations: list[EndpointDiscoveryCondition] = []
         self._route_conditions: list[EndpointDiscoveryCondition] = []
-        self._seen: set[tuple[str, int, int, str, str, str, str]] = set()
+        self._seen: set[tuple[str, int, int, str, str, str, str, int, int]] = set()
         self._startup_route_seen: set[tuple[str, int, str, tuple[EndpointMethod, ...], str]] = set()
         self._module_states: dict[str, dict[str, _Binding | None]] = {}
         self._class_scope_frames: list[_ClassScopeFrame] = []
@@ -847,7 +849,10 @@ class CustomSurfaceExtractor:
         self._process_app_factory()
         self._process_bootstrap()
         self._filter_framework_surfaces()
-        collapsed: dict[tuple[str, str, int, int], Endpoint] = {}
+        collapsed: dict[
+            tuple[str, str, int, str, int, int, int, int, tuple[tuple[str, int, int], ...]],
+            Endpoint,
+        ] = {}
         for endpoint in self._endpoints:
             declared = next(
                 (
@@ -861,11 +866,39 @@ class CustomSurfaceExtractor:
                 endpoint.identifier,
                 str(endpoint.handler.file_path),
                 endpoint.handler.line_number,
+                str(endpoint.surface.registration_file)
+                if declared is not None
+                and declared.multiplicity == ContractMultiplicity.ALL_EXECUTE
+                and endpoint.surface is not None
+                else "",
                 endpoint.surface.registration_line
                 if declared is not None
                 and declared.multiplicity == ContractMultiplicity.ALL_EXECUTE
                 and endpoint.surface is not None
                 else 0,
+                endpoint.surface.registration_column
+                if declared is not None
+                and declared.multiplicity == ContractMultiplicity.ALL_EXECUTE
+                and endpoint.surface is not None
+                else 0,
+                endpoint.surface.callback_reference_span.start_line
+                if declared is not None
+                and declared.multiplicity == ContractMultiplicity.ALL_EXECUTE
+                and endpoint.surface is not None
+                and endpoint.surface.callback_reference_span is not None
+                else 0,
+                endpoint.surface.callback_reference_span.start_column
+                if declared is not None
+                and declared.multiplicity == ContractMultiplicity.ALL_EXECUTE
+                and endpoint.surface is not None
+                and endpoint.surface.callback_reference_span is not None
+                else 0,
+                tuple(
+                    (str(span.file_path), span.start_line, span.start_column)
+                    for span in endpoint.surface.include_reference_spans
+                )
+                if endpoint.surface is not None
+                else (),
             )
             previous = collapsed.get(key)
             if previous is None or (
@@ -1236,7 +1269,30 @@ class CustomSurfaceExtractor:
                     for ancestor in self._framework_include_ancestors(event.parent, included_by):
                         conditions.setdefault(ancestor, []).append(event.condition)
                 continue
-            copied_endpoints = () if event.routes_only else tuple(live.get(event.child, ()))
+            copied_endpoints = (
+                ()
+                if event.routes_only
+                else tuple(
+                    endpoint.model_copy(
+                        update={
+                            "surface": endpoint.surface.model_copy(
+                                update={
+                                    "include_reference_spans": (
+                                        *endpoint.surface.include_reference_spans,
+                                        event.source_span,
+                                    )
+                                }
+                            )
+                        }
+                    )
+                    if endpoint.surface is not None
+                    and self._contract_has_multiplicity(
+                        endpoint.surface.contract_id, ContractMultiplicity.ALL_EXECUTE
+                    )
+                    else endpoint
+                    for endpoint in live.get(event.child, ())
+                )
+            )
             copied_routes = tuple(routes.get(event.child, ()))
             routes.setdefault(event.parent, []).extend(copied_routes)
             copied_conditions = tuple(conditions.get(event.child, ()))
@@ -1275,11 +1331,6 @@ class CustomSurfaceExtractor:
                 else:
                     retained.append(endpoint)
             live[token] = retained + list(latest.values())
-        accepted = {
-            id(endpoint)
-            for token in self._framework_selected_tokens
-            for endpoint in live.get(token, ())
-        }
         owned_routes: dict[
             tuple[str, int], tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef]
         ] = {}
@@ -1288,9 +1339,11 @@ class CustomSurfaceExtractor:
                 owned_routes[(route[0].name, id(route[1]))] = route
         self._framework_owned_routes = list(owned_routes.values())
         self._endpoints = [
+            endpoint for endpoint in self._endpoints if not self._is_framework_endpoint(endpoint)
+        ] + [
             endpoint
-            for endpoint in self._endpoints
-            if not self._is_framework_endpoint(endpoint) or id(endpoint) in accepted
+            for token in sorted(self._framework_selected_tokens)
+            for endpoint in live.get(token, ())
         ]
         for token in self._framework_selected_tokens:
             self._limitations.extend(conditions.get(token, ()))
@@ -2358,8 +2411,27 @@ class CustomSurfaceExtractor:
             receiver = self._binding_from_expression(
                 malformed_getattr_receiver_expr, callable_state, module.name
             )
+            requested_name_expression = (
+                call.func.args[1]
+                if len(call.func.args) > 1
+                else next(
+                    (item.value for item in call.func.keywords if item.arg == "name"),
+                    None,
+                )
+            )
+            requested_name = (
+                requested_name_expression.value
+                if isinstance(requested_name_expression, ast.Constant)
+                and isinstance(requested_name_expression.value, str)
+                else None
+            )
+            relevant_framework_method = requested_name is None or any(
+                contract.registration.symbol.rsplit(".", 1)[-1] == requested_name
+                for contract in self.contracts.document.contracts
+            )
             if (
-                receiver is not None
+                relevant_framework_method
+                and receiver is not None
                 and receiver.kind == "receiver"
                 and receiver.instance_token is not None
             ):
@@ -2369,7 +2441,10 @@ class CustomSurfaceExtractor:
                         EndpointDiscoveryCondition(
                             source_path=module.path,
                             source_line=call.lineno,
-                            reason="getattr lifecycle method call has unsupported arguments",
+                            reason=(
+                                "getattr lifecycle method or other framework registration "
+                                "call has unsupported arguments"
+                            ),
                         ),
                     )
                 )
@@ -3041,6 +3116,13 @@ class CustomSurfaceExtractor:
                 parent=parent,
                 child=child,
                 condition=condition,
+                source_span=NativeSourceSpan(
+                    file_path=module.path,
+                    start_line=call.lineno,
+                    start_column=call.col_offset,
+                    end_line=call.end_lineno or call.lineno,
+                    end_column=call.end_col_offset or call.col_offset + 1,
+                ),
                 routes_only=call.func.attr == "mount",
             )
         )
@@ -3150,11 +3232,11 @@ class CustomSurfaceExtractor:
         call: ast.Call,
         state: dict[str, _Binding | None],
         evaluation: _CallEvaluation | None,
-        contract: SurfaceContract,
+        _contract: SurfaceContract,
         reason: str,
     ) -> bool:
-        """Attach lifecycle uncertainty to its app when its receiver is known."""
-        if self._scope_framework_surfaces and contract.surface.kind == "framework.lifecycle":
+        """Attach framework uncertainty to its app when its receiver is known."""
+        if self._scope_framework_surfaces:
             token = self._framework_method_token(call, evaluation, state, module.name)
             if token is not None:
                 self._framework_events.append(
@@ -3642,6 +3724,8 @@ class CustomSurfaceExtractor:
                     handler_module.name,
                     function.name,
                     resource,
+                    handler_expression.lineno if handler_expression is not None else 0,
+                    handler_expression.col_offset if handler_expression is not None else 0,
                 )
                 if key in self._seen:
                     continue
@@ -3661,6 +3745,19 @@ class CustomSurfaceExtractor:
                     registration_file=module.path,
                     registration_line=call.lineno,
                     registration_column=call.col_offset,
+                    callback_reference_span=(
+                        NativeSourceSpan(
+                            file_path=module.path,
+                            start_line=handler_expression.lineno,
+                            start_column=handler_expression.col_offset,
+                            end_line=handler_expression.end_lineno or handler_expression.lineno,
+                            end_column=handler_expression.end_col_offset
+                            if handler_expression.end_col_offset is not None
+                            else handler_expression.col_offset,
+                        )
+                        if handler_expression is not None
+                        else None
+                    ),
                     registration_source_hash=self._source_hash(module, call),
                     handler_source_hash=self._source_hash(handler_module, function),
                     contract_source_path=str(self.contracts.source_path),
@@ -3712,6 +3809,16 @@ class CustomSurfaceExtractor:
                     item.source_path == module.path
                     and item.source_line == call.lineno
                     and "matched but handler was unresolved" in item.reason
+                )
+            ]
+            self._framework_events = [
+                event
+                for event in self._framework_events
+                if not (
+                    isinstance(event, _FrameworkConditionEvent)
+                    and event.condition.source_path == module.path
+                    and event.condition.source_line == call.lineno
+                    and "matched but handler was unresolved" in event.condition.reason
                 )
             ]
 
