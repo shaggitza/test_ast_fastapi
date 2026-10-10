@@ -200,6 +200,65 @@ def test_native_dependency_helper_diff_reaches_only_public_descendant_routes(
         assert candidate.endpoint.native_provenance.side == SnapshotSide.TARGET
 
 
+@pytest.mark.parametrize("change", ["base", "inherited_helper"])
+def test_callable_instance_dependency_change_reaches_only_its_route(
+    tmp_path: Path, change: str
+) -> None:
+    baseline = tmp_path / "baseline"
+    target = tmp_path / "target"
+    before = (
+        "from fastapi import Depends, FastAPI\n"
+        "def v1_helper(): return 1\n"
+        "def v2_helper(): return 2\n"
+        "class V1:\n"
+        "    def __call__(self): return v1_helper()\n"
+        "class V2:\n"
+        "    def __call__(self): return v2_helper()\n"
+        "class Provider(V1): pass\n"
+        "provider = Provider()\n"
+        "app = FastAPI()\n"
+        "@app.get('/items')\n"
+        "def items(value=Depends(provider)): return value\n"
+        "@app.get('/unrelated')\n"
+        "def unrelated(value=Depends(v1_helper)): return value\n"
+    )
+    if change == "base":
+        old_line = "class Provider(V1): pass"
+        new_line = "class Provider(V2): pass"
+    else:
+        old_line = "def v1_helper(): return 1"
+        new_line = "def v1_helper(): return 10"
+    after = before.replace(old_line, new_line)
+    assert after != before
+    for root, source in ((baseline, before), (target, after)):
+        root.mkdir()
+        (root / "main.py").write_text(source, encoding="utf-8")
+    changed_line = next(
+        number for number, line in enumerate(after.splitlines(), start=1) if line == new_line
+    )
+    diff = (
+        "diff --git a/main.py b/main.py\n"
+        f"--- a/main.py\n+++ b/main.py\n@@ -{changed_line},1 +{changed_line},1 @@\n"
+        f"-{old_line}\n+{new_line}\n"
+    )
+
+    report = ChangeMapper(
+        target / "main.py",
+        baseline_app_path=baseline / "main.py",
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+
+    expected = {"GET /items"}
+    if change == "inherited_helper":
+        expected.add("GET /unrelated")
+    candidates = {item.endpoint.identifier: item for item in report.candidate_endpoints}
+    assert set(candidates) == expected
+    for candidate in candidates.values():
+        assert candidate.endpoint.native_provenance is not None
+        assert candidate.endpoint.native_provenance.side == SnapshotSide.TARGET
+
+
 @pytest.mark.parametrize(
     ("helper", "expected"),
     [
@@ -392,6 +451,35 @@ def test_dynamic_dependency_expression_is_retained_as_conditional(
     assert dependency.kind == "ambiguous"
     assert dependency.confidence == "conditional"
     assert native_route_structural_owners(endpoint, app_file, {1}) == ()
+
+
+@pytest.mark.parametrize(
+    "provider_setup",
+    [
+        "provider = make_provider()\n",
+        "provider = Provider()\nif FLAG: provider = make_provider()\n",
+    ],
+)
+def test_callable_instance_dependency_keeps_dynamic_or_conditional_binding_low(
+    tmp_path: Path, provider_setup: str
+) -> None:
+    app_file = tmp_path / "main.py"
+    app_file.write_text(
+        "from fastapi import Depends, FastAPI\n"
+        "class Provider:\n"
+        "    def __call__(self): return 1\n"
+        + provider_setup
+        + "app = FastAPI()\n"
+        + "@app.get('/items')\n"
+        + "def items(value=Depends(provider)): return value\n",
+        encoding="utf-8",
+    )
+    endpoint = SecureASTExtractor(app_file).extract_endpoints()[0]
+    provenance = endpoint.native_provenance
+    assert provenance is not None
+    dependency = provenance.registration.dependency_expressions[0]
+    assert dependency.confidence == "conditional"
+    assert dependency.callable_expressions == ()
 
 
 def test_dependency_binding_alias_keyword_and_shadowing_are_conservative(tmp_path: Path) -> None:

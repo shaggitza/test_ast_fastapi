@@ -302,7 +302,12 @@ def _native_dependency_expressions(
                 if (
                     known_shape
                     and resolved is not None
-                    and _is_local_function_dependency(extractor, module, target, value.lineno)
+                    and (
+                        _is_local_function_dependency(extractor, module, target, value.lineno)
+                        or _is_local_callable_instance_dependency(
+                            extractor, module, target, value.lineno
+                        )
+                    )
                 ):
                     confidence = "established"
         result.append(
@@ -338,7 +343,7 @@ def _canonical_dependency_constructor(
     return None
 
 
-def _qualified_dependency_callable(
+def _qualified_dependency_callable(  # noqa: PLR0911 - exact binding alternatives fail closed
     extractor: SecureASTExtractor, module: _Module, target: ast.expr, line: int
 ) -> str | None:
     """Return an exact binding identity; leave dynamic or colliding names conditional."""
@@ -348,6 +353,9 @@ def _qualified_dependency_callable(
         function = extractor._function_at(module, target.id, line)
         if function is not None:
             return f"{module.name}.{target.id}"
+        instance_method = _local_callable_instance_method(extractor, module, target.id, line)
+        if instance_method is not None:
+            return instance_method
         binding = extractor._import_binding_at(module, target.id, line)
         if binding is not None and binding.symbol is not None:
             return f"{binding.module}.{binding.symbol}"
@@ -357,6 +365,121 @@ def _qualified_dependency_callable(
         if binding is not None and binding.symbol is None:
             return f"{binding.module}.{target.attr}"
     return None
+
+
+def _local_callable_instance_method(
+    extractor: SecureASTExtractor, module: _Module, instance_name: str, line: int
+) -> str | None:
+    """Resolve a simple module-local instance to its exact inherited ``__call__``."""
+    assignments = [
+        statement
+        for statement in module.tree.body
+        if isinstance(statement, (ast.Assign, ast.AnnAssign))
+        and _assignment_name(statement) == instance_name
+        and statement.lineno <= line
+        and statement.value is not None
+    ]
+    if len(assignments) != 1:
+        return None
+    assignment = assignments[0]
+    value = assignment.value
+    if (
+        not isinstance(value, ast.Call)
+        or not isinstance(value.func, ast.Name)
+        or value.args
+        or value.keywords
+        or _lexically_bound_name(module, instance_name, line)
+        or extractor._module_name_may_bind(
+            module,
+            instance_name,
+            assignment.end_lineno or assignment.lineno,
+            line,
+        )
+    ):
+        return None
+    class_name = value.func.id
+    initial_classes = [
+        node
+        for node in module.tree.body
+        if isinstance(node, ast.ClassDef)
+        and node.name == class_name
+        and node.lineno < assignment.lineno
+    ]
+    if len(initial_classes) != 1:
+        return None
+    initial_class = initial_classes[0]
+    if extractor._module_name_may_bind(
+        module, class_name, initial_class.end_lineno or initial_class.lineno, assignment.lineno
+    ):
+        return None
+
+    seen: set[str] = set()
+
+    def effective_method(owner: str, depth: int = 0) -> str | None:  # noqa: PLR0911
+        if depth >= 16 or owner in seen:
+            return None
+        seen.add(owner)
+        definitions = [
+            node
+            for node in module.tree.body
+            if (
+                isinstance(node, ast.ClassDef)
+                and node.name == owner
+                and node.lineno < assignment.lineno
+            )
+        ]
+        if len(definitions) != 1:
+            return None
+        definition = definitions[0]
+        if (
+            definition.decorator_list
+            or definition.keywords
+            or extractor._module_name_may_bind(
+                module, owner, definition.end_lineno or definition.lineno, line
+            )
+        ):
+            return None
+        safe_body = all(
+            isinstance(node, ast.Pass)
+            or (
+                isinstance(node, ast.Expr)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+            )
+            or (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == "__call__"
+            )
+            for node in definition.body
+        )
+        if not safe_body:
+            return None
+        methods = [
+            node
+            for node in definition.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "__call__"
+        ]
+        if methods:
+            if len(methods) != 1 or methods[0].decorator_list:
+                return None
+            return "resolved"
+        if len(definition.bases) != 1 or not isinstance(definition.bases[0], ast.Name):
+            return None
+        return effective_method(definition.bases[0].id, depth + 1)
+
+    return (
+        f"{module.name}.{class_name}.__call__" if effective_method(class_name) is not None else None
+    )
+
+
+def _is_local_callable_instance_dependency(
+    extractor: SecureASTExtractor, module: _Module, target: ast.expr | None, line: int
+) -> bool:
+    return (
+        isinstance(target, ast.Name)
+        and not _lexically_bound_name(module, target.id, line)
+        and _local_callable_instance_method(extractor, module, target.id, line) is not None
+    )
 
 
 def _is_local_function_dependency(
@@ -1503,6 +1626,68 @@ class SecureASTExtractor:
                                     )
                                     if dependency_expression:
                                         handler_dependency_expressions.extend(dependency_expression)
+                            dependency_declarations = [
+                                dependency
+                                for item in current_object_chain
+                                for dependency in item.dependency_expressions
+                            ]
+                            dependency_declarations.extend(
+                                dependency
+                                for edge in assembly_chain
+                                for dependency in edge.dependency_expressions
+                            )
+                            dependency_declarations.extend(route.dependency_expressions)
+                            dependency_declarations.extend(handler_dependency_expressions)
+                            for dependency in dependency_declarations:
+                                for callable_expression in dependency.callable_expressions:
+                                    if not callable_expression.endswith(".__call__"):
+                                        continue
+                                    provider_module_name, _, provider_class_name = (
+                                        callable_expression[: -len(".__call__")].rpartition(".")
+                                    )
+                                    provider_module = modules.get(provider_module_name)
+                                    if provider_module is None:
+                                        continue
+                                    provider_classes = [
+                                        candidate
+                                        for candidate in provider_module.tree.body
+                                        if isinstance(candidate, ast.ClassDef)
+                                        and candidate.name == provider_class_name
+                                    ]
+                                    if len(provider_classes) != 1:
+                                        continue
+                                    provider_class = provider_classes[0]
+                                    related_binding = f"{route.handler.module}.{route.handler.name}"
+                                    source_owners.extend(
+                                        NativeRouteSourceOwnerEvidence(
+                                            side=self.snapshot_side,
+                                            owner_kind="class_base",
+                                            qualified_binding=callable_expression[
+                                                : -len(".__call__")
+                                            ],
+                                            related_binding=related_binding,
+                                            confidence=dependency.confidence,
+                                            expression=ast.unparse(base)[:4096],
+                                            source_span=_native_span(provider_module.path, base),
+                                        )
+                                        for base in provider_class.bases
+                                    )
+                                    source_owners.extend(
+                                        NativeRouteSourceOwnerEvidence(
+                                            side=self.snapshot_side,
+                                            owner_kind="class_decorator",
+                                            qualified_binding=callable_expression[
+                                                : -len(".__call__")
+                                            ],
+                                            related_binding=related_binding,
+                                            confidence=dependency.confidence,
+                                            expression=ast.unparse(decorator)[:4096],
+                                            source_span=_native_span(
+                                                provider_module.path, decorator
+                                            ),
+                                        )
+                                        for decorator in provider_class.decorator_list
+                                    )
                             source_owners.append(
                                 NativeRouteSourceOwnerEvidence(
                                     side=self.snapshot_side,
