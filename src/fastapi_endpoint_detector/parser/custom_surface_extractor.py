@@ -1468,13 +1468,12 @@ class CustomSurfaceExtractor:
             self._limitations.append(self._framework_root_condition)
         self._emit_background_task_surfaces()
 
-    @staticmethod
-    def _qualify_mounted_exception(endpoint: Endpoint) -> Endpoint:
+    def _qualify_mounted_exception(self, endpoint: Endpoint) -> Endpoint:
         """Keep exception keys separate across mounted application scopes."""
         surface = endpoint.surface
         assert surface is not None
         surface_id = f"{surface.surface_id}@mount:" + "/".join(
-            f"{span.file_path}:{span.start_line}:{span.start_column}"
+            f"{span.file_path.relative_to(self.root).as_posix()}:{span.start_line}:{span.start_column}"
             for span in surface.include_reference_spans
         )
         return endpoint.model_copy(
@@ -2723,6 +2722,8 @@ class CustomSurfaceExtractor:
                 duplicate_token = receiver.instance_token if receiver is not None else None
             elif isinstance(call.func, ast.Name):
                 callable_binding = callable_state.get(call.func.id)
+                if callable_binding is not None:
+                    callable_binding = self._follow_project_binding(callable_binding)
                 if callable_binding is not None and callable_binding.kind == "method":
                     duplicate_token = callable_binding.instance_token
             if duplicate_token is None and (
@@ -3280,12 +3281,16 @@ class CustomSurfaceExtractor:
             )
         child = self._framework_receiver_token(capture.binding if capture is not None else None)
         condition = None
-        if child is None:
+        invalid_mount = call.func.attr == "mount" and not self._mount_call_has_valid_shape(call)
+        if child is None or invalid_mount:
+            child = None
             condition = EndpointDiscoveryCondition(
                 source_path=module.path,
                 source_line=call.lineno,
                 reason=(
-                    "selected application include_router target is dynamic or unresolved, or "
+                    "selected application mount argument shape is invalid or unresolved; "
+                    if invalid_mount
+                    else "selected application include_router target is dynamic or unresolved, or "
                     "mount target is unresolved; "
                     "framework surface inventory is incomplete"
                 ),
@@ -3305,6 +3310,21 @@ class CustomSurfaceExtractor:
                 routes_only=call.func.attr == "mount",
             )
         )
+
+    @staticmethod
+    def _mount_call_has_valid_shape(call: ast.Call) -> bool:
+        """Reject calls that cannot bind Starlette's path/app/name parameters."""
+        parameters = ("path", "app", "name")
+        if len(call.args) > len(parameters) or any(
+            isinstance(arg, ast.Starred) for arg in call.args
+        ):
+            return False
+        provided = set(parameters[: len(call.args)])
+        for keyword in call.keywords:
+            if keyword.arg not in parameters or keyword.arg in provided:
+                return False
+            provided.add(keyword.arg)
+        return {"path", "app"} <= provided
 
     def _record_framework_route(  # noqa: PLR0912
         self,

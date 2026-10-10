@@ -32,6 +32,75 @@ def _extract(tmp_path: Path, *, app_entry: str | None = None) -> EndpointInvento
     ).extract_inventory()
 
 
+def test_mounted_exception_ids_are_stable_across_snapshot_checkout_roots(tmp_path: Path) -> None:
+    source = (
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\nchild = FastAPI()\n"
+        "@child.exception_handler(ValueError)\n"
+        "async def child_error(request, exc): return None\n"
+        "app.mount('/first', child)\napp.mount('/second', child)\n"
+    )
+    identifiers = []
+    for name in ("baseline_checkout", "target_checkout"):
+        root = tmp_path / name
+        root.mkdir()
+        (root / "main.py").write_text(source, encoding="utf-8")
+        inventory = _extract(root)
+        assert inventory.status == InventoryStatus.ESTABLISHED
+        identifiers.append({item.identifier for item in inventory.endpoints})
+    assert len(identifiers[0]) == 2
+    assert identifiers[0] == identifiers[1]
+    assert all(str(tmp_path) not in item for item in identifiers[0])
+
+
+@pytest.mark.parametrize(
+    "mount",
+    [
+        "app.mount(app=child)",
+        "app.mount('/child')",
+        "app.mount('/child', child, 'name', 'extra')",
+        "app.mount('/child', child, path='/duplicate')",
+        "app.mount('/child', child, unknown=True)",
+    ],
+)
+def test_invalid_mount_shape_does_not_establish_child_request_callbacks(
+    tmp_path: Path, mount: str
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\nchild = FastAPI()\n"
+        "@child.middleware('http')\n"
+        "async def audit(request, call_next): return await call_next(request)\n"
+        "@child.exception_handler(ValueError)\n"
+        "async def child_error(request, exc): return None\n"
+        f"{mount}\n",
+        encoding="utf-8",
+    )
+    inventory = _extract(tmp_path)
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert not inventory.endpoints
+    assert any("mount argument shape" in item.reason for item in inventory.limitations)
+
+
+def test_imported_registration_alias_duplicate_keywords_condition_selected_receiver(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "registrations.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\nregister = app.add_event_handler\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "main.py").write_text(
+        "from registrations import app, register\n"
+        "async def callback(): pass\n"
+        "register(event_type='startup', func=callback, **{'event_type': 'shutdown'})\n",
+        encoding="utf-8",
+    )
+    inventory = _extract(tmp_path)
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert not inventory.endpoints
+    assert any("duplicate keyword" in item.reason for item in inventory.limitations)
+
+
 def test_framework_preset_versions_explicit_registration_multiplicity() -> None:
     loaded = load_surface_preset("framework-v1")
     assert loaded.document.preset.version == "9"
