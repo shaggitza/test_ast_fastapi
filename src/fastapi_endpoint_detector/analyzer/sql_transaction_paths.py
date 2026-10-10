@@ -684,13 +684,13 @@ def _has_dynamic_module_binding_mutation(module: ast.Module) -> bool:  # noqa: P
 
     # Track simple module aliases of dynamic evaluators (for example
     # ``rebind = exec`` and ``from builtins import exec as run``).
-    dynamic_aliases = {"exec", "eval", "globals", "locals", "vars"}
+    dynamic_aliases = {"exec", "eval", "globals", "locals", "vars", "delattr"}
     for statement in executed_nodes(module):
         if isinstance(statement, ast.ImportFrom) and statement.module == "builtins":
             dynamic_aliases.update(
                 alias.asname or alias.name
                 for alias in statement.names
-                if alias.name in {"exec", "eval", "globals", "locals", "vars"}
+                if alias.name in {"exec", "eval", "globals", "locals", "vars", "delattr"}
             )
         if isinstance(statement, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
             value = statement.value
@@ -739,7 +739,7 @@ def _has_dynamic_module_binding_mutation(module: ast.Module) -> bool:  # noqa: P
         func = node.func
         if isinstance(func, ast.Name) and func.id in dynamic_aliases:
             return True
-        if isinstance(func, ast.Attribute) and func.attr in {"exec", "eval"}:
+        if isinstance(func, ast.Attribute) and func.attr in {"exec", "eval", "delattr"}:
             return True
         if isinstance(func, ast.Name) and func.id == "getattr" and len(node.args) >= 2:
             if isinstance(node.args[1], ast.Constant) and node.args[1].value in {"exec", "eval"}:
@@ -893,7 +893,7 @@ def _block_must_transfer(statements: list[ast.stmt]) -> bool:
     return False
 
 
-def _yield_can_reach_normal_boundary(
+def _yield_can_reach_normal_boundary(  # noqa: PLR0912
     yielded: ast.Yield, boundary: ast.Call, parents: dict[ast.AST, ast.AST]
 ) -> bool:
     """Check fallthrough from the suspended yield through its enclosing blocks.
@@ -903,6 +903,18 @@ def _yield_can_reach_normal_boundary(
     """
     if _has_unreachable_terminator(yielded, parents):
         return False
+    # A boundary in the sibling arm of a conditional cannot follow this yield.
+    yield_cursor: ast.AST = yielded
+    while yield_cursor in parents:
+        owner = parents[yield_cursor]
+        if isinstance(owner, ast.If):
+            in_body = any(yield_cursor in set(_owned_nodes(item)) for item in owner.body)
+            in_else = any(yield_cursor in set(_owned_nodes(item)) for item in owner.orelse)
+            call_body = any(boundary in set(_owned_nodes(item)) for item in owner.body)
+            call_else = any(boundary in set(_owned_nodes(item)) for item in owner.orelse)
+            if (in_body and call_else) or (in_else and call_body):
+                return False
+        yield_cursor = owner
     boundary_ancestors: set[ast.AST] = {boundary}
     current: ast.AST = boundary
     while current in parents:
@@ -1153,6 +1165,9 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
                             and isinstance(child.value, ast.Yield)
                             and child.value.value is not None
                             and _target_key(child.value.value) == captured
+                            and not _has_unreachable_terminator(
+                                child.value, _scope_parents(wrapper_fn)
+                            )
                             for child in owned_node.body
                         ) and not _receiver_reassigned(
                             tuple(owned_node.body), -1, len(owned_node.body), captured

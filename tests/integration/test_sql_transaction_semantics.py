@@ -21,6 +21,8 @@ from fastapi_endpoint_detector.analyzer.sql_transaction import build_sql_transac
 from fastapi_endpoint_detector.analyzer.sql_transaction_paths import (
     _module_snapshot,
     _receiver_reassigned,
+    _scope_parents,
+    _yield_can_reach_normal_boundary,
     build_sql_transaction_path_diagnostics,
 )
 from fastapi_endpoint_detector.config import AnalysisConfig, Config
@@ -1837,6 +1839,106 @@ def test_source_projection_checks_yield_branch_fallthrough(
         + "\n            await session.commit()"
     )
     text = source.read_text()
+    assert original in text
+    source.write_text(text.replace(original, replacement, 1))
+    assert len(_langflow_fixture_transaction_reports(copied)[2].source_projections) == expected
+
+
+def test_source_projection_yield_and_boundary_in_opposite_arms_are_disconnected() -> None:
+    tree = ast.parse(
+        "async def wrapper():\n"
+        "    try:\n"
+        "        if flag:\n"
+        "            yield session\n"
+        "        else:\n"
+        "            await session.commit()\n"
+        "    except Exception:\n"
+        "        await session.rollback()\n"
+    )
+    function = tree.body[0]
+    yielded = next(item for item in ast.walk(function) if isinstance(item, ast.Yield))
+    boundary = next(
+        item
+        for item in ast.walk(function)
+        if isinstance(item, ast.Call)
+        and isinstance(item.func, ast.Attribute)
+        and item.func.attr == "commit"
+    )
+    assert not _yield_can_reach_normal_boundary(yielded, boundary, _scope_parents(function))
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "source/langflow/services/deps.py.txt",
+        "source/lfx/services/deps.py.txt",
+        "source/langflow/api/v1/traces.py.txt",
+    ],
+)
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        'import sys\ndelattr(sys.modules[__name__], "session_scope")',
+        "import sys\nremove = delattr\nforwarded = remove\n"
+        'forwarded(sys.modules[__name__], "session_scope")',
+        "import sys\nfrom builtins import delattr as remove\n"
+        'remove(sys.modules[__name__], "session_scope")',
+        'import sys\nimport builtins\nbuiltins.delattr(sys.modules[__name__], "session_scope")',
+    ],
+)
+def test_source_projection_rejects_reflective_deletion(
+    tmp_path: Path, relative_path: str, mutation: str
+) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    source = copied / relative_path
+    source.write_text(source.read_text() + "\n" + mutation + "\n")
+    assert _langflow_fixture_transaction_reports(copied)[2].source_projections == ()
+
+
+@pytest.mark.parametrize("prefix", ["return", "raise RuntimeError()", "pass"])
+def test_source_projection_checks_wrapper_yield_reachability(tmp_path: Path, prefix: str) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    source = copied / "source/langflow/services/deps.py.txt"
+    text = source.read_text()
+    original = "        yield session"
+    assert text.count(original) == 1
+    source.write_text(text.replace(original, f"        {prefix}\n" + original, 1))
+    assert len(_langflow_fixture_transaction_reports(copied)[2].source_projections) == (
+        1 if prefix == "pass" else 0
+    )
+
+
+@pytest.mark.parametrize(
+    ("replacement", "expected"),
+    [
+        (
+            "if flag:\n                yield session\n"
+            "            else:\n                await session.commit()",
+            0,
+        ),
+        (
+            "if flag:\n                yield session\n                await session.commit()",
+            1,
+        ),
+        (
+            "if flag:\n                yield session\n            await session.commit()",
+            1,
+        ),
+    ],
+)
+def test_source_projection_requires_compatible_commit_branch(
+    tmp_path: Path, replacement: str, expected: int
+) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    source = copied / "source/lfx/services/deps.py.txt"
+    text = source.read_text()
+    original = "yield session\n            await session.commit()"
     assert original in text
     source.write_text(text.replace(original, replacement, 1))
     assert len(_langflow_fixture_transaction_reports(copied)[2].source_projections) == expected
