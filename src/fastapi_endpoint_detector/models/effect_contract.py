@@ -228,6 +228,8 @@ class EffectBehavior(_StrictModel):
     transaction_scope: TransactionScope | None = None
     context_exit: ContextExitSemantics | None = None
     stage_receiver_from_yield: bool = False
+    returns_transaction_scope: TransactionScope | None = None
+    transaction_target_from_receiver: bool = False
 
     @model_validator(mode="after")
     def validate_async_timing(self) -> EffectBehavior:
@@ -274,6 +276,18 @@ class EffectContract(_StrictModel):
             raise ValueError("method contracts require a class-qualified exact symbol")
         scope = self.behavior.transaction_scope
         context_exit = self.behavior.context_exit
+        if self.behavior.returns_transaction_scope is not None and (
+            self.channel != EffectChannel.SQL
+            or self.operation != EffectOperation.BEGIN
+            or self.behavior.timing != EffectTiming.CONTEXT_ENTER
+            or self.behavior.returns_transaction_scope != scope
+        ):
+            raise ValueError("returned transaction scope must match a SQL begin context")
+        if self.behavior.transaction_target_from_receiver and (
+            self.channel != EffectChannel.SQL
+            or self.operation not in {EffectOperation.COMMIT, EffectOperation.ROLLBACK}
+        ):
+            raise ValueError("transaction receiver targets require SQL commit or rollback")
         if self.behavior.stage_receiver_from_yield and (
             self.channel != EffectChannel.SQL
             or self.operation != EffectOperation.BEGIN

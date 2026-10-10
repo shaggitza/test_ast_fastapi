@@ -9,7 +9,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from fastapi_endpoint_detector.models.effect_contract import load_effect_contracts
+from fastapi_endpoint_detector.models.effect_contract import (
+    EffectContract,
+    LoadedEffectContracts,
+    load_effect_contracts,
+)
 from fastapi_endpoint_detector.models.sql_transaction import (
     SQLTransactionContextPath,
     SQLTransactionOrderedPath,
@@ -17,13 +21,14 @@ from fastapi_endpoint_detector.models.sql_transaction import (
     SQLTransactionPathError,
     SQLTransactionPathReport,
     SQLTransactionSourceProjection,
+    SQLTransactionTargetScope,
     build_sql_transaction_context_path,
     build_sql_transaction_ordered_path,
     build_sql_transaction_path_report,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
 
     from fastapi_endpoint_detector.models.effect_contract_audit import (
         EffectContractAudit,
@@ -56,6 +61,8 @@ class _SourceCall:
     statement_index: int | None
     receiver_key: tuple[str, ...] | None
     receiver_hash: str | None
+    returned_receiver_key: tuple[str, ...] | None
+    has_arguments: bool
     function_body: tuple[ast.stmt, ...] | None
     context_id: str | None
     context_body_index: int | None
@@ -111,7 +118,13 @@ class _CallIndexer(ast.NodeVisitor):
         for index, statement in enumerate(body):
             direct = _direct_statement_call(statement)
             if direct is not None:
-                self._record(direct, function_name, index, body)
+                self._record(
+                    direct,
+                    function_name,
+                    index,
+                    body,
+                    returned_receiver_key=_direct_call_return_target(statement, direct),
+                )
             elif isinstance(statement, (ast.With, ast.AsyncWith)):
                 self._record_context(statement, function_name, index, body)
         # Generic traversal records control-flow calls as non-straight-line and
@@ -130,6 +143,7 @@ class _CallIndexer(ast.NodeVisitor):
         context_id: str | None = None,
         context_body_index: int | None = None,
         receiver_key_override: tuple[str, ...] | None = None,
+        returned_receiver_key: tuple[str, ...] | None = None,
         overwrite: bool = True,
     ) -> None:
         function = call.func
@@ -154,6 +168,8 @@ class _CallIndexer(ast.NodeVisitor):
                 if receiver_key is not None
                 else None
             ),
+            returned_receiver_key=returned_receiver_key,
+            has_arguments=bool(call.args or call.keywords),
             function_body=function_body,
             context_id=context_id,
             context_body_index=context_body_index,
@@ -263,6 +279,21 @@ def _direct_statement_call(statement: ast.stmt) -> ast.Call | None:
     if isinstance(statement, (ast.Expr, ast.Assign, ast.AnnAssign)):
         value = statement.value
     return _unwrap_call(value)
+
+
+def _direct_call_return_target(statement: ast.stmt, call: ast.Call) -> tuple[str, ...] | None:
+    """Return one simple assignment target for an exact direct call result."""
+    if (
+        isinstance(statement, ast.Assign)
+        and statement.value is call
+        and len(statement.targets) == 1
+    ):
+        target = statement.targets[0]
+    elif isinstance(statement, ast.AnnAssign) and statement.value is call:
+        target = statement.target
+    else:
+        return None
+    return (target.id,) if isinstance(target, ast.Name) else None
 
 
 def _receiver_key(expression: ast.expr) -> tuple[str, ...] | None:
@@ -1669,10 +1700,85 @@ def _context_manager_paths(
     return paths
 
 
+def _returned_transaction_target(
+    begin_occurrences: tuple[EffectContractAuditOccurrence, ...],
+    occurrence_by_id: dict[str, EffectContractAuditOccurrence],
+    contexts: dict[str, _SourceCall | None],
+    stage: _SourceCall,
+    boundary: _SourceCall,
+    boundary_occurrence: EffectContractAuditOccurrence,
+    boundary_kind: _BOUNDARY,
+    exact_contract: Callable[[EffectContractAuditOccurrence], EffectContract | None],
+) -> tuple[str, SQLTransactionTargetScope] | None:
+    """Prove a direct returned-transaction binding for one exact boundary call."""
+    if (
+        boundary.receiver_key is None
+        or len(boundary.receiver_key) != 1
+        or boundary.function_body is None
+        or boundary.statement_index is None
+        or boundary.has_arguments
+    ):
+        return None
+    boundary_contract = exact_contract(boundary_occurrence)
+    expected_operation = "commit" if boundary_kind == "commit" else "rollback"
+    if (
+        boundary_contract is None
+        or boundary_contract.operation.value != expected_operation
+        or boundary_contract.behavior.transaction_target_from_receiver is not True
+    ):
+        return None
+    candidates: list[tuple[int, str, SQLTransactionTargetScope]] = []
+    for begin in begin_occurrences:
+        context = contexts.get(begin.id)
+        occurrence = occurrence_by_id.get(begin.id)
+        begin_contract = exact_contract(occurrence) if occurrence is not None else None
+        if (
+            context is None
+            or occurrence is None
+            or begin_contract is None
+            or begin_contract.behavior.returns_transaction_scope is None
+            or context.returned_receiver_key != boundary.receiver_key
+            or context.receiver_key != stage.receiver_key
+            or context.file_path != stage.file_path
+            or context.function_name != stage.function_name
+            or context.function_body is not stage.function_body
+            or context.statement_index is None
+            or context.function_body is None
+            or stage.statement_index is None
+            or context.statement_index >= stage.statement_index
+            or context.statement_index >= boundary.statement_index
+            or context.has_arguments
+            or _control_flow_between(
+                context.function_body,
+                context.statement_index,
+                boundary.statement_index,
+            )
+            or _receiver_reassigned(
+                context.function_body,
+                context.statement_index,
+                boundary.statement_index,
+                boundary.receiver_key,
+            )
+        ):
+            continue
+        candidates.append(
+            (
+                context.statement_index,
+                begin.id,
+                SQLTransactionTargetScope(begin_contract.behavior.returns_transaction_scope.value),
+            )
+        )
+    if len(candidates) != 1:
+        return None
+    _index, begin_id, scope = candidates[0]
+    return begin_id, scope
+
+
 def build_sql_transaction_path_diagnostics(  # noqa: PLR0912, PLR0915
     source_root: Path,
     audit: EffectContractAudit,
     transaction_report: SQLTransactionReport,
+    effect_contracts: LoadedEffectContracts,
     *,
     max_pairs: int,
 ) -> SQLTransactionPathReport:
@@ -1680,6 +1786,7 @@ def build_sql_transaction_path_diagnostics(  # noqa: PLR0912, PLR0915
     if not 1 <= max_pairs <= 10_000:
         raise SQLTransactionPathError("SQL transaction max_pairs must be between 1 and 10000")
     root = source_root.resolve()
+    contract_by_id = {item.id: item for item in effect_contracts.document.contracts}
     occurrence_by_id = {item.id: item for item in audit.occurrences}
     pair_count = sum(
         len(item.stage_occurrence_ids)
@@ -1737,6 +1844,18 @@ def build_sql_transaction_path_diagnostics(  # noqa: PLR0912, PLR0915
         "execution, exceptions, aliases, and transaction identity are not established.",
         "Receiver equality is a stable finite source expression, not runtime object identity.",
     )
+    contract_hashes = effect_contracts.contract_hashes
+
+    def exact_contract(occurrence: EffectContractAuditOccurrence) -> EffectContract | None:
+        contract = contract_by_id.get(occurrence.contract_id or "")
+        if (
+            contract is None
+            or occurrence.contract_hash is None
+            or contract_hashes.get(contract.id) != occurrence.contract_hash
+        ):
+            return None
+        return contract
+
     for evidence in transaction_report.endpoint_evidence:
         context_paths.extend(
             _context_manager_paths(
@@ -1807,15 +1926,28 @@ def build_sql_transaction_path_diagnostics(  # noqa: PLR0912, PLR0915
                     )
                     continue
                 if stage.receiver_key != boundary.receiver_key:
-                    diagnostics.append(
-                        _diagnostic(
-                            evidence.endpoint_id,
-                            stage_id,
-                            boundary_id,
-                            "receiver_mismatch",
-                        )
+                    returned_target = _returned_transaction_target(
+                        begins,
+                        occurrence_by_id,
+                        contexts,
+                        stage,
+                        boundary,
+                        occurrence_by_id[boundary_id],
+                        boundary_kind,
+                        exact_contract,
                     )
-                    continue
+                    if returned_target is None:
+                        diagnostics.append(
+                            _diagnostic(
+                                evidence.endpoint_id,
+                                stage_id,
+                                boundary_id,
+                                "receiver_mismatch",
+                            )
+                        )
+                        continue
+                else:
+                    returned_target = None
                 if boundary.statement_index <= stage.statement_index:
                     diagnostics.append(
                         _diagnostic(
@@ -1857,6 +1989,22 @@ def build_sql_transaction_path_diagnostics(  # noqa: PLR0912, PLR0915
                     continue
                 assert stage.receiver_hash is not None
                 begin_occurrence_id = _nearest_begin(begins, contexts, stage)
+                target_begin_id = returned_target[0] if returned_target is not None else None
+                if target_begin_id is not None:
+                    begin_occurrence_id = target_begin_id
+                boundary_limitations = (
+                    "A reachable ordered flush may issue pending SQL but is not proof "
+                    "of transaction commit or durable persistence."
+                    if boundary_kind == "flush"
+                    else "A reachable ordered commit or rollback is not proof of "
+                    "boundary success or durable persistence."
+                )
+                receiver_limitation = (
+                    "The boundary receiver is an exact direct local binding returned by the "
+                    "declared begin contract; aliases and runtime identity remain unestablished."
+                    if returned_target is not None
+                    else common_limitations[1]
+                )
                 paths.append(
                     build_sql_transaction_ordered_path(
                         endpoint_id=evidence.endpoint_id,
@@ -1869,18 +2017,23 @@ def build_sql_transaction_path_diagnostics(  # noqa: PLR0912, PLR0915
                             if begin_occurrence_id is not None
                             else None
                         ),
+                        receiver_relation=(
+                            "returned_transaction"
+                            if returned_target is not None
+                            else "same_receiver"
+                        ),
+                        boundary_target_scope=(
+                            returned_target[1]
+                            if returned_target is not None
+                            else SQLTransactionTargetScope.UNKNOWN
+                        ),
                         stage_occurrence_id=stage_id,
                         boundary_occurrence_id=boundary_id,
                         boundary=boundary_kind,
                         limitations=(
-                            *common_limitations,
-                            (
-                                "A reachable ordered flush may issue pending SQL but is not proof "
-                                "of transaction commit or durable persistence."
-                                if boundary_kind == "flush"
-                                else "A reachable ordered commit or rollback is not proof of "
-                                "boundary success or durable persistence."
-                            ),
+                            common_limitations[0],
+                            receiver_limitation,
+                            boundary_limitations,
                         ),
                     )
                 )

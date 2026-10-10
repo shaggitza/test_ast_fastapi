@@ -2205,6 +2205,7 @@ class ChangeMapper:
                     self.target_project_root,
                     self._effect_contract_audit,
                     self._sql_transaction_report,
+                    self._effect_contracts,
                     max_pairs=self.config.analysis.sql_transaction_path_max_pairs,
                 )
         if self._resource_coupling is not None:
