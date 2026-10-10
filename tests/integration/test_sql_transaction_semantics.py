@@ -2199,6 +2199,82 @@ def test_source_projection_checks_zero_argument_delegate_binding(
     assert len(_langflow_fixture_transaction_reports(copied)[2].source_projections) == expected
 
 
+def test_source_projection_rejects_sync_asynccontextmanager_delegate(tmp_path: Path) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    source = copied / "source/lfx/services/deps.py.txt"
+    text = source.read_text(encoding="utf-8")
+    signature = "async def session_scope() -> AsyncGenerator[AsyncSession, None]:"
+    assert text.count(signature) == 1
+    text = text.replace(signature, "def session_scope() -> AsyncGenerator[AsyncSession, None]:", 1)
+    text = text.replace(
+        "async with db_service._with_session() as session:",
+        "with db_service._with_session() as session:",
+        1,
+    )
+    text = text.replace("await session.commit()", "session.commit()")
+    text = text.replace("await session.rollback()", "session.rollback()")
+    text = text.replace("await logger.aexception(", "logger.aexception(")
+    source.write_text(text, encoding="utf-8")
+    assert len(_langflow_fixture_transaction_reports(copied)[2].source_projections) == 0
+
+
+def test_source_projection_rejects_invalid_endpoint_wrapper_arguments(tmp_path: Path) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    endpoint = copied / "source/langflow/api/v1/traces.py.txt"
+    text = endpoint.read_text(encoding="utf-8")
+    original = "async with session_scope() as session:\n            flow_stmt ="
+    assert text.count(original) == 1
+    endpoint.write_text(
+        text.replace(
+            original,
+            "async with session_scope(unexpected=True) as session:\n            flow_stmt =",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    assert len(_langflow_fixture_transaction_reports(copied)[2].source_projections) == 0
+
+
+@pytest.mark.parametrize("call_arguments", ["", "label='configured'"])
+def test_source_projection_accepts_async_wrapper_default_arguments(
+    tmp_path: Path, call_arguments: str
+) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    wrapper = copied / "source/langflow/services/deps.py.txt"
+    wrapper_text = wrapper.read_text(encoding="utf-8")
+    signature = "async def session_scope() -> AsyncGenerator[AsyncSession, None]:"
+    assert wrapper_text.count(signature) == 1
+    wrapper.write_text(
+        wrapper_text.replace(
+            signature,
+            "async def session_scope(*, label: str = 'default') -> "
+            "AsyncGenerator[AsyncSession, None]:",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    if call_arguments:
+        endpoint = copied / "source/langflow/api/v1/traces.py.txt"
+        endpoint_text = endpoint.read_text(encoding="utf-8")
+        original = "async with session_scope() as session:\n            flow_stmt ="
+        assert endpoint_text.count(original) == 1
+        endpoint.write_text(
+            endpoint_text.replace(
+                original,
+                f"async with session_scope({call_arguments}) as session:\n            flow_stmt =",
+                1,
+            ),
+            encoding="utf-8",
+        )
+    assert len(_langflow_fixture_transaction_reports(copied)[2].source_projections) == 1
+
+
 @pytest.mark.parametrize(
     "relative_path",
     [

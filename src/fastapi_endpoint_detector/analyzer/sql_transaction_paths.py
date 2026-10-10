@@ -883,6 +883,8 @@ def _has_verified_asynccontextmanager(
     module: ast.Module, function: ast.FunctionDef | ast.AsyncFunctionDef
 ) -> bool:
     """Accept only the stdlib decorator under one unambiguous import binding."""
+    if not isinstance(function, ast.AsyncFunctionDef):
+        return False
     if len(function.decorator_list) != 1:
         return False
     decorator = function.decorator_list[0]
@@ -1010,6 +1012,53 @@ def _supports_zero_argument_call(function: ast.FunctionDef | ast.AsyncFunctionDe
     if required_positional:
         return False
     return not any(default is None for default in arguments.kw_defaults)
+
+
+def _call_binds_function(  # noqa: PLR0911
+    call: ast.Call, function: ast.FunctionDef | ast.AsyncFunctionDef
+) -> bool:
+    """Prove that explicit call arguments bind without a Python TypeError."""
+    parameters = function.args
+    positional = [*parameters.posonlyargs, *parameters.args]
+    required_positional_count = len(positional) - len(parameters.defaults)
+    keyword_only = {item.arg for item in parameters.kwonlyargs}
+    required_keyword_only = {
+        item.arg
+        for item, default in zip(parameters.kwonlyargs, parameters.kw_defaults, strict=True)
+        if default is None
+    }
+    var_keyword = parameters.kwarg is not None
+    bound: set[str] = set()
+
+    for index, argument in enumerate(call.args):
+        if isinstance(argument, ast.Starred):
+            return False
+        if index < len(positional):
+            bound.add(positional[index].arg)
+        elif parameters.vararg is None:
+            return False
+
+    seen_keywords: set[str] = set()
+    for keyword in call.keywords:
+        if keyword.arg is None or keyword.arg in seen_keywords:
+            return False
+        name = keyword.arg
+        seen_keywords.add(name)
+        if name in {item.arg for item in parameters.posonlyargs}:
+            if not var_keyword:
+                return False
+            continue
+        if name in {item.arg for item in parameters.args}:
+            if name in bound:
+                return False
+            bound.add(name)
+        elif name in keyword_only:
+            bound.add(name)
+        elif not var_keyword:
+            return False
+
+    required_positional = {item.arg for item in positional[:required_positional_count]}
+    return required_positional <= bound and required_keyword_only <= bound
 
 
 def _yield_can_reach_normal_boundary(  # noqa: PLR0912
@@ -1305,8 +1354,7 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
             (
                 node
                 for node in delegated_tree.body
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and node.name == delegate_name
+                if isinstance(node, ast.AsyncFunctionDef) and node.name == delegate_name
             ),
             None,
         )
@@ -1431,6 +1479,8 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
                 or not isinstance(context_call.func, ast.Name)
                 or context_call.func.id != imported_wrapper_name
             ):
+                continue
+            if not _call_binds_function(context_call, wrapper_fn):
                 continue
             if (
                 context_call.func.lineno,
