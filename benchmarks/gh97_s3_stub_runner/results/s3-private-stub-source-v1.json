@@ -1,0 +1,1630 @@
+{
+  "artifact": {
+    "distribution": "mypy-boto3-s3",
+    "filename": "mypy_boto3_s3-1.35.92-py3-none-any.whl",
+    "inspected_source_sha256": {
+      "mypy_boto3_s3/client.py": "sha256:e41cde1bc5682e1fc40449e36ea952ee2f953df336e805073219c3d5d6565432",
+      "mypy_boto3_s3/type_defs.py": "sha256:acbc5700f9cfb70aea9cf39abc4ee4e3e84b90ad7d6130dbf5378a5edb2aa617"
+    },
+    "matrix_manifest_sha256": "sha256:f90c11bb5eeb2e5a4d60607438f24d4070be4c84506787e73c1b06903833df1d",
+    "source": "/tmp/gh97-wheel-audit/mypy_boto3_s3-1.35.92-py3-none-any.whl",
+    "version": "1.35.92",
+    "wheel_sha256": "sha256:ce302a635da78e1925d8ff4809184ba55618cd7e3707156bea405cde7fdcf67a"
+  },
+  "benchmark_id": "gh97-exact-release-installed-s3-stub-v1",
+  "canonical_symbol_resolution": {
+    "cases": [
+      {
+        "canonical_symbol": "mypy_boto3_s3.client.S3Client.put_object",
+        "canonical_symbol_status": "matched",
+        "diagnostic_classification": {
+          "fixture_call_errors": [],
+          "imported_stub_diagnostics": [
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:23: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:24: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:25: error: Cannot find implementation or library stub for module named \"botocore.eventstream\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:26: error: Cannot find implementation or library stub for module named \"botocore.response\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/waiter.pyi:35: error: Cannot find implementation or library stub for module named \"botocore.waiter\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:42: error: Cannot find implementation or library stub for module named \"botocore.paginate\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: error: Variable \"mypy_boto3_s3.paginator._ListBucketsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: error: Invalid base class \"_ListBucketsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: error: Variable \"mypy_boto3_s3.paginator._ListDirectoryBucketsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: error: Invalid base class \"_ListDirectoryBucketsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: error: Variable \"mypy_boto3_s3.paginator._ListMultipartUploadsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: error: Invalid base class \"_ListMultipartUploadsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: error: Variable \"mypy_boto3_s3.paginator._ListObjectVersionsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: error: Invalid base class \"_ListObjectVersionsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: error: Variable \"mypy_boto3_s3.paginator._ListObjectsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: error: Invalid base class \"_ListObjectsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: error: Variable \"mypy_boto3_s3.paginator._ListObjectsV2PaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: error: Invalid base class \"_ListObjectsV2PaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: error: Variable \"mypy_boto3_s3.paginator._ListPartsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: error: Invalid base class \"_ListPartsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:24: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:24: note: See https://mypy.readthedocs.io/en/stable/running_mypy.html#missing-imports"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:25: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:26: error: Cannot find implementation or library stub for module named \"botocore.errorfactory\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:27: error: Cannot find implementation or library stub for module named \"botocore.exceptions\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:46: error: Cannot find implementation or library stub for module named \"boto3.resources.base\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:47: error: Cannot find implementation or library stub for module named \"boto3.resources.collection\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:48: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:49: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+            }
+          ],
+          "other_diagnostics": [],
+          "total": 36
+        },
+        "diagnostics": [
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:23: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:24: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:25: error: Cannot find implementation or library stub for module named \"botocore.eventstream\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:26: error: Cannot find implementation or library stub for module named \"botocore.response\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/waiter.pyi:35: error: Cannot find implementation or library stub for module named \"botocore.waiter\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:42: error: Cannot find implementation or library stub for module named \"botocore.paginate\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: error: Variable \"mypy_boto3_s3.paginator._ListBucketsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: error: Invalid base class \"_ListBucketsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: error: Variable \"mypy_boto3_s3.paginator._ListDirectoryBucketsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: error: Invalid base class \"_ListDirectoryBucketsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: error: Variable \"mypy_boto3_s3.paginator._ListMultipartUploadsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: error: Invalid base class \"_ListMultipartUploadsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: error: Variable \"mypy_boto3_s3.paginator._ListObjectVersionsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: error: Invalid base class \"_ListObjectVersionsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: error: Variable \"mypy_boto3_s3.paginator._ListObjectsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: error: Invalid base class \"_ListObjectsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: error: Variable \"mypy_boto3_s3.paginator._ListObjectsV2PaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: error: Invalid base class \"_ListObjectsV2PaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: error: Variable \"mypy_boto3_s3.paginator._ListPartsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: error: Invalid base class \"_ListPartsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:24: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:24: note: See https://mypy.readthedocs.io/en/stable/running_mypy.html#missing-imports"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:25: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:26: error: Cannot find implementation or library stub for module named \"botocore.errorfactory\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:27: error: Cannot find implementation or library stub for module named \"botocore.exceptions\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:46: error: Cannot find implementation or library stub for module named \"boto3.resources.base\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:47: error: Cannot find implementation or library stub for module named \"boto3.resources.collection\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:48: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:49: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+          }
+        ],
+        "fixture": "complete",
+        "fixture_call_diagnostics": [],
+        "fixture_sha256": "sha256:8a0f97348c1833363cc54d2a2182fa02a9a24856fd5730067b39adfaed77d3ea",
+        "keyword_bindings": [
+          "Bucket",
+          "Key",
+          "Body"
+        ],
+        "line": 5,
+        "mypy_errors": 36,
+        "positional_argument_indexes": [],
+        "selector_binding_results": {
+          "binding_status": "complete",
+          "resource": "bound",
+          "value": "bound"
+        },
+        "signature_resolved": true,
+        "typed_receiver_symbol": "mypy_boto3_s3.client.S3Client",
+        "typed_receiver_type": "mypy_boto3_s3.client.S3Client"
+      },
+      {
+        "canonical_symbol": "mypy_boto3_s3.client.S3Client.put_object",
+        "canonical_symbol_status": "matched",
+        "diagnostic_classification": {
+          "fixture_call_errors": [],
+          "imported_stub_diagnostics": [
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:23: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:24: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:25: error: Cannot find implementation or library stub for module named \"botocore.eventstream\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:26: error: Cannot find implementation or library stub for module named \"botocore.response\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/waiter.pyi:35: error: Cannot find implementation or library stub for module named \"botocore.waiter\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:42: error: Cannot find implementation or library stub for module named \"botocore.paginate\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: error: Variable \"mypy_boto3_s3.paginator._ListBucketsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: error: Invalid base class \"_ListBucketsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: error: Variable \"mypy_boto3_s3.paginator._ListDirectoryBucketsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: error: Invalid base class \"_ListDirectoryBucketsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: error: Variable \"mypy_boto3_s3.paginator._ListMultipartUploadsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: error: Invalid base class \"_ListMultipartUploadsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: error: Variable \"mypy_boto3_s3.paginator._ListObjectVersionsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: error: Invalid base class \"_ListObjectVersionsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: error: Variable \"mypy_boto3_s3.paginator._ListObjectsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: error: Invalid base class \"_ListObjectsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: error: Variable \"mypy_boto3_s3.paginator._ListObjectsV2PaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: error: Invalid base class \"_ListObjectsV2PaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: error: Variable \"mypy_boto3_s3.paginator._ListPartsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: error: Invalid base class \"_ListPartsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:24: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:24: note: See https://mypy.readthedocs.io/en/stable/running_mypy.html#missing-imports"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:25: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:26: error: Cannot find implementation or library stub for module named \"botocore.errorfactory\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:27: error: Cannot find implementation or library stub for module named \"botocore.exceptions\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:46: error: Cannot find implementation or library stub for module named \"boto3.resources.base\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:47: error: Cannot find implementation or library stub for module named \"boto3.resources.collection\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:48: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:49: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+            }
+          ],
+          "other_diagnostics": [],
+          "total": 36
+        },
+        "diagnostics": [
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:23: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:24: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:25: error: Cannot find implementation or library stub for module named \"botocore.eventstream\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:26: error: Cannot find implementation or library stub for module named \"botocore.response\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/waiter.pyi:35: error: Cannot find implementation or library stub for module named \"botocore.waiter\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:42: error: Cannot find implementation or library stub for module named \"botocore.paginate\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: error: Variable \"mypy_boto3_s3.paginator._ListBucketsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: error: Invalid base class \"_ListBucketsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: error: Variable \"mypy_boto3_s3.paginator._ListDirectoryBucketsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: error: Invalid base class \"_ListDirectoryBucketsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: error: Variable \"mypy_boto3_s3.paginator._ListMultipartUploadsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: error: Invalid base class \"_ListMultipartUploadsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: error: Variable \"mypy_boto3_s3.paginator._ListObjectVersionsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: error: Invalid base class \"_ListObjectVersionsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: error: Variable \"mypy_boto3_s3.paginator._ListObjectsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: error: Invalid base class \"_ListObjectsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: error: Variable \"mypy_boto3_s3.paginator._ListObjectsV2PaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: error: Invalid base class \"_ListObjectsV2PaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: error: Variable \"mypy_boto3_s3.paginator._ListPartsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: error: Invalid base class \"_ListPartsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:24: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:24: note: See https://mypy.readthedocs.io/en/stable/running_mypy.html#missing-imports"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:25: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:26: error: Cannot find implementation or library stub for module named \"botocore.errorfactory\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:27: error: Cannot find implementation or library stub for module named \"botocore.exceptions\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:46: error: Cannot find implementation or library stub for module named \"boto3.resources.base\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:47: error: Cannot find implementation or library stub for module named \"boto3.resources.collection\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:48: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:49: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+          }
+        ],
+        "fixture": "omitted_body",
+        "fixture_call_diagnostics": [],
+        "fixture_sha256": "sha256:cd4bd0e8cabd6585d00c8de3391962f9e59faa7408b30388812abb6eb39acee1",
+        "keyword_bindings": [
+          "Bucket",
+          "Key"
+        ],
+        "line": 5,
+        "mypy_errors": 36,
+        "positional_argument_indexes": [],
+        "selector_binding_results": {
+          "binding_status": "incomplete",
+          "resource": "bound",
+          "value": "missing_or_misbound"
+        },
+        "signature_resolved": true,
+        "typed_receiver_symbol": "mypy_boto3_s3.client.S3Client",
+        "typed_receiver_type": "mypy_boto3_s3.client.S3Client"
+      },
+      {
+        "canonical_symbol": "mypy_boto3_s3.client.S3Client.put_object",
+        "canonical_symbol_status": "matched",
+        "diagnostic_classification": {
+          "fixture_call_errors": [
+            {
+              "raw": "<private-s3-probe>/fixture/misbound_body.py:5: error: Too many positional arguments for \"put_object\" of \"S3Client\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/fixture/misbound_body.py:5: error: Argument 3 to \"put_object\" of \"S3Client\" has incompatible type \"Literal[b'payload']\"; expected \"Literal['authenticated-read', 'aws-exec-read', 'bucket-owner-full-control', 'bucket-owner-read', 'private', 'public-read', 'public-read-write']\"  [arg-type]"
+            }
+          ],
+          "imported_stub_diagnostics": [
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:23: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:24: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:25: error: Cannot find implementation or library stub for module named \"botocore.eventstream\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:26: error: Cannot find implementation or library stub for module named \"botocore.response\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/waiter.pyi:35: error: Cannot find implementation or library stub for module named \"botocore.waiter\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:42: error: Cannot find implementation or library stub for module named \"botocore.paginate\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: error: Variable \"mypy_boto3_s3.paginator._ListBucketsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: error: Invalid base class \"_ListBucketsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: error: Variable \"mypy_boto3_s3.paginator._ListDirectoryBucketsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: error: Invalid base class \"_ListDirectoryBucketsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: error: Variable \"mypy_boto3_s3.paginator._ListMultipartUploadsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: error: Invalid base class \"_ListMultipartUploadsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: error: Variable \"mypy_boto3_s3.paginator._ListObjectVersionsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: error: Invalid base class \"_ListObjectVersionsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: error: Variable \"mypy_boto3_s3.paginator._ListObjectsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: error: Invalid base class \"_ListObjectsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: error: Variable \"mypy_boto3_s3.paginator._ListObjectsV2PaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: error: Invalid base class \"_ListObjectsV2PaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: error: Variable \"mypy_boto3_s3.paginator._ListPartsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: error: Invalid base class \"_ListPartsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:24: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:24: note: See https://mypy.readthedocs.io/en/stable/running_mypy.html#missing-imports"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:25: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:26: error: Cannot find implementation or library stub for module named \"botocore.errorfactory\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:27: error: Cannot find implementation or library stub for module named \"botocore.exceptions\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:46: error: Cannot find implementation or library stub for module named \"boto3.resources.base\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:47: error: Cannot find implementation or library stub for module named \"boto3.resources.collection\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:48: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:49: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+            }
+          ],
+          "other_diagnostics": [],
+          "total": 38
+        },
+        "diagnostics": [
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:23: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:24: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:25: error: Cannot find implementation or library stub for module named \"botocore.eventstream\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:26: error: Cannot find implementation or library stub for module named \"botocore.response\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/waiter.pyi:35: error: Cannot find implementation or library stub for module named \"botocore.waiter\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:42: error: Cannot find implementation or library stub for module named \"botocore.paginate\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: error: Variable \"mypy_boto3_s3.paginator._ListBucketsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: error: Invalid base class \"_ListBucketsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: error: Variable \"mypy_boto3_s3.paginator._ListDirectoryBucketsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: error: Invalid base class \"_ListDirectoryBucketsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: error: Variable \"mypy_boto3_s3.paginator._ListMultipartUploadsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: error: Invalid base class \"_ListMultipartUploadsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: error: Variable \"mypy_boto3_s3.paginator._ListObjectVersionsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: error: Invalid base class \"_ListObjectVersionsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: error: Variable \"mypy_boto3_s3.paginator._ListObjectsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: error: Invalid base class \"_ListObjectsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: error: Variable \"mypy_boto3_s3.paginator._ListObjectsV2PaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: error: Invalid base class \"_ListObjectsV2PaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: error: Variable \"mypy_boto3_s3.paginator._ListPartsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: error: Invalid base class \"_ListPartsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:24: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:24: note: See https://mypy.readthedocs.io/en/stable/running_mypy.html#missing-imports"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:25: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:26: error: Cannot find implementation or library stub for module named \"botocore.errorfactory\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:27: error: Cannot find implementation or library stub for module named \"botocore.exceptions\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:46: error: Cannot find implementation or library stub for module named \"boto3.resources.base\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:47: error: Cannot find implementation or library stub for module named \"boto3.resources.collection\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:48: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:49: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/fixture/misbound_body.py:5: error: Too many positional arguments for \"put_object\" of \"S3Client\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/fixture/misbound_body.py:5: error: Argument 3 to \"put_object\" of \"S3Client\" has incompatible type \"Literal[b'payload']\"; expected \"Literal['authenticated-read', 'aws-exec-read', 'bucket-owner-full-control', 'bucket-owner-read', 'private', 'public-read', 'public-read-write']\"  [arg-type]"
+          }
+        ],
+        "fixture": "misbound_body",
+        "fixture_call_diagnostics": [
+          {
+            "raw": "<private-s3-probe>/fixture/misbound_body.py:5: error: Too many positional arguments for \"put_object\" of \"S3Client\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/fixture/misbound_body.py:5: error: Argument 3 to \"put_object\" of \"S3Client\" has incompatible type \"Literal[b'payload']\"; expected \"Literal['authenticated-read', 'aws-exec-read', 'bucket-owner-full-control', 'bucket-owner-read', 'private', 'public-read', 'public-read-write']\"  [arg-type]"
+          }
+        ],
+        "fixture_sha256": "sha256:cb3edf668bef5b15c3ab86219249b178fac52282a955a6f4c902968b2f926797",
+        "keyword_bindings": [],
+        "line": 5,
+        "mypy_errors": 38,
+        "positional_argument_indexes": [
+          0,
+          1,
+          2
+        ],
+        "selector_binding_results": {
+          "binding_status": "misbound_positional_to_keyword_only_parameters",
+          "resource": "missing_or_misbound",
+          "value": "missing_or_misbound"
+        },
+        "signature_resolved": true,
+        "typed_receiver_symbol": "mypy_boto3_s3.client.S3Client",
+        "typed_receiver_type": "mypy_boto3_s3.client.S3Client"
+      },
+      {
+        "canonical_symbol": "__main__.Foreign.put_object",
+        "canonical_symbol_status": "unmatched",
+        "diagnostic_classification": {
+          "fixture_call_errors": [],
+          "imported_stub_diagnostics": [],
+          "other_diagnostics": [],
+          "total": 0
+        },
+        "diagnostics": [],
+        "fixture": "foreign_same_name",
+        "fixture_call_diagnostics": [],
+        "fixture_sha256": "sha256:765b823de75475375eab3086e0a7b3d67517564d48bf14b7110754b3ba1f6f93",
+        "keyword_bindings": [
+          "Bucket",
+          "Key",
+          "Body"
+        ],
+        "line": 6,
+        "mypy_errors": 0,
+        "positional_argument_indexes": [],
+        "selector_binding_results": {
+          "binding_status": "unvalidated_unmatched_canonical",
+          "resource": "bound",
+          "value": "bound"
+        },
+        "signature_resolved": false,
+        "typed_receiver_symbol": "__main__.Foreign",
+        "typed_receiver_type": "__main__.Foreign"
+      },
+      {
+        "canonical_symbol": "mypy_boto3_s3.client.S3Client.put_object",
+        "canonical_symbol_status": "matched",
+        "diagnostic_classification": {
+          "fixture_call_errors": [
+            {
+              "raw": "<private-s3-probe>/fixture/bogus_keyword.py:5: error: Unexpected keyword argument \"Bogus\" for \"put_object\" of \"S3Client\"  [call-arg]"
+            }
+          ],
+          "imported_stub_diagnostics": [
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:23: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:24: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:25: error: Cannot find implementation or library stub for module named \"botocore.eventstream\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:26: error: Cannot find implementation or library stub for module named \"botocore.response\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/waiter.pyi:35: error: Cannot find implementation or library stub for module named \"botocore.waiter\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:42: error: Cannot find implementation or library stub for module named \"botocore.paginate\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: error: Variable \"mypy_boto3_s3.paginator._ListBucketsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: error: Invalid base class \"_ListBucketsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: error: Variable \"mypy_boto3_s3.paginator._ListDirectoryBucketsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: error: Invalid base class \"_ListDirectoryBucketsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: error: Variable \"mypy_boto3_s3.paginator._ListMultipartUploadsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: error: Invalid base class \"_ListMultipartUploadsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: error: Variable \"mypy_boto3_s3.paginator._ListObjectVersionsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: error: Invalid base class \"_ListObjectVersionsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: error: Variable \"mypy_boto3_s3.paginator._ListObjectsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: error: Invalid base class \"_ListObjectsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: error: Variable \"mypy_boto3_s3.paginator._ListObjectsV2PaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: error: Invalid base class \"_ListObjectsV2PaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: error: Variable \"mypy_boto3_s3.paginator._ListPartsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: error: Invalid base class \"_ListPartsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:24: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:24: note: See https://mypy.readthedocs.io/en/stable/running_mypy.html#missing-imports"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:25: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:26: error: Cannot find implementation or library stub for module named \"botocore.errorfactory\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:27: error: Cannot find implementation or library stub for module named \"botocore.exceptions\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:46: error: Cannot find implementation or library stub for module named \"boto3.resources.base\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:47: error: Cannot find implementation or library stub for module named \"boto3.resources.collection\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:48: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:49: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:1184: note: \"put_object\" of \"S3Client\" defined here"
+            }
+          ],
+          "other_diagnostics": [],
+          "total": 38
+        },
+        "diagnostics": [
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:23: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:24: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:25: error: Cannot find implementation or library stub for module named \"botocore.eventstream\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:26: error: Cannot find implementation or library stub for module named \"botocore.response\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/waiter.pyi:35: error: Cannot find implementation or library stub for module named \"botocore.waiter\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:42: error: Cannot find implementation or library stub for module named \"botocore.paginate\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: error: Variable \"mypy_boto3_s3.paginator._ListBucketsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: error: Invalid base class \"_ListBucketsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: error: Variable \"mypy_boto3_s3.paginator._ListDirectoryBucketsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: error: Invalid base class \"_ListDirectoryBucketsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: error: Variable \"mypy_boto3_s3.paginator._ListMultipartUploadsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: error: Invalid base class \"_ListMultipartUploadsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: error: Variable \"mypy_boto3_s3.paginator._ListObjectVersionsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: error: Invalid base class \"_ListObjectVersionsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: error: Variable \"mypy_boto3_s3.paginator._ListObjectsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: error: Invalid base class \"_ListObjectsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: error: Variable \"mypy_boto3_s3.paginator._ListObjectsV2PaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: error: Invalid base class \"_ListObjectsV2PaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: error: Variable \"mypy_boto3_s3.paginator._ListPartsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: error: Invalid base class \"_ListPartsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:24: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:24: note: See https://mypy.readthedocs.io/en/stable/running_mypy.html#missing-imports"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:25: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:26: error: Cannot find implementation or library stub for module named \"botocore.errorfactory\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:27: error: Cannot find implementation or library stub for module named \"botocore.exceptions\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:46: error: Cannot find implementation or library stub for module named \"boto3.resources.base\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:47: error: Cannot find implementation or library stub for module named \"boto3.resources.collection\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:48: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:49: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/fixture/bogus_keyword.py:5: error: Unexpected keyword argument \"Bogus\" for \"put_object\" of \"S3Client\"  [call-arg]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:1184: note: \"put_object\" of \"S3Client\" defined here"
+          }
+        ],
+        "fixture": "bogus_keyword",
+        "fixture_call_diagnostics": [
+          {
+            "raw": "<private-s3-probe>/fixture/bogus_keyword.py:5: error: Unexpected keyword argument \"Bogus\" for \"put_object\" of \"S3Client\"  [call-arg]"
+          }
+        ],
+        "fixture_sha256": "sha256:f3093d2f4ef5cd01eb1d784ab7ca73dfd73974c01a23a0d233f0c3794a7fd96f",
+        "keyword_bindings": [
+          "Bucket",
+          "Key",
+          "Body",
+          "Bogus"
+        ],
+        "line": 5,
+        "mypy_errors": 38,
+        "positional_argument_indexes": [],
+        "selector_binding_results": {
+          "binding_status": "invalid_call",
+          "resource": "bound",
+          "value": "bound"
+        },
+        "signature_resolved": true,
+        "typed_receiver_symbol": "mypy_boto3_s3.client.S3Client",
+        "typed_receiver_type": "mypy_boto3_s3.client.S3Client"
+      },
+      {
+        "canonical_symbol": "mypy_boto3_s3.client.S3Client.put_object",
+        "canonical_symbol_status": "matched",
+        "diagnostic_classification": {
+          "fixture_call_errors": [
+            {
+              "raw": "<private-s3-probe>/fixture/wrong_type.py:5: error: Argument \"Bucket\" to \"put_object\" of \"S3Client\" has incompatible type \"int\"; expected \"str\"  [arg-type]"
+            }
+          ],
+          "imported_stub_diagnostics": [
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:23: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:24: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:25: error: Cannot find implementation or library stub for module named \"botocore.eventstream\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:26: error: Cannot find implementation or library stub for module named \"botocore.response\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/waiter.pyi:35: error: Cannot find implementation or library stub for module named \"botocore.waiter\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:42: error: Cannot find implementation or library stub for module named \"botocore.paginate\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: error: Variable \"mypy_boto3_s3.paginator._ListBucketsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: error: Invalid base class \"_ListBucketsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: error: Variable \"mypy_boto3_s3.paginator._ListDirectoryBucketsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: error: Invalid base class \"_ListDirectoryBucketsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: error: Variable \"mypy_boto3_s3.paginator._ListMultipartUploadsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: error: Invalid base class \"_ListMultipartUploadsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: error: Variable \"mypy_boto3_s3.paginator._ListObjectVersionsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: error: Invalid base class \"_ListObjectVersionsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: error: Variable \"mypy_boto3_s3.paginator._ListObjectsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: error: Invalid base class \"_ListObjectsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: error: Variable \"mypy_boto3_s3.paginator._ListObjectsV2PaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: error: Invalid base class \"_ListObjectsV2PaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: error: Variable \"mypy_boto3_s3.paginator._ListPartsPaginatorBase\" is not valid as a type  [valid-type]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: error: Invalid base class \"_ListPartsPaginatorBase\"  [misc]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:24: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:24: note: See https://mypy.readthedocs.io/en/stable/running_mypy.html#missing-imports"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:25: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:26: error: Cannot find implementation or library stub for module named \"botocore.errorfactory\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:27: error: Cannot find implementation or library stub for module named \"botocore.exceptions\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:46: error: Cannot find implementation or library stub for module named \"boto3.resources.base\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:47: error: Cannot find implementation or library stub for module named \"boto3.resources.collection\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:48: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+            },
+            {
+              "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:49: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+            }
+          ],
+          "other_diagnostics": [],
+          "total": 37
+        },
+        "diagnostics": [
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:23: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:24: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:25: error: Cannot find implementation or library stub for module named \"botocore.eventstream\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/type_defs.pyi:26: error: Cannot find implementation or library stub for module named \"botocore.response\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/waiter.pyi:35: error: Cannot find implementation or library stub for module named \"botocore.waiter\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:42: error: Cannot find implementation or library stub for module named \"botocore.paginate\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: error: Variable \"mypy_boto3_s3.paginator._ListBucketsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:81: error: Invalid base class \"_ListBucketsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: error: Variable \"mypy_boto3_s3.paginator._ListDirectoryBucketsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:99: error: Invalid base class \"_ListDirectoryBucketsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: error: Variable \"mypy_boto3_s3.paginator._ListMultipartUploadsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:117: error: Invalid base class \"_ListMultipartUploadsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: error: Variable \"mypy_boto3_s3.paginator._ListObjectVersionsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:135: error: Invalid base class \"_ListObjectVersionsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: error: Variable \"mypy_boto3_s3.paginator._ListObjectsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:153: error: Invalid base class \"_ListObjectsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: error: Variable \"mypy_boto3_s3.paginator._ListObjectsV2PaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:171: error: Invalid base class \"_ListObjectsV2PaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: error: Variable \"mypy_boto3_s3.paginator._ListPartsPaginatorBase\" is not valid as a type  [valid-type]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: note: See https://mypy.readthedocs.io/en/stable/common_issues.html#variables-vs-type-aliases"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/paginator.pyi:189: error: Invalid base class \"_ListPartsPaginatorBase\"  [misc]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:24: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:24: note: See https://mypy.readthedocs.io/en/stable/running_mypy.html#missing-imports"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:25: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:26: error: Cannot find implementation or library stub for module named \"botocore.errorfactory\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/client.pyi:27: error: Cannot find implementation or library stub for module named \"botocore.exceptions\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:46: error: Cannot find implementation or library stub for module named \"boto3.resources.base\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:47: error: Cannot find implementation or library stub for module named \"boto3.resources.collection\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:48: error: Cannot find implementation or library stub for module named \"boto3.s3.transfer\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/stubtree/mypy_boto3_s3/service_resource.pyi:49: error: Cannot find implementation or library stub for module named \"botocore.client\"  [import-not-found]"
+          },
+          {
+            "raw": "<private-s3-probe>/fixture/wrong_type.py:5: error: Argument \"Bucket\" to \"put_object\" of \"S3Client\" has incompatible type \"int\"; expected \"str\"  [arg-type]"
+          }
+        ],
+        "fixture": "wrong_type",
+        "fixture_call_diagnostics": [
+          {
+            "raw": "<private-s3-probe>/fixture/wrong_type.py:5: error: Argument \"Bucket\" to \"put_object\" of \"S3Client\" has incompatible type \"int\"; expected \"str\"  [arg-type]"
+          }
+        ],
+        "fixture_sha256": "sha256:d87a3b92b29fa3c12e1e66419d887a0dd2b5d1c00c0bda8a79d9b8942fae6abc",
+        "keyword_bindings": [
+          "Bucket",
+          "Key",
+          "Body"
+        ],
+        "line": 5,
+        "mypy_errors": 37,
+        "positional_argument_indexes": [],
+        "selector_binding_results": {
+          "binding_status": "invalid_call",
+          "resource": "bound",
+          "value": "bound"
+        },
+        "signature_resolved": true,
+        "typed_receiver_symbol": "mypy_boto3_s3.client.S3Client",
+        "typed_receiver_type": "mypy_boto3_s3.client.S3Client"
+      }
+    ],
+    "expected": "mypy_boto3_s3.client.S3Client.put_object"
+  },
+  "environment": {
+    "analyzer": "mypy",
+    "analyzer_sha256": {
+      "mypy.build": "sha256:256e6a2c8d995fd0768dced90a93182537777a863da7e0911d82fc6ba17acaee",
+      "mypy.nodes": "sha256:62629147e7563483d2ee5c1ed376cf87e3cbb5a63346ff1f99dc6d8750542df9",
+      "mypy.types": "sha256:18238ca674b4965584dea05221809337882320677c0452505c1738100ce241da"
+    },
+    "analyzer_version": "1.19.1",
+    "platform": "linux",
+    "python_version": "3.11.16",
+    "settings": {
+      "allow_external_dynamic_commands": false,
+      "export_types": true,
+      "follow_imports": "normal",
+      "incremental": false,
+      "mypy_path": "private extracted wheel",
+      "preserve_asts": true
+    }
+  },
+  "product_adapter": {
+    "audit": {
+      "contract_coverage": [
+        {
+          "contract_hash": "sha256:88af27612b4e2a0f6f23f3542ebad5437fb280b0cf7242bda7bdf9a4fdb785e8",
+          "contract_id": "typed-s3-delete-object",
+          "endpoint_ids": [],
+          "invocation": "instance_method",
+          "matched": false,
+          "occurrence_ids": [],
+          "symbol": "mypy_boto3_s3.client.S3Client.delete_object"
+        },
+        {
+          "contract_hash": "sha256:0aff463f5fdb74c78619e4f0ef4f981c92eeea56a348480e1dc325ac6e028aa5",
+          "contract_id": "typed-s3-get-object",
+          "endpoint_ids": [],
+          "invocation": "instance_method",
+          "matched": false,
+          "occurrence_ids": [],
+          "symbol": "mypy_boto3_s3.client.S3Client.get_object"
+        },
+        {
+          "contract_hash": "sha256:b8c94a99d79377306986f1b60d583f5fac990d9635760b2f6fea430977a47028",
+          "contract_id": "typed-s3-put-object",
+          "endpoint_ids": [
+            "sha256:8cc3f4e72abe3e34d012221eaa912e2f0a2b1b274c71262019f4d6ed4851ccba"
+          ],
+          "invocation": "instance_method",
+          "matched": true,
+          "occurrence_ids": [
+            "sha256:d1a5204606a382d2115ea0b9c44adee71bd83b5657bf01457a2fb581c5bbfacb"
+          ],
+          "symbol": "mypy_boto3_s3.client.S3Client.put_object"
+        }
+      ],
+      "matching_status": "complete",
+      "occurrences": [
+        {
+          "audit_status": "matched",
+          "canonical_symbol": "mypy_boto3_s3.client.S3Client.put_object",
+          "column": 4,
+          "contract_hash": "sha256:b8c94a99d79377306986f1b60d583f5fac990d9635760b2f6fea430977a47028",
+          "contract_id": "typed-s3-put-object",
+          "end_column": 21,
+          "end_line": 5,
+          "endpoints": [
+            {
+              "conditions": [],
+              "discovery_status": "established",
+              "handler_file": "complete.py",
+              "handler_line": 4,
+              "handler_module": "complete",
+              "handler_name": "run",
+              "id": "sha256:8cc3f4e72abe3e34d012221eaa912e2f0a2b1b274c71262019f4d6ed4851ccba",
+              "methods": [
+                "POST"
+              ],
+              "path": "/controlled"
+            }
+          ],
+          "file_path": "complete.py",
+          "id": "sha256:d1a5204606a382d2115ea0b9c44adee71bd83b5657bf01457a2fb581c5bbfacb",
+          "invocation": "instance_method",
+          "line": 5,
+          "reason_code": null,
+          "receiver_candidates": [
+            "mypy_boto3_s3.client.S3Client"
+          ],
+          "receiver_origin": {
+            "reason_code": "receiver_origin_unavailable",
+            "schema_version": 1,
+            "status": "unavailable",
+            "value_hashes": []
+          },
+          "resolver": "mypy",
+          "resolver_status": "exact",
+          "resolver_version": "1.19.1",
+          "resource_identity": {
+            "reason_code": null,
+            "schema_version": 1,
+            "status": "exact",
+            "value_hashes": [
+              "sha256:69cdd323b34744cc85bd9f501cea60ea0cfc45f0d1d41355f382cc56c5d8c639"
+            ]
+          },
+          "source_spelling": "client.put_object"
+        }
+      ],
+      "provenance": {
+        "audit_hash": "sha256:6e7a64675adf0a5fa406531c8ac53399762b798b1d3aedaba36aa1dbfcb111f5",
+        "config_hash": "sha256:62e9eaec796e3ffd042e69758c6893d417ee0889fdf83145d56f544ae952f64a",
+        "contract_hashes": {
+          "typed-s3-delete-object": "sha256:88af27612b4e2a0f6f23f3542ebad5437fb280b0cf7242bda7bdf9a4fdb785e8",
+          "typed-s3-get-object": "sha256:0aff463f5fdb74c78619e4f0ef4f981c92eeea56a348480e1dc325ac6e028aa5",
+          "typed-s3-put-object": "sha256:b8c94a99d79377306986f1b60d583f5fac990d9635760b2f6fea430977a47028"
+        },
+        "contract_source_path": "content://sha256/7c5cf82835f371e3ec8e3d422f3f5c4f324622c7bfeb928690cb11921749b871",
+        "matcher": "exact_symbol_invocation_v1",
+        "matcher_schema_version": 1,
+        "occurrence_corpus_hash": "sha256:a6c25effd94b322c9b0c991b76140d25c7515777d8d6add3ebc92fbf281a7dbb",
+        "preset_hash": "sha256:99707cccf212f530bd2437a3cb154d5ebea775857cc7d65c777771f9771cc6c4",
+        "raw_hash": "sha256:7c5cf82835f371e3ec8e3d422f3f5c4f324622c7bfeb928690cb11921749b871",
+        "resolver_versions": [
+          "mypy@1.19.1"
+        ]
+      },
+      "schema_version": 1,
+      "scope": {
+        "cache_enabled": false,
+        "conditional_endpoints": 0,
+        "endpoint_inventory": [
+          {
+            "conditions": [],
+            "discovery_status": "established",
+            "handler_file": "complete.py",
+            "handler_line": 4,
+            "handler_module": "complete",
+            "handler_name": "run",
+            "id": "sha256:8cc3f4e72abe3e34d012221eaa912e2f0a2b1b274c71262019f4d6ed4851ccba",
+            "methods": [
+              "POST"
+            ],
+            "path": "/controlled"
+          }
+        ],
+        "endpoints": 1,
+        "established_endpoints": 1,
+        "inventory_limitations": [],
+        "inventory_status": "established",
+        "kind": "endpoint_reachable_calls",
+        "max_depth": 10,
+        "package_applicability": "not_evaluated",
+        "source_root": ".",
+        "track_transitive": true
+      },
+      "summary": {
+        "ambiguous_calls": 0,
+        "contracts": 3,
+        "endpoint_links": 1,
+        "matched_calls": 1,
+        "matched_contracts": 1,
+        "physical_occurrences": 1,
+        "unmatched_calls": 0,
+        "unmatched_contracts": 2,
+        "unresolved_calls": 0
+      }
+    },
+    "binding_complete": true,
+    "calls": [
+      {
+        "arguments": [
+          {
+            "keyword": "Bucket",
+            "positional_index": null,
+            "reason_code": null,
+            "source_index": 0,
+            "status": "exact",
+            "value_hashes": [
+              "sha256:3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d"
+            ]
+          },
+          {
+            "keyword": "Key",
+            "positional_index": null,
+            "reason_code": null,
+            "source_index": 1,
+            "status": "exact",
+            "value_hashes": [
+              "sha256:8254c329a92850f6d539dd376f4816ee2764517da5e0235514af433164480d7a"
+            ]
+          },
+          {
+            "keyword": "Body",
+            "positional_index": null,
+            "reason_code": "dynamic_argument",
+            "source_index": 2,
+            "status": "unavailable",
+            "value_hashes": []
+          }
+        ],
+        "canonical_symbol": "mypy_boto3_s3.client.S3Client.put_object",
+        "column": 4,
+        "end_column": 21,
+        "end_line": 5,
+        "file_path": "<private-s3-probe>/fixture/complete.py",
+        "invocation": "instance_method",
+        "line": 5,
+        "reason_code": null,
+        "receiver_candidates": [
+          "mypy_boto3_s3.client.S3Client"
+        ],
+        "receiver_origin": {
+          "reason_code": "receiver_origin_unavailable",
+          "schema_version": 1,
+          "status": "unavailable",
+          "value_hashes": []
+        },
+        "resolver": "mypy",
+        "resolver_version": "1.19.1",
+        "source_spelling": "client.put_object",
+        "status": "exact"
+      }
+    ],
+    "preset": {
+      "config_hash": "sha256:62e9eaec796e3ffd042e69758c6893d417ee0889fdf83145d56f544ae952f64a",
+      "lookup_name": "object-storage-v1",
+      "name": "object-storage-v1",
+      "preset_hash": "sha256:99707cccf212f530bd2437a3cb154d5ebea775857cc7d65c777771f9771cc6c4",
+      "raw_hash": "sha256:7c5cf82835f371e3ec8e3d422f3f5c4f324622c7bfeb928690cb11921749b871",
+      "source_sha256": "sha256:7c5cf82835f371e3ec8e3d422f3f5c4f324622c7bfeb928690cb11921749b871"
+    },
+    "product_module_paths": {
+      "fastapi_endpoint_detector.analyzer.effect_contract_auditor": "/tmp/test-ast-gh97-s3-module-root-20261010/src/fastapi_endpoint_detector/analyzer/effect_contract_auditor.py",
+      "fastapi_endpoint_detector.analyzer.mypy_analyzer": "/tmp/test-ast-gh97-s3-module-root-20261010/src/fastapi_endpoint_detector/analyzer/mypy_analyzer.py",
+      "fastapi_endpoint_detector.models.effect_contract": "/tmp/test-ast-gh97-s3-module-root-20261010/src/fastapi_endpoint_detector/models/effect_contract.py",
+      "fastapi_endpoint_detector.models.effect_contract_audit": "/tmp/test-ast-gh97-s3-module-root-20261010/src/fastapi_endpoint_detector/models/effect_contract_audit.py",
+      "fastapi_endpoint_detector.models.endpoint": "/tmp/test-ast-gh97-s3-module-root-20261010/src/fastapi_endpoint_detector/models/endpoint.py"
+    },
+    "product_revision": "5c83496ca5e580e686329eaaf5e707ed0fa61373",
+    "product_root": "/tmp/test-ast-gh97-s3-module-root-20261010/src",
+    "product_source_sha256": {
+      "fastapi_endpoint_detector.analyzer.effect_contract_auditor": "sha256:c6ecd7210e7c4fc054010c80e9df0961b1510fd9cb9599faa49a27e751258d57",
+      "fastapi_endpoint_detector.analyzer.mypy_analyzer": "sha256:4fe8e0fa3a872bccab33739f175ecb7aeae4f4734a0941fccc20ac2d88625cdb",
+      "fastapi_endpoint_detector.models.effect_contract": "sha256:b9e65ab6aead6392e98ba80ca59418820495b0f2e6f53864c868347b1bc3d7b3",
+      "fastapi_endpoint_detector.models.effect_contract_audit": "sha256:4d4771903cb153350710e81e59e2c880a489ff4c1b40a387b8242c8132a0bcb8",
+      "fastapi_endpoint_detector.models.endpoint": "sha256:543a97269f4665fbb7eb3e2752e728307feb5e688c7eae37cab023e1c7fce138"
+    },
+    "resolver": "1.19.1",
+    "status": "completed"
+  },
+  "schema_version": 1,
+  "scope": "one exact S3 stub wheel and pinned analyzer environment; no compatibility range or production claims",
+  "selector_binding_results": [
+    {
+      "binding_status": "complete",
+      "fixture": "complete",
+      "resource": "bound",
+      "value": "bound"
+    },
+    {
+      "binding_status": "incomplete",
+      "fixture": "omitted_body",
+      "resource": "bound",
+      "value": "missing_or_misbound"
+    },
+    {
+      "binding_status": "misbound_positional_to_keyword_only_parameters",
+      "fixture": "misbound_body",
+      "resource": "missing_or_misbound",
+      "value": "missing_or_misbound"
+    },
+    {
+      "binding_status": "unvalidated_unmatched_canonical",
+      "fixture": "foreign_same_name",
+      "resource": "bound",
+      "value": "bound"
+    },
+    {
+      "binding_status": "invalid_call",
+      "fixture": "bogus_keyword",
+      "resource": "bound",
+      "value": "bound"
+    },
+    {
+      "binding_status": "invalid_call",
+      "fixture": "wrong_type",
+      "resource": "bound",
+      "value": "bound"
+    }
+  ],
+  "source_execution": false,
+  "status": "completed",
+  "upstream_package_code_imported_or_executed": false
+}
