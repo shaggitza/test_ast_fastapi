@@ -60,3 +60,23 @@ def phase_report_payload(evidence: FrameworkPhaseIntegration) -> FrameworkPhaseR
         engine_digests=tuple(sorted({item.engine_sha256 for item in evidence.records})),
         config_digests=tuple(sorted({item.config_sha256 for item in evidence.records})),
     )
+
+
+def unavailable_phase_report(*, snapshot_side: str, limitation: str) -> FrameworkPhaseReport:
+    """Return an explicit empty report when no supported phase frontend is available."""
+    return FrameworkPhaseReport(
+        backend="unavailable",
+        backend_version="unavailable",
+        snapshot_side=snapshot_side,
+        record_count=0,
+        established_count=0,
+        conditional_count=0,
+        unavailable_count=0,
+        records=(),
+        lifecycle_conditional_surfaces=(),
+        limitations=(limitation,),
+        source_digests=(),
+        inventory_digests=(),
+        engine_digests=(),
+        config_digests=(),
+    )

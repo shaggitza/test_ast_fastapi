@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,6 +23,7 @@ from fastapi_endpoint_detector.models.report import (
     ConfidenceLevel,
     EvidenceStatus,
 )
+from fastapi_endpoint_detector.output.json_output import JsonFormatter
 from fastapi_endpoint_detector.parser.diff_parser import DiffParser
 
 
@@ -507,6 +509,43 @@ def test_scip_seed_failure_does_not_discard_other_seed_results(tmp_path: Path) -
 
     assert [item.endpoint.identifier for item in affected] == ["GET /items"]
     assert any("services:__all__" in warning for warning in warnings)
+
+    report = mapper.analyze_diff(
+        "diff --git a/services.py b/services.py\n"
+        "new file mode 100644\n--- /dev/null\n+++ b/services.py\n"
+        "@@ -0,0 +1 @@\n+def changed(): pass\n"
+    )
+    assert [item.endpoint.identifier for item in report.candidate_endpoints] == ["GET /items"]
+    assert report.analysis_completeness == "partial"
+    assert any("ambiguous export" in warning for warning in report.warnings)
+    assert json.loads(JsonFormatter().format(report))["analysis_completeness"] == "partial"
+
+
+def test_scip_baseline_lifecycle_failure_is_partial_on_additions_only(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n"
+        "@app.get('/items')\ndef items():\n    return 1\n"
+    )
+    (target / "services.py").write_text("def changed(): pass\n")
+    mapper = ChangeMapper(
+        target,
+        baseline_app_path=tmp_path / "missing" / "main.py",
+        use_cache=False,
+        secure_ast=True,
+        use_scip=True,
+    )
+    mapper._scip_analyzer = EmptyTargetAnalyzer()  # type: ignore[assignment]
+    report = mapper.analyze_diff(
+        "diff --git a/services.py b/services.py\nnew file mode 100644\n"
+        "--- /dev/null\n+++ b/services.py\n@@ -0,0 +1 @@\n+def changed(): pass\n"
+    )
+    assert report.total_endpoints == 1
+    assert report.endpoint_lifecycle == []
+    assert report.analysis_completeness == "partial"
+    assert any("baseline endpoint lifecycle" in warning for warning in report.warnings)
+    assert json.loads(JsonFormatter().format(report))["analysis_completeness"] == "partial"
 
 
 def test_scip_mapper_rejects_identical_target_and_baseline(tmp_path: Path) -> None:

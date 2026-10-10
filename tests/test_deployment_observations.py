@@ -7,6 +7,36 @@ from fastapi_endpoint_detector.analyzer.deployment_observations import (
 )
 
 
+def test_malformed_environment_url_never_exposes_credentials() -> None:
+    observations = extract_env_observations("API_URL=http://user:secret@[bad\n")
+    assert len(observations) == 1
+    assert observations[0].value is None
+    assert observations[0].certainty == "uncertain"
+    assert "secret" not in repr(observations)
+
+
+def test_docker_backtick_continuation_cannot_emit_exact_environment() -> None:
+    observations = extract_dockerfile_observations(
+        "# escape=`\nFROM scratch\nRUN echo ignored `\nENV PORT=8000\n"
+    )
+    assert observations
+    assert all(item.certainty == "uncertain" and item.value is None for item in observations)
+    assert "escape directive" in (observations[0].uncertainty or "")
+
+
+def test_expanded_subprocess_options_cannot_prove_shell_false() -> None:
+    observations = extract_subprocess_observations(
+        "import subprocess\n"
+        "options = {'shell': True}\n"
+        "subprocess.run(['echo', 'safe'], **options)\n"
+        "subprocess.run(['echo', 'safe'], shell=False)\n"
+    )
+    assert [(item.value, item.certainty) for item in observations] == [
+        (None, "uncertain"),
+        (("echo", "safe"), "exact"),
+    ]
+
+
 def test_env_observations_keep_route_keys_but_redact_other_values() -> None:
     observations = extract_env_observations(
         "API_BASE_URL=https://api.example.test/v1\n"
