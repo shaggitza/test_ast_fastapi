@@ -27,6 +27,50 @@ from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, 
 class TestMypyAnalyzerBasic:
     """Basic tests for MypyAnalyzer."""
 
+    def test_expression_branches_preserve_possible_and_dead_lambda_execution(
+        self, tmp_path: Path
+    ) -> None:
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "def handler(flag: bool) -> None:\n"
+            "    maybe_and = lambda: 1\n"
+            "    flag and maybe_and()\n"
+            "    maybe_or = lambda: 2\n"
+            "    flag or maybe_or()\n"
+            "    dead_and = lambda: 3\n"
+            "    False and dead_and()\n"
+            "    dead_or = lambda: 4\n"
+            "    True or dead_or()\n"
+            "    maybe_true = lambda: 5\n"
+            "    maybe_false = lambda: 6\n"
+            "    maybe_true() if flag else maybe_false()\n"
+            "    selected = lambda: 7\n"
+            "    dead_arm = lambda: 8\n"
+            "    selected() if True else dead_arm()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/expressions",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=1),
+        )
+        dependencies = MypyAnalyzer(tmp_path).analyze_endpoint(endpoint)
+        states = {
+            line: {
+                span.execution_state
+                for span in dependencies.source_evidence_spans
+                if span.start_line == line
+            }
+            for line in (2, 4, 6, 8, 10, 11, 13, 14)
+        }
+        for line in (2, 4, 10, 11):
+            assert "possible_execution" in states[line], states
+            assert "established_execution" not in states[line], states
+        for line in (6, 8, 14):
+            assert "deferred_execution" in states[line], states
+            assert not states[line] & {"possible_execution", "established_execution"}, states
+        assert "established_execution" in states[13], states
+
     def test_branch_joined_callable_partial_abstains_with_limitation(self, tmp_path: Path) -> None:
         app_path = tmp_path / "app.py"
         app_path.write_text(

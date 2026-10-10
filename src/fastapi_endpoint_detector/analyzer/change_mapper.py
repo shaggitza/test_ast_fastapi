@@ -1287,7 +1287,7 @@ class ChangeMapper:
             low_only_points_to = deps.references_lines_low_only(file_path, changed_lines)
             confidence = (
                 ConfidenceLevel.LOW
-                if low_only_points_to
+                if low_only_points_to or deps.analysis_limitations
                 else effect_result.confidence
                 if effect_result
                 else ConfidenceLevel.MEDIUM
@@ -1295,6 +1295,7 @@ class ChangeMapper:
             effect_summary = (
                 f"; effect analysis: {effect_result.evidence[0].summary}" if effect_result else ""
             )
+            changed_byte_spans = DiffParser.get_changed_byte_spans(diff_file, side=side)
             return AffectedEndpoint(
                 endpoint=endpoint,
                 confidence=confidence,
@@ -1340,11 +1341,30 @@ class ChangeMapper:
                         provenance=span.provenance,
                     )
                     for span in deps.get_source_evidence_spans(file_path)
-                    if set(range(span.start_line, span.end_line + 1)) & set(display_lines)
+                    if any(
+                        self._source_span_overlaps_change(span, change)
+                        for change in changed_byte_spans
+                        if change.line_number in display_lines
+                    )
                 ),
             )
 
         return None
+
+    @staticmethod
+    def _source_span_overlaps_change(span: SourceEvidenceSpan, change: ChangedByteSpan) -> bool:
+        """Match side-qualified UTF-8 edits to the actual execution span."""
+        if not span.start_line <= change.line_number <= span.end_line:
+            return False
+        if not change.exact:
+            return True
+        span_start = (span.start_line, span.start_column)
+        span_end = (span.end_line, span.end_column)
+        change_start = (change.line_number, change.start_column)
+        change_end = (change.line_number, change.end_column)
+        if change_start == change_end:
+            return span_start <= change_start < span_end
+        return change_start < span_end and span_start < change_end
 
     @staticmethod
     def _change_is_deferred_lambda_only(
@@ -1381,6 +1401,11 @@ class ChangeMapper:
             return False
         executed_spans = deps.get_source_evidence_spans(
             str(diff_file.path), execution_state="established_execution"
+        )
+        executed_spans.extend(
+            deps.get_source_evidence_spans(
+                str(diff_file.path), execution_state="possible_execution"
+            )
         )
         if not relevant_changes:
             # This side has no changed bytes (for example, a suffix deletion
@@ -2188,12 +2213,10 @@ class ChangeMapper:
             "target", self.registry, self.mypy_analyzer, warnings
         )
         analysis_limitations: list[AnalysisLimitationReport] = []
-        limited_endpoint_ids: set[str] = set()
         for endpoint in self.registry.get_all():
             dependencies = self.mypy_analyzer.get_endpoint_dependencies(endpoint)
             if dependencies is None or not dependencies.analysis_limitations:
                 continue
-            limited_endpoint_ids.add(endpoint.identifier)
             analysis_limitations.extend(
                 AnalysisLimitationReport(
                     file_path=item.file_path,
@@ -2240,14 +2263,13 @@ class ChangeMapper:
                     "unresolved."
                 )
         if self._baseline_failure is None and self.baseline_app_path is not None:
-            # Baseline-only bounds matter for deletion candidates just as
-            # target-side bounds matter for additions. Endpoint identifiers are
-            # stable across the two snapshots, so use one downgrade set.
+            # Baseline bounds are reported alongside target bounds. Confidence
+            # is bounded on each typed dependency candidate before accumulation,
+            # preserving independent direct-handler and structural evidence.
             for endpoint in self.baseline_mypy_registry.get_all():
                 dependencies = self.baseline_mypy_analyzer.get_endpoint_dependencies(endpoint)
                 if dependencies is None or not dependencies.analysis_limitations:
                     continue
-                limited_endpoint_ids.add(endpoint.identifier)
                 analysis_limitations.extend(
                     AnalysisLimitationReport(
                         file_path=item.file_path,
@@ -2368,20 +2390,6 @@ class ChangeMapper:
         report_progress(95, 100, "Filtering results...")
         threshold = self.config.analysis.confidence_threshold
         materialized = [item.materialize() for item in all_affected.values()]
-        materialized = [
-            item.model_copy(
-                update={
-                    "confidence": ConfidenceLevel.LOW,
-                    "reason": (
-                        f"{item.reason} Bounded endpoint analysis prevents stronger confidence."
-                    ),
-                }
-            )
-            if item.endpoint.identifier in limited_endpoint_ids
-            and item.confidence in {ConfidenceLevel.HIGH, ConfidenceLevel.MEDIUM}
-            else item
-            for item in materialized
-        ]
         materialized = self._expand_resource_coupling_candidates(materialized, python_files)
         materialized = self._attach_contract_evidence(
             materialized,

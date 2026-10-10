@@ -6104,7 +6104,22 @@ class MypyAnalyzer:
 
             elif isinstance(n, OpExpr):
                 walk_node(n.left)
-                walk_node(n.right)
+                if n.op in {"and", "or"}:
+                    left_truth = self._literal_boolean(n.left)
+                    if (n.op == "and" and left_truth is False) or (
+                        n.op == "or" and left_truth is True
+                    ):
+                        return
+                    if left_truth is None:
+                        possible_execution_depth[0] += 1
+                        try:
+                            walk_node(n.right)
+                        finally:
+                            possible_execution_depth[0] -= 1
+                    else:
+                        walk_node(n.right)
+                else:
+                    walk_node(n.right)
 
             elif isinstance(n, ComparisonExpr):
                 for op in n.operands:
@@ -6114,17 +6129,17 @@ class MypyAnalyzer:
                 walk_node(n.expr)
 
             elif isinstance(n, ConditionalExpr):
-                # mypy uses cond/if_true/if_false but some versions use different names
-                if hasattr(n, "cond"):
-                    walk_node(n.cond)
-                if hasattr(n, "if_true"):
-                    walk_node(n.if_true)
-                elif hasattr(n, "then"):
-                    walk_node(n.then)
-                if hasattr(n, "if_false"):
-                    walk_node(n.if_false)
-                elif hasattr(n, "else_"):
-                    walk_node(n.else_)
+                walk_node(n.cond)
+                condition_truth = self._literal_boolean(n.cond)
+                if condition_truth is not None:
+                    walk_node(n.if_expr if condition_truth else n.else_expr)
+                else:
+                    possible_execution_depth[0] += 1
+                    try:
+                        walk_node(n.if_expr)
+                        walk_node(n.else_expr)
+                    finally:
+                        possible_execution_depth[0] -= 1
 
             elif isinstance(n, (ListExpr, TupleExpr, SetExpr)):
                 for item in n.items:

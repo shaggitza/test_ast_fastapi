@@ -348,5 +348,9 @@ def test_client_updates_respect_line_terminators_and_maximal_munch() -> None:
         "counter + ++fetch; fetch('/items');",
         "counter\n++fetch; fetch('/items');",
         "import http from 'axios'; ++http; http.get('/items');",
+        "setTimeout(() => fetch('/items'), 0)\n++fetch",
+        "setTimeout(() => axios.get('/items'), 0)\n--axios",
+        "setTimeout(() => new WebSocket('wss://api.test/items'), 0)\n++WebSocket",
+        "import http from 'axios'; setTimeout(() => http.get('/items'), 0)\n--http",
     ):
         assert extract_client_observations(source) == (), source
