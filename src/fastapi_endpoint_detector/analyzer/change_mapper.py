@@ -1561,6 +1561,19 @@ class ChangeMapper:
             source_path = diff_file.source_path or diff_file.path
             baseline_file = diff_file.model_copy(update={"path": source_path})
             for endpoint in self.baseline_mypy_registry:
+                direct = self._check_direct_handler_change(
+                    endpoint, baseline_file, [], removed_lines
+                )
+                if direct is not None:
+                    direct = direct.model_copy(
+                        update={"endpoint": self._target_equivalent_endpoint(endpoint)}
+                    )
+                    _merge_affected(affected, direct)
+                    handler = endpoint.handler
+                    handler_end = handler.end_line_number or handler.line_number + 50
+                    processed_removed_lines.update(
+                        line for line in removed_lines if handler.line_number <= line <= handler_end
+                    )
                 result = self._check_mypy_dependency(
                     endpoint, baseline_file, [], removed_lines, self.baseline_mypy_analyzer
                 )
@@ -1591,7 +1604,10 @@ class ChangeMapper:
         """Map target additions and baseline removals through separate SCIP indexes."""
         has_removed = any(
             (diff_file.source_path or diff_file.path).suffix == ".py"
-            and bool(DiffParser.get_changed_line_numbers(diff_file)[1])
+            and (
+                bool(DiffParser.get_changed_line_numbers(diff_file)[1])
+                or (diff_file.source_path is not None and diff_file.source_path != diff_file.path)
+            )
             for diff_file in python_files
         )
         if has_removed and self.baseline_app_path is None:
@@ -1771,6 +1787,49 @@ class ChangeMapper:
                 )
             added_lines, removed_lines = DiffParser.get_changed_line_numbers(diff_file)
             processed_added: set[int] = set()
+            if not added_lines and not removed_lines and diff_file.path.suffix == ".py":
+                for registry, changed_path, side in (
+                    (self.registry, diff_file.path, "target"),
+                    (
+                        self.baseline_registry if self.baseline_app_path is not None else None,
+                        diff_file.source_path or diff_file.path,
+                        "baseline",
+                    ),
+                ):
+                    if registry is None:
+                        continue
+                    for endpoint in registry.get_by_file(changed_path):
+                        reported_endpoint = (
+                            target_equivalent(endpoint) if side == "baseline" else endpoint
+                        )
+                        _merge_affected(
+                            affected,
+                            AffectedEndpoint(
+                                endpoint=reported_endpoint,
+                                confidence=ConfidenceLevel.HIGH,
+                                reason=f"Line-less {side} file change affects endpoint source",
+                                dependency_chain=[str(changed_path), endpoint.handler.name],
+                                changed_files=[str(changed_path)],
+                                effect_evidence=[
+                                    EffectEvidence(
+                                        producer=EvidenceProducer.DIRECT,
+                                        status=EvidenceStatus.ESTABLISHED,
+                                        effect=ChangeEffectKind.UNKNOWN,
+                                        channel=ImpactChannel.UNKNOWN,
+                                        disposition=EffectDisposition.INTERNAL_EFFECT,
+                                        summary=(
+                                            f"Git reported a {side} file change without line "
+                                            "hunks; the endpoint handler is defined by that file."
+                                        ),
+                                        changed_location=CodeReference(
+                                            file_path=str(changed_path),
+                                            line_number=endpoint.handler.line_number,
+                                            symbol=endpoint.handler.name,
+                                        ),
+                                    )
+                                ],
+                            ),
+                        )
             if diff_file.path.suffix == ".py" and added_lines:
                 processed_added.update(
                     analyze_structural_side(

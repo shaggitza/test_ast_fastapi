@@ -104,6 +104,61 @@ def test_missing_baseline_preserves_target_handler_findings(tmp_path: Path) -> N
     assert any("baseline" in warning.lower() for warning in report.warnings)
 
 
+def test_removed_baseline_handler_body_keeps_direct_high_confidence_evidence(
+    tmp_path: Path,
+) -> None:
+    baseline = tmp_path / "baseline"
+    target = tmp_path / "target"
+    baseline.mkdir()
+    target.mkdir()
+    before = (
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "@app.get('/items')\n"
+        "def items(flag: bool):\n"
+        "    if flag:\n"
+        "        return 1\n"
+        "    return 0\n"
+    )
+    after = (
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "@app.get('/items')\n"
+        "def items(flag: bool):\n"
+        "    return 0\n"
+    )
+    (baseline / "main.py").write_text(before, encoding="utf-8")
+    (target / "main.py").write_text(after, encoding="utf-8")
+    diff = "diff --git a/main.py b/main.py\n" + "".join(
+        difflib.unified_diff(
+            before.splitlines(keepends=True),
+            after.splitlines(keepends=True),
+            fromfile="a/main.py",
+            tofile="b/main.py",
+        )
+    )
+
+    report = ChangeMapper(
+        target / "main.py",
+        baseline_app_path=baseline / "main.py",
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+
+    candidate = next(
+        item for item in report.candidate_endpoints if item.endpoint.identifier == "GET /items"
+    )
+    assert candidate.confidence == ConfidenceLevel.HIGH
+    assert any(
+        item.producer == EvidenceProducer.DIRECT
+        and item.effect == ChangeEffectKind.HANDLER_IMPLEMENTATION
+        and item.changed_location is not None
+        and item.changed_location.line_number == 5
+        for item in candidate.effect_evidence
+    )
+    assert not report.orphan_changes
+
+
 def test_recovered_baseline_retries_removed_assembly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

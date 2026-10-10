@@ -5351,7 +5351,11 @@ class MypyAnalyzer:
                         and returned_call.status == CallResolutionStatus.EXACT
                         and returned_call.canonical_symbol is not None
                     ):
-                        if returned_call.canonical_symbol == "functools.partial" and n.rvalue.args:
+                        if (
+                            returned_call.canonical_symbol == "functools.partial"
+                            and len(n.rvalue.args) == 1
+                            and not any(name is not None for name in n.rvalue.arg_names)
+                        ):
                             partial_target = n.rvalue.args[0]
                             if isinstance(partial_target, NameExpr):
                                 callable_value = callable_environment.get(partial_target.name)
@@ -5556,6 +5560,11 @@ class MypyAnalyzer:
                 flow_environment.clear()
                 string_environment.clear()
                 deferred_environment.clear()
+                # The body is traversed once for finite analysis, but the loop
+                # may execute zero or multiple times. Do not let callable
+                # aliases from that synthetic pass escape as post-loop facts.
+                callable_environment.clear()
+                lambda_environment.clear()
 
             elif isinstance(n, ForStmt):
                 consume_generator_expression(
@@ -5571,6 +5580,10 @@ class MypyAnalyzer:
                 flow_environment.clear()
                 string_environment.clear()
                 deferred_environment.clear()
+                # As with while loops, one body traversal cannot establish
+                # post-loop callable bindings.
+                callable_environment.clear()
+                lambda_environment.clear()
 
             elif isinstance(n, WithStmt):
                 for expr in n.expr:
@@ -5592,6 +5605,11 @@ class MypyAnalyzer:
                     flow_environment.clear()
                     string_environment.clear()
                     deferred_environment.clear()
+                    # An exception can leave the body before its last alias
+                    # assignment, so its final synthetic state is not a valid
+                    # starting point for any handler.
+                    callable_environment.clear()
+                    lambda_environment.clear()
                     walk_node(handler)
                 if hasattr(n, "types") and n.types:
                     for exc_type in n.types:
@@ -5601,12 +5619,18 @@ class MypyAnalyzer:
                     flow_environment.clear()
                     string_environment.clear()
                     deferred_environment.clear()
+                    callable_environment.clear()
+                    lambda_environment.clear()
                     walk_node(n.else_body)
                 if n.finally_body:
                     flow_environment.clear()
                     string_environment.clear()
                     deferred_environment.clear()
+                    callable_environment.clear()
+                    lambda_environment.clear()
                     walk_node(n.finally_body)
+                callable_environment.clear()
+                lambda_environment.clear()
                 flow_environment.clear()
                 string_environment.clear()
                 deferred_environment.clear()

@@ -621,6 +621,55 @@ def test_deleted_helper_uses_baseline_index_and_unchanged_target_endpoint(
     assert not orphans
 
 
+def test_line_less_scip_rename_seeds_endpoint_file_ownership(tmp_path: Path) -> None:
+    baseline = tmp_path / "baseline"
+    target = tmp_path / "target"
+    baseline.mkdir()
+    target.mkdir()
+    source = (
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "@app.get('/items')\n"
+        "def items():\n"
+        "    return 1\n"
+    )
+    (baseline / "main.py").write_text(source, encoding="utf-8")
+    (target / "new_main.py").write_text(source, encoding="utf-8")
+    diff_file = DiffParser.parse_string(
+        "diff --git a/main.py b/new_main.py\n"
+        "similarity index 100%\n"
+        "rename from main.py\n"
+        "rename to new_main.py\n"
+    )[0]
+
+    class EmptyIndex(ReferenceAnalyzerMixin):
+        def ensure_index(self, *, force: bool = False) -> None:
+            assert force
+
+        def definitions_at(self, _file_path: Path, _lines: set[int]):
+            return ()
+
+        def reverse_call_edges(self, _seed: SCIPDefinition):
+            return ()
+
+    mapper = ChangeMapper(
+        target,
+        use_cache=False,
+        secure_ast=True,
+        use_scip=True,
+        baseline_app_path=baseline,
+    )
+    mapper._scip_analyzer = EmptyIndex()  # type: ignore[assignment]
+    mapper._baseline_scip_analyzer = EmptyIndex()  # type: ignore[assignment]
+
+    affected, orphans = mapper._analyze_with_scip([diff_file], [], None)
+
+    assert [item.endpoint.identifier for item in affected] == ["GET /items"]
+    assert affected[0].endpoint.handler.file_path == target / "new_main.py"
+    assert affected[0].confidence == ConfidenceLevel.HIGH
+    assert not orphans
+
+
 def test_scip_mapper_reaches_direct_and_depends_endpoints(tmp_path: Path) -> None:
     target = tmp_path / "target"
     baseline = tmp_path / "baseline"
