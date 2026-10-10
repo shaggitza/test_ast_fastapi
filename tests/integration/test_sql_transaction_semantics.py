@@ -1942,3 +1942,132 @@ def test_source_projection_requires_compatible_commit_branch(
     assert original in text
     source.write_text(text.replace(original, replacement, 1))
     assert len(_langflow_fixture_transaction_reports(copied)[2].source_projections) == expected
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "source/langflow/services/deps.py.txt",
+        "source/lfx/services/deps.py.txt",
+        "source/langflow/api/v1/traces.py.txt",
+    ],
+)
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "import sys\n"
+        "import builtins\n"
+        'builtins.setattr(sys.modules[__name__], "session_scope", foreign)',
+        "import sys\n"
+        "import builtins as reflected\n"
+        'reflected.setattr(sys.modules[__name__], "session_scope", foreign)',
+        "import sys\n"
+        "from builtins import setattr as replace_binding\n"
+        'replace_binding(sys.modules[__name__], "session_scope", foreign)',
+        "import sys\n"
+        "replace_binding = setattr\n"
+        "forwarded = replace_binding\n"
+        'forwarded(sys.modules[__name__], "session_scope", foreign)',
+    ],
+)
+def test_source_projection_rejects_qualified_reflective_rebinding(
+    tmp_path: Path, relative_path: str, mutation: str
+) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    source = copied / relative_path
+    source.write_text(source.read_text() + "\n" + mutation + "\n")
+    assert _langflow_fixture_transaction_reports(copied)[2].source_projections == ()
+
+
+@pytest.mark.parametrize(
+    ("replacement", "expected"),
+    [
+        (
+            "match flag:\n"
+            "                case 1:\n"
+            "                    yield session\n"
+            "                case 2:\n"
+            "                    await session.commit()",
+            0,
+        ),
+        (
+            "match flag:\n"
+            "                case 1:\n"
+            "                    yield session\n"
+            "                    await session.commit()",
+            1,
+        ),
+        (
+            "match flag:\n"
+            "                case 1:\n"
+            "                    yield session\n"
+            "            await session.commit()",
+            1,
+        ),
+    ],
+)
+def test_source_projection_requires_compatible_match_case(
+    tmp_path: Path, replacement: str, expected: int
+) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    source = copied / "source/lfx/services/deps.py.txt"
+    text = source.read_text()
+    original = "yield session\n            await session.commit()"
+    assert original in text
+    source.write_text(text.replace(original, replacement, 1))
+    assert len(_langflow_fixture_transaction_reports(copied)[2].source_projections) == expected
+
+
+@pytest.mark.parametrize(
+    ("guard", "expected"),
+    [
+        ("0", 0),
+        ("0.0", 0),
+        ("''", 0),
+        ("b''", 0),
+        ("None", 0),
+        ("1", 1),
+        ("'nonempty'", 1),
+    ],
+)
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "source/langflow/services/deps.py.txt",
+        "source/lfx/services/deps.py.txt",
+    ],
+)
+def test_source_projection_uses_constant_guard_truthiness(
+    tmp_path: Path, relative_path: str, guard: str, expected: int
+) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    source = copied / relative_path
+    text = source.read_text()
+    tree = ast.parse(text)
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "session_scope"
+    )
+    context = next(node for node in function.body if isinstance(node, ast.AsyncWith))
+    assert context.end_lineno is not None
+    lines = text.splitlines(keepends=True)
+    start, end = context.lineno - 1, context.end_lineno
+    indentation = " " * context.col_offset
+    lines[start:end] = [
+        indentation + f"if {guard}:\n",
+        *["    " + line for line in lines[start:end]],
+    ]
+    source.write_text("".join(lines))
+    # Conditional wrapper contexts remain outside the supported direct
+    # passthrough form, including a truthy guard. Delegate guards retain
+    # their compatible normal-boundary paths.
+    if relative_path == "source/langflow/services/deps.py.txt":
+        expected = 0
+    assert len(_langflow_fixture_transaction_reports(copied)[2].source_projections) == expected

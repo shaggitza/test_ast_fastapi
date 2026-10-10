@@ -684,13 +684,13 @@ def _has_dynamic_module_binding_mutation(module: ast.Module) -> bool:  # noqa: P
 
     # Track simple module aliases of dynamic evaluators (for example
     # ``rebind = exec`` and ``from builtins import exec as run``).
-    dynamic_aliases = {"exec", "eval", "globals", "locals", "vars", "delattr"}
+    dynamic_aliases = {"exec", "eval", "globals", "locals", "vars", "delattr", "setattr"}
     for statement in executed_nodes(module):
         if isinstance(statement, ast.ImportFrom) and statement.module == "builtins":
             dynamic_aliases.update(
                 alias.asname or alias.name
                 for alias in statement.names
-                if alias.name in {"exec", "eval", "globals", "locals", "vars", "delattr"}
+                if alias.name in {"exec", "eval", "globals", "locals", "vars", "delattr", "setattr"}
             )
         if isinstance(statement, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
             value = statement.value
@@ -739,7 +739,7 @@ def _has_dynamic_module_binding_mutation(module: ast.Module) -> bool:  # noqa: P
         func = node.func
         if isinstance(func, ast.Name) and func.id in dynamic_aliases:
             return True
-        if isinstance(func, ast.Attribute) and func.attr in {"exec", "eval", "delattr"}:
+        if isinstance(func, ast.Attribute) and func.attr in {"exec", "eval", "delattr", "setattr"}:
             return True
         if isinstance(func, ast.Name) and func.id == "getattr" and len(node.args) >= 2:
             if isinstance(node.args[1], ast.Constant) and node.args[1].value in {"exec", "eval"}:
@@ -844,15 +844,15 @@ def _has_unreachable_terminator(node: ast.AST, parents: dict[ast.AST, ast.AST]) 
             isinstance(owner, ast.If)
             and isinstance(owner.test, ast.Constant)
             and (
-                (owner.test.value is False and current in owner.body)
-                or (owner.test.value is True and current in owner.orelse)
+                (not bool(owner.test.value) and current in owner.body)
+                or (bool(owner.test.value) and current in owner.orelse)
             )
         ):
             return True
         if (
             isinstance(owner, ast.While)
             and isinstance(owner.test, ast.Constant)
-            and owner.test.value is False
+            and not bool(owner.test.value)
             and current in owner.body
         ):
             return True
@@ -913,6 +913,19 @@ def _yield_can_reach_normal_boundary(  # noqa: PLR0912
             call_body = any(boundary in set(_owned_nodes(item)) for item in owner.body)
             call_else = any(boundary in set(_owned_nodes(item)) for item in owner.orelse)
             if (in_body and call_else) or (in_else and call_body):
+                return False
+        if isinstance(owner, ast.Match):
+            yield_case = next(
+                (case for case in owner.cases if yielded in set(_owned_nodes(case))), None
+            )
+            boundary_case = next(
+                (case for case in owner.cases if boundary in set(_owned_nodes(case))), None
+            )
+            if (
+                yield_case is not None
+                and boundary_case is not None
+                and yield_case is not boundary_case
+            ):
                 return False
         yield_cursor = owner
     boundary_ancestors: set[ast.AST] = {boundary}
