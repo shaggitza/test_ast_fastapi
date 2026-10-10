@@ -99,12 +99,17 @@ def items():
 +++ b/service.py
 {service_hunk}"""
 
-    report = ChangeMapper(
+    mapper = ChangeMapper(
         target_root / "main.py",
         baseline_app_path=baseline_root / "main.py",
         secure_ast=True,
         use_cache=False,
-    ).analyze_diff(diff)
+    )
+    report = mapper.analyze_diff(diff)
+    for analyzer in (mapper.mypy_analyzer, mapper.baseline_mypy_analyzer):
+        assert analyzer._build_result is None
+        assert not analyzer._trees
+        assert not analyzer._types_map
     assert not report.errors
     candidate = next(
         item for item in report.candidate_endpoints if item.endpoint.identifier == "GET /items"
@@ -125,3 +130,18 @@ def items():
     else:
         assert candidate.confidence == ConfidenceLevel.MEDIUM
         assert not data_flow
+
+    if expects_baseline_effect:
+        repeated = mapper.analyze_diff(diff)
+        assert not repeated.errors
+        repeated_candidate = next(
+            item
+            for item in repeated.candidate_endpoints
+            if item.endpoint.identifier == "GET /items"
+        )
+        assert repeated_candidate.confidence == candidate.confidence
+        assert repeated_candidate.effect_evidence == candidate.effect_evidence
+        for analyzer in (mapper.mypy_analyzer, mapper.baseline_mypy_analyzer):
+            assert analyzer._build_result is None
+            assert not analyzer._trees
+            assert not analyzer._types_map
