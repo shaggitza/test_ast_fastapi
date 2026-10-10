@@ -472,6 +472,67 @@ def _local_callable_instance_method(
     )
 
 
+def _local_callable_instance_class_chain(  # noqa: PLR0911 - ambiguous chains fail closed
+    extractor: SecureASTExtractor,
+    module: _Module,
+    class_name: str,
+    line: int,
+) -> tuple[ast.ClassDef, ...]:
+    """Return only the unique, simple local class chain proven by callable resolution."""
+    chain: list[ast.ClassDef] = []
+    seen: set[str] = set()
+    owner = class_name
+    for _ in range(16):
+        if owner in seen:
+            return ()
+        seen.add(owner)
+        definitions = [
+            node
+            for node in module.tree.body
+            if isinstance(node, ast.ClassDef) and node.name == owner and node.lineno < line
+        ]
+        if len(definitions) != 1:
+            return ()
+        definition = definitions[0]
+        if (
+            definition.decorator_list
+            or definition.keywords
+            or extractor._module_name_may_bind(
+                module, owner, definition.end_lineno or definition.lineno, line
+            )
+        ):
+            return ()
+        safe_body = all(
+            isinstance(node, ast.Pass)
+            or (
+                isinstance(node, ast.Expr)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+            )
+            or (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == "__call__"
+            )
+            for node in definition.body
+        )
+        if not safe_body:
+            return ()
+        methods = [
+            node
+            for node in definition.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "__call__"
+        ]
+        if methods and (len(methods) != 1 or methods[0].decorator_list):
+            return ()
+        chain.append(definition)
+        if methods:
+            return tuple(chain)
+        if len(definition.bases) != 1 or not isinstance(definition.bases[0], ast.Name):
+            return ()
+        owner = definition.bases[0].id
+    return ()
+
+
 def _is_local_callable_instance_dependency(
     extractor: SecureASTExtractor, module: _Module, target: ast.expr | None, line: int
 ) -> bool:
@@ -1671,6 +1732,27 @@ class SecureASTExtractor:
                                             source_span=_native_span(provider_module.path, base),
                                         )
                                         for base in provider_class.bases
+                                    )
+                                    class_chain = _local_callable_instance_class_chain(
+                                        self,
+                                        provider_module,
+                                        provider_class_name,
+                                        dependency.source_span.start_line,
+                                    )
+                                    source_owners.extend(
+                                        NativeRouteSourceOwnerEvidence(
+                                            side=self.snapshot_side,
+                                            owner_kind="class_base",
+                                            qualified_binding=(
+                                                f"{provider_module.name}.{ancestor.name}"
+                                            ),
+                                            related_binding=related_binding,
+                                            confidence=dependency.confidence,
+                                            expression=ast.unparse(base)[:4096],
+                                            source_span=_native_span(provider_module.path, base),
+                                        )
+                                        for ancestor in class_chain[1:]
+                                        for base in ancestor.bases
                                     )
                                     source_owners.extend(
                                         NativeRouteSourceOwnerEvidence(

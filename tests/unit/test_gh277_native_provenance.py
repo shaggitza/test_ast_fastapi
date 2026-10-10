@@ -259,6 +259,103 @@ def test_callable_instance_dependency_change_reaches_only_its_route(
         assert candidate.endpoint.native_provenance.side == SnapshotSide.TARGET
 
 
+def test_callable_instance_ancestor_base_change_reaches_only_dependent_route(
+    tmp_path: Path,
+) -> None:
+    baseline = tmp_path / "baseline"
+    target = tmp_path / "target"
+    before = (
+        "from decoy import Parent as DecoyParent\n"
+        "from fastapi import Depends, FastAPI\n"
+        "def v1_helper(): return 1\n"
+        "def v2_helper(): return 2\n"
+        "class V1:\n"
+        "    def __call__(self): return v1_helper()\n"
+        "class V2:\n"
+        "    def __call__(self): return v2_helper()\n"
+        "class Parent(V1): pass\n"
+        "class Provider(Parent): pass\n"
+        "provider = Provider()\n"
+        "app = FastAPI()\n"
+        "@app.get('/items')\n"
+        "def items(value=Depends(provider)): return value\n"
+        "@app.get('/unrelated')\n"
+        "def unrelated(value=Depends(v1_helper)): return value\n"
+    )
+    old_line, new_line = "class Parent(V1): pass", "class Parent(V2): pass"
+    after = before.replace(old_line, new_line)
+    assert after != before
+    for root, source in ((baseline, before), (target, after)):
+        root.mkdir()
+        (root / "main.py").write_text(source, encoding="utf-8")
+        (root / "decoy.py").write_text(
+            "class V1: pass\nclass Parent(V1): pass\nclass Provider(Parent): pass\n",
+            encoding="utf-8",
+        )
+
+    changed_line = next(
+        number for number, line in enumerate(after.splitlines(), start=1) if line == new_line
+    )
+    assert changed_line == 9
+    assert before.splitlines()[changed_line - 1] == old_line
+    assert after.splitlines()[changed_line - 1] == new_line
+    diff = (
+        "diff --git a/main.py b/main.py\n"
+        "--- a/main.py\n+++ b/main.py\n"
+        f"@@ -{changed_line},1 +{changed_line},1 @@\n"
+        f"-{old_line}\n+{new_line}\n"
+    )
+
+    target_main = target / "main.py"
+    report = ChangeMapper(
+        target_main,
+        baseline_app_path=baseline / "main.py",
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+
+    candidates = {item.endpoint.identifier for item in report.candidate_endpoints}
+    affected = {item.endpoint.identifier for item in report.affected_endpoints}
+    assert candidates == {"GET /items"}
+    assert affected == {"GET /items"}
+    endpoint = next(
+        item
+        for item in ChangeMapper(target_main, secure_ast=True, use_cache=False).inventory.endpoints
+        if item.identifier == "GET /items"
+    )
+    owners = native_route_structural_owners(endpoint, target_main, {changed_line})
+    assert [(owner.qualified_binding, owner.owner_kind) for owner in owners] == [
+        ("main.Parent", "class_base")
+    ]
+    assert native_route_structural_owners(endpoint, target / "decoy.py", {2}) == ()
+
+
+def test_callable_instance_with_unsupported_ancestor_chain_stays_conditional(
+    tmp_path: Path,
+) -> None:
+    app_file = tmp_path / "main.py"
+    app_file.write_text(
+        "from fastapi import Depends, FastAPI\n"
+        "class V1:\n"
+        "    def __call__(self): return 1\n"
+        "class Extra: pass\n"
+        "class Parent(V1, Extra): pass\n"
+        "class Provider(Parent): pass\n"
+        "provider = Provider()\n"
+        "app = FastAPI()\n"
+        "@app.get('/items')\n"
+        "def items(value=Depends(provider)): return value\n",
+        encoding="utf-8",
+    )
+    endpoint = SecureASTExtractor(app_file).extract_endpoints()[0]
+    provenance = endpoint.native_provenance
+    assert provenance is not None
+    dependency = provenance.registration.dependency_expressions[0]
+    assert dependency.confidence == "conditional"
+    assert dependency.callable_expressions == ()
+    assert not any(owner.owner_kind == "class_base" for owner in provenance.source_owners)
+
+
 @pytest.mark.parametrize(
     ("helper", "expected"),
     [
