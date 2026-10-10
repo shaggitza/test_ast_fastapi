@@ -8,7 +8,7 @@
     "target_platform": "linux",
     "track_transitive": true
   },
-  "analyzer_source_tree_sha": "5f312788383c66a9bd7ceb5e607c55fea1701017",
+  "analyzer_source_tree_sha": "41331974deb29f8ab3ac620fa18c82388cc734a6",
   "audit_counts": {
     "ambiguous": 1,
     "matched": 30,
@@ -245,7 +245,7 @@
   },
   "fixture_diagnostics": [],
   "fixture_sha256": "sha256:9501c8e223991167b331bd91bc976503716c325985d15b5f4cf329c579533c3f",
-  "git_revision": "a634a5f49373c4c381553ef7b9769abc8dec4705",
+  "git_revision": "50b09053395597339ca5a844877e141bc48b252e",
   "global_diagnostic_count": 212,
   "matched_call_count": 30,
   "missing_dependency_diagnostics": [
@@ -2091,7 +2091,7 @@
     },
     "fastapi_endpoint_detector.analyzer.mypy_analyzer": {
       "path": "src/fastapi_endpoint_detector/analyzer/mypy_analyzer.py",
-      "source_sha256": "sha256:9cbe8b1b6896279cb6a2c4cb5c34f80712ad11ec85f808434a045e84b14c0ef7"
+      "source_sha256": "sha256:4fe8e0fa3a872bccab33739f175ecb7aeae4f4734a0941fccc20ac2d88625cdb"
     },
     "fastapi_endpoint_detector.models.effect_contract": {
       "path": "src/fastapi_endpoint_detector/models/effect_contract.py",
@@ -2108,8 +2108,8 @@
     "exact": 31,
     "unresolved": 0
   },
-  "runner_revision": "a634a5f49373c4c381553ef7b9769abc8dec4705",
-  "runner_sha256": "sha256:a48dde0d9b7fb3aca0f0608c20e7b8edf76deba34d8ef215486a3dbce0aaee97",
+  "runner_revision": "889e491886ab85b259bbbb4296b0f5a18f489f48",
+  "runner_sha256": "sha256:9a65c05154abe1702caceae2e61f381a797186591a9e72ab2453978c0565ec20",
   "schema_version": 1,
   "selector_supported_call_count": 29
 }
