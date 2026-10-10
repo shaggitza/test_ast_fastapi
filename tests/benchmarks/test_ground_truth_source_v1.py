@@ -609,10 +609,10 @@ def test_fetch_disk_monitor_kills_and_reaps(
         terminated.append(process.pid)
         original_terminate(process)
 
-    def overflow(path: Path) -> tuple[int, int]:
+    def overflow(path: Path, *, live_fetch: bool = False) -> tuple[int, int]:
         if path == tmp_path:
             raise source.SourceV1Error("cache disk bound exceeded")
-        return original_bounds(path)
+        return original_bounds(path, live_fetch=live_fetch)
 
     monkeypatch.setattr(source.GitRunner, "_terminate", staticmethod(record))
     monkeypatch.setattr(source, "_tree_bounds", overflow)
@@ -692,3 +692,54 @@ def test_source_module_has_no_model_or_source_execution_surface() -> None:
     forbidden = ["subagent(", "pi -p", "checkout", "worktree", "archive", "submodule", "git clone"]
     for token in forbidden:
         assert token not in text
+
+
+def test_live_disk_monitor_allows_git_index_rename_only_during_fetch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pack = tmp_path / "objects" / "pack"
+    pack.mkdir(parents=True)
+    temporary = pack / "tmp_idx_git"
+    temporary.write_bytes(b"index bytes")
+    original_lstat = Path.lstat
+
+    def rename_before_stat(path: Path) -> os.stat_result:
+        if path == temporary:
+            if path.exists():
+                path.rename(pack / "pack-final.idx")
+            raise FileNotFoundError(str(path))
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", rename_before_stat)
+    source._tree_bounds(tmp_path, live_fetch=True)
+    assert (pack / "pack-final.idx").read_bytes() == b"index bytes"
+    temporary.write_bytes(b"second index")
+    with pytest.raises(FileNotFoundError):
+        source._tree_bounds(tmp_path)
+
+
+def test_live_disk_monitor_still_rejects_missing_root_and_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(FileNotFoundError):
+        source._tree_bounds(tmp_path / "missing", live_fetch=True)
+    (tmp_path / "link").symlink_to(tmp_path / "missing")
+    with pytest.raises(source.SourceV1Error, match="symlink"):
+        source._tree_bounds(tmp_path, live_fetch=True)
+
+
+def test_live_disk_monitor_does_not_suppress_read_denial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    denied = tmp_path / "pack.idx"
+    denied.write_bytes(b"index")
+    original_lstat = Path.lstat
+
+    def deny(path: Path) -> os.stat_result:
+        if path == denied:
+            raise PermissionError("synthetic denial")
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", deny)
+    with pytest.raises(PermissionError):
+        source._tree_bounds(tmp_path, live_fetch=True)
