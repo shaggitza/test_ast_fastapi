@@ -450,6 +450,132 @@ def test_duplicate_keyword_from_separate_expansions_fails_closed(tmp_path: Path)
     assert any("duplicate keyword names" in item.reason for item in inventory.limitations)
 
 
+@pytest.mark.parametrize("entrypoint", ["factory", "bootstrap"])
+def test_selected_deferred_entrypoint_duplicate_keyword_calls_fail_closed(
+    tmp_path: Path, entrypoint: str
+) -> None:
+    source = (
+        "from fastapi import FastAPI\n"
+        "async def startup(): pass\n"
+        "app = FastAPI()\n"
+        "def selected():\n"
+        + (
+            "    app = FastAPI(**{'on_startup': []}, **{'on_startup': []})\n    return app\n"
+            if entrypoint == "factory"
+            else "    app.add_event_handler('startup', startup, "
+            "**{'name': 'one'}, **{'name': 'two'})\n"
+        )
+    )
+    (tmp_path / "main.py").write_text(source, encoding="utf-8")
+    extractor = CustomSurfaceExtractor(
+        tmp_path,
+        load_surface_preset("framework-v1"),
+        app_entry="main:selected" if entrypoint == "factory" else None,
+        bootstrap_entry="main:selected" if entrypoint == "bootstrap" else None,
+    )
+
+    inventory = extractor.extract_inventory()
+
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert inventory.endpoints == []
+    assert any("duplicate keyword names" in item.reason for item in inventory.limitations)
+
+
+@pytest.mark.parametrize("entrypoint", ["factory", "bootstrap"])
+@pytest.mark.parametrize(
+    ("factory_kwargs", "bootstrap_kwargs"),
+    [
+        (
+            "**{'on_startup': []}, **{'debug': True}",
+            "**{'event_type': 'startup'}, **{'handler': startup}",
+        ),
+        ("**{}", "**{'event_type': 'startup', 'handler': startup}"),
+    ],
+)
+def test_selected_deferred_entrypoint_valid_kwargs_remain_complete(
+    tmp_path: Path, entrypoint: str, factory_kwargs: str, bootstrap_kwargs: str
+) -> None:
+    kwargs = factory_kwargs if entrypoint == "factory" else bootstrap_kwargs
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "async def startup(): pass\n"
+        "def selected():\n"
+        + (
+            f"    app = FastAPI({kwargs})\n    return app\n"
+            if entrypoint == "factory"
+            else f"    app.add_event_handler({kwargs})\n"
+        ),
+        encoding="utf-8",
+    )
+    inventory = CustomSurfaceExtractor(
+        tmp_path,
+        load_surface_preset("framework-v1"),
+        app_entry="main:selected" if entrypoint == "factory" else None,
+        bootstrap_entry="main:selected" if entrypoint == "bootstrap" else None,
+    ).extract_inventory()
+
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert inventory.limitations == ()
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "getattr(app, 'add_event_handler', None, None)('startup', startup)",
+        "getattr(app, 'add_event_handler', default=None)('startup', startup)",
+        "getattr(object=app, name='add_event_handler')('startup', startup)",
+    ],
+)
+def test_invalid_builtin_getattr_lifecycle_call_is_not_exactly_resolved(
+    tmp_path: Path, expression: str
+) -> None:
+    (tmp_path / "main.py").write_text(
+        f"from fastapi import FastAPI\nasync def startup(): pass\napp = FastAPI()\n{expression}\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.endpoints == []
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any("getattr lifecycle method" in item.reason for item in inventory.limitations)
+
+
+def test_builtin_getattr_with_default_still_resolves_selected_lifecycle_method(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "async def startup(): pass\n"
+        "app = FastAPI()\n"
+        "getattr(app, 'add_event_handler', None)('startup', startup)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert [item.handler.name for item in inventory.endpoints] == ["startup"]
+
+
+def test_invalid_getattr_on_unselected_app_does_not_taint_selected_inventory(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "unused = FastAPI()\n"
+        "getattr(unused, 'add_event_handler', None, None)('startup', missing)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert inventory.limitations == ()
+
+
 def test_exception_handlers_are_keyed_and_selected_app_scoped(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text(
         "from fastapi import FastAPI\n\n"

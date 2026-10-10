@@ -838,11 +838,6 @@ class CustomSurfaceExtractor:
         finally:
             self._building_states = False
         self._resolve_framework_root()
-        self._limitations.extend(
-            condition
-            for token, condition in self._framework_duplicate_call_conditions
-            if token in self._framework_selected_tokens
-        )
         for module in self._modules.values():
             self._process_statements(
                 module,
@@ -853,6 +848,11 @@ class CustomSurfaceExtractor:
             )
         self._process_app_factory()
         self._process_bootstrap()
+        self._limitations.extend(
+            condition
+            for token, condition in self._framework_duplicate_call_conditions
+            if token in self._framework_selected_tokens
+        )
         self._filter_framework_surfaces()
         collapsed: dict[tuple[str, str, int, int], Endpoint] = {}
         for endpoint in self._endpoints:
@@ -2338,6 +2338,43 @@ class CustomSurfaceExtractor:
         self._inspect_expression(module, call.func, state, inherited_conditions)
         callable_state = dict(state)
         callable_resolution = self._resolve_call(call.func, callable_state)
+        if (
+            isinstance(call.func, ast.Call)
+            and isinstance(call.func.func, ast.Name)
+            and call.func.func.id == "getattr"
+            and (
+                not self._is_builtin_getattr_call(call.func, callable_state)
+                or not isinstance(call.func.args[1], ast.Constant)
+                or not isinstance(call.func.args[1].value, str)
+            )
+        ):
+            malformed_getattr_receiver_expr = (
+                call.func.args[0]
+                if call.func.args
+                else next(
+                    (item.value for item in call.func.keywords if item.arg == "object"),
+                    None,
+                )
+            )
+            receiver = self._binding_from_expression(
+                malformed_getattr_receiver_expr, callable_state, module.name
+            )
+            if (
+                receiver is not None
+                and receiver.kind == "receiver"
+                and receiver.instance_token is not None
+            ):
+                self._framework_duplicate_call_conditions.append(
+                    (
+                        receiver.instance_token,
+                        EndpointDiscoveryCondition(
+                            source_path=module.path,
+                            source_line=call.lineno,
+                            reason="getattr lifecycle method call has unsupported arguments",
+                        ),
+                    )
+                )
+                return
         positional: list[_EvaluatedArgument] = []
         for argument in call.args:
             self._inspect_expression(module, argument, state, inherited_conditions)
@@ -5101,12 +5138,8 @@ class CustomSurfaceExtractor:
             )
             return binding.identity, invocation, None
         if not isinstance(expression, ast.Attribute):
-            if (
-                isinstance(expression, ast.Call)
-                and isinstance(expression.func, ast.Name)
-                and expression.func.id == "getattr"
-                and "getattr" not in state
-                and len(expression.args) >= 2
+            if isinstance(expression, ast.Call) and self._is_builtin_getattr_call(
+                expression, state
             ):
                 # Preserve exact receiver identity for getattr(app, "method")(...).
                 owner = self._binding_from_expression(expression.args[0], state, "")
@@ -5215,6 +5248,16 @@ class CustomSurfaceExtractor:
             current = replacement
         return current
 
+    @staticmethod
+    def _is_builtin_getattr_call(expression: ast.Call, state: dict[str, _Binding | None]) -> bool:
+        return (
+            isinstance(expression.func, ast.Name)
+            and expression.func.id == "getattr"
+            and "getattr" not in state
+            and 2 <= len(expression.args) <= 3
+            and not expression.keywords
+        )
+
     def _binding_from_expression(
         self,
         expression: ast.expr | None,
@@ -5238,10 +5281,7 @@ class CustomSurfaceExtractor:
                 return _Binding("symbol", f"{owner.identity}.{expression.attr}")
         if isinstance(expression, ast.Call):
             if (
-                isinstance(expression.func, ast.Name)
-                and expression.func.id == "getattr"
-                and "getattr" not in state
-                and len(expression.args) >= 2
+                self._is_builtin_getattr_call(expression, state)
                 and isinstance(expression.args[1], ast.Constant)
                 and isinstance(expression.args[1].value, str)
             ):
