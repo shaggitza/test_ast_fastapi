@@ -22,6 +22,13 @@ origin, method, and path matches are returned. Endpoint projection alone does
 not imply trust or origin. No global URL fanout or inferred server candidate
 is produced.
 
+`established_surfaces(endpoints)` derives `native-surface-v2:` IDs from the
+selected root, registration coordinates, ordered assembly occurrences, public
+path, and HTTP method. Separate includes of the same router have separate IDs,
+even at the same prefix. Coordinates use their canonical module identities,
+so moving an unchanged snapshot to another checkout directory preserves IDs.
+Older IDs must be rederived before supplying origin attestations.
+
 Repository scanning is opt-in through `analysis.route_observations`:
 
 ```yaml
@@ -48,6 +55,8 @@ configuration validation. When enabled, the analysis report contains an
 optional `source_observations` section; JSON/YAML retain full evidence while
 human-readable formats show its bounded-scan summary. Disabled output retains
 its existing shape.
+The CLI requires `--secure-ast` when enabled observations contain trusted origin
+mappings and rejects the incompatible combination before constructing an analyzer.
 
 `analyzer.project_observations` applies client and deployment glob selection,
 file-count and per-file byte budgets, records skipped-file issues, and emits

@@ -292,6 +292,13 @@ def analyze(
     if vm and config.analysis.route_observations.enabled:
         console.print("[red]Error:[/red] analysis.route_observations is unavailable with --vm")
         raise click.Abort()
+    if (
+        config.analysis.route_observations.enabled
+        and config.analysis.route_observations.trusted_server_origins
+        and not secure_ast
+    ):
+        console.print("[red]Error:[/red] trusted route observation origins require --secure-ast")
+        raise click.Abort()
 
     if verbose:
         console.print(f"[blue]Analyzing FastAPI application at:[/blue] {app}")

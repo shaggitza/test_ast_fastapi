@@ -6,6 +6,8 @@ interpret JavaScript. Unknown syntax is skipped or rejected conservatively.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -800,17 +802,45 @@ def established_surfaces(
         if endpoint.discovery_status != EndpointDiscoveryStatus.ESTABLISHED or provenance is None:
             continue
         registration = provenance.registration
-        surface_id = ":".join(
-            (
-                provenance.root.module,
-                provenance.root.symbol,
-                str(registration.source_span.file_path),
-                str(registration.source_span.start_line),
-                registration.operation,
-            )
-        )
         for method in endpoint.methods:
             if method != EndpointMethod.CUSTOM:
+                identity = {
+                    "root": (provenance.root.module, provenance.root.symbol),
+                    "registration": (
+                        registration.owner_module,
+                        registration.owner_symbol,
+                        registration.operation,
+                        registration.occurrence_order,
+                        registration.source_span.start_line,
+                        registration.source_span.start_column,
+                        registration.source_span.end_line,
+                        registration.source_span.end_column,
+                    ),
+                    "assembly": [
+                        (
+                            edge.parent_module,
+                            edge.parent_symbol,
+                            edge.child_module,
+                            edge.child_symbol,
+                            edge.operation,
+                            edge.occurrence_order,
+                            edge.resolved_prefix,
+                            edge.source_span.start_line,
+                            edge.source_span.start_column,
+                            edge.source_span.end_line,
+                            edge.source_span.end_column,
+                        )
+                        for edge in provenance.assembly_chain
+                    ],
+                    "path": endpoint.path,
+                    "method": method.value,
+                }
+                surface_id = (
+                    "native-surface-v2:"
+                    + hashlib.sha256(
+                        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+                    ).hexdigest()
+                )
                 result.append(
                     EstablishedSurface(surface_id, endpoint.path, method.value, origin, trusted)
                 )

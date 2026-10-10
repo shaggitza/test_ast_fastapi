@@ -737,6 +737,7 @@ class CustomSurfaceExtractor:
         *,
         app_variable: str = "app",
         app_entry: str | None = None,
+        source_paths: tuple[Path, ...] | None = None,
     ) -> None:
         self.app_path = app_path.resolve()
         self.contracts = contracts
@@ -749,6 +750,18 @@ class CustomSurfaceExtractor:
             self.root = self.app_path.parent
         else:
             self.root = self.app_path
+        self._source_paths = (
+            tuple(sorted({path.resolve() for path in source_paths}))
+            if source_paths is not None
+            else None
+        )
+        if self._source_paths is not None and any(
+            not path.is_relative_to(self.root) or path.suffix != ".py"
+            for path in self._source_paths
+        ):
+            raise CustomSurfaceExtractorError(
+                "custom source allowlist must stay inside project root"
+            )
         self._modules: dict[str, _Module] = {}
         self._functions: dict[
             str, list[tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef]]
@@ -1586,7 +1599,9 @@ class CustomSurfaceExtractor:
             self._function_scope_states.pop()
 
     def _load_modules(self) -> None:
-        if self.app_path.is_file():
+        if self._source_paths is not None:
+            paths = list(self._source_paths)
+        elif self.app_path.is_file():
             paths = [self.app_path]
         elif self.app_path.is_dir():
             paths = sorted(self.root.rglob("*.py"))

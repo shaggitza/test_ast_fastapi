@@ -62,6 +62,29 @@ def _write_cli_inputs(tmp_path: Path) -> tuple[Path, Path]:
     return app_root, diff
 
 
+def test_trusted_origins_require_secure_ast_before_analyzing(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    app_root, diff = _write_cli_inputs(tmp_path)
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "analysis:\n  route_observations:\n    enabled: true\n"
+        "    trusted_server_origins:\n      supplied-id: https://api.example.test\n"
+    )
+
+    def forbidden_mapper(**_kwargs: object) -> object:
+        raise AssertionError("must reject before constructing an analyzer")
+
+    monkeypatch.setattr(change_mapper, "ChangeMapper", forbidden_mapper)
+    result = CliRunner().invoke(
+        cli,
+        ["--config", str(config), "analyze", "--app", str(app_root), "--diff", str(diff)],
+    )
+    assert result.exit_code != 0
+    assert "trusted route observation origins require --secure-ast" in result.output
+    assert not isinstance(result.exception, AssertionError)
+
+
 def test_analyze_cli_emits_opt_in_source_observations_and_preserves_output_config(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
