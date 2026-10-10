@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import platform
 from itertools import product
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -247,6 +248,7 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
     verified_mypy_source_hashes: dict[str, str] | None = None,
     verified_package_source_hashes: dict[str, str] | None = None,
     verified_package_versions: dict[str, str] | None = None,
+    target_python_version: str | None = None,
 ) -> EffectContractAudit:
     """Match exact contract keys against a complete endpoint-reachable call corpus."""
     root = source_root.resolve()
@@ -280,6 +282,7 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
             (package.distribution or "").lower().replace("_", "-")
             for contract in applicability_contracts
             if (package := contract.package) is not None
+            and package.distribution is not None
         }
     )
     observed_target_sources = {
@@ -294,6 +297,7 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
             distribution: (verified_package_versions or {}).get(distribution)
             for distribution in pinned_distributions
         },
+        "python_version": target_python_version or platform.python_version(),
     }
     endpoint_rows = list(endpoint_call_sites)
     physical: dict[
@@ -394,13 +398,22 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
                     "_", "-"
                 )
                 observed_version = (verified_package_versions or {}).get(distribution)
-                if observed_version is None:
-                    applicability_failure = True
-                else:
+                if contract.package.distribution is not None:
+                    if observed_version is None:
+                        applicability_failure = True
+                    else:
+                        try:
+                            applicability_failure |= not SpecifierSet(
+                                contract.package.version or ""
+                            ).contains(Version(observed_version), prereleases=False)
+                        except (InvalidVersion, ValueError):
+                            applicability_failure = True
+                if contract.package.python is not None:
+                    python_version = target_python_version or platform.python_version()
                     try:
                         applicability_failure |= not SpecifierSet(
-                            contract.package.version or ""
-                        ).contains(Version(observed_version), prereleases=False)
+                            contract.package.python
+                        ).contains(Version(python_version), prereleases=False)
                     except (InvalidVersion, ValueError):
                         applicability_failure = True
                 if applicability_failure:

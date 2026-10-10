@@ -40,13 +40,20 @@ from fastapi_endpoint_detector.models.sql_transaction import (
 
 
 def _contract_hash(contract: EffectContract) -> str:
-    payload = json.dumps(
-        contract.model_dump(mode="json", exclude_none=True),
+    payload = contract.model_dump(mode="json", exclude_none=True)
+    package = payload.get("package")
+    if isinstance(package, dict) and not package.get("source_hashes"):
+        package.pop("source_hashes", None)
+    behavior = payload.get("behavior")
+    if isinstance(behavior, dict) and behavior.get("stage_receiver_from_yield") is False:
+        behavior.pop("stage_receiver_from_yield")
+    canonical_bytes = json.dumps(
+        payload,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    return f"sha256:{hashlib.sha256(payload).hexdigest()}"
+    return f"sha256:{hashlib.sha256(canonical_bytes).hexdigest()}"
 
 
 class ConfidenceLevel(str, Enum):
@@ -224,7 +231,7 @@ class ContractEffectEvidence(BaseModel):
     resolver: str
     resolver_version: str
     matcher: str
-    package_applicability: Literal["not_evaluated"] = "not_evaluated"
+    package_applicability: Literal["not_evaluated", "source_pins_evaluated"] = "not_evaluated"
     resource_identity_status: FiniteValueStatus = FiniteValueStatus.UNAVAILABLE
     resource_identity: ResourceIdentityEvidence = Field(
         default_factory=lambda: ResourceIdentityEvidence(
@@ -856,6 +863,7 @@ class AnalysisReport(BaseModel):
                 or evidence.occurrence_corpus_hash != provenance.occurrence_corpus_hash
                 or evidence.contract_source_path != provenance.contract_source_path
                 or evidence.matcher != provenance.matcher
+                or evidence.package_applicability != audit.scope.package_applicability
             ):
                 raise ValueError("contract evidence provenance is inconsistent with audit")
         for candidate in self.candidate_endpoints:

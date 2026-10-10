@@ -399,7 +399,7 @@ class EffectContractDocument(_StrictModel):
     def contract_hashes(self) -> dict[str, str]:
         """Return deterministic per-contract semantic hashes."""
         return {
-            contract.id: _semantic_hash(contract.model_dump(mode="json", exclude_none=True))
+            contract.id: _semantic_hash(_contract_document_payload(contract))
             for contract in sorted(self.contracts, key=lambda item: item.id)
         }
 
@@ -625,6 +625,9 @@ def _semantic_hash(payload: object) -> str:
 def _contract_document_payload(contract: EffectContract) -> dict[str, Any]:
     """Serialize a document contract without adding default-false hash fields."""
     payload = contract.model_dump(mode="json", exclude_none=True)
+    package = payload.get("package")
+    if isinstance(package, dict) and not package.get("source_hashes"):
+        package.pop("source_hashes", None)
     behavior = payload.get("behavior")
     if isinstance(behavior, dict) and behavior.get("stage_receiver_from_yield") is False:
         behavior.pop("stage_receiver_from_yield")

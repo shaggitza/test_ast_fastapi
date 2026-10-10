@@ -114,6 +114,7 @@ def test_live_motor_probe_binds_real_vendor_stub_declarations() -> None:
     assert any('Missing positional argument "document"' in error for error in diagnostics)
     assert any('Unexpected keyword argument "mystery"' in error for error in diagnostics)
     source_hashes = result["extracted_typed_source_hashes"]["motor"]
+    assert "motor/__init__.py" in source_hashes
     assert "motor/motor_asyncio.pyi" in source_hashes
     assert "motor/core.pyi" in source_hashes
     assert "motor/py.typed" in source_hashes
@@ -121,6 +122,9 @@ def test_live_motor_probe_binds_real_vendor_stub_declarations() -> None:
     assert result["verified_target_evidence"]["package_metadata_hashes"][
         "motor-3.6.0.dist-info/METADATA"
     ] == "sha256:dce8b401625d673eed6b2c0c66d9d196a13de0649c0788da8b3e2a72edb2965d"
+    assert result["verified_target_evidence"]["mypy_source_hashes"][
+        "motor/__init__.py"
+    ] == source_hashes["motor/__init__.py"]
     assert result["verified_target_evidence"]["audit_evidence_hash"].startswith("sha256:")
 
 

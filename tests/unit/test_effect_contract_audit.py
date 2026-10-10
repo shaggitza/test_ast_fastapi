@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from typing import TYPE_CHECKING
 
 import pytest
@@ -203,6 +204,57 @@ def test_motor_contract_requires_exact_pinned_typed_sources(tmp_path: Path) -> N
     ).occurrences[0]
     assert rejected_metadata.audit_status == AuditCallStatus.UNMATCHED
     assert rejected_metadata.reason_code == "package_applicability_unverified"
+
+
+def test_python_only_source_pins_are_enforced_without_distribution_version(tmp_path: Path) -> None:
+    endpoint = _endpoint(tmp_path, "handler")
+    site = _site(tmp_path, column=2)
+    client_source = tmp_path / "client.py"
+    client_source.write_text("def emit(value): ...\n", encoding="utf-8")
+    source_digest = "sha256:" + hashlib.sha256(client_source.read_bytes()).hexdigest()
+    path = tmp_path / "python-only.yaml"
+    document = {
+        "schema_version": 1,
+        "preset": {
+            "id": "python-only",
+            "version": "1.0.0",
+            "provenance": {"kind": "user", "source": "python-only.yaml"},
+        },
+        "contracts": [
+            {
+                "id": "emit",
+                "symbol": "company.events.emit",
+                "invocation": "function",
+                "operation": "publish",
+                "channel": "message_bus",
+                "package": {
+                    "python": ">=3.10,<4",
+                    "source_hashes": {"client.py": source_digest},
+                },
+            }
+        ],
+    }
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    loaded = load_effect_contracts(path)
+
+    def audit(python_version: str) -> EffectContractAudit:
+        return audit_effect_contracts(
+            loaded,
+            source_root=tmp_path,
+            inventory=EndpointInventory(endpoints=[endpoint]),
+            endpoint_call_sites=[(endpoint, [site])],
+            track_transitive=False,
+            max_depth=1,
+            cache_enabled=False,
+            resolver_versions=("mypy@1.19.1",),
+            verified_mypy_source_hashes={"client.py": source_digest},
+            target_python_version=python_version,
+        )
+
+    assert audit("3.11.16").occurrences[0].audit_status == AuditCallStatus.MATCHED
+    rejected = audit("2.7.18").occurrences[0]
+    assert rejected.audit_status == AuditCallStatus.UNMATCHED
+    assert rejected.reason_code == "package_applicability_unverified"
 
 
 def test_composite_resource_cartesian_overflow_is_unavailable(tmp_path: Path) -> None:

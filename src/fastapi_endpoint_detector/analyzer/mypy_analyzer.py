@@ -669,6 +669,8 @@ class MypyAnalyzer:
         self._finite_global_in_progress: set[str] = set()
         self._exact_project_identity_cache: dict[str, tuple[str, str] | None] = {}
         self._built_source_fingerprint: str | None = None
+        self._typed_environment_fingerprint: str | None = None
+        self._cached_typed_environment_fingerprint: str | None = None
         self._expected_source_fingerprint: str | None = None
         self._fullname_resolution_cache: dict[str, tuple[str, str] | None] = {}
         self._canonical_project_fullname_cache: dict[str, str | None] = {}
@@ -943,6 +945,8 @@ class MypyAnalyzer:
             self._verified_package_source_hashes = {}
             self._verified_package_versions = {}
             conflicting_package_versions: set[str] = set()
+            conflicting_mypy_source_paths: set[str] = set()
+            conflicting_package_source_paths: set[str] = set()
             analyzed_source_hashes: dict[str, str] = {}
 
             # Store the types map
@@ -969,20 +973,27 @@ class MypyAnalyzer:
                         else:
                             vendor_bytes = b""
                         if vendor_bytes and hashlib.sha1(vendor_bytes).hexdigest() == source_hash:
-                            suffix = ".pyi" if state_path.endswith(".pyi") else ".py"
-                            self._verified_mypy_source_hashes[
-                                module_name.replace(".", "/") + suffix
-                            ] = "sha256:" + hashlib.sha256(vendor_bytes).hexdigest()
                             parts = module_name.split(".")
-                            if len(parts) > 1:
-                                distribution = parts[0].replace("_", "-").lower()
-                                package_root = source_file.parent
-                                while package_root.name == parts[0] or package_root.name in parts:
-                                    package_root = package_root.parent
+                            package_root = source_file.parent
+                            while package_root.name in parts:
+                                package_root = package_root.parent
+                            try:
+                                relative_source = source_file.relative_to(package_root).as_posix()
+                            except ValueError:
+                                relative_source = ""
+                            if relative_source:
+                                digest = "sha256:" + hashlib.sha256(vendor_bytes).hexdigest()
+                                previous_digest = self._verified_mypy_source_hashes.get(
+                                    relative_source
+                                )
+                                if previous_digest is not None and previous_digest != digest:
+                                    conflicting_mypy_source_paths.add(relative_source)
+                                    self._verified_mypy_source_hashes.pop(relative_source, None)
+                                elif relative_source not in conflicting_mypy_source_paths:
+                                    self._verified_mypy_source_hashes[relative_source] = digest
+                            if relative_source:
                                 metadata_candidates = sorted(
-                                    package_root.glob(
-                                        f"{distribution}-*.dist-info/METADATA"
-                                    )
+                                    package_root.glob("*.dist-info/METADATA")
                                 )
                                 for metadata_path in metadata_candidates:
                                     metadata_bytes = metadata_path.read_bytes()
@@ -994,31 +1005,58 @@ class MypyAnalyzer:
                                         .replace("_", "-")
                                         .lower()
                                     )
-                                    if metadata_distribution == distribution:
+                                    # Distribution and import names are not
+                                    # interchangeable. Record adjacent metadata
+                                    # under its own authenticated path/name;
+                                    # contracts bind the exact metadata bytes.
+                                    if metadata_distribution:
                                         metadata_relative = metadata_path.relative_to(
                                             package_root
                                         ).as_posix()
-                                        self._verified_package_source_hashes[
-                                            metadata_relative
-                                        ] = "sha256:" + hashlib.sha256(
+                                        metadata_digest = "sha256:" + hashlib.sha256(
                                             metadata_bytes
                                         ).hexdigest()
+                                        previous_metadata_digest = (
+                                            self._verified_package_source_hashes.get(
+                                                metadata_relative
+                                            )
+                                        )
+                                        if (
+                                            previous_metadata_digest is not None
+                                            and previous_metadata_digest != metadata_digest
+                                        ):
+                                            conflicting_package_source_paths.add(
+                                                metadata_relative
+                                            )
+                                            self._verified_package_source_hashes.pop(
+                                                metadata_relative, None
+                                            )
+                                        elif (
+                                            metadata_relative
+                                            not in conflicting_package_source_paths
+                                        ):
+                                            self._verified_package_source_hashes[
+                                                metadata_relative
+                                            ] = metadata_digest
                                         version_text = metadata.get("Version")
                                         if (
                                             isinstance(version_text, str)
-                                            and distribution not in conflicting_package_versions
+                                            and metadata_distribution
+                                            not in conflicting_package_versions
                                         ):
                                             previous = self._verified_package_versions.get(
-                                                distribution
+                                                metadata_distribution
                                             )
                                             if previous is not None and previous != version_text:
-                                                conflicting_package_versions.add(distribution)
+                                                conflicting_package_versions.add(
+                                                    metadata_distribution
+                                                )
                                                 self._verified_package_versions.pop(
-                                                    distribution, None
+                                                    metadata_distribution, None
                                                 )
                                             else:
                                                 self._verified_package_versions[
-                                                    distribution
+                                                    metadata_distribution
                                                 ] = version_text
                     if inventory_paths is None or state_path in inventory_paths:
                         self._module_to_path[module_name] = state_path
@@ -1065,6 +1103,7 @@ class MypyAnalyzer:
                 path: tuple(sorted(module_names)) for path, module_names in modules_by_path.items()
             }
             self._shared_path_index = None
+            self._typed_environment_fingerprint = self._fingerprint_typed_environment()
             self._built_source_fingerprint = self._expected_source_fingerprint
 
         finally:
@@ -6382,7 +6421,17 @@ class MypyAnalyzer:
                     self._verified_mypy_source_hashes = {}
                     self._verified_package_source_hashes = {}
                     self._verified_package_versions = {}
-                return self._endpoint_deps
+                    self._endpoint_deps.clear()
+                else:
+                    if (
+                        self._cached_typed_environment_fingerprint
+                        and self._cached_typed_environment_fingerprint
+                        == self._typed_environment_fingerprint
+                    ):
+                        return self._endpoint_deps
+                    # Call-site resolution depends on imported declarations,
+                    # so a dependency typing change invalidates endpoint rows.
+                    self._endpoint_deps.clear()
         else:
             self._endpoint_deps.clear()
 
@@ -6418,6 +6467,46 @@ class MypyAnalyzer:
                 self._save_cache()
 
         return self._endpoint_deps
+
+    def _fingerprint_typed_environment(self) -> str:
+        """Hash parsed dependency source and adjacent distribution metadata."""
+        if self._build_result is None:
+            return ""
+        inputs: dict[str, str] = {}
+        package_roots: set[Path] = set()
+        for state in self._build_result.graph.values():
+            state_path = getattr(state, "path", None)
+            if not state_path:
+                continue
+            path = Path(state_path)
+            try:
+                if path.is_file() and path.suffix in {".py", ".pyi"}:
+                    content = path.read_bytes()
+                    current_digest = hashlib.sha256(content).hexdigest()
+                    parsed_digest = getattr(state, "source_hash", None)
+                    inputs[str(path.resolve())] = (
+                        f"{current_digest}:{parsed_digest}"
+                        if isinstance(parsed_digest, str)
+                        else f"{current_digest}:unavailable"
+                    )
+                    for root in path.parents:
+                        if root.name in {"site-packages", "dist-packages"} or any(
+                            root.glob("*.dist-info/METADATA")
+                        ):
+                            package_roots.add(root)
+                            break
+            except OSError:
+                continue
+        for root in package_roots:
+            try:
+                for metadata_path in root.glob("*.dist-info/METADATA"):
+                    inputs[str(metadata_path.resolve())] = hashlib.sha256(
+                        metadata_path.read_bytes()
+                    ).hexdigest()
+            except OSError:
+                continue
+        payload = json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()
+        return hashlib.sha256(payload).hexdigest()
 
     def _cache_fingerprint(self) -> tuple[str, dict[str, str]]:
         """Fingerprint all Python inputs and analysis semantics."""
@@ -6629,6 +6718,7 @@ class MypyAnalyzer:
                 "source_root": str(self.source_root),
                 "max_depth": self.max_depth,
                 "sources": sources,
+                "typed_environment_fingerprint": self._typed_environment_fingerprint,
             },
             "endpoints": endpoints_data,
         }
@@ -6661,6 +6751,13 @@ class MypyAnalyzer:
                 return False
             if data.get("fingerprint") != fingerprint:
                 return False
+            metadata = data.get("metadata")
+            self._cached_typed_environment_fingerprint = (
+                metadata.get("typed_environment_fingerprint")
+                if isinstance(metadata, dict)
+                and isinstance(metadata.get("typed_environment_fingerprint"), str)
+                else None
+            )
             endpoints_data = data.get("endpoints")
             if not isinstance(endpoints_data, dict):
                 return False

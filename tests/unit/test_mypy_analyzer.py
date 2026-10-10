@@ -27,6 +27,85 @@ from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, 
 class TestMypyAnalyzerBasic:
     """Basic tests for MypyAnalyzer."""
 
+    def test_cached_call_sites_are_recomputed_when_dependency_typing_changes(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "typing_dep.pyi").write_text(
+            "class Store:\n    def put(self, value: str) -> None: ...\n", encoding="utf-8"
+        )
+        dist_info = tmp_path / "typing-dep-1.0.dist-info"
+        dist_info.mkdir()
+        metadata = dist_info / "METADATA"
+        metadata.write_text(
+            "Metadata-Version: 2.1\nName: typing-dep\nVersion: 1.0\n", encoding="utf-8"
+        )
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "from typing_dep import Store\n"
+            "def handler() -> None:\n"
+            "    Store().put('value')\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/cache-typing",
+            methods=[EndpointMethod.POST],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=2),
+        )
+        cache_path = tmp_path / "typed-cache.json"
+
+        cold = MypyAnalyzer(tmp_path)
+        cold.set_cache_path(cache_path)
+        first = next(iter(cold.analyze_endpoints([endpoint]).values()))
+        first_site = next(site for site in first.resolved_call_sites if site.line == 3)
+        assert first_site.status.value == "exact"
+        assert first_site.canonical_symbol == "typing_dep.Store.put"
+
+        (tmp_path / "typing_dep.pyi").write_text(
+            "class Store:\n    pass\n", encoding="utf-8"
+        )
+        metadata.write_text(
+            "Metadata-Version: 2.1\nName: typing-dep\nVersion: 1.1\n", encoding="utf-8"
+        )
+        warm = MypyAnalyzer(tmp_path)
+        warm.set_cache_path(cache_path)
+        second = next(iter(warm.analyze_endpoints([endpoint]).values()))
+        second_site = next(site for site in second.resolved_call_sites if site.line == 3)
+        assert second_site.status.value != "exact"
+        assert warm.verified_package_versions["typing-dep"] == "1.1"
+
+    def test_distribution_metadata_uses_declared_name_not_import_name(
+        self, tmp_path: Path
+    ) -> None:
+        package = tmp_path / "bs4"
+        package.mkdir()
+        (package / "__init__.pyi").write_text("class Soup: ...\n", encoding="utf-8")
+        metadata = tmp_path / "beautifulsoup4-1.2.3.dist-info"
+        metadata.mkdir()
+        (metadata / "METADATA").write_text(
+            "Metadata-Version: 2.1\nName: beautifulsoup4\nVersion: 1.2.3\n",
+            encoding="utf-8",
+        )
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "from bs4 import Soup\n"
+            "def handler() -> Soup:\n"
+            "    return Soup()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/distribution-name",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=2),
+        )
+
+        analyzer = MypyAnalyzer(tmp_path)
+        analyzer.analyze_endpoints([endpoint], use_cache=False)
+
+        assert analyzer.verified_package_versions["beautifulsoup4"] == "1.2.3"
+        assert analyzer.verified_package_source_hashes[
+            "beautifulsoup4-1.2.3.dist-info/METADATA"
+        ].startswith("sha256:")
+
     def test_branch_joined_callable_partial_abstains_with_limitation(self, tmp_path: Path) -> None:
         app_path = tmp_path / "app.py"
         app_path.write_text(
