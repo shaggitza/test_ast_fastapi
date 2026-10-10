@@ -794,10 +794,8 @@ class CustomSurfaceExtractor:
             tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef]
         ] = []
         self._framework_selected_tokens: set[_FrameworkToken] = set()
-        self._framework_duplicate_call_conditions: list[
-            tuple[_FrameworkToken, EndpointDiscoveryCondition]
-        ] = []
         self._framework_root_condition: EndpointDiscoveryCondition | None = None
+        self._captured_getattr_receivers: dict[int, _Binding | None] = {}
         self._framework_factory: tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef] | None = (
             None
         )
@@ -848,11 +846,6 @@ class CustomSurfaceExtractor:
             )
         self._process_app_factory()
         self._process_bootstrap()
-        self._limitations.extend(
-            condition
-            for token, condition in self._framework_duplicate_call_conditions
-            if token in self._framework_selected_tokens
-        )
         self._filter_framework_surfaces()
         collapsed: dict[tuple[str, str, int, int], Endpoint] = {}
         for endpoint in self._endpoints:
@@ -1821,7 +1814,13 @@ class CustomSurfaceExtractor:
                 for target in statement.targets:
                     self._inspect_target_expression(module, target, state, current_conditions)
                     for name in _target_names(target):
-                        state[name] = None
+                        # At module scope ``del`` removes the global, so a later
+                        # lookup may fall through to builtins. Function locals
+                        # remain lexically local after deletion and are unbound.
+                        if self._function_scope_states:
+                            state[name] = None
+                        else:
+                            state.pop(name, None)
                     self._invalidate_mutated_target(target, state)
                 continue
             if isinstance(statement, ast.If):
@@ -2364,8 +2363,8 @@ class CustomSurfaceExtractor:
                 and receiver.kind == "receiver"
                 and receiver.instance_token is not None
             ):
-                self._framework_duplicate_call_conditions.append(
-                    (
+                self._framework_events.append(
+                    _FrameworkConditionEvent(
                         receiver.instance_token,
                         EndpointDiscoveryCondition(
                             source_path=module.path,
@@ -2376,6 +2375,17 @@ class CustomSurfaceExtractor:
                 )
                 return
         positional: list[_EvaluatedArgument] = []
+        if (
+            isinstance(call.func, ast.Name)
+            and call.func.id == "getattr"
+            and self._is_builtin_getattr_call(call, callable_state)
+            and call.args
+        ):
+            # Python evaluates getattr's object before its name/default. Keep
+            # that binding even if the default expression rebinds the name.
+            self._captured_getattr_receivers[id(call)] = self._binding_from_expression(
+                call.args[0], state, module.name
+            )
         for argument in call.args:
             self._inspect_expression(module, argument, state, inherited_conditions)
             positional.append(
@@ -2472,19 +2482,24 @@ class CustomSurfaceExtractor:
                 and callable_resolution[0] in self._declared_receiver_types
             ):
                 duplicate_token = (module.name, call.lineno, call.col_offset)
-            if duplicate_token is not None:
-                self._framework_duplicate_call_conditions.append(
-                    (
-                        duplicate_token,
-                        EndpointDiscoveryCondition(
-                            source_path=module.path,
-                            source_line=call.lineno,
-                            reason=(
-                                "call has duplicate keyword names and cannot complete registration"
-                            ),
-                        ),
-                    )
+            relevant_registration = self._resolve_call(call.func, callable_state)
+            relevant_framework_contract = relevant_registration is not None and any(
+                contract.surface.kind.startswith("framework.")
+                and self._matches(
+                    contract,
+                    relevant_registration[0],
+                    relevant_registration[1],
+                    relevant_registration[2],
                 )
+                for contract in self.contracts.document.contracts
+            )
+            if duplicate_token is not None and relevant_framework_contract:
+                condition = EndpointDiscoveryCondition(
+                    source_path=module.path,
+                    source_line=call.lineno,
+                    reason=("call has duplicate keyword names and cannot complete registration"),
+                )
+                self._framework_events.append(_FrameworkConditionEvent(duplicate_token, condition))
             return
         self._inspect_registration(
             module,
@@ -3123,6 +3138,8 @@ class CustomSurfaceExtractor:
                 return token
         callable_state = evaluation.callable_state if evaluation is not None else state
         binding = self._binding_from_expression(call.func, callable_state, module_name)
+        if binding is not None:
+            binding = self._follow_project_binding(binding)
         if binding is None or binding.kind != "method":
             return None
         return binding.instance_token
@@ -5122,6 +5139,8 @@ class CustomSurfaceExtractor:
     ) -> tuple[str, InvocationKind, str | None] | None:
         if isinstance(expression, ast.Name):
             binding = state.get(expression.id)
+            if binding is not None:
+                binding = self._follow_project_binding(binding)
             if binding is None or binding.kind == "module":
                 return None
             if binding.kind == "method":
@@ -5142,7 +5161,9 @@ class CustomSurfaceExtractor:
                 expression, state
             ):
                 # Preserve exact receiver identity for getattr(app, "method")(...).
-                owner = self._binding_from_expression(expression.args[0], state, "")
+                owner = self._captured_getattr_receivers.get(
+                    id(expression), self._binding_from_expression(expression.args[0], state, "")
+                )
                 name = expression.args[1]
                 if (
                     owner is not None
@@ -5285,7 +5306,10 @@ class CustomSurfaceExtractor:
                 and isinstance(expression.args[1], ast.Constant)
                 and isinstance(expression.args[1].value, str)
             ):
-                owner = self._binding_from_expression(expression.args[0], state, module_name)
+                owner = self._captured_getattr_receivers.get(
+                    id(expression),
+                    self._binding_from_expression(expression.args[0], state, module_name),
+                )
                 if owner is not None and owner.kind == "receiver":
                     return _Binding(
                         "method",
