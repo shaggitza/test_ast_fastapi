@@ -22,6 +22,8 @@ from benchmarks.real_world.benchmark_schema import (
     BenchmarkSchemaError,
     PrimaryArtifact,
     finite_nonnegative,
+    prediction_is_completed,
+    prediction_status,
     read_primary_artifact,
     strict_json_loads,
 )
@@ -1098,7 +1100,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
         predicted_record = predictions[record_key]
         predicted, low_predicted = ranked_entrypoints(predicted_record)
         unresolved = predicted_record.get("unresolved", [])
-        if not unresolved:
+        if prediction_is_completed(predicted_record):
             completed_prediction_records += 1
         tp = len(expected & predicted)
         fp = len(predicted - expected)
@@ -1145,7 +1147,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
                 negative_controls_with_fp += 1
             if low_predicted:
                 negative_controls_with_low_fp += 1
-            if not unresolved:
+            if prediction_is_completed(predicted_record):
                 completed_negative_controls += 1
                 if not predicted:
                     clean_completed_negative_controls += 1
@@ -1170,7 +1172,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
                     truth_source_by_key[record_key], sort_keys=True, separators=(",", ":")
                 ).encode()
             ).hexdigest(),
-            "prediction_status": predicted_record.get("status", "completed"),
+            "prediction_status": prediction_status(predicted_record),
             "unresolved_count": len(unresolved),
             "raw": {"tp": tp, "fp": fp, "fn": fn},
             "normalized": {"tp": normalized["tp"], "fp": normalized["fp"], "fn": normalized["fn"]},
@@ -1435,7 +1437,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
                 "numerator": completed_prediction_records,
                 "denominator": evaluated,
                 "rate": ratio(completed_prediction_records, evaluated),
-                "definition": "prediction rows with no unresolved diagnostics",
+                "definition": "validated completed predictions with no unresolved diagnostics",
             },
             "inventory": {
                 "available": census is not None,
