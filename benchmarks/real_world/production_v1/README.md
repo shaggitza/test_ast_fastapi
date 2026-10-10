@@ -99,6 +99,26 @@ frozen digest; only the old packet-module self-digest is non-authoritative becau
 current `checksums-v1.json` authenticates that executable module. Unknown or edited
 phase profiles fail closed.
 
+## Broker source isolation and freeze prerequisite
+
+The broker subprocess uses Python isolated mode and loads its entry module from
+the attested bundle path. Benchmark Python modules and JSON resources are
+captured in the bundle; the current working directory, `PYTHONPATH`, and
+bytecode caches cannot select broker source. A source-only hostile-directory
+test covers shadow modules.
+
+Production broker launch and escrow finalization are currently blocked. This
+host has no trusted exclusive freeze-lease provider or enforced read-only mount
+that can protect the bundle from prepare through finalization. Owner-controlled
+mode bits and point-in-time hashes do not satisfy that requirement. Runtime
+execution must remain disabled until an externally trusted mechanism can issue
+and hold an attested exclusive freeze lease across that entire interval. The
+Python interpreter, standard library, dynamically linked runtime, and installed
+dependency closure are also outside the bundle and are not content-pinned or
+attested. Those remain separate runtime-integrity blockers even if a bundle
+freeze provider is later added. The `serve-broker` API and CLI enforce the same
+fail-closed lease gate before broker startup.
+
 Authorization is single-use. Every fallible source, cache, profile, output-parent,
 and inventory check completes before its durable ledger append. Build requires that
 unused authorization as the current head. Each Git command receives a fresh
@@ -218,6 +238,14 @@ the one selected-rank receipt rather than repeating full campaign Git semantics.
 fails closed and cleans the attempt.
 Preparation also enforces three global durable active slots, writes the inode-keyed
 private registry descriptor, and starts only the resource-bounded local broker.
+Runtime attestation copies the authenticated production profile and Python broker
+package into a mode-read-only execution bundle. Its exact file inventory and digest
+are recorded in the custody receipt, which the runtime attestation and each lane
+binding already hash. The broker executes from that bundle; preparation, readiness,
+launch claim, and escrow finalization recheck bundle, current code/profile, receipt,
+binding, and runtime identity. Any drift fails closed. Historic profiles remain
+available to audit paths and cannot prepare or claim a launch. The ledger event format
+is unchanged.
 `native-launch-plan` validates the complete call against pinned Pi 0.35.1
 `SubagentParams` before atomically recording the ordered attempt/task-index mapping in
 one batch `launch_claimed` successor and emitting data for the supervisor's native

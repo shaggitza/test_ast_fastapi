@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -1568,6 +1569,7 @@ def test_prepare_runtime_boundary_rejects_attestation_or_installation_drift(
         },
     }
     monkeypatch.setattr(run, "_runtime_attestation", lambda *_: dict(attestation))
+    monkeypatch.setattr(run, "_require_current_broker_bundle", lambda *_: {})
     monkeypatch.setattr(run, "_installed_agent", lambda *_: dict(installation))
     assert run._runtime_boundary(ROOT, tmp_path, current, attestation, installation) == (
         attestation,
@@ -1580,6 +1582,142 @@ def test_prepare_runtime_boundary_rejects_attestation_or_installation_drift(
     )
     with pytest.raises(run.GroundTruthRunError, match="drifted at lane boundary"):
         run._runtime_boundary(ROOT, tmp_path, current, attestation, installation)
+
+
+def test_binding_must_match_runtime_receipt_and_launch_claim() -> None:
+    attestation = {
+        "entry_hash": "sha256:" + "a" * 64,
+        "runtime_custody_receipt_path": "/execution/runtime/custody-receipt.json",
+        "runtime_custody_receipt_sha256": "sha256:" + "b" * 64,
+    }
+    state = {"runtime_attestation_entry_hash": attestation["entry_hash"]}
+    record = SimpleNamespace(
+        runtime_attestation_entry_hash=attestation["entry_hash"],
+        runtime_custody_receipt_path=attestation["runtime_custody_receipt_path"],
+        runtime_custody_receipt_sha256=attestation["runtime_custody_receipt_sha256"],
+    )
+    run._require_binding_bundle(record, state, attestation)
+    record.runtime_custody_receipt_sha256 = "sha256:" + "c" * 64
+    with pytest.raises(run.GroundTruthRunError, match="binding, runtime attestation"):
+        run._require_binding_bundle(record, state, attestation)
+
+
+@pytest.mark.parametrize("checkpoint", ["after-readiness", "after-launch-claim"])
+def test_broker_bundle_detects_code_mutation_across_execution_freeze(
+    tmp_path: Path, checkpoint: str
+) -> None:
+    source = ROOT / "benchmarks/real_world/ground_truth_run_v1.py"
+    code = source.read_bytes()
+    bundle_root = tmp_path / "repo"
+    module = bundle_root / "benchmarks/real_world/ground_truth_run_v1.py"
+    module.parent.mkdir(parents=True)
+    module.write_bytes(code)
+    module.chmod(0o644)
+    profile = submit.ProfileSnapshot(
+        checksum_raw=b"profile",
+        checksum_sha256=run._sha(b"profile"),
+        files={"benchmarks/real_world/ground_truth_run_v1.py": code},
+        digests={"benchmarks/real_world/ground_truth_run_v1.py": run._sha(code)},
+        files_sha256=run._sha(
+            canonical_json({"benchmarks/real_world/ground_truth_run_v1.py": run._sha(code)})
+        ),
+    )
+    execution = tmp_path / "execution"
+    runtime = execution / "runtime"
+    runtime.mkdir(parents=True)
+    ready = run._build_broker_bundle(bundle_root, runtime, profile)
+    assert ready["bundle_sha256"]
+    if checkpoint == "after-readiness":
+        bundled_module = Path(ready["path"]) / "benchmarks/real_world/ground_truth_run_v1.py"
+        bundled_module.chmod(0o600)
+        bundled_module.write_bytes(code + b"# changed after readiness\n")
+        bundled_module.chmod(0o400)
+    else:
+        module.write_bytes(code + b"# changed after launch claim\n")
+    with pytest.raises(
+        run.GroundTruthRunError,
+        match=r"runtime code or profile changed|immutable broker bundle content changed",
+    ):
+        run._verify_broker_bundle(bundle_root, execution, profile)
+
+
+def test_broker_subprocess_import_isolated_from_hostile_cwd_and_pythonpath(
+    tmp_path: Path,
+) -> None:
+    bundle = tmp_path / "bundle"
+    module = bundle / "benchmarks/real_world/ground_truth_run_v1.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "from pathlib import Path\ndef main():\n print(Path(__file__).resolve())\n return 0\n"
+    )
+    hostile = tmp_path / "hostile"
+    shadow = hostile / "benchmarks/real_world"
+    shadow.mkdir(parents=True)
+    (shadow / "ground_truth_run_v1.py").write_text(
+        "raise RuntimeError('mutable cwd module imported')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", run._BROKER_BOOTSTRAP, str(bundle)],
+        cwd=hostile,
+        env={"PATH": os.environ["PATH"], "PYTHONPATH": str(hostile)},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout.strip() == str(module.resolve())
+
+
+def test_broker_freeze_lease_fails_closed_without_trusted_provider() -> None:
+    with pytest.raises(
+        run.GroundTruthRunError,
+        match="trusted exclusive broker freeze lease unavailable",
+    ):
+        run._require_exclusive_broker_freeze_lease()
+
+
+def test_serve_broker_api_fails_closed_before_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(run, "_broker_limits", pytest.fail)
+    with pytest.raises(
+        run.GroundTruthRunError,
+        match="trusted exclusive broker freeze lease unavailable",
+    ):
+        run.serve_broker(
+            tmp_path,
+            tmp_path / "broker.sock",
+            tmp_path / "binding.json",
+            1,
+            tmp_path / "ledger",
+            tmp_path / "execution",
+        )
+
+
+def test_serve_broker_cli_fails_closed_at_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(run, "_broker_limits", pytest.fail)
+    with pytest.raises(
+        run.GroundTruthRunError,
+        match="trusted exclusive broker freeze lease unavailable",
+    ):
+        run.main(
+            [
+                "--root",
+                str(tmp_path),
+                "serve-broker",
+                "--socket",
+                str(tmp_path / "broker.sock"),
+                "--binding",
+                str(tmp_path / "binding.json"),
+                "--ledger-root",
+                str(tmp_path / "ledger"),
+                "--execution-root",
+                str(tmp_path / "execution"),
+                "--deadline-unix-ms",
+                "1",
+            ]
+        )
 
 
 def _generation2_attempt(execution: Path) -> tuple[Path, dict[str, Any]]:
@@ -1688,6 +1826,7 @@ def test_generation3_prelaunch_recovery_archives_once_and_is_crash_resumable(
 
     monkeypatch.setattr(run, "_runtime_attestation", lambda *_args: attestation)
     monkeypatch.setattr(run, "_installed_agent", lambda *_args: installation)
+    monkeypatch.setattr(run, "_require_current_broker_bundle", lambda *_: {})
     monkeypatch.setattr(campaign, "_private_root", lambda path: path)
     monkeypatch.setattr(campaign, "_ledger_lock", lambda _path: contextlib.nullcontext())
     monkeypatch.setattr(run, "_extended_ledger", ledger)
@@ -2042,6 +2181,7 @@ def test_prepare_attempt_cannot_cross_authorization_generation(
         "runtime_custody_receipt_sha256": "sha256:" + "4" * 64,
     }
     installation: dict[str, Any] = {}
+    monkeypatch.setattr(run, "_require_exclusive_broker_freeze_lease", lambda: None)
     monkeypatch.setattr(run, "_runtime_attestation", lambda *_args: attestation)
     monkeypatch.setattr(run, "_installed_agent", lambda *_args: installation)
     monkeypatch.setattr(campaign, "_private_root", lambda path: path)
@@ -2090,6 +2230,7 @@ def test_runtime_boundary_binds_authorized_agent_digest(
         },
     }
     monkeypatch.setattr(run, "_runtime_attestation", lambda *_args: attestation)
+    monkeypatch.setattr(run, "_require_current_broker_bundle", lambda *_: {})
     monkeypatch.setattr(run, "_installed_agent", lambda *_args: installation)
     assert run._runtime_boundary(ROOT, ROOT, current, attestation, installation) == (
         attestation,
@@ -2363,8 +2504,14 @@ def test_native_plan_shape_is_schema_validated_before_one_batch_claim(
         "deadline_unix_ms": 9_999_999_999_999,
         "packet": str(packet),
         "binding": "/binding",
+        "binding_sha256": run._sha(b"binding"),
+        "runtime_attestation_entry_hash": runtime["entry_hash"],
     }
     monkeypatch.setattr(run, "_installed_agent", lambda *_: {})
+    monkeypatch.setattr(run, "_runtime_attestation", lambda *_: runtime)
+    monkeypatch.setattr(run, "_require_current_broker_bundle", lambda *_: {})
+    monkeypatch.setattr(run, "_require_binding_bundle", lambda *_: None)
+    monkeypatch.setattr(submit, "_owned_file", lambda *_args, **_kwargs: b"binding")
     monkeypatch.setattr(campaign, "_private_root", lambda value: value)
     monkeypatch.setattr(campaign, "_ledger_lock", lambda _: contextlib.nullcontext())
     monkeypatch.setattr(run, "_extended_ledger", lambda *_: current)

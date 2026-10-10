@@ -63,6 +63,20 @@ _MAX_RSS: Final = 4 * 1024 * 1024 * 1024
 _MAX_OUTPUT: Final = 2 * 1024 * 1024
 _RUNTIME_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _ATTEMPT = re.compile(r"^prod-v1-i[0-9]{3}-rank[0-9]{3}-pr[0-9]+-[AB]$")
+_BROKER_BOOTSTRAP: Final = (
+    "import importlib.util, pathlib, sys, types; "
+    "root=pathlib.Path(sys.argv.pop(1)); "
+    "bench=types.ModuleType('benchmarks'); bench.__path__=[str(root/'benchmarks')]; "
+    "sys.modules['benchmarks']=bench; "
+    "real=types.ModuleType('benchmarks.real_world'); "
+    "real.__path__=[str(root/'benchmarks/real_world')]; "
+    "sys.modules['benchmarks.real_world']=real; "
+    "name='benchmarks.real_world.ground_truth_run_v1'; "
+    "entry=root/'benchmarks/real_world/ground_truth_run_v1.py'; "
+    "spec=importlib.util.spec_from_file_location(name, entry); "
+    "module=importlib.util.module_from_spec(spec); sys.modules[name]=module; "
+    "spec.loader.exec_module(module); raise SystemExit(module.main())"
+)
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _ZERO_HASH: Final = "sha256:" + "0" * 64
 _EVENT_FILE = re.compile(
@@ -253,6 +267,7 @@ def _custody_receipt_payload(
     profile: submit_v1.ProfileSnapshot,
     source_inventory: dict[str, Any],
     packet_inventory: dict[str, Any],
+    broker_bundle: dict[str, Any],
 ) -> dict[str, Any]:
     source_value, source_raw, _ = source_v1._read_json(bindings, modes={0o400})
     cache_summary = source_value.get("cache")
@@ -296,12 +311,109 @@ def _custody_receipt_payload(
         },
         "production_profile_sha256": profile.checksum_sha256,
         "production_files_sha256": profile.files_sha256,
+        "broker_bundle_path": broker_bundle["path"],
+        "broker_bundle_sha256": broker_bundle["sha256"],
         "authorizations": {
             "review_launch": False,
             "adjudication": False,
             "canonical_import": False,
         },
     }
+
+
+def _build_broker_bundle(
+    root: Path, runtime: Path, profile: submit_v1.ProfileSnapshot
+) -> dict[str, Any]:
+    """Capture the exact authenticated profile and Python package used by the broker."""
+    bundle = runtime / "broker-bundle"
+    files: dict[str, bytes] = dict(profile.files)
+    source_root = root / "benchmarks/real_world"
+    for path in source_root.rglob("*"):
+        if not path.is_file() or path.suffix not in {".py", ".json"}:
+            continue
+        relative = path.relative_to(root).as_posix()
+        raw = submit_v1._owned_file(path, max_bytes=_MAX_FILE, allowed_modes={0o644})
+        prior = files.get(relative)
+        if prior is not None and prior != raw:
+            _fail("broker source differs from authenticated production profile")
+        files[relative] = raw
+    digests = {name: _sha(raw) for name, raw in sorted(files.items())}
+    for name, raw in files.items():
+        target = bundle / name
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        target.write_bytes(raw)
+        target.chmod(0o400)
+    manifest = {
+        "schema_version": 1,
+        "protocol": "ground-truth-immutable-broker-bundle-v1",
+        "production_profile_sha256": profile.checksum_sha256,
+        "production_files_sha256": profile.files_sha256,
+        "files": digests,
+        "bundle_sha256": _sha(canonical_json(digests)),
+    }
+    manifest_path = bundle / "bundle-manifest.json"
+    _atomic(manifest_path, manifest)
+    for directory, _names, _files in os.walk(bundle, topdown=False):
+        Path(directory).chmod(0o500)
+    return _verify_broker_bundle(root, runtime.parent, profile)
+
+
+def _verify_broker_bundle(
+    root: Path, execution_root: Path, profile: submit_v1.ProfileSnapshot
+) -> dict[str, Any]:
+    bundle = execution_root / "runtime/broker-bundle"
+    value, raw = _json_raw(bundle / "bundle-manifest.json", modes={0o400})
+    files = value.get("files") if isinstance(value, dict) else None
+    if isinstance(value, dict):
+        _strict_keys(
+            value,
+            {
+                "schema_version",
+                "protocol",
+                "production_profile_sha256",
+                "production_files_sha256",
+                "files",
+                "bundle_sha256",
+            },
+            "broker bundle manifest",
+        )
+    if (
+        not isinstance(files, dict)
+        or value.get("schema_version") != 1
+        or value.get("protocol") != "ground-truth-immutable-broker-bundle-v1"
+        or value.get("production_profile_sha256") != profile.checksum_sha256
+        or value.get("production_files_sha256") != profile.files_sha256
+        or value.get("bundle_sha256") != _sha(canonical_json(files))
+        or canonical_json(value) != raw
+    ):
+        _fail("immutable broker bundle manifest changed")
+    current: dict[str, str] = {}
+    source_root = root / "benchmarks/real_world"
+    for path in source_root.rglob("*"):
+        if path.is_file() and path.suffix in {".py", ".json"}:
+            current[path.relative_to(root).as_posix()] = _sha(
+                submit_v1._owned_file(path, max_bytes=_MAX_FILE, allowed_modes={0o644})
+            )
+    for name, content in profile.files.items():
+        digest = _sha(content)
+        if name in current and current[name] != digest:
+            _fail("runtime code or profile changed after bundle attestation")
+        current[name] = digest
+    if files != dict(sorted(current.items())):
+        _fail("runtime code or profile changed after bundle attestation")
+    for name, digest in files.items():
+        path = bundle / name
+        content = submit_v1._owned_file(path, max_bytes=_MAX_FILE, allowed_modes={0o400})
+        if _sha(content) != digest:
+            _fail("immutable broker bundle content changed")
+    actual_paths = {
+        path.relative_to(bundle).as_posix()
+        for path in bundle.rglob("*")
+        if path.is_file() and path.name != "bundle-manifest.json"
+    }
+    if actual_paths != set(files):
+        _fail("immutable broker bundle inventory changed")
+    return {"path": str(bundle), "sha256": _sha(raw), "bundle_sha256": value["bundle_sha256"]}
 
 
 def _package_paths() -> tuple[Path, Path, Path, Path]:
@@ -2403,6 +2515,7 @@ def attest_runtime(  # noqa: PLR0912, PLR0915
     body = _agent_body(agent_extension, prompt)
     agent_source.write_bytes(body)
     agent_source.chmod(0o400)
+    broker_bundle = _build_broker_bundle(root, runtime, profile)
     custody_receipt = _custody_receipt_payload(
         campaign_path,
         campaign,
@@ -2415,6 +2528,7 @@ def attest_runtime(  # noqa: PLR0912, PLR0915
         profile,
         source_inventory_after,
         packet_inventory_after,
+        broker_bundle,
     )
     custody_path = runtime / "custody-receipt.json"
     _atomic(custody_path, custody_receipt)
@@ -2703,6 +2817,14 @@ def _runtime_attestation(
         profile_files = current_profile.files
         profile_checksum_sha256 = current_profile.checksum_sha256
         profile_files_sha256 = current_profile.files_sha256
+    bundle_path = execution_root / "runtime/broker-bundle"
+    bundle = (
+        _verify_broker_bundle(root, execution_root, current_profile)
+        if bundle_path.exists()
+        else None
+    )
+    if bundle is None and not historical:
+        _fail("current runtime is missing its immutable broker bundle")
     extension = submit_v1._owned_file(
         execution_root / "runtime/extension/index.ts", max_bytes=_MAX_FILE, allowed_modes={0o400}
     )
@@ -2742,6 +2864,13 @@ def _runtime_attestation(
             and (
                 value.get("runtime_custody_receipt_path") != str(custody_path)
                 or value.get("runtime_custody_receipt_sha256") != _sha(custody_raw)
+                or (
+                    bundle is not None
+                    and (
+                        json.loads(custody_raw).get("broker_bundle_path") != bundle["path"]
+                        or json.loads(custody_raw).get("broker_bundle_sha256") != bundle["sha256"]
+                    )
+                )
             )
         )
         or not isinstance(value.get("campaign_lanes_sha256"), str)
@@ -4010,6 +4139,7 @@ def _runtime_boundary(
     expected_installation: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     fresh_attestation = _runtime_attestation(root, execution_root)
+    _require_current_broker_bundle(root, execution_root, fresh_attestation)
     fresh_installation = _installed_agent(root, execution_root)
     runtime = current.get("runtime")
     authorization = current.get("authorization")
@@ -4028,6 +4158,47 @@ def _runtime_boundary(
     ):
         _fail("runtime or installation drifted at lane boundary")
     return fresh_attestation, fresh_installation
+
+
+def _require_exclusive_broker_freeze_lease() -> NoReturn:
+    """Fail closed until a trusted host can enforce an exclusive freeze lease.
+
+    File modes and digest checks cannot prevent an owner or privileged process
+    from changing and restoring bytes between checks. This host has no trusted
+    read-only mount or signed freeze-lease provider, so production broker work
+    must remain blocked rather than claim immutability.
+    """
+    _fail("trusted exclusive broker freeze lease unavailable; production broker execution blocked")
+
+
+def _require_current_broker_bundle(
+    root: Path, execution_root: Path, attestation: dict[str, Any]
+) -> dict[str, Any]:
+    profile = _profile(root)
+    if attestation.get("production_profile_sha256") != profile.checksum_sha256:
+        _fail("historical runtime profile is audit-only")
+    bundle = _verify_broker_bundle(root, execution_root, profile)
+    receipt, _ = _json_raw(execution_root / "runtime/custody-receipt.json", modes={0o400})
+    if (
+        receipt.get("broker_bundle_path") != bundle["path"]
+        or receipt.get("broker_bundle_sha256") != bundle["sha256"]
+        or attestation.get("runtime_custody_receipt_sha256") != _sha(canonical_json(receipt))
+    ):
+        _fail("runtime, broker bundle, and custody receipt differ")
+    return bundle
+
+
+def _require_binding_bundle(
+    record: Any, state: dict[str, Any], attestation: dict[str, Any]
+) -> None:
+    if (
+        record.runtime_attestation_entry_hash != attestation.get("entry_hash")
+        or record.runtime_custody_receipt_path != attestation.get("runtime_custody_receipt_path")
+        or record.runtime_custody_receipt_sha256
+        != attestation.get("runtime_custody_receipt_sha256")
+        or state.get("runtime_attestation_entry_hash") != attestation.get("entry_hash")
+    ):
+        _fail("binding, runtime attestation, and broker bundle differ")
 
 
 def _event_value(current: dict[str, Any], kind: str, fields: dict[str, Any]) -> dict[str, Any]:
@@ -4285,8 +4456,10 @@ def serve_broker(
     ledger: Path,
     execution_root: Path,
 ) -> int:
+    _require_exclusive_broker_freeze_lease()
     _broker_limits()
     attestation = _runtime_attestation(root, execution_root)
+    _require_current_broker_bundle(root, execution_root, attestation)
     records = submit_v1.load_bindings(binding)
     record = records.records[0]
     private = campaign_v1._private_root(ledger)
@@ -4504,6 +4677,7 @@ def prepare_attempt(  # noqa: PLR0912,PLR0915
 ) -> dict[str, Any]:
     if not _ATTEMPT.fullmatch(attempt_id):
         _fail("attempt id is invalid")
+    _require_exclusive_broker_freeze_lease()
     attestation = _runtime_attestation(root, execution_root)
     installation = _installed_agent(root, execution_root)
     private = campaign_v1._private_root(ledger)
@@ -4594,10 +4768,16 @@ def prepare_attempt(  # noqa: PLR0912,PLR0915
         deadline_ms = int((now or _now()).timestamp() * 1000) + _MAX_WALL * 1000
         stdout = os.open(logs / "broker.stdout", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         stderr = os.open(logs / "broker.stderr", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        bundle = _require_current_broker_bundle(root, execution_root, fresh_attestation)
         argv = [
             sys.executable,
-            "-m",
-            "benchmarks.real_world.ground_truth_run_v1",
+            "-I",
+            "-B",
+            "-c",
+            _BROKER_BOOTSTRAP,
+            bundle["path"],
+            "--root",
+            str(root),
             "serve-broker",
             "--socket",
             str(socket_path),
@@ -4613,7 +4793,6 @@ def prepare_attempt(  # noqa: PLR0912,PLR0915
         env = {
             "PATH": _attested_broker_path(fresh_attestation),
             "HOME": str(Path.home()),
-            "PYTHONPATH": str(root),
             "LANG": "C",
             "LC_ALL": "C",
         }
@@ -4774,9 +4953,11 @@ process.stdout.write('VALID');
     return _sha(canonical_json(plan))
 
 
-def native_launch_plan(
+def native_launch_plan(  # noqa: PLR0915
     root: Path, ledger: Path, execution_root: Path, attempt_ids: Sequence[str]
 ) -> dict[str, Any]:
+    runtime_for_bundle = _runtime_attestation(root, execution_root)
+    _require_current_broker_bundle(root, execution_root, runtime_for_bundle)
     if (
         not attempt_ids
         or len(attempt_ids) > _MAX_ACTIVE
@@ -4808,7 +4989,14 @@ def native_launch_plan(
         state = states[attempt_id]
         packet = Path(cast("str", state["packet"])).resolve(strict=True)
         status = packet.stat(follow_symlinks=False)
-        record = submit_v1.load_bindings(Path(cast("str", state["binding"]))).records[0]
+        binding_path = Path(cast("str", state["binding"]))
+        binding_raw = submit_v1._owned_file(
+            binding_path, max_bytes=_MAX_FILE, allowed_modes={0o400}
+        )
+        if _sha(binding_raw) != state.get("binding_sha256"):
+            _fail("prepared binding changed before launch claim")
+        record = submit_v1.load_bindings(binding_path).records[0]
+        _require_binding_bundle(record, state, runtime_for_bundle)
         if status.st_dev != record.packet_device or status.st_ino != record.packet_inode:
             _fail("prepared cwd identity changed")
         tasks.append(
@@ -4840,6 +5028,10 @@ def native_launch_plan(
     with campaign_v1._ledger_lock(private):
         current = _extended_ledger(private, root)
         _authorization(current)
+        claimed_runtime = _runtime_attestation(root, execution_root)
+        _require_current_broker_bundle(root, execution_root, claimed_runtime)
+        if claimed_runtime != runtime_for_bundle or current.get("runtime") != claimed_runtime:
+            _fail("runtime bundle changed before atomic launch claim")
         _installed_agent(root, execution_root)
         for attempt_id, state in states.items():
             if current["states"].get(attempt_id) != "prepared":
@@ -4847,6 +5039,14 @@ def native_launch_plan(
             pid, identity = int(state["broker_pid"]), cast("str", state["broker_start_identity"])
             if not _same_process(pid, identity):
                 _fail("broker changed before atomic launch claim")
+            binding_path = Path(cast("str", state["binding"]))
+            binding_raw = submit_v1._owned_file(
+                binding_path, max_bytes=_MAX_FILE, allowed_modes={0o400}
+            )
+            if _sha(binding_raw) != state.get("binding_sha256"):
+                _fail("prepared binding changed before atomic launch claim")
+            record = submit_v1.load_bindings(binding_path).records[0]
+            _require_binding_bundle(record, state, claimed_runtime)
         batch_id = hashlib.sha256(
             canonical_json({"plan": plan_hash, "previous": current["head"]})
         ).hexdigest()[:24]
@@ -5020,6 +5220,9 @@ def bind_native_result(
 def finalize_attempt(
     root: Path, ledger: Path, execution_root: Path, attempt_id: str
 ) -> dict[str, Any]:
+    attestation = _runtime_attestation(root, execution_root)
+    _require_current_broker_bundle(root, execution_root, attestation)
+    _require_exclusive_broker_freeze_lease()
     _installed_agent(root, execution_root)
     state = _state(execution_root, attempt_id)
     private = campaign_v1._private_root(ledger)
@@ -5028,7 +5231,14 @@ def finalize_attempt(
         if current["states"].get(attempt_id) != "native_bound":
             _fail("finalization requires a successful bound native result")
     try:
-        record = submit_v1.load_bindings(Path(cast("str", state["binding"]))).records[0]
+        binding_path = Path(cast("str", state["binding"]))
+        binding_raw = submit_v1._owned_file(
+            binding_path, max_bytes=_MAX_FILE, allowed_modes={0o400}
+        )
+        if _sha(binding_raw) != state.get("binding_sha256"):
+            _fail("prepared binding changed during escrow finalization")
+        record = submit_v1.load_bindings(binding_path).records[0]
+        _require_binding_bundle(record, state, attestation)
         receipt = submit_v1.recover_submission(record)
         review_raw = submit_v1._owned_file(
             Path(record.escrow_path), max_bytes=_MAX_OUTPUT, allowed_modes={0o400}
@@ -5043,6 +5253,16 @@ def finalize_attempt(
             "eligible": False,
         }
         _atomic(execution_root / "attempts" / attempt_id / "pending-result.json", pending)
+        if _runtime_attestation(root, execution_root) != attestation:
+            _fail("runtime bundle changed during escrow finalization")
+        _require_current_broker_bundle(root, execution_root, attestation)
+        binding_raw = submit_v1._owned_file(
+            binding_path, max_bytes=_MAX_FILE, allowed_modes={0o400}
+        )
+        if _sha(binding_raw) != state.get("binding_sha256"):
+            _fail("prepared binding changed during escrow finalization")
+        final_record = submit_v1.load_bindings(binding_path).records[0]
+        _require_binding_bundle(final_record, state, attestation)
         with campaign_v1._ledger_lock(private):
             current = _extended_ledger(private, root)
             if current["states"].get(attempt_id) != "native_bound":
