@@ -375,7 +375,10 @@ def _shadowed_client_names(tokens: list[_Token]) -> tuple[set[str], set[str]]:  
                         bind(candidate)
                 begin = pos + 1
 
-    for index, token in enumerate(tokens):
+    # Discover canonical import aliases before checking bindings anywhere in
+    # the file, including function declarations placed before the import.
+    for index, token in sorted(enumerate(tokens), key=lambda item: item[1].value != "import"):
+        names.update(axios_imports)
         # This structural check must run for punctuation tokens too; arrow
         # parameters are enclosed by the closing-parenthesis token.
         if (

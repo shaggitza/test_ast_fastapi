@@ -8,6 +8,27 @@ from fastapi_endpoint_detector.analyzer.client_observations import (
 )
 
 
+def test_axios_aliases_are_invalidated_by_rebinding_and_local_parameters() -> None:
+    surfaces = (EstablishedSurface("admin", "/admin", "GET", "https://api.test", True),)
+    for source in (
+        "import http from 'axios'; http = client; http.get('https://api.test/admin');",
+        "import http from 'axios'; function f(http) { http.get('https://api.test/admin'); }",
+        "function f(http) { http.get('https://api.test/admin'); } import http from 'axios';",
+        "import * as http from 'axios'; const f = (http) => http.get('https://api.test/admin');",
+        "import http from 'axios'; http++; http.get('https://api.test/admin');",
+    ):
+        observations = extract_client_observations(source)
+        assert observations == (), source
+        assert join_established_surfaces(observations, surfaces) == (), source
+    observations = extract_client_observations(
+        "import http from 'axios'; http.get('https://api.test/admin');"
+    )
+    assert len(observations) == 1
+    assert [item.surface_id for item in join_established_surfaces(observations, surfaces)] == [
+        "admin"
+    ]
+
+
 def test_extracts_finite_http_websocket_calls_and_keeps_query_evidence() -> None:
     source = r"""
 fetch("https://api.example.test/items?limit=10");

@@ -409,7 +409,8 @@ def _expanded_scip_affected(
         except SCIPAnalyzerError as error:
             if warnings is not None:
                 warnings.append(
-                    f"SCIP reverse references for {definition.short_name} failed: {error}"
+                    "SCIP analysis incomplete: "
+                    f"reverse references for {definition.short_name} failed: {error}"
                 )
             continue
         if warnings is not None and limitations_for_seed:
@@ -430,7 +431,8 @@ def _expanded_scip_affected(
             except SCIPAnalyzerError as error:
                 if warnings is not None:
                     warnings.append(
-                        f"SCIP override bridge from {definition.short_name} failed: {error}"
+                        "SCIP analysis incomplete: "
+                        f"override bridge from {definition.short_name} failed: {error}"
                     )
                 bases = ()
             for base in sorted(bases, key=_scip_definition_key):
@@ -793,6 +795,10 @@ class ChangeMapper:
         if self.baseline_app_path is None:
             return []
         try:
+            if not self.baseline_app_path.exists():
+                raise FileNotFoundError(
+                    f"Baseline snapshot does not exist: {self.baseline_app_path}"
+                )
             baseline = self.baseline_mypy_registry.get_all()
         except Exception as exc:
             self._baseline_failure = str(exc)
@@ -2123,6 +2129,13 @@ class ChangeMapper:
             ]
             duration_ms = (time.time() - start_time) * 1000
             report_progress(100, 100, "Complete!")
+            endpoint_lifecycle = self._endpoint_lifecycle()
+            if self._baseline_failure:
+                warnings.append(
+                    "SCIP baseline analysis is incomplete: "
+                    "baseline endpoint lifecycle could not be reconciled "
+                    f"({self._baseline_failure})."
+                )
             return AnalysisReport(
                 app_path=str(self.app_path),
                 diff_source=diff_source_str,
@@ -2135,7 +2148,7 @@ class ChangeMapper:
                 ),
                 affected_endpoints=filtered,
                 candidate_endpoints=scip_affected,
-                endpoint_lifecycle=self._endpoint_lifecycle(),
+                endpoint_lifecycle=endpoint_lifecycle,
                 orphan_changes=scip_orphans,
                 total_files_changed=len(diff_files),
                 python_files_changed=len(python_files),
@@ -2338,6 +2351,8 @@ class ChangeMapper:
             sql_transaction_path_report=self._sql_transaction_path_report,
         )
         self.mypy_analyzer.release_typed_snapshot()
+        if self._baseline_mypy_analyzer is not None:
+            self._baseline_mypy_analyzer.release_typed_snapshot()
         return report
 
     def _preanalyze_mypy(
