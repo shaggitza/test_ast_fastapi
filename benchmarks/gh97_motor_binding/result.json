@@ -1,0 +1,327 @@
+{
+  "analysis_config": {
+    "audit_cache_enabled": false,
+    "max_depth": 1,
+    "track_transitive": false
+  },
+  "analyzer_revision": "dd615f5c3fd298f5aa854a8e2c42b26a5bd0f404",
+  "analyzer_source_hashes": {
+    "src/fastapi_endpoint_detector/analyzer/effect_contract_auditor.py": "sha256:c6ecd7210e7c4fc054010c80e9df0961b1510fd9cb9599faa49a27e751258d57",
+    "src/fastapi_endpoint_detector/analyzer/mypy_analyzer.py": "sha256:6f0d36417dc13c258a52da28d47d9a7c56b28662e55f55503dc42c26a4383fba",
+    "src/fastapi_endpoint_detector/models/effect_contract.py": "sha256:fc6a84c8e5940b790cb26254f6fa66dea457c00668930623484efc88dee2a559",
+    "src/fastapi_endpoint_detector/models/endpoint.py": "sha256:543a97269f4665fbb7eb3e2752e728307feb5e688c7eae37cab023e1c7fce138"
+  },
+  "artifact_hashes": {
+    "motor": {
+      "filename": "motor-3.6.0-py3-none-any.whl",
+      "sha256": "sha256:9f07ed96f1754963d4386944e1b52d403a5350c687edc60da487d66f98dbf894"
+    },
+    "pymongo": {
+      "filename": "pymongo-4.10.1-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "sha256": "sha256:cec237c305fcbeef75c0bcbe9d223d1e22a6e3ba1b53b2f0b79d3d29c742b45b"
+    }
+  },
+  "classification": {
+    "all_calls": 5,
+    "exact_resolution_and_audit_binding": 0,
+    "resolved_but_unmatched": 2,
+    "unsupported_or_ambiguous_resolution": 3
+  },
+  "extracted_python_source_hashes": {
+    "motor": {
+      "motor/__init__.py": "sha256:3d577f1e8e392939fe5d74e19428ebb261d486ba58a558b48140f6c895fcf1d3",
+      "motor/_version.py": "sha256:bfbfd81a5f3fc3729b45e840c6ebd1403315081c003a34968fc171113faf0f2e",
+      "motor/aiohttp/__init__.py": "sha256:4438eaa94ab434b4742ef1c91bd2d9a4dee2977cfac0ba855f5be5ed8b2f3ddf",
+      "motor/core.py": "sha256:c5690d7e1c7b3f5ff9795ae4636463c92101ebba12f6a23bd2a357cbdb5a399a",
+      "motor/docstrings.py": "sha256:8bc34dc0391cae0803806de6e7730e2a7d0188c1612e99ea2010bccd4d9637a8",
+      "motor/frameworks/__init__.py": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "motor/frameworks/asyncio/__init__.py": "sha256:6fd1c1af0dba70ce36ec6c2df366a7676e8727dec3b079708715c79f276db00d",
+      "motor/frameworks/tornado/__init__.py": "sha256:763e499d7c058e257799cb25b0ae1f24ffdbf1663058b605c3815a0f5c52b580",
+      "motor/metaprogramming.py": "sha256:ead210a1d690ca1f797d5aa7d40b93bcaa197645ecdae6a33c58fb0ea5b19030",
+      "motor/motor_asyncio.py": "sha256:d6a374145b584868e6641adb91276132818b5a9699133806b5cae2c39dcbd262",
+      "motor/motor_common.py": "sha256:79eec6a505319a3f28e60686ee926ae8f647bcf69596d5154e98ffde5741b83d",
+      "motor/motor_gridfs.py": "sha256:d4bf278d5974b900c5188950e69dbe5b021644046ab6e0a40028c0225003f19c",
+      "motor/motor_tornado.py": "sha256:fb2897c876955c531ee18723dbbe8b6eae630c8faa8aaba50ab30bcc115f1de4",
+      "motor/web.py": "sha256:d51bcbafdb7eab2139ed1f395b51a405acb364a8bacf79615f7a1d0bbbacd1be"
+    },
+    "pymongo": {
+      "bson/__init__.py": "sha256:94dc519c7124fca40be5148285888cce21d48828c28f84ef9aa52cef1d31ff19",
+      "bson/_helpers.py": "sha256:0fc7498fc2e8adf1341eb39bd3486d6e53a532fc3ee7dc7d6a447b82cd44fc1b",
+      "bson/binary.py": "sha256:df7379885edb5b672782fa6eb98ef624e105e96562ac3eb5599c5fa713ba86fe",
+      "bson/code.py": "sha256:1da4733c791ee3e8722bdc9570ba36a8207173742cbde4ea2ee840686b8d0b42",
+      "bson/codec_options.py": "sha256:e21113f90747507555e98e3cffd3c6e8a4f1378e1dd257d759fe6611073c50cb",
+      "bson/datetime_ms.py": "sha256:667a920ce01b8e2c08ac223fa351398beb7ec6520b7430f4bfe5e01b00124370",
+      "bson/dbref.py": "sha256:93c650cc1598c00526df3081a8a17efcf4c465666f68e02e7852d564f7ec3795",
+      "bson/decimal128.py": "sha256:1a145b91c5ac6649b246099bf7199098d2337763d2ac42f8b752fea0d91296d8",
+      "bson/errors.py": "sha256:9a8938d325aeac19c2bab595b125cbaadac85a9601af6ee424f74fc65ec84b6d",
+      "bson/int64.py": "sha256:d4a913c32d825514fb569d1345e8610de5cd2f71f17021cecbceb51d05cbe0bd",
+      "bson/json_util.py": "sha256:3b34397450028ce93da58287ba139472da026d117dba74317365fac9ea3cd4d1",
+      "bson/max_key.py": "sha256:6649bc9f2f2d798ac92da54d880776344b3d9e455485ca3099720df84930b7a9",
+      "bson/min_key.py": "sha256:e501ed228c2078eed6e0c02f40deb4c1b42d3798feef3ac81229bc52e5396ff9",
+      "bson/objectid.py": "sha256:4906a93204aa4fa1ea26f9e736f72894940d1c1e6e54b1f233d60695d4b8e145",
+      "bson/raw_bson.py": "sha256:56ca2ae6f592df5b6606129648c491c2dd0a0636435e1b1f4dfdbb49f2c5b3b6",
+      "bson/regex.py": "sha256:c1e3cbffa13e87d646d7eccbb62cab2f56b8204c90cf4452e17a94f9ba295a06",
+      "bson/son.py": "sha256:f215a9ee5888a278db6010cc1eb07b244477e6eb5abfe618ee646cebe9e1d432",
+      "bson/timestamp.py": "sha256:c322f6c7953655a81ee767122ce33a77f17bd34852b21604210aac7a83553694",
+      "bson/typings.py": "sha256:83b0db28ce0e73ed4969cabda733262ee34c1edf7c640e95747d3c9dfc02bac4",
+      "bson/tz_util.py": "sha256:2ffab461bd7214082f653c4a3106029f42ecbef8485e3f0d8855d8b7f6907c9e",
+      "pymongo/__init__.py": "sha256:ef8c0e22085be1c3849d7b934d36d9951e01e011071a7a9f5f87e17f9c565127",
+      "pymongo/_azure_helpers.py": "sha256:c9a3abc8f36bd49ac0c6e49ab6710bd3404a7b672d568718f93f416bfe05cdfc",
+      "pymongo/_client_bulk_shared.py": "sha256:5fc372a926c5a25b4152898278743cd270a391c43beb9843b3b9400de8f89332",
+      "pymongo/_csot.py": "sha256:fc034387195b572a353036d422fb2e5e913f28632e32e9d5badfd03e6bf0befd",
+      "pymongo/_gcp_helpers.py": "sha256:f76fae5b9ef726ada2b44a5cc75c231769ef3dad8d60cfb30db04a39574dddce",
+      "pymongo/_version.py": "sha256:ecdbb656658949b42c28cfb7e69099a3abcabc2555ef582e2693aa1723628bab",
+      "pymongo/asynchronous/__init__.py": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "pymongo/asynchronous/aggregation.py": "sha256:1916eb07fdd3ec81f823020c508d430686756ef13e1b212bf7fb439a6290f4f0",
+      "pymongo/asynchronous/auth.py": "sha256:12396f1389c872471ac8d570cbef3de8a49915e2443792e0df2a1d5db425543d",
+      "pymongo/asynchronous/auth_aws.py": "sha256:799dcf3ae00c706bbe2fe3ea34bf889abb213770cb1b736dc9160067d7795481",
+      "pymongo/asynchronous/auth_oidc.py": "sha256:ad215f864e3e3f308e111719373fb777bd71287660d9089d7b2a2d96ed57bad3",
+      "pymongo/asynchronous/bulk.py": "sha256:62a83e40393c4445c4ba15a89b92c0d0923ed34960117e7af83aa56b1962281d",
+      "pymongo/asynchronous/change_stream.py": "sha256:aa29a56e511a8a53ef84caad2a67f0dbda2fc9ddd9d38563661d42f03d405d3b",
+      "pymongo/asynchronous/client_bulk.py": "sha256:ffc202cba2d5f93e4308720752c63a6d87f5a3193eceb3a1c302c1a3cd25e361",
+      "pymongo/asynchronous/client_session.py": "sha256:e20341686013f20b0b3f081695109f4b7593c42bc0d4bcc7dd14ae50514c4c30",
+      "pymongo/asynchronous/collection.py": "sha256:8a8ae5c8031c1cdd58ea6a02ced1f60d94f02f578a78dab866b6493ac75867ab",
+      "pymongo/asynchronous/command_cursor.py": "sha256:866dcaf6da64655a23b530c4eeda973a0c882435a91c4def3a1ffc41485b8d60",
+      "pymongo/asynchronous/cursor.py": "sha256:dc8bb47b97ce696688c7f003489c3920d0977057f95a5112ea0a44c48d5d3f87",
+      "pymongo/asynchronous/database.py": "sha256:1635e9d9a0ce881a6f8974752072ae82397331f6a6379adeab0b0eb21c247e1a",
+      "pymongo/asynchronous/encryption.py": "sha256:a89d21210c111f074f764b9934474ce620b4755ea88afb96460ed7e5a1dc39cc",
+      "pymongo/asynchronous/helpers.py": "sha256:8974bda6439bcd413379dde5c0a0aefad58e3c9b965ea3271055a56b0f1fddb3",
+      "pymongo/asynchronous/mongo_client.py": "sha256:2c3c0177e8ad53e836c5b60c1227e2ac405293b455a926fdba737906f8c1bf6e",
+      "pymongo/asynchronous/monitor.py": "sha256:47885541f3710495da7133f276d2158c630b6033316476f87abc2c98718d0864",
+      "pymongo/asynchronous/network.py": "sha256:d74f4cd4b17c975bb091a402e7ce7a4405ad9c9991bc99257c89f700ea300a3e",
+      "pymongo/asynchronous/periodic_executor.py": "sha256:1cce2cc34edba1057c929ee7ffcc108f9d743e561495fdda09d852bf355487d0",
+      "pymongo/asynchronous/pool.py": "sha256:1e4ee02ef8e5be7a3b0a9913564957ccac3a043c4fb5533af8a348104244fa24",
+      "pymongo/asynchronous/server.py": "sha256:d49ea1f1c9e8e79ba7d4e912fa0e4e5b52f15bacb872a5ee4d711fdab1b05ae5",
+      "pymongo/asynchronous/settings.py": "sha256:d54ede09ca95656f62538191ec7dd6f34c722106012bd94ae1c97a15c044ac76",
+      "pymongo/asynchronous/topology.py": "sha256:276fb062ba60ffadeae0d834809c86d9196bb006beda51e26c5a7a95d05335bd",
+      "pymongo/auth.py": "sha256:53ec8fbe7663a34d712422ca01459c6c614797bd8219347035a1b8cb8837d768",
+      "pymongo/auth_oidc.py": "sha256:2ee3803b79e8c9c0c812bf5340ce508d1c130113fcba327d00202b0522d4a6fa",
+      "pymongo/auth_oidc_shared.py": "sha256:b4e49c72de577faa93ddc3c35c3488beebb0ffe520d2ca3fbd2e44bd2e5d8441",
+      "pymongo/auth_shared.py": "sha256:396abb8f4d51ed63bdec545b4be7d08a6702a0f8910798ac45b35426e34ecb9e",
+      "pymongo/bulk_shared.py": "sha256:c1d0c70cceb46610a3e33267fbc46fcddcf055763a3b47e9b49b6e9dc9754918",
+      "pymongo/change_stream.py": "sha256:3d8338ad385c607465cfaf591b01a6c0dbfa24b47dbaa1b36225c7da42c262f6",
+      "pymongo/client_options.py": "sha256:73fda1234db0c10217778d6492c212db4e786ce917a2306d6e32e6b253b2bb39",
+      "pymongo/client_session.py": "sha256:030da763c4b609574dec6a8dc3b716f4cd11ed7c4963c28a99137985699e5863",
+      "pymongo/collation.py": "sha256:b6554bf991e60e0d552a86e5e777044c6deed28ca622f5633ea56d60c75c95bd",
+      "pymongo/collection.py": "sha256:8f8fec3a39c27cfc99e69e872fddcfce668ebc690ede7db074fd0f960158d2cb",
+      "pymongo/command_cursor.py": "sha256:07beeaf18f0389d9b89e1d9732d4607af088c0a92c7ea081a4abe8ece216872c",
+      "pymongo/common.py": "sha256:d2211f0d4818ae18c7c737166ea8716d615435cfeed787cb7298e933fca72f70",
+      "pymongo/compression_support.py": "sha256:e09b67c6e2798b65cab61cf41d33addf579870fe2d68f4a05318a88c388d4eac",
+      "pymongo/cursor.py": "sha256:877eaf2a234764a496778abc18b477757235b63a1b25fe12d33d4742cf5c5223",
+      "pymongo/cursor_shared.py": "sha256:02f37a91a46e621eab99441f053e57dcac6265f1f0caf6f770987182fa5897db",
+      "pymongo/daemon.py": "sha256:b05a90265aa5886879777ff79a1b3aef1562b70ca740f403a1d1d7c9b1f9aa4c",
+      "pymongo/database.py": "sha256:4b4283b54e084db6096f6baa429eac933d699a4c8cb896417a49d1fbfc6b1d9d",
+      "pymongo/database_shared.py": "sha256:e643f0979c7009ebbce3f51c35c6b5f1cb44a6f4dce211b7b018531e85e58bdb",
+      "pymongo/driver_info.py": "sha256:b3c29bd3e9100ef3fa31ca19df878a5a3e718e058232c7372c665a782c077c8e",
+      "pymongo/encryption.py": "sha256:968a247f4bd7b2357bfde70b4e271c57cb98d7e1dbc0ca623e5a5b7af273dc79",
+      "pymongo/encryption_options.py": "sha256:8f06b41bf2d46051bc6c10b1c236f587b95cc6ca9f07637d315aaf988957f18c",
+      "pymongo/errors.py": "sha256:487a37aac6a662ae1854f98db598b61477c08bdfd5d5868457925f3879e4addb",
+      "pymongo/event_loggers.py": "sha256:614d607f3bfbbb46c166bb42ffd7103a62fd5c726999d27b6af500a03993b0c8",
+      "pymongo/hello.py": "sha256:ae284277f36fc34b4316ddd36a6ae2146ad14ad9e13122d86bf245dde433f6f7",
+      "pymongo/helpers_shared.py": "sha256:4eeb120bb3dc70f369fa93cfbdeb3643c84f82f58cb385b187f829523824523e",
+      "pymongo/lock.py": "sha256:e48bd506b01d19d7a6889ac9482d9e55d1ca4cd15d4a7c0a09251c20d469a5f0",
+      "pymongo/logger.py": "sha256:610cef25e9051c0a02d3325300a7516d68ff55021fd965c1fc3944fffec74957",
+      "pymongo/max_staleness_selectors.py": "sha256:b882791034d9fecc4049ee0dea4d1540bb0c9420fb57fb16dcabea364249c332",
+      "pymongo/message.py": "sha256:fa78468772066fcfb140a7aa156c276077ba4c85c794cfd3a0ef58d9685bbedc",
+      "pymongo/mongo_client.py": "sha256:39cd11f977fac731d4058aac0c1c0ff1857add1c0efd1a242959688887f8ac3b",
+      "pymongo/monitoring.py": "sha256:cbbdcffb52d6b187864cc07b1fd395dd8be520430a5bb912f58ec9bd28d53a32",
+      "pymongo/network_layer.py": "sha256:a61f3d7991b9f68a3068bf6ed26346c3f7e19a4f57231ea4cba98a805abb9ca5",
+      "pymongo/ocsp_cache.py": "sha256:5f0ca3e886baf27ecf3e213b82f845f9fa94b22bcab801226382b2f7bcc31649",
+      "pymongo/ocsp_support.py": "sha256:0778ac46a06e5b44df237a6bc89161885aacf52acb932dab2c1618512c333a6b",
+      "pymongo/operations.py": "sha256:d2ea228ecd5f59d85e3ea0106a173a6bac6287b8b57f26de7f78390158a986a4",
+      "pymongo/pool.py": "sha256:71910f2638022360a582c8495ade1182922ad07099ff43ed4cbd6926c874917d",
+      "pymongo/pool_options.py": "sha256:174e8527bc111662703326cee373f99b7763c3eb1822e146ff093ea51aeada0e",
+      "pymongo/pyopenssl_context.py": "sha256:582e9b8c778d736717f3da6e07951c52a870ad3b4b2801249ad499569726fe8a",
+      "pymongo/read_concern.py": "sha256:7a9007e5d89ac105b18b7ad4a44247474a5ae823d19edb6fbd0efb0aa9aa26c9",
+      "pymongo/read_preferences.py": "sha256:a48801cbff0b60d0b490372d5e52d2432030e08c16dc5586b38bd69baec91ab2",
+      "pymongo/response.py": "sha256:946bcebd2a589b104435e4f1dfcd7a6ba8ba75b8bc9e70e2c51e24927342ca31",
+      "pymongo/results.py": "sha256:08888471475aeca1bbd2b95e44259858a32127ce9c4bea5646a5efb311ffb61e",
+      "pymongo/saslprep.py": "sha256:59dff55184468ec4c1c377be0a638a52c54f78cce914af0c24de6ae60d3cb21b",
+      "pymongo/server_api.py": "sha256:c43fdc00866a9848769fc8ce2687e6e3fca59e3973db6099bd348048393afff6",
+      "pymongo/server_description.py": "sha256:64de0bf136cf58bf61893b84ce798514fdf436b6db7f42f91f12733189d097e0",
+      "pymongo/server_selectors.py": "sha256:bb431a62296bab5c8ecc317fbe5e47557ff90c1b873463ca8235c200f54ef383",
+      "pymongo/server_type.py": "sha256:22bce4466568d145c1be4bec3064faea421f3e58eab97993076ef9f414935fed",
+      "pymongo/socket_checker.py": "sha256:caad3c697877034f8b11ae00c17b121e133e9ec04ce1bb26b8571679c9cf12a4",
+      "pymongo/srv_resolver.py": "sha256:214cb18afdc4f31b625a6462be8b2b828dd68847cd1b6bc8ebab734ad85957c3",
+      "pymongo/ssl_context.py": "sha256:bbee2c5d519930bd2f76877101117400bd465eecc7a3bc0d52eca5db24fe1ec3",
+      "pymongo/ssl_support.py": "sha256:b22c7a22c10e6bc931239f8ee897834ecdad10304559b0f9461025c56b58edbd",
+      "pymongo/synchronous/__init__.py": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "pymongo/synchronous/aggregation.py": "sha256:d5d09152881a71f6e84f0bec4b75ae36964ef31085d45a914d2b81c6dc041411",
+      "pymongo/synchronous/auth.py": "sha256:9f3f4f334d3fcb7ce69e1bfef32b6354eaf317242c8c8f58fc7db901cac0a301",
+      "pymongo/synchronous/auth_aws.py": "sha256:6ee8eaa02ad7e297490c86c804fce052d51b67d0738bb260177f0c2da6d4659d",
+      "pymongo/synchronous/auth_oidc.py": "sha256:291ca1290d6ddd345c8f635b0a5563878633d45df9fe919f30f8c44fffddd077",
+      "pymongo/synchronous/bulk.py": "sha256:ff82106b82696dd567fc5d9aaa79a873510aacf485d9802f1c2cc840b82ed9d0",
+      "pymongo/synchronous/change_stream.py": "sha256:4ed53a6c944803041b7a1691040c0157c58714bc0f2a3aa470a35473e1beb06a",
+      "pymongo/synchronous/client_bulk.py": "sha256:d714418dc8cece2624bb4830e40c070019f9dd0cb1f9981a0309f4fe3b4ebaf2",
+      "pymongo/synchronous/client_session.py": "sha256:49c7467b2fd297e779af6d92c5a28b6b80d41be252493aa7d5a3a2dffe5e2531",
+      "pymongo/synchronous/collection.py": "sha256:6615eeda9469b9c401d3441c3fd5a815fa46f16f748dab13e2aca9775fe4139d",
+      "pymongo/synchronous/command_cursor.py": "sha256:7c87f5e0fe91f8a6700fcac948c550025d14f61f9375b6c9219a885d6e01e490",
+      "pymongo/synchronous/cursor.py": "sha256:033a7eea9a9b46f9946794eee5d47610f11a6b734553be05dba9d3100a99e024",
+      "pymongo/synchronous/database.py": "sha256:931ea7797e2d2f8c41d208e8af3dfa62b9fd6ed4c9230c9528ce7bd0cce14add",
+      "pymongo/synchronous/encryption.py": "sha256:b21f7f224ca4ac5841ed4268624b5a33544faa71ead043b98401984608c95790",
+      "pymongo/synchronous/helpers.py": "sha256:97b6992b8de6cf2323838de981a06715e6904336bb826631c91a20de630dd483",
+      "pymongo/synchronous/mongo_client.py": "sha256:ba081235128afe9de314f2295fc5b127bc7b25224bcd143c9c8d28a380d55d55",
+      "pymongo/synchronous/monitor.py": "sha256:0a8d395d4ad14e2c5e52296e3af5fde6ff0729735924f765289ed905a8e4b232",
+      "pymongo/synchronous/network.py": "sha256:881826f6955666c7bbd1d6b52bf657a4383dd6e17a08ce1a94c06b450ae01b97",
+      "pymongo/synchronous/periodic_executor.py": "sha256:4a0f12a93d5a77a520af8f2c421686ae3ad7c64cf3882d8203dacb4214b9a8ea",
+      "pymongo/synchronous/pool.py": "sha256:dfa6db4f816eb6e950bec4fb4a2cc15ff3c278be7f4472962dbb42b116752e3b",
+      "pymongo/synchronous/server.py": "sha256:4633b0f5dfa7545de3b821b561601380f875e735668b9e1c2266a2c5aced5b38",
+      "pymongo/synchronous/settings.py": "sha256:e8e99e889d21fbcc4ea7ba175f8254e496a36959fc950c5b89ca4af1f353fde9",
+      "pymongo/synchronous/topology.py": "sha256:2de1291377c727dd43fa944fc8e56ec602225374077fff604df433f70a5ef08f",
+      "pymongo/topology_description.py": "sha256:add3e936669d7a63719f0113d9a63f8545712911fbaca6ae99b8afcdec53ca0b",
+      "pymongo/typings.py": "sha256:6558254bc50efef3ede46f7cd9780a823b71cd21e06d462b5514983b9d12a1ba",
+      "pymongo/uri_parser.py": "sha256:d53adc70c6905ac9601449d00eddf3535194d3190611e00b11eb876bbd0d7fd0",
+      "pymongo/write_concern.py": "sha256:8f1e1f5de345f2cdc9b848de1b6c8f5d6dd4f6c4721f9966ad9a12bb3c232fcb"
+    }
+  },
+  "fixture_sha256": "sha256:e725ad87cbceeb4d81358dce603ac5b96de62402a0d9312255ba0219c4ba5eb6",
+  "limitation": "A match requires canonical exact symbol plus contract audit; descriptor declarations are not treated as public bindings.",
+  "mypy": "1.19.1",
+  "occurrences": [
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": "dynamic_argument",
+          "source_index": 0,
+          "status": "unavailable",
+          "value_hashes": []
+        }
+      ],
+      "audit_status": "unresolved",
+      "canonical_symbol": null,
+      "contract_id": null,
+      "invocation": null,
+      "line": 7,
+      "reason_code": "dynamic_receiver",
+      "receiver_candidates": [],
+      "resolver_status": "unresolved",
+      "source_spelling": "collection.insert_one"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": "dynamic_argument",
+          "source_index": 0,
+          "status": "unavailable",
+          "value_hashes": []
+        },
+        {
+          "keyword": null,
+          "positional_index": 1,
+          "reason_code": "dynamic_argument",
+          "source_index": 1,
+          "status": "unavailable",
+          "value_hashes": []
+        }
+      ],
+      "audit_status": "unresolved",
+      "canonical_symbol": null,
+      "contract_id": null,
+      "invocation": null,
+      "line": 8,
+      "reason_code": "dynamic_receiver",
+      "receiver_candidates": [],
+      "resolver_status": "unresolved",
+      "source_spelling": "collection.update_one"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": "dynamic_argument",
+          "source_index": 0,
+          "status": "unavailable",
+          "value_hashes": []
+        }
+      ],
+      "audit_status": "unresolved",
+      "canonical_symbol": null,
+      "contract_id": null,
+      "invocation": null,
+      "line": 9,
+      "reason_code": "dynamic_receiver",
+      "receiver_candidates": [],
+      "resolver_status": "unresolved",
+      "source_spelling": "collection.delete_one"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": "dynamic_argument",
+          "source_index": 0,
+          "status": "unavailable",
+          "value_hashes": []
+        }
+      ],
+      "audit_status": "unmatched",
+      "canonical_symbol": "main.Decoy.insert_one",
+      "contract_id": null,
+      "invocation": "instance_method",
+      "line": 10,
+      "reason_code": null,
+      "receiver_candidates": [
+        "main.Decoy"
+      ],
+      "resolver_status": "exact",
+      "source_spelling": "decoy.insert_one"
+    },
+    {
+      "arguments": [
+        {
+          "keyword": null,
+          "positional_index": 0,
+          "reason_code": "dynamic_argument",
+          "source_index": 0,
+          "status": "unavailable",
+          "value_hashes": []
+        }
+      ],
+      "audit_status": "unmatched",
+      "canonical_symbol": "main.Wrapper.insert_one",
+      "contract_id": null,
+      "invocation": "instance_method",
+      "line": 11,
+      "reason_code": null,
+      "receiver_candidates": [
+        "main.Wrapper"
+      ],
+      "resolver_status": "exact",
+      "source_spelling": "wrapped.insert_one"
+    }
+  ],
+  "preset": {
+    "contract_ids": [
+      "pymongo-find-one",
+      "pymongo-insert-one",
+      "pymongo-update-one",
+      "pymongo-delete-one"
+    ],
+    "selector": "mongodb-v1",
+    "sha256": "sha256:df68200dc7df8e3176257815e1de2016bace4f9a049977fd31001d088f0f4d30",
+    "symbols": [
+      "pymongo.synchronous.collection.Collection.find_one",
+      "pymongo.synchronous.collection.Collection.insert_one",
+      "pymongo.synchronous.collection.Collection.update_one",
+      "pymongo.synchronous.collection.Collection.delete_one"
+    ]
+  },
+  "probe_id": "gh97-motor-typed-binding-v1",
+  "product_import": "src/fastapi_endpoint_detector/__init__.py",
+  "product_module_paths": {
+    "fastapi_endpoint_detector.analyzer.effect_contract_auditor": "src/fastapi_endpoint_detector/analyzer/effect_contract_auditor.py",
+    "fastapi_endpoint_detector.analyzer.mypy_analyzer": "src/fastapi_endpoint_detector/analyzer/mypy_analyzer.py",
+    "fastapi_endpoint_detector.models.effect_contract": "src/fastapi_endpoint_detector/models/effect_contract.py",
+    "fastapi_endpoint_detector.models.endpoint": "src/fastapi_endpoint_detector/models/endpoint.py"
+  },
+  "python": "3.11.16",
+  "runner_sha256": "sha256:2e7596909b28e083eb44fafada0e25d3079b87951e245e45477b0182b54cf3c5",
+  "schema_version": 1,
+  "scope": "exact artifacts only; static source and analyzer audit; no upstream import/execution"
+}

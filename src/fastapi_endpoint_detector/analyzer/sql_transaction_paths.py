@@ -300,6 +300,17 @@ class _AssignmentFinder(ast.NodeVisitor):
     def visit_ClassDef(self, _node: ast.ClassDef) -> None:
         return
 
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        # A local annotation without a value does not assign to its target.
+        if node.value is not None:
+            self.visit(node.target)
+            self.visit(node.value)
+        elif isinstance(node.target, ast.Attribute):
+            self.visit(node.target.value)
+        elif isinstance(node.target, ast.Subscript):
+            self.visit(node.target.value)
+            self.visit(node.target.slice)
+
     def visit_Name(self, node: ast.Name) -> None:
         if isinstance(node.ctx, (ast.Store, ast.Del)):
             self._check((node.id,))
