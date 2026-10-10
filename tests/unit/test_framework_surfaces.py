@@ -34,7 +34,7 @@ def _extract(tmp_path: Path, *, app_entry: str | None = None) -> EndpointInvento
 
 def test_framework_preset_versions_explicit_registration_multiplicity() -> None:
     loaded = load_surface_preset("framework-v1")
-    assert loaded.document.preset.version == "8"
+    assert loaded.document.preset.version == "9"
     assert all(
         contract.multiplicity is not None and contract.multiplicity.value != "unknown"
         for contract in loaded.document.contracts
@@ -576,6 +576,38 @@ def test_invalid_getattr_on_unselected_app_does_not_taint_selected_inventory(
     assert inventory.limitations == ()
 
 
+def test_dynamic_getattr_name_uses_receiver_snapshot_and_scopes_uncertainty(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "unused = FastAPI()\n"
+        "async def callback(): pass\n"
+        "receiver = app\n"
+        "getattr(receiver, (receiver := unused) and 'add_event_handler')('startup', callback)\n",
+        encoding="utf-8",
+    )
+    inventory = _extract(tmp_path)
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert not inventory.endpoints
+    assert any("getattr lifecycle method" in item.reason for item in inventory.limitations)
+
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "unused = FastAPI()\n"
+        "async def callback(): pass\n"
+        "receiver = unused\n"
+        "getattr(receiver, (receiver := app) and 'add_event_handler')('startup', callback)\n",
+        encoding="utf-8",
+    )
+    inventory = _extract(tmp_path)
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert not inventory.endpoints
+    assert not inventory.limitations
+
+
 def test_exception_handlers_are_keyed_and_selected_app_scoped(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text(
         "from fastapi import FastAPI\n\n"
@@ -612,6 +644,101 @@ def test_exception_handler_decorator_accepts_fastapi_keyword_selector(tmp_path: 
 
     assert [(item.identifier, item.handler.name) for item in inventory.endpoints] == [
         ("FRAMEWORK.EXCEPTION_HANDLER exception:builtins.ValueError", "value_error")
+    ]
+    assert inventory.status == InventoryStatus.ESTABLISHED
+
+
+@pytest.mark.parametrize(
+    "registration",
+    [
+        "app.add_exception_handler(ValueError, handler, exc_class_or_status_code=KeyError)",
+        "@app.exception_handler(ValueError, exc_class_or_status_code=KeyError)\n"
+        "async def handler(request, exc): return None",
+        "app.add_event_handler('startup', handler, event_type='shutdown')",
+        "app.add_event_handler('startup', handler, func=handler)",
+        "app = FastAPI(lifespan=handler, **{'lifespan': handler})",
+    ],
+)
+def test_duplicate_framework_selectors_are_conditional_not_established(
+    tmp_path: Path, registration: str
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "async def handler(*args): pass\n"
+        f"{registration}\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert not any(
+        endpoint.surface is not None
+        and endpoint.surface.surface_kind in {"framework.exception_handler", "framework.lifecycle"}
+        for endpoint in inventory.endpoints
+    )
+    assert inventory.limitations
+
+
+def test_valid_positional_and_keyword_framework_selectors_remain_supported(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "async def handler(*args): pass\n"
+        "app.add_exception_handler(ValueError, handler)\n"
+        "app.add_event_handler(event_type='startup', handler=handler)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert {endpoint.identifier for endpoint in inventory.endpoints} == {
+        "FRAMEWORK.EXCEPTION_HANDLER exception:builtins.ValueError",
+        "FRAMEWORK.LIFECYCLE event:startup",
+    }
+
+
+def test_exception_handlers_accept_literal_status_code_keys(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "@app.exception_handler(404)\n"
+        "async def not_found(request, exc): return None\n"
+        "app.add_exception_handler(exc_class_or_status_code=500, handler=not_found)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert [(item.identifier, item.handler.name) for item in inventory.endpoints] == [
+        ("FRAMEWORK.EXCEPTION_HANDLER exception:status:404", "not_found"),
+        ("FRAMEWORK.EXCEPTION_HANDLER exception:status:500", "not_found"),
+    ]
+    assert inventory.status == InventoryStatus.ESTABLISHED
+
+
+def test_on_event_accepts_keyword_event_type(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import APIRouter, FastAPI\n\n"
+        "app = FastAPI()\n"
+        "router = APIRouter()\n"
+        "@app.on_event(event_type='startup')\n"
+        "async def app_start(): pass\n"
+        "@router.on_event(event_type='shutdown')\n"
+        "async def router_stop(): pass\n"
+        "app.include_router(router)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert [(item.identifier, item.handler.name) for item in inventory.endpoints] == [
+        ("FRAMEWORK.LIFECYCLE event:shutdown", "router_stop"),
+        ("FRAMEWORK.LIFECYCLE event:startup", "app_start"),
     ]
     assert inventory.status == InventoryStatus.ESTABLISHED
 
@@ -657,6 +784,43 @@ def test_unknown_exception_override_does_not_leave_stale_handler_established(
     assert any("may override an earlier key" in item.reason for item in inventory.limitations)
 
 
+def test_exception_alias_keywords_and_override_use_argument_snapshots(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "register = app.add_exception_handler\n"
+        "async def keyword_handler(request, exc): return None\n"
+        "register(exc_class_or_status_code=ValueError, handler=keyword_handler)\n",
+        encoding="utf-8",
+    )
+    inventory = _extract(tmp_path)
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert [(item.identifier, item.handler.name) for item in inventory.endpoints] == [
+        ("FRAMEWORK.EXCEPTION_HANDLER exception:builtins.ValueError", "keyword_handler")
+    ]
+
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "from errors import First, Second\n"
+        "app = FastAPI()\n"
+        "@app.exception_handler(First)\n"
+        "async def first(request, exc): return None\n"
+        "@app.exception_handler(Second)\n"
+        "async def second(request, exc): return None\n"
+        "key = First\n"
+        "app.add_exception_handler(key, (key := dynamic_handler))\n",
+        encoding="utf-8",
+    )
+    inventory = _extract(tmp_path)
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    actual = [
+        (item.surface.resource if item.surface else None, item.handler.name)
+        for item in inventory.endpoints
+    ]
+    assert actual == [("errors.Second", "second")]
+    assert any("may override an earlier key" in item.reason for item in inventory.limitations)
+
+
 def test_unknown_exception_override_in_unused_app_does_not_taint_selected_app(
     tmp_path: Path,
 ) -> None:
@@ -695,6 +859,26 @@ def test_pure_asgi_middleware_resolves_local_call_protocol(tmp_path: Path) -> No
     assert len(inventory.endpoints) == 1
     assert inventory.endpoints[0].identifier == "FRAMEWORK.MIDDLEWARE protocol:http"
     assert inventory.endpoints[0].handler.name == "__call__"
+
+
+def test_pure_asgi_middleware_resolves_bounded_local_inherited_call(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "class BaseAudit:\n"
+        "    async def __call__(self, scope, receive, send): pass\n\n"
+        "class AuditMiddleware(BaseAudit):\n"
+        "    pass\n\n"
+        "app = FastAPI()\n"
+        "app.add_middleware(AuditMiddleware)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert len(inventory.endpoints) == 1
+    assert inventory.endpoints[0].handler.name == "__call__"
+    assert inventory.endpoints[0].handler.line_number == 4
 
 
 def test_untrusted_extra_lifespan_decorator_does_not_split_phases(tmp_path: Path) -> None:
@@ -880,6 +1064,50 @@ def test_framework_surfaces_are_scoped_to_selected_app_not_mounted_lifespan(
     inventory = _extract(tmp_path)
 
     assert [endpoint.handler.name for endpoint in inventory.endpoints] == ["parent_startup"]
+
+
+def test_mounted_child_contributes_request_surfaces_but_not_lifecycle(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "unused = FastAPI()\n"
+        "@unused.middleware('http')\n"
+        "async def unused_middleware(request, call_next): return await call_next(request)\n\n"
+        "child = FastAPI()\n"
+        "@child.middleware('http')\n"
+        "async def child_middleware(request, call_next): return await call_next(request)\n"
+        "@child.on_event('startup')\n"
+        "async def child_startup(): pass\n"
+        "@child.exception_handler(ValueError)\n"
+        "async def child_error(request, exc): return None\n\n"
+        "app = FastAPI()\n"
+        "@app.middleware('http')\n"
+        "async def parent_middleware(request, call_next): return await call_next(request)\n"
+        "@app.on_event('startup')\n"
+        "async def parent_startup(): pass\n"
+        "@app.exception_handler(ValueError)\n"
+        "async def parent_error(request, exc): return None\n"
+        "app.mount('/child', child)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert sorted(
+        (item.surface.surface_kind, item.handler.name)
+        for item in inventory.endpoints
+        if item.surface is not None
+    ) == sorted(
+        [
+            ("framework.exception_handler", "child_error"),
+            ("framework.lifecycle", "parent_startup"),
+            ("framework.middleware", "child_middleware"),
+            ("framework.middleware", "parent_middleware"),
+            ("framework.exception_handler", "parent_error"),
+        ]
+    )
+    assert inventory.status == InventoryStatus.ESTABLISHED
 
 
 def test_background_tasks_follow_selected_route_ownership_and_preserve_task_identity(

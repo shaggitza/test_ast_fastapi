@@ -162,6 +162,25 @@ def _has_unknown_keyword_expansion(call: ast.Call) -> bool:
     return unknown
 
 
+def _selector_call_is_ambiguous(
+    call: ast.Call, positional_index: int | None, keyword_names: frozenset[str]
+) -> bool:
+    """Reject selector calls whose Python argument binding cannot be validly unique."""
+    selected_count = int(positional_index is not None and len(call.args) > positional_index)
+    for keyword in call.keywords:
+        if keyword.arg in keyword_names:
+            selected_count += 1
+        elif keyword.arg is None:
+            value = keyword.value
+            if not isinstance(value, ast.Dict) or any(key is None for key in value.keys):
+                # Dynamic expansions follow the established receiver-scoped uncertainty path.
+                continue
+            for key in value.keys:
+                if isinstance(key, ast.Constant) and key.value in keyword_names:
+                    selected_count += 1
+    return selected_count > 1
+
+
 @dataclass
 class _StartupScopeFrame:
     """Keep startup function-local and module-global bindings distinct."""
@@ -1276,33 +1295,49 @@ class CustomSurfaceExtractor:
                     for ancestor in self._framework_include_ancestors(event.parent, included_by):
                         conditions.setdefault(ancestor, []).append(event.condition)
                 continue
-            copied_endpoints = (
-                ()
-                if event.routes_only
-                else tuple(
-                    endpoint.model_copy(
-                        update={
-                            "surface": endpoint.surface.model_copy(
-                                update={
-                                    "include_reference_spans": (
-                                        *endpoint.surface.include_reference_spans,
-                                        event.source_span,
-                                    )
-                                }
-                            )
-                        }
-                    )
-                    if endpoint.surface is not None
-                    and self._contract_has_multiplicity(
+            copied_endpoints = tuple(
+                endpoint.model_copy(
+                    update={
+                        "surface": endpoint.surface.model_copy(
+                            update={
+                                "include_reference_spans": (
+                                    *endpoint.surface.include_reference_spans,
+                                    event.source_span,
+                                )
+                            }
+                        )
+                    }
+                )
+                if endpoint.surface is not None
+                and (
+                    self._contract_has_multiplicity(
                         endpoint.surface.contract_id, ContractMultiplicity.ALL_EXECUTE
                     )
-                    else endpoint
-                    for endpoint in live.get(event.child, ())
+                    or (
+                        event.routes_only
+                        and endpoint.surface.surface_kind == "framework.exception_handler"
+                    )
+                )
+                else endpoint
+                for endpoint in live.get(event.child, ())
+                if not event.routes_only
+                or (
+                    endpoint.surface is not None
+                    and endpoint.surface.surface_kind
+                    in {"framework.middleware", "framework.exception_handler"}
                 )
             )
             copied_routes = tuple(routes.get(event.child, ()))
             routes.setdefault(event.parent, []).extend(copied_routes)
             copied_conditions = tuple(conditions.get(event.child, ()))
+            if event.routes_only:
+                copied_endpoints = tuple(
+                    self._qualify_mounted_exception(endpoint)
+                    if endpoint.surface is not None
+                    and endpoint.surface.surface_kind == "framework.exception_handler"
+                    else endpoint
+                    for endpoint in copied_endpoints
+                )
             live.setdefault(event.parent, []).extend(copied_endpoints)
             conditions.setdefault(event.parent, []).extend(copied_conditions)
             copied_lifecycle_conditions = self._framework_copied_lifecycle_conditions(
@@ -1317,7 +1352,7 @@ class CustomSurfaceExtractor:
                 included_by.setdefault(event.child, set()).add(event.parent)
 
         for token, endpoints in tuple(live.items()):
-            latest: dict[tuple[str, str], Endpoint] = {}
+            latest: dict[tuple[str, str, tuple[NativeSourceSpan, ...]], Endpoint] = {}
             retained: list[Endpoint] = []
             for endpoint in endpoints:
                 surface = endpoint.surface
@@ -1334,7 +1369,13 @@ class CustomSurfaceExtractor:
                     and contract is not None
                     and contract.multiplicity == ContractMultiplicity.LAST_WINS
                 ):
-                    latest[(surface.surface_kind, surface.resource)] = endpoint
+                    latest[
+                        (
+                            surface.surface_kind,
+                            surface.resource,
+                            surface.include_reference_spans,
+                        )
+                    ] = endpoint
                 else:
                     retained.append(endpoint)
             live[token] = retained + list(latest.values())
@@ -1357,6 +1398,22 @@ class CustomSurfaceExtractor:
         if self._framework_root_condition is not None:
             self._limitations.append(self._framework_root_condition)
         self._emit_background_task_surfaces()
+
+    @staticmethod
+    def _qualify_mounted_exception(endpoint: Endpoint) -> Endpoint:
+        """Keep exception keys separate across mounted application scopes."""
+        surface = endpoint.surface
+        assert surface is not None
+        surface_id = f"{surface.surface_id}@mount:" + "/".join(
+            f"{span.file_path}:{span.start_line}:{span.start_column}"
+            for span in surface.include_reference_spans
+        )
+        return endpoint.model_copy(
+            update={
+                "path": surface_id,
+                "surface": surface.model_copy(update={"surface_id": surface_id}),
+            }
+        )
 
     @staticmethod
     def _framework_mount_ancestors(
@@ -2425,7 +2482,8 @@ class CustomSurfaceExtractor:
                     None,
                 )
             )
-            receiver = self._binding_from_expression(
+            captured_receiver = self._captured_getattr_receivers.get(id(call.func))
+            receiver = captured_receiver or self._binding_from_expression(
                 malformed_getattr_receiver_expr, callable_state, module.name
             )
             requested_name_expression = (
@@ -3304,46 +3362,66 @@ class CustomSurfaceExtractor:
         )
         resources: tuple[str, ...] | None = None
         if contract.surface.kind == "framework.exception_handler":
-            expression = call.args[0] if call.args else None
-            if expression is None and isinstance(call.func, ast.Attribute):
-                expression = next(
-                    (
-                        item.value
-                        for item in call.keywords
-                        if item.arg
-                        in {
-                            "exc_class_or_status_code",
-                            "exc_class",
-                            "exc",
-                            "exception_class",
-                        }
-                    ),
-                    None,
-                )
-            identity = self._symbol_identity_from_state(expression, state)
-            if (
-                identity is None
-                and isinstance(expression, ast.Name)
-                and expression.id
-                in {
-                    "Exception",
-                    "BaseException",
-                    "RuntimeError",
-                    "ValueError",
-                    "TypeError",
-                    "LookupError",
-                    "KeyError",
-                    "AssertionError",
-                    "OSError",
-                }
-            ):
-                identity = f"builtins.{expression.id}"
+            key_state = (
+                evaluation.positional[0].state
+                if evaluation is not None and evaluation.positional
+                else state
+            )
+            identity = self._exception_key(call, key_state, evaluation)
             if identity is not None:
                 resources = (identity,)
         self._framework_events.append(
             _FrameworkUnknownOverrideEvent(token, contract.surface.kind, resources, condition)
         )
         return True
+
+    @classmethod
+    def _exception_key(
+        cls,
+        call: ast.Call,
+        state: dict[str, _Binding | None],
+        evaluation: _CallEvaluation | None = None,
+    ) -> str | None:
+        """Resolve a class or literal status-code key for exception handlers."""
+        expression = call.args[0] if call.args else None
+        key_capture = (
+            evaluation.positional[0]
+            if expression is not None and evaluation is not None and evaluation.positional
+            else None
+        )
+        if expression is None:
+            key_names = {"exc_class_or_status_code", "exc_class", "exc", "exception_class"}
+            keyword_index = next(
+                (index for index, item in enumerate(call.keywords) if item.arg in key_names),
+                None,
+            )
+            if keyword_index is not None:
+                expression = call.keywords[keyword_index].value
+                if evaluation is not None and keyword_index < len(evaluation.keywords):
+                    key_capture = evaluation.keywords[keyword_index]
+        if key_capture is not None:
+            state = key_capture.state
+        if isinstance(expression, ast.Constant) and type(expression.value) is int:
+            return f"status:{expression.value}"
+        identity = cls._symbol_identity_from_state(expression, state)
+        if (
+            identity is None
+            and isinstance(expression, ast.Name)
+            and expression.id
+            in {
+                "Exception",
+                "BaseException",
+                "RuntimeError",
+                "ValueError",
+                "TypeError",
+                "LookupError",
+                "KeyError",
+                "AssertionError",
+                "OSError",
+            }
+        ):
+            identity = f"builtins.{expression.id}"
+        return identity
 
     def _inspect_registration(  # noqa: PLR0912, PLR0915
         self,
@@ -3484,6 +3562,62 @@ class CustomSurfaceExtractor:
         endpoint_count_before = len(self._endpoints)
         for contract in self.contracts.document.contracts:
             if not self._matches(contract, symbol, invocation, receiver_type):
+                continue
+            handler_index = (
+                contract.handler.index
+                if contract.handler.kind
+                in {HandlerSelectorKind.ARGUMENT, HandlerSelectorKind.ARGUMENT_CLASS_METHOD}
+                else None
+            )
+            handler_names = (
+                frozenset({contract.handler.name})
+                if contract.handler.kind == HandlerSelectorKind.KEYWORD
+                and contract.handler.name is not None
+                else frozenset()
+            )
+            if contract.registration.symbol.endswith(".add_event_handler") and handler_index == 1:
+                handler_names = frozenset({"handler", "func"})
+            elif (
+                contract.registration.symbol.endswith(".add_exception_handler")
+                and handler_index == 1
+            ):
+                handler_names = frozenset({"handler"})
+
+            resource_index: int | None = None
+            resource_names: frozenset[str] = frozenset()
+            selector = contract.surface.resource
+            if contract.surface.kind == "framework.exception_handler":
+                resource_index = 0
+                resource_names = frozenset(
+                    {"exc_class_or_status_code", "exc_class", "exc", "exception_class"}
+                )
+            elif selector.kind in {
+                ResourceSelectorKind.ARGUMENT,
+                ResourceSelectorKind.ARGUMENT_OR_KEYWORD,
+            }:
+                resource_index = selector.index
+                if selector.kind == ResourceSelectorKind.ARGUMENT_OR_KEYWORD and selector.name:
+                    resource_names = frozenset({selector.name})
+                elif contract.registration.symbol.endswith(".add_event_handler"):
+                    resource_names = frozenset({"event_type"})
+            elif selector.kind in {
+                ResourceSelectorKind.KEYWORD,
+                ResourceSelectorKind.KEYWORD_OR_HANDLER_NAME,
+            }:
+                resource_names = frozenset({selector.name}) if selector.name else frozenset()
+
+            if _selector_call_is_ambiguous(call, handler_index, handler_names) or (
+                _selector_call_is_ambiguous(call, resource_index, resource_names)
+            ):
+                self._record_framework_contract_limitation(
+                    module,
+                    call,
+                    state,
+                    evaluation,
+                    contract,
+                    "registration supplies a selector more than once or through an "
+                    "unbounded keyword expansion; inventory is conditional",
+                )
                 continue
             if (
                 contract.id.endswith(("-on-startup-list", "-on-shutdown-list"))
@@ -3723,6 +3857,7 @@ class CustomSurfaceExtractor:
                 function,
                 evaluation.callable_state if evaluation is not None else state,
                 handler_module.name,
+                evaluation,
             )
             resources = resource_result.values
             if resources is None:
@@ -5499,7 +5634,7 @@ class CustomSurfaceExtractor:
         identity = self._symbol_identity(expression, state)
         return self._resolve_class_method_identity(identity, method_name, required_base)
 
-    def _resolve_class_method_identity(  # noqa: PLR0911, PLR0912
+    def _resolve_class_method_identity(  # noqa: PLR0911, PLR0912, PLR0915
         self,
         identity: str | None,
         method_name: str,
@@ -5507,26 +5642,47 @@ class CustomSurfaceExtractor:
     ) -> tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef] | None:
         """Resolve a method through a bounded, exact local class MRO."""
         if required_base == "starlette.types.ASGIApp":
-            candidates = self._classes.get(identity or "", [])
-            if len(candidates) != 1:
+            current = identity
+            asgi_seen: set[str] = set()
+            pure_method: ast.AsyncFunctionDef | None = None
+            module: _Module | None = None
+            for _depth in range(16):
+                if current is None or current in asgi_seen:
+                    return None
+                asgi_seen.add(current)
+                candidates = self._classes.get(current, [])
+                if len(candidates) != 1:
+                    return None
+                candidate_module, class_node = candidates[0]
+                if class_node.decorator_list or class_node.keywords:
+                    return None
+                definitions = [
+                    item
+                    for item in class_node.body
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and item.name == method_name
+                ]
+                mutation = _ClassAttributeMutationVisitor(method_name)
+                for item in class_node.body:
+                    if item not in definitions:
+                        mutation.visit(item)
+                if mutation.found or len(definitions) > 1:
+                    return None
+                if definitions:
+                    method = definitions[0]
+                    if not isinstance(method, ast.AsyncFunctionDef) or method.decorator_list:
+                        return None
+                    pure_method = method
+                    module = candidate_module
+                    break
+                bases = self._class_bases.get(current)
+                if bases is None or len(bases) != 1 or bases[0] not in self._classes:
+                    return None
+                current = bases[0]
+            else:
                 return None
-            module, class_node = candidates[0]
-            if class_node.decorator_list or class_node.keywords:
+            if pure_method is None or module is None:
                 return None
-            pure_methods = [
-                item
-                for item in class_node.body
-                if isinstance(item, ast.AsyncFunctionDef)
-                and item.name == method_name
-                and not item.decorator_list
-            ]
-            mutation = _ClassAttributeMutationVisitor(method_name)
-            for item in class_node.body:
-                if item not in pure_methods:
-                    mutation.visit(item)
-            if mutation.found or len(pure_methods) != 1:
-                return None
-            pure_method = pure_methods[0]
             positional = [*pure_method.args.posonlyargs, *pure_method.args.args]
             if (
                 len(positional) != 4
@@ -5699,48 +5855,18 @@ class CustomSurfaceExtractor:
         handler: ast.FunctionDef | ast.AsyncFunctionDef,
         state: dict[str, _Binding | None],
         handler_module_name: str | None = None,
+        evaluation: _CallEvaluation | None = None,
     ) -> _ResolvedResources:
         """Resolve one bounded literal resource set without widening dynamic values."""
         selector = contract.surface.resource
         values: tuple[str, ...]
         failure = "resource set was not finite literal data"
         if contract.surface.kind == "framework.exception_handler":
-            expression = call.args[0] if call.args else None
-            if expression is None and isinstance(call.func, ast.Attribute):
-                expression = next(
-                    (
-                        item.value
-                        for item in call.keywords
-                        if item.arg
-                        in {
-                            "exc_class_or_status_code",
-                            "exc_class",
-                            "exc",
-                            "exception_class",
-                        }
-                    ),
-                    None,
-                )
-            identity = cls._symbol_identity_from_state(expression, state)
-            if (
-                identity is None
-                and isinstance(expression, ast.Name)
-                and expression.id
-                in {
-                    "Exception",
-                    "BaseException",
-                    "RuntimeError",
-                    "ValueError",
-                    "TypeError",
-                    "LookupError",
-                    "KeyError",
-                    "AssertionError",
-                    "OSError",
-                }
-            ):
-                identity = f"builtins.{expression.id}"
+            identity = cls._exception_key(call, state, evaluation)
             if identity is None:
-                return _ResolvedResources(None, "exception class identity was unresolved")
+                return _ResolvedResources(
+                    None, "exception class or status-code identity was unresolved"
+                )
             values = (identity,)
         elif selector.kind == ResourceSelectorKind.HANDLER_NAME:
             values = (cls._handler_resource(handler.name, selector.handler_name_normalization),)

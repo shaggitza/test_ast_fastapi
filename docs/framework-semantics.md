@@ -13,13 +13,19 @@ analysis:
   surface_preset: framework-v1
 ```
 
-The versioned preset recognizes only exact source-proven receivers and handlers:
+The versioned preset recognizes exact source-proven receivers and handlers:
 
-- `FastAPI.on_event` and `FastAPI.add_event_handler`;
-- `Starlette.on_event` and `Starlette.add_event_handler`;
-- `FastAPI.middleware("http")`;
-- `FastAPI.add_middleware(LocalBaseHTTPMiddlewareSubclass)`;
-- `Starlette.add_middleware(LocalBaseHTTPMiddlewareSubclass)`.
+- FastAPI and Starlette `on_event` / `add_event_handler` registrations;
+- FastAPI constructor `on_startup`, `on_shutdown`, and `lifespan` callbacks;
+- APIRouter constructor and event registrations copied by `include_router`;
+- mounted child application routes (child application lifecycle is not treated as
+  parent lifecycle);
+- FastAPI and Starlette exception handlers, keyed by exception class or literal
+  status code;
+- FastAPI HTTP middleware decorators and `add_middleware` registrations for
+  bounded local `BaseHTTPMiddleware` subclasses or project-local ASGI callables;
+- singular `Response(background=BackgroundTask(...))` callbacks and plural
+  `BackgroundTasks.add_task(...)` callbacks associated with selected routes.
 
 Startup and shutdown registrations have distinct `event:startup` and
 `event:shutdown` IDs. Exact `FastAPI(lifespan=...)` async-generator callbacks
@@ -42,15 +48,14 @@ Dynamic paths, unresolved handlers or receivers, receiver escape/rebinding,
 control-flow registrations, router inclusion, mounts, factories, stars, and
 unsupported methods fail closed with source limitations.
 
-Middleware registrations retain every physical handler; multiple handlers for
-the same protocol remain conditional rather than being collapsed. Class-based
-HTTP middleware requires one exact project-local class, the exact
-`starlette.middleware.base.BaseHTTPMiddleware` base, and a directly declared
-async `dispatch` method. Class factories, instances, decorators, rebinding,
-explicit metaclasses, dynamic class-scope calls/imports/nested classes,
-inherited-only dispatch methods, additional/dynamic bases, and generic
-`__call__` spelling fail closed. Same-named methods on other receiver types
-never match.
+Middleware registrations retain every physical handler; contract multiplicity
+is explicit (`all_execute` for lifecycle, middleware, and background tasks;
+`last_wins` per exception key). Class middleware lookup follows a bounded local
+single-base chain and preserves the source span of the resolved dispatch or
+ASGI `__call__` method. Class factories, instances, decorators, rebinding,
+explicit metaclasses, dynamic class-scope effects, ambiguous or external MRO
+links, and unsupported callback signatures fail closed with inventory
+limitations. Same-named methods on unrelated receiver types never match.
 
 Mypy execution summaries also model:
 
@@ -70,11 +75,14 @@ no framework summary.
 
 ## Current limits
 
-Starlette constructor lifespan callbacks, imported callback factories, aliases,
-context-manager class implementations, and exception paths around `yield` remain
-unresolved. Startup helper-mediated route mutation, router inclusion, mounts,
-generic ASGI middleware, middleware ordering, arbitrary callback registries,
-and runtime plugin loading also remain unresolved.
+Dynamic callback factories, context-manager class implementations, and
+exception paths around a lifespan `yield` remain unresolved. Lifespan phase
+splitting requires the exact `contextlib.asynccontextmanager` binding and one
+unconditional top-level yield; replacement or additional decorators produce an
+explicit limitation. Startup helper-mediated route mutation, mount lifecycle
+composition, middleware ordering, arbitrary callback registries, and runtime
+plugin loading also remain unresolved. Dynamic selected registrations and
+unresolved include or mount targets produce inventory limitations.
 
 The static framework preset is optional because custom-surface configuration
 currently has one provenance root. Composing several package presets without

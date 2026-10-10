@@ -360,6 +360,7 @@ class NativeRouteAssemblyEdgeEvidence(BaseModel):
     resolved_prefix: str = Field(max_length=4096)
     source_span: NativeSourceSpan
     dependency_expressions: tuple["NativeRouteDependencyExpressionEvidence", ...] = ()
+    prefix_binding_spans: tuple[NativeSourceSpan, ...] = ()
 
     class Config:
         frozen = True

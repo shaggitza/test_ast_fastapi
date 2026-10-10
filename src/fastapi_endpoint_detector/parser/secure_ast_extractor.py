@@ -7,7 +7,7 @@ import tokenize
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path  # noqa: TC003 - Pydantic models consume paths at runtime
-from typing import TYPE_CHECKING, ClassVar, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal, cast
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -100,6 +100,12 @@ def native_route_structural_owners(
             add("dependency", dependency.source_span)
     for dependency in provenance.registration.dependency_expressions:
         add("dependency", dependency.source_span)
+
+    for prefix_edge in provenance.assembly_chain:
+        if prefix_edge.operation != "include_router":
+            continue
+        for span in prefix_edge.prefix_binding_spans:
+            add("assembly", span)
     return tuple(matches)
 
 
@@ -132,6 +138,34 @@ def _native_span(path: Path, node: ast.AST) -> NativeSourceSpan:
 def _native_occurrence_order(span: NativeSourceSpan) -> int:
     """Encode physical source order with enough precision for same-line calls."""
     return span.start_line * _ORDER_SCALE + span.start_column
+
+
+def _qualified_handler_binding(
+    module: _Module, function: ast.FunctionDef | ast.AsyncFunctionDef
+) -> str:
+    """Retain the class component when a handler is a class method occurrence."""
+    owners = [
+        item.name
+        for item in module.tree.body
+        if isinstance(item, ast.ClassDef)
+        and any(
+            isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child is function
+            for child in item.body
+        )
+    ]
+    if len(owners) == 1:
+        return f"{module.name}.{owners[0]}.{function.name}"
+    return f"{module.name}.{function.name}"
+
+
+def _target_binds_name(target: ast.expr, name: str) -> bool:
+    if isinstance(target, ast.Name):
+        return target.id == name
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return any(_target_binds_name(item, name) for item in target.elts)
+    if isinstance(target, ast.Starred):
+        return _target_binds_name(target.value, name)
+    return False
 
 
 def _lexical_assignment_binding(
@@ -581,6 +615,7 @@ class _Edge:
     operation: Literal["include_router", "mount"] | None = None
     source_span: NativeSourceSpan | None = None
     dependency_expressions: tuple[NativeRouteDependencyExpressionEvidence, ...] = ()
+    prefix_binding_spans: tuple[NativeSourceSpan, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1407,6 +1442,9 @@ class SecureASTExtractor:
                             None,
                         )
                         if handler_node is not None:
+                            handler_binding = _qualified_handler_binding(
+                                handler_module, handler_node
+                            )
                             parameter_expressions: list[ast.expr] = [
                                 argument.annotation
                                 for argument in (
@@ -1451,7 +1489,7 @@ class SecureASTExtractor:
                                 NativeRouteSourceOwnerEvidence(
                                     side=self.snapshot_side,
                                     owner_kind="decorator_signature",
-                                    qualified_binding=f"{handler_module.name}.{handler_node.name}",
+                                    qualified_binding=handler_binding,
                                     confidence="established",
                                     expression=f"def {handler_node.name}",
                                     source_span=_function_header_span(
@@ -1473,7 +1511,7 @@ class SecureASTExtractor:
                                         side=self.snapshot_side,
                                         owner_kind="class_base",
                                         qualified_binding=binding,
-                                        related_binding=f"{handler_module.name}.{handler_node.name}",
+                                        related_binding=handler_binding,
                                         confidence="established",
                                         expression=ast.unparse(base)[:4096],
                                         source_span=_native_span(handler_module.path, base),
@@ -1485,7 +1523,7 @@ class SecureASTExtractor:
                                         side=self.snapshot_side,
                                         owner_kind="class_decorator",
                                         qualified_binding=binding,
-                                        related_binding=f"{handler_module.name}.{handler_node.name}",
+                                        related_binding=handler_binding,
                                         confidence="established",
                                         expression=ast.unparse(decorator)[:4096],
                                         source_span=_native_span(handler_module.path, decorator),
@@ -1900,6 +1938,7 @@ class SecureASTExtractor:
                             resolved_prefix=edge.prefix,
                             source_span=edge.source_span,
                             dependency_expressions=edge.dependency_expressions,
+                            prefix_binding_spans=edge.prefix_binding_spans,
                         ),
                     )
                 visit(
@@ -4821,6 +4860,7 @@ class SecureASTExtractor:
                             "include",
                             _keyword_expr(call, "dependencies"),
                         ),
+                        self._literal_binding_spans(prefix_expression, module, call.lineno),
                     )
                 )
                 return _DirectEffectResult("modeled")
@@ -5183,7 +5223,6 @@ class SecureASTExtractor:
             target = modules.get(target_name)
             if target is None:
                 return None
-            # Resolving the imported module consumed the first transition.
             return self._resolve_exported_object(
                 target,
                 expression.attr,
@@ -5209,7 +5248,7 @@ class SecureASTExtractor:
         local = self._object_at(module, symbol, line)
         if local is not None:
             return local
-        # A zero budget allows this local binding but forbids following another import.
+        # Zero remaining transitions may resolve a local binding, never another import.
         if remaining_hops <= 0:
             return None
         binding = self._import_binding_at(module, symbol, line)
@@ -5263,17 +5302,20 @@ class SecureASTExtractor:
             else None
         )
         if (
-            self._resolve_handler(expression, module, aliases, modules, call.lineno)
+            expression is None
+            or self._resolve_handler(expression, module, aliases, modules, call.lineno)
             != route.handler
         ):
             return ()
-        name = (
-            expression.id
-            if isinstance(expression, ast.Name)
-            else expression.value.id
-            if isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name)
-            else None
-        )
+        name: str | None = None
+        root: ast.expr = expression
+        while isinstance(root, ast.Attribute):
+            root = root.value
+        if isinstance(root, ast.Name):
+            # The selected handler is already resolved exactly above. Owning its
+            # root import also covers module.Views.method without claiming any
+            # unrelated imports that merely share a class or method name.
+            name = root.id
         if name is None:
             return ()
         binding = self._import_binding_at(module, name, call.lineno)
@@ -5330,7 +5372,406 @@ class SecureASTExtractor:
                 function = self._function_at(target, expression.attr, 2**31 - 1)
                 if function is not None:
                     return self._handler(target, function)
+        return self._resolve_class_handler(expression, module, aliases, modules, lookup_line)
+
+    def _resolve_class_handler(
+        self,
+        expression: ast.expr | None,
+        module: _Module,
+        aliases: dict[str, str],
+        modules: dict[str, _Module],
+        lookup_line: int,
+    ) -> HandlerInfo | None:
+        class_target: _Module | None = None
+        class_name: str | None = None
+        method_name: str | None = None
+        if isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Attribute):
+            # module.Class.method (including an imported module alias).
+            owner = expression.value
+            if isinstance(owner.value, ast.Name):
+                binding = self._import_binding_at(module, owner.value.id, lookup_line)
+                imported_module = (
+                    binding.module if binding is not None and binding.symbol is None else ""
+                )
+                class_target = modules.get(aliases.get(imported_module, imported_module))
+                class_name, method_name = owner.attr, expression.attr
+        elif isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name):
+            # Class.method or an imported Class.method.
+            class_name, method_name = expression.value.id, expression.attr
+            binding = self._import_binding_at(module, class_name, lookup_line)
+            if binding is not None and binding.symbol is not None:
+                class_target = modules.get(aliases.get(binding.module, binding.module))
+                class_name = binding.symbol
+            elif self._class_at(module, class_name, lookup_line) is not None:
+                class_target = module
+        if class_target is not None and class_name is not None and method_name is not None:
+            function = self._static_class_method_at(
+                class_target,
+                class_name,
+                method_name,
+                lookup_line if class_target is module else 2**31 - 1,
+            )
+            if function is not None and not self._class_method_may_be_mutated(
+                class_target, class_name, method_name, module, lookup_line, modules
+            ):
+                return self._handler(class_target, function)
         return None
+
+    @staticmethod
+    def _class_method_may_be_mutated(  # noqa: PLR0911, PLR0912
+        defining_module: _Module,
+        class_name: str,
+        method_name: str,
+        use_module: _Module,
+        use_line: int,
+        modules: dict[str, _Module],
+    ) -> bool:
+        """Fail closed if any source can replace or dynamically alter this method."""
+        for consumer in modules.values():
+            class_expressions: set[str] = set()
+            for statement in consumer.tree.body:
+                if isinstance(statement, ast.ImportFrom):
+                    source = statement.module or ""
+                    if source == defining_module.name:
+                        for item in statement.names:
+                            if item.name == class_name:
+                                class_expressions.add(item.asname or item.name)
+                elif isinstance(statement, ast.Import):
+                    for item in statement.names:
+                        if item.name == defining_module.name:
+                            module_alias = item.asname or item.name.split(".")[0]
+                            class_expressions.add(f"{module_alias}.{class_name}")
+            if consumer is defining_module:
+                class_expressions.add(class_name)
+            # Follow simple aliases and fail closed when the class escapes through
+            # a container or an opaque helper.  The extractor cannot establish
+            # identity or mutation effects across those operations.
+            changed = True
+            while changed:
+                changed = False
+                for node in ast.walk(consumer.tree):
+                    if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                        continue
+                    value = node.value
+                    if value is None:
+                        continue
+                    references_class = any(
+                        isinstance(child, (ast.Name, ast.Attribute))
+                        and ast.unparse(child) in class_expressions
+                        for child in ast.walk(value)
+                    )
+                    if not references_class:
+                        continue
+                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    for target in targets:
+                        if isinstance(target, ast.Name) and target.id not in class_expressions:
+                            if not isinstance(value, (ast.Name, ast.Attribute)) or (
+                                ast.unparse(value) not in class_expressions
+                            ):
+                                return True
+                            class_expressions.add(target.id)
+                            changed = True
+            # Cross-module execution order is not established by this source proof.
+            limit = use_line if consumer is use_module else 2**31 - 1
+            for statement in consumer.tree.body:
+                if statement.lineno > limit:
+                    continue
+                for node in ast.walk(statement):
+                    if isinstance(node, ast.Assign):
+                        targets = node.targets
+                    elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+                        targets = [node.target]
+                    elif isinstance(node, ast.Delete):
+                        targets = node.targets
+                    else:
+                        targets = []
+                    for target in targets:
+                        if (
+                            isinstance(target, ast.Attribute)
+                            and target.attr == method_name
+                            and ast.unparse(target.value) in class_expressions
+                        ):
+                            return True
+                        if (
+                            isinstance(target, ast.Attribute)
+                            and ast.unparse(target.value) in class_expressions
+                        ):
+                            return True
+                    if (
+                        isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id in {"setattr", "delattr"}
+                        and node.args
+                        and ast.unparse(node.args[0]) in class_expressions
+                    ):
+                        # Dynamic names and all literal names are rejected alike.
+                        return True
+                    if isinstance(node, ast.Call):
+                        # Passing the class to arbitrary code, or using reflective
+                        # module dictionaries, prevents a bounded identity proof.
+                        if any(
+                            (
+                                isinstance(arg, (ast.Name, ast.Attribute))
+                                and ast.unparse(arg) in class_expressions
+                            )
+                            or (
+                                isinstance(arg, (ast.List, ast.Tuple, ast.Set, ast.Dict))
+                                and any(
+                                    isinstance(child, (ast.Name, ast.Attribute))
+                                    and ast.unparse(child) in class_expressions
+                                    for child in ast.walk(arg)
+                                )
+                            )
+                            for arg in (*node.args, *(keyword.value for keyword in node.keywords))
+                        ):
+                            return True
+                        if isinstance(node.func, ast.Name) and node.func.id == "globals":
+                            return True
+                        if isinstance(node.func, ast.Name) and node.func.id in {
+                            "setattr",
+                            "delattr",
+                        }:
+                            return True
+        return False
+
+    def _class_at(self, module: _Module, name: str, line: int) -> ast.ClassDef | None:
+        """Resolve one unrebound top-level class definition before the use site."""
+        definitions = [
+            item
+            for item in module.tree.body
+            if isinstance(item, ast.ClassDef) and item.name == name and item.lineno <= line
+        ]
+        if len(definitions) != 1:
+            return None
+        definition = definitions[0]
+        # Class decorators, bases, and metaclasses can replace or customize the
+        # lookup behavior, so the lexical class name alone does not prove identity.
+        if definition.decorator_list or definition.bases or definition.keywords:
+            return None
+        return (
+            definition
+            if not self._module_name_may_bind(module, name, definition.lineno, line)
+            else None
+        )
+
+    def _static_class_method_at(
+        self, module: _Module, class_name: str, method_name: str, line: int
+    ) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+        definition = self._class_at(module, class_name, line)
+        if (
+            definition is None
+            or not self._builtin_staticmethod_at(module, definition.lineno)
+            or not self._safe_static_class_body(definition)
+        ):
+            return None
+        methods = [
+            item
+            for item in definition.body
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and item.name == method_name
+        ]
+        if len(methods) != 1:
+            return None
+        method = methods[0]
+        if len(method.decorator_list) != 1 or not isinstance(method.decorator_list[0], ast.Name):
+            return None
+        return method if method.decorator_list[0].id == "staticmethod" else None
+
+    @classmethod
+    def _builtin_staticmethod_at(cls, module: _Module, line: int) -> bool:
+        """Prove the decorator name still refers to the builtin at class execution."""
+        return not cls._module_name_may_bind(module, "staticmethod", 0, line)
+
+    @staticmethod
+    def _module_name_may_bind(
+        module: _Module, name: str, after_line: int, through_line: int
+    ) -> bool:
+        """Conservatively find module bindings, including those in control flow."""
+
+        class ExpressionBindings(ast.NodeVisitor):
+            found = False
+
+            def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+                if _target_binds_name(node.target, name):
+                    self.found = True
+                self.visit(node.value)
+
+            def visit_Lambda(self, node: ast.Lambda) -> None:
+                # Lambda defaults execute in the containing scope, its body does not.
+                for value in (*node.args.defaults, *node.args.kw_defaults):
+                    if value is not None:
+                        self.visit(value)
+
+            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+                self._header(node)
+
+            def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+                self._header(node)
+
+            def _header(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+                for value in (*node.decorator_list, *node.args.defaults, *node.args.kw_defaults):
+                    if value is not None:
+                        self.visit(value)
+
+            def visit_ClassDef(self, node: ast.ClassDef) -> None:
+                for value in (*node.decorator_list, *node.bases, *(k.value for k in node.keywords)):
+                    self.visit(value)
+
+            def visit_comprehension(self, node: ast.comprehension) -> None:
+                self.visit(node.iter)
+                for value in node.ifs:
+                    self.visit(value)
+
+            def visit_MatchAs(self, node: ast.MatchAs) -> None:
+                if node.name == name:
+                    self.found = True
+                if node.pattern:
+                    self.visit(node.pattern)
+
+            def visit_MatchStar(self, node: ast.MatchStar) -> None:
+                if node.name == name:
+                    self.found = True
+
+            def visit_MatchMapping(self, node: ast.MatchMapping) -> None:
+                if node.rest == name:
+                    self.found = True
+                self.generic_visit(node)
+
+        expression_bindings = ExpressionBindings()
+
+        def scan(statements: list[ast.stmt]) -> bool:  # noqa: PLR0911, PLR0912
+            for statement in statements:
+                if statement.lineno > through_line or (
+                    after_line and statement.lineno <= after_line
+                ):
+                    continue
+                if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    if statement.name == name:
+                        return True
+                    # Inspect eagerly evaluated headers, but never nested bodies.
+                    expression_bindings.visit(statement)
+                    if expression_bindings.found:
+                        return True
+                    continue
+                if isinstance(statement, ast.Delete) and any(
+                    _target_binds_name(target, name) for target in statement.targets
+                ):
+                    return True
+                if isinstance(statement, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+                    targets = (
+                        statement.targets
+                        if isinstance(statement, ast.Assign)
+                        else [statement.target]
+                    )
+                    if isinstance(statement, ast.AnnAssign) and statement.value is None:
+                        targets = []
+                    if any(_target_binds_name(target, name) for target in targets):
+                        return True
+                if isinstance(statement, (ast.Import, ast.ImportFrom)) and any(
+                    alias.name == "*" or (alias.asname or alias.name.split(".")[0]) == name
+                    for alias in statement.names
+                ):
+                    return True
+                # Explore module-level control-flow suites, but not nested scopes.
+                suites: list[list[ast.stmt]] = []
+                if isinstance(statement, ast.If):
+                    suites = [statement.body, statement.orelse]
+                elif isinstance(
+                    statement,
+                    (ast.For, ast.AsyncFor, ast.While, ast.With, ast.AsyncWith),
+                ):
+                    suites = [statement.body]
+                    if hasattr(statement, "orelse"):
+                        suites.append(statement.orelse)
+                elif isinstance(statement, ast.Try) or type(statement).__name__ == "TryStar":
+                    try_statement = cast("ast.Try", statement)
+                    suites = [
+                        try_statement.body,
+                        try_statement.orelse,
+                        try_statement.finalbody,
+                        *(handler.body for handler in try_statement.handlers),
+                    ]
+                elif isinstance(statement, ast.Match):
+                    expression_bindings.visit(statement.subject)
+                    for case in statement.cases:
+                        expression_bindings.visit(case.pattern)
+                        if case.guard is not None:
+                            expression_bindings.visit(case.guard)
+                    suites = [case.body for case in statement.cases]
+                # Bindings in headers happen even if the body is never entered.
+                if isinstance(statement, (ast.For, ast.AsyncFor)) and _target_binds_name(
+                    statement.target, name
+                ):
+                    return True
+                if isinstance(statement, (ast.With, ast.AsyncWith)) and any(
+                    item.optional_vars is not None and _target_binds_name(item.optional_vars, name)
+                    for item in statement.items
+                ):
+                    return True
+                if isinstance(statement, ast.Try) or type(statement).__name__ == "TryStar":
+                    try_statement = cast("ast.Try", statement)
+                    if any(handler.name == name for handler in try_statement.handlers):
+                        return True
+                if not isinstance(statement, ast.Match):
+                    expression_bindings.visit(statement)
+                if expression_bindings.found:
+                    return True
+                if any(scan(suite) for suite in suites):
+                    return True
+            return False
+
+        return scan(module.tree.body)
+
+    @staticmethod
+    def _safe_static_class_body(definition: ast.ClassDef) -> bool:
+        def passive(expression: ast.expr) -> bool:
+            if isinstance(expression, (ast.Name, ast.Constant)):
+                return True
+            if isinstance(expression, (ast.Tuple, ast.List)):
+                return all(passive(item) for item in expression.elts)
+            return False
+
+        for statement in definition.body:
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if statement.decorator_list and not (
+                    len(statement.decorator_list) == 1
+                    and isinstance(statement.decorator_list[0], ast.Name)
+                    and statement.decorator_list[0].id == "staticmethod"
+                ):
+                    return False
+                arguments = statement.args
+                parameter_nodes = [
+                    *arguments.posonlyargs,
+                    *arguments.args,
+                    *arguments.kwonlyargs,
+                ]
+                if arguments.vararg is not None:
+                    parameter_nodes.append(arguments.vararg)
+                if arguments.kwarg is not None:
+                    parameter_nodes.append(arguments.kwarg)
+                headers = [
+                    *arguments.defaults,
+                    *(value for value in arguments.kw_defaults if value is not None),
+                    *(arg.annotation for arg in parameter_nodes if arg.annotation is not None),
+                ]
+                if statement.returns is not None:
+                    headers.append(statement.returns)
+                # Defaults and eager annotations execute in the class namespace;
+                # calls, descriptor lookups and name bindings can replace the
+                # decorator before the next method is constructed.
+                if getattr(statement, "type_params", ()) or not all(
+                    passive(header) for header in headers
+                ):
+                    return False
+                continue
+            if (
+                isinstance(statement, ast.Expr)
+                and isinstance(statement.value, ast.Constant)
+                and isinstance(statement.value.value, str)
+            ):
+                continue
+            return False
+        return True
 
     def _literal_name(self, module: _Module, name: str, line: int) -> str | None:
         history = [item for item in module.strings.get(name, []) if item[0] <= line]
@@ -5347,6 +5788,53 @@ class SecureASTExtractor:
             .evaluate_string(expression)
             .string
         )
+
+    def _literal_binding_spans(
+        self, expression: ast.expr | None, module: _Module, line: int
+    ) -> tuple[NativeSourceSpan, ...]:
+        """Capture unique module assignment statements used by a static string."""
+        if expression is None or self._literal_string(expression, module, line) is None:
+            return ()
+        statements: dict[str, ast.stmt] = {}
+        for statement in module.tree.body:
+            if isinstance(statement, ast.Assign):
+                targets = statement.targets
+            elif isinstance(statement, ast.AnnAssign):
+                targets = [statement.target]
+            else:
+                continue
+            for target in targets:
+                for candidate in ast.walk(target):
+                    if isinstance(candidate, ast.Name) and isinstance(candidate.ctx, ast.Store):
+                        statements[candidate.id] = statement
+
+        spans: dict[tuple[int, int], NativeSourceSpan] = {}
+        active: set[str] = set()
+
+        def visit_name(name: str) -> None:
+            if name in active or len(module.assignments.get(name, ())) != 1:
+                return
+            statement = statements.get(name)
+            if (
+                statement is None
+                or self._latest_binding_line(module, name, line) != statement.lineno
+            ):
+                return
+            value = statement.value if isinstance(statement, (ast.Assign, ast.AnnAssign)) else None
+            if not isinstance(value, ast.expr) or self._literal_string(value, module, line) is None:
+                return
+            active.add(name)
+            span = _native_span(module.path, statement)
+            spans[(span.start_line, span.start_column)] = span
+            for child in ast.walk(value):
+                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load):
+                    visit_name(child.id)
+            active.remove(name)
+
+        for candidate in ast.walk(expression):
+            if isinstance(candidate, ast.Name) and isinstance(candidate.ctx, ast.Load):
+                visit_name(candidate.id)
+        return tuple(spans.values())
 
     def _literal_methods(
         self,
