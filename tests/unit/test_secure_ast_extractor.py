@@ -20,6 +20,99 @@ from fastapi_endpoint_detector.parser.secure_ast_extractor import (
 class TestSecureASTExtractor:
     """Tests for SecureASTExtractor class."""
 
+    def test_dynamic_getattr_argument_cannot_establish_registration_alias(
+        self, tmp_path: Path
+    ) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+app = FastAPI()
+METHOD = app.add_event_handler
+getattr(app, method_name)(METHOD := app.add_event_handler, 'startup', lambda: None)
+app.add_event_handler('startup', lambda: None)
+"""
+        )
+
+        inventory = SecureASTExtractor(main).extract_inventory()
+
+        assert inventory.endpoints == []
+        assert any(
+            "dynamic method lookup may alter route registration aliases" in item.reason
+            for item in inventory.limitations
+        )
+
+    def test_bootstrap_getattr_uses_active_local_method_binding(self, tmp_path: Path) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+app = FastAPI()
+method = 'add_event_handler'
+def run():
+    method = 'openapi'
+    getattr(app, method)('/not-a-route')
+"""
+        )
+
+        inventory = SecureASTExtractor(main, bootstrap_entry="main:run").extract_inventory()
+
+        assert inventory.endpoints == []
+        assert any("bootstrap" in item.reason for item in inventory.limitations)
+
+    def test_factory_getattr_local_method_shadows_module_method(self, tmp_path: Path) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+method = 'add_api_route'
+def endpoint():
+    return None
+def create_app(method='openapi'):
+    app = FastAPI()
+    getattr(app, method)('/not-a-route', endpoint)
+    return app
+"""
+        )
+
+        endpoints = SecureASTExtractor(main, app_entry="main:create_app").extract_endpoints()
+
+        assert endpoints == []
+
+    def test_factory_getattr_resolves_exact_local_registration_method(self, tmp_path: Path) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+def endpoint():
+    return None
+def create_app():
+    app = FastAPI()
+    method = 'add_api_route'
+    getattr(app, method)('/visible', endpoint)
+    return app
+"""
+        )
+
+        endpoints = SecureASTExtractor(main, app_entry="main:create_app").extract_endpoints()
+
+        assert [endpoint.identifier for endpoint in endpoints] == ["GET /visible"]
+
+    def test_bootstrap_getattr_resolves_exact_local_registration_method(
+        self, tmp_path: Path
+    ) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+app = FastAPI()
+def endpoint():
+    return None
+def run():
+    method = 'add_api_route'
+    getattr(app, method)('/visible', endpoint)
+"""
+        )
+
+        endpoints = SecureASTExtractor(main, bootstrap_entry="main:run").extract_endpoints()
+
+        assert [endpoint.identifier for endpoint in endpoints] == ["GET /visible"]
+
     def test_init(self, tmp_path: Path) -> None:
         """Test extractor initialization."""
         app_file = tmp_path / "app.py"

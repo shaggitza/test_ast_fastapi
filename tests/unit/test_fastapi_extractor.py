@@ -433,8 +433,80 @@ def test_runtime_dependency_graph_missing_shape_and_overrides_are_graph_local(
     assert {item.code for item in conditional.limitations} == {"dependency_overrides_visible"}
 
 
+@pytest.mark.parametrize("parent_overridden", [False, True])
+@pytest.mark.parametrize("child_overridden", [False, True])
+def test_runtime_dependency_overrides_follow_each_routes_own_provider(
+    tmp_path: Path, parent_overridden: bool, child_overridden: bool
+) -> None:
+    handler = HandlerInfo(
+        name="endpoint", module="main", file_path=tmp_path / "main.py", line_number=4
+    )
+    parent = SimpleNamespace(dependency_overrides={object(): object()} if parent_overridden else {})
+    child = SimpleNamespace(dependency_overrides={object(): object()} if child_overridden else {})
+    extractor = FastAPIExtractor(tmp_path / "main.py")
+    extractor._app = parent
+    for provider, overridden in (
+        (parent, parent_overridden),
+        (child, child_overridden),
+        (None, False),
+    ):
+        route = SimpleNamespace(
+            dependant=SimpleNamespace(dependencies=[]), dependency_overrides_provider=provider
+        )
+        graph = extractor._extract_dependency_graph(route, handler)
+        expected = (
+            DependencyGraphStatus.CONDITIONAL if overridden else DependencyGraphStatus.ESTABLISHED
+        )
+        assert graph.status == expected
+        assert {item.code for item in graph.limitations} == (
+            {"dependency_overrides_visible"} if overridden else set()
+        )
+
+
 def _synthetic_old_dependency() -> int:
     return 1
+
+
+@pytest.mark.parametrize("parent_overridden", [False, True])
+@pytest.mark.parametrize("child_overridden", [False, True])
+@pytest.mark.parametrize("root_attribute", ["starlette_route", "original_route"])
+def test_normalized_dependency_overrides_use_the_route_that_supplied_the_graph(
+    tmp_path: Path,
+    parent_overridden: bool,
+    child_overridden: bool,
+    root_attribute: str,
+) -> None:
+    parent = FastAPI()
+    child = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+    @child.get("/child", dependencies=[Depends(_synthetic_old_dependency)])
+    def child_handler() -> None:
+        pass
+
+    if parent_overridden:
+        parent.dependency_overrides[_synthetic_old_dependency] = lambda: 3
+    if child_overridden:
+        child.dependency_overrides[_synthetic_old_dependency] = lambda: 4
+    child_route = child.routes[0]
+    extractor = FastAPIExtractor(tmp_path / "main.py")
+    extractor._app = parent
+    for wrapper_has_provider in (False, True):
+        wrapper = SimpleNamespace(**{root_attribute: child_route})
+        if wrapper_has_provider:
+            wrapper.dependency_overrides_provider = parent
+        handler = HandlerInfo(
+            name="child_handler", module="main", file_path=tmp_path / "main.py", line_number=4
+        )
+        graph = extractor._extract_dependency_graph(wrapper, handler)
+        assert graph.occurrences[0].display_name == "_synthetic_old_dependency"
+        assert graph.status == (
+            DependencyGraphStatus.CONDITIONAL
+            if child_overridden
+            else DependencyGraphStatus.ESTABLISHED
+        )
+        assert {item.code for item in graph.limitations} == (
+            {"dependency_overrides_visible"} if child_overridden else set()
+        )
 
 
 def _synthetic_effective_dependency() -> int:

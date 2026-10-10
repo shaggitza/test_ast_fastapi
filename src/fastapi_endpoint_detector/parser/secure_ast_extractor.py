@@ -601,6 +601,15 @@ class _Route:
     operation: str | None = None
     source_span: NativeSourceSpan | None = None
     dependency_expressions: tuple[NativeRouteDependencyExpressionEvidence, ...] = ()
+    bootstrap_helper_owners: tuple[
+        tuple[
+            Literal["bootstrap_helper_call", "bootstrap_helper_definition"],
+            str,
+            NativeSourceSpan,
+        ],
+        ...,
+    ] = ()
+    input_owner_spans: tuple[NativeSourceSpan, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -616,6 +625,15 @@ class _Edge:
     source_span: NativeSourceSpan | None = None
     dependency_expressions: tuple[NativeRouteDependencyExpressionEvidence, ...] = ()
     prefix_binding_spans: tuple[NativeSourceSpan, ...] = ()
+    bootstrap_helper_owners: tuple[
+        tuple[
+            Literal["bootstrap_helper_call", "bootstrap_helper_definition"],
+            str,
+            NativeSourceSpan,
+        ],
+        ...,
+    ] = ()
+    input_owner_spans: tuple[NativeSourceSpan, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1673,6 +1691,30 @@ class SecureASTExtractor:
                                 source_span=route.source_span,
                             )
                         )
+                    for helper_kind, helper_binding, helper_span in route.bootstrap_helper_owners:
+                        source_owners.append(
+                            NativeRouteSourceOwnerEvidence(
+                                side=self.snapshot_side,
+                                owner_kind=helper_kind,
+                                qualified_binding=helper_binding,
+                                related_binding=route.handler.module + "." + route.handler.name,
+                                confidence="established",
+                                source_span=helper_span,
+                            )
+                        )
+                    for input_span in route.input_owner_spans:
+                        source_owners.append(
+                            NativeRouteSourceOwnerEvidence(
+                                side=self.snapshot_side,
+                                owner_kind="bootstrap_registration",
+                                qualified_binding=f"{route.owner[0]}.{route.owner[1]}",
+                                related_binding=route.handler.module + "." + route.handler.name,
+                                confidence="established",
+                                source_span=input_span,
+                            )
+                        )
+                    for assembly_edge in assembly_chain:
+                        source_owners.extend(assembly_edge.source_owners)
                     for structural_edge in assembly_chain:
                         parent_module = modules.get(structural_edge.parent_module)
                         if parent_module is None:
@@ -1939,6 +1981,30 @@ class SecureASTExtractor:
                             source_span=edge.source_span,
                             dependency_expressions=edge.dependency_expressions,
                             prefix_binding_spans=edge.prefix_binding_spans,
+                            source_owners=(
+                                *(
+                                    NativeRouteSourceOwnerEvidence(
+                                        side=self.snapshot_side,
+                                        owner_kind=kind,
+                                        qualified_binding=binding,
+                                        related_binding=f"{edge.child[0]}.{edge.child[1]}",
+                                        confidence="established",
+                                        source_span=span,
+                                    )
+                                    for kind, binding, span in edge.bootstrap_helper_owners
+                                ),
+                                *(
+                                    NativeRouteSourceOwnerEvidence(
+                                        side=self.snapshot_side,
+                                        owner_kind="bootstrap_registration",
+                                        qualified_binding=f"{edge.parent[0]}.{edge.parent[1]}",
+                                        related_binding=f"{edge.child[0]}.{edge.child[1]}",
+                                        confidence="established",
+                                        source_span=span,
+                                    )
+                                    for span in edge.input_owner_spans
+                                ),
+                            ),
                         ),
                     )
                 visit(
@@ -3099,12 +3165,40 @@ class SecureASTExtractor:
                 local_router_views.discard(statement.name)
                 local_strings.pop(statement.name, None)
                 continue
+            statement_call = (
+                statement.value
+                if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call)
+                else None
+            )
+            dynamic_method: str | None = None
+            if (
+                statement_call is not None
+                and isinstance(statement_call.func, ast.Call)
+                and isinstance(statement_call.func.func, ast.Name)
+                and statement_call.func.func.id == "getattr"
+                and "getattr" not in local_bindings
+                and self._latest_binding_line(module, "getattr", call_line) is None
+                and len(statement_call.func.args) >= 2
+                and not statement_call.func.keywords
+            ):
+                dynamic_method = literal(statement_call.func.args[1], statement.lineno)
+                if dynamic_method is None or not dynamic_method.isidentifier():
+                    return None
+                statement_call = ast.Call(
+                    func=ast.Attribute(
+                        value=statement_call.func.args[0],
+                        attr=dynamic_method,
+                        ctx=ast.Load(),
+                    ),
+                    args=statement_call.args,
+                    keywords=statement_call.keywords,
+                )
             if (
                 isinstance(statement, ast.Expr)
-                and isinstance(statement.value, ast.Call)
-                and not isinstance(statement.value.func, ast.Attribute)
+                and statement_call is not None
+                and not isinstance(statement_call.func, ast.Attribute)
             ):
-                if allow_conditional and unresolved_call_touches_modeled(statement.value):
+                if allow_conditional and unresolved_call_touches_modeled(statement_call):
                     conditionalize(
                         statement,
                         "unresolved call may mutate or escape the explicitly selected app",
@@ -3115,8 +3209,8 @@ class SecureASTExtractor:
                 continue
             if not (
                 isinstance(statement, ast.Expr)
-                and isinstance(statement.value, ast.Call)
-                and isinstance(statement.value.func, ast.Attribute)
+                and statement_call is not None
+                and isinstance(statement_call.func, ast.Attribute)
             ):
                 # Definitions below control flow execute eager headers or class
                 # bodies conditionally and are outside this straight-line slice.
@@ -3133,7 +3227,7 @@ class SecureASTExtractor:
                 if touches_modeled_binding(statement):
                     return None
                 continue
-            call = statement.value
+            call = statement_call
             call_function = call.func
             if not isinstance(call_function, ast.Attribute):
                 continue
@@ -3438,6 +3532,15 @@ class SecureASTExtractor:
             router_view_env: set[str],
             string_env: dict[str, str],
             stack: frozenset[tuple[str, str, int]],
+            helper_owners: tuple[
+                tuple[
+                    Literal["bootstrap_helper_call", "bootstrap_helper_definition"],
+                    str,
+                    NativeSourceSpan,
+                ],
+                ...,
+            ],
+            string_owner_spans: dict[str, NativeSourceSpan],
         ) -> None:
             identity = (current_module.name, current.name, current.lineno)
             if (
@@ -3462,6 +3565,7 @@ class SecureASTExtractor:
             local_objects = dict(object_env)
             local_router_views = set(router_view_env)
             local_strings = dict(string_env)
+            local_string_owner_spans = dict(string_owner_spans)
             local_modules: dict[str, _Module] = {}
             local_functions: dict[str, tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef]] = {}
             local_handlers: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
@@ -3868,6 +3972,7 @@ class SecureASTExtractor:
                         else:
                             local_router_views.discard(name)
                         local_strings.pop(name, None)
+                        local_string_owner_spans.pop(name, None)
                     else:
                         value_string = literal(value, statement.lineno)
                         escaped = [
@@ -3888,8 +3993,12 @@ class SecureASTExtractor:
                         local_objects.pop(name, None)
                         local_router_views.discard(name)
                         local_strings.pop(name, None)
+                        local_string_owner_spans.pop(name, None)
                         if value_string is not None:
                             local_strings[name] = value_string
+                            local_string_owner_spans[name] = _native_span(
+                                current_module.path, value
+                            )
                     continue
                 if isinstance(statement, ast.Return):
                     if statement.value is not None and touches_tracked(statement.value):
@@ -3931,6 +4040,41 @@ class SecureASTExtractor:
                     bound_names.add(rebound)
                 call = statement.value
                 line = statement.lineno
+                # Resolve only a builtin getattr with a literal name from this
+                # active bootstrap frame.  `literal` consults frame locals first,
+                # including parameters and prior assignments, so a local shadow
+                # cannot fall through to a module-level spelling.
+                if (
+                    isinstance(call.func, ast.Call)
+                    and isinstance(call.func.func, ast.Name)
+                    and call.func.func.id == "getattr"
+                    and "getattr" not in bound_names
+                    and self._latest_binding_line(current_module, "getattr", line) is None
+                    and len(call.func.args) >= 2
+                    and not call.func.keywords
+                ):
+                    method_name = literal(call.func.args[1], line)
+                    receiver = call.func.args[0]
+                    if method_name is not None and method_name.isidentifier():
+                        call = ast.Call(
+                            func=ast.Attribute(value=receiver, attr=method_name, ctx=ast.Load()),
+                            args=call.args,
+                            keywords=call.keywords,
+                        )
+                if (
+                    isinstance(call.func, ast.Call)
+                    and isinstance(call.func.func, ast.Name)
+                    and call.func.func.id == "getattr"
+                    and touches_tracked(call)
+                ):
+                    for owner in set(local_objects.values()):
+                        limit(
+                            current_module,
+                            owner,
+                            statement,
+                            "dynamic method lookup may replace a tracked registration alias",
+                        )
+                    continue
                 registration_receiver = (
                     call.func.value if isinstance(call.func, ast.Attribute) else None
                 )
@@ -4016,6 +4160,13 @@ class SecureASTExtractor:
                                     "copy",
                                     "include_router",
                                     _native_span(current_module.path, call),
+                                    bootstrap_helper_owners=helper_owners,
+                                    input_owner_spans=(
+                                        (local_string_owner_spans[prefix_expr.id],)
+                                        if isinstance(prefix_expr, ast.Name)
+                                        and prefix_expr.id in local_string_owner_spans
+                                        else ()
+                                    ),
                                 )
                             )
                     elif operation == "mount":
@@ -4045,6 +4196,13 @@ class SecureASTExtractor:
                                     "live",
                                     "mount",
                                     _native_span(current_module.path, call),
+                                    bootstrap_helper_owners=helper_owners,
+                                    input_owner_spans=(
+                                        (local_string_owner_spans[path_expr.id],)
+                                        if isinstance(path_expr, ast.Name)
+                                        and path_expr.id in local_string_owner_spans
+                                        else ()
+                                    ),
                                 )
                             )
                     else:
@@ -4086,6 +4244,13 @@ class SecureASTExtractor:
                                     registration_kind=NativeRegistrationKind.IMPERATIVE,
                                     operation=operation,
                                     source_span=_native_span(current_module.path, call),
+                                    bootstrap_helper_owners=helper_owners,
+                                    input_owner_spans=(
+                                        (local_string_owner_spans[path_expr.id],)
+                                        if isinstance(path_expr, ast.Name)
+                                        and path_expr.id in local_string_owner_spans
+                                        else ()
+                                    ),
                                 )
                             )
                     continue
@@ -4254,6 +4419,25 @@ class SecureASTExtractor:
                                 "helper without tracked object flow may mutate route globals",
                             )
                         continue
+                    nested_string_owner_spans: dict[str, NativeSourceSpan] = {}
+                    for parameter in parameters:
+                        expression = actuals.get(parameter.arg)
+                        if expression is None:
+                            expression = positional_defaults.get(
+                                parameter.arg, keyword_defaults.get(parameter.arg)
+                            )
+                            if expression is not None:
+                                nested_string_owner_spans[parameter.arg] = _native_span(
+                                    target_module.path, expression
+                                )
+                        elif isinstance(expression, ast.Name):
+                            owner_span = local_string_owner_spans.get(expression.id)
+                            if owner_span is not None:
+                                nested_string_owner_spans[parameter.arg] = owner_span
+                        elif actuals.get(parameter.arg) is not None:
+                            nested_string_owner_spans[parameter.arg] = _native_span(
+                                current_module.path, expression
+                            )
                     apply(
                         target_module,
                         target_function,
@@ -4261,6 +4445,20 @@ class SecureASTExtractor:
                         nested_router_views,
                         nested_strings,
                         stack | {identity},
+                        (
+                            *helper_owners,
+                            (
+                                "bootstrap_helper_call",
+                                f"{current_module.name}.{current.name}",
+                                _native_span(current_module.path, call),
+                            ),
+                            (
+                                "bootstrap_helper_definition",
+                                f"{target_module.name}.{target_function.name}",
+                                _function_header_span(target_module.path, target_function),
+                            ),
+                        ),
+                        nested_string_owner_spans,
                     )
                     continue
                 if touches_tracked(call):
@@ -4292,6 +4490,7 @@ class SecureASTExtractor:
             if visible is not None and visible.key == root.key:
                 initial_objects[name] = root
         initial_strings: dict[str, str] = {}
+        initial_string_owner_spans: dict[str, NativeSourceSpan] = {}
         parameters = [*function.args.posonlyargs, *function.args.args]
         for parameter in [*parameters, *function.args.kwonlyargs]:
             initial_objects.pop(parameter.arg, None)
@@ -4322,7 +4521,17 @@ class SecureASTExtractor:
             value = self._literal_string(default, module, function.lineno)
             if value is not None:
                 initial_strings[parameter.arg] = value
-        apply(module, function, initial_objects, set(), initial_strings, frozenset())
+                initial_string_owner_spans[parameter.arg] = _native_span(module.path, default)
+        apply(
+            module,
+            function,
+            initial_objects,
+            set(),
+            initial_strings,
+            frozenset(),
+            (),
+            initial_string_owner_spans,
+        )
 
     @staticmethod
     def _record_object_limitation(
@@ -4981,6 +5190,20 @@ class SecureASTExtractor:
                 )
                 receiver = object_root(receiver_expression, node.lineno)
                 operation = node.func.attr if isinstance(node.func, ast.Attribute) else ""
+                if (
+                    isinstance(node.func, ast.Name)
+                    and node.func.id == "getattr"
+                    and len(node.args) >= 2
+                    and not isinstance(node.args[1], ast.Constant)
+                ):
+                    dynamic_owner = object_root(node.args[0], node.lineno)
+                    if dynamic_owner is not None:
+                        record(
+                            dynamic_owner,
+                            node,
+                            "dynamic method lookup may alter route registration aliases",
+                            endpoint_impact="all",
+                        )
                 receiver_attributes = attribute_names(receiver_expression)
                 direct_result = classify_direct_call(
                     node,

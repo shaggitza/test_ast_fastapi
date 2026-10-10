@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import difflib
 from typing import TYPE_CHECKING
 
+import pytest
+
+from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
+from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.models.endpoint import SnapshotSide
 from fastapi_endpoint_detector.parser.secure_ast_extractor import (
     SecureASTExtractor,
@@ -61,6 +66,207 @@ def test_dependency_expressions_are_side_qualified_and_structurally_owned(
     assert dependency.kind == "depends"
     assert dependency.confidence == "established"
     assert dependency.callable_expressions == ("main.route_dep",)
+
+
+def test_native_route_dependency_reaches_typed_transitive_helper_without_fanout(
+    tmp_path: Path,
+) -> None:
+    app_file = tmp_path / "main.py"
+    app_file.write_text(
+        "from fastapi import APIRouter, Depends, FastAPI\n"
+        "from helpers import app_helper, include_helper, route_helper, router_helper\n"
+        "def app_dep(): return app_helper()\n"
+        "def router_dep(): return router_helper()\n"
+        "def include_dep(): return include_helper()\n"
+        "def route_dep(): return route_helper()\n"
+        "app = FastAPI(dependencies=[Depends(app_dep)])\n"
+        "router = APIRouter(dependencies=[Depends(router_dep)])\n"
+        "@router.get('/items', dependencies=[Depends(route_dep)])\n"
+        "def handler(): return 1\n"
+        "@router.get('/safe')\n"
+        "def safe_handler(): return 2\n"
+        "app.include_router(router, dependencies=[Depends(include_dep)])\n",
+        encoding="utf-8",
+    )
+    helper_file = tmp_path / "helpers.py"
+    helper_file.write_text(
+        "def app_helper(): return 3\n"
+        "def router_helper(): return 4\n"
+        "def include_helper(): return 5\n"
+        "def route_helper(): return 6\n",
+        encoding="utf-8",
+    )
+    endpoints = SecureASTExtractor(app_file).extract_endpoints()
+    selected = next(endpoint for endpoint in endpoints if endpoint.identifier == "GET /items")
+    unrelated = next(endpoint for endpoint in endpoints if endpoint.identifier == "GET /safe")
+    analyzer = MypyAnalyzer(tmp_path, max_depth=4)
+
+    result = analyzer.analyze_endpoint(selected)
+    unrelated_result = analyzer.analyze_endpoint(unrelated)
+    for line in range(3, 7):
+        assert result.references_symbol_at_line("main.py", line) is not None
+    for line in range(1, 5):
+        assert result.references_symbol_at_line("helpers.py", line) is not None
+    for line in range(3, 6):
+        assert unrelated_result.references_symbol_at_line("main.py", line) is not None
+    assert unrelated_result.references_symbol_at_line("main.py", 6) is None
+    for line in range(1, 4):
+        assert unrelated_result.references_symbol_at_line("helpers.py", line) is not None
+    assert unrelated_result.references_symbol_at_line("helpers.py", 4) is None
+    assert analyzer._endpoint_key(selected) != analyzer._endpoint_key(
+        selected.model_copy(update={"native_provenance": None})
+    )
+
+
+@pytest.mark.parametrize(
+    ("scope", "helper", "expected"),
+    [
+        ("app", "app_helper", {"GET /items", "GET /safe", "GET /foreign"}),
+        ("router", "router_helper", {"GET /items", "GET /safe"}),
+        ("include", "include_helper", {"GET /items", "GET /safe"}),
+        ("route", "route_helper", {"GET /items"}),
+    ],
+)
+def test_native_dependency_helper_diff_reaches_only_public_descendant_routes(
+    tmp_path: Path,
+    scope: str,
+    helper: str,
+    expected: set[str],
+) -> None:
+    baseline = tmp_path / "baseline"
+    target = tmp_path / "target"
+    for root in (baseline, target):
+        root.mkdir()
+        (root / "helpers.py").write_text(
+            "def app_helper(): return 1\n"
+            "def router_helper(): return 2\n"
+            "def include_helper(): return 3\n"
+            "def route_helper(): return 4\n"
+            "def foreign_helper(): return 5\n",
+            encoding="utf-8",
+        )
+        (root / "foreign.py").write_text("def route_helper(): return 6\n", encoding="utf-8")
+        (root / "main.py").write_text(
+            "from fastapi import APIRouter, Depends, FastAPI\n"
+            "from helpers import app_helper, include_helper, router_helper, route_helper\n"
+            "from foreign import route_helper as foreign_route_helper\n"
+            "def app_dep(): return app_helper()\n"
+            "def router_dep(): return router_helper()\n"
+            "def include_dep(): return include_helper()\n"
+            "def route_dep(): return route_helper()\n"
+            "app = FastAPI(dependencies=[Depends(app_dep)])\n"
+            "router = APIRouter(dependencies=[Depends(router_dep)])\n"
+            "@router.get('/items', dependencies=[Depends(route_dep)])\n"
+            "def items(): return 1\n"
+            "@router.get('/safe')\n"
+            "def safe(): return 2\n"
+            "@app.get('/foreign', dependencies=[Depends(foreign_route_helper)])\n"
+            "def foreign(): return 3\n"
+            "app.include_router(router, dependencies=[Depends(include_dep)])\n",
+            encoding="utf-8",
+        )
+
+    # Edit exactly one bound helper in each public dependency scope. The same
+    # short route_helper name in foreign.py must never create a candidate.
+    helper_lines = (target / "helpers.py").read_text(encoding="utf-8").splitlines()
+    helper_index = next(
+        index for index, line in enumerate(helper_lines) if line.startswith(f"def {helper}()")
+    )
+    old_line = helper_lines[helper_index]
+    new_line = old_line.replace("return ", "return 40 + ", 1)
+    helper_lines[helper_index] = new_line
+    (target / "helpers.py").write_text("\n".join(helper_lines) + "\n", encoding="utf-8")
+    diff = (
+        "diff --git a/helpers.py b/helpers.py\n"
+        "--- a/helpers.py\n"
+        "+++ b/helpers.py\n"
+        f"@@ -{helper_index + 1},1 +{helper_index + 1},1 @@\n"
+        f"-{old_line}\n"
+        f"+{new_line}\n"
+    )
+
+    report = ChangeMapper(
+        target / "main.py",
+        baseline_app_path=baseline / "main.py",
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+
+    candidates = {item.endpoint.identifier: item for item in report.candidate_endpoints}
+    assert set(candidates) == expected
+    assert {item.endpoint.identifier for item in report.affected_endpoints} == expected
+    for candidate in candidates.values():
+        assert candidate.endpoint.native_provenance is not None
+        assert candidate.endpoint.native_provenance.side == SnapshotSide.TARGET
+
+
+@pytest.mark.parametrize(
+    ("helper", "expected"),
+    [
+        ("parent_helper", {"GET /parent"}),
+        ("child_helper", {"GET /child/item"}),
+    ],
+)
+def test_mounted_child_dependency_diff_respects_mount_ownership_boundary(
+    tmp_path: Path,
+    helper: str,
+    expected: set[str],
+) -> None:
+    baseline = tmp_path / "baseline"
+    target = tmp_path / "target"
+    for root in (baseline, target):
+        root.mkdir()
+        (root / "helpers.py").write_text(
+            "def parent_helper(): return 1\ndef child_helper(): return 2\n",
+            encoding="utf-8",
+        )
+        (root / "main.py").write_text(
+            "from fastapi import Depends, FastAPI\n"
+            "from helpers import child_helper, parent_helper\n"
+            "def parent_dep(): return parent_helper()\n"
+            "def child_dep(): return child_helper()\n"
+            "app = FastAPI(dependencies=[Depends(parent_dep)])\n"
+            "child = FastAPI(dependencies=[Depends(child_dep)])\n"
+            "@app.get('/parent')\n"
+            "def parent_route(): return 1\n"
+            "@child.get('/item')\n"
+            "def child_route(): return 2\n"
+            "app.mount('/child', child)\n",
+            encoding="utf-8",
+        )
+
+    helper_lines = (target / "helpers.py").read_text(encoding="utf-8").splitlines()
+    helper_index = next(
+        index for index, line in enumerate(helper_lines) if line.startswith(f"def {helper}()")
+    )
+    old_line = helper_lines[helper_index]
+    new_line = old_line.replace("return ", "return 40 + ", 1)
+    helper_lines[helper_index] = new_line
+    (target / "helpers.py").write_text("\n".join(helper_lines) + "\n", encoding="utf-8")
+    diff = (
+        "diff --git a/helpers.py b/helpers.py\n"
+        "--- a/helpers.py\n"
+        "+++ b/helpers.py\n"
+        f"@@ -{helper_index + 1},1 +{helper_index + 1},1 @@\n"
+        f"-{old_line}\n"
+        f"+{new_line}\n"
+    )
+
+    report = ChangeMapper(
+        target / "main.py",
+        baseline_app_path=baseline / "main.py",
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+    candidates = {item.endpoint.identifier: item for item in report.candidate_endpoints}
+    assert set(candidates) == expected
+    assert {item.endpoint.identifier for item in report.affected_endpoints} == expected
+    for candidate in candidates.values():
+        provenance = candidate.endpoint.native_provenance
+        assert provenance is not None
+        assert provenance.side == SnapshotSide.TARGET
+        if candidate.endpoint.identifier == "GET /child/item":
+            assert any(edge.operation == "mount" for edge in provenance.assembly_chain)
 
 
 def test_global_prefix_ownership_is_limited_to_descendant_routes_and_side(
@@ -909,3 +1115,269 @@ def test_same_line_route_registrations_have_distinct_physical_occurrence_order(
     assert first_registration.source_span.start_line == second_registration.source_span.start_line
     assert first_registration.source_span != second_registration.source_span
     assert first_registration.occurrence_order < second_registration.occurrence_order
+
+
+@pytest.mark.parametrize(
+    "selection", ["factory_return", "bootstrap_registration", "bootstrap_helper_header"]
+)
+def test_public_two_snapshot_selected_factory_and_bootstrap_owner_changes(
+    tmp_path: Path, selection: str
+) -> None:
+    baseline = tmp_path / "baseline"
+    target = tmp_path / "target"
+    if selection == "factory_return":
+        before = (
+            "from fastapi import FastAPI\n"
+            "def create_app():\n"
+            "    selected = FastAPI()\n"
+            "    alternate = FastAPI()\n"
+            "    unused = FastAPI()\n"
+            "    @selected.get('/first')\n"
+            "    def first(): return 1\n"
+            "    @alternate.get('/second')\n"
+            "    def second(): return 2\n"
+            "    @unused.get('/unrelated')\n"
+            "    def unrelated(): return 3\n"
+            "    return selected\n"
+        )
+        after = before.replace("return selected", "return alternate")
+        options = {"app_entry": "main:create_app"}
+        expected = {"GET /first", "GET /second"}
+    elif selection == "bootstrap_registration":
+        before = (
+            "from fastapi import FastAPI\napp = FastAPI()\nunused = FastAPI()\n"
+            "def handler(): return 1\n"
+            "@app.get('/safe')\n"
+            "def safe(): return 2\n"
+            "def register(target, path):\n"
+            "    target.add_api_route(path, handler)\n"
+            "def run():\n"
+            "    register(app, '/old')\n"
+            "    register(unused, '/unrelated')\n"
+        )
+        after = before.replace("'/old'", "'/new'")
+        options = {"bootstrap_entry": "main:run"}
+        expected = {"GET /old", "GET /new"}
+    else:
+        before = (
+            "from fastapi import FastAPI\napp = FastAPI()\nunused = FastAPI()\n"
+            "def handler(): return 1\n"
+            "@app.get('/safe')\n"
+            "def safe(): return 2\n"
+            "def register(target, path='/old'):\n"
+            "    target.add_api_route(path, handler)\n"
+            "def unrelated(target):\n"
+            "    target.add_api_route('/unrelated', handler)\n"
+            "def run():\n"
+            "    register(app)\n"
+            "    unrelated(unused)\n"
+        )
+        after = before.replace("path='/old'", "path='/new'")
+        options = {"bootstrap_entry": "main:run"}
+        expected = {"GET /old", "GET /new"}
+    for root, source in ((baseline, before), (target, after)):
+        root.mkdir()
+        (root / "main.py").write_text(source, encoding="utf-8")
+    diff = "diff --git a/main.py b/main.py\n" + "".join(
+        difflib.unified_diff(
+            before.splitlines(True),
+            after.splitlines(True),
+            fromfile="a/main.py",
+            tofile="b/main.py",
+            n=0,
+        )
+    )
+    report = ChangeMapper(
+        target / "main.py",
+        baseline_app_path=baseline / "main.py",
+        secure_ast=True,
+        use_cache=False,
+        **options,
+    ).analyze_diff(diff)
+    assert {item.endpoint.identifier for item in report.candidate_endpoints} == expected
+    assert all(item.endpoint.identifier != "GET /unrelated" for item in report.candidate_endpoints)
+    assert all(item.endpoint.identifier != "GET /safe" for item in report.candidate_endpoints)
+    assert all(item.endpoint.native_provenance is not None for item in report.candidate_endpoints)
+
+
+def test_bootstrap_helper_definition_and_call_are_exact_structural_owners(tmp_path: Path) -> None:
+    app_file = tmp_path / "main.py"
+    app_file.write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "unused = FastAPI()\n"
+        "def handler(): pass\n"
+        "def register(target, path):\n"
+        "    target.add_api_route(path, handler)\n"
+        "def unrelated(target):\n"
+        "    target.add_api_route('/unrelated', handler)\n"
+        "def run():\n"
+        "    register(app, '/inside')\n"
+        "    unrelated(unused)\n",
+        encoding="utf-8",
+    )
+    endpoint = next(
+        item
+        for item in SecureASTExtractor(app_file, bootstrap_entry="main:run").extract_endpoints()
+        if item.path == "/inside"
+    )
+    provenance = endpoint.native_provenance
+    assert provenance is not None
+    helper_owners = [
+        owner
+        for owner in provenance.source_owners
+        if owner.owner_kind.startswith("bootstrap_helper_")
+    ]
+    assert {owner.owner_kind for owner in helper_owners} == {
+        "bootstrap_helper_call",
+        "bootstrap_helper_definition",
+    }
+    lines = app_file.read_text().splitlines()
+    call_line = next(i for i, line in enumerate(lines, 1) if "register(app" in line)
+    definition_line = next(i for i, line in enumerate(lines, 1) if "def register" in line)
+    unrelated_line = next(i for i, line in enumerate(lines, 1) if "def unrelated" in line)
+    assert native_route_structural_owners(endpoint, app_file, {call_line})
+    assert native_route_structural_owners(endpoint, app_file, {definition_line})
+    assert native_route_structural_owners(endpoint, app_file, {unrelated_line}) == ()
+
+
+def test_public_mapper_ignores_unrelated_statement_inside_invoked_bootstrap_helper(
+    tmp_path: Path,
+) -> None:
+    baseline = tmp_path / "baseline"
+    target = tmp_path / "target"
+    before = (
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "def handler(): return 1\n"
+        "def register(target, path):\n"
+        "    target.add_api_route(path, handler)\n"
+        "    marker = 1\n"
+        "def run():\n"
+        "    register(app, '/stable')\n"
+    )
+    after = before.replace("    marker = 1", "    marker = 2")
+    for root, source in ((baseline, before), (target, after)):
+        root.mkdir()
+        (root / "main.py").write_text(source, encoding="utf-8")
+    diff = "diff --git a/main.py b/main.py\n" + "".join(
+        difflib.unified_diff(
+            before.splitlines(True),
+            after.splitlines(True),
+            fromfile="a/main.py",
+            tofile="b/main.py",
+            n=0,
+        )
+    )
+    report = ChangeMapper(
+        target / "main.py",
+        baseline_app_path=baseline / "main.py",
+        bootstrap_entry="main:run",
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+    assert not report.candidate_endpoints
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "expected"),
+    [
+        (
+            "def run(path='/old'):\n    app.add_api_route(path, handler)\n",
+            "def run(path='/new'):\n    app.add_api_route(path, handler)\n",
+            {"GET /old", "GET /new"},
+        ),
+        (
+            "def run():\n    path = '/old'\n    app.add_api_route(path, handler)\n",
+            "def run():\n    path = '/new'\n    app.add_api_route(path, handler)\n",
+            {"GET /old", "GET /new"},
+        ),
+        (
+            "def attach(target, prefix='/old'):\n    target.include_router(router, prefix=prefix)\n"
+            "def run():\n    attach(app)\n",
+            "def attach(target, prefix='/new'):\n    target.include_router(router, prefix=prefix)\n"
+            "def run():\n    attach(app)\n",
+            {"GET /old/item", "GET /new/item"},
+        ),
+        (
+            "def attach(target, path='/old'):\n    target.mount(path, child)\n"
+            "def run():\n    attach(app)\n",
+            "def attach(target, path='/new'):\n    target.mount(path, child)\n"
+            "def run():\n    attach(app)\n",
+            {"GET /old/item", "GET /new/item"},
+        ),
+    ],
+    ids=["entry-default", "entry-local", "include-default", "mount-default"],
+)
+def test_public_mapper_retains_bootstrap_route_input_provenance(
+    tmp_path: Path, before: str, after: str, expected: set[str]
+) -> None:
+    base = (
+        "from fastapi import APIRouter, FastAPI\n"
+        "app = FastAPI()\n"
+        "router = APIRouter()\n"
+        "@router.get('/item')\n"
+        "def handler(): pass\n"
+        "child = FastAPI()\n"
+        "@child.get('/item')\n"
+        "def child_handler(): pass\n"
+    )
+    baseline = tmp_path / "baseline"
+    target = tmp_path / "target"
+    baseline.mkdir()
+    target.mkdir()
+    old_source = base + before
+    new_source = base + after
+    (baseline / "main.py").write_text(old_source, encoding="utf-8")
+    (target / "main.py").write_text(new_source, encoding="utf-8")
+    diff = "diff --git a/main.py b/main.py\n" + "".join(
+        difflib.unified_diff(
+            old_source.splitlines(True),
+            new_source.splitlines(True),
+            fromfile="a/main.py",
+            tofile="b/main.py",
+            n=0,
+        )
+    )
+    report = ChangeMapper(
+        target / "main.py",
+        baseline_app_path=baseline / "main.py",
+        bootstrap_entry="main:run",
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+    assert {item.endpoint.identifier for item in report.candidate_endpoints} == expected
+
+
+def test_public_mapper_does_not_own_unrelated_bootstrap_statement(tmp_path: Path) -> None:
+    baseline = tmp_path / "baseline"
+    target = tmp_path / "target"
+    before = (
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "def handler(): pass\n"
+        "def run():\n"
+        "    marker = 1\n"
+        "    app.add_api_route('/stable', handler)\n"
+    )
+    after = before.replace("marker = 1", "marker = 2")
+    for root, source in ((baseline, before), (target, after)):
+        root.mkdir()
+        (root / "main.py").write_text(source, encoding="utf-8")
+    diff = "diff --git a/main.py b/main.py\n" + "".join(
+        difflib.unified_diff(
+            before.splitlines(True),
+            after.splitlines(True),
+            fromfile="a/main.py",
+            tofile="b/main.py",
+            n=0,
+        )
+    )
+    report = ChangeMapper(
+        target / "main.py",
+        baseline_app_path=baseline / "main.py",
+        bootstrap_entry="main:run",
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+    assert not report.candidate_endpoints

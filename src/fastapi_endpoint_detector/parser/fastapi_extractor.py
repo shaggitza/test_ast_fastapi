@@ -567,10 +567,12 @@ class FastAPIExtractor:
             if candidate is not None and all(candidate is not seen for seen in candidates):
                 candidates.append(candidate)
         root = None
+        dependency_route = route
         for candidate in candidates:
             available, candidate_root = self._safe_attribute(candidate, "dependant")
             if available and candidate_root is not None:
                 root = candidate_root
+                dependency_route = candidate
                 break
         source_path, source_line = self._limitation_source(handler)
         if root is None:
@@ -824,7 +826,15 @@ class FastAPIExtractor:
             if capped:
                 break
 
-        overrides = getattr(self._app, "dependency_overrides", None)
+        # APIRoute binds the override provider that its request handler uses.
+        # A mounted child's provider is independent of the selected parent.
+        # An explicit None means no provider; only legacy route-like objects
+        # without this attribute fall back to the selected application.
+        has_provider, provider = self._safe_attribute(
+            dependency_route, "dependency_overrides_provider"
+        )
+        provider = provider if has_provider else self._app
+        overrides = getattr(provider, "dependency_overrides", None)
         try:
             overrides_visible = bool(overrides)
         except Exception:
