@@ -131,3 +131,20 @@ def test_unconfigured_factory_and_direct_formatter_constructors_remain_compatibl
     assert "Chain: service.py → items" in get_formatter("text").format(report)
     assert "**Chain:**" in get_formatter("markdown").format(report)
     assert "Chain:" in get_formatter("html").format(report)
+
+
+@pytest.mark.parametrize("name", ["text", "markdown", "html", "json", "yaml"])
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("show_confidence", "false"),
+        ("show_dependency_chain", 1),
+        ("colorize", None),
+        ("verbose", []),
+    ],
+)
+def test_formatter_factory_rejects_non_boolean_presentation_values(
+    name: str, option: str, value: object
+) -> None:
+    with pytest.raises(ValueError, match=f"Output option '{option}'.*'{name}'.*must be a bool"):
+        get_formatter(name, {option: value})

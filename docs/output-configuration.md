@@ -33,4 +33,6 @@ than silently dropping data. `colorize=false` is only meaningful for terminal te
 also rejected by Markdown and HTML.
 
 The factory accepts `OutputConfig` or a mapping with the four known option names. Unknown mapping
-keys and unknown format names raise `ValueError` with the invalid name.
+keys and unknown format names raise `ValueError` with the invalid name. Every supplied option
+value must be a boolean; non-boolean values raise `ValueError` naming the option and format instead
+of relying on Python truthiness.
