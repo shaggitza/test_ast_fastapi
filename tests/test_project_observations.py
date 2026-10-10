@@ -13,6 +13,42 @@ from fastapi_endpoint_detector.analyzer.project_observations import (
 from fastapi_endpoint_detector.parser.secure_ast_extractor import SecureASTExtractor
 
 
+def test_trusted_surface_identity_distinguishes_assembly_occurrences(tmp_path: Path) -> None:
+    source = (
+        "from fastapi import FastAPI, APIRouter\napp = FastAPI()\nrouter = APIRouter()\n"
+        "@router.get('/items')\ndef items(): pass\n"
+        "app.include_router(router, prefix='/one')\n"
+        "app.include_router(router, prefix='/two')\n"
+        "app.include_router(router, prefix='/one')\n"
+    )
+    (tmp_path / "main.py").write_text(source)
+    (tmp_path / "client.ts").write_text(
+        "fetch('https://api.example.test/one/items');\n"
+        "fetch('https://api.example.test/two/items');\n"
+    )
+    endpoints = SecureASTExtractor(tmp_path / "main.py").extract_endpoints()
+    surfaces = established_surfaces(endpoints)
+    assert len(surfaces) == 3
+    assert len({item.surface_id for item in surfaces}) == 3
+    trusted = next(item for item in surfaces if item.path == "/one/items")
+    snapshot = scan_project_observations(
+        tmp_path,
+        endpoints=endpoints,
+        trusted_server_origins={trusted.surface_id: "https://api.example.test"},
+    )
+    assert [
+        (item.surface_id, item.observation.route_path) for item in snapshot.surface_matches
+    ] == [(trusted.surface_id, "/one/items")]
+
+    other = tmp_path / "other_checkout"
+    other.mkdir()
+    (other / "main.py").write_text(source)
+    other_endpoints = SecureASTExtractor(other / "main.py").extract_endpoints()
+    assert [item.surface_id for item in established_surfaces(other_endpoints)] == [
+        item.surface_id for item in surfaces
+    ]
+
+
 def test_project_adapter_preserves_occurrences_queries_and_explicit_origin_join(
     tmp_path: Path,
 ) -> None:
