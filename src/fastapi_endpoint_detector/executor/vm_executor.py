@@ -527,12 +527,13 @@ class VMExecutor:
                 worker_request["phase_manifest_sha256"] = (
                     "sha256:" + hashlib.sha256(encoded_manifest).hexdigest()
                 )
+            mounts, request_arguments = self._worker_request_transport(worker_request, cidfile)
+            command.extend(mounts)
             cli = [
                 "python",
                 "-m",
                 "fastapi_endpoint_detector.parser.runtime_worker",
-                "--request-json",
-                json.dumps(worker_request, separators=(",", ":"), allow_nan=False),
+                *request_arguments,
             ]
         else:
             if app_entry is not None or bootstrap_entry is not None:
@@ -565,6 +566,23 @@ class VMExecutor:
         command.extend(f"{key}={value}" for key, value in sorted(self.CLEAN_ENV.items()))
         command.extend(cli)
         return command
+
+    def _worker_request_transport(
+        self, request: dict[str, Any], cidfile: Path
+    ) -> tuple[list[str], list[str]]:
+        raw_request = json.dumps(request, separators=(",", ":"), allow_nan=False)
+        encoded_request = raw_request.encode("utf-8")
+        if len(encoded_request) > 8 * 1024 * 1024:
+            raise VMExecutorError("runtime worker request exceeded the byte limit")
+        if len(encoded_request) <= 64 * 1024:
+            return [], ["--request-json", raw_request]
+        request_path = cidfile.with_suffix(".request.json")
+        # The private invocation directory owns this immutable transport.
+        with request_path.open("xb") as request_file:
+            request_file.write(encoded_request)
+        request_path.chmod(0o444)
+        target = "/workspace/runtime-request.json"
+        return ["--mount", self._mount(request_path, target)], ["--request-file", target]
 
     @staticmethod
     def _container_phase_manifest(
@@ -776,6 +794,14 @@ class VMExecutor:
                 phase_manifest,
                 phase_manifest_source_root,
             )
+            request_payload: dict[str, Any] = {}
+            if phase_manifest is not None:
+                raw_request = (
+                    cidfile.with_suffix(".request.json").read_text(encoding="utf-8")
+                    if command[-2] == "--request-file"
+                    else command[-1]
+                )
+                request_payload = json.loads(raw_request)
             stdout, _stderr = self._execute_bounded(command, cidfile, name)
         if output_format != "json":
             return stdout
@@ -790,8 +816,7 @@ class VMExecutor:
             raise VMExecutorError(f"runtime worker failed: {message[:2048]}")
         if phase_manifest is not None:
             try:
-                request = json.loads(command[-1])
-                expected_manifest = request["phase_manifest_sha256"]
+                expected_manifest = request_payload["phase_manifest_sha256"]
                 observation = PhaseObservation.model_validate(payload["phase_observation"])
             except (KeyError, TypeError, ValueError) as exc:
                 raise VMExecutorError(

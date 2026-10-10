@@ -520,3 +520,38 @@ def test_worker_analyze_uses_the_selected_runtime_inventory(tmp_path: Path, monk
     assert payload["phase"] == "analyze"
     assert payload["total_endpoints"] == 1
     assert payload["candidate_endpoints"] == []
+
+
+def test_request_file_cli_preserves_large_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    raw = json.dumps({"transport_control": "x" * (150 * 1024)})
+    request_file = tmp_path / "request.json"
+    request_file.write_text(raw, encoding="utf-8")
+    seen = []
+
+    def fake_request(value: str) -> tuple[dict[str, object], int]:
+        seen.append(value)
+        return {"status": "success"}, 0
+
+    monkeypatch.setattr(runtime_worker, "run_request", fake_request)
+    monkeypatch.setattr(sys, "argv", ["runtime_worker", "--request-file", str(request_file)])
+    assert runtime_worker.main() == 0
+    assert seen == [raw]
+    assert json.loads(capsys.readouterr().out) == {"status": "success"}
+
+
+def test_request_file_cli_rejects_oversized_payload_before_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request_file = tmp_path / "request.json"
+    request_file.write_bytes(b"x" * (8 * 1024 * 1024 + 1))
+
+    def unexpected_request(value: str) -> tuple[dict[str, object], int]:
+        raise AssertionError("oversized input must not reach application work")
+
+    monkeypatch.setattr(runtime_worker, "run_request", unexpected_request)
+    monkeypatch.setattr(sys, "argv", ["runtime_worker", "--request-file", str(request_file)])
+    with pytest.raises(SystemExit) as error:
+        runtime_worker.main()
+    assert error.value.code == 2

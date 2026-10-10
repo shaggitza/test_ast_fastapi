@@ -817,6 +817,9 @@ def _invoke_record_phase(
         canary_receipt_sha256=evidence.canary_receipt_sha256,
         runtime_version=authority.runtime_version,
     )
+    # Staging and a preceding phase may outlive the admission receipt.
+    # Reauthenticate immediately before every application-code invocation.
+    _validate_evidence(evidence, request)
     result = runner(mode, phase, replace(request, custody_binding=binding))
     receipt = verify_runtime_custody(
         result.custody_receipt,

@@ -664,10 +664,21 @@ def main() -> int:
     parser = argparse.ArgumentParser(add_help=False)
     request_mode = parser.add_mutually_exclusive_group(required=True)
     request_mode.add_argument("--request-json")
+    request_mode.add_argument("--request-file", type=Path)
     request_mode.add_argument("--result", type=Path)
     args = parser.parse_args()
-    if args.request_json is not None:
-        payload, status = run_request(args.request_json)
+    if args.request_json is not None or args.request_file is not None:
+        raw_request = args.request_json
+        if args.request_file is not None:
+            try:
+                with args.request_file.open("rb") as request_file:
+                    encoded_request = request_file.read(8 * 1024 * 1024 + 1)
+                if len(encoded_request) > 8 * 1024 * 1024:
+                    parser.error("runtime worker request exceeded the byte limit")
+                raw_request = encoded_request.decode("utf-8")
+            except (OSError, UnicodeError):
+                parser.error("runtime worker request file is unavailable or invalid")
+        payload, status = run_request(raw_request)
         if status == 2:
             return status
         sys.stdout.write(_encoded_json(payload).decode("utf-8"))

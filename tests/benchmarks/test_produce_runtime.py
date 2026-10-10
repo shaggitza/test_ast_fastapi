@@ -7,6 +7,7 @@ import hmac
 import json
 import subprocess
 import time
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -894,3 +895,49 @@ def test_secure_public_command_emits_source_bound_startup_manifest(tmp_path: Pat
     assert entries[0]["callback"]["symbol"] == "startup"
     assert entries[0]["callback"]["file"] == str(source.resolve())
     assert entries[0]["callback_file_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize("expired_lane", [3, 4])
+def test_runtime_admission_rechecked_after_each_frozen_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, expired_lane: int
+) -> None:
+    spec = _inputs(tmp_path)
+    key = "controlled-test-secret"
+    custody_key = "controlled-custody-test-secret-at-least-32-bytes"
+    monkeypatch.setenv("FASTAPI_DETECTOR_RUNTIME_TRUST_KEY", key)
+    monkeypatch.setenv("FASTAPI_DETECTOR_RUNTIME_TRUST_KEY_ID", "test-authority")
+    monkeypatch.setenv("FASTAPI_DETECTOR_RUNTIME_TRUST_VERSION", "controlled protocol fixture")
+    monkeypatch.setenv("FASTAPI_DETECTOR_RUNTIME_CUSTODY_KEY", custody_key)
+    monkeypatch.setenv("FASTAPI_DETECTOR_RUNTIME_CUSTODY_KEY_ID", "fixture-custody-authority")
+    receipt = _signed_evidence(_request(spec), key)
+    clock = [receipt.issued_at]
+    monkeypatch.setattr(producer.time, "time", lambda: clock[0])
+    original_lane = producer._frozen_lane_request
+    lanes = 0
+
+    @contextmanager
+    def expiring_lane(*args: Any, **kwargs: Any) -> Any:
+        nonlocal lanes
+        with original_lane(*args, **kwargs) as request:
+            lanes += 1
+            if lanes == expired_lane:
+                clock[0] = receipt.expires_at
+            yield request
+
+    monkeypatch.setattr(producer, "_frozen_lane_request", expiring_lane)
+    runner = SignedFakeRunner(custody_key)
+    outputs = produce_snapshot_pair(
+        spec,
+        EntryConfiguration(None, None, "app", "mypy"),
+        tmp_path / "expired-admission",
+        runner=runner,
+        runtime_evidence=receipt,
+    )
+    expected = [("secure", "list"), ("secure", "impact")]
+    if expired_lane == 4:
+        expected.append(("runtime", "list"))
+    assert runner.calls == expected
+    runtime = json.loads(outputs["runtime"].read_text(encoding="utf-8"))
+    assert runtime["status"] == "failure"
+    assert "stale, expired" in runtime["failure"]["message"]
+    assert "runtime_custody" not in runtime

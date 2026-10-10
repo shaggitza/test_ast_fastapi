@@ -817,3 +817,34 @@ def test_image_inspection_requires_a_configuration_object() -> None:
     raw = json.dumps([{"RepoDigests": [_DIGEST]}])
     with pytest.raises(VMExecutorError, match="Config"):
         VMExecutor._validated_image_inspection(raw)
+
+
+def test_large_phase_request_uses_private_readonly_file(tmp_path: Path) -> None:
+    app = tmp_path / "application.py"
+    app.write_text("app = None\n", encoding="utf-8")
+    executor = _executor(tmp_path)
+    executor._resolved_image = executor.image
+    manifest = _phase_manifest_for_test(app)
+    entry = manifest["entries"][0]
+    manifest["entries"] = [
+        {**entry, "registration": {**entry["registration"], "column": n, "end_column": n + 1}}
+        for n in range(300)
+    ]
+    cidfile = tmp_path / "large.cid"
+    command = executor._container_command(
+        app, None, "app", "json", cidfile, "large-phase", phase_manifest=manifest
+    )
+    assert command[-2:] == ["--request-file", "/workspace/runtime-request.json"]
+    assert max(len(item.encode()) for item in command) < 64 * 1024
+    request_path = cidfile.with_suffix(".request.json")
+    assert request_path.stat().st_mode & 0o777 == 0o444
+    assert executor._mount(request_path, command[-1]) in command
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    assert len(request["phase_manifest"]["entries"]) == 300
+    assert (
+        request["phase_manifest_sha256"]
+        == "sha256:"
+        + hashlib.sha256(
+            json.dumps(request["phase_manifest"], sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )
