@@ -82,6 +82,40 @@ def test_changed_startup_handler_is_a_framework_lifecycle_candidate(tmp_path: Pa
     assert report.candidate_endpoints[0].confidence == ConfidenceLevel.HIGH
 
 
+def test_dynamic_lifecycle_alias_is_reported_as_partial_inventory(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "register = app.add_event_handler\n"
+        "def choose_callback(): return callback\n"
+        "def callback(): pass\n"
+        "register('startup', choose_callback())\n",
+        encoding="utf-8",
+    )
+    diff = tmp_path / "change.diff"
+    diff.write_text(
+        "diff --git a/main.py b/main.py\n"
+        "--- a/main.py\n"
+        "+++ b/main.py\n"
+        "@@ -6,1 +6,1 @@\n"
+        "-def callback(): pass\n"
+        "+def callback(): return 1\n",
+        encoding="utf-8",
+    )
+
+    report = ChangeMapper(
+        app_path=tmp_path,
+        config=Config(analysis=AnalysisConfig(surface_preset="framework-v1")),
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+
+    assert report.inventory_status.value == "conditional"
+    assert any(
+        "callback identity is unresolved" in item.reason for item in report.inventory_limitations
+    )
+
+
 def test_changed_class_middleware_dispatch_is_exact_framework_candidate(
     tmp_path: Path,
 ) -> None:
