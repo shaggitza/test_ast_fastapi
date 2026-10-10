@@ -162,6 +162,49 @@ fetch(`${base}/foreign`, {method: 'GET'});
     assert observations == ()
 
 
+def test_template_interpolation_rebinding_invalidates_later_global_join() -> None:
+    surfaces = (EstablishedSurface("admin", "/admin", "GET", "https://api.test", True),)
+    for source in (
+        "fetch(`${base}/api/content?${fetch=foreign}`, {method:'GET'}); fetch('https://api.test/admin');",
+        "fetch(`${base}/api/content?${({fetch}=foreign)}`, {method:'GET'}); fetch('https://api.test/admin');",
+    ):
+        observations, uncertain = extract_client_observation_inventory(source, Path("client.ts"))
+        assert observations == ()
+        assert uncertain == ()
+        assert join_established_surfaces(observations, surfaces) == ()
+
+
+def test_template_query_strings_comments_and_foreign_members_are_not_rebindings() -> None:
+    source = r"""fetch(`${api.base}/items?q=${"fetch=foreign"}`, {method:'GET'});
+fetch(`${base}/items?q=${/* fetch=foreign */ query}`, {method:'GET'});
+fetch(`${base}/items?q=${Foreign.fetch}`, {method:'GET'});
+fetch('https://api.test/admin');"""
+    observations = extract_client_observations(source, Path("client.ts"))
+    assert [(item.route_path, item.query, item.origin) for item in observations] == [
+        ("/items", "dynamic", None),
+        ("/items", "dynamic", None),
+        ("/items", "dynamic", None),
+        ("/admin", None, "https://api.test"),
+    ]
+
+
+def test_escaped_template_interpolation_text_does_not_rebind_global_names() -> None:
+    observations = extract_client_observations(
+        r"fetch(`\${fetch=foreign}`); fetch('/still-global');", Path("client.ts")
+    )
+    assert [item.route_path for item in observations] == ["/still-global"]
+
+
+def test_unsupported_nested_template_expression_abstains_file_wide() -> None:
+    for source in (
+        "fetch(`${base}/items?q=${`nested ${fetch=foreign}`}`, {method:'GET'}); "
+        "fetch('https://api.test/admin');",
+        "fetch(`${base}/items?q=${/fetch=foreign/.test(query)}`, {method:'GET'}); "
+        "fetch('https://api.test/admin');",
+    ):
+        assert extract_client_observations(source) == ()
+
+
 def test_foreign_fetch_receiver_is_not_a_global_fetch_call() -> None:
     observations = extract_client_observations(
         "Foreign.fetch(`${base}/foreign`, {method:'GET'}); "

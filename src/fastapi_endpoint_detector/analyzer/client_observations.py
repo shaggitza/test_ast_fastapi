@@ -298,7 +298,9 @@ def _template_url(  # noqa: PLR0911
     if close <= 2:
         return None
     base_expression = raw[2:close]
-    if any(char in base_expression for char in "{} `"):
+    # This is deliberately a finite base grammar. Do not accept arbitrary
+    # expressions whose braces may have confused the outer template lexer.
+    if re.fullmatch(r"[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*", base_expression) is None:
         return None
     suffix = raw[close + 1 :]
     if not suffix.startswith("/") or "#" in suffix:
@@ -318,6 +320,77 @@ def _template_url(  # noqa: PLR0911
         return None
     protocol, default, route, _query, _origin = parsed
     return protocol, default, route, query_evidence, None
+
+
+def _template_write_tokens(token: _Token) -> tuple[list[list[_Token]], bool]:  # noqa: PLR0912, PLR0915
+    """Return lexed `${...}` expressions, failing closed on unknown structure."""
+    raw = token.value
+    result: list[list[_Token]] = []
+    cursor = 0
+    while True:
+        opening = raw.find("${", cursor)
+        if opening < 0:
+            return result, True
+        slash_count = 0
+        escape_cursor = opening - 1
+        while escape_cursor >= 0 and raw[escape_cursor] == "\\":
+            slash_count += 1
+            escape_cursor -= 1
+        if slash_count % 2:
+            cursor = opening + 2
+            continue
+        start = opening + 2
+        depth, pos = 1, start
+        quote = ""
+        escaped = False
+        while pos < len(raw):
+            char = raw[pos]
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = ""
+            elif raw.startswith("//", pos):
+                newline = _LINE_END.search(raw, pos + 2)
+                if newline is None:
+                    return result, False
+                pos = newline.end() - 1
+            elif raw.startswith("/*", pos):
+                end = raw.find("*/", pos + 2)
+                if end < 0:
+                    return result, False
+                pos = end + 1
+            elif char == "/":
+                # Regex literals and division need expression context. Keep
+                # unsupported slash expressions fail-closed for this file.
+                return result, False
+            elif char in "'\"":
+                quote = char
+            elif char == "`":
+                # Nested templates need a full JS lexer to distinguish their
+                # own interpolations. Treat the containing file as uncertain.
+                return result, False
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    expression = raw[start:pos]
+                    nested = _tokens(expression)
+                    offset = token.start + 1 + start
+                    result.append(
+                        [
+                            _Token(item.kind, item.value, item.start + offset, item.end + offset)
+                            for item in nested
+                        ]
+                    )
+                    cursor = pos + 1
+                    break
+            pos += 1
+        else:
+            return result, False
 
 
 def _axios_config(arg: list[_Token]) -> tuple[str, str] | None:
@@ -647,6 +720,24 @@ def _shadowed_client_names(tokens: list[_Token], source: str) -> tuple[set[str],
                     if imported.kind == "id":
                         bind(imported)
             cursor = source_index + 1
+    # Interpolations are executable expressions, even though the main lexer
+    # keeps each template opaque for URL extraction. Account for writes there
+    # before making any file-wide browser-global observations.
+    for template in (item for item in tokens if item.kind == "template"):
+        expression_tokens, valid = _template_write_tokens(template)
+        if not valid:
+            shadowed.update(names)
+            continue
+        for expression in expression_tokens:
+            has_assignment = any(item.value == "=" for item in expression)
+            for index, expression_token in enumerate(expression):
+                if (
+                    expression_token.kind == "id"
+                    and expression_token.value in names
+                    and (index == 0 or expression[index - 1].value not in {".", "["})
+                    and (has_assignment or _has_assignment_operator(expression, index, source))
+                ):
+                    bind(expression_token)
     return shadowed, axios_imports
 
 
