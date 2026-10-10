@@ -100,6 +100,12 @@ def native_route_structural_owners(
             add("dependency", dependency.source_span)
     for dependency in provenance.registration.dependency_expressions:
         add("dependency", dependency.source_span)
+
+    for prefix_edge in provenance.assembly_chain:
+        if prefix_edge.operation != "include_router":
+            continue
+        for span in prefix_edge.prefix_binding_spans:
+            add("assembly", span)
     return tuple(matches)
 
 
@@ -609,6 +615,7 @@ class _Edge:
     operation: Literal["include_router", "mount"] | None = None
     source_span: NativeSourceSpan | None = None
     dependency_expressions: tuple[NativeRouteDependencyExpressionEvidence, ...] = ()
+    prefix_binding_spans: tuple[NativeSourceSpan, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1931,6 +1938,7 @@ class SecureASTExtractor:
                             resolved_prefix=edge.prefix,
                             source_span=edge.source_span,
                             dependency_expressions=edge.dependency_expressions,
+                            prefix_binding_spans=edge.prefix_binding_spans,
                         ),
                     )
                 visit(
@@ -4852,6 +4860,7 @@ class SecureASTExtractor:
                             "include",
                             _keyword_expr(call, "dependencies"),
                         ),
+                        self._literal_binding_spans(prefix_expression, module, call.lineno),
                     )
                 )
                 return _DirectEffectResult("modeled")
@@ -5779,6 +5788,53 @@ class SecureASTExtractor:
             .evaluate_string(expression)
             .string
         )
+
+    def _literal_binding_spans(
+        self, expression: ast.expr | None, module: _Module, line: int
+    ) -> tuple[NativeSourceSpan, ...]:
+        """Capture unique module assignment statements used by a static string."""
+        if expression is None or self._literal_string(expression, module, line) is None:
+            return ()
+        statements: dict[str, ast.stmt] = {}
+        for statement in module.tree.body:
+            if isinstance(statement, ast.Assign):
+                targets = statement.targets
+            elif isinstance(statement, ast.AnnAssign):
+                targets = [statement.target]
+            else:
+                continue
+            for target in targets:
+                for candidate in ast.walk(target):
+                    if isinstance(candidate, ast.Name) and isinstance(candidate.ctx, ast.Store):
+                        statements[candidate.id] = statement
+
+        spans: dict[tuple[int, int], NativeSourceSpan] = {}
+        active: set[str] = set()
+
+        def visit_name(name: str) -> None:
+            if name in active or len(module.assignments.get(name, ())) != 1:
+                return
+            statement = statements.get(name)
+            if (
+                statement is None
+                or self._latest_binding_line(module, name, line) != statement.lineno
+            ):
+                return
+            value = statement.value if isinstance(statement, (ast.Assign, ast.AnnAssign)) else None
+            if not isinstance(value, ast.expr) or self._literal_string(value, module, line) is None:
+                return
+            active.add(name)
+            span = _native_span(module.path, statement)
+            spans[(span.start_line, span.start_column)] = span
+            for child in ast.walk(value):
+                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load):
+                    visit_name(child.id)
+            active.remove(name)
+
+        for candidate in ast.walk(expression):
+            if isinstance(candidate, ast.Name) and isinstance(candidate.ctx, ast.Load):
+                visit_name(candidate.id)
+        return tuple(spans.values())
 
     def _literal_methods(
         self,

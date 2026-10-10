@@ -5038,7 +5038,12 @@ def test_imperative_route_rejects_conditionally_shadowed_staticmethod(
         "(lambda: None)(staticmethod := decorator)\n",
         "if (staticmethod := decorator):\n    pass\n",
         "values = [(staticmethod := decorator) for x in items]\n",
-        "try:\n    pass\nexcept* Exception as staticmethod:\n    pass\n",
+        pytest.param(
+            "try:\n    pass\nexcept* Exception as staticmethod:\n    pass\n",
+            marks=pytest.mark.skipif(
+                sys.version_info < (3, 11), reason="Exception groups require Python 3.11"
+            ),
+        ),
         "match value:\n    case {'key': staticmethod}:\n        pass\n",
         "match value:\n    case [*staticmethod]:\n        pass\n",
     ],
