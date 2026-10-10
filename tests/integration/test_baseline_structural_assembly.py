@@ -104,6 +104,45 @@ def test_missing_baseline_preserves_target_handler_findings(tmp_path: Path) -> N
     assert any("baseline" in warning.lower() for warning in report.warnings)
 
 
+@pytest.mark.parametrize("baseline_state", ["absent", "failed"])
+def test_same_line_target_match_preserves_unresolved_baseline_removal(
+    tmp_path: Path, baseline_state: str
+) -> None:
+    app = tmp_path / "main.py"
+    app.write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/items')\n"
+        "def items():\n    return 2\n",
+        encoding="utf-8",
+    )
+    diff = """diff --git a/main.py b/main.py
+--- a/main.py
++++ b/main.py
+@@ -4,2 +4,2 @@
+ def items():
+-    return 1
++    return 2
+"""
+    report = ChangeMapper(
+        app,
+        baseline_app_path=tmp_path / "missing.py" if baseline_state == "failed" else None,
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+    candidate = next(
+        item for item in report.candidate_endpoints if item.endpoint.identifier == "GET /items"
+    )
+    assert candidate.confidence == ConfidenceLevel.HIGH
+    assert any(
+        item.producer == EvidenceProducer.DIRECT
+        and item.changed_location is not None
+        and item.changed_location.line_number == 5
+        for item in candidate.effect_evidence
+    )
+    assert report.analysis_completeness == "partial"
+    assert {line for orphan in report.orphan_changes for line in orphan.removed_lines} == {5}
+    assert not any(orphan.added_lines for orphan in report.orphan_changes)
+
+
 def test_removed_baseline_handler_body_keeps_direct_high_confidence_evidence(
     tmp_path: Path,
 ) -> None:
