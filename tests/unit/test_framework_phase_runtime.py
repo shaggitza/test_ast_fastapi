@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import hashlib
 import inspect
@@ -19,6 +20,21 @@ from fastapi_endpoint_detector.analyzer.framework_phase_runtime import (
 )
 from fastapi_endpoint_detector.models.surface_contract import load_surface_preset
 from fastapi_endpoint_detector.parser import runtime_worker
+
+
+def _definition_line(callback: Any) -> int:
+    """Use the same definition-line domain as the static AST manifest."""
+    code = callback.__code__
+    tree = ast.parse(Path(code.co_filename).read_bytes())
+    return next(
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == code.co_name
+        and min([node.lineno, *(item.lineno for item in node.decorator_list)])
+        == code.co_firstlineno
+    )
+
 
 _DIGEST = "sha256:" + "a" * 64
 
@@ -119,7 +135,7 @@ def test_lifespan_observation_requires_loaded_callback_identity_and_records_both
     manifest = _manifest(
         callback,
         path=Path(callback.__code__.co_filename),
-        line=callback.__code__.co_firstlineno,
+        line=_definition_line(callback),
         phases=("startup", "shutdown"),
     )
     _install_app(monkeypatch, _successful_lifespan)
@@ -128,7 +144,7 @@ def test_lifespan_observation_requires_loaded_callback_identity_and_records_both
 
     assert result["execution_status"] == "completed"
     assert [item["phase"] for item in result["observed"]] == ["startup", "shutdown"]
-    assert result["observed"][0]["registration"]["line"] == callback.__code__.co_firstlineno
+    assert result["observed"][0]["registration"]["line"] == _definition_line(callback)
     assert result["unavailable"] == []
 
 
@@ -194,7 +210,7 @@ def test_lifespan_startup_failure_does_not_claim_shutdown(
     manifest = _manifest(
         callback,
         path=Path(callback.__code__.co_filename),
-        line=callback.__code__.co_firstlineno,
+        line=_definition_line(callback),
     )
     _install_app(monkeypatch, _failing_lifespan)
 
@@ -215,7 +231,7 @@ def test_lifespan_shutdown_failure_discards_partial_startup_observation(
     manifest = _manifest(
         callback,
         path=Path(callback.__code__.co_filename),
-        line=callback.__code__.co_firstlineno,
+        line=_definition_line(callback),
         phases=("startup", "shutdown"),
     )
     _install_app(monkeypatch, asynccontextmanager(shutdown_failing_lifespan))
@@ -233,7 +249,7 @@ def test_startup_complete_does_not_attribute_a_callback_that_did_not_run(
     manifest = _manifest(
         callback,
         path=Path(callback.__code__.co_filename),
-        line=callback.__code__.co_firstlineno,
+        line=_definition_line(callback),
     )
 
     class SkippingASGIApp:
@@ -265,7 +281,7 @@ def test_lifespan_rejects_out_of_order_asgi_messages(
     manifest = _manifest(
         callback,
         path=Path(callback.__code__.co_filename),
-        line=callback.__code__.co_firstlineno,
+        line=_definition_line(callback),
     )
 
     class InvalidASGIApp:
@@ -307,7 +323,7 @@ def test_manifest_source_tamper_is_unavailable_before_callback_execution(
     manifest = _manifest(
         callback,
         path=Path(callback.__code__.co_filename),
-        line=callback.__code__.co_firstlineno,
+        line=_definition_line(callback),
     )
     manifest["entries"][0]["callback_file_sha256"] = "b" * 64
     _install_app(monkeypatch, _successful_lifespan)
@@ -323,7 +339,7 @@ def test_manifest_contract_tamper_is_rejected() -> None:
     manifest = _manifest(
         callback,
         path=Path(callback.__code__.co_filename),
-        line=callback.__code__.co_firstlineno,
+        line=_definition_line(callback),
     )
     manifest["entries"][0]["contract_id"] = "fastapi-on-event"
 

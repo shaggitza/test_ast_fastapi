@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import asyncio
 import hashlib
 import inspect
@@ -12,7 +13,9 @@ import re
 import sys
 import threading
 from contextlib import redirect_stderr, redirect_stdout, suppress
+from functools import lru_cache
 from pathlib import Path
+from types import CodeType
 from typing import Any, Literal
 
 from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
@@ -288,6 +291,31 @@ def _analyze(request: dict[str, Any], endpoints: Any) -> dict[str, Any]:
     }
 
 
+@lru_cache(maxsize=4096)
+def _runtime_code_identity(code: CodeType) -> tuple[str, str, int] | None:
+    """Normalize a loaded code object's decorator line to its AST definition."""
+    path = Path(code.co_filename)
+    try:
+        with path.open("rb") as stream:
+            source = stream.read(1024 * 1024 + 1)
+        if len(source) > 1024 * 1024:
+            return None
+        tree = ast.parse(source)
+        definitions = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == code.co_name
+            and min([node.lineno, *(item.lineno for item in node.decorator_list)])
+            == code.co_firstlineno
+        ]
+    except (OSError, SyntaxError, ValueError):
+        return None
+    if len(definitions) != 1:
+        return None
+    return str(path.resolve()), code.co_name, definitions[0].lineno
+
+
 def _runtime_callable_identity(value: Any) -> tuple[str, str, int] | None:
     """Return the loaded Python callback's physical code identity, without executing it."""
     candidate = value
@@ -296,9 +324,9 @@ def _runtime_callable_identity(value: Any) -> tuple[str, str, int] | None:
     while candidate is not None and hasattr(candidate, "__wrapped__"):
         candidate = candidate.__wrapped__
     code = getattr(candidate, "__code__", None)
-    if code is None:
+    if not isinstance(code, CodeType):
         return None
-    return str(Path(code.co_filename).resolve()), code.co_name, code.co_firstlineno
+    return _runtime_code_identity(code)
 
 
 def _manifest_callback_registered(app: Any, item: Any) -> bool:
@@ -384,17 +412,17 @@ async def _run_lifespan(request: dict[str, Any]) -> dict[str, Any]:  # noqa: PLR
         )
         for item in matching
     }
+    target_names = {(file, name) for file, name, _line, _phase in targets}
 
     def trace(frame: Any, event: str, _arg: Any) -> Any:
         if event in {"call", "line"}:
-            identity = (
-                str(Path(frame.f_code.co_filename).resolve()),
-                frame.f_code.co_name,
-                frame.f_code.co_firstlineno,
-                phase_now,
-            )
-            if identity in targets:
-                entered.add(identity)
+            code = frame.f_code
+            if (str(Path(code.co_filename).resolve()), code.co_name) in target_names:
+                callback_identity = _runtime_code_identity(code)
+                if callback_identity is not None:
+                    identity = (*callback_identity, phase_now)
+                    if identity in targets:
+                        entered.add(identity)
         return trace
 
     async def receive() -> dict[str, str]:

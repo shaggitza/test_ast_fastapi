@@ -288,13 +288,10 @@ def _validate(record: dict[str, Any], expected_mode: str) -> None:  # noqa: PLR0
             raise ComparisonError("secure records cannot contain runtime phase observations")
         if "framework_phase_manifest" in record:
             try:
-                manifest = PhaseManifest.model_validate(record["framework_phase_manifest"])
-                for entry in manifest.entries:
-                    if (
-                        entry.callback.source_sha256 != entry.source_sha256
-                        or entry.registration.source_sha256 != entry.source_sha256
-                    ):
-                        raise ValueError("manifest identity source digest is inconsistent")
+                # Snapshot, file and AST segment digests describe different byte
+                # domains. The strict manifest validates each independently;
+                # runtime custody binds the complete manifest and observations.
+                PhaseManifest.model_validate(record["framework_phase_manifest"])
             except (TypeError, ValueError) as error:
                 raise ComparisonError(f"framework phase manifest rejected: {error}") from error
     else:

@@ -321,6 +321,30 @@ def test_runtime_comparator_accepts_signed_completed_empty_phase_inventory(tmp_p
     compare(secure, runtime)
 
 
+def test_phase_manifest_accepts_distinct_snapshot_and_segment_hashes(tmp_path: Path) -> None:
+    secure_record = _record("secure")
+    record = _record("runtime")
+    manifest = secure_record["framework_phase_manifest"]
+    entry = manifest["entries"][0]
+    entry["callback"]["source_sha256"] = _digest("1")
+    entry["registration"] = {**entry["registration"], "source_sha256": _digest("2")}
+    record["framework_phase_manifest"] = manifest
+    record["framework_phase"]["manifest"] = manifest
+    digest = PhaseManifest.model_validate(manifest).digest
+    for phase in ("list", "impact"):
+        record["framework_phase"]["observations"][phase]["manifest_sha256"] = digest
+    secure = tmp_path / "secure.json"
+    runtime = tmp_path / "runtime.json"
+    _write(secure, secure_record)
+    _write(runtime, record)
+    compare(secure, runtime)
+    # The separate hash domains remain authenticated by the custody envelope.
+    record["framework_phase_manifest"]["entries"][0]["callback"]["source_sha256"] = _digest("9")
+    runtime.write_text(json.dumps(record), encoding="utf-8")
+    with pytest.raises(ComparisonError):
+        compare(secure, runtime)
+
+
 def test_failed_lifespan_cannot_claim_positive_phase_observations(tmp_path: Path) -> None:
     secure = tmp_path / "secure.json"
     runtime = tmp_path / "runtime.json"

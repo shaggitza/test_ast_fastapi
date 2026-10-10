@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import asyncio
 import hashlib
 import io
 import json
@@ -78,6 +80,72 @@ def _toy_project(root: Path) -> Path:
         encoding="utf-8",
     )
     return package
+
+
+@pytest.mark.parametrize("kind", ["event", "lifespan"])
+def test_decorated_callback_definition_identity_and_execution(tmp_path: Path, kind: str) -> None:
+    package = _toy_project(tmp_path)
+    source = package / "factory.py"
+    if kind == "event":
+        content = (
+            "from fastapi import FastAPI\napp = FastAPI()\n"
+            "@app.on_event('startup')\nasync def startup():\n    pass\n"
+            "def create_app():\n    return app\n"
+        )
+        symbol = "startup"
+        contract = "fastapi-on-event"
+    else:
+        content = (
+            "from contextlib import asynccontextmanager\nfrom fastapi import FastAPI\n"
+            "@asynccontextmanager\nasync def lifespan(app):\n    yield\n"
+            "app = FastAPI(lifespan=lifespan)\ndef create_app():\n    return app\n"
+        )
+        symbol = "lifespan"
+        contract = "fastapi-lifespan-startup"
+    source.write_text(content, encoding="utf-8")
+    function = next(
+        node
+        for node in ast.walk(ast.parse(content))
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == symbol
+    )
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    identity = SourceIdentity(
+        module="toy_api.factory",
+        symbol=symbol,
+        file=str(source.resolve()),
+        line=function.lineno,
+        column=0,
+        source_sha256="sha256:"
+        + hashlib.sha256(ast.get_source_segment(content, function).encode()).hexdigest(),
+    )
+    entry = PhaseManifestEntry(
+        callback=identity,
+        registration=identity,
+        phase="startup",
+        execution_conditions=("startup succeeds",),
+        contract_id=contract,
+        contract_sha256=load_surface_preset("framework-v1").document.contract_hashes[contract],
+        source_sha256="sha256:" + "a" * 64,
+        callback_file_sha256=digest,
+        registration_file_sha256=digest,
+        inventory_sha256="sha256:" + "b" * 64,
+        engine_sha256="sha256:" + "c" * 64,
+        config_sha256="sha256:" + "d" * 64,
+    )
+    request = json.loads(_request(tmp_path))
+    request["phase_manifest"] = PhaseManifest(entries=(entry,)).model_dump(mode="json")
+    observation = asyncio.run(runtime_worker._run_lifespan(request))
+    assert observation["execution_status"] == "completed"
+    assert observation["unavailable"] == []
+    assert len(observation["observed"]) == 1
+    assert observation["observed"][0]["callback"]["line"] == function.lineno
+    # Normalization does not authorize an incorrect manifest definition line.
+    wrong_identity = identity.model_copy(update={"line": function.decorator_list[0].lineno})
+    wrong_entry = entry.model_copy(update={"callback": wrong_identity})
+    request["phase_manifest"] = PhaseManifest(entries=(wrong_entry,)).model_dump(mode="json")
+    rejected = asyncio.run(runtime_worker._run_lifespan(request))
+    assert rejected["observed"] == []
+    assert rejected["unavailable"]
 
 
 def test_worker_list_uses_exact_selected_factory_and_bootstrap(tmp_path: Path, monkeypatch) -> None:
