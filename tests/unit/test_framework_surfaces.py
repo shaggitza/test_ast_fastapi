@@ -3280,3 +3280,56 @@ def test_conditional_deleted_getattr_retains_shadow_uncertainty(
     else:
         assert inventory.status == InventoryStatus.CONDITIONAL
         assert not inventory.endpoints
+
+
+@pytest.mark.parametrize(
+    "arguments,expected",
+    [
+        (
+            "**{'event_type': 'startup'}, event_type='shutdown', "
+            "func=app.add_event_handler('startup', cb)",
+            True,
+        ),
+        (
+            "**{'event_type': 'startup'}, event_type='shutdown', "
+            "**{'func': app.add_event_handler('startup', cb)}",
+            False,
+        ),
+    ],
+)
+def test_named_keyword_collision_evaluates_whole_named_group(
+    tmp_path: Path, arguments: str, expected: bool
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\nunused = FastAPI()\n"
+        "async def cb(): pass\n"
+        f"unused.add_event_handler({arguments})\n"
+    )
+    inventory = _extract(tmp_path)
+    assert [item.handler.name for item in inventory.endpoints] == (["cb"] if expected else [])
+    assert inventory.status == InventoryStatus.ESTABLISHED
+
+
+def test_dynamic_getattr_lookup_conditions_nested_selected_registration(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\nunused = FastAPI()\n"
+        "async def cb(): pass\nmethod = unknown_name\n"
+        "getattr(unused, method)('x', app.add_event_handler('startup', cb))\n"
+    )
+    inventory = _extract(tmp_path)
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert [item.handler.name for item in inventory.endpoints] == ["cb"]
+    assert inventory.endpoints[0].discovery_status.value == "conditional"
+    assert any("dynamic getattr lookup" in item.reason for item in inventory.limitations)
+
+
+def test_missing_exception_handler_argument_does_not_replace_known_handler(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n"
+        "async def cb(request, exc): pass\n"
+        "app.add_exception_handler(ValueError, cb)\n"
+        "app.add_exception_handler(ValueError)\n"
+    )
+    inventory = _extract(tmp_path)
+    assert [item.handler.name for item in inventory.endpoints] == ["cb"]
+    assert any("unsupported arguments" in item.reason for item in inventory.limitations)

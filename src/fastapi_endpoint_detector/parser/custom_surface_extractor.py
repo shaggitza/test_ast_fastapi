@@ -2646,9 +2646,16 @@ class CustomSurfaceExtractor:
                     )
                 )
             if self._is_builtin_getattr_call(call.func, callable_state):
-                # A dynamic method name prevents exact registration, but a
-                # valid getattr still evaluates the outer call arguments.
+                # A nonliteral lookup can fail before outer arguments execute.
                 unsupported_getattr_registration = True
+                inherited_conditions = (
+                    *inherited_conditions,
+                    EndpointDiscoveryCondition(
+                        source_path=module.path,
+                        source_line=call.lineno,
+                        reason="dynamic getattr lookup returns a callable successfully",
+                    ),
+                )
             elif "getattr" in callable_state:
                 # A replacement can return a callable. Its outer arguments
                 # remain potentially evaluated, unlike an invalid builtin call.
@@ -2690,6 +2697,11 @@ class CustomSurfaceExtractor:
         duplicate_keywords = False
         expanded_literal = False
         for keyword in call.keywords:
+            # Named values in one contiguous group are evaluated before its
+            # merge, even when an earlier name collides. A following ** group
+            # is not evaluated after that merge fails.
+            if duplicate_keywords and keyword.arg is None:
+                break
             entries: list[tuple[str, ast.expr]] | None = None
             if keyword.arg is None and isinstance(keyword.value, ast.Dict):
                 candidate: list[tuple[str, ast.expr]] = []
@@ -2729,8 +2741,6 @@ class CustomSurfaceExtractor:
                         keyword_positions[keyword.arg] = len(keywords)
                 keywords.append(capture)
                 effective_keywords.append(keyword)
-                if duplicate_keywords:
-                    break
                 continue
             expanded_literal = True
             mapping_names: set[str] = set()
@@ -3878,6 +3888,14 @@ class CustomSurfaceExtractor:
                 and method_parameters is not None
                 and (
                     len(call.args) > len(method_parameters)
+                    or (
+                        not any(isinstance(item, ast.Starred) for item in call.args)
+                        and not any(item.arg is None for item in call.keywords)
+                        and not set(method_parameters).issubset(
+                            set(method_parameters[: len(call.args)])
+                            | {item.arg for item in call.keywords if item.arg is not None}
+                        )
+                    )
                     or any(
                         item.arg is not None and item.arg not in method_parameters
                         for item in call.keywords
