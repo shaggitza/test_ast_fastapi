@@ -7,14 +7,21 @@ These tests verify the mypy-based dependency analysis, including:
 - Line progress callbacks
 """
 
+import sys
+from importlib.util import find_spec
 from pathlib import Path
+from typing import Any
 
+import mypy.build
 import pytest
+from mypy import modulefinder
 
+from fastapi_endpoint_detector.analyzer import mypy_analyzer
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import (
     CallFrame,
     EndpointDependencies,
     MypyAnalyzer,
+    _is_path_within,
 )
 from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, HandlerInfo
 
@@ -100,6 +107,224 @@ class TestMypyAnalyzerBasic:
         analyzer = MypyAnalyzer(tmp_path)
         assert analyzer.app_path == tmp_path
         assert analyzer._endpoint_deps == {}
+
+    def test_site_package_mode_is_part_of_cache_identity(self, tmp_path: Path) -> None:
+        """Hermetic and ordinary analyzer caches cannot share a fingerprint."""
+        ordinary = MypyAnalyzer(tmp_path)
+        hermetic = MypyAnalyzer(tmp_path, no_site_packages=True)
+
+        assert ordinary._cache_fingerprint()[0] != hermetic._cache_fingerprint()[0]
+
+    def test_target_platform_is_part_of_cache_identity(self, tmp_path: Path) -> None:
+        """An explicit mypy target platform changes analysis cache identity."""
+        default = MypyAnalyzer(tmp_path)
+        explicit_default = MypyAnalyzer(tmp_path, target_platform=sys.platform)
+        other_platform = MypyAnalyzer(tmp_path, target_platform="win32")
+
+        assert default._cache_fingerprint()[0] == explicit_default._cache_fingerprint()[0]
+        assert default._cache_fingerprint()[0] != other_platform._cache_fingerprint()[0]
+
+    def test_hermetic_analysis_ignores_ambient_mypypath_decoy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Explicit source search paths and no-site-packages exclude MYPYPATH stubs."""
+        app = tmp_path / "app"
+        app.mkdir()
+        (app / "main.py").write_text(
+            "from optional_decoy import decoy_call\n\ndef handler() -> None:\n    decoy_call()\n",
+            encoding="utf-8",
+        )
+        ambient = tmp_path / "ambient"
+        ambient.mkdir()
+        (ambient / "optional_decoy.pyi").write_text(
+            "def decoy_call() -> None: ...\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("MYPYPATH", str(ambient))
+
+        analyzer = MypyAnalyzer(app, no_site_packages=True)
+        analyzer._ensure_mypy_built()
+
+        assert "optional_decoy" not in analyzer._trees
+        assert str(ambient) not in analyzer._module_to_path.values()
+
+    def test_hermetic_filesystem_cache_hides_simulated_mypy_fallback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Hermetic builds ignore fallback stubs and retain explicit project imports."""
+        fallback = tmp_path / "usr-local-mypy"
+        fallback.mkdir()
+        decoy = fallback / "simplejson.pyi"
+        decoy.write_text("def loads(value: str) -> int: ...\n", encoding="utf-8")
+        app = tmp_path / "app"
+        app.mkdir()
+        helper_bytes = b"def project_call() -> None: pass\n"
+        (app / "helpers.py").write_bytes(helper_bytes)
+        (app / "main.py").write_text(
+            "import simplejson\nfrom helpers import project_call\n"
+            "def handler() -> None:\n    simplejson.loads('x')\n    project_call()\n",
+            encoding="utf-8",
+        )
+        original_default_lib_path = modulefinder.default_lib_path
+        original_build = mypy.build.build
+        captured_caches = []
+
+        def capture_cache(*args: Any, **kwargs: Any) -> Any:
+            captured_caches.append(kwargs["fscache"])
+            return original_build(*args, **kwargs)
+
+        monkeypatch.setattr(mypy_analyzer, "_MYPY_POSIX_FALLBACK_ROOT", str(fallback))
+        monkeypatch.setattr(mypy.build, "build", capture_cache)
+        monkeypatch.setattr(
+            modulefinder,
+            "default_lib_path",
+            lambda data_dir, pyversion, custom_typeshed_dir: [
+                *original_default_lib_path(data_dir, pyversion, custom_typeshed_dir),
+                str(fallback),
+            ],
+        )
+
+        analyzer = MypyAnalyzer(app, module_root=app, no_site_packages=True)
+        analyzer._ensure_mypy_built()
+
+        assert "simplejson" not in analyzer._trees
+        assert analyzer._module_to_path["helpers"] == str(app / "helpers.py")
+        assert len(captured_caches) == 1
+        cache = captured_caches[0]
+        assert cache.stat_or_none(str(decoy)) is None
+        assert not cache.isfile(str(decoy))
+        with pytest.raises(FileNotFoundError):
+            cache.listdir(str(fallback))
+        with pytest.raises(FileNotFoundError):
+            cache.read(str(decoy))
+        with pytest.raises(FileNotFoundError):
+            cache.hash_digest(str(decoy))
+        assert cache.read(str(app / "helpers.py")) == helper_bytes
+        assert _is_path_within(str(decoy), str(fallback))
+        assert not _is_path_within(str(tmp_path / "usr-local-mypy-extra/file.pyi"), str(fallback))
+
+    def test_hermetic_cache_preserves_bundled_typeshed_under_fallback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The authenticated mypy bundle remains readable inside a fallback root."""
+        data_dir = Path(mypy.build.default_data_dir()).resolve()
+        typeshed = data_dir / "typeshed"
+        builtins = typeshed / "stdlib" / "builtins.pyi"
+        assert builtins.is_file()
+        app = tmp_path / "app"
+        app.mkdir()
+        (app / "main.py").write_text("value: int = 1\n", encoding="utf-8")
+        original_default_lib_path = modulefinder.default_lib_path
+        original_build = mypy.build.build
+        captured_caches = []
+
+        def capture_cache(*args: Any, **kwargs: Any) -> Any:
+            captured_caches.append(kwargs["fscache"])
+            return original_build(*args, **kwargs)
+
+        monkeypatch.setattr(mypy_analyzer, "_MYPY_POSIX_FALLBACK_ROOT", str(data_dir))
+        monkeypatch.setattr(mypy.build, "build", capture_cache)
+        monkeypatch.setattr(
+            modulefinder,
+            "default_lib_path",
+            lambda actual_data_dir, pyversion, custom_typeshed_dir: [
+                *original_default_lib_path(actual_data_dir, pyversion, custom_typeshed_dir),
+                str(data_dir),
+            ],
+        )
+
+        analyzer = MypyAnalyzer(app, module_root=app, no_site_packages=True)
+        analyzer._ensure_mypy_built()
+
+        assert "builtins" in analyzer._trees
+        assert len(captured_caches) == 1
+        assert captured_caches[0].read(str(builtins)) == builtins.read_bytes()
+        assert captured_caches[0].stat_or_none(str(typeshed)) is not None
+
+    def test_hermetic_cache_rejects_bundled_typeshed_symlink_and_parent_escapes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fallback = tmp_path / "fallback"
+        bundled = fallback / "typeshed"
+        bundled.mkdir(parents=True)
+        outside = tmp_path / "outside.pyi"
+        outside.write_text("DECOY: int\n")
+        (fallback / "ambient.pyi").write_text("AMBIENT: int\n")
+        link = bundled / "escape.pyi"
+        link.symlink_to(outside)
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "main.py").write_text("value: int = 1\n")
+        captured_caches = []
+
+        def capture_cache(*args: Any, **kwargs: Any) -> Any:
+            captured_caches.append(kwargs["fscache"])
+            raise RuntimeError("controlled cache capture")
+
+        monkeypatch.setattr(mypy_analyzer, "_MYPY_POSIX_FALLBACK_ROOT", str(fallback))
+        monkeypatch.setattr(mypy.build, "default_data_dir", lambda: str(fallback))
+        monkeypatch.setattr(mypy.build, "build", capture_cache)
+        with pytest.raises(RuntimeError, match="controlled cache capture"):
+            MypyAnalyzer(project, module_root=project, no_site_packages=True)._ensure_mypy_built()
+        assert len(captured_caches) == 1
+        cache = captured_caches[0]
+        for candidate in (
+            link,
+            bundled / ".." / "ambient.pyi",
+            bundled / ".." / ".." / "outside.pyi",
+        ):
+            assert cache.stat_or_none(str(candidate)) is None
+            for operation in (cache.read, cache.hash_digest, cache.listdir):
+                with pytest.raises(FileNotFoundError):
+                    operation(str(candidate))
+
+    def test_hermetic_analysis_excludes_cwd_but_retains_explicit_project_imports(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        app = tmp_path / "app"
+        app.mkdir()
+        (app / "main.py").write_text(
+            "from optional_cwd_decoy import decoy_call\n"
+            "from helpers import project_call\n"
+            "def handler() -> None:\n    decoy_call()\n    project_call()\n",
+            encoding="utf-8",
+        )
+        helper = app / "helpers.py"
+        helper.write_text("def project_call() -> None: pass\n", encoding="utf-8")
+        ambient = tmp_path / "ambient"
+        ambient.mkdir()
+        decoy = ambient / "optional_cwd_decoy.pyi"
+        decoy.write_text("def decoy_call() -> None: ...\n", encoding="utf-8")
+        monkeypatch.chdir(ambient)
+        ordinary = MypyAnalyzer(app, module_root=app)
+        ordinary._ensure_mypy_built()
+        assert ordinary._module_to_path["optional_cwd_decoy"] == str(decoy)
+        hermetic = MypyAnalyzer(app, module_root=app, no_site_packages=True)
+        hermetic._ensure_mypy_built()
+        assert "optional_cwd_decoy" not in hermetic._trees
+        assert hermetic._module_to_path["helpers"] == str(helper)
+        assert hermetic._build_result is not None
+
+    def test_hermetic_analysis_excludes_interpreter_site_packages(self, tmp_path: Path) -> None:
+        """Hermetic builds skip interpreter packages while ordinary builds retain them."""
+        fastapi_spec = find_spec("fastapi")
+        if fastapi_spec is None or fastapi_spec.origin is None:
+            pytest.skip("FastAPI is not installed in the active interpreter")
+        app = tmp_path / "app"
+        app.mkdir()
+        (app / "main.py").write_text(
+            "from fastapi import FastAPI\n\napp = FastAPI()\n",
+            encoding="utf-8",
+        )
+
+        ordinary = MypyAnalyzer(app)
+        ordinary._ensure_mypy_built()
+        assert "fastapi" in ordinary._trees
+        assert ordinary._module_to_path["fastapi"] == fastapi_spec.origin
+
+        hermetic = MypyAnalyzer(app, no_site_packages=True)
+        hermetic._ensure_mypy_built()
+        assert "fastapi" not in hermetic._trees
+        assert fastapi_spec.origin not in hermetic._module_to_path.values()
 
     def test_cache_path_default(self, tmp_path: Path) -> None:
         """Test default cache path location."""

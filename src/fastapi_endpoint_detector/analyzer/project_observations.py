@@ -12,6 +12,8 @@ from __future__ import annotations
 import os
 import stat
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
+from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
@@ -190,12 +192,29 @@ def _is_candidate(path: Path) -> tuple[bool, str | None]:
     return False, None
 
 
+def _matches_pattern(relative_path: str, pattern: str) -> bool:
+    parts = relative_path.split("/")
+    segments = pattern.split("/")
+
+    @cache
+    def matches(path_index: int, pattern_index: int) -> bool:
+        if pattern_index == len(segments):
+            return path_index == len(parts)
+        if segments[pattern_index] == "**":
+            return matches(path_index, pattern_index + 1) or (
+                path_index < len(parts) and matches(path_index + 1, pattern_index)
+            )
+        return (
+            path_index < len(parts)
+            and fnmatchcase(parts[path_index], segments[pattern_index])
+            and matches(path_index + 1, pattern_index + 1)
+        )
+
+    return matches(0, 0)
+
+
 def _matches_any(relative_path: str, patterns: Sequence[str]) -> bool:
-    path = Path(relative_path)
-    return any(
-        path.match(pattern) or (pattern.startswith("**/") and path.match(pattern[3:]))
-        for pattern in patterns
-    )
+    return any(_matches_pattern(relative_path, pattern) for pattern in patterns)
 
 
 def _normalize_trusted_origin(origin: str) -> str:
@@ -356,7 +375,17 @@ def scan_project_observations(  # noqa: PLR0912, PLR0915
     scanned_files = 0
     over_budget = False
 
-    for directory, dirnames, filenames in os.walk(base, topdown=True, followlinks=False):
+    def record_traversal_error(error: OSError) -> None:
+        failed_path = Path(error.filename) if error.filename else base
+        try:
+            relative = failed_path.relative_to(base).as_posix()
+        except ValueError:
+            relative = "."
+        issues.append(SourceObservationIssue(relative, "directory traversal failed: OSError"))
+
+    for directory, dirnames, filenames in os.walk(
+        base, topdown=True, followlinks=False, onerror=record_traversal_error
+    ):
         current = Path(directory)
         retained_directories: list[str] = []
         for dirname in sorted(dirnames):
