@@ -1026,6 +1026,7 @@ class MypyAnalyzer:
             conflicting_package_source_paths: set[str] = set()
             analyzed_source_hashes: dict[str, str] = {}
             scanned_metadata_roots: set[Path] = set()
+            authenticated_metadata_hashes: dict[str, str] = {}
 
             # Store the types map
             self._types_map = self._build_result.types
@@ -1090,6 +1091,9 @@ class MypyAnalyzer:
                                         # from the verified maps, so package pins
                                         # fail closed in the contract auditor.
                                         continue
+                                    authenticated_metadata_hashes[str(metadata_path.resolve())] = (
+                                        hashlib.sha256(metadata_bytes).hexdigest()
+                                    )
                                     metadata = BytesParser(policy=compat32).parsebytes(
                                         metadata_bytes
                                     )
@@ -1192,7 +1196,9 @@ class MypyAnalyzer:
                 path: tuple(sorted(module_names)) for path, module_names in modules_by_path.items()
             }
             self._shared_path_index = None
-            self._typed_environment_fingerprint = self._fingerprint_typed_environment()
+            self._typed_environment_fingerprint = self._fingerprint_typed_environment(
+                authenticated_metadata_hashes=authenticated_metadata_hashes
+            )
             self._built_source_fingerprint = self._expected_source_fingerprint
 
         finally:
@@ -6740,7 +6746,9 @@ class MypyAnalyzer:
 
         return self._endpoint_deps
 
-    def _fingerprint_typed_environment(self) -> str:
+    def _fingerprint_typed_environment(
+        self, *, authenticated_metadata_hashes: dict[str, str] | None = None
+    ) -> str:
         """Hash parsed dependency source and adjacent distribution metadata."""
         if self._build_result is None:
             return ""
@@ -6769,16 +6777,27 @@ class MypyAnalyzer:
                             break
             except OSError as exc:
                 inputs[str(path.resolve())] = f"unreadable:{type(exc).__name__}"
+        metadata_snapshot_hashes: dict[str, str] = {}
         for root in package_roots:
             try:
                 for metadata_path in root.glob("*.dist-info/METADATA"):
-                    inputs[str(metadata_path.resolve())] = hashlib.sha256(
-                        metadata_path.read_bytes()
-                    ).hexdigest()
+                    metadata_key = str(metadata_path.resolve())
+                    metadata_digest = hashlib.sha256(metadata_path.read_bytes()).hexdigest()
+                    inputs[metadata_key] = metadata_digest
+                    metadata_snapshot_hashes[metadata_key] = metadata_digest
             except OSError as exc:
                 inputs[str(root.resolve()) + "/<metadata-scan>"] = (
                     f"unreadable:{type(exc).__name__}"
                 )
+        if authenticated_metadata_hashes is not None and any(
+            metadata_snapshot_hashes.get(path) != digest
+            for path, digest in authenticated_metadata_hashes.items()
+        ):
+            # Authenticate evidence against the same final byte reads that
+            # seal the cache. Changed, removed or unreadable metadata cannot
+            # retain an earlier version/source pin under a new fingerprint.
+            self._verified_package_source_hashes.clear()
+            self._verified_package_versions.clear()
         payload = json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(payload).hexdigest()
 

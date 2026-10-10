@@ -803,3 +803,107 @@ def test_package_applicability_is_reported_but_not_used_for_matching(tmp_path: P
 
     assert audit.occurrences[0].audit_status == AuditCallStatus.MATCHED
     assert audit.scope.package_applicability == "not_evaluated"
+
+
+@pytest.mark.parametrize("mutation", ["stable", "changed", "removed", "unreadable"])
+def test_cold_audit_uses_final_metadata_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    package = tmp_path / "race_pkg"
+    package.mkdir()
+    stub = package / "__init__.pyi"
+    stub.write_text("def emit(value: str) -> None: ...\n", encoding="utf-8")
+    dist = tmp_path / "race-pkg-1.0.dist-info"
+    dist.mkdir()
+    metadata = dist / "METADATA"
+    metadata.write_text("Name: race-pkg\nVersion: 1.0\n", encoding="utf-8")
+    app = tmp_path / "app.py"
+    app.write_text(
+        "from race_pkg import emit\ndef handler() -> None:\n    emit('value')\n",
+        encoding="utf-8",
+    )
+    endpoint = Endpoint(
+        path="/metadata-snapshot",
+        methods=[EndpointMethod.POST],
+        handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=2),
+    )
+    pins = {
+        path.relative_to(tmp_path).as_posix(): "sha256:"
+        + hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in (stub, metadata)
+    }
+    contracts = tmp_path / "metadata-effects.yaml"
+    contracts.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "preset": {
+                    "id": "metadata-snapshot",
+                    "version": "1",
+                    "provenance": {"kind": "user", "source": contracts.name},
+                },
+                "contracts": [
+                    {
+                        "id": "put",
+                        "symbol": "race_pkg.emit",
+                        "invocation": "function",
+                        "operation": "write",
+                        "channel": "filesystem",
+                        "package": {
+                            "distribution": "race-pkg",
+                            "version": "==1.0",
+                            "source_hashes": pins,
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_read = Path.read_bytes
+    reads = 0
+
+    def raced_read(path: Path) -> bytes:
+        nonlocal reads
+        if path != metadata:
+            return original_read(path)
+        reads += 1
+        if mutation == "unreadable" and reads > 1:
+            raise PermissionError("synthetic final metadata read denial")
+        raw = original_read(path)
+        if reads == 1:
+            if mutation == "changed":
+                path.write_text("Name: race-pkg\nVersion: 2.0\n", encoding="utf-8")
+            elif mutation == "removed":
+                path.unlink()
+        return raw
+
+    monkeypatch.setattr(Path, "read_bytes", raced_read)
+    analyzer = MypyAnalyzer(tmp_path)
+    dependencies = analyzer.analyze_endpoint(endpoint)
+    sites = [site for site in dependencies.resolved_call_sites if site.line == 3]
+    assert len(sites) == 1
+    assert sites[0].canonical_symbol == "race_pkg.emit"
+    audit = audit_effect_contracts(
+        load_effect_contracts(contracts),
+        source_root=tmp_path,
+        inventory=EndpointInventory(endpoints=[endpoint]),
+        endpoint_call_sites=[(endpoint, sites)],
+        track_transitive=False,
+        max_depth=1,
+        cache_enabled=False,
+        resolver_versions=("mypy@1.19.1",),
+        verified_mypy_source_hashes=analyzer.verified_mypy_source_hashes,
+        verified_package_source_hashes=analyzer.verified_package_source_hashes,
+        verified_package_versions=analyzer.verified_package_versions,
+    )
+    occurrence = audit.occurrences[0]
+    if mutation == "stable":
+        assert reads == 2
+        assert occurrence.audit_status == AuditCallStatus.MATCHED
+        assert analyzer.verified_package_versions["race-pkg"] == "1.0"
+    else:
+        assert occurrence.audit_status == AuditCallStatus.UNMATCHED
+        assert occurrence.reason_code == "package_applicability_unverified"
+        assert analyzer.verified_package_versions == {}
+        assert analyzer.verified_package_source_hashes == {}
