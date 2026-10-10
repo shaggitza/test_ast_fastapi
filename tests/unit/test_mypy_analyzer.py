@@ -201,9 +201,7 @@ class TestMypyAnalyzerBasic:
         (good / "__init__.pyi").write_text("class Good: ...\n", encoding="utf-8")
         good_metadata = tmp_path / "good-pkg-1.0.dist-info"
         good_metadata.mkdir()
-        (good_metadata / "METADATA").write_text(
-            "Name: good-pkg\nVersion: 1.0\n", encoding="utf-8"
-        )
+        (good_metadata / "METADATA").write_text("Name: good-pkg\nVersion: 1.0\n", encoding="utf-8")
 
         bad = tmp_path / "odd_import"
         bad.mkdir()

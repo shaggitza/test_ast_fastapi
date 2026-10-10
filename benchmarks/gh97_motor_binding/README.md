@@ -101,3 +101,22 @@ and one unsupported receiver; the two wrong-arity bindings remain invalid
 invocations. All earlier raw reports remain unchanged. This is source-only
 static evidence; installed compatibility, version ranges, wrappers and
 real-world GH97 acceptance remain open.
+
+The metadata-alias replay is retained separately in
+`results/metadata-alias-binding-v5.json`, produced at exact committed source
+`ca19c6b7ec043f723197cfc501dc5a103d271abe`. Its raw SHA-256 is
+`17ccd317fc0e15a77a27368e6c9356165cb910043309e0397fcbcf9687be5bba`.
+An independent locked-environment replay reproduced identical bytes. Declared
+aliases that are not among parsed declarations no longer invalidate a coherent
+installation; all parsed aliases must still share the authenticated root.
+Malformed UTF-8 alias metadata makes alias evidence unavailable without
+interrupting unrelated endpoint analysis. Cold and warm regression controls
+cover these cases and retain the split-installation negative.
+
+The full analyzer and Motor benchmark suites, including the clean-checkout
+artifact probe, completed with exit 0. The eight physical calls again yield
+five exact symbol/audit bindings, two resolved nonmatches, and one unsupported
+receiver. Two bindings have invalid arguments and do not establish valid
+invocations. All five earlier raw reports remain unchanged. This source-only
+replay does not establish installed-package behavior, version ranges, service
+behavior, or real-world GH97 acceptance.
