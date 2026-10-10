@@ -1602,6 +1602,34 @@ def test_resealed_source_projection_must_belong_to_exact_audit(field: str) -> No
         AnalysisReport.model_validate({**valid, "sql_transaction_path_report": resealed})
 
 
+def test_resealed_source_projection_must_preserve_reconstructed_uncertainty() -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    audit, transaction, paths = _langflow_fixture_transaction_reports(fixture)
+    projection_data = paths.source_projections[0].model_dump(mode="json")
+    projection_data["uncertainty"] = ["persistence established"]
+    projection = type(paths.source_projections[0]).model_validate(projection_data)
+    resealed = build_sql_transaction_path_report(
+        effect_audit_hash=paths.effect_audit_hash,
+        transaction_report_hash=paths.transaction_report_hash,
+        max_pairs=paths.max_pairs,
+        ordered_paths=paths.ordered_paths,
+        context_paths=paths.context_paths,
+        source_projections=(projection,),
+        diagnostics=paths.diagnostics,
+    )
+    with pytest.raises(ValidationError, match="SQL source projection"):
+        AnalysisReport.model_validate(
+            {
+                "app_path": str(fixture),
+                "diff_source": "fixture",
+                "total_endpoints": 1,
+                "effect_contract_audit": audit,
+                "sql_transaction_report": transaction,
+                "sql_transaction_path_report": resealed,
+            }
+        )
+
+
 def test_source_projection_requires_unchanged_supplied_snapshots(tmp_path: Path) -> None:
     fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
     copied = tmp_path / "fixture"
@@ -1678,6 +1706,33 @@ def test_source_projection_rejects_relative_contextlib_decorator(
             "from .contextlib import asynccontextmanager",
         )
     )
+    assert _langflow_fixture_transaction_reports(copied)[2].source_projections == ()
+
+
+def test_source_projection_rejects_contextlib_import_after_definition(tmp_path: Path) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    source = copied / "source/lfx/services/deps.py.txt"
+    text = source.read_text()
+    import_line = "from contextlib import asynccontextmanager, suppress\n"
+    assert text.count(import_line) == 1
+    source.write_text(text.replace(import_line, "", 1) + "\n" + import_line)
+    assert _langflow_fixture_transaction_reports(copied)[2].source_projections == ()
+
+
+def test_source_projection_rejects_delegate_import_after_async_with(tmp_path: Path) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    source = copied / "source/langflow/services/deps.py.txt"
+    text = source.read_text()
+    import_line = "    from lfx.services.deps import session_scope as lfx_session_scope\n\n"
+    use_line = "    async with lfx_session_scope() as session:\n"
+    assert text.count(import_line) == 1 and text.count(use_line) == 1
+    text = text.replace(import_line, "", 1)
+    text = text.replace(use_line, use_line + import_line, 1)
+    source.write_text(text)
     assert _langflow_fixture_transaction_reports(copied)[2].source_projections == ()
 
 

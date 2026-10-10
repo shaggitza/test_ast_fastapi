@@ -811,6 +811,9 @@ def _has_verified_asynccontextmanager(
     return (
         binding is not None
         and bound_name is not None
+        # Decorators are evaluated while the function statement executes, so
+        # an import later in the module cannot provide this binding.
+        and binding.lineno < function.lineno
         and not _module_binding_is_ambiguous(module, bound_name, binding)
     )
 
@@ -1005,8 +1008,14 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
             continue
         wrapper_scope_calls: dict[str, str] = {}
         wrapper_import_nodes: dict[str, ast.ImportFrom] = {}
-        wrapper_nodes = (*wrapper_tree.body, *_owned_nodes(wrapper_fn))
-        for node in wrapper_nodes:
+        # Module imports must execute before the wrapper definition. Function
+        # local imports must be unconditional direct statements before the
+        # async-with use; delayed or conditional imports do not dominate it.
+        module_positions = {node: index for index, node in enumerate(wrapper_tree.body)}
+        function_positions = {node: index for index, node in enumerate(wrapper_fn.body)}
+        for node in wrapper_tree.body:
+            if module_positions[node] >= module_positions.get(wrapper_fn, -1):
+                continue
             if isinstance(node, ast.ImportFrom):
                 imported_module = _resolve_imported_module(root, wrapper_module, node)
                 for alias in node.names:
@@ -1021,9 +1030,27 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
                     if symbol_module:
                         wrapper_scope_calls[local_name] = f"{symbol_module}.{symbol_name}"
                         wrapper_import_nodes[local_name] = node
-        for node in wrapper_nodes:
-            if isinstance(node, ast.AsyncWith):
-                for item in node.items:
+        for node in wrapper_fn.body:
+            if isinstance(node, ast.ImportFrom):
+                imported_module = _resolve_imported_module(root, wrapper_module, node)
+                for alias in node.names:
+                    local_name = alias.asname or alias.name
+                    symbol_module = imported_module
+                    symbol_name = alias.name
+                    if node.module is None:
+                        symbol_module = (
+                            f"{imported_module}.{alias.name}" if imported_module else None
+                        )
+                    if symbol_module:
+                        # Retain function-local bindings separately; their
+                        # validity is checked against the actual use below.
+                        wrapper_scope_calls[f"{local_name}@local:{node.lineno}"] = (
+                            f"{symbol_module}.{symbol_name}"
+                        )
+                        wrapper_import_nodes[f"{local_name}@local:{node.lineno}"] = node
+        for owned_node in _owned_nodes(wrapper_fn):
+            if isinstance(owned_node, ast.AsyncWith):
+                for item in owned_node.items:
                     captured = _target_key(item.optional_vars) if item.optional_vars else None
                     target = item.context_expr
                     if (
@@ -1032,13 +1059,22 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
                         and isinstance(target.func, ast.Name)
                     ):
                         canonical = wrapper_scope_calls.get(target.func.id)
+                        import_node = wrapper_import_nodes.get(target.func.id)
+                        if canonical is None:
+                            for key, candidate in wrapper_import_nodes.items():
+                                if key.startswith(f"{target.func.id}@local:"):
+                                    import_position = function_positions.get(candidate, -1)
+                                    use_position = function_positions.get(owned_node, -1)
+                                    if 0 <= import_position < use_position:
+                                        canonical = wrapper_scope_calls[key]
+                                        import_node = candidate
+                                        break
                         if canonical is None:
                             continue
-                        import_node = wrapper_import_nodes.get(target.func.id)
                         if (
                             import_node is None
                             or (
-                                import_node in wrapper_tree.body
+                                import_node in module_positions
                                 and _module_binding_is_ambiguous(
                                     wrapper_tree, target.func.id, import_node
                                 )
@@ -1047,7 +1083,7 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
                                 wrapper_fn,
                                 target.func.id,
                                 allowed_import=import_node
-                                if import_node in wrapper_fn.body
+                                if import_node in function_positions
                                 else None,
                             )
                         ):
@@ -1059,9 +1095,9 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
                             and isinstance(child.value, ast.Yield)
                             and child.value.value is not None
                             and _target_key(child.value.value) == captured
-                            for child in node.body
+                            for child in owned_node.body
                         ) and not _receiver_reassigned(
-                            tuple(node.body), -1, len(node.body), captured
+                            tuple(owned_node.body), -1, len(owned_node.body), captured
                         )
         if not delegated_symbol or not wrapper_yields_receiver:
             continue
@@ -1192,10 +1228,10 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
         if _has_ambiguous_scope_binding(handler, imported_wrapper_name):
             continue
         match = None
-        for node in _owned_nodes(handler):
-            if not isinstance(node, ast.AsyncWith) or len(node.items) != 1:
+        for owned_node in _owned_nodes(handler):
+            if not isinstance(owned_node, ast.AsyncWith) or len(owned_node.items) != 1:
                 continue
-            item = node.items[0]
+            item = owned_node.items[0]
             context_call = item.context_expr
             if (
                 not isinstance(context_call, ast.Call)
@@ -1217,7 +1253,7 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
             stage_node = next(
                 (
                     child
-                    for child in _owned_nodes(node)
+                    for child in _owned_nodes(owned_node)
                     if isinstance(child, ast.Call)
                     and _attribute_on_name(child, "execute", receiver_name)
                     and child.func.lineno == stage.line
@@ -1227,7 +1263,7 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
             )
             if stage_node is None or not any(
                 isinstance(child, ast.Await) and child.value is stage_node
-                for child in _owned_nodes(node)
+                for child in _owned_nodes(owned_node)
             ):
                 continue
             # The stage must be a direct expression in the owned context body.
@@ -1235,7 +1271,7 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
                 isinstance(stmt, ast.Expr)
                 and isinstance(stmt.value, ast.Await)
                 and stmt.value.value is stage_node
-                for stmt in node.body
+                for stmt in owned_node.body
             ):
                 continue
             if (
@@ -1250,7 +1286,7 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
                 != 1
             ):
                 continue
-            match = node
+            match = owned_node
             break
         if match is None:
             continue

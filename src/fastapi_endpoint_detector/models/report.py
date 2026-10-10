@@ -582,11 +582,12 @@ class AnalysisReport(BaseModel):
         )
 
         expected_projections = {
-            item.id: item.identity_payload()
+            item.id: item.model_dump(mode="json", exclude={"id"})
             for item in _fixture_source_projections(_source_project_root(self.app_path), audit)
         }
         supplied_projections = {
-            item.id: item.identity_payload() for item in path_report.source_projections
+            item.id: item.model_dump(mode="json", exclude={"id"})
+            for item in path_report.source_projections
         }
         if expected_projections != supplied_projections:
             raise ValueError("SQL source projection contradicts its supplied source snapshots")
