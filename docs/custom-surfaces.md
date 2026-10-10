@@ -96,20 +96,23 @@ The preset follows FastMCP's documented
 
 ## Framework callback preset
 
-Select `framework-v1` for exact FastAPI/Starlette startup, shutdown, and HTTP
-middleware surfaces:
+Select `framework-v1` for source-proven FastAPI/Starlette lifecycle, exception,
+middleware, and background-task surfaces:
 
 ```yaml
 analysis:
   surface_preset: framework-v1
 ```
 
-The preset is execution-free and uses exact receiver identities. Schema-v3
-constructor contracts split exact `FastAPI(lifespan=...)` async generators into
-pre-yield startup and post-yield shutdown ranges. It does not model class-based
-middleware. BackgroundTasks
-and dependency providers are handled by typed execution summaries rather than
-surface registration contracts. See [framework semantics](framework-semantics.md).
+The preset is execution-free and scopes registrations through selected app,
+router inclusion, and mount relationships. Constructor lifecycle callbacks,
+keyword selectors, exception-keyed handlers, local class middleware, and
+singular/plural background tasks have explicit contracts. Lifespan phase
+splitting requires a trusted `contextlib.asynccontextmanager` callback with one
+unconditional top-level yield. Dynamic registrations and unsupported callback
+identity or composition forms remain explicit inventory limitations.
+Background-task callbacks and dependency providers also use typed execution
+summaries. See [framework semantics](framework-semantics.md).
 
 ## Worker and CLI preset
 

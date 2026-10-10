@@ -1,11 +1,11 @@
 schema_version: 5
 preset:
   id: framework-callbacks
-  version: "8"
+  version: "9"
   provenance:
     kind: preset
     source: fastapi-endpoint-detector
-    revision: "8"
+    revision: "9"
 contracts:
   - id: fastapi-constructor-on-startup-list
     multiplicity: all_execute
@@ -105,7 +105,7 @@ contracts:
     surface:
       kind: framework.lifecycle
       id_template: "event:{resource}"
-      resource: {kind: argument, index: 0}
+      resource: {kind: argument_or_keyword, index: 0, name: event_type}
     callback_mode: either
     execution_mode: framework
     activates_routes: true
@@ -120,7 +120,7 @@ contracts:
     surface:
       kind: framework.lifecycle
       id_template: "event:{resource}"
-      resource: {kind: argument, index: 0}
+      resource: {kind: argument_or_keyword, index: 0, name: event_type}
     callback_mode: either
     execution_mode: framework
     activates_routes: true
@@ -135,7 +135,7 @@ contracts:
     surface:
       kind: framework.lifecycle
       id_template: "event:{resource}"
-      resource: {kind: argument, index: 0}
+      resource: {kind: argument_or_keyword, index: 0, name: event_type}
     callback_mode: either
     execution_mode: framework
 
@@ -149,7 +149,7 @@ contracts:
     surface:
       kind: framework.lifecycle
       id_template: "event:{resource}"
-      resource: {kind: argument, index: 0}
+      resource: {kind: argument_or_keyword, index: 0, name: event_type}
     callback_mode: either
     execution_mode: framework
 
@@ -163,7 +163,7 @@ contracts:
     surface:
       kind: framework.lifecycle
       id_template: "event:{resource}"
-      resource: {kind: argument, index: 0}
+      resource: {kind: argument_or_keyword, index: 0, name: event_type}
     callback_mode: either
     execution_mode: framework
     activates_routes: true
@@ -178,7 +178,7 @@ contracts:
     surface:
       kind: framework.lifecycle
       id_template: "event:{resource}"
-      resource: {kind: argument, index: 0}
+      resource: {kind: argument_or_keyword, index: 0, name: event_type}
     callback_mode: either
     execution_mode: framework
     activates_routes: true

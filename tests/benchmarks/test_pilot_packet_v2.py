@@ -462,6 +462,7 @@ def test_packet_aggregate_staging_bound_cleans_output(
 def test_unsafe_parent_permissions_rejected(tmp_path: Path) -> None:
     parent = tmp_path / "public"
     parent.mkdir(mode=0o755)
+    parent.chmod(0o755)
     cache_root = parent / "cache"
     with pytest.raises(packet.PilotPacketError, match="private"):
         packet.prepare_cache(cache_root, [])

@@ -361,6 +361,7 @@ class NativeRouteAssemblyEdgeEvidence(BaseModel):
     source_span: NativeSourceSpan
     dependency_expressions: tuple["NativeRouteDependencyExpressionEvidence", ...] = ()
     prefix_binding_spans: tuple[NativeSourceSpan, ...] = ()
+    source_owners: tuple["NativeRouteSourceOwnerEvidence", ...] = ()
 
     class Config:
         frozen = True
@@ -433,6 +434,8 @@ class NativeRouteStructuralOwnerEvidence(BaseModel):
             "class_decorator",
             "factory_return",
             "bootstrap_registration",
+            "bootstrap_helper_call",
+            "bootstrap_helper_definition",
         ]
         | None
     ) = None
@@ -458,6 +461,8 @@ class NativeRouteSourceOwnerEvidence(BaseModel):
         "class_decorator",
         "factory_return",
         "bootstrap_registration",
+        "bootstrap_helper_call",
+        "bootstrap_helper_definition",
     ]
     qualified_binding: str = Field(min_length=1, max_length=2048)
     related_binding: str | None = Field(default=None, min_length=1, max_length=2048)
@@ -562,6 +567,8 @@ class SurfaceRegistrationEvidence(BaseModel):
     registration_file: Path
     registration_line: int = Field(ge=1)
     registration_column: int = Field(ge=0)
+    callback_reference_span: NativeSourceSpan | None = None
+    include_reference_spans: tuple[NativeSourceSpan, ...] = ()
     registration_source_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     handler_source_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     contract_source_path: str
