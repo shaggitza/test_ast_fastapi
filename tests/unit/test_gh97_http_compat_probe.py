@@ -271,3 +271,28 @@ def test_diagnostic_root_suffix_in_unrelated_absolute_path_is_preserved() -> Non
         )
         == item
     )
+
+
+@pytest.mark.parametrize(
+    ("environment", "diagnostic"),
+    [
+        (
+            "/Users/John Doe/.venv",
+            "/Users/John Doe/.venv/lib/python3.11/site-packages/mypy/typeshed/"
+            "stdlib/builtins.pyi:42: note: value",
+        ),
+        (
+            r"C:\Users\John Doe\.venv",
+            r"C:\Users\John Doe\.venv\Lib\site-packages\mypy\typeshed"
+            r"\stdlib\builtins.pyi:42: note: value",
+        ),
+    ],
+)
+def test_typeshed_normalization_removes_whitespace_environment_roots(
+    environment: str, diagnostic: str
+) -> None:
+    normalized = probe._normalize_diagnostic(
+        diagnostic, Path("/checkout"), Path(environment), Path("/private")
+    )
+    assert normalized == "<typeshed>/stdlib/builtins.pyi:42: note: value"
+    assert "John" not in normalized

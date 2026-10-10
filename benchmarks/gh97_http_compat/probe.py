@@ -97,6 +97,14 @@ def _normalize_diagnostic(item: str, checkout: Path, environment: Path, probe_ro
         return replaced
 
     normalized = replace_root(item, probe_root, "<private-probe>")
+    # Replace known roots before typeshed matching so whitespace in a root
+    # cannot leave a partial host prefix behind.
+    for path, label in sorted(
+        ((checkout, "<analyzer-project>"), (environment, "<python-environment>")),
+        key=lambda pair: len(portable_root_pattern(pair[0])),
+        reverse=True,
+    ):
+        normalized = replace_root(normalized, path, label)
     # Typeshed can be reported below any environment root, with either slash
     # style. Match the mypy/typeshed component boundary rather than stripping
     # arbitrary preceding paths.
@@ -105,12 +113,6 @@ def _normalize_diagnostic(item: str, checkout: Path, environment: Path, probe_ro
         lambda match: "<typeshed>/" + match.group(1).replace("\\", "/"),
         normalized,
     )
-    for path, label in sorted(
-        ((checkout, "<analyzer-project>"), (environment, "<python-environment>")),
-        key=lambda pair: len(portable_root_pattern(pair[0])),
-        reverse=True,
-    ):
-        normalized = replace_root(normalized, path, label)
     return normalized
 
 
