@@ -21,7 +21,7 @@ import stat
 import sys
 import tempfile
 import tokenize
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
 from importlib.util import find_spec
@@ -2693,7 +2693,7 @@ class MypyAnalyzer:
                 return f"{receiver}.{expression.attr}" if receiver else None
             return None
 
-        def module_aliases(nodes: list[ast.AST], module_name: str) -> dict[str, str]:
+        def module_aliases(nodes: Sequence[ast.AST], module_name: str) -> dict[str, str]:
             aliases: dict[str, str] = {}
             package = module_name.rpartition(".")[0].split(".") if "." in module_name else []
 
@@ -2729,7 +2729,9 @@ class MypyAnalyzer:
 
             return aliases
 
-        def target_is_mutation(target: ast.expr, aliases: dict[str, str]) -> bool:
+        def target_is_mutation(
+            target: ast.expr, aliases: dict[str, str], imported_names: set[str]
+        ) -> bool:
             path = imported_path(target, aliases)
             if path is None:
                 if (
@@ -2752,10 +2754,255 @@ class MypyAnalyzer:
             declaration = self._source_callable_declaration(path)
             if declaration is not None:
                 return declaration[0] == fullname
+            if isinstance(target, ast.Name):
+                resolved_module = self._resolve_fullname_to_file(path)
+                if resolved_module is not None and resolved_module[1] == path:
+                    # Assigning a fresh alias (api = client) does not rebind the
+                    # original imported module name. Direct import-name rebinding
+                    # remains a conservative ownership failure.
+                    return target.id in imported_names and fullname.startswith(f"{path}.")
             return fullname.startswith(f"{path}.") or path == fullname
+
+        def is_imported_module_expression(expression: ast.AST, aliases: dict[str, str]) -> bool:
+            for child in ast.walk(expression):
+                if not isinstance(child, ast.expr):
+                    continue
+                path = imported_path(child, aliases)
+                if path is None or path == "*" or path not in aliases.values():
+                    continue
+                resolved = self._resolve_fullname_to_file(path)
+                if resolved is not None and resolved[1] == path:
+                    return True
+            return False
 
         found_mutation = False
         uncertain = False
+
+        class ScopeBindings(ast.NodeVisitor):
+            """Record lexical locals for the mutation scan, preserving outer bindings."""
+
+            def __init__(self, aliases: dict[str, str]) -> None:
+                self.shadowed: set[str] = set()
+                self.by_node: dict[int, frozenset[str]] = {}
+                self.unsupported_nonlocal = False
+                self.unsupported_module_alias = False
+                self.aliases = aliases
+
+            def visit(self, node: ast.AST) -> Any:
+                self.by_node[id(node)] = frozenset(self.shadowed)
+                return super().visit(node)
+
+            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+                self._visit_function_scope(node)
+
+            def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+                self._visit_function_scope(node)
+
+            def _visit_function_scope(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+                self.by_node[id(node)] = frozenset(self.shadowed)
+                local_names: set[str] = {
+                    arg.arg
+                    for arg in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs)
+                }
+                global_names: set[str] = set()
+                if node.args.vararg is not None:
+                    local_names.add(node.args.vararg.arg)
+                if node.args.kwarg is not None:
+                    local_names.add(node.args.kwarg.arg)
+
+                class Bindings(ast.NodeVisitor):
+                    def visit_Name(self, child: ast.Name) -> None:
+                        if isinstance(child.ctx, ast.Store):
+                            local_names.add(child.id)
+
+                    def visit_Global(self, child: ast.Global) -> None:
+                        global_names.update(child.names)
+                        local_names.difference_update(child.names)
+
+                    def visit_Nonlocal(self, child: ast.Nonlocal) -> None:
+                        local_names.difference_update(child.names)
+                        self_nonlocal[0] = True
+
+                    def visit_Import(self, child: ast.Import) -> None:
+                        local_names.update(
+                            item.asname or item.name.split(".")[0] for item in child.names
+                        )
+
+                    def visit_ImportFrom(self, child: ast.ImportFrom) -> None:
+                        local_names.update(
+                            item.asname or item.name for item in child.names if item.name != "*"
+                        )
+
+                    def visit_FunctionDef(self, child: ast.FunctionDef) -> None:
+                        local_names.add(child.name)
+
+                    def visit_AsyncFunctionDef(self, child: ast.AsyncFunctionDef) -> None:
+                        local_names.add(child.name)
+
+                    def visit_ClassDef(self, child: ast.ClassDef) -> None:
+                        local_names.add(child.name)
+
+                    def visit_Assign(self, child: ast.Assign) -> None:
+                        if child.value is not None and is_imported_module_expression(
+                            child.value, self_aliases
+                        ):
+                            bindings_owner[0].unsupported_module_alias = True
+                        self.generic_visit(child)
+
+                    def visit_AnnAssign(self, child: ast.AnnAssign) -> None:
+                        if child.value is not None and is_imported_module_expression(
+                            child.value, self_aliases
+                        ):
+                            bindings_owner[0].unsupported_module_alias = True
+                        self.generic_visit(child)
+
+                    def visit_Lambda(self, child: ast.Lambda) -> None:
+                        return
+
+                    def visit_ListComp(self, child: ast.ListComp) -> None:
+                        return
+
+                    def visit_SetComp(self, child: ast.SetComp) -> None:
+                        return
+
+                    def visit_DictComp(self, child: ast.DictComp) -> None:
+                        return
+
+                    def visit_GeneratorExp(self, child: ast.GeneratorExp) -> None:
+                        return
+
+                self_nonlocal = [False]
+                bindings_owner = [self]
+                self_aliases = self.aliases
+                bindings = Bindings()
+                for statement in node.body:
+                    bindings.visit(statement)
+                if self_nonlocal[0]:
+                    self.unsupported_nonlocal = True
+                previous = self.shadowed
+                self.shadowed = (previous - global_names) | local_names
+                for statement in node.body:
+                    self.visit(statement)
+                    self.shadowed = (previous - global_names) | local_names
+                self.shadowed = previous
+
+            def visit_ClassDef(self, node: ast.ClassDef) -> None:
+                self.by_node[id(node)] = frozenset(self.shadowed)
+                local_names: set[str] = set()
+
+                class ClassBindings(ast.NodeVisitor):
+                    def visit_Name(self, child: ast.Name) -> None:
+                        if isinstance(child.ctx, ast.Store):
+                            local_names.add(child.id)
+
+                    def visit_Global(self, child: ast.Global) -> None:
+                        local_names.difference_update(child.names)
+
+                    def visit_FunctionDef(self, child: ast.FunctionDef) -> None:
+                        local_names.add(child.name)
+
+                    def visit_AsyncFunctionDef(self, child: ast.AsyncFunctionDef) -> None:
+                        local_names.add(child.name)
+
+                    def visit_ClassDef(self, child: ast.ClassDef) -> None:
+                        local_names.add(child.name)
+
+                    def visit_Import(self, child: ast.Import) -> None:
+                        local_names.update(
+                            item.asname or item.name.split(".")[0] for item in child.names
+                        )
+
+                    def visit_ImportFrom(self, child: ast.ImportFrom) -> None:
+                        local_names.update(
+                            item.asname or item.name for item in child.names if item.name != "*"
+                        )
+
+                    def visit_Lambda(self, child: ast.Lambda) -> None:
+                        return
+
+                    def visit_ListComp(self, child: ast.ListComp) -> None:
+                        return
+
+                    def visit_SetComp(self, child: ast.SetComp) -> None:
+                        return
+
+                    def visit_DictComp(self, child: ast.DictComp) -> None:
+                        return
+
+                    def visit_GeneratorExp(self, child: ast.GeneratorExp) -> None:
+                        return
+
+                class_bindings = ClassBindings()
+                for statement in node.body:
+                    class_bindings.visit(statement)
+                previous = self.shadowed
+                self.shadowed = previous | local_names
+                if any(
+                    isinstance(child, (ast.Assign, ast.AnnAssign))
+                    and child.value is not None
+                    and is_imported_module_expression(child.value, self.aliases)
+                    for statement in node.body
+                    for child in ast.walk(statement)
+                ):
+                    self.unsupported_module_alias = True
+                for statement in node.body:
+                    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                        self.shadowed = previous
+                    self.visit(statement)
+                    self.shadowed = previous | local_names
+                self.shadowed = previous
+
+            def _visit_comprehension(
+                self,
+                node: ast.AST,
+                generators: list[ast.comprehension],
+                results: list[ast.expr],
+            ) -> None:
+                previous = self.shadowed
+                self.by_node[id(node)] = frozenset(previous)
+                if any(
+                    is_imported_module_expression(generator.iter, self.aliases)
+                    for generator in generators
+                ):
+                    self.unsupported_module_alias = True
+                bound: set[str] = set()
+                for generator in generators:
+                    self.shadowed = previous | bound
+                    self.by_node[id(generator)] = frozenset(self.shadowed)
+                    self.visit(generator.iter)
+                    bound.update(
+                        item.id
+                        for item in ast.walk(generator.target)
+                        if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Store)
+                    )
+                    self.shadowed = previous | bound
+                    for condition in generator.ifs:
+                        self.visit(condition)
+                self.shadowed = previous | bound
+                for child in results:
+                    self.visit(child)
+                self.shadowed = previous
+
+            def visit_ListComp(self, node: ast.ListComp) -> None:
+                self._visit_comprehension(node, node.generators, [node.elt])
+
+            def visit_SetComp(self, node: ast.SetComp) -> None:
+                self._visit_comprehension(node, node.generators, [node.elt])
+
+            def visit_DictComp(self, node: ast.DictComp) -> None:
+                self._visit_comprehension(node, node.generators, [node.key, node.value])
+
+            def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+                self._visit_comprehension(node, node.generators, [node.elt])
+
+        def is_shadowed(node: ast.AST, target: ast.expr, scopes: ScopeBindings) -> bool:
+            root = target
+            while isinstance(root, (ast.Attribute, ast.Subscript)):
+                root = root.value
+            return isinstance(root, ast.Name) and root.id in scopes.by_node.get(
+                id(node), frozenset()
+            )
+
         for module_name in sorted(self._project_modules):
             path = self._module_to_path.get(module_name)
             if path is None:
@@ -2774,8 +3021,39 @@ class MypyAnalyzer:
             if bounded_nodes is None:
                 uncertain = True
                 break
-            aliases = module_aliases(bounded_nodes, module_name)
+            aliases = module_aliases(tree.body, module_name)
+            imported_names = {
+                item.asname or item.name.split(".")[0]
+                for statement in tree.body
+                if isinstance(statement, ast.Import)
+                for item in statement.names
+            }
+            imported_names.update(
+                item.asname or item.name
+                for statement in tree.body
+                if isinstance(statement, ast.ImportFrom)
+                for item in statement.names
+                if item.name != "*"
+            )
+            scopes = ScopeBindings(aliases)
+            scopes.visit(bounded_nodes[0])
+            if scopes.unsupported_nonlocal or scopes.unsupported_module_alias:
+                uncertain = True
+                break
             for node in bounded_nodes:
+                if isinstance(node, ast.comprehension):
+                    stack = [node.target]
+                    while stack:
+                        candidate = stack.pop()
+                        if not isinstance(candidate, ast.Name) and target_is_mutation(
+                            candidate, aliases, imported_names
+                        ):
+                            found_mutation = True
+                            break
+                        if isinstance(candidate, (ast.Tuple, ast.List)):
+                            stack.extend(candidate.elts)
+                    if found_mutation:
+                        break
                 targets: list[ast.expr] = []
                 if isinstance(node, ast.Assign):
                     targets = list(node.targets)
@@ -2784,10 +3062,12 @@ class MypyAnalyzer:
                 elif isinstance(node, ast.Delete):
                     targets = list(node.targets)
                 for target in targets:
+                    if is_shadowed(node, target, scopes):
+                        continue
                     stack = [target]
                     while stack:
                         candidate = stack.pop()
-                        if target_is_mutation(candidate, aliases):
+                        if target_is_mutation(candidate, aliases, imported_names):
                             found_mutation = True
                             break
                         if isinstance(candidate, (ast.Tuple, ast.List)):
@@ -2796,8 +3076,8 @@ class MypyAnalyzer:
                         break
                 if found_mutation:
                     break
-                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-                    dynamic_name = node.func.id
+                if isinstance(node, ast.Call):
+                    dynamic_name = node.func.id if isinstance(node.func, ast.Name) else ""
                     dynamic_fullname = aliases.get(dynamic_name, "")
                     if dynamic_name in {"exec", "eval"} or dynamic_fullname in {
                         "builtins.exec",
@@ -2815,13 +3095,31 @@ class MypyAnalyzer:
                         ):
                             found_mutation = True
                             break
+                    # Passing an imported module into analyzed callable code escapes
+                    # the local proof: that code can rebind its attributes.
+                    if any(
+                        not is_shadowed(node, argument, scopes)
+                        and (argument_path := imported_path(argument, aliases)) is not None
+                        and argument_path != "*"
+                        and argument_path in aliases.values()
+                        and (module_identity := self._resolve_fullname_to_file(argument_path))
+                        is not None
+                        and module_identity[1] == argument_path
+                        for argument in node.args
+                    ):
+                        found_mutation = True
+                        break
                     if dynamic_name in {"setattr", "delattr"} or dynamic_fullname in {
                         "builtins.setattr",
                         "builtins.delattr",
                     }:
                         if len(node.args) < 2:
                             continue
-                        receiver = imported_path(node.args[0], aliases)
+                        receiver = (
+                            None
+                            if is_shadowed(node, node.args[0], scopes)
+                            else imported_path(node.args[0], aliases)
+                        )
                         attribute = node.args[1]
                         if receiver == "*" or (receiver and fullname.startswith(f"{receiver}.")):
                             if receiver == "*":
