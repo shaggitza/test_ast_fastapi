@@ -46,6 +46,17 @@ from fastapi_endpoint_detector.models.surface_contract import CallbackRangeMode
 
 # Type alias for line-level progress callback (file_path, line_number, symbol_name)
 LineProgressCallback = Callable[[str, int, str], None]
+_MYPY_POSIX_FALLBACK_ROOT = "/usr/local/lib/mypy"
+
+
+def _is_path_within(path: str, root: str) -> bool:
+    """Check lexical path containment without crossing path-component boundaries."""
+    absolute = str(Path(path).absolute())
+    absolute_root = str(Path(root).absolute())
+    try:
+        return os.path.commonpath((absolute, absolute_root)) == absolute_root
+    except ValueError:
+        return False
 
 
 class SourceFileRecord(Protocol):
@@ -558,6 +569,8 @@ class MypyAnalyzer:
         max_depth: int | None = None,
         module_root: Path | None = None,
         source_inventory: SourceInventory | None = None,
+        no_site_packages: bool = False,
+        target_platform: str | None = None,
     ) -> None:
         """Initialize the mypy analyzer."""
         inventory_root = (
@@ -576,6 +589,10 @@ class MypyAnalyzer:
         self.module_root = (module_root or self._infer_module_root(self.source_root)).resolve()
         self.source_inventory = source_inventory
         self.max_depth = effective_depth
+        # Hermetic source probes can opt out of all interpreter site packages.
+        # Ordinary analysis keeps mypy's historical environment discovery.
+        self.no_site_packages = no_site_packages
+        self.target_platform = target_platform
         self._endpoint_deps: dict[str, EndpointDependencies] = {}
         self._mypy_available = self._check_mypy_available()
         self._cache_file: Path | None = None
@@ -781,6 +798,7 @@ class MypyAnalyzer:
             raise MypyAnalyzerError("mypy is not installed")
 
         from mypy.build import build as mypy_build
+        from mypy.build import default_data_dir
         from mypy.fscache import FileSystemCache
         from mypy.modulefinder import BuildSource
         from mypy.options import Options
@@ -799,6 +817,13 @@ class MypyAnalyzer:
         # Configure mypy for full analysis with AST retention
         options = Options()
         options.ignore_missing_imports = True
+        if self.target_platform is not None:
+            options.platform = self.target_platform
+        options.no_site_packages = self.no_site_packages
+        if self.no_site_packages:
+            # The programmatic API defaults this to sys.executable, which makes
+            # mypy add that interpreter's site-packages despite the flag.
+            options.python_executable = None
         options.follow_imports = self._effective_follow_imports()
         options.mypy_path = [str(self.module_root)]
         options.namespace_packages = True
@@ -809,12 +834,71 @@ class MypyAnalyzer:
         options.export_types = True  # Critical for type information!
 
         original_path = sys.path.copy()
+        original_mypypath = os.environ.pop("MYPYPATH", None) if self.no_site_packages else None
         if str(self.module_root) not in sys.path:
             sys.path.insert(0, str(self.module_root))
 
         try:
-            fscache = FileSystemCache()
-            self._build_result = mypy_build(sources=sources, options=options, fscache=fscache)
+            fscache: FileSystemCache
+            if self.no_site_packages and sys.platform != "win32":
+                # mypy 1.19.1 unconditionally adds /usr/local/lib/mypy to its
+                # typeshed search paths on POSIX. Hide that one ambient fallback
+                # at the per-build filesystem boundary; changing modulefinder's
+                # global path function would race with concurrent builds.
+                class HermeticFileSystemCache(FileSystemCache):
+                    def __init__(self) -> None:
+                        super().__init__()
+                        self._bundled_typeshed = Path(default_data_dir()).resolve() / "typeshed"
+
+                    @staticmethod
+                    def _is_fallback_path(path: str) -> bool:
+                        # Check both spellings: mypy may receive the configured
+                        # path while the OS resolves it through a symlink.
+                        return _is_path_within(path, _MYPY_POSIX_FALLBACK_ROOT) or (
+                            _is_path_within(
+                                os.path.realpath(path),
+                                os.path.realpath(_MYPY_POSIX_FALLBACK_ROOT),
+                            )
+                        )
+
+                    def _is_blocked_fallback_path(self, path: str) -> bool:
+                        if not self._is_fallback_path(path):
+                            return False
+                        return not _is_path_within(
+                            os.path.realpath(path),
+                            os.path.realpath(self._bundled_typeshed),
+                        )
+
+                    def stat_or_none(self, path: str) -> os.stat_result | None:
+                        if self._is_blocked_fallback_path(path):
+                            return None
+                        return super().stat_or_none(path)
+
+                    def listdir(self, path: str) -> list[str]:
+                        if self._is_blocked_fallback_path(path):
+                            raise FileNotFoundError(path)
+                        return super().listdir(path)
+
+                    def read(self, path: str) -> bytes:
+                        if self._is_blocked_fallback_path(path):
+                            raise FileNotFoundError(path)
+                        return super().read(path)
+
+                    def hash_digest(self, path: str) -> str:
+                        if self._is_blocked_fallback_path(path):
+                            raise FileNotFoundError(path)
+                        return super().hash_digest(path)
+
+                fscache = HermeticFileSystemCache()
+            else:
+                fscache = FileSystemCache()
+            self._build_result = mypy_build(
+                sources=sources,
+                options=options,
+                fscache=fscache,
+                # mypy otherwise adds the process cwd even with no-site-packages.
+                alt_lib_path=str(self.module_root) if self.no_site_packages else None,
+            )
             analyzed_source_hashes: dict[str, str] = {}
 
             # Store the types map
@@ -879,6 +963,8 @@ class MypyAnalyzer:
 
         finally:
             sys.path = original_path
+            if self.no_site_packages and original_mypypath is not None:
+                os.environ["MYPYPATH"] = original_mypypath
 
     def _effective_follow_imports(self) -> str:
         """Translate inventory policy to mypy's string option vocabulary."""
@@ -5682,6 +5768,13 @@ class MypyAnalyzer:
                 "engine": "fastapi-endpoint-detector:mypy-analyzer-v2",
                 "source_span_normalization": "source-call-order-verified-ast-spans-v2",
                 "max_depth": self.max_depth,
+                "no_site_packages": self.no_site_packages,
+                "hermetic_search_path_policy": (
+                    "explicit-module-root-without-cwd-v1" if self.no_site_packages else None
+                ),
+                "target_platform": (
+                    self.target_platform if self.target_platform is not None else sys.platform
+                ),
                 "module_root": str(self.module_root.resolve()),
                 "effective_mypy_config": {
                     "follow_imports": follow_imports,

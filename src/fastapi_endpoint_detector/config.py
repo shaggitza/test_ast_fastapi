@@ -243,6 +243,7 @@ class AnalysisConfig(BaseModel):
         Literal[
             "filesystem-v1",
             "http-clients-v1",
+            "message-bus-v1",
             "mongodb-v1",
             "object-storage-v1",
             "redis-v1",

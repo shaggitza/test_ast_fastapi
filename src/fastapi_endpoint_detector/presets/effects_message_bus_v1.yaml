@@ -1,0 +1,25 @@
+schema_version: 1
+preset:
+  id: typed-sqs-effects
+  version: 1.0.0
+  provenance:
+    kind: preset
+    source: fastapi-endpoint-detector/effects_message_bus_v1.yaml
+    revision: "1"
+contracts:
+  - id: typed-sqs-send-message
+    symbol: mypy_boto3_sqs.client.SQSClient.send_message
+    invocation: instance_method
+    operation: publish
+    channel: message_bus
+    resource: {kind: keyword, name: QueueUrl}
+    value: {kind: keyword, name: MessageBody}
+    package: {distribution: mypy-boto3-sqs, version: "==1.35.91"}
+  - id: typed-sqs-send-message-batch
+    symbol: mypy_boto3_sqs.client.SQSClient.send_message_batch
+    invocation: instance_method
+    operation: publish
+    channel: message_bus
+    resource: {kind: keyword, name: QueueUrl}
+    value: {kind: keyword, name: Entries}
+    package: {distribution: mypy-boto3-sqs, version: "==1.35.91"}

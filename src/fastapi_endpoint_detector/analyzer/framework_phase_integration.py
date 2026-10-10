@@ -476,6 +476,9 @@ def collect_framework_phase_evidence(  # noqa: PLR0912, PLR0915
     typed_build: TypedBuild | None,
     *,
     snapshot_side: SnapshotSide = SnapshotSide.TARGET,
+    app_variable: str = "app",
+    app_entry: str | None = None,
+    bootstrap_entry: str | None = None,
 ) -> FrameworkPhaseIntegration:
     """Analyze selected lifecycle/middleware callbacks using bounded mypy APIs.
 
@@ -486,7 +489,11 @@ def collect_framework_phase_evidence(  # noqa: PLR0912, PLR0915
     """
     provider_sources, provider_source_error = _provider_source_snapshot(typed_build)
     canonical_inventory = CustomSurfaceExtractor(
-        analyzer.source_root, contracts
+        analyzer.source_root,
+        contracts,
+        app_variable=app_variable,
+        app_entry=app_entry,
+        bootstrap_entry=bootstrap_entry,
     ).extract_inventory()
     selected_surface_counts = Counter(
         key for endpoint in canonical_inventory.endpoints if (key := _surface_key(endpoint))

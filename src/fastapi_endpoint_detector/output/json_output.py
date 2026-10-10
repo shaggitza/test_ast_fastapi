@@ -160,6 +160,11 @@ class JsonFormatter(BaseFormatter):
         }
         if report.source_observations is not None:
             data["source_observations"] = report.source_observations
+        if report.framework_phase_report is not None:
+            data["schema_version"] = 5
+            data["framework_phase_report"] = report.framework_phase_report.model_dump(
+                mode="json", exclude_none=True
+            )
 
         return json.dumps(data, indent=self.indent, default=str)
 

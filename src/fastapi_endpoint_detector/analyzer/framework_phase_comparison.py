@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
-from benchmarks.real_world.compare_runtime import ComparisonError, compare
 from pydantic import BaseModel, ConfigDict
 
 from fastapi_endpoint_detector.analyzer.framework_phase_bridge import FrameworkPhase  # noqa: TC001
+from fastapi_endpoint_detector.analyzer.runtime_artifact_comparison import ComparisonError, compare
 
 if TYPE_CHECKING:
     from pathlib import Path

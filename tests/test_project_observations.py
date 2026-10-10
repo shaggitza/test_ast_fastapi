@@ -1,4 +1,7 @@
+import os
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -192,4 +195,41 @@ def test_project_adapter_marks_selected_symlinks_as_incomplete(tmp_path: Path) -
     assert snapshot.client_observations == ()
     assert snapshot.issues == (
         SourceObservationIssue("client.ts", "symlink source was not followed"),
+    )
+
+
+def test_source_globs_are_anchored_and_star_does_not_cross_directories(tmp_path: Path) -> None:
+    for relative in ("frontend/app.js", "vendor/frontend/app.js", "frontend/nested/app.js"):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("fetch('/items');", encoding="utf-8")
+    direct = scan_project_observations(
+        tmp_path, client_include_patterns=("frontend/*.js",), deployment_include_patterns=()
+    )
+    assert direct.scanned_files == 1
+    assert [item.source_path.as_posix() for item in direct.client_observations] == [
+        "frontend/app.js"
+    ]
+    recursive = scan_project_observations(
+        tmp_path, client_include_patterns=("frontend/**/*.js",), deployment_include_patterns=()
+    )
+    assert recursive.scanned_files == 2
+    assert {item.source_path.as_posix() for item in recursive.client_observations} == {
+        "frontend/app.js",
+        "frontend/nested/app.js",
+    }
+
+
+def test_directory_traversal_error_marks_snapshot_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def failed_walk(root: Path, **kwargs: Any) -> Iterator[tuple[str, list[str], list[str]]]:
+        kwargs["onerror"](PermissionError(13, "permission denied", str(root / "frontend")))
+        yield str(root), [], []
+
+    monkeypatch.setattr(os, "walk", failed_walk)
+    snapshot = scan_project_observations(tmp_path)
+    assert not snapshot.complete
+    assert snapshot.issues == (
+        SourceObservationIssue("frontend", "directory traversal failed: OSError"),
     )

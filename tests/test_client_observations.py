@@ -8,6 +8,27 @@ from fastapi_endpoint_detector.analyzer.client_observations import (
 )
 
 
+def test_axios_aliases_are_invalidated_by_rebinding_and_local_parameters() -> None:
+    surfaces = (EstablishedSurface("admin", "/admin", "GET", "https://api.test", True),)
+    for source in (
+        "import http from 'axios'; http = client; http.get('https://api.test/admin');",
+        "import http from 'axios'; function f(http) { http.get('https://api.test/admin'); }",
+        "function f(http) { http.get('https://api.test/admin'); } import http from 'axios';",
+        "import * as http from 'axios'; const f = (http) => http.get('https://api.test/admin');",
+        "import http from 'axios'; http++; http.get('https://api.test/admin');",
+    ):
+        observations = extract_client_observations(source)
+        assert observations == (), source
+        assert join_established_surfaces(observations, surfaces) == (), source
+    observations = extract_client_observations(
+        "import http from 'axios'; http.get('https://api.test/admin');"
+    )
+    assert len(observations) == 1
+    assert [item.surface_id for item in join_established_surfaces(observations, surfaces)] == [
+        "admin"
+    ]
+
+
 def test_extracts_finite_http_websocket_calls_and_keeps_query_evidence() -> None:
     source = r"""
 fetch("https://api.example.test/items?limit=10");
@@ -303,3 +324,33 @@ def test_separate_unary_operators_do_not_count_as_prefix_mutation() -> None:
         "fetch('/fetch'); axios.get('/axios'); new WebSocket('wss://api.test/events');"
     )
     assert [item.route_path for item in observations] == ["/fetch", "/axios", "/events"]
+
+
+def test_client_updates_respect_line_terminators_and_maximal_munch() -> None:
+    for source in (
+        "fetch\n++counter\nfetch('/items');",
+        "fetch /*\n*/ --counter; fetch('/items');",
+        "fetch\u2028++counter; fetch('/items');",
+        "counter+++fetch('/items');",
+        "counter---axios.get('/items');",
+        "counter++ + fetch('/items');",
+        "counter-- - axios.get('/items');",
+    ):
+        observations = extract_client_observations(source)
+        assert [(item.method, item.route_path) for item in observations] == [("GET", "/items")], (
+            source
+        )
+    for source in (
+        "++fetch; fetch('/items');",
+        "--axios; axios.get('/items');",
+        "fetch++; fetch('/items');",
+        "fetch /*no newline*/ ++; fetch('/items');",
+        "counter + ++fetch; fetch('/items');",
+        "counter\n++fetch; fetch('/items');",
+        "import http from 'axios'; ++http; http.get('/items');",
+        "setTimeout(() => fetch('/items'), 0)\n++fetch",
+        "setTimeout(() => axios.get('/items'), 0)\n--axios",
+        "setTimeout(() => new WebSocket('wss://api.test/items'), 0)\n++WebSocket",
+        "import http from 'axios'; setTimeout(() => http.get('/items'), 0)\n--http",
+    ):
+        assert extract_client_observations(source) == (), source
