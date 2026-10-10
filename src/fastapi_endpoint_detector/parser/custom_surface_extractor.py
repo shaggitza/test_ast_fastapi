@@ -50,10 +50,11 @@ from fastapi_endpoint_detector.parser.framework_ownership import (
 
 @dataclass(frozen=True)
 class _Binding:
-    kind: Literal["module", "symbol", "receiver", "function", "method"]
+    kind: Literal["module", "symbol", "receiver", "function", "method", "possible_method"]
     identity: str
     instance_token: tuple[str, int, int] | None = None
     receiver_type: str | None = None
+    possible_methods: tuple[_Binding, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -106,6 +107,7 @@ class _FrameworkIncludeEvent:
     condition: EndpointDiscoveryCondition | None
     source_span: NativeSourceSpan
     routes_only: bool = False
+    guards: tuple[EndpointDiscoveryCondition, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -119,6 +121,7 @@ class _FrameworkRouteEvent:
 class _FrameworkConditionEvent:
     token: _FrameworkToken
     condition: EndpointDiscoveryCondition
+    request_surface: bool = False
 
 
 _FrameworkEvent = (
@@ -1229,6 +1232,21 @@ class CustomSurfaceExtractor:
             )
         return tuple(conditions)
 
+    @staticmethod
+    def _guard_framework_endpoint(
+        endpoint: Endpoint, guards: tuple[EndpointDiscoveryCondition, ...]
+    ) -> Endpoint:
+        if not guards:
+            return endpoint
+        return endpoint.model_copy(
+            update={
+                "discovery_status": EndpointDiscoveryStatus.CONDITIONAL,
+                "discovery_conditions": tuple(
+                    dict.fromkeys((*endpoint.discovery_conditions, *guards))
+                ),
+            }
+        )
+
     def _filter_framework_surfaces(self) -> None:  # noqa: PLR0912, PLR0915
         """Apply selected-app identity and APIRouter copy-at-include semantics."""
         if not self._scope_framework_surfaces:
@@ -1239,9 +1257,10 @@ class CustomSurfaceExtractor:
             list[tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef]],
         ] = {}
         conditions: dict[_FrameworkToken, list[EndpointDiscoveryCondition]] = {}
+        request_conditions: dict[_FrameworkToken, list[EndpointDiscoveryCondition]] = {}
         included_by: dict[_FrameworkToken, set[_FrameworkToken]] = {}
         mounted_by: dict[_FrameworkToken, set[_FrameworkToken]] = {}
-        mount_edges: dict[_FrameworkToken, list[tuple[_FrameworkToken, NativeSourceSpan]]] = {}
+        mount_edges: dict[_FrameworkToken, list[_FrameworkIncludeEvent]] = {}
         for event in self._framework_events:
             if isinstance(event, _FrameworkRegistrationEvent):
                 live.setdefault(event.token, []).append(event.endpoint)
@@ -1273,8 +1292,12 @@ class CustomSurfaceExtractor:
                     )
                 ]
                 conditions.setdefault(event.token, []).append(event.condition)
+                if event.surface_kind != "framework.lifecycle":
+                    request_conditions.setdefault(event.token, []).append(event.condition)
                 for ancestor in self._framework_include_ancestors(event.token, included_by):
                     conditions.setdefault(ancestor, []).append(event.condition)
+                    if event.surface_kind != "framework.lifecycle":
+                        request_conditions.setdefault(ancestor, []).append(event.condition)
                 continue
             if isinstance(event, _FrameworkRouteEvent):
                 if event.callback is not None:
@@ -1283,17 +1306,25 @@ class CustomSurfaceExtractor:
                         routes.setdefault(parent, []).append(event.callback)
                 if event.condition is not None:
                     conditions.setdefault(event.token, []).append(event.condition)
+                    request_conditions.setdefault(event.token, []).append(event.condition)
                     for parent in self._framework_mount_ancestors(event.token, mounted_by):
                         conditions.setdefault(parent, []).append(event.condition)
                 continue
             if isinstance(event, _FrameworkConditionEvent):
                 conditions.setdefault(event.token, []).append(event.condition)
+                if event.request_surface:
+                    request_conditions.setdefault(event.token, []).append(event.condition)
                 for ancestor in self._framework_include_ancestors(event.token, included_by):
                     conditions.setdefault(ancestor, []).append(event.condition)
+                    if event.request_surface:
+                        request_conditions.setdefault(ancestor, []).append(event.condition)
                 continue
+            conditions.setdefault(event.parent, []).extend(event.guards)
+            request_conditions.setdefault(event.parent, []).extend(event.guards)
             if event.child is None:
                 if event.condition is not None:
                     conditions.setdefault(event.parent, []).append(event.condition)
+                    request_conditions.setdefault(event.parent, []).append(event.condition)
                     for ancestor in self._framework_include_ancestors(event.parent, included_by):
                         conditions.setdefault(ancestor, []).append(event.condition)
                 continue
@@ -1331,7 +1362,9 @@ class CustomSurfaceExtractor:
             )
             copied_routes = tuple(routes.get(event.child, ()))
             routes.setdefault(event.parent, []).extend(copied_routes)
-            copied_conditions = tuple(conditions.get(event.child, ()))
+            copied_conditions = tuple(
+                (request_conditions if event.routes_only else conditions).get(event.child, ())
+            )
             if event.routes_only:
                 copied_endpoints = tuple(
                     self._qualify_mounted_exception(endpoint)
@@ -1345,8 +1378,14 @@ class CustomSurfaceExtractor:
             # after replay so later child registrations and overrides remain
             # visible without letting a parent's overrides alter the child.
             if not event.routes_only:
-                live.setdefault(event.parent, []).extend(copied_endpoints)
+                live.setdefault(event.parent, []).extend(
+                    self._guard_framework_endpoint(endpoint, event.guards)
+                    for endpoint in copied_endpoints
+                )
             conditions.setdefault(event.parent, []).extend(copied_conditions)
+            request_conditions.setdefault(event.parent, []).extend(
+                request_conditions.get(event.child, ())
+            )
             copied_lifecycle_conditions = self._framework_copied_lifecycle_conditions(
                 copied_endpoints
             )
@@ -1355,7 +1394,7 @@ class CustomSurfaceExtractor:
                 conditions[ancestor].extend(copied_lifecycle_conditions)
             if event.routes_only:
                 mounted_by.setdefault(event.child, set()).add(event.parent)
-                mount_edges.setdefault(event.parent, []).append((event.child, event.source_span))
+                mount_edges.setdefault(event.parent, []).append(event)
             else:
                 included_by.setdefault(event.child, set()).add(event.parent)
 
@@ -1373,7 +1412,9 @@ class CustomSurfaceExtractor:
                 and endpoint.surface.surface_kind
                 in {"framework.middleware", "framework.exception_handler"}
             ]
-            for child, span in mount_edges.get(token, ()):
+            for edge in mount_edges.get(token, ()):
+                child, span = edge.child, edge.source_span
+                assert child is not None
                 for endpoint in mounted_request_surfaces(child, seen | {token}):
                     surface = endpoint.surface
                     assert surface is not None
@@ -1391,12 +1432,17 @@ class CustomSurfaceExtractor:
                     )
                     if surface.surface_kind == "framework.exception_handler":
                         copied = self._qualify_mounted_exception(copied)
+                    copied = self._guard_framework_endpoint(copied, edge.guards)
                     result.append(copied)
             return result
 
-        source_conditions = tuple((token, tuple(items)) for token, items in conditions.items())
+        source_conditions = tuple(
+            (token, tuple(items)) for token, items in request_conditions.items()
+        )
         for parent, edges in mount_edges.items():
-            for child, span in edges:
+            for edge in edges:
+                child, span = edge.child, edge.source_span
+                assert child is not None
                 for endpoint in mounted_request_surfaces(child, frozenset({parent})):
                     surface = endpoint.surface
                     assert surface is not None
@@ -1414,6 +1460,7 @@ class CustomSurfaceExtractor:
                     )
                     if surface.surface_kind == "framework.exception_handler":
                         copied = self._qualify_mounted_exception(copied)
+                    copied = self._guard_framework_endpoint(copied, edge.guards)
                     live.setdefault(parent, []).append(copied)
             # Preserve selected-app uncertainty from late registrations too.
             for child, child_conditions in source_conditions:
@@ -2590,6 +2637,12 @@ class CustomSurfaceExtractor:
                                 "call has unsupported arguments"
                             ),
                         ),
+                        request_surface=requested_name is None
+                        or any(
+                            contract.registration.symbol.rsplit(".", 1)[-1] == requested_name
+                            and contract.surface.kind != "framework.lifecycle"
+                            for contract in self.contracts.document.contracts
+                        ),
                     )
                 )
                 if self._is_builtin_getattr_call(call.func, callable_state):
@@ -2762,7 +2815,21 @@ class CustomSurfaceExtractor:
                     source_line=call.lineno,
                     reason=("call has duplicate keyword names and cannot complete registration"),
                 )
-                self._framework_events.append(_FrameworkConditionEvent(duplicate_token, condition))
+                self._framework_events.append(
+                    _FrameworkConditionEvent(
+                        duplicate_token,
+                        condition,
+                        request_surface=relevant_framework_include
+                        or (
+                            relevant_registration is not None
+                            and any(
+                                contract.surface.kind != "framework.lifecycle"
+                                and self._matches(contract, *relevant_registration)
+                                for contract in self.contracts.document.contracts
+                            )
+                        ),
+                    )
+                )
             return
         self._inspect_registration(
             module,
@@ -2814,8 +2881,8 @@ class CustomSurfaceExtractor:
         state.clear()
         state.update(replacement)
 
-    @staticmethod
     def _join_states(
+        self,
         states: tuple[dict[str, _Binding | None], ...] | list[dict[str, _Binding | None]],
     ) -> dict[str, _Binding | None]:
         if not states:
@@ -2824,13 +2891,29 @@ class CustomSurfaceExtractor:
         joined: dict[str, _Binding | None] = {}
         for name in sorted(names):
             values = [item.get(name) for item in states]
+            values = [
+                self._follow_project_binding(value) if value is not None else None
+                for value in values
+            ]
             if all(value == values[0] for value in values[1:]):
                 joined[name] = values[0]
             else:
                 # A missing global in one branch can mean builtin fallback,
                 # while another branch still shadows it. Retain uncertainty
                 # instead of treating the joined absence as a proven builtin.
-                joined[name] = None
+                methods = tuple(
+                    dict.fromkeys(
+                        candidate
+                        for value in values
+                        if value is not None
+                        for candidate in (
+                            (value,) if value.kind == "method" else value.possible_methods
+                        )
+                    )
+                )
+                joined[name] = (
+                    _Binding("possible_method", "", possible_methods=methods) if methods else None
+                )
         return joined
 
     @staticmethod
@@ -3269,6 +3352,7 @@ class CustomSurfaceExtractor:
         call: ast.Call,
         state: dict[str, _Binding | None],
         evaluation: _CallEvaluation | None,
+        inherited_conditions: tuple[EndpointDiscoveryCondition, ...],
     ) -> None:
         if not self._scope_framework_surfaces or not isinstance(call.func, ast.Attribute):
             return
@@ -3294,15 +3378,20 @@ class CustomSurfaceExtractor:
             )
         child = self._framework_receiver_token(capture.binding if capture is not None else None)
         condition = None
-        invalid_mount = call.func.attr == "mount" and not self._mount_call_has_valid_shape(call)
-        if child is None or invalid_mount:
+        invalid_shape = not (
+            self._mount_call_has_valid_shape(call)
+            if call.func.attr == "mount"
+            else self._include_router_call_has_valid_shape(call)
+        )
+        if child is None or invalid_shape:
             child = None
             condition = EndpointDiscoveryCondition(
                 source_path=module.path,
                 source_line=call.lineno,
                 reason=(
-                    "selected application mount argument shape is invalid or unresolved; "
-                    if invalid_mount
+                    f"selected application {call.func.attr} argument shape "
+                    "is invalid or unresolved; "
+                    if invalid_shape
                     else "selected application include_router target is dynamic or unresolved, or "
                     "mount target is unresolved; "
                     "framework surface inventory is incomplete"
@@ -3321,8 +3410,33 @@ class CustomSurfaceExtractor:
                     end_column=call.end_col_offset or call.col_offset + 1,
                 ),
                 routes_only=call.func.attr == "mount",
+                guards=inherited_conditions,
             )
         )
+
+    @staticmethod
+    def _include_router_call_has_valid_shape(call: ast.Call) -> bool:
+        """Bind FastAPI's single positional router and explicit keyword-only options."""
+        if len(call.args) > 1 or any(isinstance(arg, ast.Starred) for arg in call.args):
+            return False
+        allowed = {
+            "router",
+            "prefix",
+            "tags",
+            "dependencies",
+            "responses",
+            "deprecated",
+            "include_in_schema",
+            "default_response_class",
+            "callbacks",
+            "generate_unique_id_function",
+        }
+        provided = {"router"} if call.args else set()
+        for keyword in call.keywords:
+            if keyword.arg not in allowed or keyword.arg in provided:
+                return False
+            provided.add(keyword.arg)
+        return "router" in provided
 
     @staticmethod
     def _mount_call_has_valid_shape(call: ast.Call) -> bool:
@@ -3459,6 +3573,7 @@ class CustomSurfaceExtractor:
                             source_line=call.lineno,
                             reason=reason,
                         ),
+                        request_surface=_contract.surface.kind != "framework.lifecycle",
                     )
                 )
                 return True
@@ -3580,6 +3695,34 @@ class CustomSurfaceExtractor:
         if resolved is None:
             if self._scope_framework_surfaces:
                 method_binding = self._binding_from_expression(call.func, state, module.name)
+                if method_binding is not None:
+                    method_binding = self._follow_project_binding(method_binding)
+                if method_binding is not None and method_binding.kind == "possible_method":
+                    for possible in method_binding.possible_methods:
+                        contracts = tuple(
+                            contract
+                            for contract in self.contracts.document.contracts
+                            if contract.registration.symbol == possible.identity
+                            and contract.registration.receiver_type == possible.receiver_type
+                        )
+                        if possible.instance_token is not None and contracts:
+                            self._framework_events.append(
+                                _FrameworkConditionEvent(
+                                    possible.instance_token,
+                                    EndpointDiscoveryCondition(
+                                        source_path=module.path,
+                                        source_line=call.lineno,
+                                        reason=(
+                                            "framework registration alias has "
+                                            "divergent branch bindings"
+                                        ),
+                                    ),
+                                    request_surface=any(
+                                        contract.surface.kind != "framework.lifecycle"
+                                        for contract in contracts
+                                    ),
+                                )
+                            )
                 if (
                     method_binding is not None
                     and method_binding.kind == "method"
@@ -3694,7 +3837,7 @@ class CustomSurfaceExtractor:
                     ),
                 )
             )
-        self._record_framework_include(module, call, state, evaluation)
+        self._record_framework_include(module, call, state, evaluation, inherited_conditions)
         self._record_framework_route(module, call, state, evaluation, resolved, decorated_handler)
         endpoint_count_before = len(self._endpoints)
         prior_limitation_ids = {id(item) for item in self._limitations}
@@ -5607,7 +5750,7 @@ class CustomSurfaceExtractor:
             binding = state.get(expression.id)
             if binding is not None:
                 binding = self._follow_project_binding(binding)
-            if binding is None or binding.kind == "module":
+            if binding is None or binding.kind in {"module", "possible_method"}:
                 return None
             if binding.kind == "method":
                 return binding.identity, InvocationKind.INSTANCE_METHOD, binding.receiver_type

@@ -32,6 +32,121 @@ def _extract(tmp_path: Path, *, app_entry: str | None = None) -> EndpointInvento
     ).extract_inventory()
 
 
+@pytest.mark.parametrize("receiver", ["app", "unused"])
+@pytest.mark.parametrize("guard", ["flag", "True", "False"])
+def test_divergent_framework_alias_retains_receiver_uncertainty(
+    tmp_path: Path, receiver: str, guard: str
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\nunused = FastAPI()\n"
+        "async def cb(): pass\ndef custom(*args): pass\n"
+        f"register = {receiver}.add_event_handler\n"
+        f"if {guard}:\n    register = custom\nregister('startup', cb)\n"
+    )
+    inventory = _extract(tmp_path)
+    if receiver == "app" and guard == "flag":
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert any("divergent branch" in item.reason for item in inventory.limitations)
+        assert inventory.endpoints == []
+    else:
+        assert inventory.status == InventoryStatus.ESTABLISHED
+        assert [item.handler.name for item in inventory.endpoints] == (
+            ["cb"] if receiver == "app" and guard == "False" else []
+        )
+
+
+@pytest.mark.parametrize("guard", ["flag", "True", "False"])
+def test_mount_guard_is_preserved_on_child_request_callback(tmp_path: Path, guard: str) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\nchild = FastAPI()\n"
+        "@child.exception_handler(ValueError)\nasync def cb(request, exc): pass\n"
+        f"if {guard}:\n    app.mount('/child', child)\n"
+    )
+    inventory = _extract(tmp_path)
+    if guard == "False":
+        assert inventory.endpoints == []
+    else:
+        assert [item.handler.name for item in inventory.endpoints] == ["cb"]
+        callback = inventory.endpoints[0]
+        assert callback.discovery_status == (
+            EndpointDiscoveryStatus.CONDITIONAL
+            if guard == "flag"
+            else EndpointDiscoveryStatus.ESTABLISHED
+        )
+    assert inventory.status == (
+        InventoryStatus.CONDITIONAL if guard == "flag" else InventoryStatus.ESTABLISHED
+    )
+
+
+@pytest.mark.parametrize("late", [False, True])
+def test_mounted_child_lifecycle_uncertainty_does_not_pollute_parent(
+    tmp_path: Path, late: bool
+) -> None:
+    event = "child.add_event_handler(event_name(), cb)\n"
+    mount = "app.mount('/child', child)\n"
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\nchild = FastAPI()\n"
+        "async def cb(): pass\n" + (mount + event if late else event + mount)
+    )
+    inventory = _extract(tmp_path)
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert inventory.endpoints == []
+    assert inventory.limitations == ()
+
+
+@pytest.mark.parametrize("receiver", ["app", "unused"])
+def test_include_router_rejects_unknown_finite_keyword(tmp_path: Path, receiver: str) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI, APIRouter\napp = FastAPI()\nunused = FastAPI()\n"
+        "router = APIRouter()\nasync def cb(): pass\n"
+        "router.add_event_handler('startup', cb)\n"
+        f"{receiver}.include_router(**{{'router': router, 'bogus': 1}})\n"
+    )
+    inventory = _extract(tmp_path)
+    assert inventory.endpoints == []
+    assert inventory.status == (
+        InventoryStatus.CONDITIONAL if receiver == "app" else InventoryStatus.ESTABLISHED
+    )
+
+
+def test_imported_alias_branch_join_keeps_selected_receiver(tmp_path: Path) -> None:
+    (tmp_path / "registrations.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\nregister = app.add_event_handler\n"
+    )
+    (tmp_path / "main.py").write_text(
+        "from registrations import app, register\n"
+        "def custom(*args): pass\nasync def cb(): pass\n"
+        "if flag:\n    register = custom\nregister('startup', cb)\n"
+    )
+    inventory = _extract(tmp_path)
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert inventory.endpoints == []
+    assert any("divergent branch" in item.reason for item in inventory.limitations)
+
+
+@pytest.mark.parametrize("late", [False, True])
+@pytest.mark.parametrize(
+    "event",
+    [
+        "child.add_exception_handler(ValueError, dynamic_handler)\n",
+        "child.add_exception_handler(ValueError, cb, **{'handler': cb})\n",
+        "getattr(child, 'add_exception_handler', None, extra)(ValueError, cb)\n",
+    ],
+)
+def test_mounted_request_uncertainty_still_reaches_parent(
+    tmp_path: Path, late: bool, event: str
+) -> None:
+    mount = "app.mount('/child', child)\n"
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\nchild = FastAPI()\n"
+        "async def cb(request, exc): pass\n" + (mount + event if late else event + mount)
+    )
+    inventory = _extract(tmp_path)
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert inventory.endpoints == []
+    assert inventory.limitations
+
+
 def test_mounted_exception_ids_are_stable_across_snapshot_checkout_roots(tmp_path: Path) -> None:
     source = (
         "from fastapi import FastAPI\n"
