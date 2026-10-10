@@ -444,14 +444,20 @@ def _diagnostic(
 
 
 def _module_snapshot(root: Path, module: str) -> tuple[str, bytes] | None:
-    relative = Path("source", *module.split(".")).with_suffix(".py.txt")
-    path = _safe_source_path(root, relative.as_posix())
-    if path is None:
+    candidates = (
+        Path("source", *module.split(".")).with_suffix(".py.txt"),
+        Path("source", *module.split("."), "__init__.py.txt"),
+    )
+    snapshots = []
+    for relative in candidates:
+        path = _safe_source_path(root, relative.as_posix())
+        if path is not None and path.is_file():
+            snapshots.append((relative, path))
+    if len(snapshots) != 1:
         return None
+    relative, path = snapshots[0]
     raw = _read_source_snapshot(path)
-    if raw is None:
-        return None
-    return relative.as_posix(), raw
+    return None if raw is None else (relative.as_posix(), raw)
 
 
 def _resolve_imported_module(root: Path, current_module: str, node: ast.ImportFrom) -> str | None:
@@ -784,6 +790,7 @@ def _has_verified_asynccontextmanager(
             isinstance(decorator, ast.Name)
             and isinstance(statement, ast.ImportFrom)
             and statement.module == "contextlib"
+            and statement.level == 0
         ):
             if any(
                 (alias.asname or alias.name) == decorator.id and alias.name == "asynccontextmanager"
@@ -884,6 +891,13 @@ def _is_delegated_exit_boundary(
             if isinstance(parent, ast.Try) and current in parent.body:
                 allowed = parent.body + parent.orelse if name == "commit" else parent.handlers
                 if any(call in set(_owned_nodes(statement)) for statement in allowed):
+                    # A nested except arm cannot handle the exception injected
+                    # at this yield. Only the yield's own handler is in scope.
+                    ancestor = parents.get(call)
+                    while ancestor is not None and ancestor is not parent:
+                        if isinstance(ancestor, ast.ExceptHandler) and ancestor not in allowed:
+                            return False
+                        ancestor = parents.get(ancestor)
                     # A boundary must execute, rather than merely appear in a
                     # dead suffix or an unawaited coroutine expression.
                     parent = parents.get(call)

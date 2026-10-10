@@ -1654,3 +1654,75 @@ def test_oversized_projection_snapshot_is_rejected_before_read(
 
     monkeypatch.setattr(Path, "open", guarded_open)
     assert _module_snapshot(tmp_path, "wrapper") is None
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "source/langflow/services/deps.py.txt",
+        "source/lfx/services/deps.py.txt",
+    ],
+)
+def test_source_projection_rejects_relative_contextlib_decorator(
+    tmp_path: Path, relative_path: str
+) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    source = copied / relative_path
+    text = source.read_text()
+    assert "from contextlib import asynccontextmanager" in text
+    source.write_text(
+        text.replace(
+            "from contextlib import asynccontextmanager",
+            "from .contextlib import asynccontextmanager",
+        )
+    )
+    assert _langflow_fixture_transaction_reports(copied)[2].source_projections == ()
+
+
+def test_source_projection_rejects_rollback_in_nested_handler(tmp_path: Path) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    source = copied / "source/lfx/services/deps.py.txt"
+    text = source.read_text()
+    old = "                    await session.rollback()"
+    assert text.count(old) == 2
+    source.write_text(
+        text.replace(
+            old,
+            "                    try:\n"
+            "                        pass\n"
+            "                    except Exception:\n"
+            "                        await session.rollback()",
+        )
+    )
+    assert _langflow_fixture_transaction_reports(copied)[2].source_projections == ()
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "source/langflow/services/deps.py.txt",
+        "source/lfx/services/deps.py.txt",
+    ],
+)
+def test_source_projection_loads_package_initializer_snapshot(
+    tmp_path: Path, relative_path: str
+) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    source = copied / relative_path
+    package = source.parent / source.name.removesuffix(".py.txt") / "__init__.py.txt"
+    package.parent.mkdir()
+    source.rename(package)
+    projections = _langflow_fixture_transaction_reports(copied)[2].source_projections
+    assert len(projections) == 1
+    assert package.relative_to(copied).as_posix() in {
+        projections[0].wrapper_file_path,
+        projections[0].delegated_wrapper_file_path,
+    }
+    source.write_bytes(package.read_bytes())
+    assert _langflow_fixture_transaction_reports(copied)[2].source_projections == ()
