@@ -323,6 +323,13 @@ def analyze(
             )
     elif any(value is not None for value in (graphify_baseline, graphify_target, graphify_schema)):
         raise click.ClickException("Graphify snapshot options require --graphify")
+    if (
+        config.analysis.route_observations.enabled
+        and config.analysis.route_observations.trusted_server_origins
+        and not secure_ast
+    ):
+        console.print("[red]Error:[/red] trusted route observation origins require --secure-ast")
+        raise click.Abort()
 
     if verbose:
         console.print(f"[blue]Analyzing FastAPI application at:[/blue] {app}")

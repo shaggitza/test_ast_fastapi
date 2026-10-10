@@ -119,6 +119,21 @@ class TextFormatter(BaseFormatter):
                     markup=False,
                 )
         console.print(f"  Analysis Completeness: {report.analysis_completeness}")
+        if report.endpoint_lifecycle:
+            console.print("  Endpoint Lifecycle:")
+            for record in report.endpoint_lifecycle:
+                console.print(f"    {record.lifecycle.value}: {record.identity}", markup=False)
+                for side, endpoint in (
+                    ("baseline", record.baseline_endpoint),
+                    ("target", record.target_endpoint),
+                ):
+                    if endpoint is not None:
+                        handler = endpoint.handler
+                        console.print(
+                            f"      {side}: {handler.module}.{handler.name} "
+                            f"at {handler.file_path}:{handler.line_number}",
+                            markup=False,
+                        )
         console.print(f"  Total Endpoints: {report.total_endpoints}")
         console.print(
             f"  Files Changed: {report.total_files_changed} ({report.python_files_changed} Python)"

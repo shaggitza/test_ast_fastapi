@@ -2561,6 +2561,31 @@ class HtmlFormatter(BaseFormatter):
             "Analysis Completeness:</span> "
             f"{html.escape(report.analysis_completeness)}</div>"
         )
+        if report.endpoint_lifecycle:
+            content_lines.append(
+                '<div class="summary-item"><span class="summary-label">'
+                "Endpoint Lifecycle:</span><ul>"
+            )
+            for record in report.endpoint_lifecycle:
+                content_lines.append(
+                    f"<li>{html.escape(record.lifecycle.value)}: "
+                    f"<code>{html.escape(record.identity)}</code><ul>"
+                )
+                for side, endpoint in (
+                    ("baseline", record.baseline_endpoint),
+                    ("target", record.target_endpoint),
+                ):
+                    if endpoint is not None:
+                        handler = endpoint.handler
+                        details = (
+                            f"{handler.module}.{handler.name} "
+                            f"at {handler.file_path}:{handler.line_number}"
+                        )
+                        content_lines.append(
+                            f"<li>{side}: <code>{html.escape(details)}</code></li>"
+                        )
+                content_lines.append("</ul></li>")
+            content_lines.append("</ul></div>")
         content_lines.append(
             f'<div class="summary-item">'
             f'<span class="summary-label">Total Endpoints:</span> {report.total_endpoints}'

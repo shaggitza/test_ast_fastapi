@@ -9,8 +9,39 @@ from click.testing import CliRunner
 
 from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper, ChangeMapperError
 from fastapi_endpoint_detector.cli import cli
-from fastapi_endpoint_detector.config import load_config
+from fastapi_endpoint_detector.config import Config, load_config
 from fastapi_endpoint_detector.models.report import ConfidenceLevel
+
+
+def test_custom_surface_mapper_honors_both_snapshot_source_allowlists(tmp_path: Path) -> None:
+    roots = []
+    for side in ("baseline", "target"):
+        root = tmp_path / side
+        root.mkdir()
+        (root / "main.py").write_text(
+            "from fastapi import FastAPI\napp = FastAPI()\n"
+            "async def included(): pass\napp.add_event_handler('startup', included)\n"
+        )
+        (root / "excluded.py").write_text(
+            "from main import app\nasync def excluded(): pass\n"
+            "app.add_event_handler('startup', excluded)\n"
+        )
+        roots.append(root)
+    config = Config(
+        parser={"include_patterns": ["main.py"], "follow_imports": False},
+        analysis={"surface_preset": "framework-v1"},
+    )
+    mapper = ChangeMapper(
+        app_path=roots[1],
+        baseline_app_path=roots[0],
+        config=config,
+        secure_ast=True,
+        use_cache=False,
+    )
+    assert [endpoint.handler.name for endpoint in mapper.registry.get_all()] == ["included"]
+    assert [endpoint.handler.name for endpoint in mapper.baseline_mypy_registry.get_all()] == [
+        "included"
+    ]
 
 
 def _project(tmp_path: Path) -> tuple[Path, Path]:

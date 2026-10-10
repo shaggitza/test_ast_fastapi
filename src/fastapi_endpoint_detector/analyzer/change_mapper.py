@@ -755,6 +755,12 @@ class ChangeMapper:
             bootstrap_entry=self.bootstrap_entry,
             app_variable=self.app_variable,
             app_entry=self.app_entry,
+            source_paths=(
+                self.baseline_source_inventory.paths
+                if self.baseline_app_path is not None
+                and app_path.resolve() == self.baseline_app_path
+                else self.source_inventory.paths
+            ),
         ).extract_inventory()
         return merge_surface_inventory(native, custom)
 
