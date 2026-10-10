@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import importlib
 import importlib.abc
@@ -93,11 +94,15 @@ def _load_candidate_product(root: Path) -> dict[str, Any]:
         contract_module = importlib.import_module(
             "fastapi_endpoint_detector.models.effect_contract"
         )
+        audit_model_module = importlib.import_module(
+            "fastapi_endpoint_detector.models.effect_contract_audit"
+        )
         endpoint_module = importlib.import_module("fastapi_endpoint_detector.models.endpoint")
         names = (
             "fastapi_endpoint_detector.analyzer.mypy_analyzer",
             "fastapi_endpoint_detector.analyzer.effect_contract_auditor",
             "fastapi_endpoint_detector.models.effect_contract",
+            "fastapi_endpoint_detector.models.effect_contract_audit",
             "fastapi_endpoint_detector.models.endpoint",
         )
         hashes: dict[str, str] = {}
@@ -113,6 +118,7 @@ def _load_candidate_product(root: Path) -> dict[str, Any]:
             "EndpointMethod": endpoint_module.EndpointMethod,
             "HandlerInfo": endpoint_module.HandlerInfo,
             "contracts": contract_module,
+            "EffectContractAudit": audit_model_module.EffectContractAudit,
             "source_hashes": hashes,
             "module_paths": {
                 name: str(Path(sys.modules[name].__file__ or "").resolve()) for name in names
@@ -303,7 +309,12 @@ def _binding_result(row: dict[str, Any]) -> dict[str, Any]:
 
 def _normalize_private_paths(value: Any, private_root: Path, cwd: Path) -> Any:
     """Replace only exact known private-root path components in report strings."""
-    roots = (str(private_root), str(Path(os.path.relpath(private_root, cwd))))
+    try:
+        relative_root = str(Path(os.path.relpath(private_root, cwd)))
+    except ValueError:
+        # A Windows cwd on another drive has no relative representation.
+        relative_root = str(private_root)
+    roots = (str(private_root), relative_root)
 
     def normalize(text: str) -> str:
         result = text
@@ -324,10 +335,27 @@ def _normalize_private_paths(value: Any, private_root: Path, cwd: Path) -> Any:
         return [_normalize_private_paths(item, private_root, cwd) for item in value]
     if isinstance(value, dict):
         return {
-            key: _normalize_private_paths(item, private_root, cwd)
-            for key, item in value.items()
+            key: _normalize_private_paths(item, private_root, cwd) for key, item in value.items()
         }
     return value
+
+
+def _diagnostic_matches_path(error: str, path: Path, cwd: Path, line: int | None) -> bool:
+    location = re.match(r"^(.*):(\d+):", error)
+    if location is None or (line is not None and int(location.group(2)) != line):
+        return False
+    diagnostic_path = Path(location.group(1))
+    if not diagnostic_path.is_absolute():
+        diagnostic_path = cwd / diagnostic_path
+    with contextlib.suppress(OSError, ValueError):
+        resolved_diagnostic = diagnostic_path.resolve()
+        resolved_root = path.resolve()
+        return (
+            resolved_diagnostic == resolved_root
+            if line is not None
+            else resolved_diagnostic.is_relative_to(resolved_root)
+        )
+    return False
 
 
 def _product_adapter(source: Path) -> dict[str, Any]:
@@ -365,6 +393,8 @@ def _product_adapter(source: Path) -> dict[str, Any]:
             cache_enabled=False,
             resolver_versions=[f"mypy@{analyzer._resolver_version}"],
         )
+        # Serialization must retain all model identities and corpus hashes.
+        audit = product["EffectContractAudit"].model_validate(audit.model_dump(mode="json"))
         status = (
             "completed"
             if len(call_rows) == 1
@@ -483,9 +513,9 @@ def run_probe(wheel: Path, manifest: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
             for error in result.errors:
                 item = {"raw": error}
                 all_diagnostics.append(item)
-                if error.startswith(f"{source}:") and f":{call_line}:" in error:
+                if _diagnostic_matches_path(error, source, Path.cwd(), call_line):
                     fixture_call_diagnostics.append(item)
-                elif str(stub_root) in error:
+                elif _diagnostic_matches_path(error, stub_root, Path.cwd(), None):
                     imported_stub_diagnostics.append(item)
                 else:
                     other_diagnostics.append(item)
@@ -532,7 +562,7 @@ def run_probe(wheel: Path, manifest: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
     report = {
         "schema_version": 1,
         "benchmark_id": "gh97-exact-release-installed-s3-stub-v1",
-        "status": "completed",
+        "status": product_adapter["status"],
         "scope": (
             "one exact S3 stub wheel and pinned analyzer environment; no compatibility range "
             "or production claims"
@@ -586,7 +616,7 @@ def main(argv: list[str] | None = None) -> int:
         args.output.write_text(encoded, encoding="utf-8")
     else:
         sys.stdout.write(encoded)
-    return 0
+    return 0 if report["status"] == "completed" else 2
 
 
 if __name__ == "__main__":

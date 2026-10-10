@@ -81,24 +81,42 @@ def test_private_root_serialization_is_stable_and_component_bounded(
     cwd.mkdir(parents=True, exist_ok=True)
     relative = os.path.relpath(private, cwd)
     payload = {
-        "calls": [{"file_path": str(private / "fixture/complete.py"),
-                   "canonical_symbol": runner.CANONICAL}],
+        "calls": [
+            {
+                "file_path": str(private / "fixture/complete.py"),
+                "canonical_symbol": runner.CANONICAL,
+            }
+        ],
         "diagnostics": [{"raw": f"{relative}/stubtree/client.pyi:8: note"}],
         "unrelated": f"prefix{relative}/stubtree/file suffix {relative}-suffix",
         "source_sha256": {"complete.py": "sha256:abc"},
         "matched_calls": 1,
     }
     normalized = runner._normalize_private_paths(payload, private, cwd)
-    assert normalized["calls"][0]["file_path"] == (
-        "<private-s3-probe>/fixture/complete.py"
-    )
+    assert normalized["calls"][0]["file_path"] == ("<private-s3-probe>/fixture/complete.py")
     assert normalized["calls"][0]["canonical_symbol"] == runner.CANONICAL
-    assert normalized["diagnostics"][0]["raw"] == (
-        "<private-s3-probe>/stubtree/client.pyi:8: note"
-    )
+    assert normalized["diagnostics"][0]["raw"] == ("<private-s3-probe>/stubtree/client.pyi:8: note")
     assert normalized["unrelated"] == payload["unrelated"]
     assert normalized["source_sha256"] == payload["source_sha256"]
     assert normalized["matched_calls"] == 1
+
+
+def test_different_windows_drives_keep_absolute_private_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private = Path("D:/temp/private s3 root")
+    cwd = Path("C:/work")
+    monkeypatch.setattr(
+        os.path,
+        "relpath",
+        lambda _path, _cwd: (_ for _ in ()).throw(ValueError("different drives")),
+    )
+    normalized = runner._normalize_private_paths(
+        {"file_path": r"D:\temp\private s3 root\fixture\complete.py"},
+        private,
+        cwd,
+    )
+    assert normalized["file_path"] == "<private-s3-probe>\\fixture\\complete.py"
 
 
 def test_invalid_typed_calls_are_classified_from_call_diagnostics() -> None:
@@ -200,6 +218,7 @@ def test_exact_release_end_to_end_report() -> None:
         "fastapi_endpoint_detector.analyzer.mypy_analyzer",
         "fastapi_endpoint_detector.analyzer.effect_contract_auditor",
         "fastapi_endpoint_detector.models.effect_contract",
+        "fastapi_endpoint_detector.models.effect_contract_audit",
         "fastapi_endpoint_detector.models.endpoint",
     }
     assert product["preset"]["name"] == "object-storage-v1"
@@ -212,7 +231,58 @@ def test_exact_release_end_to_end_report() -> None:
         assert product["calls"][0]["arguments"][2]["status"] == "unavailable"
         assert product["calls"][0]["arguments"][2]["reason_code"] == "dynamic_argument"
         assert product["audit"]["summary"]["matched_calls"] == 1
+        audit_model = _load_candidate_product(runner.ROOT)["EffectContractAudit"]
+        assert (
+            audit_model.model_validate(product["audit"]).model_dump(mode="json") == product["audit"]
+        )
     json.dumps(report)
+
+
+@pytest.mark.skipif(not WHEEL.is_file(), reason="requires the supplied pinned wheel")
+@pytest.mark.parametrize("cwd_kind", ["tmp", "external"])
+def test_outside_cwd_preserves_all_six_diagnostic_bindings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cwd_kind: str
+) -> None:
+    monkeypatch.chdir(Path("/tmp") if cwd_kind == "tmp" else tmp_path)
+    report = run_probe(WHEEL, DEFAULT_MANIFEST)
+    cases = {row["fixture"]: row for row in report["canonical_symbol_resolution"]["cases"]}
+    assert cases["complete"]["selector_binding_results"]["binding_status"] == "complete"
+    assert cases["omitted_body"]["selector_binding_results"]["binding_status"] == "incomplete"
+    assert cases["misbound_body"]["selector_binding_results"]["binding_status"].startswith(
+        "misbound"
+    )
+    assert cases["foreign_same_name"]["selector_binding_results"]["binding_status"] == (
+        "unvalidated_unmatched_canonical"
+    )
+    for name in ("bogus_keyword", "wrong_type"):
+        assert cases[name]["selector_binding_results"]["binding_status"] == "invalid_call"
+    for name in ("misbound_body", "bogus_keyword", "wrong_type"):
+        assert cases[name]["fixture_call_diagnostics"]
+    assert cases["omitted_body"]["selector_binding_results"]["binding_status"] == "incomplete"
+    assert cases["misbound_body"]["selector_binding_results"]["binding_status"].startswith(
+        "misbound"
+    )
+    for name in ("complete", "omitted_body", "foreign_same_name"):
+        assert cases[name]["fixture_call_diagnostics"] == []
+    assert report["status"] == report["product_adapter"]["status"]
+    assert report["product_adapter"]["audit"]["summary"]["physical_occurrences"] == 1
+    assert report["product_adapter"]["audit"]["summary"]["matched_calls"] == 1
+
+
+def test_main_returns_nonzero_for_partial_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "partial.json"
+    monkeypatch.setattr(
+        runner,
+        "run_probe",
+        lambda _wheel, _manifest: {
+            "status": "partially_validated",
+            "product_adapter": {"status": "partially_validated"},
+        },
+    )
+    assert runner.main(["--wheel", str(WHEEL), "--output", str(destination)]) == 2
+    assert json.loads(destination.read_text(encoding="utf-8"))["status"] == ("partially_validated")
 
 
 @pytest.mark.skipif(not WHEEL.is_file(), reason="requires the pinned supplied wheel")
@@ -240,9 +310,7 @@ def test_wheel_read_remains_bounded_after_stat(
     monkeypatch.setattr(runner, "MAX_WHEEL_BYTES", 16)
     original_stat = Path.stat
 
-    def stale_stat(
-        path: Path, *, follow_symlinks: bool = True
-    ) -> os.stat_result | SimpleNamespace:
+    def stale_stat(path: Path, *, follow_symlinks: bool = True) -> os.stat_result | SimpleNamespace:
         if path == wheel:
             return SimpleNamespace(st_size=1)
         return original_stat(path, follow_symlinks=follow_symlinks)
