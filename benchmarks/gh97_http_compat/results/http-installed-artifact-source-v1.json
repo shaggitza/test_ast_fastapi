@@ -2108,8 +2108,8 @@
     "exact": 31,
     "unresolved": 0
   },
-  "runner_revision": "2294330163e0159193f552f06bc22fd49649a389",
-  "runner_sha256": "sha256:66bd8b8aef93d31dbec356730e523bd346ce283ad5264bbd7770e36e60b970e2",
+  "runner_revision": "96a362ef95587be1ca3ce868d616a3a4540a5135",
+  "runner_sha256": "sha256:39a5279cb691f49fd1cddc1a7707bb5eaf01f81ab3d0eaee75386526e1d573dc",
   "schema_version": 1,
   "selector_supported_call_count": 29
 }
