@@ -314,6 +314,142 @@ def test_keyword_add_event_handler_resolves_positional_or_keyword_parameters(
     assert inventory.status == InventoryStatus.ESTABLISHED
 
 
+@pytest.mark.parametrize(
+    "registration",
+    [
+        "register = app.add_event_handler\nregister(event_type='startup', func=startup)",
+        "getattr(app, 'add_event_handler')(event_type='startup', func=startup)",
+    ],
+)
+def test_keyword_add_event_handler_uses_resolved_registration_identity(
+    tmp_path: Path, registration: str
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "async def startup(): pass\n"
+        "app = FastAPI()\n"
+        f"{registration}\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert [(item.identifier, item.handler.name) for item in inventory.endpoints] == [
+        ("FRAMEWORK.LIFECYCLE event:startup", "startup")
+    ]
+
+
+def test_literal_non_lifecycle_constructor_expansion_does_not_limit_inventory(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI(**{'debug': True})\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert inventory.endpoints == []
+    assert inventory.limitations == ()
+
+
+def test_literal_lifecycle_constructor_expansion_resolves_callbacks(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "async def startup(): pass\n"
+        "app = FastAPI(**{'on_startup': [startup]})\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert [(item.identifier, item.handler.name) for item in inventory.endpoints] == [
+        ("FRAMEWORK.LIFECYCLE event:startup", "startup")
+    ]
+
+
+def test_literal_kwargs_duplicate_dict_key_uses_last_callback(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "async def bad(): pass\n"
+        "async def good(): pass\n"
+        "app = FastAPI(**{'on_startup': [bad], 'on_startup': [good]})\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert [item.handler.name for item in inventory.endpoints] == ["good"]
+
+
+def test_literal_kwargs_capture_callback_in_original_entry_order(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "async def bad(): pass\n"
+        "async def good(): pass\n"
+        "app = FastAPI(**{'on_startup': [bad], 'debug': (chosen := good), "
+        "'on_startup': [chosen]})\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert [item.handler.name for item in inventory.endpoints] == ["good"]
+
+
+def test_literal_kwargs_uses_selected_value_before_later_rebinding(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "async def bad(): pass\n"
+        "async def good(): pass\n"
+        "chosen = bad\n"
+        "app = FastAPI(**{'on_startup': [chosen], 'debug': (chosen := good)})\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert [item.handler.name for item in inventory.endpoints] == ["bad"]
+
+
+def test_invalid_duplicate_mapping_for_unselected_app_does_not_taint_inventory(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "other = FastAPI(**{'on_startup': []}, **{'on_startup': []})\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert inventory.endpoints == []
+    assert inventory.limitations == ()
+
+
+def test_duplicate_keyword_from_separate_expansions_fails_closed(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "async def startup(): pass\n"
+        "app = FastAPI(**{'on_startup': [startup]}, **{'on_startup': []})\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert not inventory.endpoints
+    assert any("duplicate keyword names" in item.reason for item in inventory.limitations)
+
+
 def test_exception_handlers_are_keyed_and_selected_app_scoped(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text(
         "from fastapi import FastAPI\n\n"

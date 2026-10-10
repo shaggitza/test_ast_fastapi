@@ -143,6 +143,22 @@ def _resource_failure(result: StaticEvaluationResult, fallback: str) -> str:
     return fallback if result.failure == "unsupported" else result.reason
 
 
+def _has_unknown_keyword_expansion(call: ast.Call) -> bool:
+    """Return whether a call contains a non-finite ``**kwargs`` expansion."""
+    unknown = False
+    for keyword in call.keywords:
+        if keyword.arg is not None:
+            continue
+        value = keyword.value
+        if not isinstance(value, ast.Dict) or any(key is None for key in value.keys):
+            unknown = True
+            continue
+        for key in value.keys:
+            if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                unknown = True
+    return unknown
+
+
 @dataclass
 class _StartupScopeFrame:
     """Keep startup function-local and module-global bindings distinct."""
@@ -778,6 +794,9 @@ class CustomSurfaceExtractor:
             tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef]
         ] = []
         self._framework_selected_tokens: set[_FrameworkToken] = set()
+        self._framework_duplicate_call_conditions: list[
+            tuple[_FrameworkToken, EndpointDiscoveryCondition]
+        ] = []
         self._framework_root_condition: EndpointDiscoveryCondition | None = None
         self._framework_factory: tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef] | None = (
             None
@@ -819,6 +838,11 @@ class CustomSurfaceExtractor:
         finally:
             self._building_states = False
         self._resolve_framework_root()
+        self._limitations.extend(
+            condition
+            for token, condition in self._framework_duplicate_call_conditions
+            if token in self._framework_selected_tokens
+        )
         for module in self._modules.values():
             self._process_statements(
                 module,
@@ -1738,7 +1762,10 @@ class CustomSurfaceExtractor:
                 if (
                     self._scope_framework_surfaces
                     and isinstance(value, ast.Call)
-                    and any(keyword.arg is None for keyword in value.keywords)
+                    and (
+                        any(keyword.arg is None for keyword in value.keywords)
+                        and _has_unknown_keyword_expansion(value)
+                    )
                     and constructor_resolution is not None
                     and constructor_resolution[1] == InvocationKind.CONSTRUCTOR
                     and constructor_resolution[0] in self._declared_receiver_types
@@ -2298,7 +2325,7 @@ class CustomSurfaceExtractor:
             evaluation=evaluation,
         )
 
-    def _inspect_call_expression(
+    def _inspect_call_expression(  # noqa: PLR0912, PLR0915
         self,
         module: _Module,
         call: ast.Call,
@@ -2322,15 +2349,106 @@ class CustomSurfaceExtractor:
                 )
             )
         keywords: list[_EvaluatedArgument] = []
+        effective_keywords: list[ast.keyword] = []
+        keyword_positions: dict[str, int] = {}
+        duplicate_keywords = False
+        expanded_literal = False
         for keyword in call.keywords:
-            self._inspect_expression(module, keyword.value, state, inherited_conditions)
-            keywords.append(
-                _EvaluatedArgument(
+            entries: list[tuple[str, ast.expr]] | None = None
+            if keyword.arg is None and isinstance(keyword.value, ast.Dict):
+                candidate: list[tuple[str, ast.expr]] = []
+                for key, entry_value in zip(keyword.value.keys, keyword.value.values, strict=True):
+                    if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                        candidate = []
+                        break
+                    candidate.append((key.value, entry_value))
+                if candidate or not keyword.value.keys:
+                    entries = candidate
+            if entries is None:
+                self._inspect_expression(module, keyword.value, state, inherited_conditions)
+                capture = _EvaluatedArgument(
                     expression=keyword.value,
                     state=dict(state),
                     binding=self._binding_from_expression(keyword.value, state, module.name),
                 )
+                if keyword.arg is not None:
+                    if keyword.arg in keyword_positions:
+                        duplicate_keywords = True
+                    else:
+                        keyword_positions[keyword.arg] = len(keywords)
+                keywords.append(capture)
+                effective_keywords.append(keyword)
+                continue
+            expanded_literal = True
+            mapping_names: set[str] = set()
+            for name, entry_value in entries:
+                if name in keyword_positions and name not in mapping_names:
+                    duplicate_keywords = True
+                mapping_names.add(name)
+                self._inspect_expression(module, entry_value, state, inherited_conditions)
+                capture = _EvaluatedArgument(
+                    expression=entry_value,
+                    state=dict(state),
+                    binding=self._binding_from_expression(entry_value, state, module.name),
+                )
+                position = keyword_positions.get(name)
+                if position is None:
+                    keyword_positions[name] = len(keywords)
+                    keywords.append(capture)
+                    effective_keywords.append(ast.keyword(arg=name, value=entry_value))
+                else:
+                    # Duplicate keys within one dict replace the value in place.
+                    keywords[position] = capture
+                    effective_keywords[position] = ast.keyword(arg=name, value=entry_value)
+        if expanded_literal:
+            call = ast.copy_location(
+                ast.Call(func=call.func, args=list(call.args), keywords=effective_keywords), call
             )
+        if duplicate_keywords:
+            # Runtime raises TypeError before the call body, so there is no
+            # registration fact to report. Only selected FastAPI surfaces
+            # should receive this condition.
+            duplicate_token: _FrameworkToken | None = None
+            if isinstance(call.func, ast.Attribute):
+                receiver_expression: ast.expr | None = call.func.value
+            elif (
+                isinstance(call.func, ast.Call)
+                and isinstance(call.func.func, ast.Name)
+                and call.func.func.id == "getattr"
+                and call.func.args
+            ):
+                receiver_expression = call.func.args[0]
+            else:
+                receiver_expression = None
+            if receiver_expression is not None:
+                receiver = self._binding_from_expression(
+                    receiver_expression, callable_state, module.name
+                )
+                duplicate_token = receiver.instance_token if receiver is not None else None
+            elif isinstance(call.func, ast.Name):
+                callable_binding = callable_state.get(call.func.id)
+                if callable_binding is not None and callable_binding.kind == "method":
+                    duplicate_token = callable_binding.instance_token
+            if duplicate_token is None and (
+                callable_resolution is not None
+                and callable_resolution[1] == InvocationKind.CONSTRUCTOR
+                and callable_resolution[0] in self._declared_receiver_types
+            ):
+                duplicate_token = (module.name, call.lineno, call.col_offset)
+            if duplicate_token is not None:
+                self._framework_duplicate_call_conditions.append(
+                    (
+                        duplicate_token,
+                        EndpointDiscoveryCondition(
+                            source_path=module.path,
+                            source_line=call.lineno,
+                            reason=(
+                                "call has duplicate keyword names and cannot complete registration"
+                            ),
+                        ),
+                    )
+                )
+            return
         self._inspect_registration(
             module,
             call,
@@ -3149,7 +3267,10 @@ class CustomSurfaceExtractor:
         if (
             self._scope_framework_surfaces
             and invocation == InvocationKind.CONSTRUCTOR
-            and any(keyword.arg is None for keyword in call.keywords)
+            and (
+                any(keyword.arg is None for keyword in call.keywords)
+                and _has_unknown_keyword_expansion(call)
+            )
             and any(
                 contract.registration.symbol == symbol
                 and contract.registration.invocation == InvocationKind.CONSTRUCTOR
@@ -3259,14 +3380,12 @@ class CustomSurfaceExtractor:
                         handler_expression = call.args[index]
                         if evaluation is not None and index < len(evaluation.positional):
                             capture = evaluation.positional[index]
-                    elif (
-                        index == 1
-                        and isinstance(call.func, ast.Attribute)
-                        and call.func.attr in {"add_event_handler", "add_exception_handler"}
+                    elif index == 1 and contract.registration.symbol.endswith(
+                        (".add_event_handler", ".add_exception_handler")
                     ):
                         accepted_names = (
                             {"handler", "func"}
-                            if call.func.attr == "add_event_handler"
+                            if contract.registration.symbol.endswith(".add_event_handler")
                             else {"handler"}
                         )
                         keyword_index = next(
@@ -5452,8 +5571,7 @@ class CustomSurfaceExtractor:
                 if (
                     selected_expression is None
                     and index == 0
-                    and isinstance(call.func, ast.Attribute)
-                    and call.func.attr == "add_event_handler"
+                    and contract.registration.symbol.endswith(".add_event_handler")
                 ):
                     selected_expression = next(
                         (item.value for item in call.keywords if item.arg == "event_type"),
