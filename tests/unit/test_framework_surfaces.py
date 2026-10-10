@@ -302,7 +302,7 @@ def test_keyword_add_event_handler_resolves_positional_or_keyword_parameters(
         "from fastapi import FastAPI\n\n"
         "async def startup(): pass\n"
         "app = FastAPI()\n"
-        "app.add_event_handler(event_type='startup', handler=startup)\n",
+        "app.add_event_handler(event_type='startup', func=startup)\n",
         encoding="utf-8",
     )
 
@@ -338,6 +338,64 @@ def test_keyword_add_event_handler_uses_resolved_registration_identity(
     assert [(item.identifier, item.handler.name) for item in inventory.endpoints] == [
         ("FRAMEWORK.LIFECYCLE event:startup", "startup")
     ]
+
+
+@pytest.mark.parametrize(
+    "registration",
+    [
+        "app.add_event_handler('startup', first); "
+        "app.add_event_handler('startup', (chosen := second))",
+        "app = FastAPI(**{'on_startup': [chosen, (chosen := second)]})",
+        "app = FastAPI(**{'on_startup': (chosen, (chosen := second))})",
+        "app = FastAPI(on_startup=[chosen, (chosen := second)])",
+        "app = FastAPI(on_startup=(chosen, (chosen := second)))",
+        "register = app.add_event_handler; register('startup', first); "
+        "register('startup', (chosen := second))",
+    ],
+)
+def test_lifecycle_callback_binding_is_captured_per_list_element(
+    tmp_path: Path, registration: str
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "async def first(): pass\nasync def second(): pass\n"
+        "chosen = first\napp = FastAPI()\n" + registration + "\n",
+        encoding="utf-8",
+    )
+    inventory = _extract(tmp_path)
+    assert [item.handler.name for item in inventory.endpoints] == ["first", "second"]
+    assert inventory.status == InventoryStatus.ESTABLISHED
+
+
+@pytest.mark.parametrize(
+    "registration",
+    [
+        "register('startup', startup, extra)",
+        "register('startup', startup, handler=startup)",
+        "register(event_type='startup', handler=startup)",
+        "app.add_event_handler('startup', startup, extra)",
+        "getattr(app, 'add_event_handler')('startup', startup, unexpected=True)",
+        "app.add_exception_handler(ValueError, startup, extra)",
+        "app.add_exception_handler(exc_class=ValueError, handler=startup)",
+        "app.on_event('startup', extra)(startup)",
+        "app.exception_handler(ValueError, extra)(startup)",
+    ],
+)
+def test_aliased_event_registration_rejects_unsupported_call_shapes(
+    tmp_path: Path, registration: str
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n"
+        "async def startup(): pass\nregister = app.add_event_handler\n" + registration + "\n",
+        encoding="utf-8",
+    )
+    inventory = _extract(tmp_path)
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert not any(
+        item.surface
+        and item.surface.surface_kind in {"framework.lifecycle", "framework.exception_handler"}
+        for item in inventory.endpoints
+    )
 
 
 def test_literal_non_lifecycle_constructor_expansion_does_not_limit_inventory(
@@ -487,9 +545,9 @@ def test_selected_deferred_entrypoint_duplicate_keyword_calls_fail_closed(
     [
         (
             "**{'on_startup': []}, **{'debug': True}",
-            "**{'event_type': 'startup'}, **{'handler': startup}",
+            "**{'event_type': 'startup'}, **{'func': startup}",
         ),
-        ("**{}", "**{'event_type': 'startup', 'handler': startup}"),
+        ("**{}", "**{'event_type': 'startup', 'func': startup}"),
     ],
 )
 def test_selected_deferred_entrypoint_valid_kwargs_remain_complete(
@@ -618,7 +676,7 @@ def test_exception_handlers_are_keyed_and_selected_app_scoped(tmp_path: Path) ->
         "@app.exception_handler(ValueError)\n"
         "async def value_error(request, exc): return None\n"
         "async def type_error(request, exc): return None\n"
-        "app.add_exception_handler(exc_class=TypeError, handler=type_error)\n",
+        "app.add_exception_handler(exc_class_or_status_code=TypeError, handler=type_error)\n",
         encoding="utf-8",
     )
 
@@ -689,7 +747,7 @@ def test_valid_positional_and_keyword_framework_selectors_remain_supported(
         "app = FastAPI()\n"
         "async def handler(*args): pass\n"
         "app.add_exception_handler(ValueError, handler)\n"
-        "app.add_event_handler(event_type='startup', handler=handler)\n",
+        "app.add_event_handler(event_type='startup', func=handler)\n",
         encoding="utf-8",
     )
 
@@ -2622,9 +2680,9 @@ def test_startup_activation_uses_pre_argument_receiver_capture(tmp_path: Path) -
         "app = FastAPI()\n"
         "alias = app\n"
         "async def late(): return None\n\n"
-        "@app.on_event('startup', marker=(app := None))\n"
         "async def startup() -> None:\n"
-        "    alias.add_api_route('/captured', late)\n",
+        "    alias.add_api_route('/captured', late)\n"
+        "app.add_event_handler('startup', (app := startup))\n",
         encoding="utf-8",
     )
 

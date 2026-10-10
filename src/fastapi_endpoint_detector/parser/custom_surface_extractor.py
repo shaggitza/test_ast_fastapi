@@ -63,6 +63,7 @@ class _EvaluatedArgument:
     expression: ast.expr
     state: dict[str, _Binding | None]
     binding: _Binding | None
+    elements: tuple[_EvaluatedArgument, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -2562,11 +2563,26 @@ class CustomSurfaceExtractor:
                 if candidate or not keyword.value.keys:
                     entries = candidate
             if entries is None:
-                self._inspect_expression(module, keyword.value, state, inherited_conditions)
+                mapping_elements: tuple[_EvaluatedArgument, ...] = ()
+                if isinstance(keyword.value, (ast.List, ast.Tuple)):
+                    captures: list[_EvaluatedArgument] = []
+                    for element in keyword.value.elts:
+                        self._inspect_expression(module, element, state, inherited_conditions)
+                        captures.append(
+                            _EvaluatedArgument(
+                                element,
+                                dict(state),
+                                self._binding_from_expression(element, state, module.name),
+                            )
+                        )
+                    mapping_elements = tuple(captures)
+                else:
+                    self._inspect_expression(module, keyword.value, state, inherited_conditions)
                 capture = _EvaluatedArgument(
                     expression=keyword.value,
                     state=dict(state),
                     binding=self._binding_from_expression(keyword.value, state, module.name),
+                    elements=mapping_elements,
                 )
                 if keyword.arg is not None:
                     if keyword.arg in keyword_positions:
@@ -2582,11 +2598,26 @@ class CustomSurfaceExtractor:
                 if name in keyword_positions and name not in mapping_names:
                     duplicate_keywords = True
                 mapping_names.add(name)
-                self._inspect_expression(module, entry_value, state, inherited_conditions)
+                element_captures: tuple[_EvaluatedArgument, ...] = ()
+                if isinstance(entry_value, (ast.List, ast.Tuple)):
+                    captures = []
+                    for element in entry_value.elts:
+                        self._inspect_expression(module, element, state, inherited_conditions)
+                        captures.append(
+                            _EvaluatedArgument(
+                                element,
+                                dict(state),
+                                self._binding_from_expression(element, state, module.name),
+                            )
+                        )
+                    element_captures = tuple(captures)
+                else:
+                    self._inspect_expression(module, entry_value, state, inherited_conditions)
                 capture = _EvaluatedArgument(
                     expression=entry_value,
                     state=dict(state),
                     binding=self._binding_from_expression(entry_value, state, module.name),
+                    elements=element_captures,
                 )
                 position = keyword_positions.get(name)
                 if position is None:
@@ -3565,6 +3596,36 @@ class CustomSurfaceExtractor:
         for contract in self.contracts.document.contracts:
             if not self._matches(contract, symbol, invocation, receiver_type):
                 continue
+            method_name = contract.registration.symbol.rsplit(".", 1)[-1]
+            method_parameters = {
+                "add_event_handler": ("event_type", "func"),
+                "add_exception_handler": ("exc_class_or_status_code", "handler"),
+                "on_event": ("event_type",),
+                "exception_handler": ("exc_class_or_status_code",),
+            }.get(method_name)
+            trusted_framework_method = contract.registration.symbol.startswith(
+                ("fastapi.", "starlette.")
+            )
+            if (
+                trusted_framework_method
+                and method_parameters is not None
+                and (
+                    len(call.args) > len(method_parameters)
+                    or any(
+                        item.arg is not None and item.arg not in method_parameters
+                        for item in call.keywords
+                    )
+                )
+            ):
+                self._record_framework_contract_limitation(
+                    module,
+                    call,
+                    state,
+                    evaluation,
+                    contract,
+                    "registration call has unsupported arguments; inventory is conditional",
+                )
+                continue
             handler_index = (
                 contract.handler.index
                 if contract.handler.kind
@@ -3640,13 +3701,15 @@ class CustomSurfaceExtractor:
                     assert isinstance(sequence, (ast.List, ast.Tuple))
                     captures = list(evaluation.keywords) if evaluation is not None else []
                     original = captures[keyword_index] if keyword_index < len(captures) else None
-                    for item in sequence.elts:
+                    for element_index, item in enumerate(sequence.elts):
                         if original is None:
                             list_capture = _EvaluatedArgument(
                                 item,
                                 dict(state),
                                 self._binding_from_expression(item, state, module.name),
                             )
+                        elif element_index < len(original.elements):
+                            list_capture = original.elements[element_index]
                         else:
                             list_capture = _EvaluatedArgument(
                                 item,
