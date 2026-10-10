@@ -515,11 +515,7 @@ def _shadowed_client_names(tokens: list[_Token], source: str) -> tuple[set[str],
         ):
             bind(token)
         # Any direct assignment may rebind a global before or after a call.
-        if (
-            token.value in names
-            and index + 1 < len(tokens)
-            and _has_assignment_operator(tokens, index, source)
-        ):
+        if token.value in names and _has_assignment_operator(tokens, index, source):
             bind(token)
         # Imported axios default/namespace bindings are accepted only from the
         # canonical package. Other imported names shadow browser globals.
