@@ -676,3 +676,27 @@ def test_seccomp_profile_is_packaged_and_deny_by_default() -> None:
     assert payload["syscalls"][0]["action"] == "SCMP_ACT_ALLOW"
     assert "mount" not in payload["syscalls"][0]["names"]
     assert "ptrace" not in payload["syscalls"][0]["names"]
+
+
+@pytest.mark.parametrize(
+    "config", [{}, {"User": "65532:65532"}, {"Volumes": None}, {"Volumes": {}}]
+)
+def test_image_config_accepts_omitted_or_empty_oci_volumes(config: dict[str, object]) -> None:
+    raw = json.dumps([{"RepoDigests": [_DIGEST], "Config": config}])
+    assert VMExecutor._validated_image_inspection(raw)["Config"] == config
+
+
+@pytest.mark.parametrize(
+    "config",
+    [None, [], "missing", {"Volumes": []}, {"Volumes": "invalid"}, {"Volumes": {"/writable": {}}}],
+)
+def test_image_config_still_rejects_malformed_or_declared_volumes(config: object) -> None:
+    raw = json.dumps([{"RepoDigests": [_DIGEST], "Config": config}])
+    with pytest.raises(VMExecutorError):
+        VMExecutor._validated_image_inspection(raw)
+
+
+def test_image_inspection_requires_a_configuration_object() -> None:
+    raw = json.dumps([{"RepoDigests": [_DIGEST]}])
+    with pytest.raises(VMExecutorError, match="Config"):
+        VMExecutor._validated_image_inspection(raw)

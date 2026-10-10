@@ -214,9 +214,11 @@ class VMExecutor:
             raise VMExecutorError("image inspect did not return exactly one image configuration")
         inspected = payload[0]
         config = inspected.get("Config")
-        if not isinstance(config, dict) or "Volumes" not in config:
-            raise VMExecutorError("image inspect did not return Config.Volumes")
-        volumes = config["Volumes"]
+        if not isinstance(config, dict):
+            raise VMExecutorError("image inspect did not return Config")
+        # OCI image config omits an empty Volumes map; recent Docker APIs
+        # preserve that omission in image inspection responses.
+        volumes = config.get("Volumes")
         if volumes is not None and not isinstance(volumes, dict):
             raise VMExecutorError("image inspect returned malformed Config.Volumes")
         if volumes:
