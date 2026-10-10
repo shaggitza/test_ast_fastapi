@@ -1,0 +1,103 @@
+{
+  "evidence_class": "independent fixture oracle; not observed Graphify output",
+  "expected_relation_orientation": {
+    "calls": "caller-to-callee",
+    "imports_from": "importer-to-imported-symbol-or-module",
+    "inherits": "subclass-to-base"
+  },
+  "required_edges": [
+    {
+      "side": "both",
+      "relation": "imports_from",
+      "source": "caller module",
+      "target": "provider.target",
+      "source_file": "caller.py",
+      "expected_line": 3
+    },
+    {
+      "side": "both",
+      "relation": "calls",
+      "source": "caller.direct_call",
+      "target": "provider.target",
+      "source_file": "caller.py",
+      "expected_line": 9
+    },
+    {
+      "side": "both",
+      "relation": "calls",
+      "source": "caller.alias_call",
+      "target": "provider.target",
+      "source_file": "caller.py",
+      "expected_line": 14
+    },
+    {
+      "side": "both",
+      "relation": "calls",
+      "source": "provider.Base.inherited",
+      "target": "provider.target",
+      "source_file": "provider.py",
+      "expected_line": 10
+    },
+    {
+      "side": "both",
+      "relation": "inherits",
+      "source": "provider.Child",
+      "target": "provider.Base",
+      "source_file": "provider.py",
+      "expected_line": 13
+    },
+    {
+      "side": "both",
+      "relation": "calls",
+      "source": "provider.Child.method",
+      "target": "provider.Base.inherited",
+      "source_file": "provider.py",
+      "expected_line": 15
+    }
+  ],
+  "line_expectations": {
+    "baseline/caller.py": {
+      "utf8_prefix": "café",
+      "utf8_prefix_byte_length": 5,
+      "expected_call_lines": [9, 14],
+      "expected_utf8_file_byte_spans": [[152, 168], [226, 239]],
+      "expected_utf8_character_spans": [[151, 167], [225, 238]],
+      "expected_import_line": 3,
+      "expected_source_location_notation": "L<number>"
+    },
+    "baseline/provider.py": {
+      "expected_target_declaration_line": 4,
+      "expected_inherited_call_line": 10,
+      "expected_inheritance_declaration_line": 13,
+      "expected_method_call_line": 15
+    },
+    "target/caller.py": {
+      "utf8_prefix": "café",
+      "utf8_prefix_byte_length": 5,
+      "expected_call_lines": [9, 14],
+      "expected_utf8_file_byte_spans": [[174, 190], [248, 261]],
+      "expected_utf8_character_spans": [[173, 189], [247, 260]],
+      "expected_import_line": 3,
+      "expected_source_location_notation": "L<number>"
+    },
+    "target/provider.py": {
+      "expected_target_declaration_line": 4,
+      "expected_inherited_call_line": 10,
+      "expected_inheritance_declaration_line": 13,
+      "expected_method_call_line": 15
+    }
+  },
+  "baseline_only_files": ["deleted.py"],
+  "target_only_files": [],
+  "deletion_expectation": "after independently attested full target extraction, no node or edge may retain source_file deleted.py; no such extraction has been run",
+  "required_edge_cases": [
+    "direct imported alias call across files",
+    "alias stored in local variable then invoked",
+    "method call and inherited method call",
+    "subclass-to-base inheritance",
+    "import evidence",
+    "UTF-8 byte offsets differ from code-point offsets after café",
+    "line-only source_location is insufficient for byte/column range provenance",
+    "target deletion compared with baseline inventory"
+  ]
+}
