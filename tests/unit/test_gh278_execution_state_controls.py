@@ -44,6 +44,115 @@ def test_partial_bound_callback_does_not_shift_second_argument_to_first(tmp_path
     assert second_change.candidate_endpoints == []
 
 
+def test_partial_invocation_keyword_overrides_creation_capture(tmp_path: Path) -> None:
+    (tmp_path / "helpers.py").write_text(
+        "def first() -> int: return 1\ndef second() -> int: return 2\n"
+        "def run(callback): return callback()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "main.py").write_text(
+        "from functools import partial\nfrom fastapi import FastAPI\n"
+        "from helpers import first, second, run\napp=FastAPI()\n"
+        "@app.get('/override')\ndef handler():\n"
+        "    bound = partial(run, callback=first)\n"
+        "    return bound(callback=second)\n",
+        encoding="utf-8",
+    )
+    mapper = ChangeMapper(tmp_path, secure_ast=True, use_cache=False)
+    assert {
+        item.endpoint.identifier
+        for item in mapper.analyze_diff(_diff("helpers.py", 2)).candidate_endpoints
+    } == {"GET /override"}
+    assert mapper.analyze_diff(_diff("helpers.py", 1)).candidate_endpoints == []
+
+
+def test_invalid_partial_positional_keyword_duplicate_is_not_promoted(tmp_path: Path) -> None:
+    (tmp_path / "helpers.py").write_text(
+        "def first() -> int: return 1\ndef second() -> int: return 2\n"
+        "def run(callback): return callback()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "main.py").write_text(
+        "from functools import partial\nfrom fastapi import FastAPI\n"
+        "from helpers import first, second, run\napp=FastAPI()\n"
+        "@app.get('/invalid')\ndef handler():\n"
+        "    bound = partial(run, first)\n"
+        "    return bound(callback=second)\n",
+        encoding="utf-8",
+    )
+    mapper = ChangeMapper(tmp_path, secure_ast=True, use_cache=False)
+    deps = mapper.mypy_analyzer.analyze_endpoints(mapper.registry.get_all(), use_cache=False)
+    endpoint_deps = next(iter(deps.values()))
+    assert any(
+        item.cap == "INVALID_PARTIAL_ARGUMENTS" for item in endpoint_deps.analysis_limitations
+    )
+    assert mapper.analyze_diff(_diff("helpers.py", 1)).candidate_endpoints == []
+    assert mapper.analyze_diff(_diff("helpers.py", 2)).candidate_endpoints == []
+
+
+def test_partial_keeps_creation_time_callback_across_rebinding(tmp_path: Path) -> None:
+    (tmp_path / "helpers.py").write_text(
+        "def first() -> int: return 1\ndef second() -> int: return 2\n"
+        "def run(callback): return callback()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "main.py").write_text(
+        "from functools import partial\nfrom fastapi import FastAPI\n"
+        "from helpers import first, second, run\napp=FastAPI()\n"
+        "@app.get('/capture')\ndef handler():\n"
+        "    callback = first\n"
+        "    bound = partial(run, callback=callback)\n"
+        "    callback = second\n"
+        "    return bound()\n",
+        encoding="utf-8",
+    )
+    mapper = ChangeMapper(tmp_path, secure_ast=True, use_cache=False)
+    assert {
+        item.endpoint.identifier
+        for item in mapper.analyze_diff(_diff("helpers.py", 1)).candidate_endpoints
+    } == {"GET /capture"}
+    assert mapper.analyze_diff(_diff("helpers.py", 2)).candidate_endpoints == []
+
+
+def test_literal_true_loop_break_uses_mandatory_assignment(tmp_path: Path) -> None:
+    (tmp_path / "helpers.py").write_text(
+        "def first(): return 1\ndef second(): return 2\n", encoding="utf-8"
+    )
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\nfrom helpers import first, second\n"
+        "app=FastAPI()\n@app.get('/loop')\ndef handler():\n"
+        "    callback = first\n    while True:\n"
+        "        callback = second\n        break\n"
+        "    return callback()\n",
+        encoding="utf-8",
+    )
+    mapper = ChangeMapper(tmp_path, secure_ast=True, use_cache=False)
+    assert {
+        item.endpoint.identifier
+        for item in mapper.analyze_diff(_diff("helpers.py", 2)).candidate_endpoints
+    } == {"GET /loop"}
+    assert mapper.analyze_diff(_diff("helpers.py", 1)).candidate_endpoints == []
+
+
+def test_conditional_break_loop_remains_conservative(tmp_path: Path) -> None:
+    (tmp_path / "helpers.py").write_text(
+        "def first(): return 1\ndef second(): return 2\n", encoding="utf-8"
+    )
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\nfrom helpers import first, second\n"
+        "app=FastAPI()\n@app.get('/loop')\ndef handler(flag: bool):\n"
+        "    callback = first\n    while True:\n"
+        "        if flag: break\n        callback = second\n"
+        "        break\n    return callback()\n",
+        encoding="utf-8",
+    )
+    report = ChangeMapper(tmp_path, secure_ast=True, use_cache=False).analyze_diff(
+        _diff("helpers.py", 2)
+    )
+    assert {item.endpoint.identifier for item in report.candidate_endpoints} == {"GET /loop"}
+    assert all(item.confidence.value != "high" for item in report.candidate_endpoints)
+
+
 def test_unknown_branch_callable_join_keeps_both_possible_targets(tmp_path: Path) -> None:
     (tmp_path / "helpers.py").write_text(
         "def first() -> int:\n    return 1\n\ndef second() -> int:\n    return 1\n",

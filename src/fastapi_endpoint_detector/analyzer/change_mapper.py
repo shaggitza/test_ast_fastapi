@@ -1285,9 +1285,25 @@ class ChangeMapper:
                 else None
             )
             low_only_points_to = deps.references_lines_low_only(file_path, changed_lines)
+            limited_call_locations = {
+                (str(Path(item.file_path).resolve()), item.call_line, item.call_column)
+                for item in deps.analysis_limitations
+                if item.call_column is not None
+            }
+            limited_path_relevant = any(
+                (
+                    str(Path(frame.caller_file_path).resolve()),
+                    frame.caller_line_number,
+                    frame.caller_column_number,
+                )
+                in limited_call_locations
+                for stack in raw_stacks
+                for frame in stack
+                if frame.caller_file_path is not None and frame.caller_line_number is not None
+            )
             confidence = (
                 ConfidenceLevel.LOW
-                if low_only_points_to or deps.analysis_limitations
+                if low_only_points_to or limited_path_relevant
                 else effect_result.confidence
                 if effect_result
                 else ConfidenceLevel.MEDIUM
