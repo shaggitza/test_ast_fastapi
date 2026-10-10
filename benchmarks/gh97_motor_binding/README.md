@@ -85,3 +85,19 @@ invalid-arity bindings do not certify valid invocations. Cold and warm analyzer
 results agree. Historical reports above remain unchanged. This source-only
 evidence does not certify installed-package compatibility, version ranges,
 service behavior or real-world GH97 acceptance.
+
+The coherent-installation replay is retained in
+`results/coherent-installation-binding-v4.json`, from committed source
+`58ff001105d3a914ab9c20d586785458df0718cb`. Its SHA-256 is
+`2599e4da39e6499dcad7abe5d25bcc117b614586aa76ab8efd49010f50615942`.
+An independent replay reproduced its bytes exactly. This source requires one
+coherent installation root for all parsed declarations of the package;
+metadata from an unrelated or split installation cannot authenticate it.
+The producer rejects every dirty tracked file before analysis and immediately
+before publishing the report. The full analyzer and Motor benchmark suites,
+including the genuine clean-checkout probe, completed with exit 0.
+The eight physical calls retain five exact bindings, two resolved nonmatches
+and one unsupported receiver; the two wrong-arity bindings remain invalid
+invocations. All earlier raw reports remain unchanged. This is source-only
+static evidence; installed compatibility, version ranges, wrappers and
+real-world GH97 acceptance remain open.
