@@ -81,7 +81,7 @@ def _project(root: Path) -> tuple[Path, Path]:
         contract_rows.append(
             {
                 "id": contract_id,
-                "symbol": f"{root.name}.main.{contract_id}",
+                "symbol": f"main.{contract_id}",
                 "invocation": "function",
                 "operation": operation,
                 "channel": "sql",
@@ -117,6 +117,15 @@ def _project(root: Path) -> tuple[Path, Path]:
 
 def _candidate_projection(report: AnalysisReport) -> list[dict[str, object]]:
     return [item.model_dump(mode="json") for item in report.candidate_endpoints]
+
+
+def _assert_open_receiver_flush_is_unmatched(report: AnalysisReport) -> None:
+    audit = report.effect_contract_audit
+    assert audit is not None
+    occurrence = next(item for item in audit.occurrences if item.source_spelling == "other.flush")
+    assert occurrence.audit_status == "ambiguous"
+    assert occurrence.reason_code == "open_receiver_dispatch"
+    assert occurrence.contract_id is None
 
 
 def _fixture_endpoint_calls(fixture: Path) -> tuple[Endpoint, tuple[ResolvedCallSite, ...]]:
@@ -410,8 +419,10 @@ def test_sql_report_tampering_is_rejected_and_formats_disclose_limitations(
 def _ordered_project(root: Path) -> tuple[Path, Path]:
     (root / "main.py").write_text(
         "from __future__ import annotations\n"
+        "from typing import final\n"
         "from fastapi import FastAPI\n\n"
         "app = FastAPI()\n\n"
+        "@final\n"
         "class Session:\n"
         "    def begin(self) -> None: pass\n"
         "    def begin_nested(self) -> None: pass\n"
@@ -421,6 +432,7 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
         "    def rollback(self) -> None: pass\n\n"
         "class Other:\n"
         "    def flush(self) -> None: pass\n\n"
+        "@final\n"
         "class AsyncSession:\n"
         "    def begin(self): return self\n"
         "    async def __aenter__(self): return self\n"
@@ -429,15 +441,18 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
         "class Holder:\n"
         "    def __init__(self) -> None:\n"
         "        self.session = Session()\n\n"
+        "@final\n"
         "class UnitOfWork:\n"
         "    def begin(self): return self\n"
         "    def __enter__(self): return self\n"
         "    def __exit__(self, exc_type, exc, tb): return False\n"
         "    def add(self, value: str) -> None: pass\n\n"
+        "@final\n"
         "class YieldedUnitOfWork:\n"
         "    def __enter__(self) -> YieldedUnitOfWork: return self\n"
         "    def __exit__(self, exc_type, exc, tb): return False\n"
         "    def add(self, value: str) -> None: pass\n\n"
+        "@final\n"
         "class UnitOfWorkFactory:\n"
         "    def begin(self) -> YieldedUnitOfWork: return YieldedUnitOfWork()\n\n"
         "    def untrusted_begin(self) -> YieldedUnitOfWork: return YieldedUnitOfWork()\n\n"
@@ -572,7 +587,7 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
                 "contracts": [
                     {
                         "id": operation,
-                        "symbol": f"{root.name}.main.Session.{operation}",
+                        "symbol": f"main.Session.{operation}",
                         "invocation": "instance_method",
                         "operation": (
                             "stage"
@@ -614,7 +629,7 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
                 + [
                     {
                         "id": "uow-begin",
-                        "symbol": f"{root.name}.main.UnitOfWork.begin",
+                        "symbol": "main.UnitOfWork.begin",
                         "invocation": "instance_method",
                         "operation": "begin",
                         "channel": "sql",
@@ -626,21 +641,21 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
                     },
                     {
                         "id": "uow-add",
-                        "symbol": f"{root.name}.main.UnitOfWork.add",
+                        "symbol": "main.UnitOfWork.add",
                         "invocation": "instance_method",
                         "operation": "stage",
                         "channel": "sql",
                     },
                     {
                         "id": "yielded-uow-add",
-                        "symbol": f"{root.name}.main.YieldedUnitOfWork.add",
+                        "symbol": "main.YieldedUnitOfWork.add",
                         "invocation": "instance_method",
                         "operation": "stage",
                         "channel": "sql",
                     },
                     {
                         "id": "uow-factory-begin",
-                        "symbol": f"{root.name}.main.UnitOfWorkFactory.begin",
+                        "symbol": "main.UnitOfWorkFactory.begin",
                         "invocation": "instance_method",
                         "operation": "begin",
                         "channel": "sql",
@@ -653,7 +668,7 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
                     },
                     {
                         "id": "uow-factory-untrusted-begin",
-                        "symbol": f"{root.name}.main.UnitOfWorkFactory.untrusted_begin",
+                        "symbol": "main.UnitOfWorkFactory.untrusted_begin",
                         "invocation": "instance_method",
                         "operation": "begin",
                         "channel": "sql",
@@ -665,7 +680,7 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
                     },
                     {
                         "id": "receiverless-begin",
-                        "symbol": f"{root.name}.main.begin_context",
+                        "symbol": "main.begin_context",
                         "invocation": "function",
                         "operation": "begin",
                         "channel": "sql",
@@ -677,7 +692,7 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
                     },
                     {
                         "id": "trusted-receiverless-begin",
-                        "symbol": f"{root.name}.main.trusted_begin_context",
+                        "symbol": "main.trusted_begin_context",
                         "invocation": "function",
                         "operation": "begin",
                         "channel": "sql",
@@ -692,7 +707,7 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
                 + [
                     {
                         "id": f"async-{operation}",
-                        "symbol": f"{root.name}.main.AsyncSession.{operation}",
+                        "symbol": f"main.AsyncSession.{operation}",
                         "invocation": "instance_method",
                         "operation": "stage" if operation == "add" else "begin",
                         "channel": "sql",
@@ -811,6 +826,7 @@ def test_ordered_paths_require_same_scope_receiver_and_straight_line(tmp_path: P
     assert _candidate_projection(configured) == _candidate_projection(baseline)
     assert configured.affected_endpoints == baseline.affected_endpoints
     assert configured.orphan_changes == baseline.orphan_changes
+    _assert_open_receiver_flush_is_unmatched(configured)
     paths = configured.sql_transaction_path_report
     assert paths is not None
     assert paths.schema_version == 4

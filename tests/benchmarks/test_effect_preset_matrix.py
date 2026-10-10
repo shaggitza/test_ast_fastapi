@@ -7,6 +7,7 @@ import platform
 import shutil
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import benchmarks.providers.effect_preset_frozen_runner as frozen_runner
 import benchmarks.providers.effect_preset_matrix as matrix_provider
@@ -36,6 +37,35 @@ from fastapi_endpoint_detector.models.endpoint import (
     EndpointMethod,
     HandlerInfo,
 )
+
+if TYPE_CHECKING:
+    from fastapi_endpoint_detector.models.effect_contract_audit import (
+        EffectContractAuditOccurrence,
+    )
+
+
+def _assert_foreign_call_is_unmatched_or_open_dispatch(
+    occurrence: EffectContractAuditOccurrence,
+) -> str:
+    method = occurrence.source_spelling.split(".", 1)[1]
+    assert occurrence.audit_status.value != "matched"
+    assert occurrence.contract_id is None and occurrence.contract_hash is None
+    if occurrence.resolver_status.value == "exact":
+        assert occurrence.audit_status.value == "unmatched"
+        assert occurrence.canonical_symbol is not None
+        assert tuple(occurrence.canonical_symbol.rsplit(".", 2)[-2:]) == ("Foreign", method)
+        assert occurrence.invocation is not None
+        return "exact"
+    if occurrence.resolver_status.value == "ambiguous":
+        assert occurrence.audit_status.value == "ambiguous"
+        assert occurrence.canonical_symbol is None
+        assert occurrence.reason_code == "open_receiver_dispatch"
+        assert occurrence.invocation is None
+        return "ambiguous"
+    pytest.fail(
+        f"unexpected resolver status for {occurrence.source_spelling}: "
+        f"{occurrence.resolver_status.value!r}"
+    )
 
 
 def _endpoint(path: Path, line: int) -> Endpoint:
@@ -598,21 +628,26 @@ def test_exact_pathlib_calls_match_and_unrelated_same_name_methods_do_not(
         item for item in audit.occurrences if item.source_spelling in negative_spellings
     ]
     assert {item.source_spelling for item in negative_calls} == negative_spellings
-    assert all(
-        item.audit_status.value != "matched" and item.contract_id is None for item in negative_calls
-    )
-    assert all(item.canonical_symbol is not None for item in negative_calls)
-    assert {
-        tuple(item.canonical_symbol.rsplit(".", 2)[-2:])
+    resolver_statuses = {
+        item.source_spelling: _assert_foreign_call_is_unmatched_or_open_dispatch(item)
         for item in negative_calls
-        if item.canonical_symbol is not None
-    } == {
-        ("Foreign", "read_text"),
-        ("Foreign", "get"),
-        ("Foreign", "set"),
-        ("Foreign", "write"),
-        ("Foreign", "send"),
     }
+    exact_negative_spellings = {
+        spelling for spelling, status in resolver_statuses.items() if status == "exact"
+    }
+    ambiguous_negative_spellings = {
+        spelling for spelling, status in resolver_statuses.items() if status == "ambiguous"
+    }
+    assert exact_negative_spellings.isdisjoint(ambiguous_negative_spellings)
+    assert exact_negative_spellings | ambiguous_negative_spellings == negative_spellings
+    assert audit.summary.unmatched_calls == 2 + len(exact_negative_spellings)
+    assert audit.summary.ambiguous_calls == len(ambiguous_negative_spellings)
+    open_unmatched_symbols = {
+        item.canonical_symbol
+        for item in audit.occurrences
+        if item.source_spelling == "open" and item.audit_status.value == "unmatched"
+    }
+    assert open_unmatched_symbols == {"builtins.open"}
     open_constructors = [
         item for item in audit.occurrences if item.source_spelling in {"open", "path.open"}
     ]

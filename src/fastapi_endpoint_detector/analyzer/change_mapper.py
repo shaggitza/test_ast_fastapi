@@ -10,12 +10,13 @@ Uses mypy for type-aware, precise dependency tracking.
 from __future__ import annotations
 
 import heapq
+import itertools
 import os
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from fastapi_endpoint_detector.analyzer.effect_analyzer import EffectAnalyzer
 from fastapi_endpoint_detector.analyzer.effect_contract_auditor import (
@@ -30,7 +31,6 @@ from fastapi_endpoint_detector.analyzer.scip_analyzer import (
     SCIPAnalyzer,
     SCIPAnalyzerError,
     SCIPDefinition,
-    SCIPReachedDefinition,
 )
 from fastapi_endpoint_detector.analyzer.sql_transaction import (
     build_sql_transaction_diagnostics,
@@ -55,6 +55,8 @@ from fastapi_endpoint_detector.models.report import (
     ContractEffectEvidence,
     EffectDisposition,
     EffectEvidence,
+    EndpointLifecycle,
+    EndpointLifecycleKind,
     EvidenceProducer,
     EvidenceStatus,
     ImpactChannel,
@@ -74,7 +76,12 @@ from fastapi_endpoint_detector.parser.fastapi_extractor import FastAPIExtractor
 from fastapi_endpoint_detector.parser.secure_ast_extractor import SecureASTExtractor
 
 if TYPE_CHECKING:
-    from fastapi_endpoint_detector.models.diff import DiffFile
+    from fastapi_endpoint_detector.analyzer.mypy_analyzer import (
+        EndpointDependencies,
+        SourceEvidenceSpan,
+    )
+    from fastapi_endpoint_detector.analyzer.source_inventory import SourceFile, SourceInventory
+    from fastapi_endpoint_detector.models.diff import ChangedByteSpan, DiffFile
     from fastapi_endpoint_detector.models.effect_contract import LoadedEffectContracts
     from fastapi_endpoint_detector.models.effect_contract_audit import (
         EffectContractAudit,
@@ -98,8 +105,6 @@ _CONFIDENCE_SCORE = {
     ConfidenceLevel.MEDIUM: 0.7,
     ConfidenceLevel.LOW: 0.3,
 }
-
-
 EndpointResultKey = tuple[str, str, int, str, str, str]
 
 
@@ -244,21 +249,48 @@ def _merge_affected(
         existing.merge(candidate)
 
 
-def _scip_confidence(seed: SCIPDefinition, depth: int) -> ConfidenceLevel:
-    if depth == 0 and "(" in seed.short_name:
-        return ConfidenceLevel.HIGH
-    # A SCIP reverse-reference path establishes call/reference reachability, not
-    # that the changed value is returned, persisted, emitted, or otherwise
-    # observed by the endpoint. Keep every transitive route as a candidate, but
-    # require independent effect/data-flow corroboration before promotion.
-    return ConfidenceLevel.LOW
-
-
 @dataclass(frozen=True)
 class _ExpandedSCIPDefinition:
     definition: SCIPDefinition
     depth: int
     dependency_chain: tuple[str, ...]
+    limitations: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _MypySourceInventory:
+    """Mypy-facing view of the canonical inventory with stable import identities."""
+
+    root: Path
+    files: tuple[SourceFile, ...]
+    unresolved_imports: tuple[tuple[str, str], ...]
+    excluded_files: tuple[str, ...]
+    follow_imports: bool
+    max_depth: int
+
+
+def _mypy_inventory(inventory: SourceInventory) -> tuple[_MypySourceInventory, Path]:
+    """Adapt inventory controls without changing its selected files or provenance."""
+    module_root = MypyAnalyzer._infer_module_root(inventory.root)
+    files = []
+    for record in inventory.files:
+        path = record.path.resolve()
+        try:
+            module = MypyAnalyzer._module_name_from_path(path, module_root)
+        except ValueError:
+            module = MypyAnalyzer._module_name_from_path(path, inventory.root)
+        files.append(replace(record, module=module))
+    return (
+        _MypySourceInventory(
+            root=inventory.root,
+            files=tuple(files),
+            unresolved_imports=inventory.unresolved_imports,
+            excluded_files=inventory.excluded_files,
+            follow_imports=inventory.follow_imports,
+            max_depth=inventory.max_depth,
+        ),
+        module_root,
+    )
 
 
 def _scip_definition_key(definition: SCIPDefinition) -> tuple[str, str, str, int, int]:
@@ -277,110 +309,181 @@ def _expanded_scip_affected(
     max_depth: int,
     warnings: list[str] | None = None,
 ) -> tuple[_ExpandedSCIPDefinition, ...]:
-    """Close native SCIP reachability over explicit override-to-base bridges."""
-    initial = analyzer.affected(seed, max_depth=max_depth)
-    best_depth_by_symbol: dict[str, int] = {}
-    definition_by_symbol: dict[str, SCIPDefinition] = {}
-    chain_by_symbol: dict[str, tuple[str, ...]] = {}
-    worklist: list[tuple[int, str, tuple[str, ...]]] = []
+    """Walk source-bound SCIP references while preserving their limitations."""
+    reverse_edges = getattr(analyzer, "reverse_call_edges", None)
+    if not callable(reverse_edges):
+        raise SCIPAnalyzerError("SCIP analyzer lacks reference-only reverse-call evidence")
 
-    def record(definition: SCIPDefinition, depth: int, chain: tuple[str, ...]) -> None:
+    scope_limitations: tuple[str, ...] = ()
+    selected_inventory_paths: set[str] | None = None
+    source_scope = getattr(analyzer, "source_scope", None)
+    if callable(source_scope):
+        scope = source_scope()
+        index_scope = getattr(scope, "index_scope", None)
+        scope_limitations = tuple(getattr(scope, "limitations", ()))
+        selected_paths = getattr(scope, "selected_inventory_paths", None)
+        if selected_paths is not None:
+            selected_inventory_paths = {Path(item).as_posix() for item in selected_paths}
+        if index_scope == "project_root":
+            scope_limitations = (
+                *scope_limitations,
+                "SCIP indexes project_root; selected inventory paths filter returned evidence "
+                "but do not restrict the index itself.",
+            )
+        else:
+            scope_limitations = (
+                *scope_limitations,
+                f"SCIP index scope is {index_scope!r}; selected inventory scope is not proven.",
+            )
+        if warnings is not None:
+            for limitation in scope_limitations:
+                warning = f"SCIP source-scope limitation: {limitation}"
+                if warning not in warnings:
+                    warnings.append(warning)
+
+    edge_limitations = getattr(analyzer, "reverse_call_edge_limitations", None)
+    best_depth_by_symbol: dict[str, int] = {seed.symbol: 0}
+    definition_by_symbol: dict[str, SCIPDefinition] = {seed.symbol: seed}
+    chain_by_symbol: dict[str, tuple[str, ...]] = {seed.symbol: (seed.symbol,)}
+    limitations_by_symbol: dict[str, set[str]] = {seed.symbol: set(scope_limitations)}
+    queue_order = itertools.count()
+    worklist: list[tuple[int, str, tuple[str, ...], int, SCIPDefinition, tuple[str, ...]]] = [
+        (0, seed.symbol, (seed.symbol,), next(queue_order), seed, scope_limitations)
+    ]
+
+    def record(
+        definition: SCIPDefinition,
+        depth: int,
+        chain: tuple[str, ...],
+        limitations: tuple[str, ...],
+    ) -> None:
         symbol = definition.symbol
         previous_depth = best_depth_by_symbol.get(symbol)
-        previous_definition = definition_by_symbol.get(symbol)
         previous_chain = chain_by_symbol.get(symbol)
-        improves = previous_depth is None or depth < previous_depth
-        if (
-            depth == previous_depth
-            and previous_definition is not None
-            and previous_chain is not None
-        ):
-            improves = (chain, _scip_definition_key(definition)) < (
-                previous_chain,
-                _scip_definition_key(previous_definition),
-            )
-        if not improves:
-            return
+        canonical_chain = (chain, _scip_definition_key(definition))
+        old_chain = (
+            (previous_chain, _scip_definition_key(definition_by_symbol[symbol]))
+            if previous_chain is not None
+            else None
+        )
+        previous_limitations = limitations_by_symbol.setdefault(symbol, set())
+        limitation_count = len(previous_limitations)
+        previous_limitations.update(limitations)
+        if previous_depth is not None:
+            if depth > previous_depth:
+                return
+            if depth == previous_depth and old_chain is not None:
+                if canonical_chain > old_chain:
+                    return
+                if canonical_chain == old_chain and len(previous_limitations) == limitation_count:
+                    return
         best_depth_by_symbol[symbol] = depth
         definition_by_symbol[symbol] = definition
         chain_by_symbol[symbol] = chain
-        heapq.heappush(worklist, (depth, symbol, chain))
-
-    for reached in initial:
-        native_chain: tuple[str, ...] = (seed.symbol,)
-        if reached.definition.symbol != seed.symbol:
-            native_chain = (*native_chain, reached.definition.symbol)
-        record(reached.definition, reached.depth, native_chain)
-
-    base_resolver = getattr(analyzer, "base_method_definitions", None)
-    if not callable(base_resolver):
-        return tuple(
-            _ExpandedSCIPDefinition(
-                definition_by_symbol[symbol],
-                best_depth_by_symbol[symbol],
-                chain_by_symbol[symbol],
-            )
-            for symbol in sorted(
-                best_depth_by_symbol,
-                key=lambda item: (best_depth_by_symbol[item], item),
-            )
+        heapq.heappush(
+            worklist,
+            (depth, symbol, chain, next(queue_order), definition, limitations),
         )
 
-    affected_cache: dict[
-        tuple[str, int], tuple[SCIPReachedDefinition, ...] | SCIPAnalyzerError
-    ] = {}
     while worklist:
-        depth, symbol, current_chain = heapq.heappop(worklist)
+        depth, symbol, current_chain, _order, definition, current_limitations = heapq.heappop(
+            worklist
+        )
         if depth != best_depth_by_symbol[symbol] or current_chain != chain_by_symbol[symbol]:
             continue
         if depth >= max_depth:
             continue
-        definition = definition_by_symbol[symbol]
         try:
-            bases = base_resolver(definition)
+            edges = reverse_edges(definition)
+            limitations_for_seed = (
+                tuple(edge_limitations(definition)) if callable(edge_limitations) else ()
+            )
         except SCIPAnalyzerError as error:
             if warnings is not None:
                 warnings.append(
-                    f"SCIP override bridge from {definition.short_name} failed: {error}"
+                    f"SCIP reverse references for {definition.short_name} failed: {error}"
                 )
             continue
-        unique_bases: dict[str, SCIPDefinition] = {}
-        for candidate in bases:
-            existing = unique_bases.get(candidate.symbol)
-            if existing is None or _scip_definition_key(candidate) < _scip_definition_key(existing):
-                unique_bases[candidate.symbol] = candidate
-        for base in sorted(unique_bases.values(), key=_scip_definition_key):
-            remaining = max_depth - depth - 1
-            cache_key = (base.symbol, remaining)
-            base_affected = affected_cache.get(cache_key)
-            if base_affected is None:
-                try:
-                    base_affected = analyzer.affected(base, max_depth=remaining)
-                except SCIPAnalyzerError as error:
-                    base_affected = error
-                    if warnings is not None:
-                        warnings.append(
-                            f"SCIP override bridge from {definition.short_name} "
-                            f"to {base.short_name} failed: {error}"
+        if warnings is not None and limitations_for_seed:
+            warning = f"SCIP reference limitations for {definition.short_name}: " + "; ".join(
+                limitations_for_seed
+            )
+            if warning not in warnings:
+                warnings.append(warning)
+        path_limitations = tuple(
+            dict.fromkeys(
+                (*current_limitations, *limitations_by_symbol[symbol], *limitations_for_seed)
+            )
+        )
+        base_resolver = getattr(analyzer, "base_method_definitions", None)
+        if callable(base_resolver):
+            try:
+                bases = base_resolver(definition)
+            except SCIPAnalyzerError as error:
+                if warnings is not None:
+                    warnings.append(
+                        f"SCIP override bridge from {definition.short_name} failed: {error}"
+                    )
+                bases = ()
+            for base in sorted(bases, key=_scip_definition_key):
+                record(
+                    base,
+                    depth + 1,
+                    (*current_chain, base.symbol),
+                    tuple(
+                        dict.fromkeys(
+                            (
+                                *path_limitations,
+                                "SCIP followed an explicit override-to-base bridge.",
+                            )
                         )
-                affected_cache[cache_key] = base_affected
-            if isinstance(base_affected, SCIPAnalyzerError):
+                    ),
+                )
+        for edge in edges:
+            edge_status = getattr(edge, "execution_status", None)
+            confidence = getattr(edge, "confidence", None)
+            if edge_status != "reference_only" or confidence != "LOW":
+                if warnings is not None:
+                    warnings.append(
+                        f"SCIP discarded reverse edge for {definition.short_name}: "
+                        "it lacks reference_only/LOW evidence labels."
+                    )
                 continue
-            bridge_chain = (*current_chain, base.symbol)
-            for reached in base_affected:
-                adjusted_depth = depth + 1 + reached.depth
-                if adjusted_depth > max_depth:
-                    continue
-                adjusted_chain: tuple[str, ...] = bridge_chain
-                if reached.definition.symbol != base.symbol:
-                    adjusted_chain = (*adjusted_chain, reached.definition.symbol)
-                record(reached.definition, adjusted_depth, adjusted_chain)
+            caller = getattr(edge, "caller", None)
+            if not isinstance(caller, SCIPDefinition):
+                if warnings is not None:
+                    warnings.append(
+                        f"SCIP discarded malformed reverse edge for {definition.short_name}."
+                    )
+                continue
+            occurrence = getattr(edge, "occurrence", None)
+            occurrence_path = getattr(occurrence, "file_path", None)
+            edge_paths: tuple[str, ...] = (caller.file_path.as_posix(),)
+            if isinstance(occurrence_path, Path):
+                edge_paths = (*edge_paths, occurrence_path.as_posix())
+            if selected_inventory_paths is not None and not set(edge_paths).issubset(
+                selected_inventory_paths
+            ):
+                if warnings is not None:
+                    warnings.append(
+                        "SCIP discarded reverse reference outside the selected source inventory."
+                    )
+                continue
+            per_edge_limitations = tuple(getattr(edge, "limitations", ()))
+            combined = tuple(dict.fromkeys((*path_limitations, *per_edge_limitations)))
+            record(
+                caller,
+                depth + 1,
+                (*current_chain, caller.symbol),
+                combined,
+            )
 
     return tuple(
         _ExpandedSCIPDefinition(
             definition_by_symbol[symbol],
             best_depth_by_symbol[symbol],
             chain_by_symbol[symbol],
+            tuple(sorted(limitations_by_symbol[symbol])),
         )
         for symbol in sorted(
             best_depth_by_symbol,
@@ -494,8 +597,6 @@ class ChangeMapper:
             raise ChangeMapperError("app_entry requires secure_ast=True")
         if bootstrap_entry is not None and not secure_ast:
             raise ChangeMapperError("bootstrap_entry requires secure_ast=True")
-        if baseline_app_path is not None and not use_scip:
-            raise ChangeMapperError("baseline_app_path is valid only with use_scip=True")
         self.baseline_app_path = baseline_app_path.resolve() if baseline_app_path else None
         target_project_root = self.app_path.parent if self.app_path.is_file() else self.app_path
         self.target_project_root = target_project_root
@@ -518,11 +619,83 @@ class ChangeMapper:
         self._sql_transaction_report: SQLTransactionReport | None = None
         self._sql_transaction_path_report: SQLTransactionPathReport | None = None
         self._mypy_analyzer: MypyAnalyzer | None = None
+        self._baseline_mypy_analyzer: MypyAnalyzer | None = None
         self._effect_analyzer = EffectAnalyzer(target_project_root)
+        self._baseline_effect_analyzer = (
+            EffectAnalyzer(baseline_project_root) if baseline_project_root is not None else None
+        )
         self._scip_analyzer: SCIPAnalyzer | None = None
         self._baseline_registry: EndpointRegistry | None = None
         self._baseline_scip_analyzer: SCIPAnalyzer | None = None
         self.source_inventory = self.config.source_inventory(self.app_path)
+        self._baseline_source_inventory: SourceInventory | None = None
+        self._baseline_extractor: FastAPIExtractor | SecureASTExtractor | None = None
+        self._baseline_failure: str | None = None
+
+    @property
+    def baseline_mypy_analyzer(self) -> MypyAnalyzer:
+        """Get an independent typed analyzer rooted at the baseline snapshot."""
+        if self.baseline_app_path is None:
+            raise ChangeMapperError("Mypy removals require an explicit --baseline-app snapshot")
+        if self._baseline_mypy_analyzer is None:
+            package_path = (
+                self.baseline_app_path.parent
+                if self.baseline_app_path.is_file()
+                else self.baseline_app_path
+            )
+            effective_depth = (
+                self.config.parser.max_depth if self.config.analysis.track_transitive else 1
+            )
+            inventory = self.baseline_source_inventory
+            mypy_inventory, module_root = _mypy_inventory(inventory)
+            self._baseline_mypy_analyzer = MypyAnalyzer(
+                package_path,
+                max_depth=effective_depth,
+                module_root=module_root,
+                source_inventory=mypy_inventory,
+            )
+        return self._baseline_mypy_analyzer
+
+    @property
+    def baseline_mypy_registry(self) -> EndpointRegistry:
+        """Discover baseline endpoints independently from the target registry."""
+        if self.baseline_app_path is None:
+            raise ChangeMapperError("Mypy removals require an explicit --baseline-app snapshot")
+        if self._baseline_registry is None:
+            if self.secure_ast:
+                secure_extractor = SecureASTExtractor(
+                    app_path=self.baseline_app_path,
+                    app_variable=self.app_variable,
+                    app_entry=self.app_entry,
+                    bootstrap_entry=self.bootstrap_entry,
+                    snapshot_side=SnapshotSide.BASELINE,
+                    source_paths=self.baseline_source_inventory.paths,
+                )
+                self._baseline_inventory = self._merge_surface_inventory(
+                    self.baseline_app_path, secure_extractor.extract_inventory()
+                )
+                endpoints = self._baseline_inventory.endpoints
+                extractor: FastAPIExtractor | SecureASTExtractor = secure_extractor
+            else:
+                extractor = FastAPIExtractor(
+                    app_path=self.baseline_app_path,
+                    app_variable=self.app_variable,
+                    source_inventory=self.baseline_source_inventory,
+                )
+                endpoints = extractor.extract_endpoints()
+            self._baseline_extractor = extractor
+            self._baseline_registry = EndpointRegistry()
+            self._baseline_registry.register_many(endpoints)
+        return self._baseline_registry
+
+    @property
+    def baseline_source_inventory(self) -> SourceInventory:
+        """Return the canonical source selection for the explicit baseline snapshot."""
+        if self.baseline_app_path is None:
+            raise ChangeMapperError("A baseline source inventory requires --baseline-app")
+        if self._baseline_source_inventory is None:
+            self._baseline_source_inventory = self.config.source_inventory(self.baseline_app_path)
+        return self._baseline_source_inventory
 
     @property
     def extractor(self) -> FastAPIExtractor | SecureASTExtractor:
@@ -576,28 +749,114 @@ class ChangeMapper:
         return merge_surface_inventory(native, custom)
 
     def _source_inventory_warnings(self) -> list[str]:
-        """Report runtime source-scope limits without changing observed route identity."""
+        """Report runtime source-scope caveats without changing route identity."""
         if self.secure_ast:
             return []
 
-        inventory = self.source_inventory
-        extractor = self.extractor
         warnings: list[str] = []
-        if isinstance(extractor, FastAPIExtractor) and extractor.source_inventory_limitations:
-            follow_policy = "enabled" if inventory.follow_imports else "disabled"
-            warnings.append(
-                f"Target runtime source scope selected {len(inventory.files)} file(s); "
-                f"local import following is {follow_policy}. "
-                f"{extractor.source_inventory_limitations[1]}"
+        snapshots = [("Target", self.source_inventory)]
+        if self.baseline_app_path is not None:
+            snapshots.append(("Baseline", self.baseline_source_inventory))
+
+        for side, inventory in snapshots:
+            extractor = self.extractor if side == "Target" else self._baseline_extractor
+            scope_limitations = (
+                extractor.source_inventory_limitations
+                if isinstance(extractor, FastAPIExtractor)
+                else ()
             )
-        for limitation in inventory.limitations:
-            warnings.append(f"Target source inventory incomplete: {limitation}")
-        if inventory.unresolved_imports:
-            warnings.append(
-                f"Target source inventory has {len(inventory.unresolved_imports)} "
-                "unresolved local import(s)."
-            )
+            if scope_limitations:
+                follow_policy = "enabled" if inventory.follow_imports else "disabled"
+                warnings.append(
+                    f"{side} runtime source scope selected {len(inventory.files)} file(s); "
+                    f"local import following is {follow_policy}. {scope_limitations[1]}"
+                )
+            for limitation in inventory.limitations:
+                warnings.append(f"{side} source inventory incomplete: {limitation}")
+            if inventory.unresolved_imports:
+                warnings.append(
+                    f"{side} source inventory has {len(inventory.unresolved_imports)} "
+                    "unresolved local import(s)."
+                )
         return warnings
+
+    def _endpoint_lifecycle(self) -> list[EndpointLifecycle]:
+        """Reconcile endpoint inventories by public route identity, failing closed."""
+        if self.baseline_app_path is None:
+            return []
+        try:
+            baseline = self.baseline_mypy_registry.get_all()
+        except Exception as exc:
+            self._baseline_failure = str(exc)
+            return []
+        target = self.registry.get_all()
+        identities = sorted({item.identifier for item in baseline + target})
+
+        baseline_root = (
+            self.baseline_app_path.parent
+            if self.baseline_app_path.is_file()
+            else self.baseline_app_path
+        )
+
+        def snapshot_path(endpoint: Endpoint, root: Path) -> Path:
+            """Compare endpoint locations inside each snapshot, not temp roots."""
+            path = endpoint.handler.file_path.resolve()
+            try:
+                return path.relative_to(root.resolve())
+            except ValueError:
+                return path
+
+        records: list[EndpointLifecycle] = []
+        for identity in identities:
+            old = [item for item in baseline if item.identifier == identity]
+            new = [item for item in target if item.identifier == identity]
+            if len(old) > 1 or len(new) > 1:
+                records.append(
+                    EndpointLifecycle(
+                        identity=identity,
+                        lifecycle=EndpointLifecycleKind.AMBIGUOUS,
+                    )
+                )
+            elif not old:
+                records.append(
+                    EndpointLifecycle(
+                        identity=identity,
+                        lifecycle=EndpointLifecycleKind.TARGET,
+                        target_endpoint=new[0],
+                    )
+                )
+            elif not new:
+                records.append(
+                    EndpointLifecycle(
+                        identity=identity,
+                        lifecycle=EndpointLifecycleKind.REMOVED,
+                        baseline_endpoint=old[0],
+                    )
+                )
+            else:
+                previous, current = old[0], new[0]
+                prior, present = previous.handler, current.handler
+                lifecycle = EndpointLifecycleKind.TARGET
+                if snapshot_path(previous, baseline_root) != snapshot_path(
+                    current, self.target_project_root
+                ):
+                    lifecycle = EndpointLifecycleKind.MOVED
+                elif prior.name != present.name:
+                    lifecycle = EndpointLifecycleKind.RENAMED
+                records.append(
+                    EndpointLifecycle(
+                        identity=identity,
+                        lifecycle=lifecycle,
+                        baseline_endpoint=previous,
+                        target_endpoint=current,
+                    )
+                )
+        return records
+
+    def _target_equivalent_endpoint(self, endpoint: Endpoint) -> Endpoint:
+        """Map baseline evidence onto a unique public target identity only."""
+        matches = [item for item in self.registry if item.identifier == endpoint.identifier]
+        return matches[0] if len(matches) == 1 else endpoint
 
     @property
     def inventory(self) -> EndpointInventory:
@@ -613,7 +872,9 @@ class ChangeMapper:
         if self._scip_analyzer is None:
             package_path = self.app_path.parent if self.app_path.is_file() else self.app_path
             self._scip_analyzer = SCIPAnalyzer(
-                package_path, use_cache=self.use_cache, source_inventory=self.source_inventory
+                package_path,
+                use_cache=self.use_cache,
+                source_inventory=cast("Any", self.source_inventory),
             )
         return self._scip_analyzer
 
@@ -629,7 +890,7 @@ class ChangeMapper:
                 app_entry=self.app_entry,
                 bootstrap_entry=self.bootstrap_entry,
                 snapshot_side=SnapshotSide.BASELINE,
-                source_paths=self.config.source_inventory(self.baseline_app_path).paths,
+                source_paths=self.baseline_source_inventory.paths,
             )
             self._baseline_registry = EndpointRegistry()
             native = extractor.extract_inventory()
@@ -648,9 +909,11 @@ class ChangeMapper:
                 if self.baseline_app_path.is_file()
                 else self.baseline_app_path
             )
-            baseline_inventory = self.config.source_inventory(self.baseline_app_path)
+            baseline_inventory = self.baseline_source_inventory
             self._baseline_scip_analyzer = SCIPAnalyzer(
-                package_path, use_cache=self.use_cache, source_inventory=baseline_inventory
+                package_path,
+                use_cache=self.use_cache,
+                source_inventory=cast("Any", baseline_inventory),
             )
         return self._baseline_scip_analyzer
 
@@ -663,7 +926,13 @@ class ChangeMapper:
             effective_depth = (
                 self.config.parser.max_depth if self.config.analysis.track_transitive else 1
             )
-            self._mypy_analyzer = MypyAnalyzer(package_path, max_depth=effective_depth)
+            mypy_inventory, module_root = _mypy_inventory(self.source_inventory)
+            self._mypy_analyzer = MypyAnalyzer(
+                package_path,
+                max_depth=effective_depth,
+                module_root=module_root,
+                source_inventory=mypy_inventory,
+            )
             # NOTE: We don't pre-analyze here - that's done in _preanalyze_mypy
             # with progress reporting
         return self._mypy_analyzer
@@ -729,6 +998,7 @@ class ChangeMapper:
         diff_file: DiffFile,
         added_lines: list[int],
         removed_lines: list[int],
+        analyzer: MypyAnalyzer | None = None,
     ) -> AffectedEndpoint | None:
         """
         Check if an endpoint's dependencies (via mypy analysis) intersect with changes.
@@ -744,12 +1014,25 @@ class ChangeMapper:
         Returns:
             AffectedEndpoint if dependencies intersect, None otherwise.
         """
-        deps = self.mypy_analyzer.get_endpoint_dependencies(endpoint)
+        snapshot_analyzer = analyzer or self.mypy_analyzer
+        deps = snapshot_analyzer.get_endpoint_dependencies(endpoint)
 
         if not deps:
             return None
 
         file_path = str(diff_file.path)
+        snapshot_root = snapshot_analyzer.source_root.resolve()
+        candidate_path = Path(file_path)
+        if not candidate_path.is_absolute():
+            candidate_path = snapshot_root / candidate_path
+        snapshot_file_path: Path | None = None
+        try:
+            resolved_path = candidate_path.resolve()
+            resolved_path.relative_to(snapshot_root)
+        except (OSError, RuntimeError, ValueError):
+            pass
+        else:
+            snapshot_file_path = resolved_path
         changed_lines = set(added_lines) | set(removed_lines)
 
         # Dependency ranges already cover complete callable definitions. Expanding
@@ -758,6 +1041,9 @@ class ChangeMapper:
         overlap = deps.references_lines(file_path, changed_lines)
 
         if overlap:
+            side = "source" if analyzer is not None else "target"
+            if self._change_is_deferred_lambda_only(deps, diff_file, overlap, side=side):
+                return None
             display_lines = overlap
 
             # Get call stacks for traceback-style output - all paths
@@ -799,8 +1085,8 @@ class ChangeMapper:
                     # Read the file once for all lines
                     lines_list = []
                     try:
-                        file_path_obj = Path(file_path)
-                        if file_path_obj.exists():
+                        file_path_obj = snapshot_file_path
+                        if file_path_obj is not None and file_path_obj.is_file():
                             with file_path_obj.open(encoding="utf-8") as f:
                                 lines_list = f.readlines()
                     except (OSError, UnicodeDecodeError):
@@ -830,12 +1116,29 @@ class ChangeMapper:
 
                             # Try to get the function name from symbol references
                             function_name = "module"
-                            for sym_ref in deps.referenced_symbols:
-                                if sym_ref.file_path == file_path and sym_ref.contains_line(
-                                    first_line
-                                ):
-                                    function_name = sym_ref.symbol_name
-                                    break
+                            symbol_paths = deps._matching_paths(
+                                file_path,
+                                (item.file_path for item in deps.referenced_symbols),
+                                "referenced_symbols",
+                            )
+                            containing_symbols = [
+                                sym_ref
+                                for sym_ref in deps.referenced_symbols
+                                if sym_ref.file_path in symbol_paths
+                                and sym_ref.contains_line(first_line)
+                            ]
+                            if containing_symbols:
+                                # Mypy may report both a module/class range and a
+                                # nested callable range. Attribute a changed line to
+                                # the most specific definition containing it.
+                                function_name = min(
+                                    containing_symbols,
+                                    key=lambda ref: (
+                                        ref.end_line - ref.start_line,
+                                        -ref.start_line,
+                                        ref.symbol_name,
+                                    ),
+                                ).symbol_name
 
                             # Try to get code context from the file
                             # For ranges, show all lines in the group
@@ -859,7 +1162,9 @@ class ChangeMapper:
 
                             call_stack.append(
                                 CallStackFrame(
-                                    file_path=file_path,
+                                    file_path=str(snapshot_file_path)
+                                    if snapshot_file_path is not None
+                                    else file_path,
                                     line_number=first_line,
                                     function_name=function_name,
                                     code_context=code_context,
@@ -869,10 +1174,19 @@ class ChangeMapper:
                 # Add this completed call stack to the list
                 all_call_stacks.append(call_stack)
 
-            effect_result = self._effect_analyzer.analyze(
-                file_path,
-                set(display_lines),
-                all_call_stacks,
+            effect_analyzer = self._effect_analyzer
+            if analyzer is not None:
+                if self._baseline_effect_analyzer is None:
+                    raise ChangeMapperError("Baseline effect analysis requires a baseline snapshot")
+                effect_analyzer = self._baseline_effect_analyzer
+            effect_result = (
+                effect_analyzer.analyze(
+                    str(snapshot_file_path),
+                    set(display_lines),
+                    all_call_stacks,
+                )
+                if snapshot_file_path is not None
+                else None
             )
             low_only_points_to = deps.references_lines_low_only(file_path, changed_lines)
             confidence = (
@@ -923,6 +1237,61 @@ class ChangeMapper:
 
         return None
 
+    @staticmethod
+    def _change_is_deferred_lambda_only(
+        deps: EndpointDependencies,
+        diff_file: DiffFile,
+        overlap_lines: set[int],
+        *,
+        side: str,
+    ) -> bool:
+        """Suppress only exact edits wholly inside deferred lambda bodies.
+
+        Side-qualified diff spans and CPython UTF-8 AST columns must both be
+        available. Missing or inexact source alignment fails closed to the
+        existing dependency candidate.
+        """
+        changes = DiffParser.get_changed_byte_spans(diff_file, side=side)
+        expected_lines = set(
+            DiffParser.get_changed_line_numbers(diff_file)[0 if side == "target" else 1]
+        )
+        content_lines = {
+            line.line_number
+            for hunk in diff_file.hunks
+            for line in (hunk.added_content if side == "target" else hunk.removed_content)
+        }
+        if not expected_lines <= content_lines:
+            return False
+        relevant_changes = [change for change in changes if change.line_number in overlap_lines]
+        if any(not change.exact for change in relevant_changes):
+            return False
+        deferred_spans = deps.get_source_evidence_spans(
+            str(diff_file.path), execution_state="deferred"
+        )
+        if not deferred_spans:
+            return False
+        executed_spans = deps.get_source_evidence_spans(
+            str(diff_file.path), execution_state="executed"
+        )
+        if not relevant_changes:
+            # This side has no changed bytes (for example, a suffix deletion
+            # represented by a replacement line). The opposite side owns the
+            # actual text edit; do not attribute it to this snapshot.
+            return True
+
+        def contained(change: ChangedByteSpan, span: SourceEvidenceSpan) -> bool:
+            if not span.start_line <= change.line_number <= span.end_line:
+                return False
+            if change.line_number == span.start_line and change.start_column < span.start_column:
+                return False
+            return not (change.line_number == span.end_line and change.end_column > span.end_column)
+
+        return all(
+            any(contained(change, span) for span in deferred_spans)
+            and not any(contained(change, span) for span in executed_spans)
+            for change in relevant_changes
+        )
+
     def _analyze_diff_file(
         self,
         diff_file: DiffFile,
@@ -946,55 +1315,126 @@ class ChangeMapper:
         # Get changed lines
         added_lines, removed_lines = DiffParser.get_changed_line_numbers(diff_file)
 
-        # Native route registrations and exact include/mount/object occurrences own
-        # their materialized descendants. Only target additions are queried here:
-        # removed coordinates require the explicit baseline path handled by SCIP.
-        for endpoint, kinds, overlap in self.registry.get_structural_overlaps(
-            diff_file.path, set(added_lines)
-        ):
-            matched_kinds = ", ".join(kinds)
-            changed_line = min(overlap)
-            _merge_affected(
-                affected,
-                AffectedEndpoint(
-                    endpoint=endpoint,
-                    confidence=ConfidenceLevel.HIGH,
-                    reason=(
-                        f"Native route assembly occurrence modified ({matched_kinds}) "
-                        f"in {diff_file.path}"
-                    ),
-                    dependency_chain=[str(diff_file.path), *kinds],
-                    changed_files=[str(diff_file.path)],
-                    effect_evidence=[
-                        EffectEvidence(
-                            producer=EvidenceProducer.STRUCTURAL,
-                            status=EvidenceStatus.ESTABLISHED,
-                            effect=ChangeEffectKind.ROUTE_ASSEMBLY,
-                            channel=ImpactChannel.UNKNOWN,
-                            disposition=EffectDisposition.INTERNAL_EFFECT,
-                            summary=(
-                                "Changed source overlaps exact secure-AST route assembly "
-                                "provenance for this endpoint occurrence."
-                            ),
-                            changed_location=CodeReference(
-                                file_path=str(diff_file.path),
-                                line_number=changed_line,
-                                symbol=matched_kinds,
-                            ),
-                        )
-                    ],
+        # Git can report a semantic file change without text hunks (pure rename,
+        # move, or mode-only update). Seed endpoints by exact registered file
+        # ownership so these changes cannot disappear from accounting.
+        if not added_lines and not removed_lines:
+            for side_registry, changed_path, side in (
+                (self.registry, diff_file.path, "target"),
+                (
+                    self.baseline_mypy_registry if self.baseline_app_path is not None else None,
+                    diff_file.source_path or diff_file.path,
+                    "baseline",
                 ),
+            ):
+                if side_registry is None:
+                    continue
+                for endpoint in side_registry.get_by_file(changed_path):
+                    reported_endpoint = (
+                        self._target_equivalent_endpoint(endpoint)
+                        if side == "baseline"
+                        else endpoint
+                    )
+                    _merge_affected(
+                        affected,
+                        AffectedEndpoint(
+                            endpoint=reported_endpoint,
+                            confidence=ConfidenceLevel.HIGH,
+                            reason=f"Line-less {side} file change affects endpoint source",
+                            dependency_chain=[str(changed_path), endpoint.handler.name],
+                            changed_files=[str(changed_path)],
+                            effect_evidence=[
+                                EffectEvidence(
+                                    producer=EvidenceProducer.DIRECT,
+                                    status=EvidenceStatus.ESTABLISHED,
+                                    effect=ChangeEffectKind.UNKNOWN,
+                                    channel=ImpactChannel.UNKNOWN,
+                                    disposition=EffectDisposition.INTERNAL_EFFECT,
+                                    summary=(
+                                        f"Git reported a {side} file change without line hunks; "
+                                        "the endpoint handler is defined by that file."
+                                    ),
+                                    changed_location=CodeReference(
+                                        file_path=str(changed_path),
+                                        line_number=endpoint.handler.line_number,
+                                        symbol=endpoint.handler.name,
+                                    ),
+                                )
+                            ],
+                        ),
+                    )
+
+        # Resolve source ownership independently on each snapshot. Baseline
+        # coordinates never consume target additions or substitute target ranges.
+        structural_sides = [
+            (self.registry, diff_file.path, added_lines, "target", processed_added_lines)
+        ]
+        if removed_lines and self.baseline_app_path is not None:
+            structural_sides.append(
+                (
+                    self.baseline_mypy_registry,
+                    diff_file.source_path or diff_file.path,
+                    removed_lines,
+                    "baseline",
+                    processed_removed_lines,
+                )
             )
-            processed_added_lines.update(overlap)
+        for (
+            side_registry,
+            changed_path,
+            structural_lines,
+            side,
+            processed_lines,
+        ) in structural_sides:
+            for endpoint, kinds, overlap in side_registry.get_structural_overlaps(
+                changed_path, set(structural_lines)
+            ):
+                matched_kinds = ", ".join(kinds)
+                changed_line = min(overlap)
+                _merge_affected(
+                    affected,
+                    AffectedEndpoint(
+                        endpoint=(
+                            self._target_equivalent_endpoint(endpoint)
+                            if side == "baseline"
+                            else endpoint
+                        ),
+                        confidence=ConfidenceLevel.HIGH,
+                        reason=(
+                            f"Native route assembly occurrence modified ({side}: {matched_kinds}) "
+                            f"in {changed_path}"
+                        ),
+                        dependency_chain=[str(changed_path), *kinds],
+                        changed_files=[str(changed_path)],
+                        effect_evidence=[
+                            EffectEvidence(
+                                producer=EvidenceProducer.STRUCTURAL,
+                                status=EvidenceStatus.ESTABLISHED,
+                                effect=ChangeEffectKind.ROUTE_ASSEMBLY,
+                                channel=ImpactChannel.UNKNOWN,
+                                disposition=EffectDisposition.INTERNAL_EFFECT,
+                                summary=(
+                                    f"Changed {side} source overlaps exact secure-AST "
+                                    "route assembly "
+                                    "provenance for this endpoint occurrence."
+                                ),
+                                changed_location=CodeReference(
+                                    file_path=str(changed_path),
+                                    line_number=changed_line,
+                                    symbol=matched_kinds,
+                                ),
+                            )
+                        ],
+                    ),
+                )
+                processed_lines.update(overlap)
 
         # Find endpoints whose handlers are defined in the changed file.
         file_endpoints = self.registry.get_by_file(diff_file.path)
 
         # Check for direct handler changes
         for endpoint in file_endpoints:
-            result = self._check_direct_handler_change(
-                endpoint, diff_file, added_lines, removed_lines
-            )
+            result = self._check_direct_handler_change(endpoint, diff_file, added_lines, [])
             if result:
                 _merge_affected(affected, result)
                 # Mark lines as processed
@@ -1002,25 +1442,42 @@ class ChangeMapper:
                 handler_end = handler.end_line_number or handler.line_number + 50
                 handler_lines = set(range(handler.line_number, handler_end + 1))
                 processed_added_lines.update(ln for ln in added_lines if ln in handler_lines)
-                processed_removed_lines.update(ln for ln in removed_lines if ln in handler_lines)
 
         # Use mypy for type-aware dependency analysis
         for endpoint in self.registry:
-            result = self._check_mypy_dependency(endpoint, diff_file, added_lines, removed_lines)
+            result = self._check_mypy_dependency(endpoint, diff_file, added_lines, [])
             if result:
                 _merge_affected(affected, result)
                 # Mark lines as processed - get the actual lines that were referenced
                 deps = self.mypy_analyzer.get_endpoint_dependencies(endpoint)
                 if deps:
                     file_path = str(diff_file.path)
-                    changed_lines = set(added_lines) | set(removed_lines)
+                    changed_lines = set(added_lines)
                     referenced = deps.references_lines(file_path, changed_lines)
                     if referenced:
                         # Only mark the directly changed lines as processed
                         processed_added_lines.update(ln for ln in added_lines if ln in referenced)
-                        processed_removed_lines.update(
-                            ln for ln in removed_lines if ln in referenced
-                        )
+
+        # Removals are interpreted exclusively against an independently built
+        # baseline graph. Without a baseline, leave them unresolved for reporting.
+        if removed_lines and self.baseline_app_path is not None:
+            source_path = diff_file.source_path or diff_file.path
+            baseline_file = diff_file.model_copy(update={"path": source_path})
+            for endpoint in self.baseline_mypy_registry:
+                result = self._check_mypy_dependency(
+                    endpoint, baseline_file, [], removed_lines, self.baseline_mypy_analyzer
+                )
+                if result:
+                    result = result.model_copy(
+                        update={
+                            "endpoint": self._target_equivalent_endpoint(result.endpoint),
+                        }
+                    )
+                    _merge_affected(affected, result)
+                    deps = self.baseline_mypy_analyzer.get_endpoint_dependencies(endpoint)
+                    if deps:
+                        referenced = deps.references_lines(str(source_path), set(removed_lines))
+                        processed_removed_lines.update(referenced)
 
         return (
             [item.materialize() for item in affected.values()],
@@ -1161,7 +1618,7 @@ class ChangeMapper:
                         endpoint = (
                             target_equivalent(discovered) if side == "baseline" else discovered
                         )
-                        confidence = _scip_confidence(seed, reached.depth)
+                        confidence = ConfidenceLevel.LOW
                         _merge_affected(
                             affected,
                             AffectedEndpoint(
@@ -1181,18 +1638,25 @@ class ChangeMapper:
                                         channel=ImpactChannel.UNKNOWN,
                                         disposition=EffectDisposition.REACHABILITY_ONLY,
                                         summary=(
-                                            f"SCIP resolves a {side} reverse-reference path "
-                                            f"at depth {reached.depth}."
+                                            f"SCIP found a {side} reference-only path "
+                                            f"at depth {reached.depth}; it does not establish "
+                                            "execution."
                                         ),
                                         changed_location=CodeReference(
                                             file_path=str(file_path),
                                             line_number=min(seed_lines),
                                             symbol=seed.short_name,
                                         ),
-                                        limitations=[
-                                            "Reference reachability does not establish "
-                                            "runtime data observation."
-                                        ],
+                                        limitations=list(
+                                            dict.fromkeys(
+                                                (
+                                                    "SCIP reverse references are LOW-confidence "
+                                                    "reference evidence and do not establish "
+                                                    "execution.",
+                                                    *reached.limitations,
+                                                )
+                                            )
+                                        ),
                                     )
                                 ],
                             ),
@@ -1542,9 +2006,7 @@ class ChangeMapper:
         warnings.extend(self._source_inventory_warnings())
         target_source_graph = source_evidence_graph(self.source_inventory)
         if self.baseline_app_path is not None:
-            baseline_graph = source_evidence_graph(
-                self.config.source_inventory(self.baseline_app_path), side="baseline"
-            )
+            baseline_graph = source_evidence_graph(self.baseline_source_inventory, side="baseline")
             target_source_graph = EvidenceGraph(
                 nodes=(*baseline_graph.nodes, *target_source_graph.nodes),
                 edges=(*baseline_graph.edges, *target_source_graph.edges),
@@ -1578,18 +2040,51 @@ class ChangeMapper:
                 ),
                 affected_endpoints=filtered,
                 candidate_endpoints=scip_affected,
+                endpoint_lifecycle=self._endpoint_lifecycle(),
                 orphan_changes=scip_orphans,
                 total_files_changed=len(diff_files),
                 python_files_changed=len(python_files),
                 analysis_duration_ms=duration_ms,
                 errors=errors,
                 warnings=warnings,
+                analysis_completeness=(
+                    "partial"
+                    if errors
+                    or any(
+                        marker in warning.lower()
+                        for warning in warnings
+                        for marker in ("unresolved", "incomplete", "error analyzing")
+                    )
+                    else "complete"
+                ),
                 source_evidence_graph=target_source_graph,
             )
 
         # Pre-analyze endpoints with mypy
         report_progress(10, 100, f"Analyzing {total_endpoints} endpoints (mypy)...")
         self._preanalyze_mypy(progress_callback)
+        has_mypy_removals = any(
+            DiffParser.get_changed_line_numbers(item)[1]
+            or (item.source_path is not None and item.source_path != item.path)
+            for item in python_files
+        )
+        if has_mypy_removals and self.baseline_app_path is None:
+            warnings.append(
+                "Mypy baseline analysis is incomplete: removed or renamed source requires "
+                "baseline_app_path; removed lines are retained as unresolved orphan evidence."
+            )
+        elif has_mypy_removals and self.baseline_app_path is not None:
+            try:
+                self._preanalyze_mypy_registry(
+                    self.baseline_mypy_registry, self.baseline_mypy_analyzer, progress_callback
+                )
+            except Exception as exc:
+                self._baseline_failure = str(exc)
+                warnings.append(
+                    "Mypy baseline analysis is incomplete: "
+                    f"baseline snapshot could not be analyzed ({exc}); removed lines remain "
+                    "unresolved."
+                )
         self._effect_contract_audit = self._build_effect_contract_audit()
         if self.config.analysis.sql_transaction_diagnostics:
             if self._effect_contracts is None or self._effect_contract_audit is None:
@@ -1635,23 +2130,48 @@ class ChangeMapper:
                     _merge_affected(all_affected, candidate)
 
                 added_lines, removed_lines = DiffParser.get_changed_line_numbers(diff_file)
-                orphan_key = _normalized_diff_path(diff_file.path)
-                evidence = orphan_evidence.setdefault(
-                    orphan_key,
+                source_path = diff_file.source_path or diff_file.path
+                target_evidence = orphan_evidence.setdefault(
+                    _normalized_diff_path(diff_file.path),
                     _OrphanAccumulator(
                         file_path=str(diff_file.path),
+                        reason=("Target-side code changes are unrelated or could not be resolved"),
+                    ),
+                )
+                target_evidence.added.update(added_lines)
+                target_evidence.processed_added.update(processed_added)
+                source_evidence = orphan_evidence.setdefault(
+                    _normalized_diff_path(source_path),
+                    _OrphanAccumulator(
+                        file_path=str(source_path),
                         reason=(
-                            "Code changes not related to any endpoint "
-                            "(possibly unused, unrelated, or has type issues)"
+                            "Baseline-side code changes are unrelated or could not be resolved"
                         ),
                     ),
                 )
-                evidence.added.update(added_lines)
-                evidence.removed.update(removed_lines)
-                evidence.processed_added.update(processed_added)
-                evidence.processed_removed.update(processed_removed)
+                source_evidence.removed.update(removed_lines)
+                source_evidence.processed_removed.update(processed_removed)
             except Exception as e:
                 warnings.append(f"Error analyzing {diff_file.path}: {e}")
+                # Preserve all line evidence when an analyzer fails after parsing.
+                added_lines, removed_lines = DiffParser.get_changed_line_numbers(diff_file)
+                target_evidence = orphan_evidence.setdefault(
+                    _normalized_diff_path(diff_file.path),
+                    _OrphanAccumulator(
+                        file_path=str(diff_file.path),
+                        reason=f"Analysis unresolved after per-file failure: {e}",
+                    ),
+                )
+                target_evidence.added.update(added_lines)
+                source_path = diff_file.source_path or diff_file.path
+                source_evidence = orphan_evidence.setdefault(
+                    _normalized_diff_path(source_path),
+                    _OrphanAccumulator(
+                        file_path=str(source_path),
+                        reason=f"Analysis unresolved after per-file failure: {e}",
+                    ),
+                )
+                source_evidence.removed.update(removed_lines)
 
         # Filter by confidence threshold
         report_progress(95, 100, "Filtering results...")
@@ -1675,6 +2195,14 @@ class ChangeMapper:
         duration_ms = (time.time() - start_time) * 1000
         report_progress(100, 100, "Complete!")
 
+        endpoint_lifecycle = self._endpoint_lifecycle()
+        if self._baseline_failure and not any(
+            "baseline analysis is incomplete" in warning.lower() for warning in warnings
+        ):
+            warnings.append(
+                "Mypy baseline analysis is incomplete: "
+                f"baseline endpoint lifecycle could not be reconciled ({self._baseline_failure})."
+            )
         report = AnalysisReport(
             app_path=str(self.app_path),
             diff_source=diff_source_str,
@@ -1685,12 +2213,23 @@ class ChangeMapper:
             ),
             affected_endpoints=filtered_affected,
             candidate_endpoints=materialized,
+            endpoint_lifecycle=endpoint_lifecycle,
             orphan_changes=orphan_changes,
             total_files_changed=len(diff_files),
             python_files_changed=len(python_files),
             analysis_duration_ms=duration_ms,
             errors=errors,
             warnings=warnings,
+            analysis_completeness=(
+                "partial"
+                if errors
+                or any(
+                    marker in warning.lower()
+                    for warning in warnings
+                    for marker in ("unresolved", "incomplete", "error analyzing")
+                )
+                else "complete"
+            ),
             source_evidence_graph=target_source_graph,
             effect_contract_audit=self._effect_contract_audit,
             resource_coupling_graph=self._resource_coupling_graph,
@@ -1740,6 +2279,24 @@ class ChangeMapper:
         # Save cache after analysis
         if self.use_cache:
             self.mypy_analyzer._save_cache()
+
+    def _preanalyze_mypy_registry(
+        self,
+        registry: EndpointRegistry,
+        analyzer: MypyAnalyzer,
+        progress_callback: ProgressCallback | None = None,
+    ) -> None:
+        """Build typed dependencies for every endpoint in one source snapshot."""
+        endpoints = registry.get_all()
+        for index, endpoint in enumerate(endpoints, 1):
+            if progress_callback:
+                progress_callback(
+                    10 + int(55 * index / max(len(endpoints), 1)),
+                    100,
+                    f"Analyzing baseline endpoint {index}/{len(endpoints)}: {endpoint.path}",
+                )
+            if analyzer.get_endpoint_dependencies(endpoint) is None:
+                analyzer.analyze_endpoint(endpoint)
 
     def get_endpoints(self) -> list[Endpoint]:
         """Get all endpoints in the application."""

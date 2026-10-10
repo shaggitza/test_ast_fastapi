@@ -5,7 +5,11 @@ Markdown output formatter.
 from pathlib import Path
 
 from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointInventory
-from fastapi_endpoint_detector.models.report import AnalysisReport, ConfidenceLevel
+from fastapi_endpoint_detector.models.report import (
+    AffectedEndpoint,
+    AnalysisReport,
+    ConfidenceLevel,
+)
 from fastapi_endpoint_detector.output.formatters import BaseFormatter, register_formatter
 
 
@@ -14,6 +18,18 @@ class MarkdownFormatter(BaseFormatter):
     """
     Format output as Markdown.
     """
+
+    def __init__(
+        self,
+        show_confidence: bool = True,
+        show_dependency_chain: bool = True,
+        colorize: bool = True,
+        verbose: bool = False,
+    ) -> None:
+        self.show_confidence = show_confidence
+        self.show_dependency_chain = show_dependency_chain
+        self.colorize = colorize
+        self.verbose = verbose
 
     def _confidence_emoji(self, confidence: ConfidenceLevel) -> str:
         """Get an emoji for a confidence level."""
@@ -46,6 +62,7 @@ class MarkdownFormatter(BaseFormatter):
                     f"  - **Inventory Limitation:** "
                     f"`{limitation.source_path}:{limitation.source_line}` — {limitation.reason}"
                 )
+        lines.append(f"- **Analysis Completeness:** {report.analysis_completeness}")
         lines.append(f"- **Total Endpoints:** {report.total_endpoints}")
         lines.append(
             f"- **Files Changed:** {report.total_files_changed} ({report.python_files_changed} Python)"
@@ -95,6 +112,11 @@ class MarkdownFormatter(BaseFormatter):
                 f"{paths.summary.unresolved_pairs} unresolved pairs; "
                 "lexical and conditional only, persistence not established"
             )
+        if report.source_observations is not None:
+            lines.append(
+                f"- **Source Observations:** "
+                f"{self.summarize_source_observations(report.source_observations)}"
+            )
         lines.append("")
 
         # Affected endpoints
@@ -103,15 +125,29 @@ class MarkdownFormatter(BaseFormatter):
             lines.append("")
 
             # Group by confidence
-            for confidence in [ConfidenceLevel.HIGH, ConfidenceLevel.MEDIUM, ConfidenceLevel.LOW]:
-                endpoints = report.get_endpoints_by_confidence(confidence)
+            groups: list[tuple[ConfidenceLevel | None, list[AffectedEndpoint]]] = (
+                [
+                    (confidence, report.get_endpoints_by_confidence(confidence))
+                    for confidence in [
+                        ConfidenceLevel.HIGH,
+                        ConfidenceLevel.MEDIUM,
+                        ConfidenceLevel.LOW,
+                    ]
+                ]
+                if self.show_confidence
+                else [(None, report.affected_endpoints)]
+            )
+            for confidence, endpoints in groups:
                 if not endpoints:
                     continue
 
-                emoji = self._confidence_emoji(confidence)
-                lines.append(
-                    f"### {emoji} {confidence.value.upper()} Confidence ({len(endpoints)})"
-                )
+                if confidence is not None:
+                    emoji = self._confidence_emoji(confidence)
+                    lines.append(
+                        f"### {emoji} {confidence.value.upper()} Confidence ({len(endpoints)})"
+                    )
+                else:
+                    lines.append(f"### Endpoints ({len(endpoints)})")
                 lines.append("")
 
                 for ae in endpoints:
@@ -133,6 +169,10 @@ class MarkdownFormatter(BaseFormatter):
                             f"`{ep.surface.config_hash}`"
                         )
                     lines.append(f"- **Reason:** {ae.reason}")
+                    if self.verbose and ae.changed_files:
+                        lines.append(
+                            f"- **Changed files:** {', '.join(f'`{p}`' for p in ae.changed_files)}"
+                        )
                     if ep.discovery_conditions:
                         lines.append("- **Discovery:** `CONDITIONAL`")
                         for condition in ep.discovery_conditions:
@@ -158,12 +198,16 @@ class MarkdownFormatter(BaseFormatter):
                             f"callsite; {coupling.strength.value}; LOW-only"
                         )
 
-                    if ae.dependency_chain and len(ae.dependency_chain) > 1:
+                    if (
+                        self.show_dependency_chain
+                        and ae.dependency_chain
+                        and len(ae.dependency_chain) > 1
+                    ):
                         chain = " → ".join(f"`{dep}`" for dep in ae.dependency_chain)
                         lines.append(f"- **Chain:** {chain}")
 
                     # Show call stack if available
-                    if ae.call_stacks:
+                    if self.show_dependency_chain and ae.call_stacks:
                         lines.append("")
                         lines.append("**Call Stack:**")
                         lines.append("")
@@ -197,10 +241,16 @@ class MarkdownFormatter(BaseFormatter):
                     if candidate.endpoint.discovery_conditions
                     else ""
                 )
-                lines.append(
-                    f"- **{methods} `{candidate.endpoint.path}`** "
-                    f"({candidate.confidence.value}){discovery}"
+                confidence_label = (
+                    f" ({candidate.confidence.value})" if self.show_confidence else ""
                 )
+                lines.append(
+                    f"- **{methods} `{candidate.endpoint.path}`**{confidence_label}{discovery}"
+                )
+                if self.verbose and candidate.changed_files:
+                    lines.append(
+                        f"  - Changed files: {', '.join(f'`{p}`' for p in candidate.changed_files)}"
+                    )
                 if candidate.endpoint.surface is not None:
                     surface = candidate.endpoint.surface
                     lines.append(

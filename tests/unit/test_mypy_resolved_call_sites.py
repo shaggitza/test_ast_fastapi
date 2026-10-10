@@ -85,11 +85,15 @@ def test_captures_exact_functions_constructors_and_method_kinds(tmp_path: Path) 
     run_sites = [site for site in sites if site.source_spelling.endswith(".run")]
     assert len(run_sites) == 2
     immediate_run = _site_by_spelling(sites, "Service().run")[0]
+    assert immediate_run.status == CallResolutionStatus.EXACT
     assert immediate_run.invocation == InvocationKind.INSTANCE_METHOD
     assert immediate_run.canonical_symbol and immediate_run.canonical_symbol.endswith("Service.run")
     local_run = _site_by_spelling(sites, "service.run")[0]
-    assert local_run.status == CallResolutionStatus.UNRESOLVED
-    assert local_run.reason_code == "dynamic_receiver"
+    assert local_run.status in {
+        CallResolutionStatus.AMBIGUOUS,
+        CallResolutionStatus.UNRESOLVED,
+    }
+    assert local_run.reason_code in {"open_receiver_dispatch", "dynamic_receiver"}
 
     build = _site_by_spelling(sites, "Service.build")[0]
     assert build.invocation == InvocationKind.CLASS_METHOD
@@ -132,6 +136,229 @@ def test_captures_hashed_finite_string_arguments_without_exposing_literals(
     assert arguments[2].status == FiniteValueStatus.UNAVAILABLE
     assert arguments[2].reason_code == "dynamic_argument"
     assert "orders" not in arguments[0].model_dump_json()
+
+
+def test_forwards_endpoint_specific_literals_through_helper_chains(tmp_path: Path) -> None:
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def writer(bucket: str, key: str) -> None: pass\n\n"
+        "def middle(bucket: str, key: str) -> None:\n"
+        "    writer(bucket, key=key)\n\n"
+        "def outer(bucket: str, key: str) -> None:\n"
+        "    middle(bucket, key)\n\n"
+        "def endpoint_a() -> None:\n"
+        "    outer('alpha', 'first')\n\n"
+        "def endpoint_b() -> None:\n"
+        "    outer('beta', 'second')\n\n"
+        "def endpoint_dynamic(bucket: str) -> None:\n"
+        "    outer(bucket, 'third')\n\n"
+        "def endpoint_reassigned(bucket: str) -> None:\n"
+        "    captured = 'safe'\n"
+        "    captured = bucket\n"
+        "    outer(captured, 'reassigned-key')\n\n"
+        "def endpoint_starred(values: tuple[str, str]) -> None:\n"
+        "    outer(*values)\n\n"
+        "def endpoint_kwargs(values: dict[str, str]) -> None:\n"
+        "    outer(**values)\n\n"
+        "def endpoint_over_cap(\n"
+        "    a: bool, b: bool, c: bool, d: bool, e: bool, f: bool, g: bool, h: bool\n"
+        ") -> None:\n"
+        "    bucket = (\n"
+        "        'a' if a else 'b' if b else 'c' if c else 'd' if d else\n"
+        "        'e' if e else 'f' if f else 'g' if g else 'h' if h else 'i'\n"
+        "    )\n"
+        "    outer(bucket, 'capped-key')\n",
+        encoding="utf-8",
+    )
+    analyzer = MypyAnalyzer(tmp_path, max_depth=5)
+
+    def digest(value: str) -> str:
+        return f"sha256:{hashlib.sha256(value.encode()).hexdigest()}"
+
+    def writer_arguments(endpoint: Endpoint) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        deps = analyzer.analyze_endpoint(endpoint)
+        sites = _site_by_spelling(deps.resolved_call_sites, "writer")
+        assert len(sites) == 1
+        assert [argument.positional_index for argument in sites[0].arguments] == [0, None]
+        assert [argument.keyword for argument in sites[0].arguments] == [None, "key"]
+        return tuple(argument.value_hashes for argument in sites[0].arguments)  # type: ignore[return-value]
+
+    args_a = writer_arguments(_endpoint(main, line=8, name="endpoint_a"))
+    args_b = writer_arguments(_endpoint(main, line=11, name="endpoint_b"))
+    args_dynamic = writer_arguments(_endpoint(main, line=14, name="endpoint_dynamic"))
+    args_reassigned = writer_arguments(_endpoint(main, line=17, name="endpoint_reassigned"))
+    args_starred = writer_arguments(_endpoint(main, line=22, name="endpoint_starred"))
+    args_kwargs = writer_arguments(_endpoint(main, line=25, name="endpoint_kwargs"))
+    args_over_cap = writer_arguments(_endpoint(main, line=28, name="endpoint_over_cap"))
+    assert args_a == ((digest("alpha"),), (digest("first"),))
+    assert args_b == ((digest("beta"),), (digest("second"),))
+    assert args_dynamic == ((), (digest("third"),))
+    assert args_reassigned == ((), (digest("reassigned-key"),))
+    assert args_starred == ((), ())
+    assert args_kwargs == ((), ())
+    assert args_over_cap == ((), (digest("capped-key"),))
+
+
+def test_invoked_lambda_alias_traces_its_body(tmp_path: Path) -> None:
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def changed() -> None: pass\n\n"
+        "def handler() -> None:\n"
+        "    callback = lambda: changed()\n"
+        "    callback()\n",
+        encoding="utf-8",
+    )
+
+    deps = MypyAnalyzer(tmp_path).analyze_endpoint(_endpoint(main, line=3))
+
+    changed = [
+        reference
+        for reference in deps.referenced_symbols
+        if reference.symbol_name.endswith(".changed")
+    ]
+    assert changed
+
+
+def test_nested_helper_calls_and_branch_returned_closures_are_reachable(tmp_path: Path) -> None:
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def nested_effect() -> None: pass\n"
+        "def closure_effect() -> None: pass\n\n"
+        "def nested_caller() -> None:\n"
+        "    def local_helper() -> None:\n"
+        "        nested_effect()\n"
+        "    local_helper()\n\n"
+        "def make_callback(flag: bool):\n"
+        "    def callback() -> None:\n"
+        "        closure_effect()\n"
+        "    if flag:\n"
+        "        return callback\n"
+        "    return callback\n\n"
+        "def handler(flag: bool) -> None:\n"
+        "    nested_caller()\n"
+        "    callback = make_callback(flag)\n"
+        "    callback()\n\n"
+        "def handler_escape_only(flag: bool) -> None:\n"
+        "    make_callback(flag)\n",
+        encoding="utf-8",
+    )
+
+    analyzer = MypyAnalyzer(tmp_path, max_depth=6)
+    deps = analyzer.analyze_endpoint(_endpoint(main, line=17))
+
+    call_symbols = {site.canonical_symbol for site in deps.resolved_call_sites}
+    assert any(symbol and symbol.endswith(".nested_effect") for symbol in call_symbols)
+    assert any(symbol and symbol.endswith(".closure_effect") for symbol in call_symbols)
+    nested_call = _site_by_spelling(deps.resolved_call_sites, "local_helper")[0]
+    assert nested_call.canonical_symbol and nested_call.canonical_symbol.endswith(
+        ".nested_caller.local_helper"
+    )
+
+    escaped_only = analyzer.analyze_endpoint(_endpoint(main, line=21, name="handler_escape_only"))
+    assert not any(
+        site.canonical_symbol and site.canonical_symbol.endswith(".closure_effect")
+        for site in escaped_only.resolved_call_sites
+    )
+    assert any(
+        reference.symbol_name.endswith(".make_callback.callback") and reference.low_confidence
+        for reference in escaped_only.referenced_symbols
+    )
+
+
+def test_bounded_callable_returns_parameters_and_partials_are_traced(tmp_path: Path) -> None:
+    (tmp_path / "effects.py").write_text(
+        "from typing import Callable\n\n"
+        "def returned_effect() -> None: pass\n"
+        "def parameter_effect() -> None: pass\n"
+        "def other_effect() -> None: pass\n"
+        "def partial_effect(value: int) -> None: pass\n\n"
+        "def make_callback() -> Callable[[], None]:\n"
+        "    return lambda: returned_effect()\n\n"
+        "def invoke(callback: Callable[[], None]) -> None:\n"
+        "    callback()\n",
+        encoding="utf-8",
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from functools import partial\n"
+        "from typing import Callable\n"
+        "from effects import parameter_effect, other_effect, partial_effect, "
+        "make_callback, invoke\n\n"
+        "def handler(unknown: Callable[[], None]) -> None:\n"
+        "    returned = make_callback()\n"
+        "    returned()\n"
+        "    invoke(parameter_effect)\n"
+        "    bound = partial(partial_effect, 1)\n"
+        "    bound()\n"
+        "    invoke(unknown)\n\n"
+        "def handler_other() -> None:\n"
+        "    invoke(other_effect)\n",
+        encoding="utf-8",
+    )
+    deps = MypyAnalyzer(tmp_path, max_depth=5).analyze_endpoint(_endpoint(main, line=5))
+
+    effects_path = str(tmp_path / "effects.py")
+    assert deps.references_file(effects_path)
+    reached_symbols = {reference.symbol_name for reference in deps.referenced_symbols}
+    assert any(symbol.endswith(".returned_effect") for symbol in reached_symbols)
+    assert any(symbol.endswith(".parameter_effect") for symbol in reached_symbols)
+    assert any(symbol.endswith(".partial_effect") for symbol in reached_symbols)
+    contextual_callback_sites = [
+        site
+        for site in deps.get_resolved_call_sites(effects_path)
+        if site.source_spelling == "callback"
+        and site.canonical_symbol is not None
+        and site.status == CallResolutionStatus.EXACT
+    ]
+    assert any(
+        site.canonical_symbol.endswith(".parameter_effect") for site in contextual_callback_sites
+    )
+    other = MypyAnalyzer(tmp_path, max_depth=5).analyze_endpoint(
+        _endpoint(main, line=12, name="handler_other")
+    )
+    other_symbols = {reference.symbol_name for reference in other.referenced_symbols}
+    assert any(symbol.endswith(".other_effect") for symbol in other_symbols)
+    assert not any(symbol.endswith(".parameter_effect") for symbol in other_symbols)
+
+
+def test_bound_method_alias_on_open_base_parameter_stays_unresolved(tmp_path: Path) -> None:
+    main = tmp_path / "main.py"
+    main.write_text(
+        "class Base:\n"
+        "    def changed(self) -> None:\n"
+        "        return None\n\n"
+        "def handler(value: Base) -> None:\n"
+        "    callback = value.changed\n"
+        "    callback()\n",
+        encoding="utf-8",
+    )
+
+    deps = MypyAnalyzer(tmp_path).analyze_endpoint(_endpoint(main, line=5))
+
+    assert not any(
+        reference.symbol_name.endswith("Base.changed") for reference in deps.referenced_symbols
+    )
+    callback_sites = _site_by_spelling(deps.resolved_call_sites, "callback")
+    assert callback_sites
+    assert all(site.status != CallResolutionStatus.EXACT for site in callback_sites)
+
+
+def test_unused_nested_function_body_is_deferred_without_a_bundle(tmp_path: Path) -> None:
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def changed() -> None: pass\n\n"
+        "def handler() -> None:\n"
+        "    def dormant() -> None:\n"
+        "        changed()\n"
+        "    return None\n",
+        encoding="utf-8",
+    )
+
+    deps = MypyAnalyzer(tmp_path).analyze_endpoint(_endpoint(main, line=3))
+
+    assert not any(
+        reference.symbol_name.endswith(".changed") for reference in deps.referenced_symbols
+    )
 
 
 def test_captures_exact_path_and_open_handle_receiver_origins(tmp_path: Path) -> None:
@@ -341,7 +568,7 @@ def test_union_receiver_is_ambiguous_when_implementations_differ(tmp_path: Path)
     assert site.receiver_candidates == tuple(sorted(site.receiver_candidates))
 
 
-def test_union_receiver_with_common_inherited_method_is_exact(tmp_path: Path) -> None:
+def test_open_union_receiver_with_common_inherited_method_is_ambiguous(tmp_path: Path) -> None:
     main = tmp_path / "main.py"
     main.write_text(
         "class Base:\n"
@@ -356,10 +583,30 @@ def test_union_receiver_with_common_inherited_method_is_exact(tmp_path: Path) ->
     deps = MypyAnalyzer(tmp_path).analyze_endpoint(_endpoint(main, line=10))
     site = _site_by_spelling(deps.resolved_call_sites, "value.run")[0]
 
-    assert site.status == CallResolutionStatus.EXACT
-    assert site.canonical_symbol and site.canonical_symbol.endswith("Base.run")
-    assert site.invocation == InvocationKind.INSTANCE_METHOD
+    assert site.status == CallResolutionStatus.AMBIGUOUS
+    assert site.reason_code == "open_receiver_dispatch"
+    assert site.canonical_symbol is None
+    assert site.invocation is None
     assert len(site.receiver_candidates) == 2
+
+
+def test_final_receiver_preserves_exact_method_dispatch(tmp_path: Path) -> None:
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from typing import final\n\n"
+        "@final\n"
+        "class Service:\n"
+        "    def run(self) -> int:\n        return 1\n\n"
+        "def handler(value: Service) -> int:\n"
+        "    return value.run()\n",
+        encoding="utf-8",
+    )
+
+    deps = MypyAnalyzer(tmp_path).analyze_endpoint(_endpoint(main, line=8))
+    site = _site_by_spelling(deps.resolved_call_sites, "value.run")[0]
+
+    assert site.status == CallResolutionStatus.EXACT
+    assert site.canonical_symbol and site.canonical_symbol.endswith("Service.run")
 
 
 def test_import_map_does_not_override_lexically_shadowed_names(tmp_path: Path) -> None:
@@ -401,8 +648,11 @@ def test_import_map_does_not_override_lexically_shadowed_names(tmp_path: Path) -
 
 
 def test_overloaded_static_and_class_methods_preserve_invocation_kind(tmp_path: Path) -> None:
+    worker = tmp_path / "worker.py"
+    worker.write_text("def changed() -> int:\n    return 1\n", encoding="utf-8")
     main = tmp_path / "main.py"
     main.write_text(
+        "from worker import changed\n"
         "from typing import overload\n\n"
         "class Service:\n"
         "    @staticmethod\n"
@@ -412,7 +662,7 @@ def test_overloaded_static_and_class_methods_preserve_invocation_kind(tmp_path: 
         "    @overload\n"
         "    def parse(value: str) -> str: ...\n"
         "    @staticmethod\n"
-        "    def parse(value: object) -> object:\n        return value\n\n"
+        "    def parse(value: object) -> object:\n        return changed()\n\n"
         "    @classmethod\n"
         "    @overload\n"
         "    def build(cls, value: int) -> int: ...\n"
@@ -427,13 +677,15 @@ def test_overloaded_static_and_class_methods_preserve_invocation_kind(tmp_path: 
         encoding="utf-8",
     )
 
-    sites = MypyAnalyzer(tmp_path).analyze_endpoint(_endpoint(main, line=24)).resolved_call_sites
+    deps = MypyAnalyzer(tmp_path).analyze_endpoint(_endpoint(main, line=24))
+    sites = deps.resolved_call_sites
     parse = _site_by_spelling(sites, "Service.parse")[0]
     build = _site_by_spelling(sites, "Service.build")[0]
 
     assert parse.status == CallResolutionStatus.EXACT
     assert parse.invocation == InvocationKind.FUNCTION
     assert build.status == CallResolutionStatus.EXACT
+    assert deps.references_symbol_at_line(str(worker), 1) is not None
     assert build.invocation == InvocationKind.CLASS_METHOD
 
 
@@ -495,23 +747,106 @@ def test_synthetic_mypy_calls_without_source_spans_are_not_recorded(tmp_path: Pa
 
 def test_utf8_byte_columns_and_same_line_calls_keep_physical_identity(tmp_path: Path) -> None:
     main = tmp_path / "main.py"
+    for prefix in ("é" * 10, "€" * 10, "😀" * 10, "é😀" * 5):
+        source_text = (
+            "def emit() -> int: return 1\n"
+            "def handler() -> int:\n"
+            f"    label = {prefix!r}; return emit() + emit()\n"
+        )
+        main.write_text(source_text, encoding="utf-8")
+        deps = MypyAnalyzer(tmp_path, module_root=tmp_path).analyze_endpoint(
+            _endpoint(main, line=2)
+        )
+        sites = _site_by_spelling(deps.get_resolved_call_sites(str(main)), "emit")
+        ast_spans = sorted(
+            (node.func.col_offset, node.func.end_col_offset)
+            for node in ast.walk(ast.parse(source_text))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        )
+
+        assert len(sites) == 2
+        assert [(site.column, site.end_column) for site in sites] == [
+            (start, end) for start, end in ast_spans
+        ]
+        assert sites[0].line == sites[1].line == 3
+        source = main.read_bytes().splitlines()[2]
+        for site in sites:
+            assert site.end_column is not None
+            assert source[site.column : site.end_column].decode("utf-8") == "emit"
+
+
+def test_utf8_live_call_identity_is_stable_with_deferred_lambda_peer(tmp_path: Path) -> None:
+    main = tmp_path / "main.py"
     main.write_text(
-        "def emit() -> int:\n    return 1\n\n"
+        "def emit() -> int: return 1\n"
         "def handler() -> int:\n"
-        "    label = 'é'; return emit() + emit()\n",
+        f"    label = {'é' * 10!r}; cb = lambda: emit(); return emit()\n",
         encoding="utf-8",
     )
+    analyzer = MypyAnalyzer(tmp_path, module_root=tmp_path)
+    deps = analyzer.analyze_endpoint(_endpoint(main, line=2))
+    handler = next(
+        node
+        for node in analyzer._trees["main"].defs
+        if isinstance(node, FuncDef) and node.name == "handler"
+    )
+    assignment = handler.body.body[1]
+    returned = handler.body.body[2]
+    lambda_call = assignment.rvalue.body.body[0].expr
+    live_call = returned.expr
+    assert isinstance(lambda_call, CallExpr)
+    assert isinstance(live_call, CallExpr)
 
-    deps = MypyAnalyzer(tmp_path).analyze_endpoint(_endpoint(main, line=4))
+    first = analyzer._call_source_identity(str(main), live_call.callee)
+    second = analyzer._call_source_identity(str(main), live_call.callee)
+    deferred = analyzer._call_source_identity(str(main), lambda_call.callee)
     sites = _site_by_spelling(deps.get_resolved_call_sites(str(main)), "emit")
 
-    assert len(sites) == 2
-    assert sites[0].line == sites[1].line == 5
-    assert sites[0].column != sites[1].column
-    source = main.read_bytes().splitlines()[4]
-    for site in sites:
-        assert site.end_column is not None
-        assert source[site.column : site.end_column].decode("utf-8") == "emit"
+    assert first == second == (3, 64, 3, 68, "emit")
+    assert deferred == (3, 49, 3, 53, "emit")
+    assert [(site.column, site.end_column) for site in sites] == [(64, 68)]
+
+
+def test_utf8_live_call_identity_is_stable_with_dead_same_line_peer(tmp_path: Path) -> None:
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def emit() -> int: return 1\n"
+        "def handler() -> int:\n"
+        f"    label = {'é' * 10!r}; ignored = False and emit(); return emit()\n",
+        encoding="utf-8",
+    )
+    analyzer = MypyAnalyzer(tmp_path, module_root=tmp_path)
+    analyzer.analyze_endpoint(_endpoint(main, line=2))
+    handler = next(
+        node
+        for node in analyzer._trees["main"].defs
+        if isinstance(node, FuncDef) and node.name == "handler"
+    )
+    dead_expression = handler.body.body[1].rvalue
+    live_return = handler.body.body[2]
+    assert isinstance(dead_expression, OpExpr)
+    dead_call = dead_expression.right
+    live_call = live_return.expr
+    assert isinstance(dead_call, CallExpr)
+    assert isinstance(live_call, CallExpr)
+
+    first = analyzer._call_source_identity(str(main), live_call.callee)
+    second = analyzer._call_source_identity(str(main), live_call.callee)
+    dead = analyzer._call_source_identity(str(main), dead_call.callee)
+    source_calls = sorted(
+        (
+            node.func.lineno,
+            node.func.col_offset,
+            node.func.end_lineno,
+            node.func.end_col_offset,
+            "emit",
+        )
+        for node in ast.walk(ast.parse(main.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "emit"
+    )
+
+    assert first == second == source_calls[1]
+    assert dead == source_calls[0]
 
 
 def test_dependency_query_filters_status_and_fails_closed_on_ambiguous_suffixes(
@@ -614,82 +949,6 @@ def test_utf8_coordinate_variants_preserve_same_line_call_identity(tmp_path: Pat
         for site in sites:
             assert site.end_column is not None
             assert source[site.column : site.end_column].decode("utf-8") == "emit"
-
-
-def test_utf8_live_call_identity_is_stable_with_deferred_lambda_peer(tmp_path: Path) -> None:
-    main = tmp_path / "main.py"
-    main.write_text(
-        "def emit() -> int: return 1\n"
-        "def handler() -> int:\n"
-        f"    label = {'é' * 10!r}; cb = lambda: emit(); return emit()\n",
-        encoding="utf-8",
-    )
-    analyzer = MypyAnalyzer(tmp_path)
-    deps = analyzer.analyze_endpoint(_endpoint(main, line=2))
-    handler = next(
-        node
-        for tree in analyzer._trees.values()
-        for node in tree.defs
-        if isinstance(node, FuncDef) and node.name == "handler"
-    )
-    assignment = handler.body.body[1]
-    returned = handler.body.body[2]
-    lambda_call = assignment.rvalue.body.body[0].expr
-    live_call = returned.expr
-    assert isinstance(lambda_call, CallExpr)
-    assert isinstance(live_call, CallExpr)
-
-    first = analyzer._call_source_identity(str(main), live_call.callee)
-    second = analyzer._call_source_identity(str(main), live_call.callee)
-    deferred = analyzer._call_source_identity(str(main), lambda_call.callee)
-    sites = _site_by_spelling(deps.get_resolved_call_sites(str(main)), "emit")
-
-    assert first == second == (3, 64, 3, 68, "emit")
-    assert deferred == (3, 49, 3, 53, "emit")
-    assert [(site.column, site.end_column) for site in sites] == [(49, 53), (64, 68)]
-
-
-def test_utf8_live_call_identity_is_stable_with_dead_same_line_peer(tmp_path: Path) -> None:
-    main = tmp_path / "main.py"
-    main.write_text(
-        "def emit() -> int: return 1\n"
-        "def handler() -> int:\n"
-        f"    label = {'é' * 10!r}; ignored = False and emit(); return emit()\n",
-        encoding="utf-8",
-    )
-    analyzer = MypyAnalyzer(tmp_path)
-    analyzer.analyze_endpoint(_endpoint(main, line=2))
-    handler = next(
-        node
-        for tree in analyzer._trees.values()
-        for node in tree.defs
-        if isinstance(node, FuncDef) and node.name == "handler"
-    )
-    dead_expression = handler.body.body[1].rvalue
-    live_return = handler.body.body[2]
-    assert isinstance(dead_expression, OpExpr)
-    dead_call = dead_expression.right
-    live_call = live_return.expr
-    assert isinstance(dead_call, CallExpr)
-    assert isinstance(live_call, CallExpr)
-
-    first = analyzer._call_source_identity(str(main), live_call.callee)
-    second = analyzer._call_source_identity(str(main), live_call.callee)
-    dead = analyzer._call_source_identity(str(main), dead_call.callee)
-    source_calls = sorted(
-        (
-            node.func.lineno,
-            node.func.col_offset,
-            node.func.end_lineno,
-            node.func.end_col_offset,
-            "emit",
-        )
-        for node in ast.walk(ast.parse(main.read_text(encoding="utf-8")))
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "emit"
-    )
-
-    assert first == second == source_calls[1]
-    assert dead == source_calls[0]
 
 
 def test_nested_lambda_calls_keep_identity_when_scope_signatures_collide(

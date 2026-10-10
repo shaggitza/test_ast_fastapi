@@ -3,12 +3,17 @@ Integration tests for the CLI.
 """
 
 import json
+from difflib import unified_diff
 from pathlib import Path
 
 import pytest
+import yaml
 from click.testing import CliRunner
 
+from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
 from fastapi_endpoint_detector.cli import cli
+from fastapi_endpoint_detector.executor.vm_executor import VMExecutor
+from fastapi_endpoint_detector.parser.fastapi_extractor import FastAPIExtractor
 
 
 @pytest.fixture
@@ -39,6 +44,7 @@ class TestCLI:
         assert "--app" in result.output
         assert "--diff" in result.output
         assert "--vm" in result.output
+
         assert "--secure-ast" in result.output
         assert "--scip" in result.output
         assert "--baseline-app" in result.output
@@ -213,11 +219,18 @@ contracts:
         assert result.exit_code != 0
         assert "--vm and --scip cannot be used together" in result.output
 
-    def test_baseline_app_requires_scip(self, runner: CliRunner, tmp_path: Path) -> None:
-        app_file = tmp_path / "app.py"
+    def test_baseline_app_is_supported_by_default_mypy(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        app = tmp_path / "target"
+        baseline = tmp_path / "baseline"
+        app.mkdir()
+        baseline.mkdir()
+        app_file = app / "app.py"
         app_file.write_text("from fastapi import FastAPI\napp = FastAPI()\n")
+        (baseline / "app.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n")
         diff_file = tmp_path / "test.diff"
-        diff_file.write_text("dummy diff\n")
+        diff_file.write_text("")
 
         result = runner.invoke(
             cli,
@@ -226,14 +239,217 @@ contracts:
                 "--app",
                 str(app_file),
                 "--baseline-app",
-                str(app_file),
+                str(baseline / "app.py"),
                 "--diff",
                 str(diff_file),
+                "--format",
+                "json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+
+    @pytest.mark.parametrize(
+        ("function_name", "invoke_lambda", "same_line_call", "expected_candidate"),
+        [
+            ("deferred_lambda_control", False, False, False),
+            ("live_invoked_lambda_counterpart", True, False, True),
+            ("same_line_executed_call_counterpart", False, True, True),
+        ],
+    )
+    def test_cli_maps_only_executed_lambda_body_edits(
+        self,
+        runner: CliRunner,
+        tmp_path: Path,
+        function_name: str,
+        invoke_lambda: bool,
+        same_line_call: bool,
+        expected_candidate: bool,
+    ) -> None:
+        baseline_app = tmp_path / "baseline" / "app"
+        target_app = tmp_path / "target" / "app"
+        baseline_app.mkdir(parents=True)
+        target_app.mkdir(parents=True)
+        (baseline_app / "helpers.py").write_text(
+            "def leaf_alias() -> int:\n    return 1\n", encoding="utf-8"
+        )
+        (target_app / "helpers.py").write_text(
+            "def leaf_alias() -> int:\n    return 1\n", encoding="utf-8"
+        )
+
+        before = "hidden = lambda: leaf_alias()"
+        after = "hidden = lambda: leaf_alias() + 1"
+        if same_line_call:
+            baseline_service = (
+                "from .helpers import leaf_alias\n\n"
+                f"def {function_name}() -> int:\n"
+                f"    {before}; return leaf_alias()\n"
+            )
+            target_service = baseline_service.replace(
+                before + "; return leaf_alias()",
+                after + "; return leaf_alias() + 2",
+            )
+        else:
+            baseline_service = (
+                "from .helpers import leaf_alias\n\n"
+                f"def {function_name}() -> int:\n"
+                f"    {before}\n" + ("    return hidden()\n" if invoke_lambda else "    return 0\n")
+            )
+            target_service = baseline_service.replace(before, after)
+        (baseline_app / "service.py").write_text(baseline_service, encoding="utf-8")
+        (target_app / "service.py").write_text(target_service, encoding="utf-8")
+
+        app_source = (
+            "from fastapi import FastAPI\n"
+            f"from .service import {function_name}\n"
+            "app = FastAPI()\n"
+            "@app.get('/one')\n"
+            f"def route_one() -> int:\n    return {function_name}()\n"
+        )
+        (baseline_app / "__init__.py").write_text(app_source, encoding="utf-8")
+        (target_app / "__init__.py").write_text(app_source, encoding="utf-8")
+
+        diff_text = "".join(
+            unified_diff(
+                baseline_service.splitlines(keepends=True),
+                target_service.splitlines(keepends=True),
+                fromfile="a/service.py",
+                tofile="b/service.py",
+                n=0,
+            )
+        )
+        diff_file = tmp_path / "lambda-body.diff"
+        diff_file.write_text(
+            "diff --git a/service.py b/service.py\n" + diff_text,
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(
+            cli,
+            [
+                "analyze",
+                "--app",
+                str(target_app),
+                "--baseline-app",
+                str(baseline_app),
+                "--diff",
+                str(diff_file),
+                "--format",
+                "json",
+                "--no-cache",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        candidates = json.loads(result.output)["candidate_endpoints"]
+        if expected_candidate:
+            assert [item["endpoint"]["path"] for item in candidates] == ["/one"]
+            # The canonical inventory may carry this finite points-to evidence
+            # at LOW confidence; the key invariant here is that executed calls
+            # remain candidates while deferred-body-only edits are removed.
+            assert candidates[0]["confidence"] in {"low", "medium"}
+        else:
+            assert candidates == []
+
+    def test_cli_mypy_module_identity_ignores_checkout_root_name(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        checkout = tmp_path / "repo.with-hyphen and spaces"
+        baseline_root = checkout / "baseline"
+        target_root = checkout / "target"
+        baseline_app = baseline_root / "app"
+        target_app = target_root / "app"
+        baseline_app.mkdir(parents=True)
+        target_app.mkdir(parents=True)
+
+        for app_root, return_value in ((baseline_app, 1), (target_app, 2)):
+            (app_root / "__init__.py").write_text(
+                "from fastapi import FastAPI\n"
+                "from .service import helper\n"
+                "app = FastAPI()\n"
+                "@app.get('/one')\n"
+                "def route_one() -> int:\n    return helper()\n",
+                encoding="utf-8",
+            )
+            (app_root / "service.py").write_text(
+                f"def helper() -> int:\n    return {return_value}\n",
+                encoding="utf-8",
+            )
+
+        # The target and baseline snapshots deliberately have different parent
+        # directories under a checkout whose own name is not a Python module.
+        # The mapper's inventory adapter must hand mypy the same app.* module
+        # identities on both sides and a side-specific import root.
+        mapper = ChangeMapper(target_app, baseline_app_path=baseline_app)
+        target_analyzer = mapper.mypy_analyzer
+        baseline_analyzer = mapper.baseline_mypy_analyzer
+        assert target_analyzer.source_inventory is not None
+        assert baseline_analyzer.source_inventory is not None
+        target_modules = [record.module for record in target_analyzer.source_inventory.files]
+        baseline_modules = [record.module for record in baseline_analyzer.source_inventory.files]
+        assert target_modules == baseline_modules == ["app", "app.service"]
+        assert target_analyzer.module_root == target_root.resolve()
+        assert baseline_analyzer.module_root == baseline_root.resolve()
+        assert all("repo.with-hyphen" not in module for module in target_modules)
+
+        diff_file = tmp_path / "module-root.diff"
+        diff_file.write_text(
+            "diff --git a/service.py b/service.py\n"
+            "--- a/service.py\n"
+            "+++ b/service.py\n"
+            "@@ -1,2 +1,2 @@\n"
+            " def helper() -> int:\n"
+            "-    return 1\n"
+            "+    return 2\n",
+            encoding="utf-8",
+        )
+        result = runner.invoke(
+            cli,
+            [
+                "analyze",
+                "--app",
+                str(target_app),
+                "--baseline-app",
+                str(baseline_app),
+                "--diff",
+                str(diff_file),
+                "--format",
+                "json",
+                "--no-cache",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        candidates = json.loads(result.output)["candidate_endpoints"]
+        assert [item["endpoint"]["path"] for item in candidates] == ["/one"]
+
+    def test_baseline_app_rejected_by_runtime_mode(self, runner: CliRunner, tmp_path: Path) -> None:
+        app = tmp_path / "app"
+        baseline = tmp_path / "baseline"
+        app.mkdir()
+        baseline.mkdir()
+        app_file = app / "app.py"
+        app_file.write_text("from fastapi import FastAPI\napp = FastAPI()\n")
+        (baseline / "app.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n")
+        diff_file = tmp_path / "test.diff"
+        diff_file.write_text("")
+
+        result = runner.invoke(
+            cli,
+            [
+                "analyze",
+                "--app",
+                str(app_file),
+                "--baseline-app",
+                str(baseline),
+                "--diff",
+                str(diff_file),
+                "--vm",
             ],
         )
 
         assert result.exit_code != 0
-        assert "--baseline-app requires --scip" in result.output
+        assert "--baseline-app is unavailable with --vm" in result.output
 
     def test_vm_and_secure_ast_mutually_exclusive_list(
         self, runner: CliRunner, tmp_path: Path
@@ -248,8 +464,270 @@ contracts:
         assert "--vm and --secure-ast cannot be used together" in result.output
 
 
+@pytest.mark.parametrize("output_format", ["text", "markdown", "html", "json", "yaml"])
+def test_runtime_list_serializes_source_scope_and_excludes_unselected_handlers(
+    runner: CliRunner,
+    tmp_path: Path,
+    output_format: str,
+) -> None:
+    app_file = tmp_path / "main.py"
+    app_file.write_text(
+        "from fastapi import FastAPI\n"
+        "from outside import router\n"
+        "app = FastAPI()\n"
+        "@app.get('/inside')\n"
+        "def inside(): return {}\n"
+        "app.include_router(router)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "outside.py").write_text(
+        "from fastapi import APIRouter\n"
+        "router = APIRouter()\n"
+        "@router.get('/outside')\n"
+        "def outside(): return {}\n",
+        encoding="utf-8",
+    )
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "parser:\n  include_patterns: ['main.py']\n  follow_imports: false\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "--config",
+            str(config),
+            "list",
+            "--app",
+            str(app_file),
+            "--format",
+            output_format,
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    if output_format in {"json", "yaml"}:
+        payload = (
+            json.loads(result.output) if output_format == "json" else yaml.safe_load(result.output)
+        )
+        assert payload["inventory_status"] == "conditional"
+        assert payload["source_scope"] == {"selected_file_count": 1, "follow_imports": False}
+        assert any("Runtime import still executes" in warning for warning in payload["warnings"])
+        assert any("source inventory is incomplete" in warning for warning in payload["warnings"])
+        listed_endpoints = {endpoint["path"]: endpoint for endpoint in payload["endpoints"]}
+        listed_paths = set(listed_endpoints)
+        assert "/inside" in listed_paths
+        assert "/outside" not in listed_paths
+        assert listed_endpoints["/inside"]["discovery_status"] == "established"
+        assert listed_endpoints["/inside"]["discovery_conditions"] == []
+        assert str(tmp_path) not in payload["warnings"]
+    else:
+        if output_format == "html":
+            assert "<p>Status: conditional</p>" in result.output
+        else:
+            assert "Inventory status: conditional" in result.output or "Status: `conditional`" in (
+                result.output
+            )
+        assert "Runtime import still executes" in result.output
+        assert "/inside" in result.output
+        assert "/outside" not in result.output
+
+
+@pytest.mark.parametrize("output_format", ["json", "yaml"])
+def test_runtime_analysis_serializes_recorded_inventory_limitations(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    output_format: str,
+) -> None:
+    app_file = tmp_path / "main.py"
+    app_file.write_text(
+        "from fastapi import FastAPI\n"
+        "from outside import router\n"
+        "app = FastAPI()\n"
+        "@app.get('/inside')\n"
+        "def inside(): return {}\n"
+        "app.include_router(router)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "outside.py").write_text(
+        "from fastapi import APIRouter\n"
+        "router = APIRouter()\n"
+        "@router.get('/outside')\n"
+        "def outside(): return {}\n",
+        encoding="utf-8",
+    )
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "parser:\n  include_patterns: ['main.py']\n  follow_imports: false\n",
+        encoding="utf-8",
+    )
+    diff_file = tmp_path / "empty.diff"
+    diff_file.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(ChangeMapper, "_preanalyze_mypy", lambda _self, _callback: None)
+
+    result = runner.invoke(
+        cli,
+        [
+            "--config",
+            str(config),
+            "analyze",
+            "--app",
+            str(app_file),
+            "--diff",
+            str(diff_file),
+            "--format",
+            output_format,
+            "--no-cache",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = (
+        json.loads(result.output) if output_format == "json" else yaml.safe_load(result.output)
+    )
+    assert payload["inventory_status"] is None
+    assert any("Target source inventory incomplete" in warning for warning in payload["warnings"])
+    assert any("unresolved local import" in warning for warning in payload["warnings"])
+    assert payload["summary"]["total_endpoints"] == 1
+
+
 class TestSecureASTMode:
     """Tests for --secure-ast option."""
+
+    def test_analyze_uses_configured_formatter_output(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "@app.get('/items')\n"
+            "def items():\n"
+            "    return helper()\n"
+            "def helper():\n"
+            "    return 1\n"
+            "for route in configured_routes:\n"
+            "    app.router.include_router(route)\n",
+            encoding="utf-8",
+        )
+        diff_file = tmp_path / "change.diff"
+        diff_file.write_text(
+            "diff --git a/app.py b/app.py\n"
+            "--- a/app.py\n"
+            "+++ b/app.py\n"
+            "@@ -7,1 +7,1 @@\n"
+            "-    return 1\n"
+            "+    return 2\n",
+            encoding="utf-8",
+        )
+        config = tmp_path / "config.yaml"
+        config.write_text(
+            "output:\n"
+            "  show_confidence: false\n"
+            "  show_dependency_chain: true\n"
+            "  colorize: false\n"
+            "  verbose: true\n",
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(
+            cli,
+            [
+                "--config",
+                str(config),
+                "analyze",
+                "--app",
+                str(tmp_path),
+                "--diff",
+                str(diff_file),
+                "--secure-ast",
+                "--no-cache",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Endpoints (1)" in result.output
+        assert "HIGH Confidence" not in result.output
+        assert "Changed files: app.py" in result.output
+        assert "Inventory Status: CONDITIONAL" in result.output
+        assert "Limitation:" in result.output
+        assert "\x1b[" not in result.output
+
+    def test_list_uses_configured_formatter_and_preserves_inventory_limitations(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "@app.get('/known')\n"
+            "def known():\n"
+            "    return None\n"
+            "for route in configured_routes:\n"
+            "    app.router.include_router(route)\n",
+            encoding="utf-8",
+        )
+        config = tmp_path / "config.yaml"
+        config.write_text("output:\n  colorize: false\n", encoding="utf-8")
+
+        result = runner.invoke(
+            cli,
+            ["--config", str(config), "list", "--app", str(app_file), "--secure-ast"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Inventory status: conditional" in result.output
+        assert "Limitation:" in result.output
+        assert "GET" in result.output and "/known" in result.output
+        assert "\x1b[" not in result.output
+
+    @pytest.mark.parametrize(
+        ("command", "use_vm"),
+        [("analyze", False), ("list", False), ("analyze", True), ("list", True)],
+    )
+    def test_rejects_unsupported_output_options_before_side_effects(
+        self,
+        runner: CliRunner,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        command: str,
+        use_vm: bool,
+    ) -> None:
+        config = tmp_path / "config.yaml"
+        config.write_text("output:\n  show_confidence: false\n", encoding="utf-8")
+        app_file = tmp_path / "app.py"
+        app_file.write_text("from fastapi import FastAPI\napp = FastAPI()\n", encoding="utf-8")
+        diff_file = tmp_path / "change.diff"
+        diff_file.write_text("diff --git a/app.py b/app.py\n", encoding="utf-8")
+
+        def unexpected_side_effect(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("output options must be validated before analysis or runtime")
+
+        monkeypatch.setattr(ChangeMapper, "__init__", unexpected_side_effect)
+        monkeypatch.setattr(FastAPIExtractor, "__init__", unexpected_side_effect)
+        monkeypatch.setattr(VMExecutor, "analyze_in_vm", unexpected_side_effect)
+
+        args = [
+            "--config",
+            str(config),
+            command,
+            "--app",
+            str(app_file),
+            "--format",
+            "json",
+        ]
+        if command == "analyze":
+            args.extend(["--diff", str(diff_file)])
+        if use_vm:
+            args.append("--vm")
+
+        result = runner.invoke(cli, args)
+
+        assert result.exit_code != 0
+        assert "Output option 'show_confidence' cannot be applied to 'json'" in result.output
 
     def test_secure_ast_list_basic(self, runner: CliRunner, tmp_path: Path) -> None:
         """Test listing endpoints with --secure-ast."""

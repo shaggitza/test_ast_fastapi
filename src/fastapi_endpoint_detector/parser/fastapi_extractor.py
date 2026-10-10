@@ -121,9 +121,9 @@ class FastAPIExtractor:
         self.app_path = app_path.resolve()
         self.app_variable = app_variable
         self.module_name = module_name
+        self.source_inventory = source_inventory
         self.app_entry = app_entry
         self.bootstrap_entry = bootstrap_entry
-        self.source_inventory = source_inventory
         self.timeout_seconds = normalized_timeout
         for name, value in (
             ("dependency_max_depth", dependency_max_depth),
@@ -1126,17 +1126,18 @@ class FastAPIExtractor:
             return endpoints
 
     def _mark_inventory_scope(self, endpoint: Endpoint) -> Endpoint:
-        """Keep source scope separate from the identity of a runtime-observed route.
+        """Keep source scope separate from whether a returned route was observed.
 
-        Inventory gaps limit negative claims about absent endpoints, so those caveats belong in
-        source inventory provenance. They do not make a route with an observed registration
-        conditional.
+        A selected handler's runtime registration establishes that endpoint identity. Inventory
+        incompleteness and imports outside the selected scope limit negative claims about missing
+        endpoints, so they belong to inventory provenance rather than route discovery conditions.
+        Existing route conditions are preserved unchanged.
         """
         return endpoint
 
     @property
     def source_inventory_limitations(self) -> tuple[str, ...]:
-        """Scope, completeness, and import limits for inventory-filtered runtime results."""
+        """Scope, completeness, and import limitations for inventory-filtered runtime results."""
         if self.source_inventory is None:
             return ()
         inventory = self.source_inventory

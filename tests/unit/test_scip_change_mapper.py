@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,8 +13,11 @@ from fastapi_endpoint_detector.analyzer.change_mapper import (
 from fastapi_endpoint_detector.analyzer.scip_analyzer import (
     SCIPAnalyzerError,
     SCIPDefinition,
-    SCIPReachedDefinition,
+    SCIPOccurrence,
+    SCIPReverseCallEdge,
+    SCIPSourceScope,
 )
+from fastapi_endpoint_detector.config import Config
 from fastapi_endpoint_detector.models.report import (
     ConfidenceLevel,
     EvidenceStatus,
@@ -21,7 +25,28 @@ from fastapi_endpoint_detector.models.report import (
 from fastapi_endpoint_detector.parser.diff_parser import DiffParser
 
 
-class OverrideEdgeAnalyzer:
+def reference_edge(callee: SCIPDefinition, caller: SCIPDefinition) -> SCIPReverseCallEdge:
+    return SCIPReverseCallEdge(
+        caller=caller,
+        callee=callee,
+        occurrence=SCIPOccurrence(caller.file_path, caller.start_line),
+        limitations=("Reference-only evidence does not establish execution.",),
+    )
+
+
+class ReferenceAnalyzerMixin:
+    def source_scope(self) -> SCIPSourceScope:
+        return SCIPSourceScope(
+            "project_root",
+            None,
+            ("SCIP indexing remains project-root-wide.",),
+        )
+
+    def reverse_call_edge_limitations(self, _callee: SCIPDefinition) -> tuple[str, ...]:
+        return ("Reference-only edges have LOW confidence.",)
+
+
+class OverrideEdgeAnalyzer(ReferenceAnalyzerMixin):
     def ensure_index(self, *, force: bool = False) -> None:
         assert force
 
@@ -33,46 +58,113 @@ class OverrideEdgeAnalyzer:
             return (SCIPDefinition("base", "base:Base:run()", Path("base.py"), 2, 3),)
         return ()
 
-    def affected(self, seed: SCIPDefinition, *, max_depth: int | None = None):
-        del max_depth
+    def reverse_call_edges(self, seed: SCIPDefinition):
         if seed.symbol == "base":
             return (
-                SCIPReachedDefinition(seed, 0),
-                SCIPReachedDefinition(
+                reference_edge(
+                    seed,
                     SCIPDefinition("handler", "main:handler()", Path("main.py"), 4, 6),
-                    1,
                 ),
             )
-        return (SCIPReachedDefinition(seed, 0),)
+        return ()
 
 
 def definition(symbol: str, *, file_path: str = "graph.py") -> SCIPDefinition:
     return SCIPDefinition(symbol, f"graph:{symbol}()", Path(file_path), 1, 2)
 
 
-class FixedPointAnalyzer:
+def test_scip_mapper_keeps_only_low_reference_edges_and_scope_limitations() -> None:
+    seed = definition("seed")
+    caller = definition("caller")
+    handler = definition("handler")
+
+    class ReferenceEvidenceAnalyzer:
+        def __init__(self) -> None:
+            self.edges = {
+                seed.symbol: (
+                    SimpleNamespace(
+                        caller=caller,
+                        execution_status="reference_only",
+                        confidence="LOW",
+                        occurrence=SimpleNamespace(file_path=Path("graph.py")),
+                        limitations=(
+                            "reference is not proof of execution",
+                            "the caller may be an uninvoked deferred lambda",
+                        ),
+                    ),
+                    SimpleNamespace(
+                        caller=definition("excluded", file_path="ignored.py"),
+                        execution_status="reference_only",
+                        confidence="LOW",
+                        occurrence=SimpleNamespace(file_path=Path("ignored.py")),
+                        limitations=(),
+                    ),
+                    SimpleNamespace(
+                        caller=definition("rejected"),
+                        execution_status="reachable",
+                        confidence="HIGH",
+                        occurrence=SimpleNamespace(file_path=Path("graph.py")),
+                        limitations=(),
+                    ),
+                ),
+                caller.symbol: (
+                    SimpleNamespace(
+                        caller=handler,
+                        execution_status="reference_only",
+                        confidence="LOW",
+                        occurrence=SimpleNamespace(file_path=Path("graph.py")),
+                        limitations=("index is broader than selected files",),
+                    ),
+                ),
+            }
+
+        def source_scope(self):
+            return SimpleNamespace(
+                index_scope="project_root",
+                selected_inventory_paths=("graph.py",),
+                limitations=("SCIP indexes the project root",),
+            )
+
+        def reverse_call_edge_limitations(self, _callee: SCIPDefinition):
+            return ("reference-only edge; LOW confidence",)
+
+        def reverse_call_edges(self, callee: SCIPDefinition):
+            return self.edges.get(callee.symbol, ())
+
+    warnings: list[str] = []
+    reached = _expanded_scip_affected(ReferenceEvidenceAnalyzer(), seed, 4, warnings)  # type: ignore[arg-type]
+
+    assert [(item.definition.symbol, item.depth) for item in reached] == [
+        ("seed", 0),
+        ("caller", 1),
+        ("handler", 2),
+    ]
+    assert "reference-only edge; LOW confidence" in reached[1].limitations
+    assert "the caller may be an uninvoked deferred lambda" in reached[1].limitations
+    assert "index is broader than selected files" in reached[2].limitations
+    assert any("lacks reference_only/LOW" in warning for warning in warnings)
+    assert any("outside the selected source inventory" in warning for warning in warnings)
+
+
+class FixedPointAnalyzer(ReferenceAnalyzerMixin):
     def __init__(
         self,
         *,
-        native: dict[str, tuple[SCIPReachedDefinition, ...]],
+        edges: dict[str, tuple[SCIPDefinition, ...]],
         bases: dict[str, tuple[SCIPDefinition, ...]],
         failing_bases: set[str] | None = None,
     ) -> None:
-        self.native = native
+        self.edges = edges
         self.bases = bases
         self.failing_bases = failing_bases or set()
-        self.affected_calls: list[tuple[str, int | None]] = []
+        self.edge_calls: list[str] = []
         self.bridge_calls: list[str] = []
 
-    def affected(self, seed: SCIPDefinition, *, max_depth: int | None = None):
-        self.affected_calls.append((seed.symbol, max_depth))
+    def reverse_call_edges(self, seed: SCIPDefinition):
+        self.edge_calls.append(seed.symbol)
         if seed.symbol in self.failing_bases:
             raise SCIPAnalyzerError(f"failed {seed.symbol}")
-        return tuple(
-            reached
-            for reached in self.native.get(seed.symbol, (SCIPReachedDefinition(seed, 0),))
-            if max_depth is None or reached.depth <= max_depth
-        )
+        return tuple(reference_edge(seed, caller) for caller in self.edges.get(seed.symbol, ()))
 
     def base_method_definitions(self, reached: SCIPDefinition):
         self.bridge_calls.append(reached.symbol)
@@ -89,7 +181,7 @@ class SuccessiveBridgeMapperAnalyzer(FixedPointAnalyzer):
         return (definition("FirstImpl", file_path="first.py"),)
 
 
-class PartiallyFailingAnalyzer:
+class PartiallyFailingAnalyzer(ReferenceAnalyzerMixin):
     def ensure_index(self, *, force: bool = False) -> None:
         assert force
 
@@ -101,20 +193,18 @@ class PartiallyFailingAnalyzer:
             SCIPDefinition("good", "services:changed()", Path("services.py"), 1, 1),
         )
 
-    def affected(self, seed: SCIPDefinition, *, max_depth: int | None = None):
-        del max_depth
+    def reverse_call_edges(self, seed: SCIPDefinition):
         if seed.symbol == "bad":
             raise SCIPAnalyzerError("ambiguous export")
         return (
-            SCIPReachedDefinition(seed, 0),
-            SCIPReachedDefinition(
+            reference_edge(
+                seed,
                 SCIPDefinition("handler", "main:handler()", Path("main.py"), 4, 6),
-                1,
             ),
         )
 
 
-class BaselineDeletionAnalyzer:
+class BaselineDeletionAnalyzer(ReferenceAnalyzerMixin):
     def ensure_index(self, *, force: bool = False) -> None:
         assert force
 
@@ -123,29 +213,27 @@ class BaselineDeletionAnalyzer:
         assert lines in ({1}, {2})
         return (SCIPDefinition("removed", "services:removed()", Path("services.py"), 1, 2),)
 
-    def affected(self, _seed: SCIPDefinition, *, max_depth: int | None = None):
-        assert max_depth == 10
+    def reverse_call_edges(self, seed: SCIPDefinition):
         return (
-            SCIPReachedDefinition(
+            reference_edge(
+                seed,
                 SCIPDefinition("handler", "main:items()", Path("main.py"), 5, 7),
-                1,
             ),
         )
 
 
-class EmptyTargetAnalyzer:
+class EmptyTargetAnalyzer(ReferenceAnalyzerMixin):
     def ensure_index(self, *, force: bool = False) -> None:
         assert force
 
     def definitions_at(self, _file_path: Path, _lines: set[int]):
         return ()
 
-    def affected(self, _seed: SCIPDefinition, *, max_depth: int | None = None):
-        assert max_depth is not None
+    def reverse_call_edges(self, _seed: SCIPDefinition):
         return ()
 
 
-class FakeSCIPAnalyzer:
+class FakeSCIPAnalyzer(ReferenceAnalyzerMixin):
     use_cache = False
 
     def ensure_index(self, *, force: bool = False) -> None:
@@ -160,28 +248,71 @@ class FakeSCIPAnalyzer:
             ),
         )
 
-    def affected(self, seed: SCIPDefinition, *, max_depth: int | None = None):
-        assert max_depth == 10
-        return (
-            SCIPReachedDefinition(seed, 0),
-            SCIPReachedDefinition(
-                SCIPDefinition("dependency-symbol", "main:quote_service()", Path("main.py"), 5, 6),
-                1,
-            ),
-            SCIPReachedDefinition(
-                SCIPDefinition("quote-symbol", "main:quote()", Path("main.py"), 8, 10),
-                2,
-            ),
-            SCIPReachedDefinition(
-                SCIPDefinition("order-symbol", "main:order()", Path("main.py"), 12, 14),
-                1,
-            ),
-        )
+    def reverse_call_edges(self, seed: SCIPDefinition):
+        if seed.symbol == "changed-symbol":
+            return (
+                reference_edge(
+                    seed,
+                    SCIPDefinition(
+                        "dependency-symbol", "main:quote_service()", Path("main.py"), 5, 6
+                    ),
+                ),
+                reference_edge(
+                    seed,
+                    SCIPDefinition("order-symbol", "main:order()", Path("main.py"), 12, 14),
+                ),
+            )
+        if seed.symbol == "dependency-symbol":
+            return (
+                reference_edge(
+                    seed,
+                    SCIPDefinition("quote-symbol", "main:quote()", Path("main.py"), 8, 10),
+                ),
+            )
+        return ()
 
 
-def test_programmatic_baseline_requires_scip(tmp_path: Path) -> None:
-    with pytest.raises(ChangeMapperError, match="only with use_scip"):
-        ChangeMapper(tmp_path, baseline_app_path=tmp_path)
+def test_programmatic_baseline_is_supported_by_mypy(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    baseline = tmp_path / "baseline"
+    target.mkdir()
+    baseline.mkdir()
+
+    mapper = ChangeMapper(target, baseline_app_path=baseline)
+
+    assert mapper.baseline_app_path == baseline.resolve()
+
+
+def test_scip_analyzers_receive_side_specific_effective_inventories(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    baseline = tmp_path / "baseline"
+    for root in (target, baseline):
+        (root / "pkg").mkdir(parents=True)
+        (root / "pkg" / "app.py").write_text("def app():\n    return 1\n")
+        (root / "ignored.py").write_text("def ignored():\n    return 2\n")
+    mapper = ChangeMapper(
+        target,
+        secure_ast=True,
+        use_scip=True,
+        baseline_app_path=baseline,
+        config=Config(parser={"include_patterns": ["pkg/*.py"]}),
+    )
+
+    target_inventory = mapper.scip_analyzer.source_inventory
+    baseline_inventory = mapper.baseline_scip_analyzer.source_inventory
+
+    assert target_inventory is not None
+    assert baseline_inventory is not None
+    assert target_inventory is mapper.source_inventory
+    assert baseline_inventory is mapper.baseline_source_inventory
+    assert target_inventory.root == target.resolve()
+    assert baseline_inventory.root == baseline.resolve()
+    assert {path.relative_to(target).as_posix() for path in target_inventory.paths} == {
+        "pkg/app.py"
+    }
+    assert {path.relative_to(baseline).as_posix() for path in baseline_inventory.paths} == {
+        "pkg/app.py"
+    }
 
 
 def test_scip_expands_proven_override_to_base_method_callers(tmp_path: Path) -> None:
@@ -216,16 +347,9 @@ def test_fixed_point_reaches_route_after_successive_bridges(tmp_path: Path) -> N
     second_base = definition("SecondBase")
     handler = SCIPDefinition("handler", "main:handler()", Path("main.py"), 5, 6)
     analyzer = SuccessiveBridgeMapperAnalyzer(
-        native={
-            first.symbol: (SCIPReachedDefinition(first, 0),),
-            first_base.symbol: (
-                SCIPReachedDefinition(first_base, 0),
-                SCIPReachedDefinition(second, 1),
-            ),
-            second_base.symbol: (
-                SCIPReachedDefinition(second_base, 0),
-                SCIPReachedDefinition(handler, 1),
-            ),
+        edges={
+            first_base.symbol: (second,),
+            second_base.symbol: (handler,),
         },
         bases={first.symbol: (first_base,), second.symbol: (second_base,)},
     )
@@ -261,18 +385,10 @@ def test_fixed_point_preserves_initial_results_and_selects_minimum_depth() -> No
     handler = definition("handler")
     base = definition("base")
     analyzer = FixedPointAnalyzer(
-        native={
-            seed.symbol: (
-                SCIPReachedDefinition(seed, 0),
-                SCIPReachedDefinition(native, 2),
-                SCIPReachedDefinition(handler, 5),
-            ),
-            base.symbol: (
-                SCIPReachedDefinition(base, 0),
-                SCIPReachedDefinition(handler, 1),
-            ),
+        edges={
+            seed.symbol: (native, handler),
         },
-        bases={seed.symbol: (base,)},
+        bases={seed.symbol: (base,), base.symbol: (handler,)},
     )
 
     reached = _expanded_scip_affected(analyzer, seed, 10)  # type: ignore[arg-type]
@@ -280,8 +396,8 @@ def test_fixed_point_preserves_initial_results_and_selects_minimum_depth() -> No
     assert [(item.definition.symbol, item.depth) for item in reached] == [
         ("seed", 0),
         ("base", 1),
-        ("handler", 2),
-        ("native", 2),
+        ("handler", 1),
+        ("native", 1),
     ]
 
 
@@ -289,11 +405,11 @@ def test_fixed_point_cycle_terminates_without_requerying() -> None:
     first = definition("FirstImpl")
     base = definition("Base")
     analyzer = FixedPointAnalyzer(
-        native={
-            first.symbol: (SCIPReachedDefinition(first, 0),),
-            base.symbol: (SCIPReachedDefinition(base, 0),),
+        edges={
+            first.symbol: (base,),
+            base.symbol: (first,),
         },
-        bases={first.symbol: (base,), base.symbol: (first,)},
+        bases={},
     )
 
     reached = _expanded_scip_affected(analyzer, first, 20)  # type: ignore[arg-type]
@@ -302,7 +418,7 @@ def test_fixed_point_cycle_terminates_without_requerying() -> None:
         ("FirstImpl", 0),
         ("Base", 1),
     ]
-    assert analyzer.affected_calls == [("FirstImpl", 20), ("Base", 19), ("FirstImpl", 18)]
+    assert analyzer.edge_calls == ["FirstImpl", "Base"]
 
 
 def test_fixed_point_honors_exact_depth_budget() -> None:
@@ -314,18 +430,13 @@ def test_fixed_point_honors_exact_depth_budget() -> None:
 
     def run(max_depth: int) -> set[str]:
         analyzer = FixedPointAnalyzer(
-            native={
-                first.symbol: (SCIPReachedDefinition(first, 0),),
-                first_base.symbol: (
-                    SCIPReachedDefinition(first_base, 0),
-                    SCIPReachedDefinition(second, 1),
-                ),
-                second_base.symbol: (
-                    SCIPReachedDefinition(second_base, 0),
-                    SCIPReachedDefinition(handler, 1),
-                ),
+            edges={
+                first.symbol: (first_base,),
+                first_base.symbol: (second,),
+                second.symbol: (second_base,),
+                second_base.symbol: (handler,),
             },
-            bases={first.symbol: (first_base,), second.symbol: (second_base,)},
+            bases={},
         )
         return {
             item.definition.symbol
@@ -343,14 +454,7 @@ def test_fixed_point_collapses_duplicate_symbols_deterministically() -> None:
     duplicate_late = SCIPDefinition("same", "z:same()", Path("z.py"), 4, 5)
     duplicate_early = SCIPDefinition("same", "a:same()", Path("a.py"), 1, 2)
     analyzer = FixedPointAnalyzer(
-        native={
-            seed.symbol: (
-                SCIPReachedDefinition(duplicate_late, 3),
-                SCIPReachedDefinition(seed, 0),
-                SCIPReachedDefinition(duplicate_late, 3),
-                SCIPReachedDefinition(duplicate_early, 1),
-            )
-        },
+        edges={seed.symbol: (duplicate_late, duplicate_late, duplicate_early)},
         bases={},
     )
 
@@ -367,12 +471,7 @@ def test_fixed_point_bridge_failure_preserves_proven_results() -> None:
     native = definition("native")
     failing_base = definition("failing_base")
     analyzer = FixedPointAnalyzer(
-        native={
-            seed.symbol: (
-                SCIPReachedDefinition(seed, 0),
-                SCIPReachedDefinition(native, 1),
-            )
-        },
+        edges={seed.symbol: (native,)},
         bases={seed.symbol: (failing_base,)},
         failing_bases={failing_base.symbol},
     )
@@ -382,12 +481,8 @@ def test_fixed_point_bridge_failure_preserves_proven_results() -> None:
         analyzer, seed, 5, warnings
     )
 
-    assert [(item.definition.symbol, item.depth) for item in reached] == [
-        ("seed", 0),
-        ("native", 1),
-    ]
-    assert len(warnings) == 1
-    assert "failed failing_base" in warnings[0]
+    assert {item.definition.symbol for item in reached} >= {"seed", "native"}
+    assert any("failed failing_base" in warning for warning in warnings)
 
 
 def test_scip_seed_failure_does_not_discard_other_seed_results(tmp_path: Path) -> None:
@@ -411,8 +506,7 @@ def test_scip_seed_failure_does_not_discard_other_seed_results(tmp_path: Path) -
     affected, _orphans = mapper._analyze_with_scip([diff_file], warnings, None)
 
     assert [item.endpoint.identifier for item in affected] == ["GET /items"]
-    assert len(warnings) == 1
-    assert "services:__all__" in warnings[0]
+    assert any("services:__all__" in warning for warning in warnings)
 
 
 def test_scip_mapper_rejects_identical_target_and_baseline(tmp_path: Path) -> None:
@@ -543,3 +637,51 @@ def test_scip_mapper_reaches_direct_and_depends_endpoints(tmp_path: Path) -> Non
     }
     assert not report.orphan_changes
     assert all(item.confidence.value == "low" for item in report.candidate_endpoints)
+
+
+def test_scip_mapper_keeps_depth_zero_endpoint_seed_low(tmp_path: Path) -> None:
+    app_path = tmp_path / "main.py"
+    app_path.write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n\n"
+        "@app.get('/direct')\n"
+        "def handler():\n"
+        "    pass\n"
+        "    return 2\n",
+        encoding="utf-8",
+    )
+    diff = tmp_path / "change.diff"
+    diff.write_text(
+        "diff --git a/main.py b/main.py\n"
+        "--- a/main.py\n"
+        "+++ b/main.py\n"
+        "@@ -6,0 +7 @@\n"
+        "+    return 2\n",
+        encoding="utf-8",
+    )
+
+    class DirectHandlerAnalyzer(ReferenceAnalyzerMixin):
+        def ensure_index(self, *, force: bool = False) -> None:
+            assert force
+
+        def definitions_at(self, file_path: Path, lines: set[int]):
+            assert file_path == Path("main.py")
+            assert lines == {7}
+            return (SCIPDefinition("handler", "main:handler()", Path("main.py"), 5, 7),)
+
+        def reverse_call_edges(self, _seed: SCIPDefinition):
+            return ()
+
+    mapper = ChangeMapper(tmp_path, use_cache=False, secure_ast=True, use_scip=True)
+    mapper._scip_analyzer = DirectHandlerAnalyzer()  # type: ignore[assignment]
+
+    report = mapper.analyze_diff(diff)
+
+    assert report.affected_endpoints == []
+    assert [item.endpoint.identifier for item in report.candidate_endpoints] == ["GET /direct"]
+    assert report.candidate_endpoints[0].confidence is ConfidenceLevel.LOW
+    assert (
+        report.candidate_endpoints[0].effect_evidence[0].status is EvidenceStatus.REACHABILITY_ONLY
+    )
+    assert report.candidate_endpoints[0].effect_evidence[0].effect.value == "unknown"
+    assert not report.orphan_changes

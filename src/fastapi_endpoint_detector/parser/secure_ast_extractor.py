@@ -1390,6 +1390,7 @@ class SecureASTExtractor:
                     and route.source_span is not None
                 ):
                     source_owners: list[NativeRouteSourceOwnerEvidence] = []
+                    source_owners.extend(self._handler_import_owners(route, aliases, modules))
                     handler_dependency_expressions: list[
                         NativeRouteDependencyExpressionEvidence
                     ] = []
@@ -5229,6 +5230,76 @@ class SecureASTExtractor:
             modules,
             visited | {token},
             remaining_hops - 1,
+        )
+
+    def _handler_import_owners(  # noqa: PLR0911
+        self, route: _Route, aliases: dict[str, str], modules: dict[str, _Module]
+    ) -> tuple[NativeRouteSourceOwnerEvidence, ...]:
+        """Own only the live import used by an established imperative handler."""
+        module = modules.get(route.owner[0])
+        if (
+            module is None
+            or route.registration_kind != NativeRegistrationKind.IMPERATIVE
+            or route.source_span is None
+        ):
+            return ()
+        call = next(
+            (
+                node
+                for node in ast.walk(module.tree)
+                if isinstance(node, ast.Call)
+                and _native_span(module.path, node) == route.source_span
+            ),
+            None,
+        )
+        if call is None:
+            return ()
+        endpoint_keywords = [item.value for item in call.keywords if item.arg == "endpoint"]
+        expression = (
+            endpoint_keywords[0]
+            if len(endpoint_keywords) == 1
+            else call.args[1]
+            if not endpoint_keywords and len(call.args) > 1
+            else None
+        )
+        if (
+            self._resolve_handler(expression, module, aliases, modules, call.lineno)
+            != route.handler
+        ):
+            return ()
+        name = (
+            expression.id
+            if isinstance(expression, ast.Name)
+            else expression.value.id
+            if isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name)
+            else None
+        )
+        if name is None:
+            return ()
+        binding = self._import_binding_at(module, name, call.lineno)
+        if binding is None:
+            return ()
+        import_node = next(
+            (
+                statement
+                for statement in module.tree.body
+                if isinstance(statement, (ast.Import, ast.ImportFrom))
+                and statement.lineno == binding.line
+            ),
+            None,
+        )
+        if import_node is None:
+            return ()
+        return (
+            NativeRouteSourceOwnerEvidence(
+                side=self.snapshot_side,
+                owner_kind="import_binding",
+                qualified_binding=f"{module.name}.{name}",
+                related_binding=f"{route.handler.module}.{route.handler.name}",
+                confidence="established",
+                expression=ast.unparse(import_node)[:4096],
+                source_span=_native_span(module.path, import_node),
+            ),
         )
 
     def _resolve_handler(

@@ -55,7 +55,7 @@ def _project(
                 "contracts": [
                     {
                         "id": "read-state",
-                        "symbol": f"{root.name}.main.read_state",
+                        "symbol": "main.read_state",
                         "invocation": "function",
                         "operation": "read",
                         "channel": "custom",
@@ -63,7 +63,7 @@ def _project(
                     },
                     {
                         "id": "write-state",
-                        "symbol": f"{root.name}.main.write_state",
+                        "symbol": "main.write_state",
                         "invocation": "function",
                         "operation": "write",
                         "channel": "custom",
@@ -147,7 +147,7 @@ def _composite_project(root: Path, reader_bucket: str) -> tuple[Path, Path, Path
                 "contracts": [
                     {
                         "id": "read-state",
-                        "symbol": f"{root.name}.main.read_state",
+                        "symbol": "main.read_state",
                         "invocation": "function",
                         "operation": "read",
                         "channel": "custom",
@@ -155,7 +155,7 @@ def _composite_project(root: Path, reader_bucket: str) -> tuple[Path, Path, Path
                     },
                     {
                         "id": "write-state",
-                        "symbol": f"{root.name}.main.write_state",
+                        "symbol": "main.write_state",
                         "invocation": "function",
                         "operation": "write",
                         "channel": "custom",
@@ -248,6 +248,71 @@ def test_report_only_graph_is_exact_and_never_changes_candidates(tmp_path: Path)
     serialized = json.dumps(configured.model_dump(mode="json"))
     assert "orders:1" not in serialized
     assert "orders-test-namespace" not in serialized
+
+
+def test_flat_contract_symbols_exclude_renamed_checkout_and_wrong_module(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "checkout-name-is-not-a-module"
+    project.mkdir()
+    contracts, coupling, diff = _project(project, changed_callsite=True)
+    document = yaml.safe_load(contracts.read_text(encoding="utf-8"))
+    read_contract = next(item for item in document["contracts"] if item["id"] == "read-state")
+    write_contract = next(item for item in document["contracts"] if item["id"] == "write-state")
+    document["contracts"].extend(
+        [
+            {
+                **read_contract,
+                "id": "checkout-prefixed-read-decoy",
+                "symbol": "checkout_name_is_not_a_module.main.read_state",
+            },
+            {
+                **read_contract,
+                "id": "wrong-package-read-decoy",
+                "symbol": "wrong_package.main.read_state",
+            },
+            {
+                **write_contract,
+                "id": "checkout-prefixed-write-decoy",
+                "symbol": "checkout_name_is_not_a_module.main.write_state",
+            },
+            {
+                **write_contract,
+                "id": "wrong-package-write-decoy",
+                "symbol": "wrong_package.main.write_state",
+            },
+        ]
+    )
+    contracts.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+    report = ChangeMapper(
+        app_path=project,
+        config=Config(
+            analysis=AnalysisConfig(
+                effect_contracts=contracts,
+                resource_coupling=coupling,
+            )
+        ),
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+
+    audit = report.effect_contract_audit
+    assert audit is not None
+    assert audit.summary.matched_calls == 2
+    assert audit.summary.unmatched_contracts == 4
+    matched = {
+        item.contract_id: item.canonical_symbol for item in audit.occurrences if item.contract_id
+    }
+    assert matched == {
+        "read-state": "main.read_state",
+        "write-state": "main.write_state",
+    }
+    graph = report.resource_coupling_graph
+    assert graph is not None
+    assert [(edge.producer_contract_id, edge.consumer_contract_id) for edge in graph.edges] == [
+        ("write-state", "read-state")
+    ]
 
 
 @pytest.mark.parametrize(
@@ -622,8 +687,9 @@ def test_graph_tampering_is_rejected_and_all_formats_disclose_report_only(
 
     for output_format in ("text", "markdown", "html"):
         rendered = get_formatter(output_format).format(report)
-        assert "report-only" in rendered
-        assert "does not change candidates" in rendered
+        normalized = " ".join(rendered.split())
+        assert "report-only" in normalized
+        assert "does not change candidates" in normalized
     assert json.loads(get_formatter("json").format(report))["resource_coupling_graph"]
     assert yaml.safe_load(get_formatter("yaml").format(report))["resource_coupling_graph"]
 
@@ -655,7 +721,7 @@ def _message_project(root: Path) -> tuple[Path, Path, Path]:
                 "contracts": [
                     {
                         "id": "consume-topic",
-                        "symbol": f"{root.name}.main.consume",
+                        "symbol": "main.consume",
                         "invocation": "function",
                         "operation": "consume",
                         "channel": "message_bus",
@@ -663,7 +729,7 @@ def _message_project(root: Path) -> tuple[Path, Path, Path]:
                     },
                     {
                         "id": "publish-topic",
-                        "symbol": f"{root.name}.main.publish",
+                        "symbol": "main.publish",
                         "invocation": "function",
                         "operation": "publish",
                         "channel": "message_bus",

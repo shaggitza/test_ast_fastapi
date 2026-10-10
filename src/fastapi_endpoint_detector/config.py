@@ -5,11 +5,12 @@ This module handles configuration file parsing, validation, and provides
 sensible defaults for all configuration options.
 """
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal
+from urllib.parse import urlsplit
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from fastapi_endpoint_detector.analyzer.source_inventory import (
     SourceInventory,
@@ -54,6 +55,160 @@ class ParserConfig(BaseModel):
         ge=1,
         description="Maximum depth for dependency traversal.",
     )
+
+
+def _validate_observation_patterns(patterns: list[str]) -> list[str]:  # noqa: PLR0912
+    """Accept only bounded, root-relative glob patterns understood by Path.glob."""
+    if len(patterns) > 128:
+        raise ValueError("route observation pattern lists may contain at most 128 entries")
+    seen: set[str] = set()
+    for pattern in patterns:
+        if not pattern or pattern != pattern.strip() or len(pattern) > 512:
+            raise ValueError("route observation patterns must be non-empty strings up to 512 chars")
+        if "\x00" in pattern or "\\" in pattern:
+            raise ValueError("route observation patterns must use relative POSIX glob syntax")
+        posix = PurePosixPath(pattern)
+        windows = PureWindowsPath(pattern)
+        if posix.is_absolute() or windows.is_absolute() or windows.drive:
+            raise ValueError("route observation patterns must be relative to the application root")
+        if any(part in {".", ".."} for part in pattern.split("/")):
+            raise ValueError(
+                "route observation patterns cannot traverse outside the application root"
+            )
+        if "{" in pattern or "}" in pattern:
+            raise ValueError("route observation patterns do not support brace expansion")
+        in_class = False
+        class_has_content = False
+        for char in pattern:
+            if char == "[":
+                if in_class:
+                    raise ValueError("route observation pattern has an invalid character class")
+                in_class = True
+                class_has_content = False
+            elif char == "]":
+                if not in_class or not class_has_content:
+                    raise ValueError("route observation pattern has an invalid character class")
+                in_class = False
+            elif in_class:
+                class_has_content = True
+        if in_class:
+            raise ValueError("route observation pattern has an unterminated character class")
+        if pattern in seen:
+            raise ValueError(f"duplicate route observation pattern: {pattern}")
+        seen.add(pattern)
+    return patterns
+
+
+def _normalize_observation_origin(origin: str) -> str:
+    """Validate and canonicalize an explicitly configured HTTP/WebSocket origin."""
+    if not origin or origin != origin.strip() or any(char.isspace() for char in origin):
+        raise ValueError("trusted server origins must be explicit URL origins")
+    try:
+        parsed = urlsplit(origin)
+        # Accessing .port validates malformed and out-of-range ports.
+        _ = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"invalid trusted server origin {origin!r}: {exc}") from exc
+    if (
+        parsed.scheme.lower() not in {"http", "https", "ws", "wss"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.netloc.endswith(":")
+        or parsed.path not in {"", "/"}
+        or "?" in origin
+        or "#" in origin
+    ):
+        raise ValueError(
+            "trusted server origins must contain only an http(s) or ws(s) scheme and authority"
+        )
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+
+
+class RouteObservationConfig(BaseModel):
+    """Opt-in bounded extraction of client and deployment route observations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(
+        default=False,
+        strict=True,
+        description="Include bounded source route observations in analyze output.",
+    )
+    client_include_patterns: list[str] = Field(
+        default=["**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx", "**/*.svelte"],
+        description="Application-root-relative globs for client source files.",
+    )
+    deployment_include_patterns: list[str] = Field(
+        default=[
+            ".env",
+            ".env.*",
+            "**/.env",
+            "**/.env.*",
+            "**/Dockerfile*",
+            "**/*.Dockerfile",
+            "**/*.py",
+        ],
+        description="Application-root-relative globs for deployment observation files.",
+    )
+    max_files: int = Field(
+        default=10_000,
+        strict=True,
+        ge=1,
+        le=10_000,
+        description="Maximum number of files read across both observation categories.",
+    )
+    max_file_bytes: int = Field(
+        default=2_000_000,
+        strict=True,
+        ge=1,
+        le=16 * 1024 * 1024,
+        description="Maximum bytes read from any one observation source file.",
+    )
+    trusted_server_origins: dict[str, str] = Field(
+        default_factory=dict,
+        description="Explicit established server surface IDs mapped to trusted URL origins.",
+    )
+
+    @field_validator("client_include_patterns", "deployment_include_patterns", mode="before")
+    @classmethod
+    def validate_pattern_list_input(cls, value: object) -> object:
+        if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+            raise ValueError("route observation include patterns must be a list of strings")
+        return value
+
+    @field_validator("client_include_patterns", "deployment_include_patterns")
+    @classmethod
+    def validate_pattern_list(cls, value: list[str]) -> list[str]:
+        return _validate_observation_patterns(value)
+
+    @field_validator("trusted_server_origins", mode="before")
+    @classmethod
+    def validate_trusted_origin_mapping_input(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            raise ValueError("trusted_server_origins must be a mapping of surface IDs to origins")
+        if len(value) > 4096:
+            raise ValueError("trusted_server_origins may contain at most 4096 surface IDs")
+        if any(
+            not isinstance(key, str) or not isinstance(origin, str) for key, origin in value.items()
+        ):
+            raise ValueError("trusted_server_origins keys and values must be strings")
+        return value
+
+    @field_validator("trusted_server_origins")
+    @classmethod
+    def validate_trusted_origin_mapping(cls, value: dict[str, str]) -> dict[str, str]:
+        normalized: dict[str, str] = {}
+        for surface_id, origin in value.items():
+            if (
+                not surface_id
+                or surface_id != surface_id.strip()
+                or len(surface_id) > 2048
+                or "\x00" in surface_id
+            ):
+                raise ValueError("trusted server surface IDs must be non-empty exact identifiers")
+            normalized[surface_id] = _normalize_observation_origin(origin)
+        return normalized
 
 
 class AnalysisConfig(BaseModel):
@@ -125,6 +280,7 @@ class AnalysisConfig(BaseModel):
             description="Named package-owned custom-surface adapter preset.",
         )
     )
+    route_observations: RouteObservationConfig = Field(default_factory=RouteObservationConfig)
 
     @model_validator(mode="after")
     def validate_contract_sources(self) -> "AnalysisConfig":
@@ -141,6 +297,15 @@ class AnalysisConfig(BaseModel):
             raise ValueError("resource_coupling requires effect_contracts or effect_preset")
         if self.surface_contracts is not None and self.surface_preset is not None:
             raise ValueError("surface_contracts and surface_preset are mutually exclusive")
+        route_observations = self.route_observations
+        if (
+            route_observations.enabled
+            and not route_observations.client_include_patterns
+            and not route_observations.deployment_include_patterns
+        ):
+            raise ValueError(
+                "route_observations requires at least one client or deployment include pattern"
+            )
         return self
 
 

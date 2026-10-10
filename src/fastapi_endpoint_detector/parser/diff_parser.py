@@ -6,14 +6,17 @@ and extract structured change information.
 """
 
 import os
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from unidiff.patch import Hunk, PatchedFile, PatchSet
 
 from fastapi_endpoint_detector.models.diff import (
+    ChangedByteSpan,
     ChangeType,
     DiffFile,
     DiffHunk,
+    DiffLineContent,
 )
 
 
@@ -63,6 +66,10 @@ class DiffParser:
         """
         added_lines: list[int] = []
         removed_lines: list[int] = []
+        added_content: list[DiffLineContent] = []
+        removed_content: list[DiffLineContent] = []
+        group = 0
+        in_change_group = False
 
         for line in hunk:
             # unidiff already distinguishes source-side and target-side
@@ -70,8 +77,30 @@ class DiffParser:
             # metadata such as ``\\ No newline at end of file`` as context.
             if line.is_added and line.target_line_no is not None:
                 added_lines.append(line.target_line_no)
+                if not in_change_group:
+                    group += 1
+                    in_change_group = True
+                added_content.append(
+                    DiffLineContent(
+                        line_number=line.target_line_no,
+                        group=group,
+                        text=DiffParser._line_text(line.value),
+                    )
+                )
             elif line.is_removed and line.source_line_no is not None:
                 removed_lines.append(line.source_line_no)
+                if not in_change_group:
+                    group += 1
+                    in_change_group = True
+                removed_content.append(
+                    DiffLineContent(
+                        line_number=line.source_line_no,
+                        group=group,
+                        text=DiffParser._line_text(line.value),
+                    )
+                )
+            else:
+                in_change_group = False
 
         return DiffHunk(
             source_start=hunk.source_start,
@@ -80,6 +109,98 @@ class DiffParser:
             target_length=hunk.target_length,
             added_lines=added_lines,
             removed_lines=removed_lines,
+            added_content=added_content,
+            removed_content=removed_content,
+        )
+
+    @staticmethod
+    def _line_text(value: str) -> str:
+        """Remove only the unified-diff line terminator from source content."""
+        if value.endswith("\n"):
+            value = value[:-1]
+        if value.endswith("\r"):
+            value = value[:-1]
+        return value
+
+    @staticmethod
+    def _changed_pair_spans(
+        source: DiffLineContent,
+        target: DiffLineContent,
+    ) -> tuple[list[ChangedByteSpan], list[ChangedByteSpan]]:
+        """Project a changed line pair onto source and target UTF-8 byte columns."""
+        if source.text == target.text:
+            return (
+                [ChangedByteSpan(source.line_number, 0, len(source.text.encode("utf-8")), False)],
+                [ChangedByteSpan(target.line_number, 0, len(target.text.encode("utf-8")), False)],
+            )
+        source_spans: list[ChangedByteSpan] = []
+        target_spans: list[ChangedByteSpan] = []
+        matcher = SequenceMatcher(a=source.text, b=target.text, autojunk=False)
+        for operation, source_start, source_end, target_start, target_end in matcher.get_opcodes():
+            if operation == "equal":
+                continue
+            if source_start < source_end:
+                source_spans.append(
+                    ChangedByteSpan(
+                        source.line_number,
+                        len(source.text[:source_start].encode("utf-8")),
+                        len(source.text[:source_end].encode("utf-8")),
+                    )
+                )
+            if target_start < target_end:
+                target_spans.append(
+                    ChangedByteSpan(
+                        target.line_number,
+                        len(target.text[:target_start].encode("utf-8")),
+                        len(target.text[:target_end].encode("utf-8")),
+                    )
+                )
+        return source_spans, target_spans
+
+    @staticmethod
+    def get_changed_byte_spans(
+        diff_file: DiffFile,
+        *,
+        side: str,
+    ) -> list[ChangedByteSpan]:
+        """Return exact UTF-8 change intervals for one side of a parsed diff.
+
+        A hunk stores separate change groups so unrelated edits separated by
+        context are never paired. Unmatched and identical moved lines remain
+        whole-line, inexact changes and therefore cannot be used to suppress
+        dependency evidence.
+        """
+        if side not in {"source", "target"}:
+            raise ValueError("side must be 'source' or 'target'")
+        spans: list[ChangedByteSpan] = []
+        for hunk in diff_file.hunks:
+            removed_groups: dict[int, list[DiffLineContent]] = {}
+            added_groups: dict[int, list[DiffLineContent]] = {}
+            for line in hunk.removed_content:
+                removed_groups.setdefault(line.group, []).append(line)
+            for line in hunk.added_content:
+                added_groups.setdefault(line.group, []).append(line)
+            for group in sorted(set(removed_groups) | set(added_groups)):
+                removed = removed_groups.get(group, [])
+                added = added_groups.get(group, [])
+                paired_count = min(len(removed), len(added))
+                for index in range(paired_count):
+                    source_spans, target_spans = DiffParser._changed_pair_spans(
+                        removed[index], added[index]
+                    )
+                    spans.extend(source_spans if side == "source" else target_spans)
+                unmatched = removed[paired_count:] if side == "source" else added[paired_count:]
+                spans.extend(
+                    ChangedByteSpan(
+                        line.line_number,
+                        0,
+                        len(line.text.encode("utf-8")),
+                        False,
+                    )
+                    for line in unmatched
+                )
+        return sorted(
+            spans, key=lambda item: (item.line_number, item.start_column, item.end_column)
         )
 
     @staticmethod
