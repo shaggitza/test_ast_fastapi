@@ -828,7 +828,13 @@ class MypyAnalyzer:
 
         try:
             fscache = FileSystemCache()
-            self._build_result = mypy_build(sources=sources, options=options, fscache=fscache)
+            self._build_result = mypy_build(
+                sources=sources,
+                options=options,
+                fscache=fscache,
+                # mypy otherwise adds the process cwd even with no-site-packages.
+                alt_lib_path=str(self.module_root) if self.no_site_packages else None,
+            )
             analyzed_source_hashes: dict[str, str] = {}
 
             # Store the types map
@@ -5699,6 +5705,9 @@ class MypyAnalyzer:
                 "source_span_normalization": "source-call-order-verified-ast-spans-v2",
                 "max_depth": self.max_depth,
                 "no_site_packages": self.no_site_packages,
+                "hermetic_search_path_policy": (
+                    "explicit-module-root-without-cwd-v1" if self.no_site_packages else None
+                ),
                 "target_platform": (
                     self.target_platform if self.target_platform is not None else sys.platform
                 ),

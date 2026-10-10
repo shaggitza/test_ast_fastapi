@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import platform
 import re
@@ -146,17 +147,26 @@ def _source_provenance(checkout: Path, runner: Path) -> dict[str, str]:
     }
 
 
+def _read_wheel_snapshot(wheel: Path) -> bytes:
+    if wheel.stat().st_size > MAX_WHEEL_BYTES:
+        raise ValueError(f"wheel exceeds archive size limit: {wheel.name}")
+    with wheel.open("rb") as stream:
+        raw = stream.read(MAX_WHEEL_BYTES + 1)
+    if len(raw) > MAX_WHEEL_BYTES:
+        raise ValueError(f"wheel exceeds archive size limit: {wheel.name}")
+    return raw
+
+
 def extract_python_sources(
     wheel: Path, destination: Path, expected_distribution: str
 ) -> dict[str, Any]:
-    if wheel.stat().st_size > MAX_WHEEL_BYTES:
-        raise ValueError(f"wheel exceeds archive size limit: {wheel.name}")
-    raw_hash = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    raw = _read_wheel_snapshot(wheel)
+    raw_hash = hashlib.sha256(raw).hexdigest()
     if raw_hash != EXPECTED_WHEEL_SHA256[expected_distribution]:
         raise ValueError(f"wheel hash does not match pinned artifact: {wheel.name}")
     files: list[dict[str, str]] = []
     total = 0
-    with zipfile.ZipFile(wheel) as archive:
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
         names = archive.namelist()
         if len(names) > MAX_MEMBERS or len(names) != len(set(names)):
             raise ValueError(f"invalid or excessive wheel members: {wheel.name}")

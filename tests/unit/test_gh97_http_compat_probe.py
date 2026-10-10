@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import platform
 import subprocess
 import zipfile
@@ -16,6 +17,34 @@ from benchmarks.gh97_http_compat.probe import (
     extract_python_sources,
     run,
 )
+
+
+def test_extraction_uses_verified_snapshot_after_wheel_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel = tmp_path / "requests.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("requests-2.32.3.dist-info/METADATA", "Name: requests\nVersion: 2.32.3\n")
+        archive.writestr("requests/__init__.py", "verified = True\n")
+    verified = wheel.read_bytes()
+    monkeypatch.setitem(EXPECTED_WHEEL_SHA256, "requests", hashlib.sha256(verified).hexdigest())
+    original_read = probe._read_wheel_snapshot
+
+    def replace_after_read(path: Path) -> bytes:
+        raw = original_read(path)
+        if path == wheel:
+            with zipfile.ZipFile(wheel, "w") as archive:
+                archive.writestr(
+                    "requests-2.32.3.dist-info/METADATA", "Name: requests\nVersion: 2.32.3\n"
+                )
+                archive.writestr("requests/__init__.py", "unverified = True\n")
+        return raw
+
+    monkeypatch.setattr(probe, "_read_wheel_snapshot", replace_after_read)
+    output = tmp_path / "out"
+    result = extract_python_sources(wheel, output, "requests")
+    assert (output / "requests/__init__.py").read_text() == "verified = True\n"
+    assert result["wheel_sha256"] == "sha256:" + hashlib.sha256(verified).hexdigest()
 
 
 @pytest.mark.skipif(

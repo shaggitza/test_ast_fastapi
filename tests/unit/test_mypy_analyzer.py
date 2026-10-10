@@ -142,6 +142,33 @@ class TestMypyAnalyzerBasic:
         assert "optional_decoy" not in analyzer._trees
         assert str(ambient) not in analyzer._module_to_path.values()
 
+    def test_hermetic_analysis_excludes_cwd_but_retains_explicit_project_imports(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        app = tmp_path / "app"
+        app.mkdir()
+        (app / "main.py").write_text(
+            "from optional_cwd_decoy import decoy_call\n"
+            "from helpers import project_call\n"
+            "def handler() -> None:\n    decoy_call()\n    project_call()\n",
+            encoding="utf-8",
+        )
+        helper = app / "helpers.py"
+        helper.write_text("def project_call() -> None: pass\n", encoding="utf-8")
+        ambient = tmp_path / "ambient"
+        ambient.mkdir()
+        decoy = ambient / "optional_cwd_decoy.pyi"
+        decoy.write_text("def decoy_call() -> None: ...\n", encoding="utf-8")
+        monkeypatch.chdir(ambient)
+        ordinary = MypyAnalyzer(app, module_root=app)
+        ordinary._ensure_mypy_built()
+        assert ordinary._module_to_path["optional_cwd_decoy"] == str(decoy)
+        hermetic = MypyAnalyzer(app, module_root=app, no_site_packages=True)
+        hermetic._ensure_mypy_built()
+        assert "optional_cwd_decoy" not in hermetic._trees
+        assert hermetic._module_to_path["helpers"] == str(helper)
+        assert hermetic._build_result is not None
+
     def test_hermetic_analysis_excludes_interpreter_site_packages(self, tmp_path: Path) -> None:
         """Hermetic builds skip interpreter packages while ordinary builds retain them."""
         fastapi_spec = find_spec("fastapi")
