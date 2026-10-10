@@ -370,19 +370,33 @@ def test_fixture_resolver_rejects_fallback_decoy_and_accepts_explicit_project(
     assert not any("private_only" in e for e in result.errors)
 
 
+@pytest.mark.parametrize("value", [None, "", "/tmp/ambient-mypy-path"])
+@pytest.mark.parametrize("fail", [False, True])
 def test_direct_build_temporarily_removes_and_restores_mypy_path(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, value: str | None, fail: bool
 ) -> None:
-    monkeypatch.setenv("MYPYPATH", "/tmp/ambient-mypy-path")
+    if value is None:
+        monkeypatch.delenv("MYPYPATH", raising=False)
+    else:
+        monkeypatch.setenv("MYPYPATH", value)
 
-    def fail_build(*args: Any, **kwargs: Any) -> Any:
+    def guarded_action() -> None:
+        # Exercise the build guard itself, independent of pinned-wheel inputs
+        # and the probe's required interpreter version.
+        with runner._without_mypy_path():
+            assert "MYPYPATH" not in os.environ
+            if fail:
+                raise RuntimeError("simulated mypy build failure")
+
+    if fail:
+        with pytest.raises(RuntimeError, match="simulated mypy build failure"):
+            guarded_action()
+    else:
+        guarded_action()
+    if value is None:
         assert "MYPYPATH" not in os.environ
-        raise RuntimeError("simulated mypy build failure")
-
-    monkeypatch.setattr(mypy_build, "build", fail_build)
-    with pytest.raises(RuntimeError, match="simulated mypy build failure"):
-        run_probe(WHEEL, DEFAULT_MANIFEST)
-    assert os.environ["MYPYPATH"] == "/tmp/ambient-mypy-path"
+    else:
+        assert os.environ["MYPYPATH"] == value
 
 
 @pytest.mark.skipif(not WHEEL.is_file(), reason="requires the supplied pinned wheel")
