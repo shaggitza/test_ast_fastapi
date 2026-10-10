@@ -46,6 +46,17 @@ from fastapi_endpoint_detector.models.surface_contract import CallbackRangeMode
 
 # Type alias for line-level progress callback (file_path, line_number, symbol_name)
 LineProgressCallback = Callable[[str, int, str], None]
+_MYPY_POSIX_FALLBACK_ROOT = "/usr/local/lib/mypy"
+
+
+def _is_path_within(path: str, root: str) -> bool:
+    """Check lexical path containment without crossing path-component boundaries."""
+    absolute = str(Path(path).absolute())
+    absolute_root = str(Path(root).absolute())
+    try:
+        return os.path.commonpath((absolute, absolute_root)) == absolute_root
+    except ValueError:
+        return False
 
 
 class SourceFileRecord(Protocol):
@@ -827,7 +838,47 @@ class MypyAnalyzer:
             sys.path.insert(0, str(self.module_root))
 
         try:
-            fscache = FileSystemCache()
+            fscache: FileSystemCache
+            if self.no_site_packages and sys.platform != "win32":
+                # mypy 1.19.1 unconditionally adds /usr/local/lib/mypy to its
+                # typeshed search paths on POSIX. Hide that one ambient fallback
+                # at the per-build filesystem boundary; changing modulefinder's
+                # global path function would race with concurrent builds.
+                class HermeticFileSystemCache(FileSystemCache):
+                    @staticmethod
+                    def _is_fallback_path(path: str) -> bool:
+                        # Check both spellings: mypy may receive the configured
+                        # path while the OS resolves it through a symlink.
+                        return _is_path_within(path, _MYPY_POSIX_FALLBACK_ROOT) or (
+                            _is_path_within(
+                                os.path.realpath(path),
+                                os.path.realpath(_MYPY_POSIX_FALLBACK_ROOT),
+                            )
+                        )
+
+                    def stat_or_none(self, path: str) -> os.stat_result | None:
+                        if self._is_fallback_path(path):
+                            return None
+                        return super().stat_or_none(path)
+
+                    def listdir(self, path: str) -> list[str]:
+                        if self._is_fallback_path(path):
+                            raise FileNotFoundError(path)
+                        return super().listdir(path)
+
+                    def read(self, path: str) -> bytes:
+                        if self._is_fallback_path(path):
+                            raise FileNotFoundError(path)
+                        return super().read(path)
+
+                    def hash_digest(self, path: str) -> str:
+                        if self._is_fallback_path(path):
+                            raise FileNotFoundError(path)
+                        return super().hash_digest(path)
+
+                fscache = HermeticFileSystemCache()
+            else:
+                fscache = FileSystemCache()
             self._build_result = mypy_build(
                 sources=sources,
                 options=options,
