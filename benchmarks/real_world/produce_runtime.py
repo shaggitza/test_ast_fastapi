@@ -310,15 +310,24 @@ class CommandRunner:
         environment = os.environ.copy()
         started = time.monotonic()
         try:
-            completed = subprocess.run(
-                args,
-                cwd=app if app.is_dir() else app.parent,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=self.timeout_seconds,
-                env=environment,
-            )
+            # This producer compares the canonical framework catalog explicitly;
+            # project-controlled configuration files never select its authority.
+            with tempfile.TemporaryDirectory(prefix="framework-phase-config-") as directory:
+                config_path = Path(directory) / "config.json"
+                config_path.write_text(
+                    json.dumps({"analysis": {"surface_preset": "framework-v1"}}),
+                    encoding="utf-8",
+                )
+                args[3:3] = ["--config", str(config_path)]
+                completed = subprocess.run(
+                    args,
+                    cwd=app if app.is_dir() else app.parent,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=self.timeout_seconds,
+                    env=environment,
+                )
         except subprocess.TimeoutExpired as error:
             raise PhaseFailure("timeout", f"{phase} command timed out") from error
         except OSError as error:
@@ -1028,6 +1037,7 @@ def produce_snapshot_pair(
             "bootstrap_entry": configuration.bootstrap_entry,
             "app_variable": configuration.app_variable,
             "backend": configuration.backend,
+            "surface_preset": "framework-v1",
         },
         "backend": configuration.backend,
         "no_cache": True,

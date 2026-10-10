@@ -9,6 +9,7 @@ Uses mypy for type-aware, precise dependency tracking.
 
 from __future__ import annotations
 
+import hashlib
 import heapq
 import itertools
 import os
@@ -17,6 +18,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
+
+from mypy.errors import CompileError
 
 from fastapi_endpoint_detector.analyzer.effect_analyzer import EffectAnalyzer
 from fastapi_endpoint_detector.analyzer.effect_contract_auditor import (
@@ -34,6 +37,11 @@ from fastapi_endpoint_detector.analyzer.framework_phase_report import (
     unavailable_phase_report,
 )
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
+from fastapi_endpoint_detector.analyzer.mypy_incremental import (
+    BuildConfig,
+    IncrementalBuildError,
+    MypyIncrementalProvider,
+)
 from fastapi_endpoint_detector.analyzer.resource_coupling import build_resource_coupling_graph
 from fastapi_endpoint_detector.analyzer.scip_analyzer import (
     SCIPAnalyzer,
@@ -88,6 +96,7 @@ if TYPE_CHECKING:
         EndpointDependencies,
         SourceEvidenceSpan,
     )
+    from fastapi_endpoint_detector.analyzer.mypy_incremental import TypedBuild
     from fastapi_endpoint_detector.analyzer.source_inventory import SourceFile, SourceInventory
     from fastapi_endpoint_detector.models.diff import ChangedByteSpan, DiffFile
     from fastapi_endpoint_detector.models.effect_contract import LoadedEffectContracts
@@ -888,9 +897,8 @@ class ChangeMapper:
         """Map the explicitly selected framework-v1 catalog to a report payload.
 
         This report-only hook does not affect endpoint candidates or confidence.
-        The current mapper retains mypy's full build result rather than the
-        explicit TypedBuild receipt required for typed phase authority, so phase
-        records are deliberately unavailable until that provider is connected.
+        An independent bounded typed build authenticates the selected source
+        inventory. It establishes source bindings, never runtime execution.
         """
         if self.config.analysis.surface_preset != "framework-v1":
             return None
@@ -943,17 +951,60 @@ class ChangeMapper:
                     "outside the mapper's target project root"
                 ),
             )
+        try:
+            typed_build = self._framework_typed_build(analyzer)
+        except (CompileError, IncrementalBuildError, OSError, ValueError) as exc:
+            return unavailable_phase_report(
+                snapshot_side=snapshot_side.value,
+                limitation=f"bounded framework typed evidence is unavailable: {exc}",
+            )
         evidence = collect_framework_phase_evidence(
             inventory,
             self._surface_contracts,
             analyzer,
-            None,
+            typed_build,
             snapshot_side=snapshot_side,
             app_variable=self.app_variable,
             app_entry=self.app_entry,
             bootstrap_entry=self.bootstrap_entry,
         )
         return phase_report_payload(evidence)
+
+    def _framework_typed_build(self, analyzer: MypyAnalyzer) -> TypedBuild:
+        """Authenticate a bounded, complete allowlist before collecting phase types."""
+        source = self.source_inventory
+        if source.unresolved_imports or source.module_collisions or source.limitations:
+            raise IncrementalBuildError("selected source inventory has unresolved limitations")
+        selected, module_root = _mypy_inventory(source)
+        if len(selected.files) > 4096:
+            raise IncrementalBuildError("selected source inventory exceeds the file budget")
+        paths: dict[str, str] = {}
+        total_bytes = 0
+        for record in selected.files:
+            if any(path.is_symlink() for path in (record.path, *record.path.parents)):
+                raise IncrementalBuildError("selected source inventory now uses a symlink path")
+            if record.module in paths:
+                raise IncrementalBuildError("selected source inventory has duplicate module IDs")
+            size = record.path.stat().st_size
+            total_bytes += size
+            if size > analyzer.MAX_LAMBDA_SOURCE_FILE_BYTES or (
+                total_bytes > analyzer.MAX_LAMBDA_SOURCE_SNAPSHOT_BYTES
+            ):
+                raise IncrementalBuildError("selected source inventory exceeds the byte budget")
+            with record.path.open("rb") as stream:
+                data = stream.read(analyzer.MAX_LAMBDA_SOURCE_FILE_BYTES + 1)
+            if len(data) != size or hashlib.sha256(data).hexdigest() != record.sha256:
+                raise IncrementalBuildError("selected source inventory changed before typed build")
+            paths[record.module] = str(record.path)
+        if not paths:
+            raise IncrementalBuildError("selected source inventory is empty")
+        typed = MypyIncrementalProvider(BuildConfig(module_root)).build(paths)
+        if dict(typed.report.source_digests_before) != dict(typed.report.source_digests_after):
+            raise IncrementalBuildError("selected source inventory changed during typed build")
+        expected = {record.module: record.sha256 for record in selected.files}
+        if dict(typed.report.source_digests_after) != expected:
+            raise IncrementalBuildError("typed source receipt differs from selected inventory")
+        return typed
 
     @property
     def scip_analyzer(self) -> SCIPAnalyzer:

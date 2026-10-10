@@ -727,3 +727,29 @@ def test_receipt_request_binds_snapshot_side_and_actual_diff_bytes(
     request.snapshot.diff_path.write_text("changed diff bytes\n")
     with pytest.raises(ProducerError, match="request_sha256"):
         producer._validate_evidence(receipt, request)
+
+
+def test_secure_public_command_emits_source_bound_startup_manifest(tmp_path: Path) -> None:
+    spec = _inputs(tmp_path)
+    source = spec.app_path / "main.py"
+    source.write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "@app.on_event('startup')\n"
+        "def startup() -> None: pass\n"
+    )
+    request = replace(
+        _request_for_source_only_test(spec),
+        phase_manifest_state={},
+        phase_manifest_source_root=spec.app_path,
+    )
+    result = CommandRunner(timeout_seconds=120)("secure", "impact", request)
+    assert result.impact is not None
+    assert request.phase_manifest_state is not None
+    entries = request.phase_manifest_state["entries"]
+    assert len(entries) == 1
+    assert entries[0]["phase"] == "startup"
+    assert entries[0]["callback"]["module"] == "main"
+    assert entries[0]["callback"]["symbol"] == "startup"
+    assert entries[0]["callback"]["file"] == str(source.resolve())
+    assert entries[0]["callback_file_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
