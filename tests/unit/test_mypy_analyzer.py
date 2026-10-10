@@ -202,6 +202,81 @@ class TestMypyAnalyzerBasic:
         assert _is_path_within(str(decoy), str(fallback))
         assert not _is_path_within(str(tmp_path / "usr-local-mypy-extra/file.pyi"), str(fallback))
 
+    def test_hermetic_cache_preserves_bundled_typeshed_under_fallback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The authenticated mypy bundle remains readable inside a fallback root."""
+        data_dir = Path(mypy.build.default_data_dir()).resolve()
+        typeshed = data_dir / "typeshed"
+        builtins = typeshed / "stdlib" / "builtins.pyi"
+        assert builtins.is_file()
+        app = tmp_path / "app"
+        app.mkdir()
+        (app / "main.py").write_text("value: int = 1\n", encoding="utf-8")
+        original_default_lib_path = modulefinder.default_lib_path
+        original_build = mypy.build.build
+        captured_caches = []
+
+        def capture_cache(*args: Any, **kwargs: Any) -> Any:
+            captured_caches.append(kwargs["fscache"])
+            return original_build(*args, **kwargs)
+
+        monkeypatch.setattr(mypy_analyzer, "_MYPY_POSIX_FALLBACK_ROOT", str(data_dir))
+        monkeypatch.setattr(mypy.build, "build", capture_cache)
+        monkeypatch.setattr(
+            modulefinder,
+            "default_lib_path",
+            lambda actual_data_dir, pyversion, custom_typeshed_dir: [
+                *original_default_lib_path(actual_data_dir, pyversion, custom_typeshed_dir),
+                str(data_dir),
+            ],
+        )
+
+        analyzer = MypyAnalyzer(app, module_root=app, no_site_packages=True)
+        analyzer._ensure_mypy_built()
+
+        assert "builtins" in analyzer._trees
+        assert len(captured_caches) == 1
+        assert captured_caches[0].read(str(builtins)) == builtins.read_bytes()
+        assert captured_caches[0].stat_or_none(str(typeshed)) is not None
+
+    def test_hermetic_cache_rejects_bundled_typeshed_symlink_and_parent_escapes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fallback = tmp_path / "fallback"
+        bundled = fallback / "typeshed"
+        bundled.mkdir(parents=True)
+        outside = tmp_path / "outside.pyi"
+        outside.write_text("DECOY: int\n")
+        (fallback / "ambient.pyi").write_text("AMBIENT: int\n")
+        link = bundled / "escape.pyi"
+        link.symlink_to(outside)
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "main.py").write_text("value: int = 1\n")
+        captured_caches = []
+
+        def capture_cache(*args: Any, **kwargs: Any) -> Any:
+            captured_caches.append(kwargs["fscache"])
+            raise RuntimeError("controlled cache capture")
+
+        monkeypatch.setattr(mypy_analyzer, "_MYPY_POSIX_FALLBACK_ROOT", str(fallback))
+        monkeypatch.setattr(mypy.build, "default_data_dir", lambda: str(fallback))
+        monkeypatch.setattr(mypy.build, "build", capture_cache)
+        with pytest.raises(RuntimeError, match="controlled cache capture"):
+            MypyAnalyzer(project, module_root=project, no_site_packages=True)._ensure_mypy_built()
+        assert len(captured_caches) == 1
+        cache = captured_caches[0]
+        for candidate in (
+            link,
+            bundled / ".." / "ambient.pyi",
+            bundled / ".." / ".." / "outside.pyi",
+        ):
+            assert cache.stat_or_none(str(candidate)) is None
+            for operation in (cache.read, cache.hash_digest, cache.listdir):
+                with pytest.raises(FileNotFoundError):
+                    operation(str(candidate))
+
     def test_hermetic_analysis_excludes_cwd_but_retains_explicit_project_imports(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

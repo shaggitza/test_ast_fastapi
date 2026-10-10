@@ -798,6 +798,7 @@ class MypyAnalyzer:
             raise MypyAnalyzerError("mypy is not installed")
 
         from mypy.build import build as mypy_build
+        from mypy.build import default_data_dir
         from mypy.fscache import FileSystemCache
         from mypy.modulefinder import BuildSource
         from mypy.options import Options
@@ -845,6 +846,10 @@ class MypyAnalyzer:
                 # at the per-build filesystem boundary; changing modulefinder's
                 # global path function would race with concurrent builds.
                 class HermeticFileSystemCache(FileSystemCache):
+                    def __init__(self) -> None:
+                        super().__init__()
+                        self._bundled_typeshed = Path(default_data_dir()).resolve() / "typeshed"
+
                     @staticmethod
                     def _is_fallback_path(path: str) -> bool:
                         # Check both spellings: mypy may receive the configured
@@ -856,23 +861,31 @@ class MypyAnalyzer:
                             )
                         )
 
+                    def _is_blocked_fallback_path(self, path: str) -> bool:
+                        if not self._is_fallback_path(path):
+                            return False
+                        return not _is_path_within(
+                            os.path.realpath(path),
+                            os.path.realpath(self._bundled_typeshed),
+                        )
+
                     def stat_or_none(self, path: str) -> os.stat_result | None:
-                        if self._is_fallback_path(path):
+                        if self._is_blocked_fallback_path(path):
                             return None
                         return super().stat_or_none(path)
 
                     def listdir(self, path: str) -> list[str]:
-                        if self._is_fallback_path(path):
+                        if self._is_blocked_fallback_path(path):
                             raise FileNotFoundError(path)
                         return super().listdir(path)
 
                     def read(self, path: str) -> bytes:
-                        if self._is_fallback_path(path):
+                        if self._is_blocked_fallback_path(path):
                             raise FileNotFoundError(path)
                         return super().read(path)
 
                     def hash_digest(self, path: str) -> str:
-                        if self._is_fallback_path(path):
+                        if self._is_blocked_fallback_path(path):
                             raise FileNotFoundError(path)
                         return super().hash_digest(path)
 
