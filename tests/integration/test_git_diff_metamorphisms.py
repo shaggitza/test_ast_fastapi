@@ -179,6 +179,62 @@ def test_real_git_paths_identify_duplicate_basenames_with_windows_projection(
     assert registry.get_by_file(changed[0].path.name) == []
 
 
+def test_real_git_import_replacement_tracks_static_class_handler_ownership(
+    tmp_path: Path,
+) -> None:
+    baseline_files = {
+        "main.py": (
+            "from fastapi import FastAPI\n"
+            "from views import Views as Alias\n"
+            "app = FastAPI()\n"
+            "app.add_api_route('/items', Alias.read, methods=['GET'])\n"
+        ),
+        "views.py": "class Views:\n    @staticmethod\n    def read(): return 1\n",
+    }
+    target_files = {
+        **baseline_files,
+        "main.py": (
+            "from fastapi import FastAPI\n"
+            "import views as handlers\n"
+            "app = FastAPI()\n"
+            "app.add_api_route('/items', handlers.Views.read, methods=['GET'])\n"
+        ),
+    }
+    target_root, baseline_root, diff = _committed_pair(tmp_path, baseline_files, target_files)
+
+    report = _analyze_pair(target_root, baseline_root, diff)
+
+    assert not report.errors
+    assert [item.endpoint.identifier for item in report.candidate_endpoints] == ["GET /items"]
+    assert not report.orphan_changes
+
+
+def test_real_git_removed_import_retains_baseline_static_handler_ownership(
+    tmp_path: Path,
+) -> None:
+    baseline_main = (
+        "from fastapi import FastAPI\n"
+        "from views import Views as Alias\n"
+        "app = FastAPI()\n"
+        "app.add_api_route('/items', Alias.read, methods=['GET'])\n"
+    )
+    baseline_files = {
+        "main.py": baseline_main,
+        "views.py": "class Views:\n    @staticmethod\n    def read(): return 1\n",
+    }
+    target_files = {
+        **baseline_files,
+        "main.py": baseline_main.replace("from views import Views as Alias\n", ""),
+    }
+    target_root, baseline_root, diff = _committed_pair(tmp_path, baseline_files, target_files)
+
+    report = _analyze_pair(target_root, baseline_root, diff)
+
+    assert not report.errors
+    assert [item.endpoint.identifier for item in report.candidate_endpoints] == ["GET /items"]
+    assert not report.orphan_changes
+
+
 def test_real_git_deletion_uses_baseline_reachability_and_keeps_unrelated_orphans(
     tmp_path: Path,
 ) -> None:

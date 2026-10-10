@@ -396,15 +396,27 @@ class TextFormatter(BaseFormatter):
                 str(ep.handler.line_number),
                 ep.discovery_status.value,
                 (
-                    f"{ep.surface.contract_id} ({ep.surface.match_kind.value}) "
-                    f"{ep.surface.callback_mode.value}/{ep.surface.execution_mode.value} "
-                    f"{ep.surface.config_hash}"
+                    f"{ep.surface.contract_id} ({ep.surface.match_kind.value})"
                     if ep.surface is not None
                     else ""
                 ),
             )
 
         console.print(table)
+        for ep in endpoints:
+            if ep.surface is None:
+                continue
+            # Narrow table columns can ellipsize execution modes and hashes.
+            # Keep the complete contract evidence in ordinary, literal text.
+            console.print(
+                Text(
+                    f"Surface contract for {self._display_path(ep.identifier)}: "
+                    f"{ep.surface.contract_id} ({ep.surface.match_kind.value}); "
+                    f"callback {ep.surface.callback_mode.value}; "
+                    f"execution {ep.surface.execution_mode.value}; "
+                    f"config {ep.surface.config_hash}"
+                )
+            )
         console.print(f"\nTotal: {len(endpoints)} endpoints")
 
         return output.getvalue()
