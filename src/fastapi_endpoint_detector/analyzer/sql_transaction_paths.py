@@ -445,6 +445,27 @@ def _module_snapshot(root: Path, module: str) -> tuple[str, bytes] | None:
         return None
 
 
+def _resolve_imported_module(root: Path, current_module: str, node: ast.ImportFrom) -> str | None:
+    """Resolve an import using the package represented by the source snapshot."""
+    if node.level == 0:
+        return node.module
+    module_path = Path("source", *current_module.split(".")).with_suffix(".py.txt")
+    current_source = _safe_source_path(root, module_path.as_posix())
+    if current_source is None or not current_source.is_file():
+        return None
+    init_path = Path("source", *current_module.split("."), "__init__.py.txt")
+    init_source = _safe_source_path(root, init_path.as_posix())
+    is_package = init_source is not None and init_source.is_file()
+    package_parts = current_module.split(".") if is_package else current_module.split(".")[:-1]
+    remove = node.level - 1
+    if remove >= len(package_parts):
+        return None
+    base = package_parts[: len(package_parts) - remove]
+    if node.module:
+        base.extend(node.module.split("."))
+    return ".".join(base) or None
+
+
 def _attribute_on_name(call: ast.Call, attribute: str, name: str) -> bool:
     return (
         isinstance(call.func, ast.Attribute)
@@ -829,11 +850,20 @@ def _fixture_source_projections(  # noqa: PLR0912, PLR0915
         wrapper_scope_calls: dict[str, str] = {}
         wrapper_import_nodes: dict[str, ast.ImportFrom] = {}
         for node in _owned_nodes(wrapper_fn):
-            if isinstance(node, ast.ImportFrom) and node.module:
+            if isinstance(node, ast.ImportFrom):
+                imported_module = _resolve_imported_module(root, wrapper_module, node)
                 for alias in node.names:
                     local_name = alias.asname or alias.name
-                    wrapper_scope_calls[local_name] = f"{node.module}.{alias.name}"
-                    wrapper_import_nodes[local_name] = node
+                    symbol_module = imported_module
+                    symbol_name = alias.name
+                    if node.module is None:
+                        symbol_module = (
+                            f"{imported_module}.{alias.name}" if imported_module else None
+                        )
+                        symbol_name = alias.name
+                    if symbol_module:
+                        wrapper_scope_calls[local_name] = f"{symbol_module}.{symbol_name}"
+                        wrapper_import_nodes[local_name] = node
             if isinstance(node, ast.AsyncWith):
                 for item in node.items:
                     captured = _target_key(item.optional_vars) if item.optional_vars else None

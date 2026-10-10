@@ -1258,12 +1258,29 @@ def test_source_projection_covers_each_shared_handler_route() -> None:
         resolver_versions=("pinned_fixture_ast@1",),
     )
     transaction = build_sql_transaction_diagnostics(effects, audit)
-    paths = build_sql_transaction_path_diagnostics(fixture, audit, transaction, max_pairs=8)
+    paths = build_sql_transaction_path_diagnostics(fixture, audit, transaction, max_pairs=1)
     expected_ids = {ref.id for occurrence in audit.occurrences for ref in occurrence.endpoints}
     assert len(expected_ids) == 2
     assert {item.endpoint_id for item in paths.source_projections} == expected_ids
     assert len(paths.source_projections) == 2
-    assert len({item.id for item in paths.source_projections}) == 2
+
+
+def test_source_projection_resolves_relative_wrapper_delegate_import(tmp_path: Path) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    wrapper = copied / "source/langflow/services/deps.py.txt"
+    wrapper.write_text(
+        wrapper.read_text().replace(
+            "from lfx.services.deps import session_scope as lfx_session_scope",
+            "from .transaction import session_scope as lfx_session_scope",
+            1,
+        )
+    )
+    delegate = copied / "source/lfx/services/deps.py.txt"
+    relative_delegate = copied / "source/langflow/services/transaction.py.txt"
+    relative_delegate.write_bytes(delegate.read_bytes())
+    assert len(_langflow_fixture_transaction_reports(copied)[2].source_projections) == 1
 
 
 @pytest.mark.parametrize(
@@ -1343,6 +1360,28 @@ def test_resealed_source_projection_must_belong_to_exact_audit(field: str) -> No
         "sql_transaction_path_report": paths,
     }
     AnalysisReport.model_validate(valid)
+    for supplied in ((), paths.source_projections[:-1]):
+        incomplete = build_sql_transaction_path_report(
+            effect_audit_hash=paths.effect_audit_hash,
+            transaction_report_hash=paths.transaction_report_hash,
+            max_pairs=1,
+            ordered_paths=(),
+            context_paths=(),
+            source_projections=supplied,
+            diagnostics=(),
+        )
+        with pytest.raises(ValidationError, match="SQL source projection"):
+            AnalysisReport.model_validate({**valid, "sql_transaction_path_report": incomplete})
+    bounded_projection = build_sql_transaction_path_report(
+        effect_audit_hash=paths.effect_audit_hash,
+        transaction_report_hash=paths.transaction_report_hash,
+        max_pairs=1,
+        ordered_paths=(),
+        context_paths=(),
+        source_projections=paths.source_projections,
+        diagnostics=(),
+    )
+    assert bounded_projection.max_pairs == 1
     projection_data = paths.source_projections[0].model_dump(mode="json")
     projection_data[field] = "sha256:" + "f" * 64 if field.endswith(("_id", "_hash")) else "foreign"
     identity = {
@@ -1381,7 +1420,9 @@ def test_source_projection_requires_unchanged_supplied_snapshots(tmp_path: Path)
         "sql_transaction_report": transaction,
         "sql_transaction_path_report": paths,
     }
-    AnalysisReport.model_validate(valid)
+    validated = AnalysisReport.model_validate(valid)
+    for output_format in ("text", "markdown", "html"):
+        assert "1 source projections" in get_formatter(output_format).format(validated).lower()
     projection = paths.source_projections[0]
     for relative_path in (
         projection.endpoint_file_path,

@@ -460,10 +460,7 @@ class SQLTransactionPathReport(_StrictModel):
         if self.summary != expected:
             raise ValueError("SQL path summary does not match report contents")
         if (
-            len(self.ordered_paths)
-            + len(self.context_paths)
-            + len(self.source_projections)
-            + len(self.diagnostics)
+            len(self.ordered_paths) + len(self.context_paths) + len(self.diagnostics)
             > self.max_pairs
         ):
             raise ValueError("SQL path report exceeds its atomic pair limit")
