@@ -75,8 +75,10 @@ def _diagnostic_line(item: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def _normalize_diagnostic(item: str, checkout: Path, environment: Path) -> str:
-    normalized = re.sub(r"/tmp/gh97_http_wheels_[^/]+", "/tmp/<private-probe>", item)
+def _normalize_diagnostic(item: str, checkout: Path, environment: Path, probe_root: Path) -> str:
+    # Diagnostics may use either slash style, regardless of the host path style.
+    root_pattern = re.escape(probe_root.resolve().as_posix()).replace("/", r"[\\/]")
+    normalized = re.sub(root_pattern + r"(?=[\\/]|$)", "<private-probe>", item)
     normalized = re.sub(r"/[^\s\"']*/mypy/typeshed/", "<typeshed>/", normalized)
     for path, label in sorted(
         ((checkout, "<analyzer-project>"), (environment, "<python-environment>")),
@@ -332,7 +334,7 @@ def run(wheels: dict[str, Path] = WHEELS) -> dict[str, Any]:
         ]
         raw_diagnostics = (
             [
-                _normalize_diagnostic(str(item), source_root, Path(sys.prefix))
+                _normalize_diagnostic(str(item), source_root, Path(sys.prefix), root)
                 for item in analyzer._build_result.errors
             ]
             if analyzer._build_result

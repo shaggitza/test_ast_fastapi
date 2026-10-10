@@ -129,19 +129,35 @@ def test_stale_product_module_is_rejected(tmp_path: Path, monkeypatch: pytest.Mo
 
 
 def test_diagnostic_paths_are_portable_without_losing_typeshed_locations() -> None:
+    probe_root = Path("/var/tmp/gh97_http_wheels_random")
     item = (
         "/workspace/project/.venv/lib/python3.11/site-packages/mypy/typeshed/stdlib/builtins.pyi: "
         "note: /workspace/project/helper.py /workspace/project/.venv/lib/dependency.py "
-        "/tmp/gh97_http_wheels_random/app/fixture.py:12: error"
+        "/var/tmp/gh97_http_wheels_random/app/fixture.py:12: error; "
+        "/tmp/gh97_http_wheels_unrelated/app/fixture.py:13: error"
     )
     normalized = probe._normalize_diagnostic(
-        item, Path("/workspace/project"), Path("/workspace/project/.venv")
+        item,
+        Path("/workspace/project"),
+        Path("/workspace/project/.venv"),
+        probe_root,
     )
     assert normalized == (
         "<typeshed>/stdlib/builtins.pyi: note: <analyzer-project>/helper.py "
-        "<python-environment>/lib/dependency.py /tmp/<private-probe>/app/fixture.py:12: error"
+        "<python-environment>/lib/dependency.py <private-probe>/app/fixture.py:12: error; "
+        "/tmp/gh97_http_wheels_unrelated/app/fixture.py:13: error"
     )
     assert probe._diagnostic_line(normalized) == 12
+
+
+def test_diagnostic_probe_root_accepts_windows_separators() -> None:
+    normalized = probe._normalize_diagnostic(
+        r"\var\tmp\gh97_http_wheels_random\app\fixture.py:7: error",
+        Path("/checkout"),
+        Path("/python"),
+        Path("/var/tmp/gh97_http_wheels_random"),
+    )
+    assert normalized == r"<private-probe>\app\fixture.py:7: error"
 
 
 def test_source_provenance_survives_result_commits_and_rejects_dirty_sources(
