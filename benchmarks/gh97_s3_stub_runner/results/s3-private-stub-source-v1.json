@@ -1572,11 +1572,11 @@
       "fastapi_endpoint_detector.models.effect_contract_audit": "/tmp/test-ast-gh97-s3-module-root-20261010/src/fastapi_endpoint_detector/models/effect_contract_audit.py",
       "fastapi_endpoint_detector.models.endpoint": "/tmp/test-ast-gh97-s3-module-root-20261010/src/fastapi_endpoint_detector/models/endpoint.py"
     },
-    "product_revision": "eefcede5f9176706c7169bd52e53c896a757a5d1",
+    "product_revision": "5c83496ca5e580e686329eaaf5e707ed0fa61373",
     "product_root": "/tmp/test-ast-gh97-s3-module-root-20261010/src",
     "product_source_sha256": {
       "fastapi_endpoint_detector.analyzer.effect_contract_auditor": "sha256:c6ecd7210e7c4fc054010c80e9df0961b1510fd9cb9599faa49a27e751258d57",
-      "fastapi_endpoint_detector.analyzer.mypy_analyzer": "sha256:5a7ce15649224b39b2be90a8ebdd3c4e47bc5f0aebb0d9bbf91660e06648ac7b",
+      "fastapi_endpoint_detector.analyzer.mypy_analyzer": "sha256:4fe8e0fa3a872bccab33739f175ecb7aeae4f4734a0941fccc20ac2d88625cdb",
       "fastapi_endpoint_detector.models.effect_contract": "sha256:b9e65ab6aead6392e98ba80ca59418820495b0f2e6f53864c868347b1bc3d7b3",
       "fastapi_endpoint_detector.models.effect_contract_audit": "sha256:4d4771903cb153350710e81e59e2c880a489ff4c1b40a387b8242c8132a0bcb8",
       "fastapi_endpoint_detector.models.endpoint": "sha256:543a97269f4665fbb7eb3e2752e728307feb5e688c7eae37cab023e1c7fce138"
