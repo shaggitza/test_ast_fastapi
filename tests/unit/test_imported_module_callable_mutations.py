@@ -203,6 +203,25 @@ def test_nested_global_writes_override_outer_parameter_and_local(tmp_path: Path)
     assert handler_call.canonical_symbol is None
 
 
+def test_nested_global_name_rebind_is_detected_after_declaration(tmp_path: Path) -> None:
+    """A direct global-name write remains visible after lexical binding collection."""
+    app = tmp_path / "app"
+    app.mkdir()
+    sites = _call_sites(
+        app,
+        "import httpx as client\n"
+        "def outer(client: object, replacement: object) -> None:\n"
+        "    def mutate() -> None:\n"
+        "        global client\n"
+        "        client = replacement\n"
+        "def handler(url: str) -> None:\n"
+        "    client.get(url)\n",
+    )
+    handler_call = next(site for site in sites if site.source_spelling == "client.get")
+    assert handler_call.status == CallResolutionStatus.AMBIGUOUS
+    assert handler_call.canonical_symbol is None
+
+
 def test_nested_global_declaration_without_write_preserves_exact_call(tmp_path: Path) -> None:
     """A global declaration alone does not count as a module mutation."""
     app = tmp_path / "app"

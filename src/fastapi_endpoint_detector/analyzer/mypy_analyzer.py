@@ -2817,7 +2817,6 @@ class MypyAnalyzer:
 
                     def visit_Global(self, child: ast.Global) -> None:
                         global_names.update(child.names)
-                        local_names.difference_update(child.names)
 
                     def visit_Nonlocal(self, child: ast.Nonlocal) -> None:
                         local_names.difference_update(child.names)
@@ -2877,6 +2876,7 @@ class MypyAnalyzer:
                 bindings = Bindings()
                 for statement in node.body:
                     bindings.visit(statement)
+                local_names.difference_update(global_names)
                 if self_nonlocal[0]:
                     self.unsupported_nonlocal = True
                 previous = self.shadowed
