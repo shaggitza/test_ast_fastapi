@@ -28,6 +28,7 @@ from fastapi_endpoint_detector.parser.fastapi_extractor import (
     FastAPIExtractor,
     FastAPIExtractorError,
 )
+from fastapi_endpoint_detector.parser.runtime_entry import select_runtime_app
 from fastapi_endpoint_detector.parser.secure_ast_extractor import SecureASTExtractor
 
 
@@ -1147,6 +1148,76 @@ def package_route():
     assert endpoints[0].handler.file_path == routes
     assert "runtime_package" not in sys.modules
     assert "runtime_package.routes" not in sys.modules
+
+
+def test_runtime_extractor_selects_main_in_default_nonpackage_directory(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    main = project / "main.py"
+    main.write_text(
+        """from fastapi import FastAPI
+
+service = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+@service.get("/default-directory")
+def default_directory_route():
+    return {}
+"""
+    )
+
+    endpoints = FastAPIExtractor(project, app_variable="service").extract_endpoints()
+
+    assert [endpoint.identifier for endpoint in endpoints] == ["GET /default-directory"]
+    assert endpoints[0].handler.file_path == main
+
+
+def test_runtime_extractor_rejects_ambiguous_default_directory(tmp_path: Path) -> None:
+    project = tmp_path / "ambiguous_project"
+    project.mkdir()
+    for filename in ("main.py", "alternate.py"):
+        (project / filename).write_text("from fastapi import FastAPI\napp = FastAPI()\n")
+
+    with pytest.raises(FastAPIExtractorError, match="--app-entry"):
+        FastAPIExtractor(project).extract_endpoints()
+
+
+def test_default_directory_selection_ignores_hostile_cached_module_and_restores_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "isolated_project"
+    project.mkdir()
+    (project / "main.py").write_text(
+        """from fastapi import FastAPI
+from local_helper import ROUTE_PATH
+
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+@app.get(ROUTE_PATH)
+def local_route():
+    return {}
+"""
+    )
+    (project / "local_helper.py").write_text('ROUTE_PATH = "/local-helper"\n')
+    hostile = ModuleType("local_helper")
+    hostile.__dict__["ROUTE_PATH"] = "/hostile-cache"
+    monkeypatch.setitem(sys.modules, "local_helper", hostile)
+    original_path = list(sys.path)
+    original_meta_path = list(sys.meta_path)
+
+    app = select_runtime_app(
+        project,
+        app_path=project,
+        app_variable="app",
+    )
+
+    assert isinstance(app, FastAPI)
+    assert [route.path for route in app.routes if hasattr(route, "path")] == ["/local-helper"]
+    assert sys.modules["local_helper"] is hostile
+    assert sys.path == original_path
+    assert sys.meta_path == original_meta_path
 
 
 def test_runtime_extractor_imports_nested_package_file_with_relative_routes(
