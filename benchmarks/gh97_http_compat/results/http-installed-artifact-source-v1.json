@@ -2,16 +2,17 @@
   "analysis_config": {
     "ambient_mypypath": "excluded",
     "max_depth": 2,
+    "module_root_policy": "explicit_verified_extracted_package_root",
     "no_site_packages": true,
     "preset": "http-clients-v1",
     "target_platform": "linux",
     "track_transitive": true
   },
-  "analyzer_source_tree_sha": "80b3afd8a8c2c6e2dda44524fbf782d076e30423",
+  "analyzer_source_tree_sha": "e1594f000b8d46fff7067984c89a0fef7f243512",
   "audit_counts": {
-    "ambiguous": 0,
+    "ambiguous": 1,
     "matched": 30,
-    "unmatched": 2,
+    "unmatched": 1,
     "unresolved": 0
   },
   "call_count": 32,
@@ -244,7 +245,7 @@
   },
   "fixture_diagnostics": [],
   "fixture_sha256": "sha256:9501c8e223991167b331bd91bc976503716c325985d15b5f4cf329c579533c3f",
-  "git_revision": "cd6a87deecd328cf0eae61ae3cfe774c6cc2264f",
+  "git_revision": "090b264751736e1f56ea8eb665fa57e97262a883",
   "global_diagnostic_count": 212,
   "matched_call_count": 30,
   "missing_dependency_diagnostics": [
@@ -257,10 +258,12 @@
         {
           "keyword": null,
           "positional_index": 0,
-          "reason_code": "dynamic_argument",
+          "reason_code": null,
           "source_index": 0,
-          "status": "unavailable",
-          "value_hashes": []
+          "status": "exact",
+          "value_hashes": [
+            "sha256:b53e20aba39adfcf6ae1931406ef2ec33a660916f7f3c0c36ad6e46ff8f86cb8"
+          ]
         }
       ],
       "audit_status": "matched",
@@ -282,10 +285,12 @@
       },
       "resolver_status": "exact",
       "resource": {
-        "reason_code": "dynamic_argument",
+        "reason_code": null,
         "schema_version": 1,
-        "status": "unavailable",
-        "value_hashes": []
+        "status": "exact",
+        "value_hashes": [
+          "sha256:b53e20aba39adfcf6ae1931406ef2ec33a660916f7f3c0c36ad6e46ff8f86cb8"
+        ]
       },
       "source_spelling": "client.get"
     },
@@ -1578,24 +1583,19 @@
           ]
         }
       ],
-      "audit_status": "unmatched",
+      "audit_status": "ambiguous",
       "call_diagnostics": [],
       "call_validation": "no_call_diagnostics",
-      "canonical_symbol": "app.fixture.Foreign.get",
+      "canonical_symbol": null,
       "contract_id": null,
-      "invocation": "instance_method",
+      "invocation": null,
       "line": 47,
-      "reason_code": null,
+      "reason_code": "open_receiver_dispatch",
       "receiver_candidates": [
         "app.fixture.Foreign"
       ],
-      "receiver_origin": {
-        "reason_code": "receiver_origin_unavailable",
-        "schema_version": 1,
-        "status": "unavailable",
-        "value_hashes": []
-      },
-      "resolver_status": "exact",
+      "receiver_origin": null,
+      "resolver_status": "ambiguous",
       "resource": null,
       "source_spelling": "foreign.get"
     },
@@ -2091,11 +2091,11 @@
     },
     "fastapi_endpoint_detector.analyzer.mypy_analyzer": {
       "path": "src/fastapi_endpoint_detector/analyzer/mypy_analyzer.py",
-      "source_sha256": "sha256:5a393eefb3c91c8da190d1ca405c9c7bbe6c79f661fab19c1392ed379cf9926b"
+      "source_sha256": "sha256:8ee62c854a382fe4b275422f2791c4b517c0134b981c14ba338fae895fa0238d"
     },
     "fastapi_endpoint_detector.models.effect_contract": {
       "path": "src/fastapi_endpoint_detector/models/effect_contract.py",
-      "source_sha256": "sha256:fc6a84c8e5940b790cb26254f6fa66dea457c00668930623484efc88dee2a559"
+      "source_sha256": "sha256:b9e65ab6aead6392e98ba80ca59418820495b0f2e6f53864c868347b1bc3d7b3"
     },
     "fastapi_endpoint_detector.models.endpoint": {
       "path": "src/fastapi_endpoint_detector/models/endpoint.py",
@@ -2104,12 +2104,12 @@
   },
   "python_version": "3.11.16",
   "resolution_counts": {
-    "ambiguous": 0,
-    "exact": 32,
+    "ambiguous": 1,
+    "exact": 31,
     "unresolved": 0
   },
-  "runner_revision": "6c5ad931cb128fcbccdcbff51bae9a9b9d8a7836",
-  "runner_sha256": "sha256:5acd7822472f135fd61844591b0aa3c2017b7bd9ccb6ccfda3e349d46a196aa9",
+  "runner_revision": "2294330163e0159193f552f06bc22fd49649a389",
+  "runner_sha256": "sha256:66bd8b8aef93d31dbec356730e523bd346ce283ad5264bbd7770e36e60b970e2",
   "schema_version": 1,
-  "selector_supported_call_count": 28
+  "selector_supported_call_count": 29
 }
