@@ -121,6 +121,65 @@ def test_framework_preset_versions_explicit_registration_multiplicity() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        "((receiver := app) and 'startup', callback)",
+        "(event_type=(receiver := app) and 'startup', func=callback)",
+    ],
+)
+def test_dynamic_getattr_outer_arguments_preserve_receiver_mutation(
+    tmp_path: Path, arguments: str
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\nunused = FastAPI()\n"
+        "async def callback(): pass\nasync def selected(): pass\n"
+        "receiver = unused\nmethod = 'add_event_handler'\n"
+        f"getattr(receiver, method){arguments}\n"
+        "receiver.add_event_handler('shutdown', selected)\n",
+        encoding="utf-8",
+    )
+    inventory = _extract(tmp_path)
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert not inventory.limitations
+    assert [item.handler.name for item in inventory.endpoints] == ["selected"]
+
+
+def test_malformed_getattr_does_not_evaluate_outer_arguments(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\nunused = FastAPI()\n"
+        "async def callback(): pass\nreceiver = unused\n"
+        "getattr(receiver, 'add_event_handler', None, None)("
+        "(receiver := app) and 'startup', callback)\n"
+        "receiver.add_event_handler('shutdown', callback)\n",
+        encoding="utf-8",
+    )
+    inventory = _extract(tmp_path)
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert not inventory.endpoints
+    assert not inventory.limitations
+
+
+@pytest.mark.parametrize("receiver", ["app", "unused"])
+def test_duplicate_mount_keywords_are_receiver_scoped(tmp_path: Path, receiver: str) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\nunused = FastAPI()\nchild = FastAPI()\n"
+        "@child.middleware('http')\n"
+        "async def audit(request, call_next): return await call_next(request)\n"
+        f"{receiver}.mount(**{{'path': '/x', 'app': child}}, **{{'path': '/y'}})\n",
+        encoding="utf-8",
+    )
+    inventory = _extract(tmp_path)
+    assert not inventory.endpoints
+    if receiver == "app":
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert any("duplicate keyword" in item.reason for item in inventory.limitations)
+    else:
+        assert inventory.status == InventoryStatus.ESTABLISHED
+        assert not inventory.limitations
+
+
 def _expected_late_nested_calls(callback: str) -> list[str]:
     installed_version = version("fastapi")
     release = re.match(r"^(\d+)\.(\d+)", installed_version)

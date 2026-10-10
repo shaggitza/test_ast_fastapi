@@ -2532,6 +2532,7 @@ class CustomSurfaceExtractor:
         self._inspect_expression(module, call.func, state, inherited_conditions)
         callable_state = dict(state)
         callable_resolution = self._resolve_call(call.func, callable_state)
+        unsupported_getattr_registration = False
         if (
             isinstance(call.func, ast.Call)
             and isinstance(call.func.func, ast.Name)
@@ -2591,7 +2592,12 @@ class CustomSurfaceExtractor:
                         ),
                     )
                 )
-                return
+                if self._is_builtin_getattr_call(call.func, callable_state):
+                    # A dynamic method name prevents exact registration, but a
+                    # valid getattr still evaluates the outer call arguments.
+                    unsupported_getattr_registration = True
+                else:
+                    return
         positional: list[_EvaluatedArgument] = []
         for argument_index, argument in enumerate(call.args):
             self._inspect_expression(module, argument, state, inherited_conditions)
@@ -2699,6 +2705,8 @@ class CustomSurfaceExtractor:
             call = ast.copy_location(
                 ast.Call(func=call.func, args=list(call.args), keywords=effective_keywords), call
             )
+        if unsupported_getattr_registration:
+            return
         if duplicate_keywords:
             # Runtime raises TypeError before the call body, so there is no
             # registration fact to report. Only selected FastAPI surfaces
@@ -2743,7 +2751,12 @@ class CustomSurfaceExtractor:
                 )
                 for contract in self.contracts.document.contracts
             )
-            if duplicate_token is not None and relevant_framework_contract:
+            relevant_framework_include = isinstance(
+                call.func, ast.Attribute
+            ) and call.func.attr in {"mount", "include_router"}
+            if duplicate_token is not None and (
+                relevant_framework_contract or relevant_framework_include
+            ):
                 condition = EndpointDiscoveryCondition(
                     source_path=module.path,
                     source_line=call.lineno,
