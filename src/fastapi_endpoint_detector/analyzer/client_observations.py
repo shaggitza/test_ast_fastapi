@@ -353,6 +353,16 @@ def _has_assignment_operator(tokens: list[_Token], index: int, source: str) -> b
             and first.value in {"+", "-"}
             and first.end == previous.start
         ):
+            # Maximal munch groups a contiguous run left to right. In `x+++fetch`
+            # the final plus is binary, rather than part of `++fetch`.
+            run_start = index - 2
+            while (
+                run_start > 0
+                and tokens[run_start - 1].kind == "punct"
+                and tokens[run_start - 1].value == first.value
+                and tokens[run_start - 1].end == tokens[run_start].start
+            ):
+                run_start -= 1
             # Whitespace and comments may separate a postfix operator from
             # its operand. A line terminator in that gap makes it a prefix
             # operator under JavaScript's automatic semicolon rules.
@@ -364,7 +374,8 @@ def _has_assignment_operator(tokens: list[_Token], index: int, source: str) -> b
                 )
                 and _can_end_postfix_operand(tokens, index - 3)
             )
-            return not postfix
+            if (index - run_start) % 2 == 0:
+                return not postfix
     operator = ""
     cursor = index + 1
     while cursor < len(tokens) and len(operator) < 4 and tokens[cursor].kind == "punct":
@@ -372,6 +383,12 @@ def _has_assignment_operator(tokens: list[_Token], index: int, source: str) -> b
             break
         operator += tokens[cursor].value
         cursor += 1
+    if operator.startswith(("++", "--")) and any(
+        char in source[tokens[index].end : tokens[index + 1].start] for char in "\r\n\u2028\u2029"
+    ):
+        # Postfix updates cannot cross a line terminator; the operator belongs
+        # to the following expression under automatic semicolon insertion.
+        return False
     if operator.startswith("="):
         return not operator.startswith(("==", "=>"))
     return operator.startswith(

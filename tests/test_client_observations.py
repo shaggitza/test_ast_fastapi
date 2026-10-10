@@ -324,3 +324,29 @@ def test_separate_unary_operators_do_not_count_as_prefix_mutation() -> None:
         "fetch('/fetch'); axios.get('/axios'); new WebSocket('wss://api.test/events');"
     )
     assert [item.route_path for item in observations] == ["/fetch", "/axios", "/events"]
+
+
+def test_client_updates_respect_line_terminators_and_maximal_munch() -> None:
+    for source in (
+        "fetch\n++counter\nfetch('/items');",
+        "fetch /*\n*/ --counter; fetch('/items');",
+        "fetch\u2028++counter; fetch('/items');",
+        "counter+++fetch('/items');",
+        "counter---axios.get('/items');",
+        "counter++ + fetch('/items');",
+        "counter-- - axios.get('/items');",
+    ):
+        observations = extract_client_observations(source)
+        assert [(item.method, item.route_path) for item in observations] == [("GET", "/items")], (
+            source
+        )
+    for source in (
+        "++fetch; fetch('/items');",
+        "--axios; axios.get('/items');",
+        "fetch++; fetch('/items');",
+        "fetch /*no newline*/ ++; fetch('/items');",
+        "counter + ++fetch; fetch('/items');",
+        "counter\n++fetch; fetch('/items');",
+        "import http from 'axios'; ++http; http.get('/items');",
+    ):
+        assert extract_client_observations(source) == (), source
