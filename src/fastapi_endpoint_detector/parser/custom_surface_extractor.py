@@ -122,6 +122,7 @@ class _FrameworkConditionEvent:
     token: _FrameworkToken
     condition: EndpointDiscoveryCondition
     request_surface: bool = False
+    future_registrations: bool = False
 
 
 _FrameworkEvent = (
@@ -1257,6 +1258,7 @@ class CustomSurfaceExtractor:
             list[tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef]],
         ] = {}
         conditions: dict[_FrameworkToken, list[EndpointDiscoveryCondition]] = {}
+        future_registration_conditions: dict[_FrameworkToken, list[EndpointDiscoveryCondition]] = {}
         request_conditions: dict[_FrameworkToken, list[EndpointDiscoveryCondition]] = {}
         included_by: dict[_FrameworkToken, set[_FrameworkToken]] = {}
         mounted_by: dict[_FrameworkToken, set[_FrameworkToken]] = {}
@@ -1312,6 +1314,10 @@ class CustomSurfaceExtractor:
                 continue
             if isinstance(event, _FrameworkConditionEvent):
                 conditions.setdefault(event.token, []).append(event.condition)
+                if event.future_registrations:
+                    future_registration_conditions.setdefault(event.token, []).append(
+                        event.condition
+                    )
                 if event.request_surface:
                     request_conditions.setdefault(event.token, []).append(event.condition)
                 for ancestor in self._framework_include_ancestors(event.token, included_by):
@@ -1502,6 +1508,33 @@ class CustomSurfaceExtractor:
             for route in routes.get(token, ()):
                 owned_routes[(route[0].name, id(route[1]))] = route
         self._framework_owned_routes = list(owned_routes.values())
+        for token, endpoints in live.items():
+            guards = future_registration_conditions.get(token, ())
+            if not guards:
+                continue
+            live[token] = [
+                endpoint.model_copy(
+                    update={
+                        "discovery_status": EndpointDiscoveryStatus.CONDITIONAL,
+                        "discovery_conditions": tuple(
+                            dict.fromkeys((*endpoint.discovery_conditions, *applicable))
+                        ),
+                    }
+                )
+                if (
+                    (surface := endpoint.surface) is not None
+                    and (
+                        applicable := tuple(
+                            guard
+                            for guard in guards
+                            if guard.source_path == surface.registration_file
+                            and guard.source_line < surface.registration_line
+                        )
+                    )
+                )
+                else endpoint
+                for endpoint in endpoints
+            ]
         self._endpoints = [
             endpoint for endpoint in self._endpoints if not self._is_framework_endpoint(endpoint)
         ] + [
@@ -2577,9 +2610,21 @@ class CustomSurfaceExtractor:
     ) -> None:
         """Evaluate a call in CPython AST order with per-argument captures."""
         self._inspect_expression(module, call.func, state, inherited_conditions)
+        state_before_outer_arguments = dict(state)
         callable_state = dict(state)
+        if (
+            isinstance(call.func, ast.Call)
+            and isinstance(call.func.func, ast.Name)
+            and call.func.func.id == "getattr"
+            and len(call.func.args) > 1
+            and self._is_builtin_getattr_call(call.func, callable_state)
+        ):
+            known_name = self._getattr_name_literal(module, call.func.args[1], call.func)
+            if known_name is not None:
+                call.func.args[1] = ast.copy_location(ast.Constant(known_name), call.func.args[1])
         callable_resolution = self._resolve_call(call.func, callable_state)
         unsupported_getattr_registration = False
+        conditional_getattr_call = False
         if (
             isinstance(call.func, ast.Call)
             and isinstance(call.func.func, ast.Name)
@@ -2648,14 +2693,18 @@ class CustomSurfaceExtractor:
             if self._is_builtin_getattr_call(call.func, callable_state):
                 # A nonliteral lookup can fail before outer arguments execute.
                 unsupported_getattr_registration = True
-                inherited_conditions = (
-                    *inherited_conditions,
-                    EndpointDiscoveryCondition(
-                        source_path=module.path,
-                        source_line=call.lineno,
-                        reason="dynamic getattr lookup returns a callable successfully",
-                    ),
+                conditional_getattr_call = self._getattr_name_is_dynamic(
+                    module, call.func.args[1], call.func
                 )
+                if conditional_getattr_call:
+                    inherited_conditions = (
+                        *inherited_conditions,
+                        EndpointDiscoveryCondition(
+                            source_path=module.path,
+                            source_line=call.lineno,
+                            reason="dynamic getattr lookup returns a callable successfully",
+                        ),
+                    )
             elif "getattr" in callable_state:
                 # A replacement can return a callable. Its outer arguments
                 # remain potentially evaluated, unlike an invalid builtin call.
@@ -2786,6 +2835,24 @@ class CustomSurfaceExtractor:
             call = ast.copy_location(
                 ast.Call(func=call.func, args=list(call.args), keywords=effective_keywords), call
             )
+        if conditional_getattr_call:
+            # The argument expressions run only if the dynamic lookup succeeds.
+            # Preserve mutations and mark affected selected receivers conditional.
+            for name, binding in state.items():
+                if binding is None or binding == state_before_outer_arguments.get(name):
+                    continue
+                if binding.kind == "receiver" and binding.instance_token is not None:
+                    self._framework_events.append(
+                        _FrameworkConditionEvent(
+                            binding.instance_token,
+                            EndpointDiscoveryCondition(
+                                source_path=module.path,
+                                source_line=call.lineno,
+                                reason="dynamic getattr lookup returns a callable successfully",
+                            ),
+                            future_registrations=True,
+                        )
+                    )
         if unsupported_getattr_registration:
             return
         if duplicate_keywords:
@@ -5923,6 +5990,42 @@ class CustomSurfaceExtractor:
             and 2 <= len(expression.args) <= 3
             and not expression.keywords
         )
+
+    @staticmethod
+    def _getattr_name_is_dynamic(module: _Module, expression: ast.expr, call: ast.Call) -> bool:
+        """Recognize a direct module-level string alias for a getattr name."""
+        return CustomSurfaceExtractor._getattr_name_literal(module, expression, call) is None
+
+    @staticmethod
+    def _getattr_name_literal(module: _Module, expression: ast.expr, call: ast.Call) -> str | None:
+        if isinstance(expression, ast.Constant) and isinstance(expression.value, str):
+            return expression.value
+        if not isinstance(expression, ast.Name):
+            return None
+        call_position = (call.lineno, call.col_offset)
+        for statement in reversed(module.tree.body):
+            if (statement.lineno, statement.col_offset) >= call_position:
+                continue
+            assigned_value: ast.expr | None = None
+            if (
+                isinstance(statement, ast.Assign)
+                and any(
+                    isinstance(target, ast.Name) and target.id == expression.id
+                    for target in statement.targets
+                )
+            ) or (
+                isinstance(statement, ast.AnnAssign)
+                and isinstance(statement.target, ast.Name)
+                and statement.target.id == expression.id
+            ):
+                assigned_value = statement.value
+            if assigned_value is not None:
+                if isinstance(assigned_value, ast.Constant) and isinstance(
+                    assigned_value.value, str
+                ):
+                    return assigned_value.value
+                return None
+        return None
 
     def _binding_from_expression(
         self,

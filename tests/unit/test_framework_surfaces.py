@@ -3323,6 +3323,65 @@ def test_dynamic_getattr_lookup_conditions_nested_selected_registration(tmp_path
     assert any("dynamic getattr lookup" in item.reason for item in inventory.limitations)
 
 
+def test_dynamic_getattr_lookup_keeps_argument_binding_mutation_conditional(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\nunused = FastAPI()\n"
+        "receiver = unused\nasync def cb(): pass\nasync def unrelated(): pass\n"
+        "async def certain(): pass\n"
+        "method = unknown_name\n"
+        "getattr((certain_receiver := app), method)((receiver := unused))\n"
+        "receiver.add_event_handler('startup', cb)\n"
+        "certain_receiver.add_event_handler('startup', certain)\n"
+        "app.add_event_handler('shutdown', unrelated)\n",
+        encoding="utf-8",
+    )
+    inventory = _extract(tmp_path)
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert {item.handler.name for item in inventory.endpoints} == {"certain", "unrelated"}
+
+
+def test_future_getattr_name_assignment_does_not_prove_lookup_success(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\nunused = FastAPI()\n"
+        "method = unknown_name\nreceiver = unused\nasync def cb(): pass\n"
+        "getattr(unused, method)((receiver := app))\n"
+        "method = 'add_event_handler'\n"
+        "receiver.add_event_handler('startup', cb)\n",
+        encoding="utf-8",
+    )
+    inventory = _extract(tmp_path)
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert [item.handler.name for item in inventory.endpoints] == ["cb"]
+    assert inventory.endpoints[0].discovery_status.value == "conditional"
+
+
+def test_preceding_getattr_name_alias_remains_exact(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n"
+        "method = 'add_event_handler'\nasync def cb(): pass\n"
+        "getattr(app, method)('startup', cb)\n",
+        encoding="utf-8",
+    )
+    inventory = _extract(tmp_path)
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert [item.handler.name for item in inventory.endpoints] == ["cb"]
+
+
+def test_literal_getattr_argument_binding_mutation_remains_certain(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n"
+        "async def cb(): pass\n"
+        "getattr((receiver := app), 'add_event_handler')('startup', cb)\n"
+        "receiver.add_event_handler('shutdown', cb)\n",
+        encoding="utf-8",
+    )
+    inventory = _extract(tmp_path)
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert [item.handler.name for item in inventory.endpoints] == ["cb", "cb"]
+
+
 def test_missing_exception_handler_argument_does_not_replace_known_handler(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text(
         "from fastapi import FastAPI\napp = FastAPI()\n"
