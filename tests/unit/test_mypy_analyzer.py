@@ -138,6 +138,31 @@ class TestMypyAnalyzerBasic:
         assert expected in states
         assert ("established_execution" if conditional else "possible_execution") not in states
 
+    def test_try_else_lambda_invocation_is_possible_execution(self, tmp_path: Path) -> None:
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "def may_raise() -> None: pass\n"
+            "def handler() -> None:\n"
+            "    callback = lambda: 1\n"
+            "    try:\n        may_raise()\n"
+            "    except RuntimeError:\n        pass\n"
+            "    else:\n        callback()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/try-else",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=2),
+        )
+        dependencies = MypyAnalyzer(tmp_path).analyze_endpoint(endpoint)
+        states = {
+            span.execution_state
+            for span in dependencies.source_evidence_spans
+            if span.start_line == 3
+        }
+        assert "possible_execution" in states
+        assert "established_execution" not in states
+
     def test_branch_joined_callable_partial_abstains_with_limitation(self, tmp_path: Path) -> None:
         app_path = tmp_path / "app.py"
         app_path.write_text(

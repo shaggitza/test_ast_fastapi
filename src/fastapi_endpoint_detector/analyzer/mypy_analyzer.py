@@ -6067,7 +6067,11 @@ class MypyAnalyzer:
                     callable_environment = dict(body_callables)
                     partial_environment = dict(body_partials)
                     lambda_environment = dict(body_lambdas)
-                    walk_node(n.else_body)
+                    possible_execution_depth[0] += 1
+                    try:
+                        walk_node(n.else_body)
+                    finally:
+                        possible_execution_depth[0] -= 1
                     normal_callables = dict(callable_environment)
                     normal_partials = dict(partial_environment)
                     normal_lambdas = dict(lambda_environment)
@@ -6397,7 +6401,7 @@ class MypyAnalyzer:
                 "schema": self.CACHE_SCHEMA_VERSION,
                 "engine": "fastapi-endpoint-detector:mypy-analyzer-v2",
                 "source_span_normalization": "source-call-order-verified-ast-spans-v2",
-                "execution_state_policy": "conditional-elif-guaranteed-finally-v2",
+                "execution_state_policy": "conditional-elif-try-else-guaranteed-finally-v3",
                 "max_depth": self.max_depth,
                 "no_site_packages": self.no_site_packages,
                 "hermetic_search_path_policy": (
