@@ -139,6 +139,92 @@ def test_unresolved_or_aliased_selected_lifecycle_registration_is_limited(
     assert any("callback identity is unresolved" in item.reason for item in inventory.limitations)
 
 
+@pytest.mark.parametrize(
+    "registration",
+    [
+        "register = app.add_event_handler\nregister('startup', selected)",
+        "getattr(app, 'add_event_handler')('startup', selected)",
+    ],
+)
+def test_selected_lifecycle_registration_keeps_alias_receiver_identity(
+    tmp_path: Path, registration: str
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "async def selected(): pass\n"
+        "async def unrelated(): pass\n"
+        "unused = FastAPI()\n"
+        "unused.add_event_handler('startup', unrelated)\n"
+        "app = FastAPI()\n"
+        f"{registration}\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert [item.handler.name for item in inventory.endpoints] == ["selected"]
+
+
+def test_dynamic_unselected_lifecycle_alias_does_not_limit_selected_graph(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "def event_name(): return 'startup'\n"
+        "async def selected(): pass\n"
+        "unused = FastAPI()\n"
+        "register = unused.add_event_handler\n"
+        "register(event_name(), selected)\n"
+        "app = FastAPI()\n"
+        "app.add_event_handler('startup', selected)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert [item.handler.name for item in inventory.endpoints] == ["selected"]
+    assert inventory.limitations == ()
+
+
+def test_dynamic_selected_lifecycle_alias_remains_an_explicit_limit(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "def event_name(): return 'startup'\n"
+        "async def selected(): pass\n"
+        "app = FastAPI()\n"
+        "register = app.add_event_handler\n"
+        "register(event_name(), selected)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert inventory.endpoints == []
+    assert len(inventory.limitations) == 1
+    assert inventory.limitations[0].source_line == 6
+    assert "resource set was not finite literal data" in inventory.limitations[0].reason
+
+
+def test_shadowed_getattr_lambda_is_not_treated_as_builtin_alias(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "async def selected(): pass\n"
+        "app = FastAPI()\n"
+        "getattr = lambda *args: None\n"
+        "getattr(app, 'add_event_handler')('startup', selected)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert inventory.endpoints == []
+    assert inventory.limitations
+
+
 def test_dynamic_lifecycle_constructor_expansion_limits_selected_app_only(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text(
         "from fastapi import FastAPI\n"

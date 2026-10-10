@@ -2939,11 +2939,7 @@ class CustomSurfaceExtractor:
     ) -> None:
         if not self._scope_framework_surfaces or not self._is_framework_endpoint(endpoint):
             return
-        token = (
-            self._framework_call_token(call, evaluation, state)
-            if isinstance(call.func, ast.Attribute)
-            else None
-        )
+        token = self._framework_method_token(call, evaluation, state, module.name)
         if (
             token is None
             and endpoint.surface is not None
@@ -2957,6 +2953,57 @@ class CustomSurfaceExtractor:
             token = (module.name, call.lineno, call.col_offset)
         if token is not None:
             self._framework_events.append(_FrameworkRegistrationEvent(token, endpoint))
+
+    def _framework_method_token(
+        self,
+        call: ast.Call,
+        evaluation: _CallEvaluation | None,
+        state: dict[str, _Binding | None],
+        module_name: str,
+    ) -> _FrameworkToken | None:
+        """Recover a framework receiver through attributes, aliases, or literal getattr."""
+        if isinstance(call.func, ast.Attribute):
+            token = self._framework_call_token(call, evaluation, state)
+            if token is not None:
+                return token
+        callable_state = evaluation.callable_state if evaluation is not None else state
+        binding = self._binding_from_expression(call.func, callable_state, module_name)
+        if binding is None or binding.kind != "method":
+            return None
+        return binding.instance_token
+
+    def _record_framework_contract_limitation(
+        self,
+        module: _Module,
+        call: ast.Call,
+        state: dict[str, _Binding | None],
+        evaluation: _CallEvaluation | None,
+        contract: SurfaceContract,
+        reason: str,
+    ) -> bool:
+        """Attach lifecycle uncertainty to its app when its receiver is known."""
+        if self._scope_framework_surfaces and contract.surface.kind == "framework.lifecycle":
+            token = self._framework_method_token(call, evaluation, state, module.name)
+            if token is not None:
+                self._framework_events.append(
+                    _FrameworkConditionEvent(
+                        token,
+                        EndpointDiscoveryCondition(
+                            source_path=module.path,
+                            source_line=call.lineno,
+                            reason=reason,
+                        ),
+                    )
+                )
+                return True
+        self._limitations.append(
+            EndpointDiscoveryCondition(
+                source_path=module.path,
+                source_line=call.lineno,
+                reason=reason,
+            )
+        )
+        return False
 
     def _record_unknown_framework_override(
         self,
@@ -3038,6 +3085,44 @@ class CustomSurfaceExtractor:
                             ),
                         )
                     )
+                elif (
+                    isinstance(call.func, ast.Call)
+                    and isinstance(call.func.func, ast.Name)
+                    and call.func.func.id == "getattr"
+                    and "getattr" in state
+                    and len(call.func.args) >= 2
+                    and isinstance(call.func.args[1], ast.Constant)
+                    and isinstance(call.func.args[1].value, str)
+                ):
+                    owner = self._binding_from_expression(call.func.args[0], state, module.name)
+                    symbol = (
+                        f"{owner.identity}.{call.func.args[1].value}"
+                        if owner is not None and owner.kind == "receiver"
+                        else ""
+                    )
+                    if (
+                        owner is not None
+                        and owner.kind == "receiver"
+                        and owner.instance_token is not None
+                        and any(
+                            contract.registration.symbol == symbol
+                            and contract.surface.kind == "framework.lifecycle"
+                            for contract in self.contracts.document.contracts
+                        )
+                    ):
+                        self._framework_events.append(
+                            _FrameworkConditionEvent(
+                                owner.instance_token,
+                                EndpointDiscoveryCondition(
+                                    source_path=module.path,
+                                    source_line=call.lineno,
+                                    reason=(
+                                        "selected framework lifecycle callable is shadowed or "
+                                        "unresolved; framework surface inventory is incomplete"
+                                    ),
+                                ),
+                            )
+                        )
             callable_name = (
                 call.func.id
                 if isinstance(call.func, ast.Name)
@@ -3270,15 +3355,16 @@ class CustomSurfaceExtractor:
                         )
                         continue
                 if not scoped_override:
-                    self._limitations.append(
-                        EndpointDiscoveryCondition(
-                            source_path=module.path,
-                            source_line=call.lineno,
-                            reason=(
-                                f"custom surface contract {contract.id!r} matched but "
-                                "handler was unresolved"
-                            ),
-                        )
+                    self._record_framework_contract_limitation(
+                        module,
+                        call,
+                        state,
+                        evaluation,
+                        contract,
+                        (
+                            f"custom surface contract {contract.id!r} matched but handler "
+                            "was unresolved"
+                        ),
                     )
                 continue
             handler_module, function = handler_result
@@ -3343,15 +3429,16 @@ class CustomSurfaceExtractor:
                     resource_result.reason,
                 )
                 if not scoped_override:
-                    self._limitations.append(
-                        EndpointDiscoveryCondition(
-                            source_path=module.path,
-                            source_line=call.lineno,
-                            reason=(
-                                f"custom surface contract {contract.id!r} matched but "
-                                f"{resource_result.reason}"
-                            ),
-                        )
+                    self._record_framework_contract_limitation(
+                        module,
+                        call,
+                        state,
+                        evaluation,
+                        contract,
+                        (
+                            f"custom surface contract {contract.id!r} matched but "
+                            f"{resource_result.reason}"
+                        ),
                     )
                 continue
             conditions = list(inherited_conditions)
@@ -4899,7 +4986,7 @@ class CustomSurfaceExtractor:
                 isinstance(expression, ast.Call)
                 and isinstance(expression.func, ast.Name)
                 and expression.func.id == "getattr"
-                and state.get("getattr") is None
+                and "getattr" not in state
                 and len(expression.args) >= 2
             ):
                 # Preserve exact receiver identity for getattr(app, "method")(...).
@@ -5034,7 +5121,7 @@ class CustomSurfaceExtractor:
             if (
                 isinstance(expression.func, ast.Name)
                 and expression.func.id == "getattr"
-                and state.get("getattr") is None
+                and "getattr" not in state
                 and len(expression.args) >= 2
                 and isinstance(expression.args[1], ast.Constant)
                 and isinstance(expression.args[1].value, str)
