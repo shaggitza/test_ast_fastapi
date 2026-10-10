@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import socket
 import stat
 import struct
@@ -17,6 +18,7 @@ if TYPE_CHECKING:
 
 import pytest
 from benchmarks.real_world import pilot_submit_v3 as submit
+from benchmarks.real_world import pilot_typed_run_v3 as typed_runner
 from benchmarks.real_world.ground_truth_v2 import GroundTruthError
 from benchmarks.real_world.ground_truth_v2.evidence import (
     GitEvidenceValidator,
@@ -744,3 +746,103 @@ def test_extension_rejection_and_success_are_nonthrowing_nonterminating() -> Non
     assert "const binding = await trustedTransport(ctx.cwd);" in runtime
     assert "const response = await brokerRequest(" in runtime
     assert 'throw new Error("broker success response is invalid")' in runtime
+
+
+def test_socket_is_private_immediately_after_bind(tmp_path: Path) -> None:
+    path = tmp_path / "private.sock"
+    original_umask = os.umask(0o022)
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+            submit._bind_private_socket(server, path)
+            assert stat.S_IMODE(path.stat().st_mode) == 0
+        assert os.umask(0o022) == 0o022
+    finally:
+        os.umask(original_umask)
+
+
+def test_failed_private_bind_restores_process_umask(tmp_path: Path) -> None:
+    path = tmp_path / "occupied.sock"
+    path.write_text("occupied", encoding="utf-8")
+    original_umask = os.umask(0o022)
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server, pytest.raises(OSError):
+            submit._bind_private_socket(server, path)
+        assert os.umask(0o022) == 0o022
+        assert path.read_text(encoding="utf-8") == "occupied"
+    finally:
+        os.umask(original_umask)
+
+
+def test_readiness_waits_until_broker_has_listened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = _packet_and_record(tmp_path)
+    record = record.model_copy(
+        update={"run": record.run.model_copy(update={"started_at": datetime.now(timezone.utc)})}
+    )
+    bindings = tmp_path / "bindings.json"
+    _write_bindings(bindings, record)
+    path = _private(tmp_path / "socket") / "submit.sock"
+    before_listen = threading.Event()
+    resume = threading.Event()
+    ready = threading.Event()
+    errors: list[BaseException] = []
+    real_socket = socket.socket
+
+    class PausedSocket(real_socket):
+        def listen(self, backlog: int = 1) -> None:
+            before_listen.set()
+            assert resume.wait(5)
+            super().listen(backlog)
+
+    monkeypatch.setattr(submit.socket, "socket", PausedSocket)
+    monkeypatch.setattr(submit, "GitEvidenceValidator", _fake_evidence_factory)
+    monkeypatch.setattr(submit, "_verify_peer_cwd", lambda *_args: None)
+    monkeypatch.setattr(typed_runner, "_same_process", lambda *_args: True)
+    outcome: list[BaseException | int] = []
+    server = _serve_thread(path, bindings, outcome)
+
+    def wait_ready() -> None:
+        try:
+            typed_runner._wait_socket(path, os.getpid(), "test-identity", timeout=5)
+            ready.set()
+        except BaseException as error:
+            errors.append(error)
+
+    waiter = threading.Thread(target=wait_ready)
+    try:
+        assert before_listen.wait(5)
+        assert stat.S_IMODE(path.stat().st_mode) == 0
+        waiter.start()
+        assert not ready.wait(0.1)
+        assert not errors
+        resume.set()
+        assert ready.wait(5)
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        response = _exchange(
+            path,
+            {
+                "protocol_version": 3,
+                "capability": record.capability,
+                "cwd": record.packet_path,
+                "draft": _negative(),
+            },
+        )
+        assert response["ok"] is True
+    finally:
+        resume.set()
+        server.join(timeout=6)
+        if waiter.ident is not None:
+            waiter.join(timeout=6)
+    assert not errors
+    assert outcome == [0]
+
+
+@pytest.mark.parametrize("mode", [0o604, 0o666, 0o700])
+def test_readiness_still_rejects_unsafe_socket_permissions(tmp_path: Path, mode: int) -> None:
+    path = tmp_path / "unsafe.sock"
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+        server.bind(str(path))
+        path.chmod(mode)
+        with pytest.raises(typed_runner.PilotTypedRunError, match="socket is unsafe"):
+            typed_runner._wait_socket(path, os.getpid(), "unused", timeout=1)
