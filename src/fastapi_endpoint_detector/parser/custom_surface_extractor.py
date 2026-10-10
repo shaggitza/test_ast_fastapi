@@ -20,6 +20,7 @@ from fastapi_endpoint_detector.models.endpoint import (
     EndpointMethod,
     HandlerInfo,
     InventoryStatus,
+    NativeSourceSpan,
     RouteActivationEvidence,
     SurfaceRegistrationEvidence,
 )
@@ -49,9 +50,11 @@ from fastapi_endpoint_detector.parser.framework_ownership import (
 
 @dataclass(frozen=True)
 class _Binding:
-    kind: Literal["module", "symbol", "receiver", "function"]
+    kind: Literal["module", "symbol", "receiver", "function", "method", "possible_method"]
     identity: str
     instance_token: tuple[str, int, int] | None = None
+    receiver_type: str | None = None
+    possible_methods: tuple[_Binding, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -61,6 +64,7 @@ class _EvaluatedArgument:
     expression: ast.expr
     state: dict[str, _Binding | None]
     binding: _Binding | None
+    elements: tuple[_EvaluatedArgument, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -92,6 +96,7 @@ class _FrameworkRegistrationEvent:
 class _FrameworkUnknownOverrideEvent:
     token: _FrameworkToken
     surface_kind: str
+    resources: tuple[str, ...] | None
     condition: EndpointDiscoveryCondition
 
 
@@ -100,7 +105,9 @@ class _FrameworkIncludeEvent:
     parent: _FrameworkToken
     child: _FrameworkToken | None
     condition: EndpointDiscoveryCondition | None
+    source_span: NativeSourceSpan
     routes_only: bool = False
+    guards: tuple[EndpointDiscoveryCondition, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -110,11 +117,20 @@ class _FrameworkRouteEvent:
     condition: EndpointDiscoveryCondition | None
 
 
+@dataclass(frozen=True)
+class _FrameworkConditionEvent:
+    token: _FrameworkToken
+    condition: EndpointDiscoveryCondition
+    request_surface: bool = False
+    future_registrations: bool = False
+
+
 _FrameworkEvent = (
     _FrameworkRegistrationEvent
     | _FrameworkUnknownOverrideEvent
     | _FrameworkIncludeEvent
     | _FrameworkRouteEvent
+    | _FrameworkConditionEvent
 )
 
 
@@ -133,6 +149,41 @@ class _StartupRouteResult:
 
 def _resource_failure(result: StaticEvaluationResult, fallback: str) -> str:
     return fallback if result.failure == "unsupported" else result.reason
+
+
+def _has_unknown_keyword_expansion(call: ast.Call) -> bool:
+    """Return whether a call contains a non-finite ``**kwargs`` expansion."""
+    unknown = False
+    for keyword in call.keywords:
+        if keyword.arg is not None:
+            continue
+        value = keyword.value
+        if not isinstance(value, ast.Dict) or any(key is None for key in value.keys):
+            unknown = True
+            continue
+        for key in value.keys:
+            if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                unknown = True
+    return unknown
+
+
+def _selector_call_is_ambiguous(
+    call: ast.Call, positional_index: int | None, keyword_names: frozenset[str]
+) -> bool:
+    """Reject selector calls whose Python argument binding cannot be validly unique."""
+    selected_count = int(positional_index is not None and len(call.args) > positional_index)
+    for keyword in call.keywords:
+        if keyword.arg in keyword_names:
+            selected_count += 1
+        elif keyword.arg is None:
+            value = keyword.value
+            if not isinstance(value, ast.Dict) or any(key is None for key in value.keys):
+                # Dynamic expansions follow the established receiver-scoped uncertainty path.
+                continue
+            for key in value.keys:
+                if isinstance(key, ast.Constant) and key.value in keyword_names:
+                    selected_count += 1
+    return selected_count > 1 or (selected_count > 0 and _has_unknown_keyword_expansion(call))
 
 
 @dataclass
@@ -517,6 +568,7 @@ class _FunctionScopeFrame:
     local_state: dict[str, _Binding | None]
     global_state: dict[str, _Binding | None]
     local_names: frozenset[str]
+    global_names: frozenset[str]
 
 
 @dataclass
@@ -758,7 +810,7 @@ class CustomSurfaceExtractor:
         self._endpoints: list[Endpoint] = []
         self._limitations: list[EndpointDiscoveryCondition] = []
         self._route_conditions: list[EndpointDiscoveryCondition] = []
-        self._seen: set[tuple[str, int, int, str, str, str, str]] = set()
+        self._seen: set[tuple[str, int, int, str, str, str, str, int, int]] = set()
         self._startup_route_seen: set[tuple[str, int, str, tuple[EndpointMethod, ...], str]] = set()
         self._module_states: dict[str, dict[str, _Binding | None]] = {}
         self._class_scope_frames: list[_ClassScopeFrame] = []
@@ -771,6 +823,7 @@ class CustomSurfaceExtractor:
         ] = []
         self._framework_selected_tokens: set[_FrameworkToken] = set()
         self._framework_root_condition: EndpointDiscoveryCondition | None = None
+        self._captured_getattr_receivers: dict[int, _Binding | None] = {}
         self._framework_factory: tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef] | None = (
             None
         )
@@ -822,7 +875,10 @@ class CustomSurfaceExtractor:
         self._process_app_factory()
         self._process_bootstrap()
         self._filter_framework_surfaces()
-        collapsed: dict[tuple[str, str, int, int], Endpoint] = {}
+        collapsed: dict[
+            tuple[str, str, int, str, int, int, int, int, tuple[tuple[str, int, int], ...]],
+            Endpoint,
+        ] = {}
         for endpoint in self._endpoints:
             declared = next(
                 (
@@ -836,11 +892,39 @@ class CustomSurfaceExtractor:
                 endpoint.identifier,
                 str(endpoint.handler.file_path),
                 endpoint.handler.line_number,
+                str(endpoint.surface.registration_file)
+                if declared is not None
+                and declared.multiplicity == ContractMultiplicity.ALL_EXECUTE
+                and endpoint.surface is not None
+                else "",
                 endpoint.surface.registration_line
                 if declared is not None
                 and declared.multiplicity == ContractMultiplicity.ALL_EXECUTE
                 and endpoint.surface is not None
                 else 0,
+                endpoint.surface.registration_column
+                if declared is not None
+                and declared.multiplicity == ContractMultiplicity.ALL_EXECUTE
+                and endpoint.surface is not None
+                else 0,
+                endpoint.surface.callback_reference_span.start_line
+                if declared is not None
+                and declared.multiplicity == ContractMultiplicity.ALL_EXECUTE
+                and endpoint.surface is not None
+                and endpoint.surface.callback_reference_span is not None
+                else 0,
+                endpoint.surface.callback_reference_span.start_column
+                if declared is not None
+                and declared.multiplicity == ContractMultiplicity.ALL_EXECUTE
+                and endpoint.surface is not None
+                and endpoint.surface.callback_reference_span is not None
+                else 0,
+                tuple(
+                    (str(span.file_path), span.start_line, span.start_column)
+                    for span in endpoint.surface.include_reference_spans
+                )
+                if endpoint.surface is not None
+                else (),
             )
             previous = collapsed.get(key)
             if previous is None or (
@@ -1078,6 +1162,7 @@ class CustomSurfaceExtractor:
             local_state=state,
             global_state=self._module_states[module.name],
             local_names=frozenset(local_names),
+            global_names=frozenset(scope.globals),
         )
         self._function_scope_states.append(frame)
         try:
@@ -1148,6 +1233,21 @@ class CustomSurfaceExtractor:
             )
         return tuple(conditions)
 
+    @staticmethod
+    def _guard_framework_endpoint(
+        endpoint: Endpoint, guards: tuple[EndpointDiscoveryCondition, ...]
+    ) -> Endpoint:
+        if not guards:
+            return endpoint
+        return endpoint.model_copy(
+            update={
+                "discovery_status": EndpointDiscoveryStatus.CONDITIONAL,
+                "discovery_conditions": tuple(
+                    dict.fromkeys((*endpoint.discovery_conditions, *guards))
+                ),
+            }
+        )
+
     def _filter_framework_surfaces(self) -> None:  # noqa: PLR0912, PLR0915
         """Apply selected-app identity and APIRouter copy-at-include semantics."""
         if not self._scope_framework_surfaces:
@@ -1158,8 +1258,11 @@ class CustomSurfaceExtractor:
             list[tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef]],
         ] = {}
         conditions: dict[_FrameworkToken, list[EndpointDiscoveryCondition]] = {}
+        future_registration_conditions: dict[_FrameworkToken, list[EndpointDiscoveryCondition]] = {}
+        request_conditions: dict[_FrameworkToken, list[EndpointDiscoveryCondition]] = {}
         included_by: dict[_FrameworkToken, set[_FrameworkToken]] = {}
         mounted_by: dict[_FrameworkToken, set[_FrameworkToken]] = {}
+        mount_edges: dict[_FrameworkToken, list[_FrameworkIncludeEvent]] = {}
         for event in self._framework_events:
             if isinstance(event, _FrameworkRegistrationEvent):
                 live.setdefault(event.token, []).append(event.endpoint)
@@ -1185,10 +1288,18 @@ class CustomSurfaceExtractor:
                     or not self._contract_has_multiplicity(
                         endpoint.surface.contract_id, ContractMultiplicity.LAST_WINS
                     )
+                    or (
+                        event.resources is not None
+                        and endpoint.surface.resource not in event.resources
+                    )
                 ]
                 conditions.setdefault(event.token, []).append(event.condition)
+                if event.surface_kind != "framework.lifecycle":
+                    request_conditions.setdefault(event.token, []).append(event.condition)
                 for ancestor in self._framework_include_ancestors(event.token, included_by):
                     conditions.setdefault(ancestor, []).append(event.condition)
+                    if event.surface_kind != "framework.lifecycle":
+                        request_conditions.setdefault(ancestor, []).append(event.condition)
                 continue
             if isinstance(event, _FrameworkRouteEvent):
                 if event.callback is not None:
@@ -1197,21 +1308,90 @@ class CustomSurfaceExtractor:
                         routes.setdefault(parent, []).append(event.callback)
                 if event.condition is not None:
                     conditions.setdefault(event.token, []).append(event.condition)
+                    request_conditions.setdefault(event.token, []).append(event.condition)
                     for parent in self._framework_mount_ancestors(event.token, mounted_by):
                         conditions.setdefault(parent, []).append(event.condition)
                 continue
+            if isinstance(event, _FrameworkConditionEvent):
+                conditions.setdefault(event.token, []).append(event.condition)
+                if event.future_registrations:
+                    future_registration_conditions.setdefault(event.token, []).append(
+                        event.condition
+                    )
+                if event.request_surface:
+                    request_conditions.setdefault(event.token, []).append(event.condition)
+                for ancestor in self._framework_include_ancestors(event.token, included_by):
+                    conditions.setdefault(ancestor, []).append(event.condition)
+                    if event.request_surface:
+                        request_conditions.setdefault(ancestor, []).append(event.condition)
+                continue
+            conditions.setdefault(event.parent, []).extend(event.guards)
+            request_conditions.setdefault(event.parent, []).extend(event.guards)
             if event.child is None:
                 if event.condition is not None:
                     conditions.setdefault(event.parent, []).append(event.condition)
+                    request_conditions.setdefault(event.parent, []).append(event.condition)
                     for ancestor in self._framework_include_ancestors(event.parent, included_by):
                         conditions.setdefault(ancestor, []).append(event.condition)
                 continue
-            copied_endpoints = () if event.routes_only else tuple(live.get(event.child, ()))
+            copied_endpoints = tuple(
+                endpoint.model_copy(
+                    update={
+                        "surface": endpoint.surface.model_copy(
+                            update={
+                                "include_reference_spans": (
+                                    *endpoint.surface.include_reference_spans,
+                                    event.source_span,
+                                )
+                            }
+                        )
+                    }
+                )
+                if endpoint.surface is not None
+                and (
+                    self._contract_has_multiplicity(
+                        endpoint.surface.contract_id, ContractMultiplicity.ALL_EXECUTE
+                    )
+                    or (
+                        event.routes_only
+                        and endpoint.surface.surface_kind == "framework.exception_handler"
+                    )
+                )
+                else endpoint
+                for endpoint in live.get(event.child, ())
+                if not event.routes_only
+                or (
+                    endpoint.surface is not None
+                    and endpoint.surface.surface_kind
+                    in {"framework.middleware", "framework.exception_handler"}
+                )
+            )
             copied_routes = tuple(routes.get(event.child, ()))
             routes.setdefault(event.parent, []).extend(copied_routes)
-            copied_conditions = tuple(conditions.get(event.child, ()))
-            live.setdefault(event.parent, []).extend(copied_endpoints)
+            copied_conditions = tuple(
+                (request_conditions if event.routes_only else conditions).get(event.child, ())
+            )
+            if event.routes_only:
+                copied_endpoints = tuple(
+                    self._qualify_mounted_exception(endpoint)
+                    if endpoint.surface is not None
+                    and endpoint.surface.surface_kind == "framework.exception_handler"
+                    else endpoint
+                    for endpoint in copied_endpoints
+                )
+            # Mounts retain a live child application; include_router copies
+            # at this registration point. Project mounted request callbacks
+            # after replay so later child registrations and overrides remain
+            # visible without letting a parent's overrides alter the child.
+            if not event.routes_only:
+                live.setdefault(event.parent, []).extend(
+                    self._guard_framework_endpoint(endpoint, event.guards)
+                    for endpoint in copied_endpoints
+                )
             conditions.setdefault(event.parent, []).extend(copied_conditions)
+            request_conditions.setdefault(event.parent, []).extend(
+                request_conditions.get(event.child, ())
+            )
             copied_lifecycle_conditions = self._framework_copied_lifecycle_conditions(
                 copied_endpoints
             )
@@ -1220,11 +1400,81 @@ class CustomSurfaceExtractor:
                 conditions[ancestor].extend(copied_lifecycle_conditions)
             if event.routes_only:
                 mounted_by.setdefault(event.child, set()).add(event.parent)
+                mount_edges.setdefault(event.parent, []).append(event)
             else:
                 included_by.setdefault(event.child, set()).add(event.parent)
 
+        source_live = {token: tuple(endpoints) for token, endpoints in live.items()}
+
+        def mounted_request_surfaces(
+            token: _FrameworkToken, seen: frozenset[_FrameworkToken]
+        ) -> list[Endpoint]:
+            if token in seen:
+                return []
+            result = [
+                endpoint
+                for endpoint in source_live.get(token, ())
+                if endpoint.surface is not None
+                and endpoint.surface.surface_kind
+                in {"framework.middleware", "framework.exception_handler"}
+            ]
+            for edge in mount_edges.get(token, ()):
+                child, span = edge.child, edge.source_span
+                assert child is not None
+                for endpoint in mounted_request_surfaces(child, seen | {token}):
+                    surface = endpoint.surface
+                    assert surface is not None
+                    copied = endpoint.model_copy(
+                        update={
+                            "surface": surface.model_copy(
+                                update={
+                                    "include_reference_spans": (
+                                        *surface.include_reference_spans,
+                                        span,
+                                    )
+                                }
+                            )
+                        }
+                    )
+                    if surface.surface_kind == "framework.exception_handler":
+                        copied = self._qualify_mounted_exception(copied)
+                    copied = self._guard_framework_endpoint(copied, edge.guards)
+                    result.append(copied)
+            return result
+
+        source_conditions = tuple(
+            (token, tuple(items)) for token, items in request_conditions.items()
+        )
+        for parent, edges in mount_edges.items():
+            for edge in edges:
+                child, span = edge.child, edge.source_span
+                assert child is not None
+                for endpoint in mounted_request_surfaces(child, frozenset({parent})):
+                    surface = endpoint.surface
+                    assert surface is not None
+                    copied = endpoint.model_copy(
+                        update={
+                            "surface": surface.model_copy(
+                                update={
+                                    "include_reference_spans": (
+                                        *surface.include_reference_spans,
+                                        span,
+                                    )
+                                }
+                            )
+                        }
+                    )
+                    if surface.surface_kind == "framework.exception_handler":
+                        copied = self._qualify_mounted_exception(copied)
+                    copied = self._guard_framework_endpoint(copied, edge.guards)
+                    live.setdefault(parent, []).append(copied)
+            # Preserve selected-app uncertainty from late registrations too.
+            for child, child_conditions in source_conditions:
+                if parent in self._framework_mount_ancestors(child, mounted_by):
+                    conditions.setdefault(parent, []).extend(child_conditions)
+
         for token, endpoints in tuple(live.items()):
-            latest: dict[tuple[str, str], Endpoint] = {}
+            latest: dict[tuple[str, str, tuple[NativeSourceSpan, ...]], Endpoint] = {}
             retained: list[Endpoint] = []
             for endpoint in endpoints:
                 surface = endpoint.surface
@@ -1241,15 +1491,16 @@ class CustomSurfaceExtractor:
                     and contract is not None
                     and contract.multiplicity == ContractMultiplicity.LAST_WINS
                 ):
-                    latest[(surface.surface_kind, surface.resource)] = endpoint
+                    latest[
+                        (
+                            surface.surface_kind,
+                            surface.resource,
+                            surface.include_reference_spans,
+                        )
+                    ] = endpoint
                 else:
                     retained.append(endpoint)
             live[token] = retained + list(latest.values())
-        accepted = {
-            id(endpoint)
-            for token in self._framework_selected_tokens
-            for endpoint in live.get(token, ())
-        }
         owned_routes: dict[
             tuple[str, int], tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef]
         ] = {}
@@ -1257,16 +1508,60 @@ class CustomSurfaceExtractor:
             for route in routes.get(token, ()):
                 owned_routes[(route[0].name, id(route[1]))] = route
         self._framework_owned_routes = list(owned_routes.values())
+        for token, endpoints in live.items():
+            guards = future_registration_conditions.get(token, ())
+            if not guards:
+                continue
+            live[token] = [
+                endpoint.model_copy(
+                    update={
+                        "discovery_status": EndpointDiscoveryStatus.CONDITIONAL,
+                        "discovery_conditions": tuple(
+                            dict.fromkeys((*endpoint.discovery_conditions, *applicable))
+                        ),
+                    }
+                )
+                if (
+                    (surface := endpoint.surface) is not None
+                    and (
+                        applicable := tuple(
+                            guard
+                            for guard in guards
+                            if guard.source_path == surface.registration_file
+                            and guard.source_line < surface.registration_line
+                        )
+                    )
+                )
+                else endpoint
+                for endpoint in endpoints
+            ]
         self._endpoints = [
+            endpoint for endpoint in self._endpoints if not self._is_framework_endpoint(endpoint)
+        ] + [
             endpoint
-            for endpoint in self._endpoints
-            if not self._is_framework_endpoint(endpoint) or id(endpoint) in accepted
+            for token in sorted(self._framework_selected_tokens)
+            for endpoint in live.get(token, ())
         ]
         for token in self._framework_selected_tokens:
             self._limitations.extend(conditions.get(token, ()))
         if self._framework_root_condition is not None:
             self._limitations.append(self._framework_root_condition)
         self._emit_background_task_surfaces()
+
+    def _qualify_mounted_exception(self, endpoint: Endpoint) -> Endpoint:
+        """Keep exception keys separate across mounted application scopes."""
+        surface = endpoint.surface
+        assert surface is not None
+        surface_id = f"{surface.surface_id}@mount:" + "/".join(
+            f"{span.file_path.relative_to(self.root).as_posix()}:{span.start_line}:{span.start_column}"
+            for span in surface.include_reference_spans
+        )
+        return endpoint.model_copy(
+            update={
+                "path": surface_id,
+                "surface": surface.model_copy(update={"surface_id": surface_id}),
+            }
+        )
 
     @staticmethod
     def _framework_mount_ancestors(
@@ -1572,6 +1867,7 @@ class CustomSurfaceExtractor:
                 local_state=state,
                 global_state=self._module_states[module_name],
                 local_names=frozenset(local_names),
+                global_names=frozenset(scope.globals),
             )
         )
         try:
@@ -1719,6 +2015,40 @@ class CustomSurfaceExtractor:
                 if value is not None:
                     self._inspect_expression(module, value, state, current_conditions)
                 binding = self._binding_from_expression(value, state, module.name)
+                constructor_resolution = (
+                    self._resolve_call(value.func, state) if isinstance(value, ast.Call) else None
+                )
+                if (
+                    self._scope_framework_surfaces
+                    and isinstance(value, ast.Call)
+                    and (
+                        any(keyword.arg is None for keyword in value.keywords)
+                        and _has_unknown_keyword_expansion(value)
+                    )
+                    and constructor_resolution is not None
+                    and constructor_resolution[1] == InvocationKind.CONSTRUCTOR
+                    and constructor_resolution[0] in self._declared_receiver_types
+                    and any(
+                        contract.registration.symbol == constructor_resolution[0]
+                        and contract.registration.invocation == InvocationKind.CONSTRUCTOR
+                        and contract.handler.kind == HandlerSelectorKind.KEYWORD
+                        for contract in self.contracts.document.contracts
+                    )
+                ):
+                    token = (module.name, value.lineno, value.col_offset)
+                    self._framework_events.append(
+                        _FrameworkConditionEvent(
+                            token,
+                            EndpointDiscoveryCondition(
+                                source_path=module.path,
+                                source_line=value.lineno,
+                                reason=(
+                                    "selected framework constructor lifecycle callback may "
+                                    "be hidden in dynamic keyword expansion"
+                                ),
+                            ),
+                        )
+                    )
                 targets = (
                     statement.targets if isinstance(statement, ast.Assign) else [statement.target]
                 )
@@ -1750,7 +2080,22 @@ class CustomSurfaceExtractor:
                 for target in statement.targets:
                     self._inspect_target_expression(module, target, state, current_conditions)
                     for name in _target_names(target):
-                        state[name] = None
+                        # At module scope ``del`` removes the global, so a later
+                        # lookup may fall through to builtins. Function locals
+                        # remain lexically local after deletion and are unbound.
+                        frame = (
+                            self._function_scope_states[-1] if self._function_scope_states else None
+                        )
+                        if frame is not None and name in frame.global_names:
+                            state.pop(name, None)
+                            if current_conditions:
+                                frame.global_state[name] = None
+                            else:
+                                frame.global_state.pop(name, None)
+                        elif frame is not None:
+                            state[name] = None
+                        else:
+                            state.pop(name, None)
                     self._invalidate_mutated_target(target, state)
                 continue
             if isinstance(statement, ast.If):
@@ -2254,7 +2599,7 @@ class CustomSurfaceExtractor:
             evaluation=evaluation,
         )
 
-    def _inspect_call_expression(
+    def _inspect_call_expression(  # noqa: PLR0912, PLR0915
         self,
         module: _Module,
         call: ast.Call,
@@ -2265,11 +2610,129 @@ class CustomSurfaceExtractor:
     ) -> None:
         """Evaluate a call in CPython AST order with per-argument captures."""
         self._inspect_expression(module, call.func, state, inherited_conditions)
+        state_before_outer_arguments = dict(state)
         callable_state = dict(state)
+        if (
+            isinstance(call.func, ast.Call)
+            and isinstance(call.func.func, ast.Name)
+            and call.func.func.id == "getattr"
+            and len(call.func.args) > 1
+            and self._is_builtin_getattr_call(call.func, callable_state)
+        ):
+            known_name = self._getattr_name_literal(module, call.func.args[1], call.func)
+            if known_name is not None:
+                call.func.args[1] = ast.copy_location(ast.Constant(known_name), call.func.args[1])
         callable_resolution = self._resolve_call(call.func, callable_state)
+        unsupported_getattr_registration = False
+        conditional_getattr_call = False
+        if (
+            isinstance(call.func, ast.Call)
+            and isinstance(call.func.func, ast.Name)
+            and call.func.func.id == "getattr"
+            and (
+                not self._is_builtin_getattr_call(call.func, callable_state)
+                or not isinstance(call.func.args[1], ast.Constant)
+                or not isinstance(call.func.args[1].value, str)
+            )
+        ):
+            malformed_getattr_receiver_expr = (
+                call.func.args[0]
+                if call.func.args
+                else next(
+                    (item.value for item in call.func.keywords if item.arg == "object"),
+                    None,
+                )
+            )
+            captured_receiver = self._captured_getattr_receivers.get(id(call.func))
+            receiver = captured_receiver or self._binding_from_expression(
+                malformed_getattr_receiver_expr, callable_state, module.name
+            )
+            requested_name_expression = (
+                call.func.args[1]
+                if len(call.func.args) > 1
+                else next(
+                    (item.value for item in call.func.keywords if item.arg == "name"),
+                    None,
+                )
+            )
+            requested_name = (
+                requested_name_expression.value
+                if isinstance(requested_name_expression, ast.Constant)
+                and isinstance(requested_name_expression.value, str)
+                else None
+            )
+            relevant_framework_method = requested_name is None or any(
+                contract.registration.symbol.rsplit(".", 1)[-1] == requested_name
+                for contract in self.contracts.document.contracts
+            )
+            if (
+                relevant_framework_method
+                and receiver is not None
+                and receiver.kind == "receiver"
+                and receiver.instance_token is not None
+            ):
+                self._framework_events.append(
+                    _FrameworkConditionEvent(
+                        receiver.instance_token,
+                        EndpointDiscoveryCondition(
+                            source_path=module.path,
+                            source_line=call.lineno,
+                            reason=(
+                                "getattr lifecycle method or other framework registration "
+                                "call has unsupported arguments"
+                            ),
+                        ),
+                        request_surface=requested_name is None
+                        or any(
+                            contract.registration.symbol.rsplit(".", 1)[-1] == requested_name
+                            and contract.surface.kind != "framework.lifecycle"
+                            for contract in self.contracts.document.contracts
+                        ),
+                    )
+                )
+            if self._is_builtin_getattr_call(call.func, callable_state):
+                # A nonliteral lookup can fail before outer arguments execute.
+                unsupported_getattr_registration = True
+                conditional_getattr_call = self._getattr_name_is_dynamic(
+                    module, call.func.args[1], call.func
+                )
+                if conditional_getattr_call:
+                    inherited_conditions = (
+                        *inherited_conditions,
+                        EndpointDiscoveryCondition(
+                            source_path=module.path,
+                            source_line=call.lineno,
+                            reason="dynamic getattr lookup returns a callable successfully",
+                        ),
+                    )
+            elif "getattr" in callable_state:
+                # A replacement can return a callable. Its outer arguments
+                # remain potentially evaluated, unlike an invalid builtin call.
+                unsupported_getattr_registration = True
+                inherited_conditions = (
+                    *inherited_conditions,
+                    EndpointDiscoveryCondition(
+                        source_path=module.path,
+                        source_line=call.lineno,
+                        reason="shadowed getattr returns a callable successfully",
+                    ),
+                )
+            else:
+                return
         positional: list[_EvaluatedArgument] = []
-        for argument in call.args:
+        for argument_index, argument in enumerate(call.args):
             self._inspect_expression(module, argument, state, inherited_conditions)
+            if (
+                argument_index == 0
+                and isinstance(call.func, ast.Name)
+                and call.func.id == "getattr"
+                and self._is_builtin_getattr_call(call, callable_state)
+            ):
+                # getattr evaluates its object expression first. Capture the
+                # resulting binding now, before its name/default arguments run.
+                self._captured_getattr_receivers[id(call)] = self._binding_from_expression(
+                    argument, state, module.name
+                )
             positional.append(
                 _EvaluatedArgument(
                     expression=argument,
@@ -2278,15 +2741,191 @@ class CustomSurfaceExtractor:
                 )
             )
         keywords: list[_EvaluatedArgument] = []
+        effective_keywords: list[ast.keyword] = []
+        keyword_positions: dict[str, int] = {}
+        duplicate_keywords = False
+        expanded_literal = False
         for keyword in call.keywords:
-            self._inspect_expression(module, keyword.value, state, inherited_conditions)
-            keywords.append(
-                _EvaluatedArgument(
+            # Named values in one contiguous group are evaluated before its
+            # merge, even when an earlier name collides. A following ** group
+            # is not evaluated after that merge fails.
+            if duplicate_keywords and keyword.arg is None:
+                break
+            entries: list[tuple[str, ast.expr]] | None = None
+            if keyword.arg is None and isinstance(keyword.value, ast.Dict):
+                candidate: list[tuple[str, ast.expr]] = []
+                for key, entry_value in zip(keyword.value.keys, keyword.value.values, strict=True):
+                    if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                        candidate = []
+                        break
+                    candidate.append((key.value, entry_value))
+                if candidate or not keyword.value.keys:
+                    entries = candidate
+            if entries is None:
+                mapping_elements: tuple[_EvaluatedArgument, ...] = ()
+                if isinstance(keyword.value, (ast.List, ast.Tuple)):
+                    captures: list[_EvaluatedArgument] = []
+                    for element in keyword.value.elts:
+                        self._inspect_expression(module, element, state, inherited_conditions)
+                        captures.append(
+                            _EvaluatedArgument(
+                                element,
+                                dict(state),
+                                self._binding_from_expression(element, state, module.name),
+                            )
+                        )
+                    mapping_elements = tuple(captures)
+                else:
+                    self._inspect_expression(module, keyword.value, state, inherited_conditions)
+                capture = _EvaluatedArgument(
                     expression=keyword.value,
                     state=dict(state),
                     binding=self._binding_from_expression(keyword.value, state, module.name),
+                    elements=mapping_elements,
                 )
+                if keyword.arg is not None:
+                    if keyword.arg in keyword_positions:
+                        duplicate_keywords = True
+                    else:
+                        keyword_positions[keyword.arg] = len(keywords)
+                keywords.append(capture)
+                effective_keywords.append(keyword)
+                continue
+            expanded_literal = True
+            mapping_names: set[str] = set()
+            for name, entry_value in entries:
+                if name in keyword_positions and name not in mapping_names:
+                    duplicate_keywords = True
+                mapping_names.add(name)
+                element_captures: tuple[_EvaluatedArgument, ...] = ()
+                if isinstance(entry_value, (ast.List, ast.Tuple)):
+                    captures = []
+                    for element in entry_value.elts:
+                        self._inspect_expression(module, element, state, inherited_conditions)
+                        captures.append(
+                            _EvaluatedArgument(
+                                element,
+                                dict(state),
+                                self._binding_from_expression(element, state, module.name),
+                            )
+                        )
+                    element_captures = tuple(captures)
+                else:
+                    self._inspect_expression(module, entry_value, state, inherited_conditions)
+                capture = _EvaluatedArgument(
+                    expression=entry_value,
+                    state=dict(state),
+                    binding=self._binding_from_expression(entry_value, state, module.name),
+                    elements=element_captures,
+                )
+                position = keyword_positions.get(name)
+                if position is None:
+                    keyword_positions[name] = len(keywords)
+                    keywords.append(capture)
+                    effective_keywords.append(ast.keyword(arg=name, value=entry_value))
+                else:
+                    # Duplicate keys within one dict replace the value in place.
+                    keywords[position] = capture
+                    effective_keywords[position] = ast.keyword(arg=name, value=entry_value)
+            # The whole mapping expression is evaluated before merging it.
+            # A failed merge prevents evaluation of subsequent keywords.
+            if duplicate_keywords:
+                break
+        if expanded_literal:
+            call = ast.copy_location(
+                ast.Call(func=call.func, args=list(call.args), keywords=effective_keywords), call
             )
+        if conditional_getattr_call:
+            # The argument expressions run only if the dynamic lookup succeeds.
+            # Preserve mutations and mark affected selected receivers conditional.
+            for name, binding in state.items():
+                if binding is None or binding == state_before_outer_arguments.get(name):
+                    continue
+                if binding.kind == "receiver" and binding.instance_token is not None:
+                    self._framework_events.append(
+                        _FrameworkConditionEvent(
+                            binding.instance_token,
+                            EndpointDiscoveryCondition(
+                                source_path=module.path,
+                                source_line=call.lineno,
+                                reason="dynamic getattr lookup returns a callable successfully",
+                            ),
+                            future_registrations=True,
+                        )
+                    )
+        if unsupported_getattr_registration:
+            return
+        if duplicate_keywords:
+            # Runtime raises TypeError before the call body, so there is no
+            # registration fact to report. Only selected FastAPI surfaces
+            # should receive this condition.
+            duplicate_token: _FrameworkToken | None = None
+            if isinstance(call.func, ast.Attribute):
+                receiver_expression: ast.expr | None = call.func.value
+            elif (
+                isinstance(call.func, ast.Call)
+                and isinstance(call.func.func, ast.Name)
+                and call.func.func.id == "getattr"
+                and call.func.args
+            ):
+                receiver_expression = call.func.args[0]
+            else:
+                receiver_expression = None
+            if receiver_expression is not None:
+                receiver = self._binding_from_expression(
+                    receiver_expression, callable_state, module.name
+                )
+                duplicate_token = receiver.instance_token if receiver is not None else None
+            elif isinstance(call.func, ast.Name):
+                callable_binding = callable_state.get(call.func.id)
+                if callable_binding is not None:
+                    callable_binding = self._follow_project_binding(callable_binding)
+                if callable_binding is not None and callable_binding.kind == "method":
+                    duplicate_token = callable_binding.instance_token
+            if duplicate_token is None and (
+                callable_resolution is not None
+                and callable_resolution[1] == InvocationKind.CONSTRUCTOR
+                and callable_resolution[0] in self._declared_receiver_types
+            ):
+                duplicate_token = (module.name, call.lineno, call.col_offset)
+            relevant_registration = self._resolve_call(call.func, callable_state)
+            relevant_framework_contract = relevant_registration is not None and any(
+                contract.surface.kind.startswith("framework.")
+                and self._matches(
+                    contract,
+                    relevant_registration[0],
+                    relevant_registration[1],
+                    relevant_registration[2],
+                )
+                for contract in self.contracts.document.contracts
+            )
+            relevant_framework_include = isinstance(
+                call.func, ast.Attribute
+            ) and call.func.attr in {"mount", "include_router"}
+            if duplicate_token is not None and (
+                relevant_framework_contract or relevant_framework_include
+            ):
+                condition = EndpointDiscoveryCondition(
+                    source_path=module.path,
+                    source_line=call.lineno,
+                    reason=("call has duplicate keyword names and cannot complete registration"),
+                )
+                self._framework_events.append(
+                    _FrameworkConditionEvent(
+                        duplicate_token,
+                        condition,
+                        request_surface=relevant_framework_include
+                        or (
+                            relevant_registration is not None
+                            and any(
+                                contract.surface.kind != "framework.lifecycle"
+                                and self._matches(contract, *relevant_registration)
+                                for contract in self.contracts.document.contracts
+                            )
+                        ),
+                    )
+                )
+            return
         self._inspect_registration(
             module,
             call,
@@ -2337,8 +2976,8 @@ class CustomSurfaceExtractor:
         state.clear()
         state.update(replacement)
 
-    @staticmethod
     def _join_states(
+        self,
         states: tuple[dict[str, _Binding | None], ...] | list[dict[str, _Binding | None]],
     ) -> dict[str, _Binding | None]:
         if not states:
@@ -2347,8 +2986,29 @@ class CustomSurfaceExtractor:
         joined: dict[str, _Binding | None] = {}
         for name in sorted(names):
             values = [item.get(name) for item in states]
+            values = [
+                self._follow_project_binding(value) if value is not None else None
+                for value in values
+            ]
             if all(value == values[0] for value in values[1:]):
                 joined[name] = values[0]
+            else:
+                # A missing global in one branch can mean builtin fallback,
+                # while another branch still shadows it. Retain uncertainty
+                # instead of treating the joined absence as a proven builtin.
+                methods = tuple(
+                    dict.fromkeys(
+                        candidate
+                        for value in values
+                        if value is not None
+                        for candidate in (
+                            (value,) if value.kind == "method" else value.possible_methods
+                        )
+                    )
+                )
+                joined[name] = (
+                    _Binding("possible_method", "", possible_methods=methods) if methods else None
+                )
         return joined
 
     @staticmethod
@@ -2787,6 +3447,7 @@ class CustomSurfaceExtractor:
         call: ast.Call,
         state: dict[str, _Binding | None],
         evaluation: _CallEvaluation | None,
+        inherited_conditions: tuple[EndpointDiscoveryCondition, ...],
     ) -> None:
         if not self._scope_framework_surfaces or not isinstance(call.func, ast.Attribute):
             return
@@ -2812,12 +3473,21 @@ class CustomSurfaceExtractor:
             )
         child = self._framework_receiver_token(capture.binding if capture is not None else None)
         condition = None
-        if child is None:
+        invalid_shape = not (
+            self._mount_call_has_valid_shape(call)
+            if call.func.attr == "mount"
+            else self._include_router_call_has_valid_shape(call)
+        )
+        if child is None or invalid_shape:
+            child = None
             condition = EndpointDiscoveryCondition(
                 source_path=module.path,
                 source_line=call.lineno,
                 reason=(
-                    "selected application include_router target is dynamic or unresolved, or "
+                    f"selected application {call.func.attr} argument shape "
+                    "is invalid or unresolved; "
+                    if invalid_shape
+                    else "selected application include_router target is dynamic or unresolved, or "
                     "mount target is unresolved; "
                     "framework surface inventory is incomplete"
                 ),
@@ -2827,9 +3497,56 @@ class CustomSurfaceExtractor:
                 parent=parent,
                 child=child,
                 condition=condition,
+                source_span=NativeSourceSpan(
+                    file_path=module.path,
+                    start_line=call.lineno,
+                    start_column=call.col_offset,
+                    end_line=call.end_lineno or call.lineno,
+                    end_column=call.end_col_offset or call.col_offset + 1,
+                ),
                 routes_only=call.func.attr == "mount",
+                guards=inherited_conditions,
             )
         )
+
+    @staticmethod
+    def _include_router_call_has_valid_shape(call: ast.Call) -> bool:
+        """Bind FastAPI's single positional router and explicit keyword-only options."""
+        if len(call.args) > 1 or any(isinstance(arg, ast.Starred) for arg in call.args):
+            return False
+        allowed = {
+            "router",
+            "prefix",
+            "tags",
+            "dependencies",
+            "responses",
+            "deprecated",
+            "include_in_schema",
+            "default_response_class",
+            "callbacks",
+            "generate_unique_id_function",
+        }
+        provided = {"router"} if call.args else set()
+        for keyword in call.keywords:
+            if keyword.arg not in allowed or keyword.arg in provided:
+                return False
+            provided.add(keyword.arg)
+        return "router" in provided
+
+    @staticmethod
+    def _mount_call_has_valid_shape(call: ast.Call) -> bool:
+        """Reject calls that cannot bind Starlette's path/app/name parameters."""
+        parameters = ("path", "app", "name")
+        if len(call.args) > len(parameters) or any(
+            isinstance(arg, ast.Starred) for arg in call.args
+        ):
+            return False
+        provided = set(parameters[: len(call.args)])
+        for keyword in call.keywords:
+            if keyword.arg not in parameters or keyword.arg in provided:
+                return False
+            provided.add(keyword.arg)
+        return {"path", "app"} <= provided
 
     def _record_framework_route(  # noqa: PLR0912
         self,
@@ -2895,11 +3612,7 @@ class CustomSurfaceExtractor:
     ) -> None:
         if not self._scope_framework_surfaces or not self._is_framework_endpoint(endpoint):
             return
-        token = (
-            self._framework_call_token(call, evaluation, state)
-            if isinstance(call.func, ast.Attribute)
-            else None
-        )
+        token = self._framework_method_token(call, evaluation, state, module.name)
         if (
             token is None
             and endpoint.surface is not None
@@ -2913,6 +3626,60 @@ class CustomSurfaceExtractor:
             token = (module.name, call.lineno, call.col_offset)
         if token is not None:
             self._framework_events.append(_FrameworkRegistrationEvent(token, endpoint))
+
+    def _framework_method_token(
+        self,
+        call: ast.Call,
+        evaluation: _CallEvaluation | None,
+        state: dict[str, _Binding | None],
+        module_name: str,
+    ) -> _FrameworkToken | None:
+        """Recover a framework receiver through attributes, aliases, or literal getattr."""
+        if isinstance(call.func, ast.Attribute):
+            token = self._framework_call_token(call, evaluation, state)
+            if token is not None:
+                return token
+        callable_state = evaluation.callable_state if evaluation is not None else state
+        binding = self._binding_from_expression(call.func, callable_state, module_name)
+        if binding is not None:
+            binding = self._follow_project_binding(binding)
+        if binding is None or binding.kind != "method":
+            return None
+        return binding.instance_token
+
+    def _record_framework_contract_limitation(
+        self,
+        module: _Module,
+        call: ast.Call,
+        state: dict[str, _Binding | None],
+        evaluation: _CallEvaluation | None,
+        _contract: SurfaceContract,
+        reason: str,
+    ) -> bool:
+        """Attach framework uncertainty to its app when its receiver is known."""
+        if self._scope_framework_surfaces:
+            token = self._framework_method_token(call, evaluation, state, module.name)
+            if token is not None:
+                self._framework_events.append(
+                    _FrameworkConditionEvent(
+                        token,
+                        EndpointDiscoveryCondition(
+                            source_path=module.path,
+                            source_line=call.lineno,
+                            reason=reason,
+                        ),
+                        request_surface=_contract.surface.kind != "framework.lifecycle",
+                    )
+                )
+                return True
+        self._limitations.append(
+            EndpointDiscoveryCondition(
+                source_path=module.path,
+                source_line=call.lineno,
+                reason=reason,
+            )
+        )
+        return False
 
     def _record_unknown_framework_override(
         self,
@@ -2929,11 +3696,7 @@ class CustomSurfaceExtractor:
             or contract.multiplicity != ContractMultiplicity.LAST_WINS
         ):
             return False
-        token = (
-            self._framework_call_token(call, evaluation, state)
-            if isinstance(call.func, ast.Attribute)
-            else None
-        )
+        token = self._framework_method_token(call, evaluation, state, module.name)
         if token is None:
             return False
         condition = EndpointDiscoveryCondition(
@@ -2944,10 +3707,68 @@ class CustomSurfaceExtractor:
                 f"registration is unresolved: {reason}"
             ),
         )
+        resources: tuple[str, ...] | None = None
+        if contract.surface.kind == "framework.exception_handler":
+            key_state = (
+                evaluation.positional[0].state
+                if evaluation is not None and evaluation.positional
+                else state
+            )
+            identity = self._exception_key(call, key_state, evaluation)
+            if identity is not None:
+                resources = (identity,)
         self._framework_events.append(
-            _FrameworkUnknownOverrideEvent(token, contract.surface.kind, condition)
+            _FrameworkUnknownOverrideEvent(token, contract.surface.kind, resources, condition)
         )
         return True
+
+    @classmethod
+    def _exception_key(
+        cls,
+        call: ast.Call,
+        state: dict[str, _Binding | None],
+        evaluation: _CallEvaluation | None = None,
+    ) -> str | None:
+        """Resolve a class or literal status-code key for exception handlers."""
+        expression = call.args[0] if call.args else None
+        key_capture = (
+            evaluation.positional[0]
+            if expression is not None and evaluation is not None and evaluation.positional
+            else None
+        )
+        if expression is None:
+            key_names = {"exc_class_or_status_code", "exc_class", "exc", "exception_class"}
+            keyword_index = next(
+                (index for index, item in enumerate(call.keywords) if item.arg in key_names),
+                None,
+            )
+            if keyword_index is not None:
+                expression = call.keywords[keyword_index].value
+                if evaluation is not None and keyword_index < len(evaluation.keywords):
+                    key_capture = evaluation.keywords[keyword_index]
+        if key_capture is not None:
+            state = key_capture.state
+        if isinstance(expression, ast.Constant) and type(expression.value) is int:
+            return f"status:{expression.value}"
+        identity = cls._symbol_identity_from_state(expression, state)
+        if (
+            identity is None
+            and isinstance(expression, ast.Name)
+            and expression.id
+            in {
+                "Exception",
+                "BaseException",
+                "RuntimeError",
+                "ValueError",
+                "TypeError",
+                "LookupError",
+                "KeyError",
+                "AssertionError",
+                "OSError",
+            }
+        ):
+            identity = f"builtins.{expression.id}"
+        return identity
 
     def _inspect_registration(  # noqa: PLR0912, PLR0915
         self,
@@ -2967,6 +3788,99 @@ class CustomSurfaceExtractor:
             else self._resolve_call(call.func, state)
         )
         if resolved is None:
+            if self._scope_framework_surfaces:
+                method_binding = self._binding_from_expression(call.func, state, module.name)
+                if method_binding is not None:
+                    method_binding = self._follow_project_binding(method_binding)
+                if method_binding is not None and method_binding.kind == "possible_method":
+                    for possible in method_binding.possible_methods:
+                        contracts = tuple(
+                            contract
+                            for contract in self.contracts.document.contracts
+                            if contract.registration.symbol == possible.identity
+                            and contract.registration.receiver_type == possible.receiver_type
+                        )
+                        if possible.instance_token is not None and contracts:
+                            self._framework_events.append(
+                                _FrameworkConditionEvent(
+                                    possible.instance_token,
+                                    EndpointDiscoveryCondition(
+                                        source_path=module.path,
+                                        source_line=call.lineno,
+                                        reason=(
+                                            "framework registration alias has "
+                                            "divergent branch bindings"
+                                        ),
+                                    ),
+                                    request_surface=any(
+                                        contract.surface.kind != "framework.lifecycle"
+                                        for contract in contracts
+                                    ),
+                                )
+                            )
+                if (
+                    method_binding is not None
+                    and method_binding.kind == "method"
+                    and method_binding.receiver_type is not None
+                    and method_binding.instance_token is not None
+                    and any(
+                        contract.registration.symbol == method_binding.identity
+                        and contract.registration.receiver_type == method_binding.receiver_type
+                        and contract.surface.kind == "framework.lifecycle"
+                        for contract in self.contracts.document.contracts
+                    )
+                ):
+                    self._framework_events.append(
+                        _FrameworkConditionEvent(
+                            method_binding.instance_token,
+                            EndpointDiscoveryCondition(
+                                source_path=module.path,
+                                source_line=call.lineno,
+                                reason=(
+                                    "selected framework lifecycle callback identity is unresolved; "
+                                    "framework surface inventory is incomplete"
+                                ),
+                            ),
+                        )
+                    )
+                elif (
+                    isinstance(call.func, ast.Call)
+                    and isinstance(call.func.func, ast.Name)
+                    and call.func.func.id == "getattr"
+                    and "getattr" in state
+                    and len(call.func.args) >= 2
+                    and isinstance(call.func.args[1], ast.Constant)
+                    and isinstance(call.func.args[1].value, str)
+                ):
+                    owner = self._binding_from_expression(call.func.args[0], state, module.name)
+                    symbol = (
+                        f"{owner.identity}.{call.func.args[1].value}"
+                        if owner is not None and owner.kind == "receiver"
+                        else ""
+                    )
+                    if (
+                        owner is not None
+                        and owner.kind == "receiver"
+                        and owner.instance_token is not None
+                        and any(
+                            contract.registration.symbol == symbol
+                            and contract.surface.kind == "framework.lifecycle"
+                            for contract in self.contracts.document.contracts
+                        )
+                    ):
+                        self._framework_events.append(
+                            _FrameworkConditionEvent(
+                                owner.instance_token,
+                                EndpointDiscoveryCondition(
+                                    source_path=module.path,
+                                    source_line=call.lineno,
+                                    reason=(
+                                        "selected framework lifecycle callable is shadowed or "
+                                        "unresolved; framework surface inventory is incomplete"
+                                    ),
+                                ),
+                            )
+                        )
             callable_name = (
                 call.func.id
                 if isinstance(call.func, ast.Name)
@@ -2974,7 +3888,7 @@ class CustomSurfaceExtractor:
                 if isinstance(call.func, ast.Attribute)
                 else ""
             )
-            if callable_name in {
+            if not self._scope_framework_surfaces and callable_name in {
                 item.registration.symbol.rsplit(".", maxsplit=1)[-1]
                 for item in self.contracts.document.contracts
             }:
@@ -2990,11 +3904,135 @@ class CustomSurfaceExtractor:
                 )
             return
         symbol, invocation, receiver_type = resolved
-        self._record_framework_include(module, call, state, evaluation)
+        if (
+            self._scope_framework_surfaces
+            and invocation == InvocationKind.CONSTRUCTOR
+            and (
+                any(keyword.arg is None for keyword in call.keywords)
+                and _has_unknown_keyword_expansion(call)
+            )
+            and any(
+                contract.registration.symbol == symbol
+                and contract.registration.invocation == InvocationKind.CONSTRUCTOR
+                and contract.handler.kind == HandlerSelectorKind.KEYWORD
+                for contract in self.contracts.document.contracts
+            )
+        ):
+            token = (module.name, call.lineno, call.col_offset)
+            self._framework_events.append(
+                _FrameworkConditionEvent(
+                    token,
+                    EndpointDiscoveryCondition(
+                        source_path=module.path,
+                        source_line=call.lineno,
+                        reason=(
+                            "selected framework constructor lifecycle callback may be hidden "
+                            "in dynamic keyword expansion"
+                        ),
+                    ),
+                )
+            )
+        self._record_framework_include(module, call, state, evaluation, inherited_conditions)
         self._record_framework_route(module, call, state, evaluation, resolved, decorated_handler)
         endpoint_count_before = len(self._endpoints)
+        prior_limitation_ids = {id(item) for item in self._limitations}
+        prior_framework_event_ids = {id(event) for event in self._framework_events}
         for contract in self.contracts.document.contracts:
             if not self._matches(contract, symbol, invocation, receiver_type):
+                continue
+            method_name = contract.registration.symbol.rsplit(".", 1)[-1]
+            method_parameters = {
+                "add_event_handler": ("event_type", "func"),
+                "add_exception_handler": ("exc_class_or_status_code", "handler"),
+                "on_event": ("event_type",),
+                "exception_handler": ("exc_class_or_status_code",),
+            }.get(method_name)
+            trusted_framework_method = contract.registration.symbol.startswith(
+                ("fastapi.", "starlette.")
+            )
+            if (
+                trusted_framework_method
+                and method_parameters is not None
+                and (
+                    len(call.args) > len(method_parameters)
+                    or (
+                        not any(isinstance(item, ast.Starred) for item in call.args)
+                        and not any(item.arg is None for item in call.keywords)
+                        and not set(method_parameters).issubset(
+                            set(method_parameters[: len(call.args)])
+                            | {item.arg for item in call.keywords if item.arg is not None}
+                        )
+                    )
+                    or any(
+                        item.arg is not None and item.arg not in method_parameters
+                        for item in call.keywords
+                    )
+                )
+            ):
+                self._record_framework_contract_limitation(
+                    module,
+                    call,
+                    state,
+                    evaluation,
+                    contract,
+                    "registration call has unsupported arguments; inventory is conditional",
+                )
+                continue
+            handler_index = (
+                contract.handler.index
+                if contract.handler.kind
+                in {HandlerSelectorKind.ARGUMENT, HandlerSelectorKind.ARGUMENT_CLASS_METHOD}
+                else None
+            )
+            handler_names = (
+                frozenset({contract.handler.name})
+                if contract.handler.kind == HandlerSelectorKind.KEYWORD
+                and contract.handler.name is not None
+                else frozenset()
+            )
+            if contract.registration.symbol.endswith(".add_event_handler") and handler_index == 1:
+                handler_names = frozenset({"handler", "func"})
+            elif (
+                contract.registration.symbol.endswith(".add_exception_handler")
+                and handler_index == 1
+            ):
+                handler_names = frozenset({"handler"})
+
+            resource_index: int | None = None
+            resource_names: frozenset[str] = frozenset()
+            selector = contract.surface.resource
+            if contract.surface.kind == "framework.exception_handler":
+                resource_index = 0
+                resource_names = frozenset(
+                    {"exc_class_or_status_code", "exc_class", "exc", "exception_class"}
+                )
+            elif selector.kind in {
+                ResourceSelectorKind.ARGUMENT,
+                ResourceSelectorKind.ARGUMENT_OR_KEYWORD,
+            }:
+                resource_index = selector.index
+                if selector.kind == ResourceSelectorKind.ARGUMENT_OR_KEYWORD and selector.name:
+                    resource_names = frozenset({selector.name})
+                elif contract.registration.symbol.endswith(".add_event_handler"):
+                    resource_names = frozenset({"event_type"})
+            elif selector.kind in {
+                ResourceSelectorKind.KEYWORD,
+                ResourceSelectorKind.KEYWORD_OR_HANDLER_NAME,
+            }:
+                resource_names = frozenset({selector.name}) if selector.name else frozenset()
+
+            if _selector_call_is_ambiguous(call, handler_index, handler_names) or (
+                _selector_call_is_ambiguous(call, resource_index, resource_names)
+            ):
+                self._record_framework_contract_limitation(
+                    module,
+                    call,
+                    state,
+                    evaluation,
+                    contract,
+                    "registration supplies a selector more than once or through an "
+                    "unbounded keyword expansion; inventory is conditional",
+                )
                 continue
             if (
                 contract.id.endswith(("-on-startup-list", "-on-shutdown-list"))
@@ -3015,13 +4053,15 @@ class CustomSurfaceExtractor:
                     assert isinstance(sequence, (ast.List, ast.Tuple))
                     captures = list(evaluation.keywords) if evaluation is not None else []
                     original = captures[keyword_index] if keyword_index < len(captures) else None
-                    for item in sequence.elts:
+                    for element_index, item in enumerate(sequence.elts):
                         if original is None:
                             list_capture = _EvaluatedArgument(
                                 item,
                                 dict(state),
                                 self._binding_from_expression(item, state, module.name),
                             )
+                        elif element_index < len(original.elements):
+                            list_capture = original.elements[element_index]
                         else:
                             list_capture = _EvaluatedArgument(
                                 item,
@@ -3078,14 +4118,12 @@ class CustomSurfaceExtractor:
                         handler_expression = call.args[index]
                         if evaluation is not None and index < len(evaluation.positional):
                             capture = evaluation.positional[index]
-                    elif (
-                        index == 1
-                        and isinstance(call.func, ast.Attribute)
-                        and call.func.attr in {"add_event_handler", "add_exception_handler"}
+                    elif index == 1 and contract.registration.symbol.endswith(
+                        (".add_event_handler", ".add_exception_handler")
                     ):
                         accepted_names = (
                             {"handler", "func"}
-                            if call.func.attr == "add_event_handler"
+                            if contract.registration.symbol.endswith(".add_event_handler")
                             else {"handler"}
                         )
                         keyword_index = next(
@@ -3142,16 +4180,48 @@ class CustomSurfaceExtractor:
                     contract,
                     "handler callback identity was unresolved",
                 )
-                if not scoped_override:
-                    self._limitations.append(
-                        EndpointDiscoveryCondition(
-                            source_path=module.path,
-                            source_line=call.lineno,
-                            reason=(
-                                f"custom surface contract {contract.id!r} matched but "
-                                "handler was unresolved"
-                            ),
+                if (
+                    not scoped_override
+                    and self._scope_framework_surfaces
+                    and contract.surface.kind == "framework.lifecycle"
+                ):
+                    receiver_token = (
+                        self._framework_call_token(call, evaluation, state)
+                        if isinstance(call.func, ast.Attribute)
+                        else None
+                    )
+                    if receiver_token is None and evaluation is not None:
+                        callable_binding = self._binding_from_expression(
+                            call.func, evaluation.callable_state, module.name
                         )
+                        if callable_binding is not None and callable_binding.kind == "method":
+                            receiver_token = callable_binding.instance_token
+                    if receiver_token is not None:
+                        self._framework_events.append(
+                            _FrameworkConditionEvent(
+                                receiver_token,
+                                EndpointDiscoveryCondition(
+                                    source_path=module.path,
+                                    source_line=call.lineno,
+                                    reason=(
+                                        "selected framework lifecycle callback identity is "
+                                        "unresolved; framework surface inventory is incomplete"
+                                    ),
+                                ),
+                            )
+                        )
+                        continue
+                if not scoped_override:
+                    self._record_framework_contract_limitation(
+                        module,
+                        call,
+                        state,
+                        evaluation,
+                        contract,
+                        (
+                            f"custom surface contract {contract.id!r} matched but handler "
+                            "was unresolved"
+                        ),
                     )
                 continue
             handler_module, function = handler_result
@@ -3204,6 +4274,7 @@ class CustomSurfaceExtractor:
                 function,
                 evaluation.callable_state if evaluation is not None else state,
                 handler_module.name,
+                evaluation,
             )
             resources = resource_result.values
             if resources is None:
@@ -3216,15 +4287,16 @@ class CustomSurfaceExtractor:
                     resource_result.reason,
                 )
                 if not scoped_override:
-                    self._limitations.append(
-                        EndpointDiscoveryCondition(
-                            source_path=module.path,
-                            source_line=call.lineno,
-                            reason=(
-                                f"custom surface contract {contract.id!r} matched but "
-                                f"{resource_result.reason}"
-                            ),
-                        )
+                    self._record_framework_contract_limitation(
+                        module,
+                        call,
+                        state,
+                        evaluation,
+                        contract,
+                        (
+                            f"custom surface contract {contract.id!r} matched but "
+                            f"{resource_result.reason}"
+                        ),
                     )
                 continue
             conditions = list(inherited_conditions)
@@ -3255,6 +4327,8 @@ class CustomSurfaceExtractor:
                     handler_module.name,
                     function.name,
                     resource,
+                    handler_expression.lineno if handler_expression is not None else 0,
+                    handler_expression.col_offset if handler_expression is not None else 0,
                 )
                 if key in self._seen:
                     continue
@@ -3274,6 +4348,19 @@ class CustomSurfaceExtractor:
                     registration_file=module.path,
                     registration_line=call.lineno,
                     registration_column=call.col_offset,
+                    callback_reference_span=(
+                        NativeSourceSpan(
+                            file_path=module.path,
+                            start_line=handler_expression.lineno,
+                            start_column=handler_expression.col_offset,
+                            end_line=handler_expression.end_lineno or handler_expression.lineno,
+                            end_column=handler_expression.end_col_offset
+                            if handler_expression.end_col_offset is not None
+                            else handler_expression.col_offset,
+                        )
+                        if handler_expression is not None
+                        else None
+                    ),
                     registration_source_hash=self._source_hash(module, call),
                     handler_source_hash=self._source_hash(handler_module, function),
                     contract_source_path=str(self.contracts.source_path),
@@ -3322,9 +4409,21 @@ class CustomSurfaceExtractor:
                 item
                 for item in self._limitations
                 if not (
-                    item.source_path == module.path
+                    id(item) not in prior_limitation_ids
+                    and item.source_path == module.path
                     and item.source_line == call.lineno
                     and "matched but handler was unresolved" in item.reason
+                )
+            ]
+            self._framework_events = [
+                event
+                for event in self._framework_events
+                if not (
+                    isinstance(event, _FrameworkConditionEvent)
+                    and id(event) not in prior_framework_event_ids
+                    and event.condition.source_path == module.path
+                    and event.condition.source_line == call.lineno
+                    and "matched but handler was unresolved" in event.condition.reason
                 )
             ]
 
@@ -4747,13 +5846,17 @@ class CustomSurfaceExtractor:
             expected in ("*", found) for expected, found in zip(pattern, actual, strict=True)
         )
 
-    def _resolve_call(  # noqa: PLR0911
+    def _resolve_call(  # noqa: PLR0911, PLR0912
         self, expression: ast.expr, state: dict[str, _Binding | None]
     ) -> tuple[str, InvocationKind, str | None] | None:
         if isinstance(expression, ast.Name):
             binding = state.get(expression.id)
-            if binding is None or binding.kind == "module":
+            if binding is not None:
+                binding = self._follow_project_binding(binding)
+            if binding is None or binding.kind in {"module", "possible_method"}:
                 return None
+            if binding.kind == "method":
+                return binding.identity, InvocationKind.INSTANCE_METHOD, binding.receiver_type
             constructor_symbols = {
                 contract.registration.symbol
                 for contract in self.contracts.document.contracts
@@ -4766,6 +5869,25 @@ class CustomSurfaceExtractor:
             )
             return binding.identity, invocation, None
         if not isinstance(expression, ast.Attribute):
+            if isinstance(expression, ast.Call) and self._is_builtin_getattr_call(
+                expression, state
+            ):
+                # Preserve exact receiver identity for getattr(app, "method")(...).
+                owner = self._captured_getattr_receivers.get(
+                    id(expression), self._binding_from_expression(expression.args[0], state, "")
+                )
+                name = expression.args[1]
+                if (
+                    owner is not None
+                    and owner.kind == "receiver"
+                    and isinstance(name, ast.Constant)
+                    and isinstance(name.value, str)
+                ):
+                    return (
+                        f"{owner.identity}.{name.value}",
+                        InvocationKind.INSTANCE_METHOD,
+                        owner.identity,
+                    )
             return None
         binding = self._expression_binding(expression.value, state)
         if binding is None:
@@ -4859,6 +5981,61 @@ class CustomSurfaceExtractor:
             current = replacement
         return current
 
+    @staticmethod
+    def _is_builtin_getattr_call(expression: ast.Call, state: dict[str, _Binding | None]) -> bool:
+        return (
+            isinstance(expression.func, ast.Name)
+            and expression.func.id == "getattr"
+            and "getattr" not in state
+            and 2 <= len(expression.args) <= 3
+            and not expression.keywords
+        )
+
+    @staticmethod
+    def _getattr_name_is_dynamic(module: _Module, expression: ast.expr, call: ast.Call) -> bool:
+        """Recognize a direct module-level string alias for a getattr name."""
+        return CustomSurfaceExtractor._getattr_name_literal(module, expression, call) is None
+
+    @staticmethod
+    def _getattr_name_literal(module: _Module, expression: ast.expr, call: ast.Call) -> str | None:
+        if isinstance(expression, ast.Constant) and isinstance(expression.value, str):
+            return expression.value
+        if not isinstance(expression, ast.Name):
+            return None
+        call_position = (call.lineno, call.col_offset)
+        for statement in reversed(module.tree.body):
+            if (statement.lineno, statement.col_offset) >= call_position:
+                continue
+            assigned_value: ast.expr | None = None
+            if (
+                isinstance(statement, ast.Assign)
+                and any(
+                    isinstance(target, ast.Name) and target.id == expression.id
+                    for target in statement.targets
+                )
+            ) or (
+                isinstance(statement, ast.AnnAssign)
+                and isinstance(statement.target, ast.Name)
+                and statement.target.id == expression.id
+            ):
+                assigned_value = statement.value
+            if assigned_value is not None:
+                if isinstance(assigned_value, ast.Constant) and isinstance(
+                    assigned_value.value, str
+                ):
+                    return assigned_value.value
+                return None
+            # A later executed deletion or nested rebinding invalidates the
+            # earlier literal. Deferred function bodies do not mutate it yet.
+            mutation = _EagerStateMutationVisitor()
+            if isinstance(statement, ast.AnnAssign) and statement.value is None:
+                mutation.visit(statement.annotation)
+            else:
+                mutation.visit(statement)
+            if expression.id in mutation.rebound_names:
+                return None
+        return None
+
     def _binding_from_expression(
         self,
         expression: ast.expr | None,
@@ -4871,9 +6048,32 @@ class CustomSurfaceExtractor:
             )
         if isinstance(expression, ast.Attribute):
             owner = self._expression_binding(expression.value, state)
+            if owner is not None and owner.kind == "receiver":
+                return _Binding(
+                    "method",
+                    f"{owner.identity}.{expression.attr}",
+                    owner.instance_token,
+                    owner.identity,
+                )
             if owner is not None and owner.kind in {"module", "symbol"}:
                 return _Binding("symbol", f"{owner.identity}.{expression.attr}")
         if isinstance(expression, ast.Call):
+            if (
+                self._is_builtin_getattr_call(expression, state)
+                and isinstance(expression.args[1], ast.Constant)
+                and isinstance(expression.args[1].value, str)
+            ):
+                owner = self._captured_getattr_receivers.get(
+                    id(expression),
+                    self._binding_from_expression(expression.args[0], state, module_name),
+                )
+                if owner is not None and owner.kind == "receiver":
+                    return _Binding(
+                        "method",
+                        f"{owner.identity}.{expression.args[1].value}",
+                        owner.instance_token,
+                        owner.identity,
+                    )
             resolved = self._resolve_call(expression.func, state)
             if (
                 resolved is not None
@@ -4898,7 +6098,7 @@ class CustomSurfaceExtractor:
         identity = self._symbol_identity(expression, state)
         return self._resolve_class_method_identity(identity, method_name, required_base)
 
-    def _resolve_class_method_identity(  # noqa: PLR0911, PLR0912
+    def _resolve_class_method_identity(  # noqa: PLR0911, PLR0912, PLR0915
         self,
         identity: str | None,
         method_name: str,
@@ -4906,26 +6106,47 @@ class CustomSurfaceExtractor:
     ) -> tuple[_Module, ast.FunctionDef | ast.AsyncFunctionDef] | None:
         """Resolve a method through a bounded, exact local class MRO."""
         if required_base == "starlette.types.ASGIApp":
-            candidates = self._classes.get(identity or "", [])
-            if len(candidates) != 1:
+            current = identity
+            asgi_seen: set[str] = set()
+            pure_method: ast.AsyncFunctionDef | None = None
+            module: _Module | None = None
+            for _depth in range(16):
+                if current is None or current in asgi_seen:
+                    return None
+                asgi_seen.add(current)
+                candidates = self._classes.get(current, [])
+                if len(candidates) != 1:
+                    return None
+                candidate_module, class_node = candidates[0]
+                if class_node.decorator_list or class_node.keywords:
+                    return None
+                definitions = [
+                    item
+                    for item in class_node.body
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and item.name == method_name
+                ]
+                mutation = _ClassAttributeMutationVisitor(method_name)
+                for item in class_node.body:
+                    if item not in definitions:
+                        mutation.visit(item)
+                if mutation.found or len(definitions) > 1:
+                    return None
+                if definitions:
+                    method = definitions[0]
+                    if not isinstance(method, ast.AsyncFunctionDef) or method.decorator_list:
+                        return None
+                    pure_method = method
+                    module = candidate_module
+                    break
+                bases = self._class_bases.get(current)
+                if bases is None or len(bases) != 1 or bases[0] not in self._classes:
+                    return None
+                current = bases[0]
+            else:
                 return None
-            module, class_node = candidates[0]
-            if class_node.decorator_list or class_node.keywords:
+            if pure_method is None or module is None:
                 return None
-            pure_methods = [
-                item
-                for item in class_node.body
-                if isinstance(item, ast.AsyncFunctionDef)
-                and item.name == method_name
-                and not item.decorator_list
-            ]
-            mutation = _ClassAttributeMutationVisitor(method_name)
-            for item in class_node.body:
-                if item not in pure_methods:
-                    mutation.visit(item)
-            if mutation.found or len(pure_methods) != 1:
-                return None
-            pure_method = pure_methods[0]
             positional = [*pure_method.args.posonlyargs, *pure_method.args.args]
             if (
                 len(positional) != 4
@@ -5098,48 +6319,18 @@ class CustomSurfaceExtractor:
         handler: ast.FunctionDef | ast.AsyncFunctionDef,
         state: dict[str, _Binding | None],
         handler_module_name: str | None = None,
+        evaluation: _CallEvaluation | None = None,
     ) -> _ResolvedResources:
         """Resolve one bounded literal resource set without widening dynamic values."""
         selector = contract.surface.resource
         values: tuple[str, ...]
         failure = "resource set was not finite literal data"
         if contract.surface.kind == "framework.exception_handler":
-            expression = call.args[0] if call.args else None
-            if expression is None and isinstance(call.func, ast.Attribute):
-                expression = next(
-                    (
-                        item.value
-                        for item in call.keywords
-                        if item.arg
-                        in {
-                            "exc_class_or_status_code",
-                            "exc_class",
-                            "exc",
-                            "exception_class",
-                        }
-                    ),
-                    None,
-                )
-            identity = cls._symbol_identity_from_state(expression, state)
-            if (
-                identity is None
-                and isinstance(expression, ast.Name)
-                and expression.id
-                in {
-                    "Exception",
-                    "BaseException",
-                    "RuntimeError",
-                    "ValueError",
-                    "TypeError",
-                    "LookupError",
-                    "KeyError",
-                    "AssertionError",
-                    "OSError",
-                }
-            ):
-                identity = f"builtins.{expression.id}"
+            identity = cls._exception_key(call, state, evaluation)
             if identity is None:
-                return _ResolvedResources(None, "exception class identity was unresolved")
+                return _ResolvedResources(
+                    None, "exception class or status-code identity was unresolved"
+                )
             values = (identity,)
         elif selector.kind == ResourceSelectorKind.HANDLER_NAME:
             values = (cls._handler_resource(handler.name, selector.handler_name_normalization),)
@@ -5192,8 +6383,7 @@ class CustomSurfaceExtractor:
                 if (
                     selected_expression is None
                     and index == 0
-                    and isinstance(call.func, ast.Attribute)
-                    and call.func.attr == "add_event_handler"
+                    and contract.registration.symbol.endswith(".add_event_handler")
                 ):
                     selected_expression = next(
                         (item.value for item in call.keywords if item.arg == "event_type"),

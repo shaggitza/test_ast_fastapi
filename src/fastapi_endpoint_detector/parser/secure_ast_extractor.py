@@ -3165,12 +3165,40 @@ class SecureASTExtractor:
                 local_router_views.discard(statement.name)
                 local_strings.pop(statement.name, None)
                 continue
+            statement_call = (
+                statement.value
+                if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call)
+                else None
+            )
+            dynamic_method: str | None = None
+            if (
+                statement_call is not None
+                and isinstance(statement_call.func, ast.Call)
+                and isinstance(statement_call.func.func, ast.Name)
+                and statement_call.func.func.id == "getattr"
+                and "getattr" not in local_bindings
+                and self._latest_binding_line(module, "getattr", call_line) is None
+                and len(statement_call.func.args) >= 2
+                and not statement_call.func.keywords
+            ):
+                dynamic_method = literal(statement_call.func.args[1], statement.lineno)
+                if dynamic_method is None or not dynamic_method.isidentifier():
+                    return None
+                statement_call = ast.Call(
+                    func=ast.Attribute(
+                        value=statement_call.func.args[0],
+                        attr=dynamic_method,
+                        ctx=ast.Load(),
+                    ),
+                    args=statement_call.args,
+                    keywords=statement_call.keywords,
+                )
             if (
                 isinstance(statement, ast.Expr)
-                and isinstance(statement.value, ast.Call)
-                and not isinstance(statement.value.func, ast.Attribute)
+                and statement_call is not None
+                and not isinstance(statement_call.func, ast.Attribute)
             ):
-                if allow_conditional and unresolved_call_touches_modeled(statement.value):
+                if allow_conditional and unresolved_call_touches_modeled(statement_call):
                     conditionalize(
                         statement,
                         "unresolved call may mutate or escape the explicitly selected app",
@@ -3181,8 +3209,8 @@ class SecureASTExtractor:
                 continue
             if not (
                 isinstance(statement, ast.Expr)
-                and isinstance(statement.value, ast.Call)
-                and isinstance(statement.value.func, ast.Attribute)
+                and statement_call is not None
+                and isinstance(statement_call.func, ast.Attribute)
             ):
                 # Definitions below control flow execute eager headers or class
                 # bodies conditionally and are outside this straight-line slice.
@@ -3199,7 +3227,7 @@ class SecureASTExtractor:
                 if touches_modeled_binding(statement):
                     return None
                 continue
-            call = statement.value
+            call = statement_call
             call_function = call.func
             if not isinstance(call_function, ast.Attribute):
                 continue
@@ -4012,6 +4040,41 @@ class SecureASTExtractor:
                     bound_names.add(rebound)
                 call = statement.value
                 line = statement.lineno
+                # Resolve only a builtin getattr with a literal name from this
+                # active bootstrap frame.  `literal` consults frame locals first,
+                # including parameters and prior assignments, so a local shadow
+                # cannot fall through to a module-level spelling.
+                if (
+                    isinstance(call.func, ast.Call)
+                    and isinstance(call.func.func, ast.Name)
+                    and call.func.func.id == "getattr"
+                    and "getattr" not in bound_names
+                    and self._latest_binding_line(current_module, "getattr", line) is None
+                    and len(call.func.args) >= 2
+                    and not call.func.keywords
+                ):
+                    method_name = literal(call.func.args[1], line)
+                    receiver = call.func.args[0]
+                    if method_name is not None and method_name.isidentifier():
+                        call = ast.Call(
+                            func=ast.Attribute(value=receiver, attr=method_name, ctx=ast.Load()),
+                            args=call.args,
+                            keywords=call.keywords,
+                        )
+                if (
+                    isinstance(call.func, ast.Call)
+                    and isinstance(call.func.func, ast.Name)
+                    and call.func.func.id == "getattr"
+                    and touches_tracked(call)
+                ):
+                    for owner in set(local_objects.values()):
+                        limit(
+                            current_module,
+                            owner,
+                            statement,
+                            "dynamic method lookup may replace a tracked registration alias",
+                        )
+                    continue
                 registration_receiver = (
                     call.func.value if isinstance(call.func, ast.Attribute) else None
                 )
@@ -5124,6 +5187,20 @@ class SecureASTExtractor:
                 )
                 receiver = object_root(receiver_expression, node.lineno)
                 operation = node.func.attr if isinstance(node.func, ast.Attribute) else ""
+                if (
+                    isinstance(node.func, ast.Name)
+                    and node.func.id == "getattr"
+                    and len(node.args) >= 2
+                    and not isinstance(node.args[1], ast.Constant)
+                ):
+                    dynamic_owner = object_root(node.args[0], node.lineno)
+                    if dynamic_owner is not None:
+                        record(
+                            dynamic_owner,
+                            node,
+                            "dynamic method lookup may alter route registration aliases",
+                            endpoint_impact="all",
+                        )
                 receiver_attributes = attribute_names(receiver_expression)
                 direct_result = classify_direct_call(
                     node,
