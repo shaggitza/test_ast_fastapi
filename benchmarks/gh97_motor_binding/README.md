@@ -34,7 +34,7 @@ cd /path/to/checked-out/repository
 PYTHONPATH="$PWD/src" /path/to/python \
   benchmarks/gh97_motor_binding/run.py \
   --artifacts /tmp/gh97-wheel-audit \
-  --output benchmarks/gh97_motor_binding/result.json
+  --output /tmp/gh97-motor-current-replay.json
 ```
 
 The output pins interpreter, mypy, artifact hashes, extracted source hashes,
@@ -71,3 +71,17 @@ two resolved nonmatches and one ambiguous receiver; the two invalid-arity
 bindings remain declarations, not valid invocation claims. This is a new replay,
 not a relabeling of either historical report. Installed-package behavior,
 version ranges and real-world GH97 evaluation remain open.
+
+A current source replay is retained separately in
+`results/current-production-binding-v3.json`, produced at
+`92d55a50be4e06251ea52b7c1bff7a2ec1f33643`. The report has 58,090 bytes
+and SHA-256
+`2945c224968732a0c0eee9f14417cc372a04ae0973ee794e17471671c5f42f74`.
+An independent locked-environment run reproduced these exact bytes. This
+source revision includes metadata membership and final parsed-source race
+guards. Its eight physical calls yield five exact static audit bindings, two
+resolved nonmatches and one unsupported or ambiguous receiver. The two
+invalid-arity bindings do not certify valid invocations. Cold and warm analyzer
+results agree. Historical reports above remain unchanged. This source-only
+evidence does not certify installed-package compatibility, version ranges,
+service behavior or real-world GH97 acceptance.
