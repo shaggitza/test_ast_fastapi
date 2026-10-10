@@ -684,13 +684,13 @@ def _has_dynamic_module_binding_mutation(module: ast.Module) -> bool:  # noqa: P
 
     # Track simple module aliases of dynamic evaluators (for example
     # ``rebind = exec`` and ``from builtins import exec as run``).
-    dynamic_aliases = {"exec", "eval"}
+    dynamic_aliases = {"exec", "eval", "globals", "locals", "vars"}
     for statement in executed_nodes(module):
         if isinstance(statement, ast.ImportFrom) and statement.module == "builtins":
             dynamic_aliases.update(
                 alias.asname or alias.name
                 for alias in statement.names
-                if alias.name in {"exec", "eval"}
+                if alias.name in {"exec", "eval", "globals", "locals", "vars"}
             )
         if isinstance(statement, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
             value = statement.value
@@ -876,6 +876,61 @@ def _has_unreachable_terminator(node: ast.AST, parents: dict[ast.AST, ast.AST]) 
     return False
 
 
+def _block_must_transfer(statements: list[ast.stmt]) -> bool:
+    """Recognize paths with no normal fallthrough in a bounded statement block."""
+    for statement in statements:
+        if isinstance(statement, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
+            return True
+        if isinstance(statement, ast.If):
+            if isinstance(statement.test, ast.Constant):
+                selected = statement.body if bool(statement.test.value) else statement.orelse
+                if _block_must_transfer(selected):
+                    return True
+            elif _block_must_transfer(statement.body) and _block_must_transfer(statement.orelse):
+                return True
+        if isinstance(statement, ast.Try) and _block_must_transfer(statement.finalbody):
+            return True
+    return False
+
+
+def _yield_can_reach_normal_boundary(
+    yielded: ast.Yield, boundary: ast.Call, parents: dict[ast.AST, ast.AST]
+) -> bool:
+    """Check fallthrough from the suspended yield through its enclosing blocks.
+
+    A sibling check at the boundary alone loses return/raise statements inside
+    the branch which reached the yield. Inspect each exited block's suffix too.
+    """
+    if _has_unreachable_terminator(yielded, parents):
+        return False
+    boundary_ancestors: set[ast.AST] = {boundary}
+    current: ast.AST = boundary
+    while current in parents:
+        current = parents[current]
+        boundary_ancestors.add(current)
+    current = yielded
+    while current in parents:
+        owner = parents[current]
+        for _field, values in ast.iter_fields(owner):
+            if not isinstance(values, list) or current not in values:
+                continue
+            suffix = values[values.index(current) + 1 :]
+            # Only the statements before the boundary's containing statement
+            # matter once both paths share a block.
+            before_boundary = []
+            for sibling in suffix:
+                if sibling in boundary_ancestors:
+                    break
+                if isinstance(sibling, ast.stmt):
+                    before_boundary.append(sibling)
+            if _block_must_transfer(before_boundary):
+                return False
+        if owner in boundary_ancestors:
+            return True
+        current = owner
+    return False
+
+
 def _is_delegated_exit_boundary(
     call: ast.Call,
     name: str,
@@ -908,7 +963,10 @@ def _is_delegated_exit_boundary(
                         return False
                     if call.keywords:
                         return False
-                    return not _has_unreachable_terminator(call, parents)
+                    return not _has_unreachable_terminator(call, parents) and (
+                        name != "commit"
+                        or _yield_can_reach_normal_boundary(yield_node, call, parents)
+                    )
             current = parent
     return False
 

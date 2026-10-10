@@ -1781,3 +1781,62 @@ def test_source_projection_loads_package_initializer_snapshot(
     }
     source.write_bytes(package.read_bytes())
     assert _langflow_fixture_transaction_reports(copied)[2].source_projections == ()
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "source/langflow/services/deps.py.txt",
+        "source/lfx/services/deps.py.txt",
+        "source/langflow/api/v1/traces.py.txt",
+    ],
+)
+@pytest.mark.parametrize("accessor", ["globals", "locals", "vars"])
+def test_source_projection_rejects_namespace_accessor_alias(
+    tmp_path: Path, relative_path: str, accessor: str
+) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    source = copied / relative_path
+    source.write_text(
+        source.read_text()
+        + (
+            f"\nnamespace = {accessor}\nforwarded = namespace\n"
+            'forwarded()["session_scope"] = unrelated_scope\n'
+        )
+    )
+    assert _langflow_fixture_transaction_reports(copied)[2].source_projections == ()
+
+
+@pytest.mark.parametrize(
+    ("suffix", "expected"),
+    [
+        ("return", 0),
+        ("raise RuntimeError()", 0),
+        (
+            "if other:\n                    return\n"
+            "                else:\n                    return",
+            0,
+        ),
+        ("if other:\n                    return", 1),
+        ("pass", 1),
+    ],
+)
+def test_source_projection_checks_yield_branch_fallthrough(
+    tmp_path: Path, suffix: str, expected: int
+) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures/sql_transactions/langflow_13960"
+    copied = tmp_path / "fixture"
+    shutil.copytree(fixture, copied)
+    source = copied / "source/lfx/services/deps.py.txt"
+    original = "yield session\n            await session.commit()"
+    replacement = (
+        "if flag:\n                yield session\n                "
+        + suffix
+        + "\n            await session.commit()"
+    )
+    text = source.read_text()
+    assert original in text
+    source.write_text(text.replace(original, replacement, 1))
+    assert len(_langflow_fixture_transaction_reports(copied)[2].source_projections) == expected
