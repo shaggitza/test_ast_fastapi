@@ -178,7 +178,7 @@ def _selector_call_is_ambiguous(
             for key in value.keys:
                 if isinstance(key, ast.Constant) and key.value in keyword_names:
                     selected_count += 1
-    return selected_count > 1
+    return selected_count > 1 or (selected_count > 0 and _has_unknown_keyword_expansion(call))
 
 
 @dataclass
@@ -3560,6 +3560,8 @@ class CustomSurfaceExtractor:
         self._record_framework_include(module, call, state, evaluation)
         self._record_framework_route(module, call, state, evaluation, resolved, decorated_handler)
         endpoint_count_before = len(self._endpoints)
+        prior_limitation_ids = {id(item) for item in self._limitations}
+        prior_framework_event_ids = {id(event) for event in self._framework_events}
         for contract in self.contracts.document.contracts:
             if not self._matches(contract, symbol, invocation, receiver_type):
                 continue
@@ -3992,7 +3994,8 @@ class CustomSurfaceExtractor:
                 item
                 for item in self._limitations
                 if not (
-                    item.source_path == module.path
+                    id(item) not in prior_limitation_ids
+                    and item.source_path == module.path
                     and item.source_line == call.lineno
                     and "matched but handler was unresolved" in item.reason
                 )
@@ -4002,6 +4005,7 @@ class CustomSurfaceExtractor:
                 for event in self._framework_events
                 if not (
                     isinstance(event, _FrameworkConditionEvent)
+                    and id(event) not in prior_framework_event_ids
                     and event.condition.source_path == module.path
                     and event.condition.source_line == call.lineno
                     and "matched but handler was unresolved" in event.condition.reason
