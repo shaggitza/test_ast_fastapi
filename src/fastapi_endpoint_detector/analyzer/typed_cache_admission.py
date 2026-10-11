@@ -352,6 +352,13 @@ def prepare_cache_run(  # noqa: PLR0912, PLR0915
                 raise CacheAdmissionError("cache artifact path differs from its source record")
             meta_bytes = _read_relative(root, meta_rel, MAX_CACHE_BYTES)
             data_bytes = _read_relative(root, data_rel, MAX_CACHE_BYTES)
+            try:
+                meta_record = json.loads(meta_bytes)
+            except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
+                raise CacheAdmissionError("cache artifact metadata is malformed") from exc
+            if not isinstance(meta_record, dict) or type(meta_record.get("data_mtime")) is not int:
+                raise CacheAdmissionError("cache artifact metadata has no valid data mtime")
+            data_mtime = meta_record["data_mtime"]
             cache_count += 2
             cache_total += len(meta_bytes) + len(data_bytes)
             if cache_count > MAX_CACHE_FILES or cache_total > MAX_CACHE_BYTES:
@@ -368,6 +375,11 @@ def prepare_cache_run(  # noqa: PLR0912, PLR0915
             for descriptor, contents in ((meta_fd, meta_bytes), (data_fd, data_bytes)):
                 with os.fdopen(os.dup(descriptor), "wb") as stream:
                     stream.write(contents)
+            # Writing the bytes gives the memfd a new timestamp. Mypy validates
+            # CacheMeta.data_mtime against stat(data_file), so preserve the
+            # timestamp declared by the unchanged metadata after writing.
+            os.utime(data_fd, (data_mtime, data_mtime))
+            for descriptor in (meta_fd, data_fd):
                 fcntl.fcntl(
                     descriptor,
                     fcntl.F_ADD_SEALS,

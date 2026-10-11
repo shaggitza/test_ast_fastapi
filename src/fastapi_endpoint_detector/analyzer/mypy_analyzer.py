@@ -986,6 +986,7 @@ class MypyAnalyzer:
             original_options.export_types = True
 
             warm_fallback = False
+            proof_failed = False
             try:
                 self._build_result = mypy_build(
                     sources=sources,
@@ -994,10 +995,64 @@ class MypyAnalyzer:
                     # mypy otherwise adds the process cwd even with no-site-packages.
                     alt_lib_path=str(self.module_root) if self.no_site_packages else None,
                 )
+                if cache_plan is not None:
+                    hit_modules = {
+                        module
+                        for module in cache_plan.admitted_modules
+                        if module in self._build_result.graph
+                        and getattr(self._build_result.graph[module], "tree", None) is not None
+                        and module not in self._build_result.manager.rechecked_modules
+                    }
+                    graph_source_hashes_match = all(
+                        getattr(self._build_result.graph[module], "meta_source_hash", None)
+                        == cache_plan.expected_graph.get(module)
+                        for module in hit_modules
+                    )
+                    roots_fresh = set(self._module_to_path) <= set(
+                        self._build_result.manager.rechecked_modules
+                    )
+                    cache_inputs_intact = all(
+                        hashlib.sha256(Path(cache_path).read_bytes()).hexdigest() == digest
+                        for cache_path, digest in (cache_plan.artifact_hashes or {}).items()
+                    )
+                    external_sources_unchanged = external_snapshots_unchanged(external_source_bytes)
+                    self.cache_admission_observation = {
+                        "scope": "local_synthetic_diagnostic_only",
+                        "consumer_profile": CONSUMER_PROFILE,
+                        "cache_hit_modules": sorted(hit_modules),
+                        "graph_source_hashes_match": graph_source_hashes_match,
+                        "graph_source_hashes": {
+                            module: getattr(
+                                self._build_result.graph[module], "meta_source_hash", None
+                            )
+                            for module in hit_modules
+                        },
+                        "manifest_source_hashes": {
+                            module: cache_plan.expected_graph.get(module) for module in hit_modules
+                        },
+                        "cache_artifact_sha256": sorted(
+                            (cache_plan.artifact_hashes or {}).values()
+                        ),
+                        "roots_fresh": roots_fresh,
+                        "cache_inputs_intact": cache_inputs_intact,
+                        "external_sources_unchanged": external_sources_unchanged,
+                        "warm_rechecked_modules": sorted(
+                            self._build_result.manager.rechecked_modules
+                        ),
+                        "trust_id": cache_plan.trust_id,
+                        "manifest_sha256": cache_plan.manifest_sha256,
+                    }
+                    proof_failed = (
+                        not hit_modules
+                        or not graph_source_hashes_match
+                        or not roots_fresh
+                        or not cache_inputs_intact
+                        or not external_sources_unchanged
+                    )
             except Exception as warm_error:
-                # Deliberately catch Exception only: KeyboardInterrupt,
-                # SystemExit, and cancellation-like BaseException subclasses
-                # must propagate after the outer finally closes staged inputs.
+                # The boundary covers both mypy_build and every warm proof read
+                # and validation. BaseException cancellation propagates through
+                # the outer finally, which closes the staged descriptors.
                 if cache_plan is None:
                     raise
                 self._build_result = mypy_build(
@@ -1011,57 +1066,10 @@ class MypyAnalyzer:
                     "scope": "local_synthetic_diagnostic_only",
                     "consumer_profile": CONSUMER_PROFILE,
                     "disposition": "cold_fallback",
-                    "reason": "warm_build_exception",
+                    "reason": "warm_build_or_proof_exception",
                     "exception_type": type(warm_error).__name__,
                 }
             if cache_plan is not None and not warm_fallback:
-                hit_modules = {
-                    module
-                    for module in cache_plan.admitted_modules
-                    if module in self._build_result.graph
-                    and getattr(self._build_result.graph[module], "tree", None) is not None
-                    and module not in self._build_result.manager.rechecked_modules
-                }
-                graph_source_hashes_match = all(
-                    getattr(self._build_result.graph[module], "meta_source_hash", None)
-                    == cache_plan.expected_graph.get(module)
-                    for module in hit_modules
-                )
-                roots_fresh = set(self._module_to_path) <= set(
-                    self._build_result.manager.rechecked_modules
-                )
-                cache_inputs_intact = all(
-                    hashlib.sha256(Path(cache_path).read_bytes()).hexdigest() == digest
-                    for cache_path, digest in (cache_plan.artifact_hashes or {}).items()
-                )
-                external_sources_unchanged = external_snapshots_unchanged(external_source_bytes)
-                self.cache_admission_observation = {
-                    "scope": "local_synthetic_diagnostic_only",
-                    "consumer_profile": CONSUMER_PROFILE,
-                    "cache_hit_modules": sorted(hit_modules),
-                    "graph_source_hashes_match": graph_source_hashes_match,
-                    "graph_source_hashes": {
-                        module: getattr(self._build_result.graph[module], "meta_source_hash", None)
-                        for module in hit_modules
-                    },
-                    "manifest_source_hashes": {
-                        module: cache_plan.expected_graph.get(module) for module in hit_modules
-                    },
-                    "cache_artifact_sha256": sorted((cache_plan.artifact_hashes or {}).values()),
-                    "roots_fresh": roots_fresh,
-                    "cache_inputs_intact": cache_inputs_intact,
-                    "external_sources_unchanged": external_sources_unchanged,
-                    "warm_rechecked_modules": sorted(self._build_result.manager.rechecked_modules),
-                    "trust_id": cache_plan.trust_id,
-                    "manifest_sha256": cache_plan.manifest_sha256,
-                }
-                proof_failed = (
-                    not hit_modules
-                    or not graph_source_hashes_match
-                    or not roots_fresh
-                    or not cache_inputs_intact
-                    or not external_sources_unchanged
-                )
                 # The paired v2 identity/report/runtime protocol is not enabled
                 # in this tranche. Keep the successful read as a private
                 # diagnostic and expose only the legacy full-cold result.
@@ -1071,6 +1079,7 @@ class MypyAnalyzer:
                     fscache=cold_fscache,
                     alt_lib_path=str(self.module_root) if self.no_site_packages else None,
                 )
+                assert self.cache_admission_observation is not None
                 self.cache_admission_observation["fallback"] = (
                     "cache_proof_failed"
                     if proof_failed

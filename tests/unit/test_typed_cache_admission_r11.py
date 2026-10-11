@@ -11,6 +11,7 @@ from mypy.build import build, get_cache_names
 from mypy.modulefinder import BuildSource
 from mypy.options import Options
 
+import fastapi_endpoint_detector.analyzer.mypy_analyzer as mypy_analyzer_module
 import fastapi_endpoint_detector.analyzer.typed_cache_admission as cache_admission_module
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.analyzer.source_inventory import build_source_inventory
@@ -49,9 +50,11 @@ def _options(module_root: Path, cache_dir: Path) -> Options:
         "warm_cancel",
         "cold_failure",
         "staging_failure",
+        "postproof_read_failure",
+        "postproof_validation_failure",
     ],
 )
-def test_analyzer_consumes_admitted_dependency_cache_with_fresh_text_roots(  # noqa: PLR0915
+def test_analyzer_consumes_admitted_dependency_cache_with_fresh_text_roots(  # noqa: PLR0911, PLR0912, PLR0915
     tmp_path: Path, case: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     main = tmp_path / "main.py"
@@ -158,6 +161,23 @@ def test_analyzer_consumes_admitted_dependency_cache_with_fresh_text_roots(  # n
             return original_fcntl(descriptor, command, *args)
 
         monkeypatch.setattr(cache_admission_module.fcntl, "fcntl", fail_seal)
+    elif case == "postproof_read_failure":
+        original_read_bytes = Path.read_bytes
+
+        def fail_memfd_read(path: Path) -> bytes:
+            if str(path).startswith("/proc/self/fd/"):
+                raise OSError("injected post-proof cache read failure")
+            return original_read_bytes(path)
+
+        monkeypatch.setattr(Path, "read_bytes", fail_memfd_read)
+    elif case == "postproof_validation_failure":
+
+        def fail_external_validation(_snapshots: dict[str, bytes]) -> bool:
+            raise RuntimeError("injected post-proof validation failure")
+
+        monkeypatch.setattr(
+            mypy_analyzer_module, "external_snapshots_unchanged", fail_external_validation
+        )
 
     analyzer = MypyAnalyzer(
         main,
@@ -179,6 +199,17 @@ def test_analyzer_consumes_admitted_dependency_cache_with_fresh_text_roots(  # n
         assert set(store.glob("r13-run-*")) == initial_run_dirs
         assert len(list(Path("/proc/self/fd").iterdir())) == initial_fd_count
         return
+    if case in {"postproof_read_failure", "postproof_validation_failure"}:
+        analyzer._ensure_mypy_built()
+        observation = analyzer.cache_admission_observation
+        assert observation is not None
+        assert observation["disposition"] == "cold_fallback", observation
+        assert observation["reason"] == "warm_build_or_proof_exception", observation
+        assert "helper" in analyzer._build_result.manager.rechecked_modules
+        assert set(store.glob("r13-run-*")) == initial_run_dirs
+        assert len(list(Path("/proc/self/fd").iterdir())) == initial_fd_count
+        analyzer.release_typed_snapshot()
+        return
 
     analyzer._ensure_mypy_built()
     observation = analyzer.cache_admission_observation
@@ -190,7 +221,7 @@ def test_analyzer_consumes_admitted_dependency_cache_with_fresh_text_roots(  # n
     assert observation is not None
     if case == "warm_failure":
         assert observation["disposition"] == "cold_fallback", observation
-        assert observation["reason"] == "warm_build_exception", observation
+        assert observation["reason"] == "warm_build_or_proof_exception", observation
         assert "helper" in analyzer._build_result.manager.rechecked_modules
         assert calls == 2
         assert incremental_values == [True, False]
