@@ -23,24 +23,34 @@ from mypy.nodes import (
     ARG_STAR,
     ARG_STAR2,
     AssignmentStmt,
+    Block,
     CallExpr,
     Decorator,
+    ForStmt,
     FuncDef,
+    IfStmt,
     Import,
     ImportFrom,
     LambdaExpr,
+    MatchStmt,
     MemberExpr,
     NameExpr,
     Node,
     OperatorAssignmentStmt,
+    RaiseStmt,
+    ReturnStmt,
+    TryStmt,
     TypeInfo,
     Var,
+    WhileStmt,
+    WithStmt,
 )
 
 GraphSide = Literal["baseline", "target"]
 EdgeKind = Literal["call", "constructor", "global_read", "global_write", "dependency"]
 Confidence = Literal["HIGH", "MEDIUM", "LOW"]
 Invocation = Literal["function", "instance_method", "class_method", "constructor", "unknown"]
+_GRAPH_SCHEMA_VERSION = 5
 
 
 class TypedSnapshot(Protocol):
@@ -285,6 +295,8 @@ class TypedReverseGraph:
                         continue
                     confidence = _confidence((occurrence.confidence, *(e.confidence for e in path)))
                     exec_state = _join_execution(edge.execution_state for edge in path)
+                    if exec_state != "executed":
+                        confidence = "LOW"
                     ref_state = _join_reference(edge.reference_state for edge in path)
                     path_owners = {
                         occurrence.symbol,
@@ -526,6 +538,8 @@ class _ModuleWalker:
         self._invoked_lambdas: set[int] = set()
         self._call_callees: set[int] = set()
         self._write_names: set[int] = set()
+        self._awaited_calls: set[int] = set()
+        self._default_owner: str | None = None
 
     def visit_mypy_file(self, tree: Any) -> None:
         self._collect_invoked_lambdas(tree)
@@ -544,6 +558,11 @@ class _ModuleWalker:
                 self._invoked_lambdas.add(id(node.callee))
             if isinstance(node, CallExpr):
                 self._call_callees.add(id(node.callee))
+            # Only the exact scheduler form ``await async_function(...)`` proves
+            # that the coroutine body is consumed. Stored/forwarded awaitables
+            # remain unresolved and are reported LOW by the main walk.
+            if type(node).__name__ == "AwaitExpr" and isinstance(node.expr, CallExpr):
+                self._awaited_calls.add(id(node.expr))
             if isinstance(node, AssignmentStmt):
                 for lvalue in node.lvalues:
                     self._collect_write_names(lvalue)
@@ -560,28 +579,103 @@ class _ModuleWalker:
         for child in _mypy_children(node):
             self._collect_write_names(child)
 
-    def _walk(self, node: Any) -> None:  # noqa: PLR0912
+    def _walk(self, node: Any) -> None:  # noqa: PLR0911, PLR0912, PLR0915
         if id(node) in self._seen:
             return
         self._seen.add(id(node))
         if isinstance(node, FuncDef):
             fullname = _fullname(node)
-            if fullname and not fullname.startswith(self.module + "."):
+            if fullname and "." in fullname and not fullname.startswith(self.module + "."):
                 return
             previous_owner = self.owner
-            fullname = fullname or previous_owner
-            self.owner = fullname
+            if previous_owner != self.module and not (
+                fullname and fullname.startswith(previous_owner + ".")
+            ):
+                fullname = f"{previous_owner}.{node.name}"
+            else:
+                fullname = fullname or previous_owner
             self.symbols[fullname] = self._symbol(fullname, "function", node)
+            previous_execution_state = self.execution_state
+            # Defaults execute when the definition is created; the function
+            # body is a separate callable transfer and is walked under its own
+            # symbol so callers can reach it through typed call edges.
+            previous_default_owner = self._default_owner
+            self._default_owner = fullname
+            for argument in node.arguments:
+                if argument.initializer is not None:
+                    self._walk(argument.initializer)
+            self._default_owner = previous_default_owner
+            self.owner = fullname
+            self._walk(node.body)
+            self.owner = previous_owner
+            self.execution_state = previous_execution_state
+            return
+        if isinstance(node, Block):
+            for statement in node.body:
+                self._walk(statement)
+                if _statement_terminates(statement):
+                    break
+            return
+        if isinstance(node, (ReturnStmt, RaiseStmt)):
             for child in _mypy_children(node):
                 self._walk(child)
-            self.owner = previous_owner
+            return
+        if isinstance(node, IfStmt):
+            for index, (condition, body) in enumerate(zip(node.expr, node.body, strict=False)):
+                self._walk(condition)
+                truth = _static_truth(condition)
+                if truth is True:
+                    self._walk(body)
+                    return
+                if truth is None:
+                    previous_state = self.execution_state
+                    self.execution_state = "unknown"
+                    for branch in node.body[index:]:
+                        self._walk(branch)
+                    if node.else_body is not None:
+                        self._walk(node.else_body)
+                    self.execution_state = previous_state
+                    if _if_followup_is_unknown(node):
+                        self.execution_state = _join_execution((previous_state, "unknown"))
+                    return
+            if node.else_body is not None:
+                self._walk(node.else_body)
+            return
+        if isinstance(node, (ForStmt, MatchStmt, TryStmt, WhileStmt, WithStmt)):
+            previous_state = self.execution_state
+            self.execution_state = "unknown"
+            self._record_uncertainty(
+                self.owner,
+                node,
+                "source_coverage",
+                "control_flow_transfer_not_imported",
+                type(node).__name__,
+            )
+            for child in _mypy_children(node):
+                self._walk(child)
+            self.execution_state = previous_state
             return
         if isinstance(node, Decorator):
             fullname = _fullname(node) or _fullname(node.func)
-            if fullname and not fullname.startswith(self.module + "."):
+            if fullname and "." in fullname and not fullname.startswith(self.module + "."):
                 return
+            if self.owner != self.module and not (
+                fullname and fullname.startswith(self.owner + ".")
+            ):
+                fullname = f"{self.owner}.{node.func.name}"
             if fullname:
                 self.symbols[fullname] = self._symbol(fullname, "function", node.func)
+                if any(
+                    not _is_route_registration_decorator(decorator)
+                    for decorator in getattr(node, "decorators", ())
+                ):
+                    self._record_uncertainty(
+                        fullname,
+                        node,
+                        "deferred_callable",
+                        "decorator_transfer_not_imported",
+                        "decorator_application",
+                    )
             for child in _mypy_children(node):
                 self._walk(child)
             return
@@ -619,6 +713,14 @@ class _ModuleWalker:
         resolved_target_node: Any = target_node
         if isinstance(node.callee, NameExpr):
             target = self.import_aliases.get(node.callee.name, target)
+            if (
+                target
+                and "." not in target
+                and isinstance(target_node, (FuncDef, Decorator))
+                and self.owner != self.module
+            ):
+                lexical_parent = self.owner.rsplit(".", maxsplit=1)[0]
+                target = f"{lexical_parent}.{target}"
         elif isinstance(node.callee, MemberExpr):
             base_expression = node.callee.expr
             base_node = getattr(base_expression, "node", None)
@@ -682,6 +784,32 @@ class _ModuleWalker:
                 resolved_target_node = None
                 invocation = "unknown"
         if target and _is_project_symbol(target, self.module_ids):
+            async_target = (
+                resolved_target_node.func
+                if isinstance(resolved_target_node, Decorator)
+                else resolved_target_node
+            )
+            is_coroutine = bool(getattr(async_target, "is_coroutine", False))
+            is_generator = bool(
+                getattr(async_target, "is_generator", False)
+                or getattr(async_target, "is_async_generator", False)
+            )
+            if is_coroutine or is_generator:
+                if is_coroutine and id(node) in self._awaited_calls:
+                    call_execution: Literal["executed", "deferred", "unknown"] = "executed"
+                else:
+                    call_execution = "unknown"
+                    self._record_uncertainty(
+                        self.owner,
+                        node,
+                        "deferred_callable",
+                        "async_result_not_directly_awaited"
+                        if is_coroutine
+                        else "generator_result_not_proven_consumed",
+                        target,
+                    )
+            else:
+                call_execution = self.execution_state
             span = self._span(node)
             receiver = (
                 _expression_fullname(node.callee.expr, self.import_aliases, self.owner)
@@ -703,7 +831,7 @@ class _ModuleWalker:
                 kind,
                 span,
                 confidence,
-                self.execution_state,
+                call_execution,
                 "invocation",
                 relation,
                 arguments,
@@ -738,15 +866,24 @@ class _ModuleWalker:
                 )
         elif not isinstance(node.callee, LambdaExpr):
             spelling = _call_spelling(node.callee)
-            self._record_uncertainty(
-                self.owner,
-                node,
-                "unknown_binding",
-                "call_target_outside_typed_project_graph"
-                if target
-                else "typed_call_target_unavailable",
-                spelling,
-            )
+            if spelling.rsplit(".", maxsplit=1)[-1] == "Depends":
+                self._record_uncertainty(
+                    self._default_owner or self.owner,
+                    node,
+                    "dependency_injection",
+                    "dependency_parameter_transfer_not_proven",
+                    spelling,
+                )
+            else:
+                self._record_uncertainty(
+                    self.owner,
+                    node,
+                    "unknown_binding",
+                    "call_target_outside_typed_project_graph"
+                    if target
+                    else "typed_call_target_unavailable",
+                    spelling,
+                )
             if isinstance(node.callee, MemberExpr):
                 self._record_uncertainty(
                     self.owner,
@@ -891,6 +1028,7 @@ def build_typed_reverse_graph(  # noqa: PLR0912, PLR0915
     endpoint_bindings: tuple[EndpointOccurrenceBinding, ...] | list[EndpointOccurrenceBinding],
     *,
     config_fingerprint: str,
+    source_snapshots: dict[str, bytes] | None = None,
 ) -> TypedReverseGraph:
     """Build one immutable typed graph from inventory bytes and retained mypy ASTs."""
     inventory_root = Path(inventory.root)
@@ -915,7 +1053,13 @@ def build_typed_reverse_graph(  # noqa: PLR0912, PLR0915
             raise ValueError(f"inventory relative path mismatch: {record.module}")
         if record.module in module_paths or resolved.suffix != ".py":
             raise ValueError(f"invalid or duplicate canonical module identity: {record.module}")
-        raw = resolved.read_bytes()
+        raw = (
+            source_snapshots.get(record.module)
+            if source_snapshots is not None
+            else resolved.read_bytes()
+        )
+        if raw is None:
+            raise ValueError(f"source snapshot is missing for {record.module}")
         digest = hashlib.sha256(raw).hexdigest()
         if digest != record.sha256:
             raise ValueError(f"source hash mismatch: {record.module}")
@@ -1039,7 +1183,7 @@ def build_typed_reverse_graph(  # noqa: PLR0912, PLR0915
     if reported_sources != tuple(sorted(source_hashes)):
         raise ValueError("typed provider source digests do not match canonical inventory bytes")
     return TypedReverseGraph(
-        4,
+        _GRAPH_SCHEMA_VERSION,
         str(root),
         inventory_fingerprint,
         tuple(source_hashes),
@@ -1153,6 +1297,89 @@ def _mypy_children(node: Any) -> tuple[Any, ...]:
             elif hasattr(type(value), "__mypyc_attrs__"):
                 children.append(value)
     return tuple(children)
+
+
+def _static_truth(node: Any) -> bool | None:  # noqa: PLR0911
+    """Resolve only literal conditions; all other control flow stays unknown."""
+    kind = type(node).__name__
+    if kind == "NameExpr":
+        fullname = getattr(node, "fullname", None)
+        if fullname == "builtins.True":
+            return True
+        if fullname == "builtins.False":
+            return False
+    if kind == "BoolExpr":
+        values = [_static_truth(value) for value in node.values]
+        if node.op == "and" and False in values:
+            return False
+        if node.op == "or" and True in values:
+            return True
+        if all(value is not None for value in values):
+            return all(values) if node.op == "and" else any(values)
+    if kind in {"IntExpr", "FloatExpr", "StrExpr", "BytesExpr"}:
+        value = getattr(node, "value", None)
+        if isinstance(value, (bool, int, float, str, bytes)):
+            return bool(value)
+    if kind == "UnaryExpr" and getattr(node, "op", None) == "not":
+        value = _static_truth(node.expr)
+        return None if value is None else not value
+    return None
+
+
+def _is_route_registration_decorator(node: Any) -> bool:
+    expression = node.callee if isinstance(node, CallExpr) else node
+    return isinstance(expression, MemberExpr) and expression.name in {
+        "get",
+        "post",
+        "put",
+        "delete",
+        "patch",
+        "options",
+        "head",
+        "route",
+        "api_route",
+        "websocket",
+    }
+
+
+def _statement_terminates(node: Any) -> bool:
+    """Recognize only unconditional return/raise paths in a bounded block walk."""
+    if isinstance(node, (ReturnStmt, RaiseStmt)):
+        return True
+    if not isinstance(node, IfStmt):
+        return False
+    for index, (condition, branch) in enumerate(zip(node.expr, node.body, strict=False)):
+        truth = _static_truth(condition)
+        if truth is True:
+            return _block_terminates(branch)
+        if truth is None:
+            remaining = (*node.body[index + 1 :], node.else_body)
+            return all(_block_terminates(item) for item in (branch, *remaining))
+    return _block_terminates(node.else_body)
+
+
+def _block_terminates(node: Any) -> bool:
+    return isinstance(node, Block) and bool(node.body) and _statement_terminates(node.body[-1])
+
+
+def _if_followup_is_unknown(node: IfStmt) -> bool:
+    possible: list[Any] = []
+    unknown_seen = False
+    for index, (condition, branch) in enumerate(zip(node.expr, node.body, strict=False)):
+        truth = _static_truth(condition)
+        if truth is False:
+            continue
+        possible.append(branch)
+        if truth is True:
+            break
+        unknown_seen = True
+        possible.extend(node.body[index + 1 :])
+        break
+    if not unknown_seen:
+        return False
+    possible.append(node.else_body)
+    terminated = [_block_terminates(branch) for branch in possible]
+    return any(terminated) and not all(terminated)
 
 
 def _is_project_symbol(fullname: str, module_ids: frozenset[str]) -> bool:
@@ -1385,7 +1612,7 @@ class TypedGraphCache:
             return False
         return (
             tuple(current) == graph.source_hashes
-            and graph.schema_version == 4
+            and graph.schema_version == _GRAPH_SCHEMA_VERSION
             and graph.inventory_fingerprint == inventory_fingerprint
             and inventoried_paths.issubset(snapshot_paths)
             and bool(snapshot_provenance)
